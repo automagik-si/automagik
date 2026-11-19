@@ -21,7 +21,7 @@
 //! records its keys and advances the file's offset, so a killed run leaves either all of a chunk
 //! or none of it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -511,21 +511,32 @@ impl Store {
             errors,
             health,
             now_ms,
-            false,
+            None,
         )
     }
 
     /// Applies an Antigravity conversation's chunk. Its rows are re-read while a held row waits,
     /// so a repeat is not a duplicate line and neither the duplicate nor the usage-line counters
-    /// grow; `usage_lines` is the number of new usage calls.
+    /// grow; `usage_lines` is the number of new usage calls. A late earlier step can change
+    /// the call's key, so check its possible previous keys in the same transaction.
     pub fn apply_agy(
         &mut self,
         file: &FileState,
         events: &[Attributed],
+        later_step_keys: &HashMap<String, Vec<i64>>,
         health: Health,
         now_ms: i64,
     ) -> rusqlite::Result<Health> {
-        self.apply(Some(file), "agy", None, events, &[], health, now_ms, true)
+        self.apply(
+            Some(file),
+            "agy",
+            None,
+            events,
+            &[],
+            health,
+            now_ms,
+            Some(later_step_keys),
+        )
     }
 
     /// Applies usage that comes with no file (a Codex thread counted from its `tokens_used`) and
@@ -545,7 +556,7 @@ impl Store {
             &[],
             health,
             now_ms,
-            false,
+            None,
         )
     }
 
@@ -559,7 +570,7 @@ impl Store {
         errors: &[record::ErrorRow],
         health: Health,
         now_ms: i64,
-        quiet_duplicates: bool,
+        agy_step_keys: Option<&HashMap<String, Vec<i64>>>,
     ) -> rusqlite::Result<Health> {
         let r = self.apply_tx(
             file,
@@ -569,7 +580,7 @@ impl Store {
             errors,
             health,
             now_ms,
-            quiet_duplicates,
+            agy_step_keys,
         );
         if r.is_err() {
             // An id it cached may belong to the rolled-back transaction.
@@ -588,8 +599,9 @@ impl Store {
         errors: &[record::ErrorRow],
         mut health: Health,
         now_ms: i64,
-        quiet_duplicates: bool,
+        agy_step_keys: Option<&HashMap<String, Vec<i64>>>,
     ) -> rusqlite::Result<Health> {
+        let quiet_duplicates = agy_step_keys.is_some();
         let tx = self.conn.transaction()?;
         let mut seq: i64 =
             tx.query_row("SELECT coalesce(max(seq), 0) FROM seen", [], |r| r.get(0))?;
@@ -602,7 +614,17 @@ impl Store {
                    parent_session = coalesce(excluded.parent_session, parent_session),
                    first_ms = min(first_ms, excluded.first_ms), last_ms = max(last_ms, excluded.last_ms)",
             )?;
-            for e in events {
+            'event: for e in events {
+                if let Some(keys) = agy_step_keys.and_then(|keys| keys.get(&e.dedupe_key)) {
+                    // Preserve the original count and leave the new key available for a future call.
+                    let mut seen =
+                        tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM seen WHERE k = ?1)")?;
+                    for key in keys {
+                        if seen.query_row([*key], |r| r.get::<_, bool>(0))? {
+                            continue 'event;
+                        }
+                    }
+                }
                 // Every session with a usage line has its row, a copy of another session's call
                 // included (a forked dsh-tui session starts with its parent's): which file is read
                 // first then decides only which session a call's tokens go to, never which
