@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and in draft #1541; no delivery merged) |
+| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and repaired in #1546; layout follow-up #1719; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin only (3.N.P): `apps/bots-dsh` gains the UI and the host half; nothing here builds the desktop app |
 | Created | 2026-11-18 |
@@ -17,7 +17,7 @@ version exists; a full-screen modal that says what changes in plain words; then 
 download, check the signature, install beside the current version, restart, health check; a success
 screen; and an automatic rollback to the previous version, saying nothing was lost, when health fails.
 
-Step 1, the clickable mock, is #1541 and is approved. Everything below is what the real thing adds
+Step 1, the clickable mock, was reviewed as #1541 and is approved; the repaired mock lands in #1546. Its layout follow-up is #1719. Everything below is what the real thing adds
 around it, in small deliveries that each land on their own.
 
 ## Where the new version and its signature come from
@@ -204,7 +204,7 @@ The plan changes that follow from this comparison, all inside the deliveries tab
 
 | # | What it adds | Visible to the person |
 |---|---|---|
-| 1 | The mock (#1541, approved) | the whole flow, with sample data, behind `?mock-1540` |
+| 1 | The mock (approved; reviewed as #1541, lands in #1546) | the whole flow, with sample data, behind `?mock-1540` |
 | 2 | This RFC | no |
 | 3 | Host half: version store, `current.json`, `update-status`, and the "did the last run finish" read the page uses | no (no update yet) |
 | 4 | Verified fetch: read `lane.json` through `verifyLane` (`scripts/lane.ts`, as `scripts/upgrade.ts:50` does), take this plugin's `version`/`sha256`, download the tarball, check it, and stop — a dry run that writes what it would do | a "check for updates" line in Settings, no install |
