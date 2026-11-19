@@ -19,8 +19,8 @@ const PRESET_NAME = '@deepseek-ai/dsh-agent-preset'
 const JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: text => text }
 const PATCH_FILE = 'cordis.patch.yml'
 
-function parsePatch(yaml, text, { allowOpaque = false } = {}) {
-  const document = yaml.parseDocument(text, { customTags: [JS_TAG] })
+function parsePatch(yaml, text, { allowOpaque = false, keepSourceTokens = false } = {}) {
+  const document = yaml.parseDocument(text, { customTags: [JS_TAG], keepSourceTokens })
   document.contents ??= document.createNode([])
   if (document.errors.length || !yaml.isSeq(document.contents)) {
     if (allowOpaque) return null
@@ -70,7 +70,7 @@ export function hasReadScopeAdapters(profile) {
   return available.every(Boolean)
 }
 
-function adaptPresetTools(yaml, nodes, config, available) {
+function adaptPresetTools(yaml, nodes, config, available, replaceName) {
   const { resolve, get } = nodes
   const replaced = new Set()
   const visited = new Set()
@@ -84,7 +84,9 @@ function adaptPresetTools(yaml, nodes, config, available) {
         const stockName = `@deepseek-ai/dsh-${tool}`
         const adapterName = `${BOT_PACKAGE}/${adapter}`
         if (get(row, 'name') !== (available ? stockName : adapterName)) continue
-        row.set('name', available ? adapterName : stockName)
+        const name = available ? adapterName : stockName
+        replaceName?.(row, name)
+        row.set('name', name)
         replaced.add(tool)
       }
       if (get(row, 'group') === true) visit(get(row, 'config'))
@@ -99,7 +101,7 @@ function presetRegistrations(yaml, nodes, row) {
   return yaml.isSeq(insert) ? insert.items.filter(plugin => nodes.get(plugin, 'name') === PRESET_NAME) : []
 }
 
-function adaptProfilePresets(yaml, patch, nodes, ids, available) {
+function adaptProfilePresets(yaml, patch, nodes, ids, available, replaceName) {
   let changed = false
   for (const row of patch.contents.items) {
     const override = yaml.isMap(nodes.resolve(row)) && !nodes.resolve(row).has('insert')
@@ -108,7 +110,7 @@ function adaptProfilePresets(yaml, patch, nodes, ids, available) {
       ? [row] : presetRegistrations(yaml, nodes, row)
     for (const preset of presets) {
       if (!ids.has(nodes.get(preset, 'id'))) continue
-      if (adaptPresetTools(yaml, nodes, nodes.get(preset, 'config'), available).size > 0) changed = true
+      if (adaptPresetTools(yaml, nodes, nodes.get(preset, 'config'), available, replaceName).size > 0) changed = true
     }
   }
   return changed
@@ -202,6 +204,119 @@ export function replaceProfilePatch(file, text, mode = 0o644) {
   }
 }
 
+// Use the parsed document for merge decisions and the original source for owner text.
+function patchSource(yaml, patch, text) {
+  const edits = []
+  const newline = text.match(/\r?\n/)?.[0] ?? '\n'
+  const replace = (start, end, value) => edits.push({ start, end, value })
+  const insert = (offset, value) => replace(offset, offset, value.replace(/\r?\n/g, newline))
+  const fragment = new yaml.Document(undefined, { schema: patch.schema })
+  fragment.directives = patch.directives.clone()
+  const render = (node, flow) => {
+    fragment.contents = node
+    const value = fragment.toString({
+      directives: false,
+      verifyAliasOrder: false,
+      lineWidth: 0,
+      collectionStyle: flow ? 'flow' : undefined,
+      flowCollectionPadding: false,
+      trailingComma: flow,
+    })
+    return flow ? value.slice(1, -2) : value
+  }
+  const beforeNext = body => body.endsWith('\n') ? body : `${body}, `
+  const indentLines = (body, indent) => body.replace(/^(?=.)/gm, ' '.repeat(indent))
+  const startLine = offset => Math.max(text.charCodeAt(0) === 0xfeff ? 1 : 0, text.lastIndexOf('\n', offset - 1) + 1)
+  const root = patch.contents.srcToken
+  const original = new Map(patch.contents.items.map((row, index) => [row, root?.items[index]]))
+
+  function insertBlock(offset, body, indent) {
+    const prefix = offset > startLine(offset) ? '\n' : ''
+    insert(offset, prefix + indentLines(body, indent))
+  }
+
+  function appendFlow(token, body, count) {
+    const trailingComma = token.items.length > count && token.items.at(-1).start.some(part => part.type === 'comma')
+    const separator = count > 0 && !trailingComma ? ', ' : ''
+    insert(token.end[0].offset, separator + body.replaceAll('\n', '\n' + ' '.repeat(token.indent)))
+  }
+
+  return {
+    replaceName(row, name) {
+      const source = row.get('name', true)?.srcToken
+      if (!source) return
+      const token = structuredClone(source)
+      yaml.CST.setScalarValue(token, name, { afterKey: true, inFlow: row.flow })
+      if (token.type === 'block-scalar') token.source = token.source.replaceAll('\n', newline)
+      replace(source.offset, source.offset + yaml.CST.stringify(source).length, yaml.CST.stringify(token))
+    },
+    addDisabled(plugin, value) {
+      const token = plugin.srcToken
+      if (!token) return
+      const flow = token.type === 'flow-collection'
+      const body = render(patch.createNode({ disabled: value }), flow)
+      if (flow) appendFlow(token, body, plugin.items.length)
+      else insertBlock(plugin.range[1], body, token.indent)
+    },
+    addAnchor(row, anchor) {
+      const pair = row.items.find(pair => pair.key?.value === 'config')
+      const colon = pair?.srcToken?.sep?.find(token => token.type === 'map-value-ind')
+      if (!colon) return
+      const offset = colon.offset + 1
+      const space = /\S/.test(text.charAt(offset)) ? ' ' : ''
+      insert(offset, ` &${anchor}${space}`)
+    },
+    finish() {
+      // A rendered fragment can refer to an anchor elsewhere in the merged document.
+      const anchors = new Set()
+      yaml.visit(patch, {
+        Node: (_, node) => { if (node.anchor) anchors.add(node.anchor) },
+        Alias: (_, node) => {
+          if (!anchors.has(node.source)) throw new Error(`Unresolved alias (the anchor must be set before the alias): ${node.source}`)
+        },
+      })
+      const flow = root?.type === 'flow-collection'
+      const added = new yaml.YAMLSeq(patch.schema)
+      const flush = next => {
+        if (added.items.length === 0) return
+        const body = render(added, flow)
+        if (flow) {
+          const comma = next?.start.find(token => token.type === 'comma')
+          if (!next) appendFlow(root, body, original.size)
+          else if (!comma) insert(root.offset + 1, beforeNext(body))
+          else {
+            // A comment on the comma's line still describes the preceding owner row.
+            const offset = comma.offset + 1
+            const comment = /^[ \t]*#[^\n]*\n/.exec(text.slice(offset))
+            insert(offset + (comment?.[0].length ?? 0), beforeNext(body))
+          }
+        } else {
+          let offset = patch.contents.range?.[1] ?? patch.range?.[1] ?? text.length
+          if (next) {
+            const first = next.start[0].offset
+            const line = startLine(first)
+            offset = /\S/.test(text.slice(line, first)) ? text.indexOf('\n', first) + 1 : line
+          }
+          insertBlock(offset, body, root?.indent ?? 0)
+        }
+        added.items = []
+      }
+      for (const row of patch.contents.items) {
+        if (original.has(row)) flush(original.get(row))
+        else added.items.push(row)
+      }
+      flush()
+      let offset = 0
+      let result = ''
+      for (const { start, end, value } of edits.sort((a, b) => a.start - b.start || a.end - b.end)) {
+        result += text.slice(offset, start) + value
+        offset = end
+      }
+      return result + text.slice(offset)
+    },
+  }
+}
+
 /** Merge registrations by insert target and plugin id, and settings by override operation. */
 export function mergePatch(yaml, user, shipped, { readScopeOnly = false, readScopeAvailable = true } = {}) {
   if (!readScopeAvailable) {
@@ -212,10 +327,11 @@ export function mergePatch(yaml, user, shipped, { readScopeOnly = false, readSco
   const source = parsePatch(yaml, shipped)
   const rows = source.contents.items.filter(row => !readScopeOnly || readScopeRow(yaml, row))
   if (rows.length === 0) return null
-  const patch = parsePatch(yaml, user)
+  const patch = parsePatch(yaml, user, { keepSourceTokens: true })
   if (!readScopeOnly && user.trim() === '[]') return shipped
 
   const items = patch.contents.items
+  const sourceText = patchSource(yaml, patch, user)
   const nodes = patchNodes(yaml, patch)
   const { resolve: rowOf, get, getNode } = nodes
   const isOverride = node => yaml.isMap(rowOf(node)) && !rowOf(node).has('insert')
@@ -236,6 +352,7 @@ export function mergePatch(yaml, user, shipped, { readScopeOnly = false, readSco
         // Keep the !!js tag without evaluating it or introducing a forward alias.
         const value = disabled.clone()
         delete value.anchor
+        if (!added) sourceText.addDisabled(plugin, value)
         plugin.set('disabled', value)
         changed = true
       }
@@ -246,7 +363,9 @@ export function mergePatch(yaml, user, shipped, { readScopeOnly = false, readSco
     const config = rowOf(settings)?.get('config', true)
     if (!yaml.isNode(config)) return
     // Reuse the existing config node, including flags that disable native write tools.
+    const anchor = config.anchor
     const reference = yaml.isAlias(config) ? config.clone() : patch.createAlias(config)
+    if (anchor !== config.anchor) sourceText.addAnchor(rowOf(settings), config.anchor)
     items.push(patch.createNode({ id, config: reference }))
   }
 
@@ -288,6 +407,6 @@ export function mergePatch(yaml, user, shipped, { readScopeOnly = false, readSco
     changed = true
   }
 
-  if (adaptProfilePresets(yaml, patch, nodes, presetIds, true)) changed = true
-  return changed ? patch.toString() : null
+  if (adaptProfilePresets(yaml, patch, nodes, presetIds, true, sourceText.replaceName)) changed = true
+  return changed ? sourceText.finish() : null
 }
