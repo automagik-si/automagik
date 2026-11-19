@@ -174,8 +174,8 @@ jobs:
   cut:
     name: Cut v<version> on dev
     runs-on: ubuntu-24.04
-    # Three bounded attempts, each re-running the gates on a moved dev (#668): room for the first
-    # attempt's gates and up to two re-cuts, not a place for a hung gate to hide.
+    # The job keeps its 45-minute timeout. A re-cut starts only if the longest measured attempt
+    # fits before the cut deadline, leaving five minutes for the steps after a successful push.
     timeout-minutes: 45
     concurrency:
       group: release-cut
@@ -198,6 +198,15 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PRERELEASE: ${{ inputs.prerelease }}
     steps:
+      - name: Start the release cut clock
+        id: clock
+        run: |
+          set -euo pipefail
+          started=$(date +%s)
+          deadline=$(( started + 40 * 60 ))
+          echo "started=${started}" >> "$GITHUB_OUTPUT"
+          echo "deadline=${deadline}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: dev
@@ -386,6 +395,8 @@ jobs:
         id: cut
         if: steps.new.outputs.release == 'true'
         env:
+          RELEASE_CUT_STARTED: ${{ steps.clock.outputs.started }}
+          RELEASE_CUT_DEADLINE: ${{ steps.clock.outputs.deadline }}
           KIND: ${{ steps.lane.outputs.kind }}
           HERDR: ${{ steps.lane.outputs.herdr }}
           POCKET: ${{ steps.lane.outputs.pocket }}
