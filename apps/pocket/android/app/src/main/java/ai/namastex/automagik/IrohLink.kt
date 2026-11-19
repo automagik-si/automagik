@@ -19,7 +19,6 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.io.Closeable
-import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.URI
@@ -67,12 +66,11 @@ object IrohLink {
     private fun network(context: Context): String? =
         runCatching { context.getSystemService(ConnectivityManager::class.java)?.activeNetwork?.toString() }.getOrNull()
 
-    private suspend fun endpoint(context: Context): Endpoint = lock.withLock {
+    private suspend fun endpoint(context: Context, create: Boolean = false): Endpoint = lock.withLock {
         endpoint?.takeUnless { it.isClosed() } ?: run {
             IrohAndroid.installAndroidContext(context.applicationContext)
-            val file = File(context.noBackupFilesDir, "iroh.key")
-            if (!file.exists()) file.writeBytes(SecretKey.generate().toBytes())
-            Endpoint.bind(EndpointOptions(secretKey = file.readBytes(), alpns = emptyList())).also { endpoint = it; boundOn = network(context); timeouts = 0 }
+            val key = PhoneKey.load(context.noBackupFilesDir, Seal.sealer(), create) { SecretKey.generate().toBytes() }
+            Endpoint.bind(EndpointOptions(secretKey = key, alpns = emptyList())).also { endpoint = it; boundOn = network(context); timeouts = 0 }
         }
     }
 
@@ -89,7 +87,7 @@ object IrohLink {
 
     /** Pairs this phone with the desktop that made [link]; returns the desktop's name. */
     suspend fun pair(context: Context, link: PairingLink, device: String): String {
-        val ep = endpoint(context)
+        val ep = endpoint(context, create = true)
         val conn = withTimeout(30_000) { ep.connect(EndpointTicket.fromString(link.ticket).endpointAddr(), PAIR) }
         try {
             val bi = conn.openBi()
