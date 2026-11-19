@@ -330,8 +330,11 @@ jobs:
     needs: [changes, nodes]
     if: ${{ !cancelled() && needs.changes.outputs.herdr != 'false' }}
     runs-on: ubuntu-24.04
-    # The full CLI/worker suites plus the local/linked start matrix exceed ten minutes.
-    timeout-minutes: 15
+    # Measured: 10m58 on Node 22, 12m32 on Node 24, whose leg also runs the herdr-app
+    # system-libraries apt-get (2m33 in the slow run). At 15 that leg was cancelled at its cap
+    # twice in one day on unrelated changes (#1603, #1681) after its tests passed, so 20 keeps
+    # the suite, the install and a slow runner's variance under the cap. Do not trim it back.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       # One list for CI and the release (#1645): .github/node-versions.json.
