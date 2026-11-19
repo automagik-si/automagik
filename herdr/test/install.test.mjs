@@ -2978,7 +2978,33 @@ test("--uninstall on macOS falls back when node is not on PATH, failing closed (
   assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
   // The probe's own runtime is gone: its check must return the launchd fallback, never accept
   // anything. The rest of the uninstall also runs without node.
-  s.extraEnv.PATH = `${s.bin}:/usr/bin:/bin:/usr/sbin:/sbin`;
+  // Linux may install node in /usr/bin, so mirror any system directory that contains it.
+  const pathEntries = [s.bin];
+  const seen = new Set();
+  for (let dir of ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]) {
+    try {
+      dir = realpathSync(dir);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      pathEntries.push(dir);
+      continue;
+    }
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    const entries = readdirSync(dir);
+    if (!entries.includes("node")) {
+      pathEntries.push(dir);
+      continue;
+    }
+    const mirror = mkdtempSync(join(s.root, "no-node-bin-"));
+    for (const name of entries) {
+      if (name !== "node") symlinkSync(join(dir, name), join(mirror, name));
+    }
+    pathEntries.push(mirror);
+  }
+  s.extraEnv.PATH = pathEntries.join(":");
+  const which = spawnSync("/bin/sh", ["-c", "command -v node"], { encoding: "utf8", env: { PATH: s.extraEnv.PATH } });
+  assert.notEqual(which.status, 0, `node must be absent from the test PATH, found ${which.stdout.trim()}`);
   lc.set("gone");
   const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
   assert.equal(u.code, 0, `a missing node fails closed: ${u.out}${u.err}`);
