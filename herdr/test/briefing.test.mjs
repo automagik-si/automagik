@@ -1491,3 +1491,16 @@ test("#805 briefing gives the Herdr restart path and explains Claude's /restart 
   assert.match(text, /Update installed · \/restart to apply/);
   assert.match(text, /never works.*--append-system-prompt-file.*--settings/);
 });
+
+test("#1556 a seat with a context threshold is told how to hand off; one with none is not", () => {
+  const { file } = parseBots(JSON.stringify(team()));
+  const main = byId(file, ID.main);
+  const member = byId(file, ID.dev);
+  const everyone = { file };
+  assert.match(launchBriefingText({ self: main, ...everyone }), /When `am` asks for your handoff, write it to the path its message names/);
+  assert.match(briefingText({ self: main, ...everyone }), /When `am` asks for your handoff/);
+  assert.doesNotMatch(launchBriefingText({ self: member, ...everyone }), /asks for your handoff/);
+  // A member with its own threshold is told too.
+  const told = { ...member, restartAt: 1000 };
+  assert.match(launchBriefingText({ self: told, ...everyone }), /asks for your handoff/);
+});

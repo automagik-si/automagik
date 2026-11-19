@@ -347,6 +347,37 @@ export function launchChange({ name, launch, agent, argv, template = null, usedT
  */
 export const claudeSlug = (folder) => String(folder ?? "").replace(/[^A-Za-z0-9]/g, "-");
 
+/** Where Claude Code keeps `session`'s log for a pane launched in `cwd` (#1556), as a path. */
+export const claudeTranscriptPath = (home, cwd, session) =>
+  `${String(home ?? "").replace(/\/+$/, "")}/.claude/projects/${claudeSlug(cwd)}/${session}.jsonl`;
+
+/**
+ * The context a Claude Code session's next request carries (#1556): input + cache-read +
+ * cache-creation tokens of the NEWEST assistant message in the session log's JSONL text.
+ * Later assistant messages win; a line that isn't JSON, isn't an assistant message or carries
+ * no usable usage is skipped. Null when the text holds no such message: nothing is measured,
+ * never zero.
+ */
+export function contextTokensOf(text) {
+  const lines = String(text ?? "").split("\n");
+  let tokens = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let row;
+    try { row = JSON.parse(trimmed); } catch { continue; }
+    if (row?.type !== "assistant") continue;
+    const usage = row?.message?.usage;
+    if (!usage || typeof usage !== "object" || Array.isArray(usage)) continue;
+    const parts = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+      .map((k) => usage[k])
+      .filter((n) => typeof n === "number" && Number.isFinite(n) && n >= 0);
+    if (!parts.length) continue;
+    tokens = parts.reduce((sum, n) => sum + n, 0);
+  }
+  return tokens;
+}
+
 /** The old pane's Claude session id (its agent.session label, UUID-shaped), or null. */
 export const sessionOf = (get) => sessionId(get?.labels?.[SESSION]);
 

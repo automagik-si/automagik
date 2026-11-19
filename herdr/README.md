@@ -437,6 +437,22 @@ this sidebar's attachment. Saved configuration changes use these same choices wh
 them. Pack updates reload mods and do not restart bot panes. The Bots list and the Attach picker open
 on the bots the sidebar already knows and refresh behind.
 
+**Restart at a context threshold.** A running Claude Code seat's `context_tokens` is the newest
+assistant message's input plus cache-read and cache-creation tokens; `am ls --json` and
+`am show <bot>` report it. A bot may store a threshold in tokens (`restartAt`, set with
+`am edit <bot> --restart-at N` or cleared with `--no-restart-at`): a main bot defaults to 250000,
+a member has none until one is set. `am restart --due [--dry-run] [--all]` asks every seat over
+its threshold to write a handoff to `<app home>/automagik-herdr/handoff/<bot>.md` (what is in
+flight, what waits on whom, the next three actions) and end its turn; an idle seat then restarts
+fresh with its helpers (`--fresh --tree`) and the handoff becomes its new conversation's first
+message. A working or blocked seat is queued until its next idle (`am restart --queued` lists
+it). The old conversation is not resumed: what survives is the handoff file, the bot's definition
+and briefing, and its helpers' own conversations (resumed under the new pane); nothing else from
+the old conversation does. A seat that doesn't write the file within the time limit, or a handoff
+home that can't be written, is reported and left running: the pass refuses rather than restarting
+without the handoff. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
+nothing.
+
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a

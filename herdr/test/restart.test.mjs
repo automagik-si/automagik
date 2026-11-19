@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { AGENTS, CODEX_MODE_ARGS, canResume, continuesAnywhere, resumeArgs, withoutModel, withoutResume } from "../mods/am-sidebar/models.js";
-import { carriedLabels, commandArgv, continueRefusal, helperArgs, helperPlan, ledgerSession, launchChange, paneCommand, paneLaunch, paneSession, planText,
+import { carriedLabels, claudeTranscriptPath, commandArgv, contextTokensOf, continueRefusal, helperArgs, helperPlan, ledgerSession, launchChange, paneCommand, paneLaunch, paneSession, planText,
   restartAnswer, restartArgs, claudeSlug, restartPlan, restartRefusal, sameSessions, sessionId, sessionOf, sharedFolders, sharedFresh, takesWords, withoutPrompt }
   from "../mods/am-sidebar/restart.js";
 
@@ -643,4 +643,30 @@ test("#1411: a Codex seat's own effort and tier are on every plan (resume, fresh
   assert.equal(tpl.template, "seat");
   assert.deepEqual(tpl.argv, ["sh", "-c", 'codex --no-daemon -p sol -m gpt-6.1-sol "$@"', "sh",
     ...CODEX_MODE_ARGS.filter((w) => w !== "--no-daemon"), "resume", SID, ...own]);
+});
+
+// ---- #1556: restart from a handoff at a context threshold ----
+
+test("#1556 contextTokensOf: the newest assistant message's input + cache read + cache creation, never output", () => {
+  const lines = [
+    JSON.stringify({ type: "user", message: { role: "user", content: "hi" } }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 7 } } }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", usage: { input_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4, output_tokens: 999 } } }),
+    "not json",
+    JSON.stringify({ type: "assistant", message: { role: "assistant" } }),
+  ].join("\n");
+  assert.equal(contextTokensOf(lines), 9, "the newest usable assistant message wins; output isn't context");
+  // A usage with only some of the three fields sums those it has.
+  const partial = JSON.stringify({ type: "assistant", message: { usage: { input_tokens: 5 } } });
+  assert.equal(contextTokensOf(partial), 5);
+  // Nothing to measure is null, never zero.
+  assert.equal(contextTokensOf(""), null);
+  assert.equal(contextTokensOf("not json\n"), null);
+  assert.equal(contextTokensOf(JSON.stringify({ type: "user", message: { usage: { input_tokens: 5 } } })), null);
+  assert.equal(contextTokensOf(JSON.stringify({ type: "assistant", message: { usage: { input_tokens: "5" } } })), null);
+});
+
+test("#1556 claudeTranscriptPath follows the folder slug Claude Code keeps", () => {
+  assert.equal(claudeTranscriptPath("/srv/h", "/work/a/b", SID), `/srv/h/.claude/projects/-work-a-b/${SID}.jsonl`);
+  assert.equal(claudeTranscriptPath("/srv/h/", "/work/a/b", SID), `/srv/h/.claude/projects/-work-a-b/${SID}.jsonl`);
 });
