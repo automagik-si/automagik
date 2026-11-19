@@ -6194,7 +6194,10 @@ function switchLoginFor(live) {
     if (!record.problem) listed = record.logins;
   } catch { /* no record: the default login alone */ }
   const cwd = live?.foreground?.cwd ?? live?.cwd;
-  const session = sessionFor("claude", paneSession(live, "claude"));
+  // The session the restart would resume: the pane's label, else the hook's ledger row (the
+  // same order cmdRestart uses), so a seat whose label is gone can still switch.
+  const session = sessionFor("claude", paneSession(live, "claude"))
+    ?? ledgerSession(workerLedgerRows(), live?.address, "claude", live?.created_ms)?.session ?? null;
   const noHeadroom = { login: null, why: "no second signed-in login with headroom" };
   const reasons = [];
   const seen = new Set();

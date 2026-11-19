@@ -82,6 +82,10 @@ test("a report that mentions the limit and lists findings is not the options dia
     "",
   ].join("\n");
   assert.equal(rateLimitDialog(report, NOW), null);
+  // The exact text the review used, including its trailing idle prompt.
+  const review = ["Here is what I found about the rate limit handling:", "", "1. The detector reads the last 15 lines.",
+    "2. It never sends keys.", "", "❯"].join("\n");
+  assert.equal(rateLimitDialog(review, NOW), null);
   // A quoted markdown list uses ">" for the quote, never the dialog's own cursor.
   assert.equal(rateLimitDialog("Rate limit report:\n> 1. Wait until it resets\n> 2. Upgrade your plan\n", NOW), null);
   // Numbered options without the selection cursor are still not the dialog.

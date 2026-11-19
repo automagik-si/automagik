@@ -6678,6 +6678,24 @@ test("#1557 switch without the conversation in the second login parks and says w
   assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing switched");
 });
 
+test("#1557 switch resumes the ledger's session when the pane label is gone", (t) => {
+  const s = restartScene(t, { session: null });
+  s.seed(team({ onRateLimit: "switch" }));
+  const dir = secondLogin(s);
+  seedTranscript(dir, s.project, SID);
+  // The pane lost its agent.session label; the hook's ledger row still names the conversation.
+  mkdirSync(dirname(ledgerPath(s.app)), { recursive: true });
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "session", terminal: "t5", agent: "claude", session: SID, at: new Date().toISOString() })}\n`);
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.equal(sweep.json().switched.length, 1);
+  assert.equal(sweep.json().switched[0].login, "l2");
+  const run = runCall(s.calls());
+  assert.ok(agentParts(run).env.includes(`CLAUDE_CONFIG_DIR=${dir}`), run.join(" "));
+  assert.ok(agentWords(run).includes("--resume"), "the ledger's conversation resumes on the other login");
+});
+
 test("#1557 a stale meter reading does not prove headroom for switch", (t) => {
   const s = restartScene(t);
   s.seed(team({ onRateLimit: "switch" }));
