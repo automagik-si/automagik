@@ -14,7 +14,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { AGENTS, CLAUDE_PERSON_SETTINGS, CODEX_MODE_ARGS, CODEX_NETWORK, absPath, cleanPath, codexClean, codexGrantPlan, codexGrantPaths, codexCleanNote, codexDirAllowed,
+import { AGENTS, CLAUDE_PERSON_SETTINGS, CODEX_LOGIN_SHELL, CODEX_MODE_ARGS, CODEX_NETWORK, absPath, cleanPath, codexClean, codexGrantPlan, codexGrantPaths, codexCleanNote, codexDirAllowed,
   codexDirVerdict, codexGrants, codexKeepDirs, codexWhere, codexWithheldWarning, homeWide, launchRun, withCodexGrants, withoutBriefing }
   from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
@@ -326,7 +326,7 @@ test("withCodexGrants puts each --add-dir right after the mode words: before res
 // ---- templates: read, never rewritten ----
 
 test("codexCommandCheck reads a template's Codex words; the --no-daemon warning names the template and the fix", () => {
-  const full = `codex --approve-for-me --disable hooks --no-daemon -c ${CODEX_NETWORK} -m x`;
+  const full = `codex --approve-for-me --disable hooks --no-daemon -c ${CODEX_NETWORK} -c ${CODEX_LOGIN_SHELL} -m x`;
   assert.deepEqual(codexCommandCheck(full), { conflicts: [], missing: [], lost: [], forwards: true, single: true });
   assert.deepEqual(codexCommandCheck("A=1 codex -m x"), { conflicts: [], missing: MODE, lost: [], forwards: true, single: true });
   // #1142: env is a program run before Codex, not one of the forms codexForwards proves.
@@ -340,8 +340,14 @@ test("codexCommandCheck reads a template's Codex words; the --no-daemon warning 
   // The local template before t1wb's fix: workspace-write, approval never, no --no-daemon.
   const local = "codex --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true --add-dir /r/.git";
   assert.match(codexTemplateWarning("codex-worker", local), /^Template codex-worker runs Codex without --no-daemon.*Add --no-daemon/);
-  assert.equal(codexTemplateWarning("mac-dev", "codex --no-daemon --dangerously-bypass-approvals-and-sandbox -m x"), null,
-    "the owner's bypass template: no warning, no refusal");
+  assert.match(codexTemplateWarning("mac-dev", "codex --no-daemon --dangerously-bypass-approvals-and-sandbox -m x"),
+    /runs Codex in a login shell.*allow_login_shell=false/,
+    "the owner's bypass template: the guard-preserving word is named, never refused");
+  assert.equal(codexTemplateWarning("mac-dev", `codex --no-daemon --dangerously-bypass-approvals-and-sandbox -c ${CODEX_LOGIN_SHELL} -m x`), null);
+  // #1133 follow-up: a valid TOML spelling reads as the same word, not a false login-shell warning.
+  assert.equal(codexTemplateWarning("mac-dev", "codex --no-daemon -c 'allow_login_shell = false'"), null);
+  assert.equal(codexTemplateWarning("mac-dev", "codex --no-daemon --config 'allow_login_shell = false'"), null);
+  assert.match(codexTemplateWarning("mac-dev", "codex --no-daemon -c 'allow_login_shell = true'"), /runs Codex in a login shell/);
   assert.equal(codexTemplateWarning("rev", "claude --model x"), null);
 });
 
@@ -355,7 +361,7 @@ test("a seat's Codex template: kept with the words it lacks and the grants throu
   assert.deepEqual(kept.argv, ["sh", "-c", 'codex -m x "$@"', "sh", ...MODE, "--add-dir", "/r/.git", "resume", "s-1"]);
   assert.deepEqual([kept.template, kept.granted, kept.templateNote], ["seat-tpl", true, null]);
   // Compliant and complete: only the grants and the resume.
-  const full = plan(`codex --approve-for-me --disable hooks --no-daemon -c ${CODEX_NETWORK}`);
+  const full = plan(`codex --approve-for-me --disable hooks --no-daemon -c ${CODEX_NETWORK} -c ${CODEX_LOGIN_SHELL}`);
   assert.deepEqual(full.argv.slice(4), ["--add-dir", "/r/.git", "resume", "s-1"]);
   // The owner's worker bypass never reaches a seat: the agent row, and a note with flag names only.
   const bypass = plan("codex --no-daemon --dangerously-bypass-approvals-and-sandbox -s danger-full-access");
@@ -670,7 +676,7 @@ test("#1142 a template's words are proved to reach Codex only for one literal sh
   const intact = (got, name) => {
     const at = got.indexOf(MODE[0]);
     assert.deepEqual(got.slice(at, at + MODE.length), MODE, `${name}: ${JSON.stringify(got)}`);
-    for (const m of MODE) assert.equal(count(got, m), 1, `${name}: ${m} once: ${JSON.stringify(got)}`);
+    for (const m of new Set(MODE)) assert.equal(count(got, m), MODE.filter((x) => x === m).length, `${name}: ${m} once per word: ${JSON.stringify(got)}`);
     const cut = got.indexOf("--");
     assert.ok(at >= 0 && (cut < 0 || at + MODE.length <= cut), `${name}: before any --: ${JSON.stringify(got)}`);
   };
@@ -1041,7 +1047,7 @@ test("#1142 a template worker keeps the owner's command as written, never with t
   assert.deepEqual(owner.argv.slice(0, 4), ["sh", "-c", `${command} "$@"`, "sh"]);
   assert.equal(owner.argv.includes("/r/.git"), false, "no pack-injected --add-dir");
   assert.equal("granted" in owner, false);
-  assert.equal(owner.warning, null);
+  assert.match(owner.warning, /runs Codex in a login shell/);
   const got = codexReceives(t, owner.argv);
   assert.deepEqual(got.slice(0, 2), ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox"], "the owner's flags reach Codex as options");
   // #1142, warning-only (no --no-daemon among its options): recovered as written, warned, never with the pack's folders or granted.

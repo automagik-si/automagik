@@ -397,7 +397,7 @@ test("helperPlan: a worker rebuilt from its ledger row (its task not sent again)
   assert.deepEqual(w.argv, ["omp", "--model=k", "--thinking=high", `--resume=${SID}`]);
   const tpl = helperPlan({ get: { address: "t8", cwd: "/r", foreground: { argv: ["codex", "-m", "g"] }, argv: ["sh", "-c", "codex -m g"], template: "rev" }, agents: AGENTS });
   // #1125: an hc template's pane that is no template worker keeps its command, with the launch-mode words after it.
-  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex -m g "$@"', "sh", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "resume", "--last"]);
+  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex -m g "$@"', "sh", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "-c", "allow_login_shell=false", "resume", "--last"]);
   const hand = helperPlan({ get: { address: "t9", cwd: "/h", foreground: { argv: ["claude", "--model", "m"] }, argv: ["claude", "--model", "m", "--continue"] }, agents: AGENTS });
   assert.deepEqual(hand.argv, ["claude", "--model", "m", "--continue"]);
   const none = helperPlan({ get: { address: "t10", cwd: "/h", foreground: { argv: ["claude"] } }, agents: AGENTS });
