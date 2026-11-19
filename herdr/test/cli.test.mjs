@@ -3247,7 +3247,39 @@ test("history: the bot's panes, starts, sessions (only while it held the pane) a
   assert.equal(ledgerOf(s).length, 4);
 });
 
-test("history: no ledgers is an empty history; a removed bot by its bare id; an unknown name is refused", (t) => {
+test("history (#206): a linked machine's rows for the same bot and terminal id never show here or move a local session", (t) => {
+  const s = scene(t);
+  s.seed(team());
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  const at = (m) => `2026-11-03T10:0${m}:00.000Z`;
+  const row = (event, b, terminal, when, by, extra = {}) => ({ v: 1, event, bot: b, project: s.project, terminal, core: "c1", created_ms: 1, machine: null, by, at: when, ...extra });
+  const vm = { machine: "vm", core: "core-of-vm" };
+  writeFileSync(attachFile(s.app), [
+    row("attach", ID.dev, "t5", at(1), "start"),
+    // On vm, Dev's own id in vm's t5: attached, then detached before the local session began.
+    row("attach", ID.dev, "t5", "2026-11-03T10:01:10.000Z", "attach", vm),
+    row("detach", ID.dev, "t5", "2026-11-03T10:01:30.000Z", "detach", vm),
+  ].map((r) => `${JSON.stringify(r)}\n`).join(""), { mode: 0o600 });
+  writeFileSync(ledgerPath(s.app), [
+    { event: "session", terminal: "t5", session: "11111111-aaaa", transcript: "/x/dev.jsonl", at: at(2) },
+  ].map((r) => `${JSON.stringify(r)}\n`).join(""));
+  const json = s.cli(["history", "Dev", "--json"]);
+  assert.equal(json.code, 0, json.err);
+  const h = json.json();
+  // The local shape, with no machine key.
+  assert.deepEqual(Object.keys(h), ["id", "name", "bot", "attach", "starts", "workers", "sessions", "transcript"]);
+  assert.deepEqual(h.attach.map((r) => [r.event, r.terminal, r.machine]), [["attach", "t5", null]]);
+  // vm's detach of its own t5 leaves the local t5 Dev's: the session is still Dev's.
+  assert.deepEqual(h.sessions.map((r) => [r.terminal, r.session]), [["t5", "***"]]);
+  assert.equal(h.transcript, "/x/dev.jsonl");
+  const text = s.cli(["history", "Dev"]);
+  assert.equal(text.code, 0, text.err);
+  assert.doesNotMatch(text.out, /detached from/);
+  assert.match(text.out, /^Dev \(b-cccccccccc\)\n/);
+  assert.equal(attachOf(s).length, 3);
+});
+
+test("history: no ledgers is an empty history;a removed bot by its bare id; an unknown name is refused", (t) => {
   const s = scene(t);
   s.seed(team());
   assert.match(s.cli(["history", "Studio"]).out, /nothing recorded on this computer/);
