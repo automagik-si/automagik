@@ -54,6 +54,11 @@ fun machineStatus(machine: MachineState): String =
 /** A saved machine's status line: a legacy SSH machine ([LegacySsh]) only ever asks to be paired again. */
 fun machineStatus(host: HostProfile, machine: MachineState): String = if (host.legacySsh) LegacySsh.STATUS else machineStatus(machine)
 
+private val PAIRED_KEY = Regex("^[0-9a-f]{12}$")
+
+/** The stored key fingerprint, when a paired card has a key prefix. */
+fun pairedKey(host: HostProfile): String? = host.host.takeIf { host.paired && PAIRED_KEY.matches(it) }?.let(::keyFingerprint)
+
 /** A machine card's icon, name, address and connection dot. */
 @Composable fun MachineHeader(name: String, address: String, connected: Boolean, greyed: Boolean = false) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -119,6 +124,7 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
             MachineHeader(host.name, host.address, machine.connected)
             Spacer(Modifier.height(18.dp))
             Text(machineStatus(host, machine), fontSize = 12.sp, color = Muted)
+            pairedKey(host)?.let { Text("Computer key fingerprint $it", fontSize = 12.sp, color = Muted) }
             machine.error?.let { Spacer(Modifier.height(10.dp)); SelectionContainer { Text(it, color = Blocked, fontSize = 12.sp, lineHeight = 18.sp) } }
             LinkedMachineRows(linked, host.name)
             Spacer(Modifier.height(10.dp))
