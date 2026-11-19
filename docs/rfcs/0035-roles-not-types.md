@@ -133,7 +133,7 @@ A role is **not**:
 
 | Part | Today | With roles |
 |---|---|---|
-| Record | `kind` selects a crew product; a missing plugin makes the Bot read as not installed | `kind` stays a stored compatibility field; new Bots get no crew kind; `bot.roles` carries the product |
+| Record | `kind` selects a crew product; a missing plugin makes the Bot read as not installed | `state.json`'s `kind` stays a stored compatibility field; new Bots get no crew kind; `bot.roles` carries the product |
 | Model | a crew kind may own its menu through its plugin | a role never sets the model or route; a plugin-owned model menu stays a separate extension point, not a role |
 | Permission, shell, folder | the Bot's own settings | unchanged; every role part is fenced by them, and a role cannot request a change |
 | Channels | the team's and the Bot's links | unchanged; a role cannot add a channel or route a message |
@@ -146,11 +146,12 @@ A role is **not**:
 | Surface | kind-specific marks and rows | a role tag, the role's rows and its settings card, all host-drawn |
 | Data | `state.json` and the team home | the same, plus the role's own data folder under the team home |
 
-A team with no roles sees no change. A Bot of kind `genie` is read as the built-in Genie role
+A team with no roles sees no change. A DSH Bot of kind `genie` is read as the built-in Genie role
 from P1 and keeps its wishes, its Session and its memory; P6 is the delivery that writes the
-role and retires the kind. The free-text `bot.role` label is kept exactly as it is on `dev`: the
-new roles never read or write it, and the two are never converted into each other. It is not
-migrated or superseded in P1-P6; only the product name "Role" is new.
+role and retires the kind. A Herdr-exposed Bot keeps its roster record and takes no role in
+P1-P6 (see "Herdr's `.herdr` roster"). The free-text `bot.role` label is kept exactly as it is
+on `dev`: the new roles never read or write it, and the two are never converted into each other.
+It is not migrated or superseded in P1-P6; only the product name "Role" is new.
 
 ### Role assignment
 
@@ -162,7 +163,8 @@ is refused before a byte is written into the team home.
 **Attach** is a Bot act by the person. The Bot's Role picker lists installed roles only. Picking
 one writes `bot.roles` with the role's id, the exact version, the attach time and an empty grant
 list. The role's tools and rows appear, and its prompt part joins the next turn. A group chat
-uses each member's own role; there is no group role.
+uses each member's own role; there is no group role. A Herdr-exposed Bot is not an attach
+target: it has no Role picker and `role-attach` refuses it (see "Herdr's `.herdr` roster").
 
 **Detach** removes the role's tools at once and its prompt part and rows from the next turn; a
 turn already running finishes under the role it started with. The grants go with the
@@ -179,6 +181,50 @@ cannot attach a role to itself or to another Bot, and a role cannot add a second
 Attaching pins a version. A newer package in the catalog does not move a Bot that already has
 the role: the shop shows the update, and the person detaches and attaches again (or, later, an
 explicit update action). This is Q3.
+
+### Herdr's `.herdr` roster
+
+Some Bots live in Herdr's project roster, `<project>/.herdr/bots.json`, not in the team's
+`state.json`. RFC 0014 keeps that file at version 1, read and written in place (its "The legacy
+file" and "Contracts introduced"), and a Herdr-exposed Bot is never written to `state.json` (its
+"Herdr Bots in Automagik"). Its `kind` is Herdr's seat, `main` or `member`
+(`herdr/mods/am-sidebar/model.js:14-15`; an unknown value is left out at `:188`), not one of the
+team's crew kinds. Its `role` is the free-text briefing line
+(`herdr/mods/am-sidebar/model.js:36-37`), the same `role` field the plan keeps as the `bot.role`
+label and never reads as the product. This section is the plan's answer for that record.
+
+- **P1-P6 write no role there.** A role is DSH host code with a prompt part, tools and host-drawn
+  rows, served on a DSH Bot's turns (see "What a role is"). A Herdr-exposed Bot has no DSH
+  Session: its chat in Automagik is a projection of its live Herdr agent, and its tools run in
+  that agent under its own settings (RFC 0014, "Herdr Bots in Automagik"). So there is no DSH
+  turn to run the role in, and the roster is the Bot's only record: in P1-P6 a role has no place
+  for an exposed Bot, in the roster or in `state.json`. The Role picker is not shown on an exposed
+  Bot, `role-attach` refuses it with that reason, and no `bot.roles` entry is written. This is a
+  limit of P1-P6, not a hidden half-feature.
+- **The roster is read and written in place, as RFC 0014 says.** Herdr starts an edit from the
+  text it read, refuses the write if that text changed, and renames the new text into place (RFC
+  0014, "Writes under one lock"); P1-P6 add no write. Today's version 1 file is converted to the
+  version 2 repo file by RFC 0014's delivery 4; after that conversion the Bot's record is still
+  the repo file's, never `state.json`. Neither file gets a `roles` key from this plan.
+- **The roster's `kind` is a seat, not a role.** `main` and `member` stay Herdr's seat: Herdr
+  reads them as its main and member seats, and RFC 0014 carries `kind: "main"` into the version 2
+  file's `main` field. They are not mapped to a role, not converted to a crew kind and not
+  retired. P6's Genie conversion applies to DSH Bots; a roster carries no crew kind to convert. A
+  Herdr-exposed main Bot is still an exposed Bot: it takes no role in P1-P6, and Q2's "a role may
+  be attached to a Main Bot" means a DSH team Main Bot.
+- **Consistency with `state.json`'s roles is by record, not by copy.** Each Bot lives in exactly
+  one file (RFC 0014, Q1). The Bots in `state.json` carry `bot.roles`, resolved against the
+  install records in `state.roles`; a roster Bot has neither, and no role data folder is keyed by
+  its id. `state.prefs.roles` is the team-level switch for the DSH team (contract 11); it does
+  not reach Herdr. Installing a team role changes no roster, and attaching one changes no roster
+  either, because attach refuses an exposed Bot.
+- **A later RFC owns roles for exposed Bots.** If an exposed Bot is to host a role, that RFC first
+  decides the runtime (a DSH Session or a Herdr-side role host). It then writes the attachment in
+  the Bot's own record — the version 1 roster before RFC 0014's delivery 4, the version 2 repo
+  file after it — in place under that file's rule, never in `state.json`. A repo file arrives with
+  a clone and its text is untrusted (RFC 0014, Threat model), so the attachment would still be
+  the person's act on this computer, never a field a clone can vouch for. P1-P6 add no such
+  field.
 
 ### The marketplace
 
@@ -214,6 +260,13 @@ limits:
 - **The Bot's fences stay.** A role's tools go through the same level, folder, shell, deny-list
   and approval checks as the team's tools. A role cannot raise a level, add a shell, leave the
   folder, add a channel, read another Bot's Session or become a Main Bot.
+- **Herdr's roster is not a role surface.** A repo file arrives with a clone, so its text is
+  untrusted (RFC 0014, Threat model): its `look` (after conversion, `identity`) sets the look
+  only, the person's per-project yes is what brings a Bot in, and P1-P6 read no role from
+  `.herdr/bots.json`. An exposed Bot has no DSH Session and its tools run in its Herdr agent (RFC
+  0014, "Herdr Bots in Automagik"), so even the person cannot attach a role to it in P1-P6; the
+  picker is not shown and `role-attach` refuses it. A later RFC's roster attachment would still
+  be the person's act on this computer, never a field a clone can vouch for.
 - **Capabilities are separate, named and person-granted.** `audio-out` (speak through the
   person's voice pane), `task-start` (start a wish or task, at the narrower of the Bot's and the
   caller's level), `route-policy` (choose the route for work it starts, within the Bot's
@@ -246,7 +299,14 @@ process, and this RFC does not claim they do. That is why community roles wait f
   share or a hosted marketplace.
 - A Bot installing, attaching or detaching a role, or a marketplace in which Bots buy from each
   other.
+- Roles on Herdr-exposed Bots, and any role write into `.herdr/bots.json` or the version 2 repo
+  file. RFC 0014 keeps the version 1 roster read and written in place until its delivery 4
+  converts it, and an exposed Bot is never in `state.json`; an exposed Bot has no DSH Session to
+  run the role in, and P1-P6 add no field to the roster. A later RFC decides the runtime and the
+  attachment's place.
 - Cloud sync, cross-machine install, or roles as a Cloud entitlement.
+- Roles on a linked machine's roster or a remote Bot. P1-P6 write roles only on this computer;
+  RFC 0014's remote reads and `hc` links carry no role install or attachment.
 - Replacing DSH plugins, MCP capabilities or skills with roles.
 - A role authoring kit inside the app.
 - Migrating existing team Bots other than Genie, or changing any Bot's model, permission,
@@ -255,18 +315,27 @@ process, and this RFC does not claim they do. That is why community roles wait f
 
 ## Migration
 
-- **The record is additive.** A Bot gains `bot.roles`; nothing existing is renamed or removed.
-  Teams with no roles behave exactly as before. An older plugin ignores the new keys and keeps
-  them in `state.json`, so a downgrade loses the role's parts but not the Bot or its data.
-- **Kind is read, not rewritten.** In P1-P5 a Bot with `kind: 'genie'` is shown and served as the
-  built-in Genie role. `kind` stays on the record and no automatic write happens. `omni` and
-  `unfold` are left exactly as they are.
+- **The record is additive.** A DSH Bot gains `bot.roles`; nothing existing is renamed or
+  removed. Teams with no roles behave exactly as before. An older plugin ignores the new keys and
+  keeps them in `state.json`, so a downgrade loses the role's parts but not the Bot or its data.
+- **Kind is read, not rewritten.** In P1-P5 a DSH Bot with `kind: 'genie'` is shown and served as
+  the built-in Genie role. `kind` stays on the record and no automatic write happens. `omni` and
+  `unfold` are left exactly as they are. Herdr's roster has a different `kind` (next bullet).
+- **Herdr's roster keeps its `kind` and gains no role in P1-P6.** `<project>/.herdr/bots.json`
+  stays version 1, read and written in place (RFC 0014), and a Herdr-exposed Bot is never written
+  to `state.json` (RFC 0014, "Kept apart from DSH's team"). Its `kind` is Herdr's seat, `main` or
+  `member` (`herdr/mods/am-sidebar/model.js:15`; an unknown value is left out at `:188`), not the
+  crew `kind`; it is kept as an input, never mapped to a role and never retired. P1-P6 write no
+  `roles` key there, so a downgrade changes nothing in the roster: its `kind`, `role`,
+  instructions and look stay as they are. A Herdr Bot's `role` stays the same kind of free-text
+  label as `bot.role`, never a product Role. Attaching a role to an exposed Bot is a later RFC's
+  work (Out of scope).
 - **Genie's Session, memory and wishes do not move.** The role uses the same tool and the same
   wish rows; attaching it to an ordinary Bot adds them there, and the Genie Bot keeps its own.
-- **P6 is the one rewrite.** It writes the Genie attachment (`{ id: 'genie', version, ... }`)
-  and keeps `kind` for one release where both are read, after a backup of the team's
-  `state.json`. A rollback restores `kind` and the previous record; the package stays installed
-  and the wishes stay in their records.
+- **P6 is the one rewrite of `state.json`.** It writes the Genie attachment
+  (`{ id: 'genie', version, ... }`) and keeps `kind` for one release where both are read, after a
+  backup of the team's `state.json`. A rollback restores `kind` and the previous record; the
+  package stays installed and the wishes stay in their records.
 - **A missing package is visible, not fatal.** If the installed files are gone, the attachment
   shows as broken, its tools do not load, and nothing else changes. The person can reinstall the
   same version or detach. No automatic uninstall, no automatic role change.
@@ -307,15 +376,25 @@ process, and this RFC does not claim they do. That is why community roles wait f
 8. **Capabilities.** `audio-out`, `task-start`, `route-policy`, `history-read`: declared by the
    package, granted one by one by the person, recorded on the attachment, removed by detach. A
    capability never widens the Bot's permission, folder, shell, channels, memory or Sessions.
-9. **Kind stays a stored field.** `genie` is read as the built-in role from P1 and as the
-   installed package from P6. No product may add a new crew kind; a role is the extension point.
+9. **Kind stays a stored field.** `state.json`'s `kind: 'genie'` is read as the built-in role from
+   P1 and as the installed package from P6. No product may add a new crew kind; a role is the
+   extension point. Herdr's roster has its own seat `kind` (contract 12), which is not a crew
+   kind.
 10. **Release artifacts.** An official role is `automagik-role-<id>-<version>.tgz` plus its
     `.sha256`, attached to the release; the signed `roles.json` on that release names it. Nothing
     is published to npm.
 11. **The roles setting.** `state.json: prefs.roles` is a team-level boolean introduced in P1,
     on by default: the one switch the deliveries reuse. It gates the Role picker and tag (P1),
     the temporary install action (P2) and the Roles section and chip (P3). It is not a Bot
-    setting, not `bot.role`, not `bots[].roles` and not the install records in `roles`.
+    setting, not `bot.role`, not `bots[].roles` and not the install records in `roles`. It does
+    not reach Herdr's roster; an exposed Bot has no Role picker (contract 12).
+12. **The Herdr roster is closed to roles in P1-P6.** `<project>/.herdr/bots.json` stays version
+    1, read and written in place (RFC 0014); no `roles` key is written there, and no Herdr-exposed
+    Bot is written to `state.json`. Herdr's `kind` is `main` or `member`, a seat, not a crew kind
+    or a role; it is kept. The Role picker, `role-attach` and `role-detach` do not apply to an
+    exposed Bot. A later RFC that gives one a role writes the attachment in that Bot's own record
+    (the version 1 roster, or the version 2 repo file after RFC 0014's delivery 4), in place, and
+    never in `state.json`.
 
 ## Deliveries
 
@@ -434,7 +513,8 @@ being created and is migrated.
    by accident.
 5. **Who may install and attach?** **Recommend the person only.** A Bot may ask in its chat; the
    card is the person's, like a permission or a secret approval. No Bot tool for install,
-   attach, detach or uninstall in P1-P6.
+   attach, detach or uninstall in P1-P6. An exposed Herdr Bot is not an attach target at all in
+   these deliveries (Design, "Herdr's `.herdr` roster").
 6. **What may run before P5?** **Recommend official Automagik roles only.** "Vetted publisher"
    is a review with a named owner, not a badge; until that review exists, a community role is
    listed and not installable. A signature without a review is not enough for host code.
