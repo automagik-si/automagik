@@ -16,6 +16,7 @@ import { GUARD_DIR, stableGuardDir, stableHelper, stableRunner } from "../mods/a
 import { botTerminals, liveFrom } from "../mods/am-sidebar/rows.js";
 const { startBot, attachBot, liveTerminalOf, botOfTerminal, ledgerBindings, runCli } = await import("../mods/am-sidebar/launch.js");
 import { briefingFilePath } from "../mods/am-sidebar/briefingText.mjs";
+import { removePath } from "../mods/am-sidebar/layoutSafe.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", plan: "b-eeeeeeeeee" };
@@ -240,6 +241,9 @@ async function world(t, { file = team(), terminals = () => [] } = {}) {
   delete process.env.HERDR_APP_HOME;
   t.after(() => {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    // The fixture's mods/am-sidebar is a link to this checkout: unlink it before the folder that
+    // holds it goes, so teardown never hands a link to rmSync (removePath, #550).
+    removePath(join(app, "mods/am-sidebar"), { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   });
   Object.assign(state, { spaces: [], panes: [], shared: new Map(), setSharedCalls: 0, offline: new Set(), calls: [], terminals: [], focused: null,
@@ -250,6 +254,18 @@ async function world(t, { file = team(), terminals = () => [] } = {}) {
   const ledger = () => { try { return readFileSync(join(app, "automagik-herdr/attach.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   return { root, main, app, calls, hcState, setHc, ledger };
 }
+
+// world() links the app home's mods/am-sidebar to this checkout. A test that hands the sidebar a
+// stand-in CLI replaces that link with a real folder, so the CLI it runs is the test's, not this
+// checkout's. removePath unlinks the link (#550): on Node 24.0 to 24.9 rmSync follows a link to a
+// folder, names it a directory and throws ERR_FS_EISDIR. Never rmSync this path.
+function standInMod(w) {
+  const mod = join(w.app, "mods/am-sidebar");
+  removePath(mod, { recursive: true, force: true });
+  mkdirSync(join(mod, "bin"), { recursive: true });
+  return mod;
+}
+
 const term = (address, { bot: b, cwd = "/x", argv = ["claude"], created = 1 } = {}) => ({ address, name: address, cwd, state: "live", parent: null,
   created_ms: created, labels: b ? { bot: b } : {}, foreground: { argv, cwd }, status: { app: "claude-code", state: "idle" } });
 
@@ -261,9 +277,7 @@ test("the fake hc is the one the CLI runs here: never the real one", async (t) =
 
 test("ledgerBindings: an older CLI refuses --all, and the labels still draw the rows (#223)", async (t) => {
   const w = await world(t);
-  const mod = join(w.app, "mods/am-sidebar");
-  rmSync(mod, { force: true });
-  mkdirSync(join(mod, "bin"), { recursive: true });
+  const mod = standInMod(w);
   // The CLI at this head has no --all (it lands with #1616): `whois --all --json` is a usage
   // error, exit 2, and no answer. The sidebar reads null and keeps its bot= labels.
   const seen = join(w.root, "older-cli-args.log");
@@ -288,9 +302,7 @@ process.exit(2);
 
 test("ledgerBindings: a CLI with --all answers the ledger's bindings (#223)", async (t) => {
   const w = await world(t);
-  const mod = join(w.app, "mods/am-sidebar");
-  rmSync(mod, { force: true });
-  mkdirSync(join(mod, "bin"), { recursive: true });
+  const mod = standInMod(w);
   const rows = [{ terminal: "t7", core: "c0", created_ms: 1, bot: ID.main, project: w.main, since: "2026-01-01T00:00:00Z",
     address: "t7", machine: null, state: "live" }];
   // A stand-in for the CLI #1616 lands: it answers only `whois --all --json`, so passing the
