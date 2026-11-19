@@ -406,8 +406,85 @@ jobs:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run check
+
+      # A browser hit skips both the Chromium download and Playwright's apt step; a browser
+      # miss still installs under a hard bound. The archive cache keeps a miss's deb downloads
+      # from repeating. Both keys carry the image or the pinned Playwright version, plus a
+      # suffix to bump when this step changes.
+      - name: Prepare the browser and apt caches
+        id: caches
+        run: |
+          set -euo pipefail
+          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
+          # here; the cache key must move when the hosted image (and its apt indexes) moves.
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "playwright=$(node -p "require('./node_modules/playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /var/cache/apt/archives/partial
+          # actions/cache restores as the runner user; the install then hands the cache to apt.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          sudo chmod -R u+rwX /var/cache/apt/archives
+
+      - name: Restore the Chromium package cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.caches.outputs.image }}-v1
+
+      - name: Restore the Playwright browser cache
+        id: browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.caches.outputs.playwright }}-${{ steps.caches.outputs.image }}-v1
+
       - name: Chromium for the page tests
-        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+        run: |
+          set -euo pipefail
+
+          # Hard wall-clock bound around Playwright's whole Chromium phase: it downloads the
+          # browser and runs its own apt-get for the system libraries. 420s (7 min) is generous
+          # for a cold install on the hosted image (the job ran 9m9s end to end, browser
+          # included), while a stalled mirror or CDN is killed instead of holding the 15-minute
+          # job open. A browser-cache hit skips this phase entirely.
+          readonly PLAYWRIGHT_LIMIT=420
+          readonly KILL_AFTER=15
+
+          log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+          # A hit means the browser tree is restored; trust it only if its executable is there.
+          if [ "${{ steps.browsers.outputs.cache-hit }}" = "true" ]; then
+            executable="$(node -e 'process.stdout.write(require("playwright-core").chromium.executablePath())' 2>/dev/null || true)"
+            if [ -n "${executable}" ] && [ -x "${executable}" ]; then
+              log "Playwright's Chromium came from the browser cache; skipping download and apt"
+              exit 0
+            fi
+            log "::warning::the browser cache reported a hit without an executable; installing again"
+          fi
+
+          # apt downloads as _apt; the restored archive cache must be writable by it, and handed
+          # back to the runner user afterwards so actions/cache can save the new debs.
+          sudo chown -R _apt:root /var/cache/apt/archives
+          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
+          hand_back() { sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives; }
+          trap hand_back EXIT
+
+          # The archive cache is already restored; apt uses its .debs and only a miss fetches
+          # the rest. This is the one install attempt, and its whole phase is bounded.
+          started=$SECONDS
+          log "Chromium and its system dependencies started (bound ${PLAYWRIGHT_LIMIT}s, kill-after ${KILL_AFTER}s)"
+          status=0
+          timeout --signal=TERM --kill-after="${KILL_AFTER}" "${PLAYWRIGHT_LIMIT}" \
+            node node_modules/playwright-core/cli.js install --with-deps chromium || status=$?
+          elapsed=$((SECONDS - started))
+          if [ "${status}" -eq 0 ]; then
+            log "Chromium and its system dependencies finished in ${elapsed}s"
+          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            echo "::error::the Chromium phase 'browser and system dependencies' was killed at its ${PLAYWRIGHT_LIMIT}s bound (exit ${status}); it must not hang the id job"
+            exit 1
+          else
+            echo "::error::the Chromium phase 'browser and system dependencies' failed (exit ${status}); the step fails instead of retrying forever"
+            exit 1
+          fi
       - run: bun run test
       - run: node scripts/mutations.mjs
 
@@ -470,6 +547,29 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      # The archive cache lets a later run install the libraries it already downloaded instead
+      # of fetching them again; the key carries the hosted image (ImageOS/ImageVersion) and a
+      # suffix to bump when this step changes. A miss still installs, bounded below.
+      - name: Prepare the apt archive cache
+        if: matrix.node == '24'
+        id: image
+        run: |
+          set -euo pipefail
+          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
+          # here; the cache key must move when the hosted image (and its apt indexes) moves.
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /var/cache/apt/archives/partial
+          # actions/cache restores as the runner user; the install then hands the cache to apt.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          sudo chmod -R u+rwX /var/cache/apt/archives
+
+      - name: Restore the herdr-app package cache
+        if: matrix.node == '24'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-herdr-app-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-v1
+
       # The app's own mod loader, not a stand-in: every PACK_MODS mod of the pack built from this
       # commit must load in the pinned Linux herdr-app. #624's node:url import passed the pack's
       # tests and failed only here, so this runs before them and prints herdr-app's own output.
@@ -478,8 +578,92 @@ jobs:
       - name: herdr-app system libraries
         if: matrix.node == '24'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libxkbcommon-x11-0 libxcb-xkb1
+          set -euo pipefail
+          sudo chown -R _apt:root /var/cache/apt/archives
+          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
+
+          # Hard wall-clock bounds, in seconds, around every apt phase. An install gets 240s
+          # (4 min) and `update` 120s (2 min): this two-package install took 2m33 in the slow
+          # run, so both are generous for a slow but working mirror, while a stalled one is
+          # killed at the bound. Each bound sends TERM, then KILL 15s later, so the worst path
+          # here (cache try, update, install) is 240+120+240 plus three 15s graces = 10m45s,
+          # under the job's 20-minute cap. PR #1690's run 44521928357 failed this step with
+          # `Unable to connect to azure.archive.ubuntu.com:http` and no phase visible, because
+          # every apt call was `-qq`.
+          readonly APT_INSTALL_LIMIT=240
+          readonly APT_UPDATE_LIMIT=120
+          readonly APT_KILL_AFTER=15
+
+          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
+          # stall visible in the log while apt still prints no secrets.
+          apt_opts=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+
+          log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
+          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
+          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
+          run_apt() {
+            local limit="$1" phase="$2"
+            shift 2
+            local started="$SECONDS" status=0
+            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
+            local elapsed=$((SECONDS - started))
+            case "${status}" in
+              0)
+                log "apt phase '${phase}' finished in ${elapsed}s"
+                return 0
+                ;;
+              124|137)
+                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+              *)
+                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+            esac
+          }
+
+          # fail_phase <phase> <status>: end the step, naming the phase, instead of retrying.
+          fail_phase() {
+            local phase="$1" status="$2"
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              echo "::error::the herdr-app system-libraries phase '${phase}' was killed at its wall-clock bound (exit ${status}); apt must not hang the herdr job"
+            else
+              echo "::error::the herdr-app system-libraries phase '${phase}' failed (apt exit ${status}); the step fails instead of retrying forever"
+            fi
+            exit 1
+          }
+
+          packages=(libxkbcommon-x11-0 libxcb-xkb1)
+
+          # A restored cache hit installs from its .debs only: --no-download makes apt use
+          # /var/cache/apt/archives or fail, so a hit needs no mirror at all.
+          status=0
+          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
+            install -y --no-install-recommends --no-download "${packages[@]}" || status=$?
+          if [ "${status}" -eq 0 ]; then
+            :
+          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            fail_phase "cache install (--no-download)" "${status}"
+          else
+            # A miss or an incomplete cache falls through to one bounded update + install; that
+            # is the single retry, and both of its phases stay bounded too.
+            log "apt: the package cache does not cover this image; refreshing indexes once, then installing"
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || fail_phase "update" "$?"
+            run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+              install -y --no-install-recommends "${packages[@]}" || fail_phase "install (after update)" "$?"
+          fi
+
+          # Hand the downloaded debs back to the runner user so actions/cache can save them.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
       - name: Every pack mod loads in herdr-app
         if: matrix.node == '24'
