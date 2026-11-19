@@ -153,6 +153,7 @@ if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
 
 switch (words[0]) {
   case "ls": {
+    if (Object.hasOwn(state, "lsReply")) { out(state.lsReply); break; }
     const want = [];
     for (let i = 1; i < words.length; i += 1) if (words[i] === "--label") want.push(words[++i]);
     // --all: finished terminals too (a removed one, hc rm, is in neither list).
@@ -169,12 +170,13 @@ switch (words[0]) {
       if (state.addAfterLs.seen === state.addAfterLs.nth) {
         state.terminals.push(state.addAfterLs.terminal);
         delete state.addAfterLs;
-        save();
       }
+      save();
     }
     break;
   }
   case "get": {
+    if (Object.hasOwn(state.getReply ?? {}, words[1])) { out(state.getReply[words[1]]); break; }
     // state.failGet: terminals hc can't answer for (a server error, not "no such terminal"); with
     // state.failGetExit, that exit code and hc's JSON error of another kind instead of exit 1.
     if ((state.failGet ?? []).includes(words[1])) {
@@ -254,6 +256,9 @@ switch (words[0]) {
     break;
   }
   case "run": {
+    // state.runDelayBeforeMs: the answer waits that long before the terminal exists, so a call
+    // killed at its own timeout leaves no terminal behind (the other half of #1262).
+    if (state.runDelayBeforeMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.runDelayBeforeMs);
     const labels = {};
     let name = null, cwd = null, parent = null, outlive = false, on = null, noParent = false;
     let i = 1;
@@ -313,9 +318,18 @@ switch (words[0]) {
     // state.onRunWrite: { path, text }: a file edit that lands while this run happens.
     if (state.onRunWrite) writeFileSync(state.onRunWrite.path, state.onRunWrite.text);
     save();
+    // state.runDelayMs: the answer waits that long, as hc's own does for a template whose program
+    // never reports a status (its first-status wait). The terminal is saved before the wait, so a
+    // call killed at its own timeout still leaves the terminal behind (#1262). state.runDelayDone
+    // names a file holding one line when the fake got to its answer, never when it was killed.
+    if (state.runDelayMs) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.runDelayMs);
+      if (state.runDelayDone) appendLine(state.runDelayDone, name ?? "");
+    }
     // state.runNoAddress: the pane starts, but the answer carries no address.
     if (state.runNoAddress) { out({}); break; }
-    out({ address });
+    // state.runFirstMessage: hc's first_message on a template run (what it delivered, or why not).
+    out({ address, ...(state.runFirstMessage ? { first_message: state.runFirstMessage } : {}) });
     break;
   }
   case "send": {

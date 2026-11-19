@@ -977,6 +977,18 @@ test("start and attach append a seat row to the ledger", (t) => {
   assert.equal(seat.template, null, "a seat runs no template");
 });
 
+test("#1262: a seat start gets the longer hc run timeout too, and a timed-out run is recorded by name", (t) => {
+  const s = scene(t);
+  const done = join(s.root, "seat-run-answered");
+  hcStateExtra(s, { runDelayMs: 16_000, runDelayDone: done });
+  const r = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "20000" } });
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(done), "the seat's hc run was allowed to answer past the old 15 s timeout");
+  const seat = s.ledger().find((x) => x.kind === "seat");
+  assert.equal(seat.terminal, "t100");
+  assert.equal(seat.botId, ID.main);
+});
+
 // ---- hc templates ----
 
 test("worker --template: hc's template form, a child of the bot's pane in the worktree, labelled; ledger names it", (t) => {
@@ -1008,6 +1020,87 @@ test("worker --template: hc's template form, a child of the bot's pane in the wo
   assert.equal(text.code, 0, text.err);
   assert.match(text.out, /template  opus-rev \(runs claude\)/);
   assert.ok(existsSync(join(s.project, ".claude/worktrees/feat-review/.claude/settings.local.json")), "a Claude template gets the hook");
+});
+
+// ---- #1262: hc's first-status wait outlasts the old 15 s program timeout ----
+
+/** Puts `fields` on the scene's fake-hc state (a template that reports no status, say). */
+const hcStateExtra = (s, fields) => {
+  const st = s.hcState();
+  Object.assign(st, fields);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+};
+
+test("#1262: a template worker that reports no status is waited for past hc's 60 s first-status wait and recorded", (t) => {
+  const s = scene(t);
+  // hc itself waits 60 s for a template's new terminal to report a status before it answers.
+  const done = join(s.root, "run-answered");
+  hcStateExtra(s, { runDelayMs: 61_000, runDelayDone: done });
+  const began = Date.now();
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  const took = Date.now() - began;
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(done), "hc's run was allowed to answer, not killed at 15 s");
+  assert.ok(took >= 60_000, `the start waited hc's first-status wait (${took} ms)`);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.doesNotMatch(r.err, /task wasn't delivered/, "hc answered: the task did go in");
+});
+
+test("#1262: an hc run that outlasts its timeout is still recorded: the terminal it started is found by name", (t) => {
+  const s = scene(t);
+  // The fake hc creates and saves the terminal, then waits far past the call's own timeout, as a
+  // program that never reports a status makes hc wait after the terminal already exists.
+  hcStateExtra(s, { runDelayMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.ok(s.hcState().terminals.some((x) => x.address === "t100" && x.state === "live"), "the worker is live");
+});
+
+test("#1262: the late lookup records the worker's own terminal, never a newer one whose name shares its prefix", (t) => {
+  const s = scene(t);
+  // Someone else's newer terminal, named with the worker's prefix: a lookup by prefix (or by the
+  // newest terminal) must not record this one as the worker.
+  const st = s.hcState();
+  st.terminals.push({ address: "t99", name: "e2e-x-helper", cwd: s.project, state: "live", parent: null,
+    created_ms: Date.now() + 1_000_000, labels: {}, foreground: { argv: ["zsh"], cwd: s.project, pid: 4999 },
+    status: { app: "zsh", state: "idle" } });
+  st.runDelayMs = 10_000;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100", "the worker's own terminal, never the newer t99");
+  assert.match(r.err, /hc send t100/);
+});
+
+test("#1262: a timeout with no terminal under the name is a failed start, never a recorded worker", (t) => {
+  const s = scene(t);
+  // The fake waits before it creates the terminal, so the call's timeout leaves nothing behind.
+  hcStateExtra(s, { runDelayBeforeMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /didn't answer within 0.8s and no live terminal is named e2e-x/);
+  assert.equal(s.ledger().some((x) => x.kind === "worker"), false, "no worker row for a terminal that never ran");
+});
+
+test("#1262: hc's first_message sent false is said as started without its task, and the worker is recorded", (t) => {
+  const s = scene(t);
+  hcStateExtra(s, { runFirstMessage: { sent: false, reason: "it never reported its status, so it may be showing a dialog" } });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  assert.equal(s.ledger().find((x) => x.kind === "worker").terminal, "t100");
 });
 
 test("worker --template with --agent, --model or --effort is refused; an unknown template too, before any worktree", (t) => {
@@ -2022,18 +2115,93 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
   git(s.project, "worktree", "add", "-q", "-b", "feat/wait", wt);
   const lockDir = join(s.app, "automagik-herdr");
   mkdirSync(lockDir, { recursive: true });
-  // Held by this test's process (fresh: under the 10 s stale limit), let go after 4.5 s.
+  // Startup is not contention: keep our holder fresh until the complete wait notice arrives.
   const lock = worktreeLock(lockDir, wt);
-  writeFileSync(lock, `${process.pid} held-by-the-test`);
-  const call = s.cliAsync(["worker", "go", "--worktree", wt]);
-  const free = setTimeout(() => rmSync(lock, { force: true }), 4500);
-  t.after(() => clearTimeout(free));
-  const r = await call;
-  assert.equal(r.code, 0, r.err);
-  assert.match(r.err, new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
-    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m"));
-  assert.equal(r.err.split("waiting for").length, 2, "said once");
-  assert.equal(s.runs().length, 1);
+  const holder = `${process.pid} held-by-the-test`;
+  writeFileSync(lock, holder);
+  const ownsLock = () => {
+    try { return readFileSync(lock, "utf8") === holder; }
+    catch (e) { if (e.code === "ENOENT") return false; throw e; }
+  };
+  const notice = new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
+    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m");
+  let child, fresh, watchdog;
+  let closed = false;
+  let released = false;
+  let terminal = false;
+  let out = "", err = "";
+  let close;
+  try {
+    child = s.spawnCli(["worker", "go", "--worktree", wt]);
+    let finish;
+    const result = new Promise((resolve) => { finish = resolve; });
+    close = new Promise((resolve) => child.once("close", (code, signal) => {
+      terminal = true;
+      closed = true;
+      resolve();
+      finish({ code, signal });
+    }));
+    const fail = (why) => { terminal = true; finish({ failure: why }); };
+    child.on("error", (e) => fail(`scratch CLI error: ${e.message}`));
+    child.stdout.on("error", (e) => fail(`stdout error: ${e.message}`));
+    child.stderr.on("error", (e) => fail(`stderr error: ${e.message}`));
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => {
+      err += d;
+      if (terminal || released || !notice.test(err)) return;
+      released = true; // Accumulated stderr keeps matching; never remove a successor's lock.
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      try {
+        assert.ok(ownsLock(), "fixture holder lost before its wait notice");
+        rmSync(lock);
+      } catch (e) { fail(e.message); return; }
+      watchdog = setTimeout(() => fail("scratch CLI did not close within 30 s after its notice"), 30_000);
+    });
+    fresh = setInterval(() => {
+      try {
+        assert.ok(ownsLock(), "fixture holder lost while waiting for its notice");
+        const now = new Date();
+        utimesSync(lock, now, now);
+      } catch (e) { clearInterval(fresh); fail(e.message); }
+    }, 200);
+    watchdog = setTimeout(() => fail("no complete wait notice within 30 s"), 30_000);
+    const r = await result;
+    const diagnostic = `${r.failure || "scratch CLI closed"}\nstdout: ${out}\nstderr: ${err}`;
+    assert.equal(r.failure, undefined, diagnostic);
+    assert.equal(r.signal, null, diagnostic);
+    assert.equal(r.code, 0, diagnostic);
+    assert.match(err, notice);
+    assert.equal(err.split("waiting for").length, 2, "said once");
+    assert.equal(s.runs().length, 1);
+  } finally {
+    terminal = true; // Keep draining late output without releasing or rearming during teardown.
+    clearInterval(fresh);
+    clearTimeout(watchdog);
+    try {
+      if (child && !closed) {
+        // Only this scratch child; wait for pipe closure before scene's after-hook removes it.
+        const waitClose = async (ms) => {
+          let timer;
+          try { await Promise.race([close, new Promise((resolve) => { timer = setTimeout(resolve, ms); })]); }
+          finally { clearTimeout(timer); }
+        };
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+        await waitClose(2000);
+        if (!closed) {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          await waitClose(3000);
+        }
+        assert.ok(closed, `scratch CLI did not close after termination\nstdout: ${out}\nstderr: ${err}`);
+      }
+    } finally {
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      if (ownsLock()) rmSync(lock);
+    }
+  }
 });
 
 test("worker #536: two calls on one new branch at once, a writer and a reviewer: one makes the worktree, the other finds it", async (t) => {

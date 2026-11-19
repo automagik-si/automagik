@@ -132,7 +132,9 @@ for (const proved of [false, true]) {
       'new-invented-credentials')
     assert.throws(() => trackRun({ spec: { env: old } }), /account changed/)
     homes.collect('codex')
-    assert.equal(existsSync(old.HOME), !proved,
-      'cleanup removes only a generation with full exit proof; pending evidence is retained')
+    assert.equal(existsSync(old.HOME), true,
+      'a retired home is kept whatever exit proof exists; its history stays readable (#1529)')
+    assert.equal(readFileSync(join(old.CODEX_HOME, 'auth.json'), 'utf8'),
+      'old-invented-credentials')
   })
 }

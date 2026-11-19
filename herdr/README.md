@@ -437,6 +437,15 @@ this sidebar's attachment. Saved configuration changes use these same choices wh
 them. Pack updates reload mods and do not restart bot panes. The Bots list and the Attach picker open
 on the bots the sidebar already knows and refresh behind.
 
+**A question is not a permission.** An agent that ends its turn waiting on you sets the pane
+label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
+`hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a
+**Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
+**Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
+clears the moment the pane works again or the label is removed: the sidebar reads the label from
+the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
+a day is reported by `am tidy` (`stale-needs-owner`).
+
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
 Detach). The Bots list names the project with its machine, and New bot on a focused space of
@@ -773,6 +782,21 @@ Which pane plays which bot is recorded in one file, `<app home>/automagik-herdr/
 `attach` and `detach`, and any run that reads it and finds a pane ended. The sidebar's Start
 and Attach run the command line too. The `bot` label is a display hint: `hc label` changes
 no row, so relabelling a pane moves no bot.
+
+**Which app home a restart uses.** `HERDR_APP_HOME` names it. With it unset, restart resolves
+the home before it writes anything: a pane's launch home wins, live or ended (hc keeps an ended
+pane until it is removed, and its launch carries the home); else a live binding wins over a
+stale one; else the project's own app home (`<project>/.herdr/app-home`, RFC 0021 delivery 3)
+is used when it names the bot and the default does not. A binding is **live** while hc still
+gives its terminal with the same `created_ms` (a finished, vanished or reused terminal is
+**stale**), and that one rule is what `restart`, `attach`, `show`, `whois` and `revive` resolve
+with: the live binding is the bot's wherever the command was typed. `ls`, `brief` and `start`
+read the selected home first and fall back to the project's own home when it names nothing
+live. Two live bindings on different panes, and two stale ledgers that both name the bot, have
+no launch record to decide between them: `restart`, `show` and `whois` refuse them, naming both
+ledgers, before anything starts or is written. Set `HERDR_APP_HOME` to the home that owns it.
+`am revive` leaves a bot alone when a live pane carries its label or the project's own home
+still binds it live, so a stale row in another home never brings back a twin.
 
 The file is made with mode 0600; one that is group- or world-writable is refused (every
 command that reads it exits 1, naming the fix: `chmod 600`). Each row is one line, written

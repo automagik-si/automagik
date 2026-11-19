@@ -3116,7 +3116,8 @@ test("restart (#341): a teammate re-seated in a worktree still left its omp conv
   seats(moved, wt, "t9");
   const note = fresh(moved);
   assert.match(note, /Captain \(t7, ended\) also ran Oh My Pi in /);
-  assert.doesNotMatch(note, /t9/, "the worktree pane isn't in this folder");
+  // The note quotes the project path, whose random scratch name can itself spell `t9`; match the pane the note names.
+  assert.doesNotMatch(note, /Captain \(t9[,)]/, "the worktree pane isn't in this folder");
 });
 
 test("restart (#328 review): a teammate's omp inside the keep wrapper is a sharer", (t) => {
