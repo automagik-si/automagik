@@ -246,3 +246,47 @@ func TestHistoryCarriesACommandRunsResult(t *testing.T) {
 		}
 	}
 }
+
+// The panel draws a target and only offers one when this build names the
+// kinds, so the listing carries both (#498).
+func TestListCarriesTargets(t *testing.T) {
+	setup(t, `backend: hc
+automations:
+  - name: housekeeping
+    cron: "0 9 * * *"
+    repo: /x
+    target: "bot:b-6jrz4bmxml"
+    prompt: tidy
+  - name: review
+    cron: "0 10 * * *"
+    repo: /x
+    target: "worker:b-6jrz4bmxml"
+    prompt: review
+`)
+	l, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Targets) != 2 || l.Targets[0] != "bot" || l.Targets[1] != "worker" {
+		t.Fatalf("targets = %v", l.Targets)
+	}
+	byName := map[string]Automation{}
+	for _, a := range l.Automations {
+		byName[a.Name] = a
+	}
+	if a := byName["housekeeping"]; a.Target != "bot:b-6jrz4bmxml" || a.TargetWhenBusy != "queue" {
+		t.Fatalf("bot target %+v", a)
+	}
+	if a := byName["review"]; a.Target != "worker:b-6jrz4bmxml" || a.TargetWhenBusy != "" {
+		t.Fatalf("worker target %+v", a)
+	}
+	raw, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"targets":`, `"target":"bot:b-6jrz4bmxml"`, `"target_when_busy":"queue"`} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("ls --json has no %s: %s", key, raw)
+		}
+	}
+}

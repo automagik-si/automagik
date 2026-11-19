@@ -189,8 +189,13 @@ func (r *Runner) report(a config.Automation, rec history.Record) string {
 // statusFor decides how a run that ended in err is remembered. Only a workspace
 // closed under the run is not a failure.
 func statusFor(err error) history.Status {
-	if errors.Is(err, host.ErrCancelled) {
+	switch {
+	case errors.Is(err, host.ErrCancelled):
 		return history.StatusCancelled
+	case errors.Is(err, host.ErrTargetBusy):
+		// A bot that was busy when the entry says skip is a dropped
+		// occurrence, the same as an overlapping run (#498).
+		return history.StatusSkipped
 	}
 	return history.StatusFailed
 }

@@ -22,7 +22,11 @@ type Listing struct {
 	State string `json:"state"`
 	// Kinds are the kinds of work this build runs: prompt, workflow, command.
 	// A panel offers the command form only when it reads "command" here.
-	Kinds       []string     `json:"kinds"`
+	Kinds []string `json:"kinds"`
+	// Targets are the target kinds this build runs: bot, worker. A panel
+	// offers a bot or worker target only when it reads them here, so it never
+	// writes a target to a scheduler that would drop it (#498).
+	Targets     []string     `json:"targets"`
 	Automations []Automation `json:"automations"`
 	Invalid     []Invalid    `json:"invalid"`
 }
@@ -43,12 +47,17 @@ type Automation struct {
 	// Command is the program the scheduler runs itself, and Notify the bot its
 	// one-line result goes to (ADR 0013). A command entry has no repo,
 	// workspace or agent.
-	Command        *config.Command `json:"command,omitempty"`
-	Notify         string          `json:"notify,omitempty"`
-	MCPConfig      string          `json:"mcp_config,omitempty"`
-	AgentArgs      []string        `json:"agent_args,omitempty"`
-	TimeoutMinutes int             `json:"timeout_minutes"`
-	CatchUpMinutes int             `json:"catch_up_minutes"`
+	Command *config.Command `json:"command,omitempty"`
+	Notify  string          `json:"notify,omitempty"`
+	// Target is "bot:<id>" or "worker:<id>": who a prompt run hands its prompt
+	// to instead of opening a fresh session (#498). TargetWhenBusy is a bot
+	// target's queue|skip answer.
+	Target         string   `json:"target,omitempty"`
+	TargetWhenBusy string   `json:"target_when_busy,omitempty"`
+	MCPConfig      string   `json:"mcp_config,omitempty"`
+	AgentArgs      []string `json:"agent_args,omitempty"`
+	TimeoutMinutes int      `json:"timeout_minutes"`
+	CatchUpMinutes int      `json:"catch_up_minutes"`
 	// BlockedGraceMinutes is how long an agent may sit on a dialog before the
 	// run fails; the loader fills in the default (2), -1 waits it out.
 	BlockedGraceMinutes int       `json:"blocked_grace_minutes"`
@@ -97,6 +106,7 @@ func List() (Listing, error) {
 	out := Listing{
 		Backend: cfg.Backend, Paused: cfg.Paused, Scheduler: pid, Config: config.Path(), State: config.StateDir(),
 		Kinds:       config.Kinds,
+		Targets:     config.Targets,
 		Automations: []Automation{}, Invalid: []Invalid{},
 	}
 	now := time.Now()
@@ -109,6 +119,7 @@ func List() (Listing, error) {
 			CatchUpMinutes: a.CatchUpMinutes, BlockedGraceMinutes: a.BlockedGraceMinutes,
 			Disabled: a.Disabled, Line: a.Line,
 			Command: a.Command, Notify: a.Notify,
+			Target: a.Target, TargetWhenBusy: string(a.TargetWhenBusy),
 		}
 		if a.Template != "" {
 			entry.Agent = "" // the default filled in at load; a template brings its own

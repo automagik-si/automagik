@@ -352,6 +352,12 @@ func TestStatusForSeparatesACancellationFromAFailure(t *testing.T) {
 	if got := statusFor(errors.New("start claude agent: boom")); got != history.StatusFailed {
 		t.Errorf("a real failure recorded as %q, want failed", got)
 	}
+	// A bot that was busy when its automation was told to skip is a dropped
+	// occurrence, not a failure that toasts at 3am (#498).
+	busy := fmt.Errorf("housekeeping: %w: Housekeeper was working", host.ErrTargetBusy)
+	if got := statusFor(busy); got != history.StatusSkipped {
+		t.Errorf("a busy bot target recorded as %q, want skipped", got)
+	}
 }
 
 func TestHistoryRemembersWhichSessionARunLivesIn(t *testing.T) {

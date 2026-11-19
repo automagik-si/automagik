@@ -7,8 +7,14 @@ Herdr term, the Herdr meaning wins — this is a plugin, not a peer.
 
 **Automation** — one entry in `automations.yaml`: a cron expression and one
 piece of work: a prompt or a workflow to delegate to, each with a repo, or a
-command. The unit the user thinks in. Never
-"job", "task" or "schedule".
+command. A prompt may name a **target** instead of a session. The unit the
+user thinks in. Never "job", "task" or "schedule".
+
+**Target** — who a prompt run hands its prompt to: `bot:<id>` (the bot's own
+terminal) or `worker:<id>` (a worker of that bot for this run only). Named by
+the bot's id from the project's `.herdr/bots.json`, never by a terminal
+address. An automation with no target opens a session, as every prompt run
+used to (ADR 0014).
 
 **Occurrence** — one moment a cron expression comes due. An automation has
 infinitely many; most of them never become runs.

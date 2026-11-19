@@ -26,6 +26,8 @@ type fakeHC struct {
 	screen     string
 	screenErr  error
 	terminals  []string
+	termSeq    [][]string // one answer per call, the last repeating; wins over terminals
+	termCalls  int
 	termErr    error
 	termLabels map[string]string
 	runErr     error
@@ -35,6 +37,14 @@ type fakeHC struct {
 	calls      []string      // kill and rm, with their address
 	readCalls  int
 	killErr    error
+	sent       []string // hc send's texts, in order
+	sendErr    error
+}
+
+func (f *fakeHC) Send(address, text string) error {
+	f.calls = append(f.calls, "send "+address)
+	f.sent = append(f.sent, text)
+	return f.sendErr
 }
 
 func (f *fakeHC) Kill(address string) error {
@@ -57,6 +67,14 @@ func (f *fakeHC) Read(string) (string, error) {
 
 func (f *fakeHC) Terminals(labels map[string]string) ([]string, error) {
 	f.termLabels = labels
+	if f.termSeq != nil {
+		at := f.termCalls
+		f.termCalls++
+		if at >= len(f.termSeq) {
+			at = len(f.termSeq) - 1
+		}
+		return f.termSeq[at], f.termErr
+	}
 	return f.terminals, f.termErr
 }
 
