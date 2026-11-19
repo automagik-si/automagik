@@ -76,6 +76,164 @@ function countsOf(value) {
   return Object.keys(counts).length === 0 ? undefined : counts
 }
 
+// The two fields Omni's channels plugin publishes for the backfill card (#1326 K2): the
+// open proposals on the team view, and the live runs on every state answer. Like a kit row,
+// they are rebuilt from the labels, dates, states and counts the card draws: a chat preview
+// or a message text a caller passed, and a field the card does not know, never reach a
+// window. A proposal or a run without its id names no card and is left out.
+const BACKFILL_ID_MAX = 200
+const BACKFILL_CHATS_MAX = 200
+const BACKFILL_ROWS_MAX = 200
+// The card draws every open proposal and the newest three runs (BACKFILL_RUNS_SHOWN in the
+// model), so the slice publishes at most this many of each. Twenty leaves room for a busy
+// team's open proposals and for the runs the card counts beyond the three it draws, and
+// with the per-element caps it keeps the published slice small even when every run is full.
+export const GENUI_MAX_BACKFILL_PROPOSALS = 20
+export const GENUI_MAX_BACKFILL_RUNS = 20
+const BACKFILL_STATES = new Set(['queued', 'fetching', 'done', 'phone-did-not-answer', 'cancelled', 'failed'])
+const BACKFILL_OUTCOMES = new Set(['done', 'phone-did-not-answer', 'stopped', 'failed', 'not-started'])
+const BACKFILL_SUMMARY = ['total', 'running', 'done', 'phoneDidNotAnswer', 'stopped', 'failed']
+const backfillId = value => clip(value, BACKFILL_ID_MAX)
+// A millisecond timestamp (the runs') or an ISO time (the reading rows').
+const stampOf = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.min(Math.floor(value), 1e15)
+  const when = iso(value)
+  return when === undefined ? undefined : Date.parse(when)
+}
+
+export function backfillProposalOf(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const id = backfillId(value.id)
+  if (id === undefined) return undefined
+  const proposal = { id }
+  const botId = backfillId(value.botId)
+  if (botId !== undefined) proposal.botId = botId
+  for (const key of ['from', 'to']) {
+    if (value[key] === null) proposal[key] = null
+    else {
+      const when = iso(value[key])
+      if (when !== undefined) proposal[key] = when
+    }
+  }
+  const createdAt = stampOf(value.createdAt)
+  if (createdAt !== undefined) proposal.createdAt = createdAt
+  const chats = []
+  for (const entry of Array.isArray(value.chats) ? value.chats.slice(0, BACKFILL_CHATS_MAX) : []) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const chatId = backfillId(entry.id)
+    if (chatId === undefined) continue
+    const chat = { id: chatId, ticked: entry.ticked === true }
+    const name = clip(entry.name, 120)
+    if (name !== undefined) chat.name = name
+    const kind = clip(entry.kind, 24)
+    if (kind !== undefined) chat.kind = kind
+    const channelId = backfillId(entry.channelId)
+    if (channelId !== undefined) chat.channelId = channelId
+    const channel = clip(entry.channel, 120)
+    if (channel !== undefined) chat.channel = channel
+    chats.push(chat)
+  }
+  proposal.chats = chats
+  return proposal
+}
+
+function backfillRowOf(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const chatId = backfillId(value.chatId)
+  if (chatId === undefined) return undefined
+  const row = { chatId }
+  const chat = clip(value.chat ?? value.name, 120)
+  if (chat !== undefined) row.chat = chat
+  const channelId = backfillId(value.channelId)
+  if (channelId !== undefined) row.channelId = channelId
+  if (value.jobId === null) row.jobId = null
+  else {
+    const jobId = backfillId(value.jobId)
+    if (jobId !== undefined) row.jobId = jobId
+  }
+  if (BACKFILL_STATES.has(value.state)) row.state = value.state
+  if (value.outcome === null) row.outcome = null
+  else if (BACKFILL_OUTCOMES.has(value.outcome)) row.outcome = value.outcome
+  const round = integer(value.round)
+  if (round !== undefined && round > 0) row.round = round
+  if (value.oldestReached === null) row.oldestReached = null
+  else {
+    const oldestReached = iso(value.oldestReached)
+    if (oldestReached !== undefined) row.oldestReached = oldestReached
+  }
+  const counts = countsOf(value.counts !== null && typeof value.counts === 'object' && !Array.isArray(value.counts) ? value.counts : value)
+  if (counts !== undefined) row.counts = counts
+  if (value.coverage === null) row.coverage = null
+  else {
+    const coverage = coverageOf(value.coverage)
+    if (coverage !== undefined) row.coverage = coverage
+  }
+  for (const key of ['startedAt', 'updatedAt']) {
+    const when = stampOf(value[key])
+    if (when !== undefined) row[key] = when
+  }
+  return row
+}
+
+export function backfillRunOf(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const id = backfillId(value.id)
+  if (id === undefined) return undefined
+  const run = { id }
+  const botId = backfillId(value.botId)
+  if (botId !== undefined) run.botId = botId
+  for (const key of ['from', 'to']) {
+    if (value[key] === null) run[key] = null
+    else {
+      const when = iso(value[key])
+      if (when !== undefined) run[key] = when
+    }
+  }
+  const startedAt = stampOf(value.startedAt)
+  if (startedAt !== undefined) run.startedAt = startedAt
+  if (value.summary !== null && typeof value.summary === 'object' && !Array.isArray(value.summary)) {
+    const summary = {}
+    for (const key of BACKFILL_SUMMARY) {
+      const count = integer(value.summary[key])
+      if (count !== undefined) summary[key] = count
+    }
+    if (Object.keys(summary).length > 0) run.summary = summary
+  }
+  const rows = []
+  for (const entry of Array.isArray(value.rows) ? value.rows.slice(0, BACKFILL_ROWS_MAX) : []) {
+    const row = backfillRowOf(entry)
+    if (row !== undefined) rows.push(row)
+  }
+  run.rows = rows
+  return run
+}
+
+/**
+ * Wraps the view and live hooks a plugin registers, so the two kit fields are rebuilt on
+ * their way into the team's answers. Every other field a hook returns passes through as it
+ * was; a hook that returns no backfill field is left alone.
+ */
+export function guardBackfillFields(hooks) {
+  for (const name of ['view', 'live']) {
+    const register = hooks?.[name]
+    if (typeof register !== 'function') continue
+    hooks[name] = fn => register(() => {
+      const value = fn()
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+      const hasProposals = Object.hasOwn(value, 'omniBackfillProposals')
+      const hasRuns = Object.hasOwn(value, 'omniBackfills')
+      if (!hasProposals && !hasRuns) return value
+      const out = { ...value }
+      if (hasProposals) out.omniBackfillProposals = Array.isArray(value.omniBackfillProposals)
+        ? value.omniBackfillProposals.slice(0, GENUI_MAX_BACKFILL_PROPOSALS).map(backfillProposalOf).filter(Boolean) : []
+      if (hasRuns) out.omniBackfills = Array.isArray(value.omniBackfills)
+        ? value.omniBackfills.slice(0, GENUI_MAX_BACKFILL_RUNS).map(backfillRunOf).filter(Boolean) : []
+      return out
+    })
+  }
+  return hooks
+}
+
 // One row, rebuilt from the fields a card draws. A row without a chat id names nothing to
 // merge into, so it is left out.
 export function rowOf(run) {
@@ -144,6 +302,9 @@ const kindOf = error => [error?.code, error?.name].find(value => typeof value ==
 
 export function install(rt) {
   const { ctx } = rt
+  // The kit fields the backfill card draws are guarded from here on: a plugin's view or
+  // live hook cannot carry a preview or an unknown field into a window.
+  guardBackfillFields(rt.hooks)
   const batches = new Map()
   let revision = 0
   // A publish nudges the desktop's own feed, at most once per burst: a backfill reports

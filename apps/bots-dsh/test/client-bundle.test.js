@@ -46,12 +46,14 @@ test('client.js registers a factory that exports apply and inject', () => {
   assert.deepEqual(Object.keys(exports.omni.ui).sort(), ['BotMark', 'CHARACTERS', 'MAIN_LOOK', 'OmniMark', 'createSource', 'icons', 'relativeShort'])
   // The shared gen-UI kit (#1326) is a plugin's to draw with: the rows, the person card,
   // the slice reader and the endpoint it reads.
-  assert.deepEqual(Object.keys(exports.omni.genui).sort(), ['CoverageRow', 'PersonCard', 'ProgressRow', 'ProgressRows', 'READING_NOTE', 'loadReadingNote', 'model', 'revisionOf', 'rows'])
+  assert.deepEqual(Object.keys(exports.omni.genui).sort(), ['BackfillCard', 'CANCEL_BACKFILL', 'CoverageRow', 'PersonCard', 'ProgressRow', 'ProgressRows', 'READING_NOTE', 'START_BACKFILL', 'backfillView', 'cancelBackfill', 'loadReadingNote', 'model', 'revisionOf', 'rows', 'startBackfill'])
   assert.equal(exports.omni.genui.READING_NOTE, 'omni-reading-note')
-  for (const name of ['CoverageRow', 'PersonCard', 'ProgressRow', 'ProgressRows', 'loadReadingNote', 'revisionOf', 'rows']) {
+  assert.equal(exports.omni.genui.START_BACKFILL, 'start_backfill')
+  assert.equal(exports.omni.genui.CANCEL_BACKFILL, 'cancel_backfill')
+  for (const name of ['BackfillCard', 'CoverageRow', 'PersonCard', 'ProgressRow', 'ProgressRows', 'backfillView', 'cancelBackfill', 'loadReadingNote', 'revisionOf', 'rows', 'startBackfill']) {
     assert.equal(typeof exports.omni.genui[name], 'function', name)
   }
-  assert.deepEqual(Object.keys(exports.omni.genui.model).sort(), ['countText', 'coverageLine', 'coverageOf', 'parseReadingNote', 'percentOf', 'personView', 'rowView', 'shortDate', 'spanOf', 'stateId', 'stateWord'])
+  assert.deepEqual(Object.keys(exports.omni.genui.model).sort(), ['backfillDay', 'backfillRange', 'backfillSummaryText', 'backfillView', 'canCancel', 'countText', 'coverageLine', 'coverageOf', 'parseReadingNote', 'percentOf', 'personView', 'proposalView', 'rowView', 'runView', 'shortDate', 'spanOf', 'stateId', 'stateWord'])
   assert.ok(Object.isFrozen(exports.omni))
   assert.equal(exports.omni.face(), null)
   // No `configForms`: the client never writes the user's DSH settings, such as the
