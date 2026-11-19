@@ -316,7 +316,7 @@ test('switch on unshares the network, masks the real dir, ~/.ssh and the proxy, 
 });
 
 test('the pane gets the proxy environment, so only the relay is reachable', () => {
-  const env = proxyEnvironment({ PATH: '/bin', HOME: '/home/fixture' });
+  const env = proxyEnvironment({ PATH: '/bin', HOME: '/home/x' });
   assert.equal(env.HTTPS_PROXY, EGRESS_PROXY_URL);
   assert.equal(env.https_proxy, EGRESS_PROXY_URL);
   assert.equal(env.HTTP_PROXY, EGRESS_PROXY_URL);
@@ -324,7 +324,7 @@ test('the pane gets the proxy environment, so only the relay is reachable', () =
   assert.equal(env.NO_PROXY, '127.0.0.1,localhost,::1');
   assert.equal(env.NODE_USE_ENV_PROXY, '1');
   assert.equal(env.PATH, '/bin');
-  assert.equal(env.HOME, '/home/fixture');
+  assert.equal(env.HOME, '/home/x');
 });
 
 test('a missing proxy still masks everything, says one line and starts bwrap', () => {
