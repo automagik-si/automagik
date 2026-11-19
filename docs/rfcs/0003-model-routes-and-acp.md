@@ -831,8 +831,14 @@ old account consent. It requires fresh in-app sign-in, preserves Bot models and 
 does not log out or copy the old account. Bot CLI user settings also start empty; project
 settings still load from the workspace. The previous physical folder and its unproved records
 remain at their original path: it is never renamed and reused. A surviving vendor process can
-write only to the abandoned generation. Cleanup removes it later only when exit is proven;
-unproved generations, including Windows crash records, stay retained. Both serialization and
+write only to the abandoned generation. The retired folder stays readable at its bound path: its
+`RETIRED.json` holds the disposition, and later starts remove nothing until the measurement
+side's complete post-last-write scan with the root frozen, its retirement record, and the
+session-absorption receipt hold; a `KEEP` file in the home opts out. A marker, note or bound
+path that cannot be proved to be that generation's own is refused and left untouched, and a
+missing, unreadable or unparseable `RETIRED.json` is refused too: without the record of what was
+decided the home is ambiguous. Unproved generations,
+including Windows crash records, stay retained. Both serialization and
 app registrations sit outside the
 replaceable home. Captured launches check the installation's current-generation pointer as well
 as local version markers; delayed account reads and image tickets are invalidated by Reset.
@@ -936,7 +942,11 @@ For edits, the Image read boundary's text-only-input statement gains this except
 bots-dsh reads the person's verified upload from DSH's store and acp-dsh passes it inline
 when image prompts are supported and writes a 0400 copy in the per-draw scratch. No read
 root is added. Only an acknowledged per-draw profile permits an edit; fallback refuses it
-(D3's recommended default). The scratch and input copy are removed afterwards. Codex still
+(D3's recommended default). Any edit the locked run cannot be set up for (sign-in, account,
+configuration, switch check, profile acknowledgement, an older ACP service, a connector or
+session that cannot start) is refused with
+`reason: edit-not-isolated`, so bots-dsh gives the Bot its own verified copy to edit the file
+itself; the original stays unchanged. The scratch and input copy are removed afterwards. Codex still
 selects its image-tool paths without an adapter pre-read hook; acknowledgement is not proof
 of scratch-only reads, and #870 remains open. Real-app acceptance must demonstrate that
 Codex preserves the reference picture's distinctive shapes and text before this ships.

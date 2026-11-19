@@ -18,18 +18,21 @@ permissions:
 # (apps/pocket/docs/decisions/teams-v1.md), and Pocket Link's covers the shared transcript
 # fixture, its only repository input outside its own folder.
 env:
-  HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
+  HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
   SCHEDULER_CHANGED_PATHS: '^(herdr/scheduler/|\.github/workflows/ci\.yml$)'
-  AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
+  AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
   POCKET_CHANGED_PATHS: '^(apps/pocket/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|\.github/workflows/ci\.yml$)'
   METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
   USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
 
+# Cancel only pull_request runs: a push to dev or main finishes, and
+# a manual run is never cancelled by a push. A pull request push
+# cancels the older run. GitHub keeps one pending run per group.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -131,8 +134,43 @@ jobs:
             cat "${report}" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+  nodes:
+    # The Node versions the herdr and am gates run on, read once from .github/node-versions.json
+    # (#1645). The release cut reads the same file, so the version a release runs is always a
+    # version a pull request ran: CI's 22 + latest 24 missed the release's 24.9.0, where a
+    # symlink/rmSync difference (24.0-24.13 followed the link, 24.18 unlinked it) failed every
+    # release for hours with every PR check green. Its own job, not an output of `changes`: a
+    # failed detection must still run every area (#895), so the matrix cannot live there.
+    name: Node versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read the gates' Node versions
+        id: read
+        run: |
+          set -euo pipefail
+          matrix=$(jq -c '.ci' .github/node-versions.json)
+          release=$(jq -r '.release' .github/node-versions.json)
+          # The release must be an exact version that is a matrix leg, or it can float away from
+          # what a pull request ran: that is the skew this file exists to end.
+          if [[ ! "${release}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release Node version '${release}' in .github/node-versions.json is not exact x.y.z"
+            exit 1
+          fi
+          if ! jq -e --arg version "${release}" '.ci | index($version)' .github/node-versions.json > /dev/null; then
+            echo "::error::release Node version '${release}' is not one of the ci matrix legs in .github/node-versions.json"
+            exit 1
+          fi
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
   repo:
-    # One version everywhere, the release tooling's tests, and the market index: DSH's own
+    # One version everywhere, release tooling tests and lint, and the market index: DSH's own
     # parser, and every pinned commit holds the package it lists (so it needs history).
     name: Versions and market index
     runs-on: ubuntu-24.04
@@ -143,10 +181,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Lint release scripts
+        run: |
+          bash -n scripts/release-gates.sh
+          bash -n scripts/release-cut.sh
+          shellcheck scripts/release-gates.sh scripts/release-cut.sh
+
       # scripts/test-guard.test.ts runs real `node --test` runs, on the plugins' Node.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -158,7 +202,12 @@ jobs:
   landing:
     name: Landing page and browser
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Measured on 2026-11-19: the ffmpeg step was still installing when the old 10-minute cap
+    # cancelled the job 9m57s into that step (run 44488373957: job 08:32:21, step 08:32:40,
+    # cancelled 08:42:37), so bun install, both test files and the Chrome check never ran. Those
+    # steps are short; 20 leaves a cold apt install room to finish, while a genuinely hung step
+    # still fails. A package-cache hit removes the download entirely.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -166,11 +215,123 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
+
+      # The page gate re-derives every committed WebP from its recorded source; that check
+      # calls ffprobe and ffmpeg, which the runner image does not carry. The archive cache lets
+      # a later run install the packages it already downloaded instead of fetching them again;
+      # the key carries the hosted image (ImageOS/ImageVersion) and a suffix to bump when this
+      # step changes. A miss still installs, bounded below, rather than assuming a hit.
+      - name: Prepare the apt archive cache
+        id: image
+        run: |
+          set -euo pipefail
+          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
+          # here; the cache key must move when the hosted image (and its apt indexes) moves.
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /var/cache/apt/archives/partial
+          # actions/cache restores as the runner user; the install then hands the cache to apt.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          sudo chmod -R u+rwX /var/cache/apt/archives
+
+      - name: Restore the ffmpeg package cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-v1
+
+      - name: ffmpeg for the derived art check
+        run: |
+          set -euo pipefail
+          sudo chown -R _apt:root /var/cache/apt/archives
+          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
+
+          # Hard wall-clock bounds, in seconds, around every apt phase. An install gets 240s
+          # (4 min) and `update` 120s (2 min): a cold ffmpeg install on the hosted runner runs
+          # well under a minute, so both are generous for a slow but working mirror, while a
+          # stalled one is killed at the bound. Each bound sends TERM, then KILL 15s later, so
+          # the worst path here (cache try, update, install) is 240+120+240 plus three 15s
+          # graces = 10m45s, far under the job's 20-minute cap. #1686 bounded one connection
+          # (`Acquire::*::Timeout`), not the phase: PR #1688's run 44513936685 sat in this step
+          # 19m50 (job 135524951317) with no output because every apt call was `-qq`.
+          readonly APT_INSTALL_LIMIT=240
+          readonly APT_UPDATE_LIMIT=120
+          readonly APT_KILL_AFTER=15
+
+          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
+          # stall visible in the log while apt still prints no secrets.
+          apt_opts=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+
+          log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
+          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
+          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
+          run_apt() {
+            local limit="$1" phase="$2"
+            shift 2
+            local started="$SECONDS" status=0
+            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
+            local elapsed=$((SECONDS - started))
+            case "${status}" in
+              0)
+                log "apt phase '${phase}' finished in ${elapsed}s"
+                return 0
+                ;;
+              124|137)
+                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+              *)
+                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+            esac
+          }
+
+          # fail_phase <phase> <status>: end the step, naming the phase, instead of retrying.
+          fail_phase() {
+            local phase="$1" status="$2"
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              echo "::error::the ffmpeg dependency phase '${phase}' was killed at its wall-clock bound (exit ${status}); apt must not hang the landing job"
+            else
+              echo "::error::the ffmpeg dependency phase '${phase}' failed (apt exit ${status}); the step fails instead of retrying forever"
+            fi
+            exit 1
+          }
+
+          # A restored cache hit installs from its .debs only: --no-download makes apt use
+          # /var/cache/apt/archives or fail, so a hit needs no mirror at all. ffprobe is not a
+          # separate package on Ubuntu (ffmpeg provides both binaries), and
+          # --no-install-recommends only drops extras this check does not use.
+          status=0
+          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
+            install -y --no-install-recommends --no-download ffmpeg || status=$?
+          if [ "${status}" -eq 0 ]; then
+            :
+          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            fail_phase "cache install (--no-download)" "${status}"
+          else
+            # A miss or an incomplete cache falls through to one bounded update + install; that
+            # is the single retry, and both of its phases stay bounded too.
+            log "apt: the package cache does not cover this image; refreshing indexes once, then installing"
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || fail_phase "update" "$?"
+            run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+              install -y --no-install-recommends ffmpeg || fail_phase "install (after update)" "$?"
+          fi
+
+          # Hand the downloaded debs back to the runner user so actions/cache can save them.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: node --test apps/landing/landing.test.mjs apps/landing/waitlist.test.mjs
@@ -205,7 +366,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -248,7 +409,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
@@ -274,7 +435,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - run: node herdr/scripts/privacy-check.mjs
 
@@ -292,15 +453,19 @@ jobs:
     # Only when herdr/ changed, or the workflows and lane tooling that test and pack it: the
     # `changes` job's herdr output decides it before this job takes a runner.
     name: herdr pack (Node ${{ matrix.node }})
-    needs: changes
+    needs: [changes, nodes]
     if: ${{ !cancelled() && needs.changes.outputs.herdr != 'false' }}
     runs-on: ubuntu-24.04
-    # The full CLI/worker suites plus the local/linked start matrix exceed ten minutes.
-    timeout-minutes: 15
+    # Measured: 10m58 on Node 22, 12m32 on Node 24, whose leg also runs the herdr-app
+    # system-libraries apt-get (2m33 in the slow run). At 15 that leg was cancelled at its cap
+    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 keeps the
+    # suite, the install and a slow runner's variance under the cap. Do not trim it back.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
+      # One list for CI and the release (#1645): .github/node-versions.json.
       matrix:
-        node: ['22', '24']
+        node: ${{ fromJSON(needs.nodes.outputs.matrix) }}
     defaults:
       run:
         working-directory: herdr
@@ -513,14 +678,15 @@ jobs:
     # Only when am/, what it copies, or the workflows and tooling that release it changed: the
     # `changes` job's am output decides it before this job takes a runner.
     name: am (Node ${{ matrix.node }})
-    needs: changes
+    needs: [changes, nodes]
     if: ${{ !cancelled() && needs.changes.outputs.am != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
+      # One list for CI and the release (#1645): .github/node-versions.json.
       matrix:
-        node: ['22', '24']
+        node: ${{ fromJSON(needs.nodes.outputs.matrix) }}
     defaults:
       run:
         working-directory: am
@@ -646,8 +812,24 @@ jobs:
           restore-keys: |
             robolectric-m2-${{ runner.os }}-${{ steps.robolectric.outputs.version }}-
 
-      # Validates the wrapper checksum and caches Gradle's dependencies.
+      # Gradle's dependencies and wrapper, keyed on the files that can change resolution: a Gradle
+      # file change starts a fresh key (the restore-key still seeds it) and a source-only change
+      # reuses the warm cache, so a normal run resolves nothing over the network (#1675).
+      - name: Cache Gradle's dependencies and wrapper (~/.gradle)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-pocket-${{ runner.os }}-${{ hashFiles('apps/pocket/android/**/*.gradle.kts', 'apps/pocket/android/**/*.toml', 'apps/pocket/android/gradle/wrapper/gradle-wrapper.properties', 'apps/pocket/android/gradle.properties') }}
+          restore-keys: |
+            gradle-pocket-${{ runner.os }}-
+
+      # Wrapper checksum validation only: the explicit cache above owns ~/.gradle, and setup-gradle
+      # stands down when that directory already exists, so its own cache is off here (#1675).
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          cache-disabled: true
 
       # One shared debug key for PR APKs (docs/decisions/shared-debug-signing-key.md). With the
       # secret, the job signs with it and publishes the APK; without it (a fork), the default key.
@@ -672,8 +854,23 @@ jobs:
         id: build
         working-directory: apps/pocket/android
         run: |
+          set -euo pipefail
           touch "$RUNNER_TEMP/m2-marker"
-          ./gradlew --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+          args=(--no-daemon --max-workers=2 --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug)
+          first="$RUNNER_TEMP/gradle-first-attempt.log"
+          status=0
+          ./gradlew "${args[@]}" 2>&1 | tee "$first" || status=$?
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          # A dropped connection (a plugin marker or a dependency that did not resolve) is retried
+          # exactly once; a test, lint or compile failure is not, and a second failure fails the
+          # job, so a genuinely disappeared artifact is still obvious (#1675).
+          if ! grep -Eq 'Plugin .* was not found|Could not resolve|Could not GET' "$first"; then
+            exit "$status"
+          fi
+          echo "resolution failed, retrying once"
+          ./gradlew "${args[@]}"
 
       # The certificate is public evidence that two PR runs share a key; the APK is what a tester installs.
       - name: Debug APK certificate
@@ -1124,7 +1321,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -1140,6 +1337,12 @@ jobs:
         run: |
           bun install --frozen-lockfile
           [ -d dev/harness/node_modules ] || bun run harness
+
+      - name: Desktop dependencies for ACP lifecycle tests
+        # The app-build upgrade case calls Desktop's profile merger, which resolves yaml here.
+        if: matrix.app == 'acp-dsh'
+        working-directory: apps/desktop
+        run: npm ci --omit=dev --ignore-scripts --no-fund --no-audit
 
       - name: Omni's plugins at the pinned release
         # The welcome lists the tools Omni's channels and canvases register; its test reads
@@ -1231,7 +1434,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -1383,7 +1586,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - name: Install
         run: npm ci --no-fund --no-audit
@@ -1415,7 +1618,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - name: Test
         run: node --test test/batch-spawn.test.js test/process-identity.test.js

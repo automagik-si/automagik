@@ -5,7 +5,7 @@
 // usagemeter reads. Pure: no `herdr`, `gpui-*` or `fs`, so `node --test`, the CLI and the
 // briefing hook share it. Apache-2.0.
 
-import { AGENTS, AGY_MODE_DEFAULT, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
+import { AGENTS, AGY_MODE_DEFAULT, CODEX_LOGIN_SHELL, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
   hasEffortFlag, launchRun, modelArgs, modelRefusal, promptArgs, resolveAgent } from "./models.js";
 import { TEMPLATE_SHAPE } from "./model.js";
 import { envWords } from "./logins.js";
@@ -362,7 +362,8 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
   const labels = target.labels ?? {};
   if (bound || labels.bot) return `${address} is a bot's pane, not a worker; worker kill ends only a worker you started`;
   const owner = labels[WORKER_OF_LABEL] ?? null;
-  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label); worker kill ends only a worker you started`;
+  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label). `
+    + "Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started";
   if (!botId || owner !== botId) return `${address} is another bot's worker; worker kill ends only a worker you started`;
   // A worker mid-turn is not ended from here: its work would be lost. The project's main bot can.
   if (target.state !== "finished" && target.status?.state === "working") {
@@ -642,12 +643,36 @@ export function codexCommandCheck(command, agents = AGENTS, where = null) {
   const options = runs.map((r) => split(r.args)[0]);
   const all = (test) => options.length > 0 && options.every((a) => test(a));
   const pair = (args, flag, value) => args.some((w, i) => (w === flag && args[i + 1] === value) || w === `${flag}=${value}`);
-  const config = (args, value) => pair(args, "-c", value) || pair(args, "--config", value) || args.includes(`-c${value}`);
+  // A config word's text as Codex reads it: `-c key=value`, `-c=key=value`,
+  // `--config key=value`, `--config=key=value` (or joined `-ckey=value`). The key and value
+  // are trimmed around `=`, so a valid TOML spelling (`-c 'allow_login_shell = false'`) reads
+  // as the same word, not as a missing one or a different key.
+  const configWords = (args) => {
+    const texts = [];
+    for (let i = 0; i < args.length; i += 1) {
+      const w = args[i];
+      if ((w === "-c" || w === "--config") && typeof args[i + 1] === "string") { texts.push(args[i + 1]); i += 1; }
+      else if (typeof w === "string" && w.startsWith("--config=")) texts.push(w.slice("--config=".length));
+      else if (typeof w === "string" && w.startsWith("-c") && w.length > 2) texts.push(w.slice(2));
+    }
+    return texts;
+  };
+  const config = (args, entry) => {
+    const want = /^([^=]+?)\s*=\s*(.*)$/.exec(String(entry).trim());
+    if (!want) return false;
+    return configWords(args).some((text) => {
+      const got = /^([^=]+?)\s*=\s*(.*)$/.exec(text.trim());
+      return Boolean(got) && got[1].trim() === want[1].trim() && got[2].trim() === want[2].trim();
+    });
+  };
   const missing = [];
   if (!all((a) => a.includes("--approve-for-me"))) missing.push("--approve-for-me");
   if (!all((a) => pair(a, "--disable", "hooks") || config(a, "features.hooks=false"))) missing.push("--disable", "hooks");
   if (!all((a) => a.includes("--no-daemon"))) missing.push("--no-daemon");
   if (!all((a) => config(a, CODEX_NETWORK))) missing.push("-c", CODEX_NETWORK);
+  // #1133: a command the pack builds must keep the pane PATH's hc kill shim first at command
+  // time, so its shell never runs as a login shell that can prepend another `hc`.
+  if (!all((a) => config(a, CODEX_LOGIN_SHELL))) missing.push("-c", CODEX_LOGIN_SHELL);
   const inexact = options.some((a) => !codexDirsExact(a, where)) ? ["--add-dir"] : [];
   const conflicts = [...new Set([...options.flatMap((a) => codexClean(["codex", ...a], where).dropped), ...inexact])];
   const lost = [...new Set(runs.flatMap((r) => split(r.args)[1].map(optionName).filter((n) => CODEX_LOST_OPTIONS.has(n))))];
@@ -674,15 +699,24 @@ export function codexTemplateRefusal(template, command, agents = AGENTS) {
 
 /**
  * The warning for a worker template whose command runs Codex without --no-daemon among its
- * options (#1125): hc says Codex must run with it, or its commands run outside hc. The owner's
- * template exception keeps the command as it is (never rewritten, rerouted or refused): this
- * names the fix.
+ * options (#1125), or in a login shell (#1133): hc says Codex must run with --no-daemon, and a
+ * login startup can prepend another `hc` ahead of the pane's kill shim. The owner's template
+ * exception keeps the command as it is (never rewritten, rerouted or refused): this names the
+ * fix.
  */
 export function codexTemplateWarning(template, command, agents = AGENTS) {
   const check = codexCommandCheck(command, agents);
-  if (!check || !check.missing.includes("--no-daemon")) return null;
-  return `Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
-    + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`;
+  if (!check) return null;
+  const lines = [];
+  if (check.missing.includes("--no-daemon")) {
+    lines.push(`Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
+      + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`);
+  }
+  if (check.missing.includes(CODEX_LOGIN_SHELL)) {
+    lines.push(`Template ${template} runs Codex in a login shell, so a profile that prepends a directory can put another hc ahead of `
+      + `the pane's hc kill shim (#1133). Add \`-c ${CODEX_LOGIN_SHELL}\` to the codex command in that template's file (hc templates lists it).`);
+  }
+  return lines.length ? lines.join(" ") : null;
 }
 
 /**

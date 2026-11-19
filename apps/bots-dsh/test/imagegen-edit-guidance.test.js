@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { CODEX_RECORD, createImageGen, install as imagegen } from '../src/host/imagegen.js'
 import { install as uploads } from '../src/host/shared-uploads.js'
 
-async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated') {
+async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated', { access = { ready: true }, codex = true, canEdit = true, grant = false, authScope } = {}) {
   const folder = await mkdtemp(join(tmpdir(), 'edit-guidance-'))
   t.after(() => rm(folder, { recursive: true, force: true }))
   const data = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
@@ -18,10 +18,15 @@ async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated'
     botOfSession: () => bot, roomOf: () => undefined, partsOf: () => [], warn() {},
     async *eventsBackwards() { yield { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'image', attachment: ref }] } } },
     ctx: { on() {}, inject() {}, get: name => ({
-      credentials: { readRecord: async () => undefined, resolve: async () => undefined },
+      credentials: { readRecord: async name => grant && name === CODEX_RECORD ? { kind: 'grant', payload: { access: 'test-token' } } : undefined, resolve: async () => undefined },
       attachments: { readImage: async typed => { reads++; assert.equal(typed.name, undefined); return { ref: typed, data } } },
       sandboxPolicy: { resolve: () => ({ mode }) },
-      acpAgents: { imageAccess: async () => ({ ready: true }), editImage: async () => { throw Object.assign(new Error('The image run was refused.'), { reason }) }, generateImage: () => assert.fail('no draw') },
+      acpAgents: codex ? {
+        ...(authScope === undefined ? {} : { authScope }),
+        imageAccess: async () => access,
+        generateImage: () => assert.fail('no draw'),
+        ...(canEdit ? { editImage: async () => { throw Object.assign(new Error('The image run was refused.'), { reason }) } } : {}),
+      } : undefined,
     })[name] } }
   uploads(rt); imagegen(rt)
   const tool = rt.teamTools.find(tool => tool.name === 'generate_image')
@@ -44,6 +49,67 @@ for (const mode of ['workspace-write', 'read-only']) test(`isolated-edit failure
   assert.equal(f.reads(), 1)
   assert.equal(f.rt.images.progress('edit').phase, 'failed')
   assert.doesNotMatch(text + f.tool.description, /OpenAI key/)
+})
+
+// The issue's rule: when the locked run cannot be set up, the Bot is given its own copy to edit
+// the file itself. A Codex whose account check, sign-in or switch enforcement refuses before the
+// run (the #1637 preflight) must not answer with a reason alone.
+for (const [name, access, detail] of [
+  ['unsupported', { ready: false, signedIn: true, reason: 'unsupported', unsupported: true }, /does not take the locked image run/],
+  ['signed out', { ready: false, signedIn: false }, /not signed in/],
+  ['unconfirmed account', { ready: false, signedIn: true, reason: 'account' }, /not confirmed/],
+  ['unloadable config', { ready: false, signedIn: true, reason: 'config' }, /could not load its own configuration/],
+  ['unreadable check', { ready: false, signedIn: true, reason: 'unreadable' }, /could not be checked for safe editing/],
+]) test(`an edit Codex cannot ready (${name}) still gives the Bot its own copy`, async t => {
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { access })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)), text)
+  assert.match(text, /no edited image was made/)
+  assert.match(text, detail)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+  assert.deepEqual(await readFile(path), f.data)
+  assert.equal((await stat(path)).mode & 0o777, 0o444)
+})
+
+test('an edit with no image service at all still gives the Bot its own copy', async t => {
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { codex: false })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)), text)
+  assert.match(text, /no edited image was made/)
+  assert.match(text, /no image service is connected/)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+})
+
+test('an edit an older Codex service cannot take still gives the Bot its own copy', async t => {
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { canEdit: false })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)), text)
+  assert.match(text, /no edited image was made/)
+  assert.match(text, /cannot edit pictures/)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+})
+
+// A shared host falls back to the earlier ChatGPT grant whenever its Codex is not ready, for any
+// reason. The copy path must still run, and the cause it names must be the access state, not a
+// presumed sign-out.
+for (const [name, access, wording] of [
+  ['signed out', { ready: false, signedIn: false }, /not signed in/],
+  ['unloadable config', { ready: false, signedIn: true, reason: 'config' }, /could not load its own configuration/],
+]) test(`an edit on a legacy shared grant (${name}) saves the Bot's copy and names the actual cause`, async t => {
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { access, grant: true, authScope: 'shared' })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)), text)
+  assert.match(text, /no edited image was made/)
+  assert.match(text, wording)
+  if (access.reason === 'config') assert.doesNotMatch(text, /not signed in/i)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+  assert.deepEqual(await readFile(path), f.data)
+  assert.equal((await stat(path)).mode & 0o777, 0o444)
+  assert.equal(f.rt.images.progress('edit').phase, 'failed')
 })
 
 for (const error of ['os', 'other']) test(`copy ${error} refusal never claims an edit`, async t => {
@@ -96,7 +162,7 @@ test('edit sign-in and plugin-update refusals suggest Codex and Automagik withou
   for (const shared of [false, true]) {
     const images = createImageGen({
       credentials: () => ({ readRecord: async key => shared && key === CODEX_RECORD ? { kind: 'grant', payload: { access: 'test-token' } } : undefined, resolve: async () => undefined }),
-      codex: () => ({ authScope: shared ? 'shared' : 'isolated', imageAccess: async () => ({ ready: !shared }), generateImage: () => assert.fail('no draw') }),
+      codex: () => ({ authScope: shared ? 'shared' : 'isolated', imageAccess: async () => ({ ready: !shared, ...(shared ? { signedIn: false } : {}) }), generateImage: () => assert.fail('no draw') }),
       folder: () => assert.fail('no copy'), fetch: () => assert.fail('no network') })
     await assert.rejects(images.generate({ input, prompt: 'Make it blue', callId: 'refused-edit' }), error => {
       assert.match(error.message, shared ? /needs Codex signed in.*Bot's chat/ : /needs a newer Automagik.*update/)
@@ -105,6 +171,26 @@ test('edit sign-in and plugin-update refusals suggest Codex and Automagik withou
     })
     assert.equal(images.progress('refused-edit').phase, 'failed')
   }
+})
+
+// The legacy-grant branch is reached for any not-ready shared Codex, so its sentence must follow
+// what `imageAccess()` said: a configuration failure is not a missing sign-in, and vice versa.
+for (const [name, access, wording] of [
+  ['signed out', { ready: false, signedIn: false }, /needs Codex signed in.*Bot's chat/],
+  ['unloadable config', { ready: false, signedIn: true, reason: 'config' }, /needs Codex to load its configuration.*fix Codex's config file/],
+]) test(`the legacy-grant refusal follows imageAccess (${name})`, async () => {
+  const images = createImageGen({
+    credentials: () => ({ readRecord: async key => key === CODEX_RECORD ? { kind: 'grant', payload: { access: 'test-token' } } : undefined, resolve: async () => undefined }),
+    codex: () => ({ authScope: 'shared', imageAccess: async () => access, generateImage: () => assert.fail('no draw') }),
+    folder: () => assert.fail('no copy'), fetch: () => assert.fail('no network') })
+  const input = { data: Buffer.from('test bytes'), mediaType: 'image/png' }
+  await assert.rejects(images.generate({ input, prompt: 'Make it blue', callId: 'legacy-edit' }), error => {
+    assert.equal(error.reason, 'edit-not-isolated')
+    assert.match(error.message, wording)
+    if (access.reason === 'config') assert.doesNotMatch(error.message, /not signed in/i)
+    assert.doesNotMatch(error.message, /OpenAI\s+(?:API\s+)?key/i)
+    return true
+  })
 })
 
 test('a quoted working folder and image name remain escaped in the lock guidance', async t => {

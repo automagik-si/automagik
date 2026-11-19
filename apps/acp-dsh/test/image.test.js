@@ -3,7 +3,7 @@
 // real Codex runs, nothing reaches a network, and no Codex home or config is read or written.
 import assert from 'node:assert/strict'
 import childProcess from 'node:child_process'
-import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,9 +34,37 @@ function setup(mode, env = {}) {
     return dir
   }
   const spawn = () => ({ command: process.execPath, args: [FAKE], env: { FAKE_IMAGE_MODE: mode, FAKE_IMAGE_TRACE: traceFile, CODEX_PATH: '/fake/codex', ...env } })
-  const trace = () => (existsSync(traceFile) ? readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
+  const trace = ({ live = false } = {}) => {
+    if (!existsSync(traceFile)) return []
+    const lines = readFileSync(traceFile, 'utf8').split('\n')
+    // While the fake is writing, only the newline commits a frame.
+    if (live || lines.at(-1) === '') lines.pop()
+    return lines.map(line => JSON.parse(line))
+  }
   return { home, scratch, scratches, spawn, trace, cleanup: () => rmSync(home, { recursive: true, force: true }) }
 }
+
+test('a live trace exposes each frame at its newline and reports malformed completed frames', (t) => {
+  const run = setup('hang')
+  t.after(run.cleanup)
+  const traceFile = join(run.home, 'trace.jsonl')
+  const start = { event: 'start' }
+  const prompt = { event: 'prompt' }
+  appendFileSync(traceFile, '{"event":"start"}\n{"event":"pro')
+  assert.deepEqual(run.trace({ live: true }), [start])
+  appendFileSync(traceFile, 'mpt"}')
+  assert.deepEqual(run.trace({ live: true }), [start])
+  assert.deepEqual(run.trace(), [start, prompt])
+  appendFileSync(traceFile, '\n')
+  assert.deepEqual(run.trace({ live: true }), [start, prompt])
+
+  appendFileSync(traceFile, 'broken')
+  assert.throws(() => run.trace(), SyntaxError)
+  appendFileSync(traceFile, '\n')
+  assert.throws(() => run.trace(), SyntaxError)
+  appendFileSync(traceFile, '{"event":')
+  assert.throws(() => run.trace({ live: true }), SyntaxError)
+})
 
 test('the image call\'s PNG comes from its content or raw output, never its saved file', () => {
   const content = [{ type: 'content', content: { type: 'image', data: PNG, mimeType: 'image/png', uri: '/home/x/.codex/generated_images/a.png' } }]
@@ -78,7 +106,7 @@ test('one image: an empty read-only scratch session, the feature on for this run
   // then gets; the tools are read under the very config the session then gets. The last two
   // renders prove each required switch's effect with only that switch on.
   const clis = trace.filter(entry => entry.event === 'cli')
-  assert.deepEqual(clis.map(entry => entry.cwd), Array(6).fill(run.scratches[0].replace(run.home, realpathSync(run.home))))
+  assert.deepEqual(clis.map(entry => entry.cwd), Array(6).fill(run.scratches[0]))
   assert.deepEqual(clis[0].args, ['mcp', 'list', '--json', '-c', `projects={ '${run.scratches[0]}' = { trust_level = 'trusted' } }`], 'the person\'s MCP servers are listed first')
   assert.deepEqual(clis[1].args, ['features', 'list', '-c', 'features={ image_generation = true, shell_tool = false, view_image = false }'])
   assert.deepEqual(clis[2].args, sessionArgs(config))
@@ -192,6 +220,16 @@ test('offered tools: only the fixed list and the image tool pass; anything else,
   ]) {
     assert.throws(() => readOffered(text), error => error.kind === 'unsupported', label)
   }
+})
+
+test('offered tools: the newest Codex\'s asynchronous message to the user is on the fixed list, and a name it does not offer still refuses', () => {
+  // Codex 0.170 offers this one with every switch the run turns off still off; its own
+  // `send_message_to_user_async` switch reports off and does not take it away. It sends the
+  // person a message and reads no file or command, so it belongs on the fixed list (#1021). A
+  // name the list does not hold still stops the draw: the list stays a guard.
+  const offered = { tools: ['functions.exec', 'functions.wait', 'functions.send_message_to_user_async', 'collaboration.send_message'], nested: ['apply_patch'] }
+  checkOffered(offered)
+  assert.throws(() => checkOffered({ ...offered, tools: [...offered.tools, 'functions.send_message_to_user'] }), error => error.kind === 'unsupported' && /does not allow/.test(error.message))
 })
 
 test('nested tools: one declaration per tool in the one form Codex writes; any other form is refused', () => {
@@ -747,18 +785,29 @@ test('Invalid configuration on any successful check refuses the draw and removes
 test('a failed or aborted profile draw removes the scratch config', async (t) => {
   for (const mode of ['failed', 'hang']) {
     const run = setup(mode, { FAKE_IMAGE_PROFILE: 'offer' })
-    homeProfile(run)
+    const profile = homeProfile(run)
     t.after(run.cleanup)
     const controller = new AbortController()
     const drawing = drawImage({ spawn: run.spawn, prompt: 'a fox', scratch: run.scratch, signal: controller.signal })
     let timer
+    let traceError
     if (mode === 'hang') timer = setInterval(() => {
-      if (run.trace().some(entry => entry.event === 'prompt')) controller.abort()
+      try {
+        if (!run.trace({ live: true }).some(entry => entry.event === 'prompt')) return
+      } catch (error) {
+        traceError = error
+      }
+      clearInterval(timer)
+      controller.abort()
     }, 20)
     try {
       await assert.rejects(drawing, error => error.code === (mode === 'hang' ? STOPPED : FAILED))
     } finally { clearInterval(timer) }
-    assert.ok(JSON.parse(run.trace().find(entry => entry.event === 'new-session').codexConfig).default_permissions)
+    if (traceError) throw traceError
+    const trace = run.trace()
+    assert.equal(JSON.parse(trace.find(entry => entry.event === 'new-session').codexConfig).default_permissions, profile.id)
+    if (mode === 'hang') assert.ok(trace.some(entry => entry.event === 'cancel'), 'the hanging draw is cancelled')
+    assert.ok(trace.some(entry => entry.event === 'close'), `${mode}: the session is closed`)
     assert.equal(existsSync(join(run.scratches[0], '.codex')), false)
     assert.equal(existsSync(run.scratches[0]), false)
   }

@@ -32,7 +32,8 @@ const SKIP_ALL = ["--dangerously-skip-permissions", "--dangerously-bypass-approv
 // What each kind's launch adds, written out here so a change to the table is a change to this list.
 const EXPECTED = {
   claude: ["--permission-mode", "auto"],
-  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"],
+  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "allow_login_shell=false"],
   antigravity: ["--dangerously-skip-permissions"],
 };
 
@@ -338,4 +339,16 @@ test("workerKillRefusal: only a worker of the calling bot may be ended; a seat, 
   for (const status of [{ state: "idle" }, { state: "done" }, null]) assert.equal(workerKillRefusal({ target: { ...mine, status }, botId: ID, self: "t1" }), null);
   assert.equal(workerKillRefusal({ target: { ...mine, state: "finished", status: { state: "working" } }, botId: ID, self: "t1" }), null);
   assert.match(workerKillRefusal({ target: mine, botId: null, self: "t1" }), /another bot's worker/, "no caller bot, no kill");
+  // #1129: hc's parent is the caller's own word at hc run, not proof of who started it, so it
+  // authorizes nothing. A plain child is refused however its parent reads; the main bot ends it.
+  const plain = /^t2 isn't a worker \(it has no worker\.of label\)\. Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started$/;
+  const child = { address: "t2", state: "live", labels: {} };
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t1", status: { state: "idle" } }, botId: ID, self: "t1" }), plain, "a finished direct child");
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t4", status: { state: "idle" } }, botId: ID, self: "t1" }), plain, "another pane's child");
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t1", status: { state: "working" } }, botId: ID, self: "t1" }), plain, "a working direct child");
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t0", status: { state: "idle" } }, botId: ID, self: "t1" }), plain, "a child of the caller's old pane");
+  assert.match(workerKillRefusal({ target: { address: "t4", parent: "t1", labels: { bot: "b-bbbbbbbbbb" } }, botId: ID, self: "t1" }), /^t4 is a bot's pane, not a worker/, "a seat started from the caller");
+  assert.match(workerKillRefusal({ target: { ...mine, parent: "t1", labels: { "worker.of": "b-bbbbbbbbbb" } }, botId: ID, self: "t1" }), /^t9 is another bot's worker/, "the label beats the parent");
+  // Ownership is the bot's, not the pane's: after a handoff or restart its worker is still its own.
+  assert.equal(workerKillRefusal({ target: { ...mine, parent: "t0" }, botId: ID, self: "t1" }), null);
 });

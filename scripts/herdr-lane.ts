@@ -22,7 +22,8 @@
  *       pointer (pack.json, pack.json.sig), it verifies, and its sequence is higher; or when <dir>
  *       holds a posted pointer that does not verify, unless HERDR_LANE_REPLACE_UNVERIFIED=true (the
  *       release's replace_unverified_herdr_pointer input)
- *   bun scripts/herdr-lane.ts check-key               HERDR_PACK_KEY is set, and its public key is in pack-keys.json
+ *   bun scripts/herdr-lane.ts check-key               validate HERDR_PACK_SIGNER and its selected key
+ *       against pack-keys.json, then print the slot and keyId
  *   bun scripts/herdr-lane.ts keygen [--repo <owner/repo>] [--key-id <id>]
  *       make a key: an ed25519 pair generated in memory; the private key goes straight to `gh secret
  *       set` on its stdin (never printed, never written to disk), and only then is the public key
@@ -146,6 +147,13 @@ export function postedProblem(next: Buffer, posted: Buffer | null, postedSig: st
 export const slotFor = (keys: PackKey[], signer: string | null) =>
   keys.length === 0 ? SLOTS[0] : (signer === SLOTS[1] ? SLOTS[0] : SLOTS[1]);
 
+/** The signing slot named by HERDR_PACK_SIGNER, or a problem when the name is unknown. */
+export function signerSlot(signer?: string) {
+  if (!signer) return SLOTS[0];
+  const slot = SLOTS.find(slot => slot === signer);
+  return slot ?? { problem: `HERDR_PACK_SIGNER names an unknown slot ${JSON.stringify(signer)}` };
+}
+
 /** install.sh's embedded copy of pack-keys.json: its `TRUSTED_KEYS='…'` line, parsed. */
 export const installKeys = (text: string): PackKey[] => JSON.parse(/^\s*TRUSTED_KEYS='([^']*)'$/m.exec(text)?.[1] ?? 'null')?.keys;
 
@@ -162,12 +170,19 @@ if (import.meta.main) {
   const flag = (name: string, fallback: string) => { const i = args.indexOf(name); return i >= 0 && args[i + 1] ? args[i + 1] : fallback; };
   if (command === 'manifest' && args.length === 4) {
     const [tgz, version, commit, issuedAt] = args;
-    const keyId = process.env.HERDR_PACK_KEY ? keyIdOf(process.env.HERDR_PACK_KEY, readKeys()) : null;
-    if (!keyId) throw new Error(`herdr lane: ${keyProblem(process.env.HERDR_PACK_KEY, readKeys())}`);
+    const slot = signerSlot(process.env.HERDR_PACK_SIGNER);
+    if (typeof slot !== 'string') throw new Error(`herdr lane: ${slot.problem}`);
+    // The workflow puts the selected slot's key in HERDR_PACK_KEY for all signing commands.
+    const key = process.env.HERDR_PACK_KEY;
+    const keys = readKeys();
+    const keyId = key ? keyIdOf(key, keys) : null;
+    if (!keyId) throw new Error(`herdr lane: ${keyProblem(key, keys)} (${slot} selected)`);
     console.log(JSON.stringify(pointer(tgz, { version, commit, issuedAt, keyId }), null, 2));
   } else if (command === 'sign' && args.length === 1) {
+    const slot = signerSlot(process.env.HERDR_PACK_SIGNER);
+    if (typeof slot !== 'string') throw new Error(`herdr lane: ${slot.problem}`);
     const key = process.env.HERDR_PACK_KEY;
-    if (!key) throw new Error('HERDR_PACK_KEY is not set');
+    if (!key) throw new Error(`${slot} is not set`);
     console.log(signPointer(readFileSync(args[0]), key));
   } else if (command === 'verify' && args.length === 2) {
     const found = verifyPointer(readFileSync(args[0]), readFileSync(args[1], 'utf8'), readKeys());
@@ -190,9 +205,19 @@ if (import.meta.main) {
       console.log(posted || sig ? 'herdr lane: the posted pointer is not newer' : 'herdr lane: no pointer posted yet');
     }
   } else if (command === 'check-key' && args.length === 0) {
-    const problem = keyProblem(process.env.HERDR_PACK_KEY, readKeys());
-    if (problem) { console.error(`herdr lane: ${problem} (bun scripts/herdr-lane.ts keygen makes it; RFC 0011)`); process.exit(1); }
-    console.log(`herdr lane: HERDR_PACK_KEY is ${keyIdOf(process.env.HERDR_PACK_KEY as string, readKeys())}, listed in pack-keys.json`);
+    const slot = signerSlot(process.env.HERDR_PACK_SIGNER);
+    if (typeof slot !== 'string') {
+      console.error(`herdr lane: ${slot.problem}`);
+      process.exit(1);
+    }
+    const key = process.env.HERDR_PACK_KEY;
+    const keys = readKeys();
+    const problem = keyProblem(key, keys);
+    if (problem) {
+      console.error(`herdr lane: ${problem} (${slot} selected). See RFC 0011 for bun scripts/herdr-lane.ts keygen.`);
+      process.exit(1);
+    }
+    console.log(`herdr lane: ${slot} is ${keyIdOf(key as string, keys)}, listed in pack-keys.json`);
   } else if (command === 'keygen') {
     const repo = flag('--repo', 'automagik-si/automagik');
     const keyId = flag('--key-id', KEY_ID);

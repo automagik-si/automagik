@@ -36,19 +36,38 @@ const team = () => ({
   ],
 });
 
-// The stub: logs every call, answers hc ls/get from the state file, and for any other verb
-// prints the pass-through markers and exits HC_STUB_CODE.
+// The stub: logs every call, answers hc ls/get/read from the state file, and for any other
+// verb prints the pass-through markers and exits HC_STUB_CODE. A pane's `screen` is what a
+// `read` returns; a pane's `readFail` makes that read fail as a transport error would.
 const STUB = `#!/usr/bin/env node
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.HC_STUB_LOG, JSON.stringify({ argv: args, marker: process.env.AM_HC_GUARD_REENTRY ?? null }) + "\\n");
 const state = JSON.parse(readFileSync(process.env.HC_STUB_STATE, "utf8"));
+const found = (at) => state.get[at] ?? Object.values(state.get).find((g) => g.name === at);
 if (args[0] === "ls") { process.stdout.write(JSON.stringify({ terminals: state.terminals }) + "\\n"); process.exit(0); }
 if (args[0] === "get") {
   const at = args[1];
-  const found = state.get[at] ?? Object.values(state.get).find((g) => g.name === at);
-  if (!found) { process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3); }
-  process.stdout.write(JSON.stringify(found) + "\\n"); process.exit(0);
+  const hit = found(at);
+  if (!hit) { process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3); }
+  process.stdout.write(JSON.stringify(hit) + "\\n"); process.exit(0);
+}
+if (args[0] === "read") {
+  // The target is the first positional; #628 reads may name their options before it
+  // (read --lines 5 t102), so skip a value-taking option and its word.
+  const optionValue = new Set(["--lines"]);
+  let at = null;
+  for (let i = 1; i < args.length; i += 1) {
+    const word = args[i];
+    if (optionValue.has(word)) { i += 1; continue; }
+    if (word.startsWith("-")) continue;
+    at = word;
+    break;
+  }
+  const hit = found(at);
+  if (!hit) { process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3); }
+  if (hit.readFail) { process.stderr.write("the screen could not be read\\n"); process.exit(1); }
+  process.stdout.write(JSON.stringify({ text: hit.screen ?? "", complete: true, how: "screen", why: null }) + "\\n"); process.exit(0);
 }
 process.stdout.write("stub-out " + JSON.stringify(args) + "\\n");
 process.stderr.write("stub-err " + args[0] + "\\n");
@@ -133,6 +152,17 @@ const readLog = (s) => readFileSync(s.logPath, "utf8").split("\n").filter(Boolea
 const calls = (s) => readLog(s).map((row) => row.argv);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+/** Patch one pane's hc get answer in the scene's state file (its status, screen, readFail). */
+const editPane = (s, address, patch) => {
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get[address] = { ...state.get[address], ...patch };
+  writeFileSync(s.statePath, JSON.stringify(state));
+};
+/** A visible question dialog, as the pack's pendingDialog reads one. */
+const DIALOG_SCREEN = "This command requires approval\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend";
+/** A free pane: its prompt is the last line, with no dialog below it. */
+const FREE_SCREEN = "all done\n❯ ";
+
 function assertRefused(r) {
   assert.notEqual(r.status, 0, "a refusal exits non-zero");
   const lines = r.stderr.trim().split("\n");
@@ -141,6 +171,20 @@ function assertRefused(r) {
   assert.match(r.stderr, /#628/);
   assert.match(r.stderr, /#631/);
   assert.equal(r.stdout, "", "a refusal prints no stdout");
+}
+
+/** A held-pane refusal: hc's blocked exit, one JSON error line, the pane and the reason. */
+function assertHeld(r, address) {
+  assert.equal(r.status, 9, `a held pane exits 9 (hc's blocked code): ${r.stderr}`);
+  assert.equal(r.stdout, "", "a held refusal prints no stdout");
+  const lines = r.stderr.trim().split("\n");
+  assert.equal(lines.length, 1, `exactly one stderr line: ${JSON.stringify(r.stderr)}`);
+  const error = JSON.parse(lines[0]).error;
+  assert.equal(error.kind, "blocked", "a relay can tell it from a transport error");
+  assert.ok(error.message.includes(address), `the pane is named: ${error.message}`);
+  assert.match(error.message, /held by a dialog/);
+  assert.match(error.message, /nothing was sent/);
+  assert.match(error.hint, /answer the dialog|route this message/i);
 }
 
 // ---- the allow list ----
@@ -163,13 +207,11 @@ test("every allowed verb reaches the stub unchanged", (t) => {
 
 test("the allowed call keeps the stub's stdout, stderr and exit code", (t) => {
   const s = scene(t);
-  const r = guardRun(s, ["read", "t101"], { HC_STUB_CODE: "7" });
+  const r = guardRun(s, ["templates"], { HC_STUB_CODE: "7" });
   assert.equal(r.status, 7);
-  assert.equal(r.stdout, 'stub-out ["read","t101"]\n');
-  assert.equal(r.stderr, "stub-err read\n");
-  // The team check resolves the target first (its own `ls`/`get` lookups); the call itself is
-  // forwarded once, unchanged.
-  assert.deepEqual(calls(s).filter((argv) => argv[0] === "read"), [["read", "t101"]]);
+  assert.equal(r.stdout, 'stub-out ["templates"]\n');
+  assert.equal(r.stderr, "stub-err templates\n");
+  assert.deepEqual(calls(s), [["templates"]]);
 });
 
 test("the doc-only forms pass; a doc flag on a refused command does not", (t) => {
@@ -570,21 +612,26 @@ test("kill shim (#955): a main bot's own worker is a worker; a seat on a roster 
   assert.deepEqual(killsSeen(s), []);
 });
 
-test("kill shim (#955): every other hc call goes to the real hc untouched, for a seat, a worker and an unknown pane", (t) => {
+test("kill shim (#955): every other hc call goes to the real hc untouched; a send is read first (#1414)", (t) => {
   const s = killScene(t);
   const others = [["send", "t105", "status?"], ["send", "t105", "kill"], ["--json", "send", "t105", "kill"], ["exec", "--", "sh", "-c", "echo kill"],
     ["run", "--bg", "claude"], ["keys", "t105", "enter"], ["interrupt", "t105"], ["rm", "t105"], ["read", "t105"], ["label", "t105", "a=b"],
     ["file", "write", "/x"], ["machine", "ls"], ["server", "status"], ["attach", "t105"], ["ls", "--all"], ["get", "t105"],
     ["--version"], ["--skill"], ["--help"], ["kill", "--help"], ["kill", "-h"], []];
+  // A send first resolves its target and looks at its screen (one call each); the text then
+  // goes to the real hc word for word, exactly once.
+  const sendLookups = [["ls", "--json"], ["get", "t105", "--json"], ["read", "t105", "--lines", "40", "--json"]];
   for (const terminal of ["t103", "t101", "t100", "t105", "t121"]) {
     for (const args of others) {
       writeFileSync(s.logPath, "");
       const r = shimRun(s, args, { HC_TERMINAL_ID: terminal, HC_STUB_CODE: "7" });
-      // The stub answers ls and get itself (exit 0); everything else exits with the code it was given.
-      const stubAnswers = ["ls", "get"].includes(args[0]);
+      // The stub answers ls, get and read itself (exit 0); everything else exits with the code it was given.
+      const stubAnswers = ["ls", "get", "read"].includes(args[0]);
       assert.equal(r.status, stubAnswers ? 0 : 7, `hc ${args.join(" ")} from ${terminal}: the real hc's exit code (${r.stderr})`);
       assert.doesNotMatch(r.stderr, /hc kill shim/, `hc ${args.join(" ")}: the shim says nothing`);
-      assert.deepEqual(calls(s), [args], `hc ${args.join(" ")} from ${terminal}: one call, word for word, and nothing read for it`);
+      const isSend = args[0] === "send" || args[1] === "send";
+      const expected = isSend ? [...sendLookups, args] : [args];
+      assert.deepEqual(calls(s), expected, `hc ${args.join(" ")} from ${terminal}: the lookups then one call, word for word`);
     }
   }
   // No HC_TERMINAL_ID at all: still passed on (only a kill needs a caller).
@@ -595,7 +642,7 @@ test("kill shim (#955): every other hc call goes to the real hc untouched, for a
     return env;
   })(), encoding: "utf8" });
   assert.equal(bare.status, 0, bare.stderr);
-  assert.deepEqual(calls(s), [["send", "t105", "hi"]]);
+  assert.deepEqual(calls(s), [...sendLookups, ["send", "t105", "hi"]]);
 });
 
 test("kill shim (#955): a kill it cannot check is refused; no real hc is exit 127; it never hands a call to another guard", (t) => {
@@ -1104,7 +1151,7 @@ test("a guard copy that calls its caller stops at once instead of looping", (t) 
   const s = scene(t);
   const mod = join(s.root, "other-guard"), copyGuard = join(mod, "guard");
   mkdirSync(copyGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   appendFileSync(join(mod, "hcGuard.mjs"), "\n// not this guard\n");
@@ -1125,7 +1172,7 @@ test("an older guard copy after this one cannot turn a refusal into an allow", (
   const mod = join(s.root, "older-guard"), olderGuard = join(mod, "guard");
   const log = join(mod, "older.log");
   mkdirSync(olderGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   // An older copy: it predates the re-entry marker, so it ignores the marker on its env.
@@ -1532,13 +1579,13 @@ test("#1421 shim passes prefixed sends to bash and python3 at the resolved addre
         assert.equal(r.status, 7, r.stderr);
         assert.equal(r.stdout, `stub-out ${JSON.stringify(expected)}\n`);
         assert.equal(r.stderr, `stub-err ${expected[0]}\n`);
-        assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t101", "--json"], expected]);
+        assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], expected]);
       });
     }
   }
 });
 
-test("#1421 shim plain texts pass unchanged with exactly one stub call", (t) => {
+test("#1421 shim plain texts pass unchanged after the target check", (t) => {
   const s = killScene(t);
   const state = JSON.parse(readFileSync(s.statePath, "utf8"));
   state.get.t101.status = { app: "claude-code" };
@@ -1553,7 +1600,11 @@ test("#1421 shim plain texts pass unchanged with exactly one stub call", (t) => 
         assert.equal(r.status, 0, r.stderr);
         assert.equal(r.stdout, `stub-out ${JSON.stringify(args)}\n`);
         assert.equal(r.stderr, `stub-err ${args[0]}\n`);
-        assert.deepEqual(calls(s), [args], "no lookup or target rewrite for plain text");
+        // #1414: every send checks the target first; the text and its address then go on unchanged.
+        const expected = target === "t999"
+          ? [["ls", "--json"], ["get", "t999", "--json"], args]
+          : [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], args];
+        assert.deepEqual(calls(s), expected, "the target check, then the send unchanged");
       }
     }
   }
@@ -1624,4 +1675,98 @@ test("#1421 full guard passes prefixed sends to a shell team target at its addre
     assert.ok(calls(s).some((argv) => same(argv, ["get", "t101", "--json"])));
     assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [expected]);
   }
+});
+
+// ---- a send to a pane held by a dialog (#1414) ----
+//
+// A question dialog takes an incoming send as its own answer: the text is pasted into the
+// dialog's input and submitted, and a person's question disappears unanswered. A dialog is a
+// blocked status in herdr-core, or a visible prompt/banner on the pane's screen when the pane's
+// status is stale or absent (a linked machine, a revived pane). These cases pin both.
+
+test("#1414 a blocked question pane refuses the send before anything is typed", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "blocked", kind: "question" }, screen: DIALOG_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "t101", "the report"]);
+  assertHeld(r, "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "nothing was typed into the dialog");
+  assert.equal(calls(s).some((argv) => argv[0] === "read"), false, "a blocked status is enough; no screen read");
+});
+
+test("#1414 a visible dialog whose status says idle is refused, not answered", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen: DIALOG_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "t101", "the report"]);
+  assertHeld(r, "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+  assert.ok(calls(s).some((argv) => same(argv, ["read", "t101", "--lines", "40", "--json"])), "the screen was looked at");
+});
+
+test("#1414 a linked-machine pane with no status is checked by its screen", (t) => {
+  const s = scene(t);
+  editPane(s, "m/t101", { screen: DIALOG_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "m/t101", "the report"]);
+  assertHeld(r, "m/t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+});
+
+test("#1414 a free pane's send is unchanged, byte for byte", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen: FREE_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "t101", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'stub-out ["send","t101","hello"]\n');
+  assert.equal(r.stderr, "stub-err send\n");
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [["send", "t101", "hello"]]);
+});
+
+test("#1414 a finished pane's last dialog screen is not mistaken for a live hold", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { state: "finished", status: { state: "done", app: "claude-code" }, screen: DIALOG_SCREEN });
+  const r = guardRun(s, ["send", "t101", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [["send", "t101", "hello"]]);
+});
+
+test("#1414 --force cannot answer a person's dialog", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "blocked", kind: "question" } });
+  const r = guardRun(s, ["send", "--force", "t101", "the report"]);
+  assertHeld(r, "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+});
+
+test("#1414 two messages while held are both refused; order is kept once it is free", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen: DIALOG_SCREEN });
+  assertHeld(guardRun(s, ["send", "t101", "first"]), "t101");
+  assertHeld(guardRun(s, ["send", "t101", "second"]), "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "neither was typed");
+  editPane(s, "t101", { screen: FREE_SCREEN });
+  for (const text of ["first", "second"]) {
+    const r = guardRun(s, ["send", "t101", text]);
+    assert.equal(r.status, 0, r.stderr);
+  }
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"),
+    [["send", "t101", "first"], ["send", "t101", "second"]]);
+});
+
+test("#1414 a screen that cannot be read is left to hc's own send", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, readFail: true });
+  const r = guardRun(s, ["send", "t101", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [["send", "t101", "hello"]]);
+});
+
+test("#1414 the kill shim refuses a send to a held pane too", (t) => {
+  const s = killScene(t);
+  editPane(s, "t105", { status: { state: "blocked", kind: "question" }, screen: DIALOG_SCREEN });
+  const r = shimRun(s, ["send", "t105", "the report"], { HC_TERMINAL_ID: "t103" });
+  assertHeld(r, "t105");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
 });

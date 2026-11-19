@@ -5,6 +5,9 @@
 export const NAMESPACE = 'omni-ui'
 
 const ZH = {
+  'File-tool folder': '文件工具的文件夹',
+  'Folder for these four file tools': '这四个文件工具使用的文件夹',
+  'Clear folder': '清除文件夹',
   "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "操作系统阻止了对 {folder} 的读取或写入。请允许 Automagik 使用此文件夹：在 macOS 上，打开系统设置 > 隐私与安全性 > 文件与文件夹（或完全磁盘访问权限）；在其他系统上，允许你的用户读取和写入该文件夹。你选择的文件夹已保留。",
   "What will it do?": "它会做什么？",
   "Add instructions": "添加说明",
@@ -486,7 +489,10 @@ const ZH = {
   "Account not shown by the CLI": "CLI 未显示账号",
   "Account change failed. Close other app windows and try again.": "无法更改账号。请关闭其他应用窗口后重试。",
   "Bot accounts": "Bot 账号",
+  "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
+  "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.":
+    "这台电脑上的其他 Automagik 安装可能使用同一个 Bot 登录。在此更改会同时更改它们的登录。",
   "Your terminal login is separate and stays unchanged.": "终端的登录独立，保持不变。",
   "Bots: {account}": "Bot：{account}",
   "Sign in again in the app to resume Bots": "在应用内重新登录以恢复 Bot",
@@ -783,9 +789,9 @@ const ZH = {
   'The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Bot 团队启动失败。原因在引擎的启动输出里——它的控制台，或应用的启动错误框。',
   'The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Bot 团队启动失败。{error}。原因在引擎的启动输出里——它的控制台，或应用的启动错误框。',
   'Automation tasks': '自动化任务',
-  Connectors: '连接器',
-  'Search connectors': '搜索连接器',
-  'No connectors': '暂无连接器',
+  Apps: '应用',
+  'Search apps': '搜索应用',
+  'No apps': '暂无应用',
   IM: 'IM',
   'via {platform}': '来自 {platform}',
   'Your IM bots': '我的 IM 机器人',
@@ -2251,7 +2257,7 @@ const ZH = {
   'Who to chat with…': '想和谁聊…',
   'Add at least one more Bot': '再至少添加一个 Bot',
   Members: '成员',
-  // Connectors and scheduled tasks
+  // Apps and scheduled tasks
   'Scheduled tasks': '定时任务',
   'Every day': '每天',
   'Every {count} days': '每 {count} 天',
@@ -2684,7 +2690,7 @@ const ZH = {
   'Design': '设计',
   'Data': '数据',
   'Commerce': '商务',
-  'No connectors connected': '未连接任何连接器',
+  'No apps connected': '未连接任何应用',
   '{bot} needs {name}': '{bot} 需要 {name}',
   '{bot} wants to send an email': '{bot} 想发送一封邮件',
   'Mail': '邮件',
@@ -2973,6 +2979,37 @@ const HOST_ZH = {
   'The note could not be read.': '无法读取笔记。',
   'Read through {date}': '已读到 {date}',
   'This chat': '这个聊天',
+  // The shared kit's interactive backfill card (#1326 K2): a proposal to read, one approval,
+  // and the live runs with a stop.
+  'Read chat history': '读取聊天记录',
+  'Choose the chats to read, then set the dates. Nothing starts until you press Start.': '选择要读取的聊天并设置日期。在你按下“开始”之前，不会启动任何操作。',
+  'Starting…': '正在开始…',
+  'Sending your approval…': '正在发送你的批准…',
+  'Your approval was sent. One backfill is starting for each chat you chose.': '你的批准已发送。你选择的每个聊天都会开始一次历史记录回填。',
+  'Start date': '开始日期',
+  'End date': '结束日期',
+  'The start date must be before the end date.': '开始日期必须早于结束日期。',
+  'There are no chats to read here.': '这里没有可读取的聊天。',
+  'Chats to read': '要读取的聊天',
+  'Stopping…': '正在停止…',
+  'Stop the backfill of {chat}': '停止 {chat} 的回填',
+  'The backfill could not be started.': '无法开始回填。',
+  'The backfill could not be stopped.': '无法停止回填。',
+  'Started {date}': '开始于 {date}',
+  '{count} more chats': '还有 {count} 个聊天',
+  'Showing only {count} runs': '仅显示 {count} 次运行',
+  'Backfill': '回填',
+  'Backfills': '回填记录',
+  'All available history': '所有可用的历史记录',
+  'From {date}': '从 {date}',
+  'Through {date}': '截至 {date}',
+  'Unnamed chat': '未命名聊天',
+  '{count} chats selected': '已选择 {count} 个聊天',
+  '{count} running': '{count} 个进行中',
+  '{count} done': '{count} 个已完成',
+  '{count} phone did not answer': '{count} 个手机没有响应',
+  '{count} stopped': '{count} 个已停止',
+  '{count} failed': '{count} 个失败',
   // The Bot browser tab beside the conversation (bot-browser-tab.js): the person drives the
   // Bot's own page, then gives it back.
   'Bot browser': 'Bot 浏览器',
@@ -2998,6 +3035,23 @@ Object.assign(ZH, {
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
   "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
+})
+// The Apps page's Automagik overlay (official.js).
+Object.assign(ZH, {
+  'Automagik official': 'Automagik 官方',
+  'Official': '官方',
+  'Install': '安装',
+  'Installed': '已安装',
+  'Not installed': '未安装',
+  'State': '状态',
+  'SAMPLE DATA': '示例数据',
+  'Included with Automagik': '随 Automagik 提供',
+  'Sample row: nothing is installed from this preview.': '示例行：此预览不会安装任何内容。',
+  'A mock of the Apps page. Nothing here installs; click a row to expand it.': '应用页面的模型：这里不会安装任何内容；点击一行即可展开。',
+  'The Main Bot: your team, channels, and memory': '主 Bot：你的团队、频道和记忆',
+  'Plans, works, and reports on wishes': '规划、执行并汇报愿望',
+  'Claude Code through the Agent Client Protocol': '通过 Agent Client Protocol 使用 Claude Code',
+  'OpenAI Codex through the Agent Client Protocol': '通过 Agent Client Protocol 使用 OpenAI Codex',
 })
 Object.assign(ZH, HOST_ZH)
 

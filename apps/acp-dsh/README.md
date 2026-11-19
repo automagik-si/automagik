@@ -429,9 +429,22 @@ The owner-confirmed `accountReset(id)` pauses admission and stops known work, th
 fresh, empty, uniquely named vendor home and requires fresh in-app sign-in. It never logs out,
 copies credentials from, renames or reuses the previous physical folder. Pending, damaged and
 legacy ownership evidence stays there: even a surviving old process writes only to that old
-generation. Abandoned folders are removed on later starts only after exit evidence is verified;
-unproved folders, including Windows crash records, remain retained. Mutexes and app registrations
-live outside replaceable homes.
+generation. A retired home is kept, not removed. Its `RETIRED.json` (0600) names the bound
+path, keeps the vendor's session files and the usage history recorded there, says there is no
+time limit, and says how to inspect it and that a `KEEP` file beside it opts out of any future
+collection. A later start removes nothing: the measurement side's complete post-last-write
+scan with the root frozen, its retirement record, and the session-absorption receipt are not
+available here yet, so the default is keep. A folder whose marker, note or bound path cannot be
+proved to be the retired generation's own is refused and left untouched; a missing, unreadable
+or unparseable `RETIRED.json` is refused too, because the record of what was decided is then
+ambiguous. An absent note is reported as absent and a corrupt one as corrupt. A startup line
+counts kept, missing and refused homes separately: it claims retention at a bound path only for
+a home that is still there. Unproved folders,
+including Windows crash records, remain retained. To inspect them, each 0-byte marker under
+`acp/cli-homes/retired/<vendor>/` names a retired generation; its home is
+`acp/cli-homes/homes/<vendor>/<generation>` (the legacy home is `acp/cli-homes/<vendor>`), and
+`RETIRED.json` inside it says what is kept, for how long, and how to keep it.
+Mutexes and app registrations live outside replaceable homes.
 Launches also check the installation's selected generation, so changing an old folder's local
 version or pause marker cannot revive a captured launch. Bot models and DSH history stay intact.
 Bot CLI user settings start empty; project settings still load from the working folder.
@@ -514,7 +527,11 @@ chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw sc
 an inline image block when the agent advertises image prompts. No read root is added. Edits
 run only when the adapter acknowledged the Bot home's image profile and Codex's resolved
 profile matched it; the read-only fallback refuses
-an edit. The scratch, including the input copy, is removed afterwards.
+an edit. An edit whose pre-session setup stops before a prompt (a connector that cannot spawn, a
+scratch folder that cannot be made, an unreadable configuration, an inert switch, a missing or
+unacknowledged profile, a signed-out Codex, a session that does not start in time) is refused
+with `reason: edit-not-isolated` too, so bots-dsh hands the Bot its own verified copy to edit as
+a file. The scratch, including the input copy, is removed afterwards.
 
 `drawImage` accepts no user-selected local image-input path, registers no ACP filesystem-read
 callback, and receives no pre-read image-tool arguments. Codex selects and reads

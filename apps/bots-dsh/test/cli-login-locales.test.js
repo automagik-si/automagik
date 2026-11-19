@@ -35,6 +35,10 @@ const SENTENCES = [
   'Signing out of the Bot account could not be verified. Try again.',
   'The Bot account was reset. Press Sign in again.',
   'This sign-in is not available for this Bot.',
+  // Whose sign-in is whose (#1399): the account card names this installation and says the Bot
+  // sign-in may be shared with another one on this computer.
+  'This installation: {installation}',
+  'Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.',
 ]
 
 // The two sentences that carry a failure class: the host words them with the class in them, so the

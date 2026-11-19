@@ -11,7 +11,7 @@
 #   ... | bash -s -- --no-scheduler   leave herdr-automations and its login service alone
 #   ... | bash -s -- --dsh-tui | --no-dsh-tui  install (or leave) dsh-TUI as a Herdr agent
 #   ... | bash -s -- --revive | --no-revive    install (or leave) the login service that brings
-#                                              the bots back after a restart (Linux, #939)
+#                                              the bots back after a restart (Linux or macOS, #939)
 #
 # It checks the OS, Node and Herdr (herdrdev's, dev.herdr.app: offering its own installer from
 # releases.herdr.dev, no sudo, asking first),
@@ -113,9 +113,9 @@ main() {
   DSH_TUI=ask
   # The login service that brings the bots back after a restart of this computer (#939): ask, yes
   # or no. It changes what runs at login, so only --revive or an explicit answer installs it;
-  # --yes never does. Linux (a systemd user unit); the CLI writes and removes it.
+  # --yes never does. Linux (a systemd user unit) or macOS (a launchd agent); the CLI writes and
+  # removes it, and its path is revive_service_file's.
   REVIVE=ask
-  REVIVE_UNIT=$HOME/.config/systemd/user/automagik-herdr-revive.service
 
   YES=0
   ADOPT=0
@@ -160,7 +160,8 @@ main() {
   fi
 
   TMP=
-  trap 'rm -rf "$TMP"' EXIT
+  REVIVE_ANSWER=
+  trap 'rm -rf "$TMP"; [ -z "$REVIVE_ANSWER" ] || rm -f "$REVIVE_ANSWER"' EXIT
   trap 'exit 130' INT TERM
 
   if [ "$UNINSTALL" = 1 ]; then uninstall; else install; fi
@@ -200,9 +201,12 @@ the installer asks (unless --yes), and a machine with no dsh gets one line sayin
 --uninstall removes dsh-TUI (the plugin and the shim) when this installer put it there.
 --revive installs the login service that brings the bots back after a restart of this computer
 ('am revive --boot': each bot whose pane is gone or a bare shell is restarted in its
-place, resumed where its agent allows). Linux only for now: a systemd user unit, enabled, never
+place, resumed where its agent allows). Linux: a systemd user unit, enabled. macOS: a launchd
+agent in your own ~/Library/LaunchAgents, which launchd loads at your next login. Neither is
 started on the spot. --no-revive leaves it alone. Without either, the installer asks (--yes never
-installs it). --uninstall removes the unit when it is this pack's.
+installs it). --uninstall removes the unit or the plist when it is this pack's; on macOS it asks
+launchd first, also when the plist is already gone, and refuses, naming the launchctl command,
+when launchd can't say whether the job is still loaded.
 EOF
 }
 
@@ -1290,17 +1294,43 @@ dsh_tui_step() {
   fi
   printf '%s\n' "$dsh_out" | sed 's/^/  /'
 }
-# The login service that runs 'automagik-herdr revive --boot' (#939). The unit is the pack CLI's
+# The login service that runs 'automagik-herdr revive --boot' (#939). The file is the pack CLI's
 # ('automagik-herdr revive service install'); refresh its PATH (#1418), else decide whether to
-# ask. Linux only: on another OS nothing is asked and nothing is written.
+# ask. Linux and macOS only: on another OS nothing is asked and nothing is written.
+#
+# The service file: a systemd user unit on Linux, a plist in the person's own LaunchAgents on
+# macOS; empty on any other system (the caller asks nothing and writes nothing).
+revive_service_file() {
+  case ${REVIVE_OS:-$(uname -s 2>/dev/null)} in
+    Linux) printf '%s\n' "$HOME/.config/systemd/user/automagik-herdr-revive.service" ;;
+    Darwin) printf '%s\n' "$HOME/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist" ;;
+  esac
+}
+# Whether $1 is the service file this pack wrote: the unit's mark is its first line, the plist's
+# its second (an XML declaration must come first).
+revive_file_is_ours() {
+  [ -f "$1" ] || return 1
+  case ${REVIVE_OS:-} in
+    Darwin) sed -n '2p' "$1" 2>/dev/null | grep -q '^<!-- Automagik Herdr: brings the bots back after a restart' ;;
+    *) sed -n '1p' "$1" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart' ;;
+  esac
+}
+# Whether $1 keeps the PATH it was installed with (#1418).
+revive_file_keeps_path() {
+  [ -f "$1" ] || return 1
+  case ${REVIVE_OS:-} in
+    Darwin) grep -q '<key>PATH</key>' "$1" 2>/dev/null ;;
+    *) grep -q '^Environment="PATH=' "$1" 2>/dev/null ;;
+  esac
+}
 revive_step() {
-  [ "$(uname -s)" = Linux ] || return 0
+  REVIVE_OS=$(uname -s 2>/dev/null)
+  REVIVE_UNIT=$(revive_service_file)
+  [ -n "$REVIVE_UNIT" ] || return 0
   [ "$REVIVE" = no ] && { say "Left the revive login service alone (--no-revive)."; return 0; }
   [ -x "$LINK" ] || return 0
   case ":$PATH:" in *":$BIN_DIR:"*) revive_path=$PATH ;; *) revive_path=$PATH:$BIN_DIR ;; esac
-  if [ -f "$REVIVE_UNIT" ] \
-    && sed -n '1p' "$REVIVE_UNIT" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart' \
-    && ! grep -q '^Environment="PATH=' "$REVIVE_UNIT"; then
+  if revive_file_is_ours "$REVIVE_UNIT" && ! revive_file_keeps_path "$REVIVE_UNIT"; then
     revive_rc=0
     revive_out=$(PATH=$revive_path "$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
     if [ "$revive_rc" != 0 ]; then
@@ -1328,20 +1358,165 @@ revive_step() {
   fi
   printf '%s\n' "$revive_out" | sed 's/^/  /'
 }
-# --uninstall: the unit goes through the command that wrote it, while the pack and its link are
-# still in place, and only when its first line is the pack's mark (revive.js UNIT_MARK).
+# launchd's own not-found answer, exactly as the CLI's launchdNotLoaded reads it (revive.js):
+# exit 113, or a line that starts "Could not find service" and ends the word there. Every other
+# answer (usage, EPERM, an I/O error, a timeout) is "can't tell", never "not loaded".
+revive_launchd_not_loaded() {
+  if [ "$1" = 113 ]; then return 0; fi
+  printf '%s\n' "$2" | grep -Eq '^Could not find service($|[^[:alnum:]_])'
+}
+# Whether the installed command can answer the login-service question on this computer. macOS
+# support came after `revive service` itself, so a pack from before it carries the command — and
+# on macOS that command's `service status` exits 0 anyway (it reports the systemd unit as not
+# installed); only `service uninstall` refuses. Exit status therefore proves nothing. Parse the
+# status answer as JSON and require what only a launchd-aware command emits: `label` exactly the
+# launchd label, and `path` a file structurally under a `Library/LaunchAgents` folder. The answer
+# goes into a temp file, never a shell variable: a POSIX command substitution drops NUL bytes, and
+# dropping one can turn a malformed answer into valid JSON. Node runs the read-only question with a
+# timeout and SIGKILL, writes the raw bytes straight to that file, and the parser refuses any NUL
+# or invalid UTF-8 before it parses. A refusal, a non-zero exit, an unparseable or truncated
+# answer, a missing field, a wrong type, a wrong label or a path that merely contains the string is
+# "pre-PR pack", never "launchd-aware". Node is the command's own runtime and the installer already
+# requires it; if it is missing here the probe fails closed to the installer's own launchctl
+# fallback. Read-only, with its own status query. Linux has always answered, so nothing is asked
+# there.
+revive_cli_can_answer() {
+  [ "$REVIVE_OS" = Darwin ] || return 0
+  command -v node >/dev/null 2>&1 || return 1
+  revive_answer_file=$(mktemp "${TMPDIR:-/tmp}/automagik-herdr-revive-status.XXXXXX") || return 1
+  REVIVE_ANSWER=$revive_answer_file
+  revive_rc=0
+  node - "$LINK" "$REVIVE_ANSWER" <<'NODE' || revive_rc=$?
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const [link, file] = process.argv.slice(2);
+let fd;
+try { fd = fs.openSync(file, "w"); } catch { process.exit(1); }
+let r;
+try {
+  r = spawnSync(link, ["revive", "service", "status", "--json"], {
+    timeout: 3000, killSignal: "SIGKILL", stdio: ["ignore", fd, "ignore"],
+  });
+} finally { fs.closeSync(fd); }
+if (r.error || r.status !== 0) process.exit(1);
+let bytes;
+try { bytes = fs.readFileSync(file); } catch { process.exit(1); }
+if (bytes.includes(0)) process.exit(1);
+let answer;
+try { answer = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { process.exit(1); }
+let status;
+try { status = JSON.parse(answer); } catch { process.exit(1); }
+if (status === null || typeof status !== "object" || Array.isArray(status)) process.exit(1);
+if (status.label !== "dev.herdr.automagik-herdr-revive" || typeof status.path !== "string") process.exit(1);
+const parts = status.path.split("/");
+if (parts.some((part) => part === "..")) process.exit(1);
+const at = parts.findIndex((part, i) => part === "Library" && parts[i + 1] === "LaunchAgents");
+if (at < 0 || at + 2 >= parts.length || parts[at + 2] === "") process.exit(1);
+NODE
+  rm -f "$REVIVE_ANSWER"
+  REVIVE_ANSWER=
+  [ "$revive_rc" = 0 ]
+}
+# --uninstall: the service goes through the command that wrote it, while the pack and its link
+# are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
+# PLIST_MARK in the macOS plist) and the command can answer on this computer. That command is
+# called even when the plist is gone: it owns the second-run recovery (a label launchd still
+# holds), and its answer is the one to show. The fallback runs when that command is gone or from
+# before it could answer on this system, never after it refused; on macOS it asks launchd even
+# with the plist gone, boots a loaded label out, and reads only launchd's own not-found answer
+# (113, or the exact "Could not find service") as not loaded. A refusal leaves the file (when
+# there is one), stops the uninstall before the pack and link leave, and names the command that
+# finishes by hand.
 revive_uninstall() {
-  [ -f "$REVIVE_UNIT" ] || return 0
-  if ! sed -n '1p' "$REVIVE_UNIT" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart'; then
-    say "Left $REVIVE_UNIT: it is not this installer's."
-    return 0
+  REVIVE_OS=$(uname -s 2>/dev/null)
+  REVIVE_UNIT=$(revive_service_file)
+  [ -n "$REVIVE_UNIT" ] || return 0
+  revive_present=0
+  if [ -f "$REVIVE_UNIT" ]; then
+    revive_present=1
+    if ! revive_file_is_ours "$REVIVE_UNIT"; then
+      say "Left $REVIVE_UNIT: it is not this installer's."
+      return 0
+    fi
   fi
+  # The command is called only when it can answer on this computer: a pack from before the macOS
+  # agent has `revive service`, answers `service status` there, and cannot describe a launchd job
+  # (it refuses only `service uninstall`). Calling its uninstall would stop the whole uninstall
+  # over a capability the pack never had. Such a pack cannot name a label either (it never wrote
+  # a plist), so the installer's own launchctl probe below is the one that can still see one
+  # launchd holds.
+  revive_cli=0
   if link_ours && [ -f "$PACK/bin/automagik-herdr.mjs" ] && grep -q 'revive service' "$PACK/bin/automagik-herdr.mjs" 2>/dev/null; then
+    if revive_cli_can_answer; then
+      revive_cli=1
+    else
+      say "The pack's command doesn't know macOS's login service, so this installer asked launchd itself."
+    fi
+  fi
+  if [ "$revive_cli" = 1 ]; then
     revive_rc=0
     revive_out=$("$LINK" revive service uninstall <"/dev/null" 2>&1) || revive_rc=$?
     if [ "$revive_rc" = 0 ]; then printf '%s\n' "$revive_out" | sed 's/^/  /'; return 0; fi
+    # 126/127: the command did not run at all (no Node 22.7+ or Bun, or a wrapper that cannot
+    # execute), so it is gone for this purpose and the fallback below asks launchd instead. Any
+    # other status is the CLI's own refusal.
+    if [ "$revive_rc" != 126 ] && [ "$revive_rc" != 127 ]; then
+      # The CLI is here and refused: its answer (which names the command that finishes by hand) is
+      # the one to show. The fallback must never overrule it: a blind remove here is how a label
+      # launchd still holds gets orphaned.
+      printf '%s\n' "$revive_out" | sed 's/^/  /'
+      if [ "$revive_present" = 1 ]; then
+        fail "the revive login service was not removed and $REVIVE_UNIT was left in place; the answer above says how to finish."
+      fi
+      fail "the revive login service was not removed; the answer above says how to finish."
+    fi
   fi
-  rm -f "$REVIVE_UNIT" && say "Removed $REVIVE_UNIT (systemctl --user daemon-reload drops it from systemd)."
+  if [ "$REVIVE_OS" = Darwin ]; then
+    label=dev.herdr.automagik-herdr-revive
+    domain="gui/$(id -u)"
+    if ! command -v launchctl >/dev/null 2>&1; then
+      if [ "$revive_present" = 1 ]; then
+        fail "Left $REVIVE_UNIT: launchctl isn't here, so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
+      fi
+      fail "launchctl isn't here, so whether launchd holds $label can't be read, and no plist is at $REVIVE_UNIT. Run launchctl bootout $domain/$label, then run this again."
+    fi
+    # Ask first, and read only launchd's own not-found answer as "not loaded": exit 113, or the
+    # exact "Could not find service". Every other failure is a refusal, never a removal.
+    revive_rc=0
+    revive_out=$(launchctl print "$domain/$label" 2>&1) || revive_rc=$?
+    revive_loaded=0
+    if revive_launchd_not_loaded "$revive_rc" "$revive_out"; then
+      :
+    elif [ "$revive_rc" != 0 ]; then
+      if [ "$revive_present" = 1 ]; then
+        fail "Left $REVIVE_UNIT: launchctl print $domain/$label failed (exit $revive_rc${revive_out:+: $(printf '%s\n' "$revive_out" | sed -n '1p')}), so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
+      fi
+      fail "launchctl print $domain/$label failed (exit $revive_rc${revive_out:+: $(printf '%s\n' "$revive_out" | sed -n '1p')}), so whether launchd holds $label can't be read, and no plist is at $REVIVE_UNIT. Run launchctl bootout $domain/$label, then run this again."
+    else
+      revive_loaded=1
+      if ! launchctl bootout "$domain/$label" >/dev/null 2>&1; then
+        if [ "$revive_present" = 1 ]; then
+          fail "Left $REVIVE_UNIT: launchd still holds $label and it could not be booted out. Run launchctl bootout $domain/$label, then run this again."
+        fi
+        fail "launchd still holds $label and it could not be booted out, so nothing was removed. Run launchctl bootout $domain/$label, then run this again."
+      fi
+    fi
+    if [ "$revive_present" = 1 ]; then
+      if rm -f "$REVIVE_UNIT"; then
+        say "Removed $REVIVE_UNIT (launchd no longer holds $label)."
+      else
+        fail "$REVIVE_UNIT could not be removed; remove it by hand."
+      fi
+    elif [ "$revive_loaded" = 1 ]; then
+      say "The plist is gone ($REVIVE_UNIT), but launchd still held $label: booted it out, so no orphaned label is left."
+    else
+      say "The revive login service isn't installed ($REVIVE_UNIT)."
+    fi
+    return 0
+  fi
+  if [ "$revive_present" = 1 ]; then
+    rm -f "$REVIVE_UNIT" && say "Removed $REVIVE_UNIT (systemctl --user daemon-reload drops it from systemd)."
+  fi
   return 0
 }
 # --uninstall: the plugin and the shim go through the command that put them there, while the pack

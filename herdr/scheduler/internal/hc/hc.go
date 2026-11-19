@@ -44,6 +44,20 @@ type Terminal struct {
 	Status *struct {
 		State string `json:"state"`
 	} `json:"status"`
+	// Address, CreatedMS, Cwd, Labels and Foreground are the pane's identity:
+	// what tells a target's live terminal apart from a stale shell, another
+	// project's pane, or a terminal that merely carries the same label (#498).
+	Address    string            `json:"address"`
+	CreatedMS  int64             `json:"created_ms"`
+	Cwd        string            `json:"cwd"`
+	Labels     map[string]string `json:"labels"`
+	Foreground *Foreground       `json:"foreground"`
+}
+
+// Foreground is the program in front of a pane: a shell when its agent has
+// quit, the agent itself while it runs.
+type Foreground struct {
+	Argv []string `json:"argv"`
 }
 
 // ErrNotFound is hc's answer about a terminal it does not have, or no longer.

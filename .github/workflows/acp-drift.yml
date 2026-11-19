@@ -162,6 +162,7 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run harness
+          npm ci --prefix ../desktop --omit=dev --ignore-scripts --no-fund --no-audit
 
       - name: The newest adapters and CLIs, in a throwaway home
         run: |
@@ -359,6 +360,7 @@ jobs:
           "
           bun install
           bun run harness
+          npm ci --prefix ../desktop --omit=dev --ignore-scripts --no-fund --no-audit
 
       - name: The newest adapters and CLIs, in a throwaway home
         if: steps.latest.outputs.move == 'true'

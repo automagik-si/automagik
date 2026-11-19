@@ -2093,7 +2093,7 @@ fn read_agy_into_store(
         .attribute(store, read.events, counted_from)
         .map_err(store_write)?;
     let applied = store
-        .apply_agy(state, &attributed, health, now)
+        .apply_agy(state, &attributed, &read.later_step_keys, health, now)
         .map_err(store_write)?;
     report.health.add(&applied);
     report.files_read += 1;

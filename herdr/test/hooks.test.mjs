@@ -16,6 +16,7 @@ import {
   BACKUP_SUFFIX, HOOKS_JOURNAL, botPaneFolders, foldersOf, hooksNotice, knownProjects, ledgerFolders, migrateHooks, relink, retargetHooks, revertHooks, syncHooks,
   toStable, ownHook,
 } from "../mods/am-sidebar/migrateHooks.mjs";
+import { assertNoFixtureManifest, quietOuterManifestEnv } from "./outer-manifest.mjs";
 
 // git here must not read this host's global config.
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
@@ -333,7 +334,9 @@ esac
 /** An app home holding a copy of the pack's sidebar folder, a project with one Claude bot, and a fake hc. */
 function botHome(t) {
   const s = scratch(t);
-  cpSync(PACK, join(s.mods, "spaces-agents"), { recursive: true });
+  const sidebar = join(s.mods, "spaces-agents");
+  cpSync(PACK, sidebar, { recursive: true });
+  assertNoFixtureManifest(s.root, s.app, s.mods, sidebar);
   const proj = project(s.root, "proj", "w1");
   write(join(proj, ".herdr", "bots.json"), JSON.stringify({
     version: 1, categories: [],
@@ -352,7 +355,10 @@ function botHome(t) {
   const hook = (command, { input = "{}", appHome = true, keep = false } = {}) => {
     if (!keep) rmSync(join(s.app, "automagik-herdr", "briefed"), { recursive: true, force: true });
     const started = Date.now();
-    const env = { PATH: `${bin}:${NODE_DIR}:/usr/bin:/bin`, HOME: s.root, HC_TERMINAL_ID: "t1", CLAUDE_PROJECT_DIR: proj };
+    const env = {
+      PATH: `${bin}:${NODE_DIR}:/usr/bin:/bin`, HOME: s.root, HC_TERMINAL_ID: "t1", CLAUDE_PROJECT_DIR: proj,
+      ...quietOuterManifestEnv(s.root),
+    };
     if (appHome) env.HERDR_APP_HOME = s.app;
     const r = spawnSync("sh", ["-c", command], { cwd: proj, input, encoding: "utf8", env });
     return { ...r, ms: Date.now() - started };
@@ -403,7 +409,9 @@ test("the entry point runs am's copy first; a missing or broken am copy falls ba
 
   // A working am copy runs, not the sidebar's (broken here to prove it), and with no
   // HERDR_APP_HOME it is told the entry point's app home: its session lands in that ledger.
-  cpSync(PACK, join(part, "3.0.0"), { recursive: true });
+  const amCopy = join(part, "3.0.0");
+  cpSync(PACK, amCopy, { recursive: true });
+  assertNoFixtureManifest(join(s.root, ".automagik"), dirname(part), part, amCopy);
   writeFileSync(sidebar, "throw new Error('the sidebar copy ran');\n");
   const am = s.hook(command, { appHome: false, input: JSON.stringify({ session_id: "s-am" }) });
   assert.equal(am.status, 0, am.stderr);
@@ -663,6 +671,7 @@ function amSidebarPack(root, version) {
   const tree = join(root, `pack-${version}`);
   const dir = join(tree, "am-sidebar");
   cpSync(PACK, dir, { recursive: true });
+  assertNoFixtureManifest(dir);
   renameSync(join(dir, "release.js"), join(dir, "releaseFull.js"));
   write(join(dir, "release.js"), 'export * from "./releaseFull.js";\nexport const PACK_MODS = ["am-sidebar"];\n');
   write(join(dir, "VERSION"), `${version}\n`);
@@ -682,7 +691,8 @@ test("update.mjs: install across the rename moves the hooks; rollback to v0.3 pu
   const bin = join(home, ".local", "bin");
   mkdirSync(bin, { recursive: true });
   const link = join(bin, "automagik-herdr");
-  const env = { HOME: home, PATH: `${NODE_DIR}:/usr/bin:/bin`, AUTOMAGIK_HERDR_NO_UPDATE: "1" };
+  assertNoFixtureManifest(join(s.app, "automagik-herdr"));
+  const env = { HOME: home, PATH: `${NODE_DIR}:/usr/bin:/bin`, AUTOMAGIK_HERDR_NO_UPDATE: "1", ...quietOuterManifestEnv(s.root) };
   const cli = (...args) => spawnSync(process.execPath, [UPDATE, ...args, "--mods", s.mods], { env, encoding: "utf8" });
 
   const tgz = amSidebarPack(s.root, "9.9.9");

@@ -298,14 +298,21 @@ export function install(rt, { transport = options => new HermesTransport(options
     const stale = config.mode !== 'ssh' || migration || config.setupVersion !== 1
       || config.profile !== row.id || JSON.stringify(config.profiles ?? []) !== JSON.stringify(profiles)
       || JSON.stringify(config.models ?? []) !== JSON.stringify(models) || !config.credentialRef || botsStale
+      // A carried-over connection kept its legacy credential ref: move it to the stable one.
+      || config.credentialRef !== ATTACH_CREDENTIAL_REF
     if (!stale) return Promise.resolve()
     return attachNormalization ??= mutate(async () => {
       if (disposed) return
       const current = record()
       if (current !== config) return
       const selected = profiles.find(profile => profile.id === current.profile) ?? row
-      // The secret first: if the store refuses it, no half-migrated record is left behind.
-      if (!current.credentialRef && connection.credential) {
+      // A carried-over connection keeps the credential ref it had before the attach. Its
+      // onAuthUpdate has already rewritten that name with the serve's attach token, so the
+      // first open does not re-ask; now the token moves to the stable attach ref and the
+      // legacy name is removed. The secret first: a refused write leaves no half-moved record.
+      const carried = current.credentialRef === undefined || current.credentialRef === ''
+        || current.credentialRef === ATTACH_CREDENTIAL_REF ? undefined : current.credentialRef
+      if ((!current.credentialRef || carried !== undefined) && connection.credential) {
         await rt.secretEndpoint('secret-set', { name: ATTACH_CREDENTIAL_REF, value: JSON.stringify({ kind: 'attach', credential: connection.credential }), purpose: 'Remote Hermes attached serve token', scope: [] })
         current.credentialRef = ATTACH_CREDENTIAL_REF
       }
@@ -327,6 +334,7 @@ export function install(rt, { transport = options => new HermesTransport(options
         }
       }
       await saveState()
+      if (carried !== undefined) await deleteUnreferenced(carried)
       publish()
     }, true).finally(() => { if (attachNormalization) attachNormalization = undefined })
   }

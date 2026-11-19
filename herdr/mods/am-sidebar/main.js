@@ -29,7 +29,7 @@ import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
-import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText } from "./rows.js";
+import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION } from "./rows.js";
 
 // The pack itself as a dialog: the bot form (create.js), or the attach picker, the Bots list
 // and a bot row's menu as a popup (a popup is as tall as its items; height is only the most).
@@ -287,6 +287,7 @@ export default class Spaces extends View {
     this.hoverRow = null;
     this.hoverMachine = undefined; // the hovered machine header (null is this computer)
     this.trees = [];
+    this.waiting = new Map(); // space id -> the text of a stopped pane's needs-owner question
     // Per project id, from the last draw that showed its space: its index in its sidebar
     // list, where its rows stay once that space closes.
     this.places = new Map();
@@ -360,6 +361,27 @@ export default class Spaces extends View {
   // This render's terminals(), first row per address.
   reportOf(address) { return this.byAddress?.get(address)?.report ?? null; }
 
+  // A pane's pending owner question (rows.js ownerQuestionOf): its needs-owner label while it is
+  // live, stopped and not blocked, which is what the sidebar draws as a Question chip. `status`
+  // is the row's drawn status, for a bot row whose error is drawn as blocked.
+  ownerOf(address, status) { return ownerQuestionOf(this.byAddress?.get(address), status, this.now); }
+
+  // The spaces holding such a pane, by space id: the first question's text. Read from this
+  // render's terminals() and panes(), so the space's dot and the row's chip come from one hc
+  // read and clear together.
+  ownerSpaces() {
+    const tabs = new Map(this.snap.spaces.flatMap((s) => (s.tabs ?? []).map((c) => [c.id, s])));
+    const out = new Map();
+    for (const p of this.snap.panes ?? []) {
+      const s = tabs.get(p.tab);
+      if (!s || out.has(s.id)) continue;
+      const t = this.byAddress?.get(p.terminal);
+      const text = ownerQuestionOf(t, t?.status, this.now);
+      if (text) out.set(s.id, text);
+    }
+    return out;
+  }
+
   // Agents agents() misses because of that rename: their pane joins no terminal there.
   // Shown with the core's own reported status; never one that reports nothing.
   aliased(ps) {
@@ -408,11 +430,15 @@ export default class Spaces extends View {
   }
 
   // The agents mod's status marks. `report` is herdr-core's status object for the row's
-  // terminal; a blocked mark names a permission when it says so.
-  status(t, a, report = null) {
+  // terminal; a blocked mark names a permission when it says so. `owner` is the pane's
+  // needs-owner question: a stopped agent waiting on the person draws its own Question chip,
+  // apart from the blocked chip, its tooltip carrying what it asks.
+  status(t, a, report = null, owner = null) {
     const color = t[a.status] ?? t.dim;
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child(needsYouText(report));
+    if (owner) return div().flex_none().px(6).h(18).rounded(5).bg(t.ansi3 + "26").text_size(10.5).font_semibold().text_color(t.ansi3)
+      .flex().items_center().tooltip(`Waiting on you: ${owner}`).child(OWNER_QUESTION);
     if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
     return div().size(7).mx(3).flex_none().rounded(4).bg(a.status === "done" ? color : t.dim + "00");
   }
@@ -460,13 +486,14 @@ export default class Spaces extends View {
       .when(Boolean(machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)))
       .child(a.extra && !a.status
         ? div().id(`unknown-${a.address}`).size(7).mx(3).flex_none().rounded(4).bg(t.unknown).tooltip("No status reported")
-        : this.status(t, a, this.reportOf(a.core ?? a.address)));
+        : this.status(t, a, this.reportOf(a.core ?? a.address), this.ownerOf(a.core ?? a.address, a.status)));
   }
 
   // A plain agent's sub-agent, with the tree lines in front of it.
   subRow(k, lines, indent, t) {
     const on = k.address === this.snap.focused?.agent;
     const kpic = icon(k.program, 13, t.foreground);
+    const st = kidStatus(k, this.listed);
     return h_flex().id(`sub-${k.address}`).h(24).flex_none().pl(indent + 4).pr(8).items_center().rounded(8).text_size(12)
       .cursor_pointer()
       .when(on, (el) => el.bg(t.raised))
@@ -477,7 +504,7 @@ export default class Spaces extends View {
         .when(l === "└" || l === "├", (el) => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(kpic), (el) => el.child(div().mr(7).child(kpic)))
       .child(div().flex_1().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
-      .child(this.status(t, { status: kidStatus(k, this.listed) }, k.report ?? null));
+      .child(this.status(t, { status: st }, k.report ?? null, ownerQuestionOf(k, st, this.now)));
   }
 
   // The agents list's grouped-view name: a tab someone named or the agent's own
@@ -523,7 +550,7 @@ export default class Spaces extends View {
   // for liveness too: the program table can say shell while the agent runs). The attach
   // ledger's bindings, when readLedger has them, name each bot's pane; its labels otherwise.
   prepareBots() {
-    const now = Date.now();
+    const now = this.now ?? Date.now();
     const known = knownBots(this.bots);
     this.keyOf = listedKeyOf(this.bots, this.paneKeyReader());
     const live = liveFrom(this.all, known, argvReader(this.argvOf), this.keyOf, this.ledger);
@@ -739,6 +766,7 @@ export default class Spaces extends View {
     this.order.push(h.terminal);
     const shown = this.snap.focused?.agent === h.terminal;
     const pic = icon(h.program, 14, t.foreground) ?? image("icons/shell.svg").size(14).flex_none();
+    const st = kidStatus({ address: h.terminal, status: h.status }, this.listed);
     return h_flex().items_stretch()
       .children(this.guides(r.guides, t))
       .child(h_flex().id(`row-${r.id}`).flex_1().min_w(0).h(26).px(6).gap(8).items_center().rounded(8).text_size(12).cursor_pointer()
@@ -749,7 +777,7 @@ export default class Spaces extends View {
         .when(Boolean(h.template || h.model || h.effort), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(10)
           .text_color(t.dim).child([h.template, h.model, h.effort].filter(Boolean).join(" · "))))
         .when(h.terminal.includes("/"), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(h.terminal.split("/")[0])))
-        .child(this.status(t, { status: kidStatus({ address: h.terminal, status: h.status }, this.listed) }, this.reportOf(h.terminal))));
+        .child(this.status(t, { status: st }, this.reportOf(h.terminal), ownerQuestionOf(this.byAddress?.get(h.terminal), st, this.now))));
   }
 
   // A helper, worker or live bot row's click (workerTab.js rowWorker): its pane; else a tab
@@ -814,7 +842,7 @@ export default class Spaces extends View {
         .text_size(10).font_semibold().text_color(t.muted).child(`Wave ${b.planned.wave}`));
     } else {
       row = row.child(this.agentIcon(n, main ? 16 : 15, t))
-        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal)) : div().w(13).flex_none());
+        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal), ownerQuestionOf(this.byAddress?.get(live.terminal), s, this.now)) : div().w(13).flex_none());
     }
     const box = this.rowEvents(row, r, t, onClick, onMenu).rounded(main ? 10 : 8);
     const styled = main
@@ -1357,6 +1385,7 @@ export default class Spaces extends View {
     const colors = shared("am.space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color === "transparent" ? null : color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+    const owner = this.waiting?.get(w.id) ?? null;
     return v_flex()
       .relative()
       .id(`space-${w.id}`)
@@ -1393,6 +1422,8 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(this.avatar(w, fill, t)))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
+          .when(Boolean(owner), el => el.child(div().id(`owner-${w.id}`).size(6).rounded(3).flex_none().bg(t.ansi3)
+            .tooltip(`Waiting on you: ${owner}`)))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
           .child(this.addButton(w, t)),
       );
@@ -1448,6 +1479,7 @@ export default class Spaces extends View {
   }
 
   compact({ w, i }, t) {
+    const owner = this.waiting?.get(w.id) ?? null;
     return h_flex()
       .id(`space-${w.id}`)
       .h(26)
@@ -1458,7 +1490,7 @@ export default class Spaces extends View {
       .hover((s) => s.bg(t.hover))
       .on_click(() => run("space.select", { id: w.id }))
       .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
-      .child(div().text_color(tone(t, w.status)).child(glyph(w.status)));
+      .child(div().text_color(owner ? t.ansi3 : tone(t, w.status)).child(glyph(owner ? "done" : w.status)));
   }
 
   advisoryRow(notes, t) {
@@ -1479,6 +1511,8 @@ export default class Spaces extends View {
     // from by every row: the main thread is the only one, so it can't change during a render.
     // A click reads it again (the snapshot of that moment), never this one.
     this.snap = { spaces: spaces(), panes: panes(), terminals: terminals(), agents: agents(), machines: machines(), focused: focused() };
+    // One clock per render: a label's age and an idle bot's sleep use the same now.
+    this.now = Date.now();
     const sp = this.snap.spaces;
     const ids = new Set(sp.map(p => p.id));
     const kept = Object.fromEntries(Object.entries(shared("am.space.colors") ?? {}).filter(([id]) => ids.has(id)));
@@ -1493,6 +1527,8 @@ export default class Spaces extends View {
     this.prepareAgents();
     this.prepareBots();
     this.nameBotTabs();
+    // The spaces a stopped pane's needs-owner label marks, read once from this render's snapshot.
+    this.waiting = this.ownerSpaces();
     const list = this.grouped(t, collapsed);
     const advisories = collapsed ? null : shared(UPDATE_ADVISORIES);
     // agent.next / agent.prev follow the rows; ones not shown come after, in model order.

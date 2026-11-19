@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
-import { PRUNE_EXTRA_FILE, pruneExtras } from '../assemble.mjs'
+import { PRUNE_EXTRA_FILE, pruneExtras, pruneRuntime } from '../assemble.mjs'
 
 const temps = []
 after(() => {
@@ -47,5 +47,36 @@ test('third-party tests, examples, docs, .yarn and test files go; runtime files 
   }
   for (const kept of ['a/package.json', 'a/dist/keep.js', 'a/node_modules/b/dist/keep.js']) {
     assert.ok(existsSync(join(modules, kept)), kept)
+  }
+})
+
+test('server runtime pruning keeps the sharp wasm fallback and its dependencies', () => {
+  const lock = JSON.parse(readFileSync(new URL('../../apps/desktop/runtime/package-lock.json', import.meta.url), 'utf8'))
+  const version = lock.packages['node_modules/@img/sharp-wasm32'].version
+  const fallback = '@img/sharp-wasm32'
+  const binding = `${fallback}/lib/sharp-wasm32-${version}.node`
+  const wasm = Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  const modules = temp()
+  const kept = [
+    [`${fallback}/package.json`, '{}\n'],
+    [`${fallback}/index.cjs`],
+    [`${fallback}/versions.json`, '{}\n'],
+    [`${binding}.js`],
+    [`${binding}.wasm`, wasm],
+    ['sharp/package.json', '{}\n'],
+    ['@emnapi/runtime/package.json', '{}\n'],
+    ['tslib/package.json', '{}\n'],
+  ]
+  for (const [path, content] of kept) write(modules, path, content)
+  write(modules, '@img/sharp-linuxmusl-x64/lib/x.node')
+  write(modules, 'neutral/x.js.map')
+  write(modules, 'neutral/test/x.js')
+
+  pruneRuntime(modules)
+
+  for (const [path] of kept) assert.ok(existsSync(join(modules, path)), path)
+  assert.deepEqual(readFileSync(join(modules, `${binding}.wasm`)), wasm)
+  for (const path of ['@img/sharp-linuxmusl-x64', 'neutral/x.js.map', 'neutral/test']) {
+    assert.ok(!existsSync(join(modules, path)), path)
   }
 })

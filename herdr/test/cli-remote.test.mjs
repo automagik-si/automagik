@@ -203,9 +203,9 @@ test("--machine refusals: no --project, a relative one, a folder not there, a ma
   assert.match(s.cli(["ls", "--all", ...s.on]).err, /without --all/);
 });
 
-test("--machine with a command still on this computer only (worker, brief, history, tidy) is refused, never run here instead", (t) => {
+test("--machine with a command still on this computer only (worker, brief, tidy) is refused, never run here instead", (t) => {
   const s = scene(t);
-  for (const args of [["history", "Hedge"], ["brief", "Hedge"], ["worker", "task", "--branch", "x"], ["tidy"]]) {
+  for (const args of [["brief", "Hedge"], ["worker", "task", "--branch", "x"], ["tidy"]]) {
     const r = s.cli([...args, ...s.on]);
     assert.equal(r.code, 2, args.join(" "));
     assert.match(r.err, /works on this computer only for now/);

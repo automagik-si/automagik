@@ -148,7 +148,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile, group = false, botId } = {}) {
+  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false } = {}) {
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -171,8 +171,13 @@ export function install(rt) {
       }
     }
     const preset = await botPreset(profile, { group })
+    const reserved = readScopeSource === undefined ? undefined
+      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope })
     rt.assertShellChoice?.(undefined, botId)
-    const { sessionId } = await ctx.sessionController.create({ ...place, ...preset })
+    const { sessionId } = await ctx.sessionController.create({
+      ...place, ...preset, ...(reserved === undefined ? {} : { sessionId: reserved }),
+    })
+    if (reserved !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -276,13 +281,13 @@ export function install(rt) {
   // `pickModel` leaves the model to the user: the chat opens on a model card, and the
   // greeting waits until a model is chosen. So does a Bot made when no model it can
   // run on is served.
-  async function createBot(options) {
+  async function createBot(options, { readScopeSource = rt.callerSessionId?.() } = {}) {
     const cleanName = String(options.name ?? '').trim().slice(0, 40)
     const problem = nameProblem(cleanName)
     if (problem !== undefined) throw refusal(problem)
     if (botNameTaken(cleanName)) throw refusal(`A Bot named ${cleanName} already exists`)
     const existing = options.existingSessionId
-    if (existing === undefined) return holdName('bot', cleanName, () => buildBot(cleanName, options))
+    if (existing === undefined) return holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource))
     if (typeof existing !== 'string' || !existing.trim()) throw refusal('An existing Session needs its id')
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) throw refusal(readOnly)
@@ -295,7 +300,7 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -349,9 +354,10 @@ export function install(rt) {
     const permission = existingSessionId !== undefined ? undefined
       : creator !== undefined ? rt.inheritedPermission(creator, opener) ?? state.prefs.permission
         : personPermission
+    if (existingSessionId === undefined && createdBy !== undefined && readScopeSource === undefined) rt.assertNoConfiguredReadScope()
     // A host adapter may already own a configured root Session. Adopt it without creating
     // another Session or moving its workspace; this option is internal, not a user payload.
-    const id = existingSessionId ?? await createSession(cleanName, { dir })
+    const id = existingSessionId ?? await createSession(cleanName, { dir, readScopeSource })
     // Checked against the Session's own tool surface, before the Bot record exists: a name
     // this DSH does not serve refuses the create (the catch below archives the Session).
     if (denyTools) await rt.assertDenyTools(id, denyTools)
@@ -606,7 +612,6 @@ export function install(rt) {
     // The tool deny list is checked with the rest, before anything is written: a name this
     // DSH does not serve refuses the update, so a typo cannot quietly weaken the list.
     const denyTools = cleanDenyTools(patch.denyTools)
-    if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
     // The shell capability, checked with the rest: a value that is not true or false
     // refuses the update before anything is written.
     const shell = cleanShell(patch.shell)
@@ -655,19 +660,22 @@ export function install(rt) {
     // old conversation across the harness. Other fields cannot ride along: the switch is its
     // own step, and the caller can update them after it.
     const currentModel = bot.model ?? bot.appliedModel
-    if (modelRef !== undefined && modelRef !== null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
-      // A host-owned Session has no DSH agent with `whenIdle`, so no fresh part can be
-      // started here: its host owns the conversation, and the host's in-place move stands.
-      // A DSH agent, pinned included, takes the new-conversation path; the pinned check in
-      // switchRoute refuses it rather than carrying the Session across the harness.
-      const agent = await rt.resolveAgent(rt.chatOf(bot.id)).catch(() => undefined)
-      if (typeof agent?.whenIdle === 'function') {
-        const extra = Object.keys(patch).filter(key => key !== 'id' && key !== 'model' && key !== 'effort')
-        if (extra.length > 0) throw refusal(`${bot.name} needs a new conversation for that route, so change only its model in this step.`)
-        await rt.switchRoute(bot.id, modelRef, patch.effort)
-        return bot
+    if (modelRef != null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
+      const entry = actorId === undefined ? 'update-bot' : 'update_bot'
+      // The host owns a pinned chat. Refuse before even resolving its agent, including
+      // mixed edits whose permission validation could otherwise open that Session.
+      if (bot.sessionPinned !== true) {
+        const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
+        if (extra.length > 0) {
+          rt.routeAttempt(bot, currentModel, modelRef, entry)('refused', 'mixed edit')
+          throw refusal(`${bot.name} needs a new conversation for that route, so change only its model in this step.`)
+        }
       }
+      await rt.switchRoute(bot.id, modelRef, patch.effort, { entry })
+      return bot
     }
+    // Deny-list validation can open the Session; only do it after crossing eligibility.
+    if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
     // A new level resolves against the model the Bot will run on: the new one, the
     // model it keeps, or — the model cleared — the one it last ran on.
     const effortRef = modelRef === undefined ? bot.model ?? bot.appliedModel : modelRef ?? bot.appliedModel

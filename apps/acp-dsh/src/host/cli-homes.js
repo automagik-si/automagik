@@ -9,9 +9,10 @@ import {
 } from './login-ownership.js'
 import {
   assertGeneration, CliGenerations, GENERATION_ENV, ownershipAt, ownershipState,
-  POINTER_ENV, removeDeadOwnership, sameOwnership,
+  POINTER_ENV, removeDeadOwnership,
 } from './cli-generations.js'
 import { processState, validBirth } from './process-identity.js'
+import { retiredHomes, writeRetiredNote } from './retired-home.js'
 
 export const HOME_ENV = 'AUTOMAGIK_BOT_CLI_HOME'
 const VERSION_ENV = 'AUTOMAGIK_BOT_CLI_VERSION'
@@ -28,9 +29,10 @@ const inherited = new RegExp([
 const failure = message => Object.assign(new Error(message), { code: 'acp-account/busy' })
 
 export class CliHomes {
-  constructor(root, { onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup') } = {}) {
+  constructor(root, { onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup'), onRetired = () => {} } = {}) {
     this.root = resolve(root)
     this.onRecordError = onRecordError
+    this.onRetired = onRetired
     this.instance = `${process.pid}-${randomUUID()}`
     this.registered = new Map()
     this.changes = new Map()
@@ -160,6 +162,9 @@ export class CliHomes {
       const retired = join(this.root, 'retired', vendor)
       mkdirSync(retired, { recursive: true, mode: 0o700 })
       writeFileSync(join(retired, previous), '', { mode: 0o600 })
+      // #1529: the marker says the home is retired; the note in it says what stays and how to
+      // inspect or keep it. Neither removes anything, and a note failure never stops the reset.
+      writeRetiredNote({ root: this.root, vendor, generation: previous, home: this.generations.folder(vendor, previous) })
     }
     this.end(vendor)
     const registered = this.registered.get(vendor)
@@ -172,48 +177,22 @@ export class CliHomes {
     return home
   }
 
-  // Unproved folders remain retained. Cleanup never discards pending, damaged or legacy
-  // ownership evidence; it only removes an abandoned home once every recorded owner exited.
+  // #1529: collection keeps every retired home. Removal needs four separately proved
+  // conditions - the recorded owners are dead, a complete measurement scan taken after the
+  // home's last write with the root frozen, the measurement retirement record, and the
+  // session-absorption receipt. The last three belong to the measurement side and to the
+  // skill's receipt, so none is available here yet and the default is keep. The report is for
+  // inspection and for that later gate; it never deletes, and a home whose marker, note or
+  // bound path cannot be proved to be its own is refused and left untouched.
   collect(vendor) {
-    return this.generations.exclusive(vendor, () => {
-      const directory = join(this.root, 'retired', vendor)
-      if (!existsSync(directory)) return
-      const current = this.generations.current(vendor)
-      for (const generation of readdirSync(directory)) {
-        if (generation === current) continue
-        if (generation !== 'legacy' && !/^[a-f0-9-]{36}$/.test(generation)) continue
-        const old = this.generations.folder(vendor, generation)
-        try {
-          const physical = lstatSync(old)
-          if (!physical.isDirectory() || physical.isSymbolicLink()) continue
-          const retired = join(directory, generation)
-          const marker = lstatSync(retired)
-          if (!marker.isFile() || marker.size !== 0) continue
-          verifyLoginRecords(old, '') // Even this instance's abandoned login needs exit proof.
-          this.verify(old)
-          this.generations.otherApps(vendor, old)
-          const instances = join(old, 'instances')
-          const names = existsSync(instances) ? readdirSync(instances).sort() : []
-          const owners = names.map(name => ownershipAt(join(instances, name), { legacy: 'home' }))
-          if (owners.some(owner => ownershipState(owner) !== 'dead')) continue
-          const lock = join(old, 'changing')
-          const changing = existsSync(lock) ? this.lockSnapshot(lock) : null
-          if (changing && this.lockState(lock, changing) !== 'dead') continue
-          verifyLoginRecords(old, '')
-          this.verify(old)
-          this.generations.otherApps(vendor, old)
-          if (owners.some(owner => !sameOwnership(owner) || ownershipState(owner) !== 'dead' || !sameOwnership(owner))) continue
-          if (JSON.stringify(existsSync(instances) ? readdirSync(instances).sort() : []) !== JSON.stringify(names)) continue
-          if (changing ? this.lockState(lock, changing) !== 'dead'
-            || JSON.stringify(this.lockSnapshot(lock)) !== JSON.stringify(changing) : existsSync(lock)) continue
-          const finalHome = lstatSync(old), finalMarker = lstatSync(retired)
-          if (finalHome.dev !== physical.dev || finalHome.ino !== physical.ino
-            || finalMarker.dev !== marker.dev || finalMarker.ino !== marker.ino || finalMarker.size !== 0) continue
-          rmSync(old, { recursive: true, force: true })
-          rmSync(retired, { force: true })
-        } catch { /* No exit proof: retain the original folder and try on a later app start. */ }
-      }
-    })
+    if (!vendors.has(vendor)) return []
+    return retiredHomes(this.root, vendor)
+  }
+
+  /** Every vendor's retired homes when no vendor is named, for inspection only. */
+  retired(vendor) {
+    if (vendor !== undefined) return this.collect(vendor)
+    return [...vendors].flatMap(key => this.collect(key))
   }
 
   verify(home) {
@@ -342,7 +321,10 @@ export class CliHomes {
         }
       }
     })
-    this.collect(vendor)
+    const retired = this.collect(vendor)
+    if (retired.length > 0) {
+      try { this.onRetired(vendor, retired) } catch {}
+    }
     // ACP start: the generation record follows both pointers; a matching record is not rewritten.
     try { this.generations.ensureRecord() } catch {
       try { this.onRecordError(vendor) } catch {}
