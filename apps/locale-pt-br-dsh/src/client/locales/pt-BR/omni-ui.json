@@ -43,7 +43,7 @@
   "Bot accounts": "Contas dos Bots",
   "This installation: {installation}": "Esta instalação: {installation}",
   "Bots in this installation share these accounts.": "Os Bots desta instalação compartilham estas contas.",
-  "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "Outras instalações do Automagik neste computador podem usar este mesmo login dos Bots. Mudar aqui muda o login para todas elas.",
+  "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "Outras instalações do Automagik neste computador podem usar este mesmo login dos Bots. Mudar aqui muda o login para todas as instalações.",
   "Your terminal login is separate and stays unchanged.": "O login do terminal é separado e permanece intacto.",
   "Bots: {account}": "Bots: {account}",
   "Sign in again in the app to resume Bots": "Entre de novo no app para retomar os Bots",
