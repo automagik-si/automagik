@@ -378,7 +378,7 @@ A settings page reads the agents through this host service; the plugin stays hos
 | `account(id, { fresh? })` | For the DSH owner's views only: `{ id, signedIn?, consent?, ref?, account?: { kind: 'account' \| 'key', email?, org?, plan? }, notice? }`. Who the CLI is signed in as, read from the CLI itself (below); never on a `status()` or `inspect()` row, in a log or in an event. `ref` names the account read and goes back with `accountConfirm`. |
 | `accountConfirm(id, { ref? })` | The person's word that the app may use the account this CLI is signed in to. Asks the CLI again, records the consent and announces `acp-dsh/login-ready`. Another account than `ref` is refused (`acp-account/changed`); a signed-out CLI too (`acp-account/signed-out`). |
 | `accountNoticed(id)` | The one-time notice of a vendor carried through an upgrade was shown. |
-| `imageAccess()` | `{ ready, signedIn?, reason?, unsupported? }`: whether Codex can draw an image now, on its own ChatGPT sign-in (Codex on, its CLI found, its connector installed, `codex login status` says signed in; an unknown sign-in is asked once; the person confirmed its account, else `reason: 'account'`; the image run's checks hold for this Codex, else not ready, with `reason`: `unsupported` (and `unsupported: true`), `config` or `unreadable`). Reads no credential and starts no sign-in. |
+| `imageAccess()` | `{ ready, signedIn?, reason?, unsupported? }`: preliminary readiness on Codex's own ChatGPT sign-in (Codex on, its CLI found, its connector installed, `codex login status` says signed in; an unknown sign-in is asked once; the person confirmed its account, else `reason: 'account'`; the preliminary checks hold for this Codex, else not ready, with `reason`: `unsupported` (and `unsupported: true`), `config` or `unreadable`). Selecting the permission profile is checked separately for each draw. Reads no credential and starts no sign-in. |
 | `generateImage({ prompt, size?, quality?, background?, signal?, timeoutMs? })` | Draws one image with the Codex CLI (`src/host/image.js`) and resolves `{ base64, mimeType: 'image/png' }`. Refusals carry an `acp/image-*` code (`signed-out`, `usage-limit`, `timeout`, `unavailable`, `failed`, `stopped`, `refused`) and a message to show as it is. |
 | `keepImages(keeper)` | Where an image an agent makes in a chat is kept, so the chat can show it (`src/host/agent-image.js`). `keeper` is `{ start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) -> Promise<{ file }>, fail?({ callId, sessionId, error }) }`; one at a time, and the call returns its disposer. The Bot team registers its images folder. |
 | `ownMode(answer)` | Registers one answerer for an unbridged Workspace Session's own mode. Only exact `true` within two seconds counts, twice per prompt. Returns a disposer for that registration; competing registrations disable own mode permanently. |
@@ -489,26 +489,29 @@ or `:minimal` roots. Before the session starts, the draw reads Codex's resolved 
 `debug prompt-input` and accepts only root deny, scratch read and at most Codex's own helper
 folder under that home's `tmp/arg0-…/codex-arg0…`. Other grants or unknown forms fail the check.
 After `session/new`, the run selects `permission-profile:<id>` and waits for acknowledgement
-before sending the prompt. The scratch is removed afterwards. `CODEX_HOME` comes from
+before sending the prompt. Scratch cleanup is best effort. `CODEX_HOME` comes from
 `cli-homes.js`; the terminal's config is never written. The same checked overrides go through
 codex-acp's `CODEX_CONFIG`.
 
-If the profile is unavailable, its config is refused, its resolved grants are wider, or the
-adapter does not offer or acknowledge its mode, drawing continues in `read-only` mode under
-the owner's policy (`ALLOW_IMAGE_READ_ONLY_FALLBACK`). Windows keeps this fallback and refuses
-edits. One warning names the reason without private details, in the logger and stderr, and the
-result is marked internally as not isolated. There is no UI change. A passing `imageAccess()`
-check means drawing is available; it does not establish that this draw can select a profile.
-The internal `isolated=true` flag means the resolved grants passed and the mode was acknowledged;
-it does not prove that the hosted image tool reads through that profile.
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. One warning in the
+logger and stderr names the reason without private details. With no profile, the checks and
+the session may start before the refusal. Windows has no profile modes, so `imageAccess()` can
+report ready and a one-off Codex draw still returns “Update Automagik and try again.” The
+OpenAI-key path and a Codex Bot's own chat image tool are separate routes. The internal
+`isolated=true` flag records the passed grants check and the mode acknowledgement. The hosted
+tool's filesystem access also depends on Codex's runtime grants.
 
 The draw fingerprints the local config sources Codex reads for the session before the check
 and again after mode acknowledgement. These are the home's `config.toml`; on Linux and macOS,
 also `/etc/codex/config.toml`, `/etc/codex/managed_config.toml`, `/etc/codex/requirements.toml`,
-and each scratch ancestor's `.codex/config.toml` and `.git` marker. It checks at both points
-that the scratch has no `.codex` entry (including a dangling symlink). Changed or unreadable
-sources, or a scratch `.codex` entry, take the same fallback/refusal path. Change and restore
-inside that window, and changes after acknowledgement, are not covered. Neither are macOS
+and each scratch ancestor's `.codex/config.toml` and `.git` marker. At the post-acknowledgement
+check, changed or unreadable sources or a scratch `.codex` entry (including a dangling symlink)
+refuse the draw or edit before any prompt. The check covers changes visible at that point.
+Change and restore inside that window and later changes are outside its coverage, as are macOS
 managed preferences (MDM), cloud requirements or cloud-managed config. A process that can
 already write these sources controls this Codex's configuration; the image lock cannot defend
 against it.
@@ -526,12 +529,11 @@ PNG, JPEG or WebP from DSH's verified attachment store: bots-dsh resolves it in 
 chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw scratch and sends
 an inline image block when the agent advertises image prompts. No read root is added. Edits
 run only when the adapter acknowledged the Bot home's image profile and Codex's resolved
-profile matched it; the read-only fallback refuses
-an edit. An edit whose pre-session setup stops before a prompt (a connector that cannot spawn, a
+profile matched it. An edit whose setup stops before a prompt (a connector that cannot spawn, a
 scratch folder that cannot be made, an unreadable configuration, an inert switch, a missing or
 unacknowledged profile, a signed-out Codex, a session that does not start in time) is refused
 with `reason: edit-not-isolated` too, so bots-dsh hands the Bot its own verified copy to edit as
-a file. The scratch, including the input copy, is removed afterwards.
+a file. The run attempts to remove the scratch, including the input copy, afterwards.
 
 `drawImage` accepts no user-selected local image-input path, registers no ACP filesystem-read
 callback, and receives no pre-read image-tool arguments. Codex selects and reads
@@ -629,10 +631,10 @@ the tested Read only flow, not Workspace `/tmp` denial, other versions/platforms
 application acceptance. Unsupported ordinary sessions retain their existing base behavior;
 they cannot fall back to another mode to activate a session-file grant.
 
-**Security warning (#870): full-disk reads remain in the legacy fallback.** Auto keeps `agent`:
+**Security warning (#870): legacy chat modes can read across the disk.** Auto keeps `agent`:
 codex-acp 2.6.0 gives profile modes one reviewer per session. Full access is unrestricted by
 design. Windows keeps legacy modes, as do older adapters or a config that cannot offer the
-profiles. Those modes and the one-off drawing fallback can read wherever the OS user can;
+profiles. Those legacy modes can read wherever the OS user can;
 an injected request could put a local file's contents into a picture shown in chat. Files in
 `/tmp` and `$TMPDIR` remain readable at Workspace, and no native macOS run is recorded.
 Tool checks and permission refusals alone do not prevent these reads. Prompt text itself is
@@ -653,15 +655,17 @@ when a check does not hold; Codex's profile plus runtime grants supply filesyste
   the model (`debug prompt-input`). Nothing is sent to a model, and nothing of the answers is
   kept or logged but names. The checks read the Bot's isolated Codex home, signed in or not, as
   the session will, and run in the session's own scratch folder with the trust codex-acp gives
-  it. Together they have 40 seconds; a stop from the caller ends them, and a command that
+  it. Each check sequence has 40 seconds. A stop from the caller ends it, and a command that
   hangs is killed with the Codex it started.
   - `shell_tool` and `view_image` must be listed, not removed, and off; `image_generation` must
     be on.
   - Every tool offered must be on a fixed list (`IMAGE_TOOLS_ALLOWED`, `IMAGE_NESTED_ALLOWED`)
     or be the image tool. A command tool, image viewing, an MCP tool, a tool this version does
     not know, an item of an unknown kind or no tool block at all stops the draw.
-  - An `Invalid configuration` line on check stderr stops the draw, even if Codex exits
-    successfully and uses defaults.
+  - An `Invalid configuration` line on check stderr fails the check, even if Codex exits
+    successfully and uses defaults. A config failure from a command without the profile
+    retries the sequence once, keeping the same profile when one is available. A config
+    failure from a command carrying the profile refuses the draw or edit before the session.
   - The list must be in the form this code knows. A tool of an unknown kind or with a field it
     does not know stops the draw. So does a tool `exec` reaches that is not written as Codex
     0.167 writes it (one `declare const tools: { name(…) }` block per tool, one tool per block,
@@ -690,22 +694,25 @@ when a check does not hold; Codex's profile plus runtime grants supply filesyste
 A check that does not hold answers `acp/image-unavailable`, with what the person can do: update
 Automagik (this Codex does not take the lockdown), fix Codex's config file
 (Codex could not load it), or try again (the check itself broke). One `warn` log line names the
-feature or tool; the message shown does not. `imageAccess` makes the same check, remembered per
-Codex and adapter for five minutes, and answers `{ ready: false, signedIn: true, reason }` when
+feature, tool or isolation failure. `imageAccess` makes a preliminary check without selecting
+a profile, remembers it per Codex and adapter for five minutes, and answers
+`{ ready: false, signedIn: true, reason }` when
 it does not hold (`reason`: `unsupported`, with `unsupported: true`; `config`; `unreadable`), so
 the Bot team goes on to its next image source, or says which it was. Only a check that ran out
 of time leaves Codex ready. A draw always makes its own check.
 
-**Security notes: containment limits and accepted fallback risk (#870).**
+**Security notes: containment limits (#870).**
 
-- **The image tool's own input in the fallback (risk accepted).** A prompt injection can
+- **The hosted image tool's input.** A prompt injection can
   ask Codex to use a readable local image file as input and return its contents in chat.
   codex-acp reports the image call without its arguments. No feature switch disables that
   input. In `read-only` mode codex-acp sends a full-disk `readOnly` policy on every turn;
-  `CODEX_CONFIG` cannot narrow it. The per-home image profile mode instead sends the profile id
+  `CODEX_CONFIG` cannot narrow it. The per-home image profile mode sends the profile id
   on every turn. Codex's image accessor uses a sandboxed helper, whose runtime grants widen
-  the profile's requested read boundary. The owner chose to keep the fallback enabled when
-  that mode is unavailable or rejected; that decision does not establish scratch-only reads.
+  the profile's requested read boundary. Images in permitted runtime directories remain
+  readable. The 2026-11-11 owner decision accepted the risk of continuing in legacy
+  `read-only` for draws when the profile mode was unavailable or rejected. The draft
+  proposes refusing those draws before any prompt.
   Ordinary chat images (`agent-image.js`) use the chat profiles above at Read only and
   Workspace when offered. Signed-in enforcement on the actual per-turn path still needs
   verification in the app.

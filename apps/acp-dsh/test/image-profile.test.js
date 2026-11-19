@@ -1,14 +1,24 @@
-// The profile fallback's failure paths. Only temp folders and the fake agent are used.
+// Isolation refusals and the 2026-11-11 fallback policy. Only temp folders and the fake agent are used.
 import assert from 'node:assert/strict'
+import childProcess from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import fs from 'node:fs/promises'
-import { registerHooks, syncBuiltinESMExports } from 'node:module'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { AgentRun } from '../src/host/acp.js'
-import { drawImage, mcpServerNames, STOPPED, TIMED_OUT, UNAVAILABLE } from '../src/host/image.js'
+import { drawImage, imageProfileFor, mcpServerNames, STOPPED, TIMED_OUT, UNAVAILABLE } from '../src/host/image.js'
+import { imageWith20261111Policy } from './support/image-policy-2026-11-11.mjs'
+
+const { drawImage: drawWith20261111Policy } = await imageWith20261111Policy()
+
+test('the shipped image policy fails closed', () => {
+  const source = readFileSync(new URL('../src/host/image.js', import.meta.url), 'utf8')
+  assert.match(source, /^const ALLOW_IMAGE_READ_ONLY_FALLBACK = false$/m)
+})
+
 
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-image-agent.mjs')
 
@@ -32,12 +42,13 @@ function fixture(t, profile = 'offer') {
   }
 }
 
-const configError = () => Object.assign(new Error('profile config refused'), { kind: 'config' })
+const configError = () => Object.assign(new Error('base config refused'), { kind: 'config', profiled: false })
+const CONFIG_TEXT = 'Codex could not load its own configuration, so the image was not started. Fix Codex\'s config file and try again.'
 
-test('a config refusal only with the profile retries all checks without it and draws read-only', async (t) => {
+test('the 2026-11-11 policy drops the profile on a config refusal and draws read-only', async (t) => {
   const run = fixture(t)
   const checks = []
-  const made = await drawImage({
+  const made = await drawWith20261111Policy({
     ...run.request,
     listServers: async (launch, options) => {
       const profile = checks.length === 0
@@ -59,10 +70,10 @@ test('a config refusal only with the profile retries all checks without it and d
   assert.equal(existsSync(run.dir), false)
 })
 
-test('a config refusal with and without the profile refuses after exactly two checks', async (t) => {
+test('the 2026-11-11 policy refuses after exactly two failing config checks', async (t) => {
   const run = fixture(t)
   const profiles = []
-  await assert.rejects(drawImage({
+  await assert.rejects(drawWith20261111Policy({
     ...run.request,
     listServers: async () => {
       profiles.push(profiles.length === 0)
@@ -76,46 +87,66 @@ test('a config refusal with and without the profile refuses after exactly two ch
   assert.equal(existsSync(run.dir), false)
 })
 
-// Flip the policy only in this test's module instance, without editing the source on disk.
-async function withoutFallback() {
-  const suffix = '?image-review-no-fallback'
-  const hook = registerHooks({
-    load(url, context, next) {
-      const result = next(url, context)
-      if (!url.endsWith(suffix)) return result
-      const source = String(result.source)
-      const policy = 'const ALLOW_IMAGE_READ_ONLY_FALLBACK = true'
-      assert.ok(source.includes(policy))
-      return { ...result, source: source.replace(policy, 'const ALLOW_IMAGE_READ_ONLY_FALLBACK = false') }
-    },
-  })
-  try { return await import(`../src/host/image.js${suffix}`) } finally { hook.deregister() }
-}
 
-test('with fallback disabled a profile config refusal does not retry or start a session', async (t) => {
-  const strict = await withoutFallback()
+test('the shipped policy retries a failing base config once and reports its error', async (t) => {
   const run = fixture(t)
   let checks = 0
-  await assert.rejects(strict.drawImage({
+  await assert.rejects(drawImage({
     ...run.request,
     listServers: async () => { checks += 1; throw configError() },
-  }), error => error.code === UNAVAILABLE && error.message.startsWith('The Codex image run could not be isolated'))
-  assert.equal(checks, 1)
+  }), error => error.code === UNAVAILABLE && error.message === CONFIG_TEXT)
+  assert.equal(checks, 2)
   assert.deepEqual(run.trace(), [])
+  assert.deepEqual(run.logged, ['the Codex image run was not started (config): base config refused'])
+  assert.equal(existsSync(run.dir), false)
+})
+
+test('the shipped policy refuses missing and rejected profile modes', async (t) => {
+  for (const profile of ['', 'reject']) {
+    const run = fixture(t, profile)
+    await assert.rejects(drawImage(run.request), error => error.code === UNAVAILABLE && error.message.startsWith('The Codex image run could not be isolated'))
+    const trace = run.trace()
+    assert.equal(trace.some(row => row.event === 'prompt' || (row.event === 'mode' && row.modeId === 'read-only')), false)
+    const reason = profile === 'reject' ? 'profile mode selection rejected' : 'profile mode not offered'
+    assert.deepEqual(run.logged, [`the Codex image run is not isolated (${reason}); the image was refused`])
+    assert.equal(existsSync(run.dir), false)
+  }
+})
+
+test('a one-time base config failure retries with the same profile and draws isolated', async t => {
+  const run = fixture(t)
+  const launch = run.request.spawn()
+  const profile = imageProfileFor(launch.profileModes)
+  const execFile = childProcess.execFile
+  let attempts = 0
+  const mock = t.mock.method(childProcess, 'execFile', (command, args, options, callback) => {
+    if (args[0] === FAKE && args[2] === 'features' && ++attempts === 1) {
+      options = { ...options, env: { ...options.env, FAKE_INVALID_CONFIG: 'features' } }
+    }
+    return execFile(command, args, options, callback)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports() })
+  const made = await drawImage(run.request)
+  assert.equal(made.isolated, true)
+  const trace = run.trace()
+  assert.deepEqual(trace.filter(row => row.event === 'cli').map(row => row.args[0]),
+    ['mcp', 'features', 'mcp', 'features', 'debug', 'features', 'debug', 'debug'])
+  assert.equal(trace.find(row => row.event === 'new-session').profileId, profile.id)
+  assert.equal(trace.find(row => row.event === 'prompt').modeId, profile.mode)
   assert.deepEqual(run.logged, [])
   assert.equal(existsSync(run.dir), false)
 })
 
-test('with fallback disabled missing and rejected profile modes give a clear isolation refusal', async (t) => {
-  const strict = await withoutFallback()
-  for (const profile of ['', 'reject']) {
-    const run = fixture(t, profile)
-    await assert.rejects(strict.drawImage(run.request), error => error.code === UNAVAILABLE && error.message.startsWith('The Codex image run could not be isolated'))
-    const trace = run.trace()
-    assert.equal(trace.some(row => row.event === 'prompt' || (row.event === 'mode' && row.modeId === 'read-only')), false)
-    assert.deepEqual(run.logged, [])
-    assert.equal(existsSync(run.dir), false)
-  }
+test('a persistent base config failure with a valid profile gives config guidance', async t => {
+  const run = fixture(t)
+  const launch = run.request.spawn()
+  launch.env.FAKE_INVALID_CONFIG = 'mcp'
+  await assert.rejects(drawImage({ ...run.request, spawn: () => launch }),
+    error => error.code === UNAVAILABLE && error.message === CONFIG_TEXT && error.reason === undefined)
+  assert.deepEqual(run.trace().map(row => [row.event, row.args?.[0]]), [['cli', 'mcp'], ['cli', 'mcp']])
+  assert.deepEqual(run.logged, ['the Codex image run was not started (config): the MCP server list could not be read: Codex could not load its configuration'])
+  assert.equal(existsSync(run.dir), false)
 })
 
 test('failure to write the edit input has its own refusal and log', async (t) => {

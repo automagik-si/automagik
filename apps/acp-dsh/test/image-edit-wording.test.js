@@ -5,15 +5,18 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { drawImage, IMAGE_PROFILE_GRANTS, UNAVAILABLE } from '../src/host/image.js'
+import { drawImage, IMAGE_PROFILE_GRANTS, imageProfileFor, UNAVAILABLE } from '../src/host/image.js'
 import { chatProfilesConfig, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { realpathSync } from 'node:fs'
 import { AcpAdapter } from '../src/host/adapter.js'
 import { AgentRun } from '../src/host/acp.js'
+import { imageWith20261111Policy } from './support/image-policy-2026-11-11.mjs'
 
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+const { drawImage: drawWith20261111Policy } = await imageWith20261111Policy()
+const policies = [['shipped', drawImage], ['2026-11-11', drawWith20261111Policy]]
 
-for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its locked profile ${mode} retains UNAVAILABLE and a reason and sends no prompt`, async t => {
+for (const [policy, draw] of policies) for (const mode of ['not-offered', 'selection-rejected']) test(`${policy}: an edit with its locked profile ${mode} retains UNAVAILABLE and a reason and sends no prompt`, async t => {
   const home = await mkdtemp(join(tmpdir(), 'edit-wording-'))
   t.after(() => rm(home, { recursive: true, force: true }))
   const profileModes = ensureChatProfiles(home, { platform: 'linux' })
@@ -55,7 +58,7 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
     async prompt() { prompts++; assert.fail('the isolation check must refuse first') }
     dispose() {}
   }
-  await assert.rejects(drawImage({
+  await assert.rejects(draw({
     spawn: () => ({ command: 'test-codex', args: [], profileModes, env: { CODEX_HOME: home } }),
     scratch: () => mkdtemp(join(home, 'scratch-')), Run, log: line => t.diagnostic(line),
     input: { data: PNG, mimeType: 'image/png' }, prompt: 'Make the background blue',
@@ -67,8 +70,12 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
   })
   assert.equal(prompts, 0)
   assert.equal(checked.length, 6)
-  assert.equal(selected.at(-1), 'read-only')
-  assert.equal(selected.length, mode === 'selection-rejected' ? 2 : 1)
+  if (policy === 'shipped') {
+    assert.deepEqual(selected, mode === 'selection-rejected' ? [imageProfileFor(profileModes).mode] : [])
+  } else {
+    assert.equal(selected.at(-1), 'read-only')
+    assert.equal(selected.length, mode === 'selection-rejected' ? 2 : 1)
+  }
 })
 
 test('the per-image profile still denies the filesystem root and reads only its scratch workspace', () => {

@@ -605,12 +605,12 @@ before; without one, the Codex CLI on its own ChatGPT sign-in (acp-dsh `generate
 session with a per-draw permission profile using Codex's image tool). A ChatGPT grant stored by an earlier version's DSH
 sign-in is read last. CLI auto-updates stay on (D-h).
 
-**Image read boundary (#870).** Each draw writes an owner-only project config in its scratch
-folder with a fresh permission profile and `default_permissions`. It denies `:root`, reads
-only `:workspace_roots`, and has no network table, `extends` or `:minimal`. The adapter must
-offer and acknowledge `permission-profile:<id>` before the prompt. This is containment, not a
-scratch-only read boundary: Codex adds `:minimal` and helper-executable read grants, with
-platform runtime roots. Images there remain readable. Automagik passes only prompt text and
+**Image read boundary (#870).** Each draw uses a fresh scratch folder and selects the image
+permission profile from the Bot's isolated Codex home through its session overrides. The
+folder starts with no project config. The profile denies `:root`, reads `:workspace_roots`,
+and has no network table, `extends` or `:minimal`. The adapter must offer and acknowledge
+`permission-profile:<id>` before the prompt. Codex adds runtime read grants for its helper
+and platform runtime roots. Images there remain readable. Automagik passes only prompt text and
 has no pre-read hook for Codex's image-input paths; output bytes are inline, never opened from
 `savedPath`. No adapter-controlled input path exists to validate. The [security notes and
 pinned source lines][codex-image-security] list Linux, macOS and Windows grants and the real
@@ -618,8 +618,9 @@ helper read tests. Those tests reconstruct the helper policy; they do not prove 
 ACP image-tool path. **#870 remains open.** Feature and offered-tool checks stay in place,
 and each required switch is read under the session's whole config and proven by its effect
 before the draw; a switch Codex lists but silently ignores refuses the draw.
-An `Invalid configuration` warning fails a pre-session check.
-The run uses the Bot's isolated Codex home and removes the scratch config with the folder.
+An `Invalid configuration` warning fails a pre-session check. A base-config failure retries
+the check sequence once with the same profile. A profile-specific config failure refuses the
+draw or edit before session start. Scratch cleanup is best effort.
 
 **Accepted image security risk (owner decision, 2026-11-11).** If the profile mode is absent
 or rejected, drawing continues in `read-only` with one warning and an internal not-isolated
@@ -628,6 +629,16 @@ could return a readable local image in the picture. The owner keeps this fallbac
 A Codex Bot's ordinary chat image tool (`agent-image.js`) is outside this per-draw profile
 and retains the risk under its chat permissions. Signed-in enforcement on the actual
 per-turn adapter path still needs verification in the app.
+
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. A config change is
+one visible at the post-acknowledgement check, which also rejects a scratch `.codex` entry.
+With no profile, the preliminary checks and session may start. Windows has no profile modes.
+Readiness can report ready there even though the one-off Codex draw is refused with
+“Update Automagik and try again.”
 
 An OpenAI API key avoids `generate_image`'s one-off Codex session by using the Images API;
 the API still receives the prompt. Prompt text is outside the file boundary. A Bot running
@@ -941,12 +952,12 @@ ChatGPT grants cannot edit; older ACP services must update or use an OpenAI key.
 For edits, the Image read boundary's text-only-input statement gains this exception:
 bots-dsh reads the person's verified upload from DSH's store and acp-dsh passes it inline
 when image prompts are supported and writes a 0400 copy in the per-draw scratch. No read
-root is added. Only an acknowledged per-draw profile permits an edit; fallback refuses it
-(D3's recommended default). Any edit the locked run cannot be set up for (sign-in, account,
+root is added. An edit requires an acknowledged per-draw profile before any prompt.
+Any edit the locked run cannot be set up for (sign-in, account,
 configuration, switch check, profile acknowledgement, an older ACP service, a connector or
 session that cannot start) is refused with
 `reason: edit-not-isolated`, so bots-dsh gives the Bot its own verified copy to edit the file
-itself; the original stays unchanged. The scratch and input copy are removed afterwards. Codex still
+itself; the original stays unchanged. Scratch cleanup, including its input copy, is best effort. Codex still
 selects its image-tool paths without an adapter pre-read hook; acknowledgement is not proof
 of scratch-only reads, and #870 remains open. Real-app acceptance must demonstrate that
 Codex preserves the reference picture's distinctive shapes and text before this ships.

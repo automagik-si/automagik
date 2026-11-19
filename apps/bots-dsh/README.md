@@ -440,7 +440,7 @@ the result is a new image in the same chat card and team images folder.
 Edits use the person's OpenAI key through the Images edits API, or Codex on their ChatGPT
 plan through `acpAgents.editImage`. An older ACP plugin asks for an update;
 a legacy ChatGPT grant cannot edit. Codex edits require acknowledgement of the per-draw
-profile and refuse the read-only fallback. A Codex Bot keeps its own image tool unchanged.
+profile before sending the edit prompt. A Codex Bot's own chat image tool is a separate route.
 
 Each picture is saved only for the Bots it was sent to: the person's uploads, group lines
 shown to a member, and explicit forwards through `message_bot`'s `images` array (up to four
@@ -489,18 +489,23 @@ file, and must only claim an edit when that file exists; otherwise it says it co
 At Read only it tells the person that Workspace in Details allows editing as a file. A copy
 failure gives the OS guidance or says that the picture could not be edited here.
 
-**Codex image security (#870).** Each one-off draw requests scratch-only reads through a fresh
-permission profile. Codex's filesystem helper adds runtime read grants, so this is containment,
-not a scratch-only read boundary: images in permitted runtime directories remain readable.
+**Codex image security (#870).** Each one-off draw selects the Bot home's image permission
+profile and uses a fresh scratch folder. Codex's filesystem helper adds runtime read grants,
+so images in permitted runtime directories remain readable.
 Automagik sends prompt text and has no pre-read hook for Codex's image-input paths. The
 [ACP image security notes](../acp-dsh/README.md#images-through-codex) list the platform grants,
 pinned sources and test limits; native macOS/Windows and signed-in per-turn enforcement remain
-untested here. #870 remains open. The scratch folder and config are removed afterwards.
-An adapter that lacks the mode or rejects it falls back to `read-only`, logs one warning and
-marks the result internally as not isolated. The owner keeps this fallback enabled with the
-file disclosure risk accepted: an injected request could use a readable local image as input
-and return its contents in a picture shown in chat. A Codex Bot's own image tool in ordinary
-chat is outside the per-draw profile and retains that risk under its chat permissions.
+untested here. #870 remains open. Scratch cleanup is best effort.
+
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+If the per-draw profile checks fail under the proposed default, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. One warning records
+the reason. Windows has no profile modes, so preliminary readiness can pass even though the
+one-off Codex draw is refused with “Update Automagik and try again.” A Codex Bot's ordinary
+chat image tool uses its chat permissions, which govern whether an injected request can use
+a readable local image as input and return its contents in chat.
 
 An OpenAI API key routes `generate_image` through the Images API instead of its one-off
 Codex session. Prompt text still reaches the model; keep secrets out of it. A Bot running on
