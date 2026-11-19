@@ -290,7 +290,7 @@ jobs:
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
         env:
           HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
-        run: bun scripts/herdr-lane.ts check-key
+        run: bash scripts/release-gates.sh herdr-key
 
       # Every release carries am (RFC 0012): its tests, a syntax check, shellcheck on its launcher,
       # and its copies of the pack's CLI and briefing byte for byte the pack's.
@@ -307,7 +307,7 @@ jobs:
         if: steps.new.outputs.release == 'true'
         env:
           AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || secrets.AM_LANE_KEY }}
-        run: bun scripts/am-lane.ts check-key
+        run: bash scripts/release-gates.sh am-key
 
       # Before the cut, so a release that builds the meter never goes out with a crate that fails its
       # gates (ci.yml's usagemeter job, again on the commit being released), on the toolchain ci.yml
@@ -327,7 +327,7 @@ jobs:
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'
         env:
           METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}
-        run: bun scripts/meter-lane.ts check-key
+        run: bash scripts/release-gates.sh meter-key
 
       # Before the cut, so a release that rebuilds Pocket never goes out with an app that fails its
       # tests or lint, nor without the key that signs it (names only: the values are never read here).
@@ -336,11 +336,7 @@ jobs:
         env:
           HAS_KEYSTORE: ${{ secrets.POCKET_SIGNING_KEYSTORE != '' }}
           HAS_PASSWORD: ${{ secrets.POCKET_SIGNING_PASSWORD != '' }}
-        run: |
-          if [[ "${HAS_KEYSTORE}" != "true" || "${HAS_PASSWORD}" != "true" ]]; then
-            echo "::error::POCKET_SIGNING_KEYSTORE and POCKET_SIGNING_PASSWORD must be in this repository's secrets: a Pocket release is signed with the release key"
-            exit 1
-          fi
+        run: bash scripts/release-gates.sh pocket-key
 
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
@@ -373,6 +369,13 @@ jobs:
           HERDR: ${{ steps.lane.outputs.herdr }}
           POCKET: ${{ steps.lane.outputs.pocket }}
           METER: ${{ steps.lane.outputs.meter }}
+          # A re-cut re-runs the signing-key gates on the new tip: they read the key lists, which a
+          # merge in the window can change, so the same secrets the key-check steps got are here.
+          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
+          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || secrets.AM_LANE_KEY }}
+          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}
+          HAS_KEYSTORE: ${{ secrets.POCKET_SIGNING_KEYSTORE != '' }}
+          HAS_PASSWORD: ${{ secrets.POCKET_SIGNING_PASSWORD != '' }}
         run: bash scripts/release-cut.sh
 
       # Every release, whatever its kind (RFC 0012). Into release/ before the plugins'

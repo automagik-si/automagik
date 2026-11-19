@@ -800,24 +800,29 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     expect(lines[at('The meter lane\'s signing key') + 2].trim()).toBe("if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'");
     const key = lines.slice(at('The meter lane\'s signing key'), at('The meter lane\'s signing key') + 6).join('\n');
     expect(key).toContain("METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}");
-    expect(key).toContain('run: bun scripts/meter-lane.ts check-key');
+    expect(key).toContain('run: bash scripts/release-gates.sh meter-key');
+    // The gate script holds the command, so a re-cut on a moved dev runs it again (#1653).
+    expect(script('release-gates.sh').join('\n')).toContain('bun scripts/meter-lane.ts check-key');
     const cut = job('cut').map(line => line.trim());
     expect(cut).toContain('meter: ${{ steps.lane.outputs.meter }}');
     expect(cut).toContain('meter_sign: ${{ steps.meterkey.outputs.sign }}');
   });
 
-  test('the meter is signed with its own key alone, in two places only; the posting job holds no key', () => {
+  test('the meter is signed with its own key alone, in three places only; the posting job holds no key', () => {
     const attach = job('meter-attach').join('\n');
     expect(attach).toContain('METER_LANE_KEY:');
     for (const other of ['PLUGIN_LANE_KEY', 'HERDR_PACK_KEY', 'AM_LANE_KEY']) expect(attach).not.toContain(other);
     expect(job('meter-lane').join('\n')).not.toMatch(/LANE_KEY|PACK_KEY/);
-    // The meter's key reaches no other step: only the key check and the attach step name it.
+    // The meter's key reaches only the key check, the cut step (which re-runs the check on a moved
+    // dev, #1653) and the attach step.
     const named = lines.map((line, i) => [line, i] as const).filter(([line]) => /secrets\.METER_LANE_KEY/.test(line)).map(([, i]) => i);
-    expect(named.length).toBe(2);
+    expect(named.length).toBe(3);
     expect(named[0]).toBeGreaterThan(at('The meter lane\'s signing key'));
     expect(named[0]).toBeLessThan(at('The meter lane\'s signing key') + 5);
-    expect(named[1]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
-    expect(named[1]).toBeLessThan(jobEnds('meter-attach'));
+    expect(named[1]).toBeGreaterThan(at('Version, commit and tag'));
+    expect(named[1]).toBeLessThan(at('Pack am'));
+    expect(named[2]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
+    expect(named[2]).toBeLessThan(jobEnds('meter-attach'));
     // The attach job is gated on the key too, and signs before anything goes up.
     expect(job('meter-attach').map(line => line.trim())).toContain("if: needs.cut.outputs.version != '' && needs.cut.outputs.meter == 'yes' && needs.cut.outputs.meter_sign == 'yes'");
     expect(attach.indexOf('bun scripts/meter-lane.ts verify')).toBeLessThan(attach.indexOf('gh release upload'));

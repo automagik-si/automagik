@@ -7,18 +7,25 @@
 #   scripts/release-gates.sh herdr           the pack's tests, syntax checks, shellcheck and indexes
 #   scripts/release-gates.sh herdr-imports   every shipped mod's static import graph
 #   scripts/release-gates.sh herdr-app       every shipped mod loads in the pinned herdr-app
+#   scripts/release-gates.sh herdr-key       HERDR_PACK_KEY is a key pack-keys.json lists
 #   scripts/release-gates.sh am              am's tests, syntax check and shellcheck
+#   scripts/release-gates.sh am-key          AM_LANE_KEY signs against am/am-keys.json (or warns)
 #   scripts/release-gates.sh meter           the meter crate's fmt, clippy and tests
+#   scripts/release-gates.sh meter-key       METER_LANE_KEY is a key meter-keys.json lists
 #   scripts/release-gates.sh pocket          Pocket's unit tests and lint
+#   scripts/release-gates.sh pocket-key      Pocket's two signing secrets are present
 #   scripts/release-gates.sh addons <dir>    the add-ons the lane carries, into <dir>
 #   scripts/release-gates.sh lane [<file>]   the "Which lane" decision: key=value into <file>
 #                                            (default: $GITHUB_OUTPUT), the human line to stdout
 #   scripts/release-gates.sh all <kind> <herdr> <pocket> <meter>
-#                                            every gate that lane needs, as the cut ran them
+#                                            every gate that lane needs, in the order the workflow
+#                                            ran them, the signing-key checks included
 #
-# The lane's signing-key checks are not here: they do not read the tree, so the cut runs them once
-# and a re-cut has no reason to repeat them. Each gate needs what its workflow step sets up (the
-# herdr-app libraries, Rust, the Android SDK); the step that runs it is still responsible for that.
+# Every gate is a function, and `all` calls the same functions the single-gate dispatch does, so a
+# case label can never run as a command. The signing-key checks read the tree (the key lists), so a
+# re-cut runs them again on the new tip: a key-list change between attempts stops the new tip
+# before its tag. Each gate needs what its workflow step sets up (the herdr-app libraries, Rust, the
+# Android SDK); the step that runs it is still responsible for that.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -60,87 +67,154 @@ lane() {
   echo "since ${full:-the start}: ${kind} release; since ${last:-the start}, the herdr pack: ${herdr}; since ${pocket_since:-the start}, Pocket: ${pocket}; since ${meter_since:-the start}, the meter: ${meter}"
 }
 
-case "${1:-}" in
-  base)
-    bun install --frozen-lockfile --ignore-scripts
-    bun run check
-    for app in acp-dsh bots-dsh locale-pt-br-dsh welcome-dsh; do
-      (cd "apps/${app}" && bun install --frozen-lockfile --ignore-scripts && { [ ! -f scripts/build-client.mjs ] || node scripts/build-client.mjs --check; })
+# The repository's checks and the plugins' client bundles (release.yml's "The gates the release
+# stands on" step).
+gate_base() {
+  bun install --frozen-lockfile --ignore-scripts
+  bun run check
+  for app in acp-dsh bots-dsh locale-pt-br-dsh welcome-dsh; do
+    (cd "apps/${app}" && bun install --frozen-lockfile --ignore-scripts && { [ ! -f scripts/build-client.mjs ] || node scripts/build-client.mjs --check; })
+  done
+}
+
+# The pack's tests, syntax checks, shellcheck and indexes (release.yml's "The herdr pack's gates").
+gate_herdr() {
+  (
+    cd herdr
+    node --test 'test/*.test.mjs'
+    for f in mods/*/*.js mods/*/*.mjs mods/*/bin/*.mjs mods/*/pack/*.mjs scripts/*.mjs scripts/*/*.mjs; do
+      node --check "$f"
     done
-    ;;
-  herdr)
-    (
-      cd herdr
-      node --test 'test/*.test.mjs'
-      for f in mods/*/*.js mods/*/*.mjs mods/*/bin/*.mjs mods/*/pack/*.mjs scripts/*.mjs scripts/*/*.mjs; do
-        node --check "$f"
-      done
-      sh -n install.sh
-      shellcheck -s sh install.sh mods/am-sidebar/bin/run.sh mods/am-sidebar/bin/automagik-herdr
-      node scripts/catalog.mjs --check
-      node scripts/version.mjs check
-      node scripts/entries.mjs --check
-      node scripts/parts.mjs --check
-    )
-    ;;
-  herdr-imports)
-    (cd herdr && node --test test/mod-imports.test.mjs)
-    ;;
-  herdr-app)
-    node .github/scripts/herdr-app-check.mjs --strict
-    ;;
-  am)
-    (
-      cd am
-      node ../scripts/am-copies.mjs --check
-      node --test 'test/*.test.mjs'
-      for f in *.js *.mjs bin/*.mjs lib/*.mjs; do
-        node --check "$f"
-      done
-      shellcheck -s sh bin/am bin/run.sh bin/automagik-herdr
-    )
-    ;;
-  meter)
-    (
-      cd meter/usagemeter
-      toolchain="${RUST_TOOLCHAIN:-1.93.0}"
-      rustup toolchain install "${toolchain}" --profile minimal --component rustfmt,clippy
-      rustup default "${toolchain}"
-      cargo fmt --check
-      cargo clippy --all-targets --locked -- -D warnings
-      cargo test --locked
-    )
-    ;;
-  pocket)
-    (cd apps/pocket/android && ./gradlew --stacktrace :app:testDebugUnitTest :app:lintDebug)
-    ;;
-  addons)
-    bun scripts/lane.ts pack-addons "${2:-release}"
-    ;;
-  lane)
-    lane "${2:-}"
-    ;;
-  all)
-    kind="${2:?the lane kind}"
-    herdr="${3:?herdr yes or no}"
-    pocket="${4:?pocket yes or no}"
-    meter="${5:?meter yes or no}"
-    base
-    am
-    if [[ "${herdr}" == yes ]]; then
-      herdr
-      herdr-imports
-      herdr-app
-    fi
-    if [[ "${meter}" == yes ]]; then meter; fi
-    if [[ "${pocket}" == yes ]]; then pocket; fi
-    case "${kind}" in
-      herdr | pocket | am | meter) ;;
-      *) addons release ;;
-    esac
-    ;;
+    sh -n install.sh
+    shellcheck -s sh install.sh mods/am-sidebar/bin/run.sh mods/am-sidebar/bin/automagik-herdr
+    node scripts/catalog.mjs --check
+    node scripts/version.mjs check
+    node scripts/entries.mjs --check
+    node scripts/parts.mjs --check
+  )
+}
+
+# Every shipped mod's static import graph (release.yml's "Every pack mod's import graph").
+gate_herdr_imports() {
+  (cd herdr && node --test test/mod-imports.test.mjs)
+}
+
+# Every shipped mod loads in the pinned herdr-app (release.yml's "Every pack mod loads in herdr-app").
+gate_herdr_app() {
+  node .github/scripts/herdr-app-check.mjs --strict
+}
+
+# HERDR_PACK_KEY must be a key pack-keys.json lists (release.yml's "The herdr pack's signing key").
+gate_herdr_key() {
+  bun scripts/herdr-lane.ts check-key
+}
+
+# am's tests, syntax check and shellcheck (release.yml's "The am part's gates").
+gate_am() {
+  (
+    cd am
+    node ../scripts/am-copies.mjs --check
+    node --test 'test/*.test.mjs'
+    for f in *.js *.mjs bin/*.mjs lib/*.mjs; do
+      node --check "$f"
+    done
+    shellcheck -s sh bin/am bin/run.sh bin/automagik-herdr
+  )
+}
+
+# AM_LANE_KEY against am/am-keys.json (release.yml's "The am lane's signing key"): a listed key
+# signs (sign=yes), no listed key or no secret warns and signs nothing (sign=no), and any other key
+# fails before the tag.
+gate_am_key() {
+  bun scripts/am-lane.ts check-key
+}
+
+# The meter crate's fmt, clippy and tests (release.yml's "The meter's gates").
+gate_meter() {
+  (
+    cd meter/usagemeter
+    toolchain="${RUST_TOOLCHAIN:-1.93.0}"
+    rustup toolchain install "${toolchain}" --profile minimal --component rustfmt,clippy
+    rustup default "${toolchain}"
+    cargo fmt --check
+    cargo clippy --all-targets --locked -- -D warnings
+    cargo test --locked
+  )
+}
+
+# METER_LANE_KEY against meter-keys.json (release.yml's "The meter lane's signing key"): a meter
+# build is never attached unsigned, so anything but a listed key fails before the tag.
+gate_meter_key() {
+  bun scripts/meter-lane.ts check-key
+}
+
+# Pocket's unit tests and lint (release.yml's "Pocket's gates").
+gate_pocket() {
+  (cd apps/pocket/android && ./gradlew --stacktrace :app:testDebugUnitTest :app:lintDebug)
+}
+
+# Both Pocket signing secrets must be present (release.yml's "Pocket's signing key is in the
+# secrets"): names only, the values are never read here.
+gate_pocket_key() {
+  if [[ "${HAS_KEYSTORE:-}" != "true" || "${HAS_PASSWORD:-}" != "true" ]]; then
+    echo "::error::POCKET_SIGNING_KEYSTORE and POCKET_SIGNING_PASSWORD must be in this repository's secrets: a Pocket release is signed with the release key"
+    exit 1
+  fi
+}
+
+# The add-ons the lane carries, packed into <dir> (release.yml's "Pack the add-ons the lane carries").
+gate_addons() {
+  bun scripts/lane.ts pack-addons "${1:-release}"
+}
+
+# Every gate the lane needs, in the order release.yml ran its steps. A gate's failure ends the run
+# with its own message, exactly as its step did; a retry's `all` is the same set of commands, not a
+# shortened one.
+all() {
+  local kind="${1:?the lane kind}"
+  local herdr="${2:?herdr yes or no}"
+  local pocket="${3:?pocket yes or no}"
+  local meter="${4:?meter yes or no}"
+  gate_base
+  if [[ "${herdr}" == yes ]]; then
+    gate_herdr
+    gate_herdr_imports
+    gate_herdr_app
+    gate_herdr_key
+  fi
+  gate_am
+  gate_am_key
+  if [[ "${meter}" == yes ]]; then
+    gate_meter
+    gate_meter_key
+  fi
+  if [[ "${pocket}" == yes ]]; then
+    gate_pocket_key
+    gate_pocket
+  fi
+  case "${kind}" in
+    herdr | pocket | am | meter) ;;
+    *) gate_addons release ;;
+  esac
+}
+
+case "${1:-}" in
+  base) gate_base ;;
+  herdr) gate_herdr ;;
+  herdr-imports) gate_herdr_imports ;;
+  herdr-app) gate_herdr_app ;;
+  herdr-key) gate_herdr_key ;;
+  am) gate_am ;;
+  am-key) gate_am_key ;;
+  meter) gate_meter ;;
+  meter-key) gate_meter_key ;;
+  pocket) gate_pocket ;;
+  pocket-key) gate_pocket_key ;;
+  addons) gate_addons "${2:-release}" ;;
+  lane) lane "${2:-}" ;;
+  all) all "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
   *)
-    echo "usage: scripts/release-gates.sh base|herdr|herdr-imports|herdr-app|am|meter|pocket|addons|lane|all ..." >&2
+    echo "usage: scripts/release-gates.sh base|herdr|herdr-imports|herdr-app|herdr-key|am|am-key|meter|meter-key|pocket|pocket-key|addons|lane|all ..." >&2
     exit 2
     ;;
 esac

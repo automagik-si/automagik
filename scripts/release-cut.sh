@@ -67,8 +67,14 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
     fi
     rm -f "${lane_file}"
     echo "::notice::dev moved on while this run cut v${previous}; re-cutting on the new tip (attempt ${attempt} of ${attempts})"
-    # The new tip's tree, on which this attempt's tag will name the release commit.
-    "${gates_cmd[@]}" all "${KIND}" "${HERDR}" "${POCKET}" "${METER}"
+    # The new tip's tree, on which this attempt's tag will name the release commit. The signing-key
+    # gates run again here because they read the tree; their `sign=` goes to a scratch file, since
+    # the job outputs that decide the pointer jobs were set by the key-check steps before the cut.
+    (
+      recheck_output=$(mktemp)
+      trap 'rm -f "${recheck_output}"' EXIT
+      GITHUB_OUTPUT="${recheck_output}" "${gates_cmd[@]}" all "${KIND}" "${HERDR}" "${POCKET}" "${METER}"
+    )
   fi
 
   version=$(next_version)
