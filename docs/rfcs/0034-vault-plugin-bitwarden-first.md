@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | Approved |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: Q1-Q12 answered as decided, Q6 by the delegated #1668 contract; delivery 0, the RFC: #1655) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-11-19 |
-| Amended | 2026-11-19: the review's blocking findings — the freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder. Q1-Q12 decided the same day: Q6 from #1668, the other eleven as recommended; the #1668 contract pins `bw` 2026.10.1 and tolerates only its network-failure allowlist |
+| Amended | 2026-11-19: the review's blocking findings — the freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder. Q1-Q12 answered the same day as decided, Q6 by the delegated #1668 contract; that contract pins `bw` 2026.10.1, allows only its network-failure list, and refuses and locks every other failure |
 
 > Approved by Guga's delegation while the owner is away (19/11); the owner may amend on return.
 
@@ -17,8 +17,8 @@ Propose an optional Vault plugin, `@automagik/vault-dsh`, that makes a password 
 `request_secret` by name and uses `$DSH_SECRET_<NAME>`; the value is read from the vault when an
 approved command needs it and is not saved by Automagik. Bitwarden's `bw` is first, read-only,
 and the Bot team keeps every authorization decision. The owner's delegate approved it on
-2026-11-19 and answered every numbered question below as recommended; no question is open. The
-issue calls it RFC 0033, but 0033 is
+2026-11-19 and answered every numbered question below as decided; Q6 follows the delegated #1668
+contract, so no question is open. The issue calls it RFC 0033, but 0033 is
 [Attachments from Pocket](0033-attachments-from-pocket.md), so this is 0034.
 
 The contract is stated as rules with numbers, not as intentions: a read's gate is a `bw sync`
@@ -65,8 +65,8 @@ replace DSH's `ctx.credentials`, the profile's model-key store (`apps/welcome-ds
 ### The decision, and the options
 
 The decision was whether a password manager becomes a secret source, and under which boundary and
-first manager. The owner's delegate chose (b) below on 2026-11-19, as recommended: an optional
-plugin, Bitwarden `bw` first, read-only, with `bots-dsh` keeping authorization.
+first manager. The owner's delegate chose (b) below on 2026-11-19: an optional plugin, Bitwarden
+`bw` first, read-only, with `bots-dsh` keeping authorization.
 
 | Decision | Options and trade-offs | Recommended |
 |---|---|---|
@@ -82,14 +82,14 @@ plugin, Bitwarden `bw` first, read-only, with `bots-dsh` keeping authorization.
 
 ### The shape and the seam
 
-`apps/vault-dsh` is a DSH host plugin, installed from the market and turned on in Settings ›
+`apps/vault-dsh` will be a DSH host plugin, installed from the market and turned on in Settings ›
 Plugins. "Vault" here means a password manager, not HashiCorp Vault, which is one later adapter.
-It provides one service, `secretSources`, with one adapter per manager. An adapter can unlock,
+It will provide one service, `secretSources`, with one adapter per manager. An adapter will unlock,
 lock, report status, list items for the person's picker, and read exactly one field (or the item
 transiently where the CLI has no field command, with only the mapped field leaving the adapter).
 It can read; it cannot grant.
 
-`bots-dsh` injects it (`ctx.inject(['secretSources'])`, as it does `acpAgents`) and keeps
+`bots-dsh` will inject it (`ctx.inject(['secretSources'])`, as it does `acpAgents`) and keep
 `request_secret`, `list_secrets`, scope, cards, masking and the audit. It never asks the plugin to
 list or search the vault for a Bot, and never passes a Bot's argument as the item reference.
 Without the plugin the service is absent: a vault-backed name is unavailable, and an unmapped
@@ -99,7 +99,7 @@ are keyed by name — `secrets.json` is a `Map` (`secrets.js:614`, `:698`) and
 `vault-sources.json` is an object — so the plugin adds a second keyed store, never a source
 order.
 
-The plugin never reads `<team home>/secrets.json`, writes a value, or puts a session key in
+The plugin will never read `<team home>/secrets.json`, write a value, or put a session key in
 `ctx.credentials`: that is the profile's model-key store, a file in the profile, where a session
 key must not be.
 
@@ -217,8 +217,9 @@ mapped.
   gets a note and no value, and no grant is issued.
 - `list_secrets` shows the name, purpose, scope, and one availability word: available, locked or
   unavailable (a name defined twice and a mapped name with the plugin off read unavailable).
-  `stale` is a read result, never an availability word. It never shows the provider, item, field,
-  reference or value.
+  `stale` has one meaning: the read result after a `sync` that failed with a message in the
+  pinned network allowlist; every other failure refuses and runs `bw lock`. It is never an
+  availability word, and the list never shows the provider, item, field, reference or value.
 - The Bot may read exactly the one value, in the one approved execution. It cannot list, search,
   export, read another field, write, unlock, change scope, or supply a vault reference.
 - The first cut reaches the shell only, through `$DSH_SECRET_<NAME>`. MCP capabilities, the
@@ -297,16 +298,16 @@ unparseable body — is not in the allowlist and refuses and locks. The classifi
 bare `ENOTFOUND` or `timeout` substring, and never treats a non-`FetchError` message or a value
 it cannot parse as network.
 
-**Where the classifier lives and how it is tested.** It is a pure function in
+**Where the classifier will live and how it will be tested.** It will be a pure function in
 `apps/vault-dsh/src/bw/classify.js`, called by the adapter between the sync child and the read.
-It takes only the observed version, the child's exit code and the decoded `BW_RESPONSE`
-stdout/stderr, returns `ok`, `stale-network`, `auth` or `unknown`, and performs no I/O and no
-logging. `apps/vault-dsh/test/classify.test.js` forges both classes without a real vault:
+It will take only the observed version, the child's exit code and the decoded `BW_RESPONSE`
+stdout/stderr, return `ok`, `stale-network`, `auth` or `unknown`, and perform no I/O and no
+logging. `apps/vault-dsh/test/classify.test.js` will forge both classes without a real vault:
 table-driven fixtures of the exact strings above (recorded from `bw` 2026.10.1) plus auth, 5xx,
-TLS, truncated JSON and unknown text, all passed as text. The delivery 3 adapter test also puts a
-fake `bw` on `PATH` that prints a fixture and exits 1, so the refusal, the `bw lock` call and the
-audit row are proven with temp homes and a fake clock. No test needs a vault account, a server or
-a real `bw`.
+TLS, truncated JSON and unknown text, all passed as text. The delivery 3 adapter test will also
+put a fake `bw` on `PATH` that prints a fixture and exits 1, so the refusal, the `bw lock` call
+and the audit row are proven with temp homes and a fake clock. No test needs a vault account, a
+server or a real `bw`.
 
 - **A revoked session between two reads.** Every read syncs, so the first read after a revocation
   gets the auth failure, refuses and locks; no value is served. A revocation that lands after a
@@ -321,8 +322,8 @@ What each revocation means:
 
 | Revoked in the vault | Next use | What it cannot do |
 |---|---|---|
-| Item deleted | With a successful sync, the read finds no item: refuse with `The value for <name> is not in the vault; nothing was read.`, audit `result: revoked`. The person's Secrets row says "item not found". A tolerated stale read can serve the pre-deletion value until the next successful sync. | Delete a value a command already read. |
-| Field renamed or removed | With a successful sync, refuse with `The value for <name> is not available from the vault; nothing was read.` The person's Secrets row names the item and field; the Bot's message never does. A tolerated stale read can serve the old field's value until the next successful sync. | Same. |
+| Item deleted | With a successful sync, the read finds no item: refuse with `The value for <name> is not in the vault; nothing was read.`, audit `result: revoked`. The person's Secrets row says "item not found". A tolerated `stale` read after a recognized network failure can serve the pre-deletion value until the next successful sync. | Delete a value a command already read. |
+| Field renamed or removed | With a successful sync, refuse with `The value for <name> is not available from the vault; nothing was read.` The person's Secrets row names the item and field; the Bot's message never does. A tolerated `stale` read after a recognized network failure can serve the old field's value until the next successful sync. | Same. |
 | Value rotated | With a successful sync, the new value is served, and only it; there is no plugin cache holding the old one. A tolerated stale read after a recognized network failure can serve the pre-rotation value until the next successful sync, with `result: stale`. | Change a Bot's context, a file the Bot wrote, or a process started before the rotation. |
 | Session revoked or the account disabled | The next `bw sync` fails authentication; the read refuses as locked or unauthenticated regardless of `lastSync`, the plugin drops its session key and runs `bw lock`, audit `result: locked`. | Revoke a value already delivered. |
 | Mapping deleted, or the Bot removed from its scope | The name no longer resolves for that Bot, and no card can grant it. | Same. |
@@ -414,9 +415,10 @@ not that no same-user process can read it while a child runs.
   logged. The audit holds a command digest, never the command text.
 - **Bot-facing refusals carry the secret name only.** A deleted item, a renamed field and a
   revoked session each answer the Bot with the name it asked for and a generic reason; the item,
-  field, connection and manager output stay in the person's Settings view. A tolerated `stale`
-  read is not a refusal: it returns the value and audits `stale`. A refusal returned to the Bot is
-  part of its session, so it is written to the same boundary as a value.
+  field, connection and manager output stay in the person's Settings view. A `stale` read is the
+  one tolerated case — a `sync` failure whose message is in the pinned network allowlist — and it
+  returns the value and audits `stale`; every other failure refuses and locks. A refusal returned
+  to the Bot is part of its session, so it is written to the same boundary as a value.
 - **The person must approve:** the mapping (name to provider, item and field, with whose Bots may
   ask), the unlock, each use (allow once, for the named command, shell and folder), turning the
   plugin on, and a new connection. A Bot can never approve any of these.
@@ -455,29 +457,31 @@ not that no same-user process can read it while a child runs.
 
 ## Contracts introduced
 
-- `@automagik/vault-dsh` (`apps/vault-dsh`), an optional market plugin. It adds no package
-  dependency and bundles no manager CLI. The person installs `bw`; the plugin pins the 2026.10
-  line and never updates it.
-- Service `secretSources`, version 1: status, unlock, lock, a read of one field (or the item
-  transiently, with only the field leaving), and a person-only item list for the picker. `status`
-  resolves to `{state: 'unlocked'|'locked'|'unauthenticated', lastSync?: number}`; a read is
-  `version (5 s gate) → status (5 s pre-check) → sync (10 s gate) → a stale allowance only on a
-  message in the pinned version's network allowlist → one field`. Unlock input comes from the
-  host's Settings, never from a model message. A Bot-facing list or read-all is not part of the
-  service.
-- **The `bw` version and its network allowlist are a contract.** The first cut accepts
+- `@automagik/vault-dsh` (`apps/vault-dsh`) will be an optional market plugin. It will add no
+  package dependency and bundle no manager CLI. The person installs `bw`; the plugin pins the
+  2026.10 line and never updates it.
+- The `secretSources` service, version 1, will offer status, unlock, lock, a read of one field
+  (or the item transiently, with only the field leaving), and a person-only item list for the
+  picker. `status` will resolve to `{state: 'unlocked'|'locked'|'unauthenticated', lastSync?:
+  number}`; a read will be four `bw` invocations: `--version` (5 s gate) → `status` (5 s
+  pre-check) → `sync` (10 s gate) → `get` (the one field). A `sync` failure will yield `stale`
+  only for a message in the pinned version's network allowlist; every other failure refuses and
+  locks. Unlock input comes from the host's Settings, never from a model message. A Bot-facing
+  list or read-all is not part of the service.
+- **The `bw` version and its network allowlist are a contract.** The first cut will accept
   `>= 2026.10.1` and `< 2026.11.0`; any other version refuses and locks. Only the 2026.10.1
   messages listed under "Freshness, offline and revocation" may yield `stale`; every other
   failure, including an auth failure, an unknown message, a 5xx and a TLS or certificate error,
-  refuses and locks. The classifier is `apps/vault-dsh/src/bw/classify.js`, a pure function over
-  the version, the exit code and the decoded `BW_RESPONSE` output. A new `bw` line is refused
+  refuses and locks. The classifier will be `apps/vault-dsh/src/bw/classify.js`, a pure function
+  over the version, the exit code and the decoded `BW_RESPONSE` output. A new `bw` line is refused
   until an RFC amendment names it and its messages; it never widens the allowlist by itself. This
   is the #1668 contract.
 - `<team home>/vault-sources.json`, mode 0600, version 1, keyed by name with one row per name:
   name, provider, connection label, item, field, scope, purpose, requester and timestamps. No
-  value, ever. `bots-dsh` owns and reads it, not the plugin, and always reads it, with or without
-  the service; `secret-source-set` writes it. `scope` says which Bots may **ask**; it is not a use
-  grant. The connection is a label; `bw config server` owns the server address, so Automagik
+  value, ever. `bots-dsh` will own and read it, not the plugin, and will always read it, with or
+  without the service; `secret-source-set` writes it. `scope` will say which Bots may **ask**; it
+  is not a use grant. The connection is a label; `bw config server` owns the server address, so
+  Automagik
   stores no host. One connection label only in the first cut.
 - `secrets.json` is unchanged (version 1: each entry's name, value, purpose, scope, Session,
   requester and timestamps; `secrets.js:614`, `:698-708`). No reference is added. A name here is
@@ -500,17 +504,18 @@ not that no same-user process can read it while a child runs.
   shell is its new argument, both already in the session transcript; the folder is the Session's.
   The card renders provider, item and field from `vault-sources.json`; they are never stored in
   the session or the model context.
-- The existing `POST /api/omni-ui` route (the browser session cookie) gains `secret-source-set`,
-  `secret-source-clear`, `vault-unlock`, `vault-lock` and `vault-status`; `secret-source-set` and
-  the `vault-*` calls are refused when `secretSources` is absent, while `secret-source-clear`
-  works without it so a person can remove a mapping while the plugin is off. Older clients ignore
-  them; the source row appears only when the service is present.
+- The existing `POST /api/omni-ui` route (the browser session cookie) will gain
+  `secret-source-set`, `secret-source-clear`, `vault-unlock`, `vault-lock` and `vault-status`;
+  `secret-source-set` and the `vault-*` calls are refused when `secretSources` is absent, while
+  `secret-source-clear` works without it so a person can remove a mapping while the plugin is
+  off. Older clients ignore them; the source row appears only when the service is present.
 - Unchanged: `DSH_SECRET_<NAME>`, `list_secrets`, scope and cards. Newly removed from every Bot
   shell and MCP environment: `BW_SESSION`, `BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`,
   `VAULT_TOKEN` and every adapter's unlock variable.
-- `<team home>/vault-audit.jsonl`, mode 0600, bounded and rotated: time, secret name, Bot id,
-  consumer kind, command digest, decision, result. `result` is one of `ok`, `stale`, `revoked`,
-  `locked`, `refused`. No value, reference, field, connection, raw command or command text.
+- `<team home>/vault-audit.jsonl`, mode 0600, bounded and rotated, will hold: time, secret name,
+  Bot id, consumer kind, command digest, decision, result. `result` will be one of `ok`, `stale`,
+  `revoked`, `locked`, `refused`. No value, reference, field, connection, raw command or command
+  text.
 - **Masking floor.** A vault field shorter than 4 characters is never used, exactly as a typed
   value below `MIN_VALUE` is held (`secrets.js:22`, `:53`), with `The vault value for <name> is
   shorter than 4 characters, so it cannot be masked; nothing was read.` A 4–7 character value is
@@ -518,14 +523,14 @@ not that no same-user process can read it while a child runs.
 - **Windows.** On Windows the 0600 mode has no effect on `vault-sources.json` or
   `vault-audit.jsonl`; both are protected by the user's profile folder, as `secrets.json` is
   (`apps/bots-dsh/README.md`, Limits).
-- No new release lane. A vault change after the first release is a plugin patch (3.N.P). The first
-  release adds `apps/vault-dsh` to the plugin lists (`scripts/lane.ts`, `scripts/version.ts`, the
-  release and CI plugin loops, `apps/desktop/src/lane.js`) and to `marketplace/automagik.json`.
-  That first release is a desktop release (3.N): its changed paths include
-  `apps/desktop/src/lane.js`, which is not a plugin path (`scripts/lane.ts`'s `kindOf` gives a
-  plugin patch only for `apps/<plugin>/`), so a plugin-list change outside `apps/<plugin>/` makes
-  it 3.N. The market index is `neverShipped` and is not the reason. It is market-only by default,
-  not in the desktop profile's preinstalled bundles.
+- No new release lane. A vault change after the first release will be a plugin patch (3.N.P). The
+  first release will add `apps/vault-dsh` to the plugin lists (`scripts/lane.ts`,
+  `scripts/version.ts`, the release and CI plugin loops, `apps/desktop/src/lane.js`) and to
+  `marketplace/automagik.json`. That first release will be a desktop release (3.N): its changed
+  paths include `apps/desktop/src/lane.js`, which is not a plugin path (`scripts/lane.ts`'s
+  `kindOf` gives a plugin patch only for `apps/<plugin>/`), so a plugin-list change outside
+  `apps/<plugin>/` makes it 3.N. The market index is `neverShipped` and is not the reason. It will
+  be market-only by default, not in the desktop profile's preinstalled bundles.
 
 ## Threat model
 
@@ -613,7 +618,7 @@ Each delivery is on one release lane, per [RFC 0011](0011-monorepo-parts-and-rel
    mappings remain and no value is stored.
 3. **`apps/vault-dsh`, Bitwarden `bw`, read-only by reference** (desktop, 3.N — one lane). Unlock
    in Settings, the idle lock, the item picker, the approval card, and the freshness rule
-   (`bw --version` gate → `bw status` pre-check → `bw sync` gate → one read). Vaultwarden's
+   (`bw --version` gate → `bw status` pre-check → `bw sync` gate → `bw get` read). Vaultwarden's
    `bw config server` flow gets its own fake-`bw` case. This is the desktop release from the
    plugin lists, plus its market listing. *Check:* the acceptance list in #1271, with a fake `bw`
    on `PATH`, a fake clock and temp homes: the value and the session key are absent from every
@@ -651,9 +656,9 @@ Vault writes are not a delivery. They need an owner rule and a later RFC.
 
 ## Decided questions
 
-The twelve questions this RFC asked are decided (2026-11-19): Q6 is the owner's decision on
-#1668, and the other eleven carry the recommended answer the owner's delegate approved. Q4 takes
-the conservative end of its recommended range, 5 minutes. No question is open.
+The twelve questions this RFC asked are answered as decided (2026-11-19): Q6 by the delegated
+#1668 contract, the other eleven as the owner's delegate decided. Q4 takes the conservative end of
+its range, 5 minutes. No question is open.
 
 1. **Transport for the first cut.** **Decided: the installed `bw` CLI**; the Management API does
    not enter now, because the CLI reaches Bitwarden cloud, self-hosted and Vaultwarden through the
@@ -703,7 +708,7 @@ in both stores is unavailable from both (no precedence, no fallback); `bots-dsh`
 `vault-sources.json` even with the plugin off (so a mapped name never falls back); and the session
 key is limited by the same-user boundary (there is no "never seen" claim).
 
-Q2 and Q5 restate what the design already fixes. Both were answered as recommended, so delivery 3's
+Q2 and Q5 restate what the design already fixes. Both were answered as decided, so delivery 3's
 acceptance and the Contracts above stand as written.
 
 ## Links

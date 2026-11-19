@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Approved |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: the design and its proposed bounds; amends RFC 0015; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-14 |
@@ -125,7 +125,8 @@ disk caching. `attachments.readImage(ref,signal)` is verified in
 All method names and limits here are proposed. The proposed RFC 0015 amendment covers message
 and row shapes, attachment transport and limits, rendering, privacy and its DSH-write amendment:
 `docs/rfcs/0015-live-chat-projection.md:254`, `docs/rfcs/0015-live-chat-projection.md:331`,
-`docs/rfcs/0015-live-chat-projection.md:577`. Write it into 0015 only after owner acceptance.
+`docs/rfcs/0015-live-chat-projection.md:577`. Write it into 0015 with this RFC's delivery 0,
+under the acceptance above; the owner may amend on return.
 
 - Retain `herdr-pocket/chat/1`; negotiate `attachments:1`, methods, MIME types and effective caps
   at both handshakes. This explicitly proposes amending 0015's new-ALPN rule for changed method
