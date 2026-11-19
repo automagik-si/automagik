@@ -1599,7 +1599,11 @@ test("usagemeter: a scratch install puts the pointer's build in ~/.local/bin; a 
     assert.equal(parseMarker(s.mark()).usagemeterSequence, 2_000_005);
     assert.equal(s.meterBuilds().length, before);
   }
-  assert.doesNotMatch(readFileSync(INSTALL, "utf8"), /LaunchAgent|launchctl/);
+  // #939: the revive login service is the one login service install.sh may write, and --yes never
+  // installs it (the run above wrote none). usagemeter itself names no launchd anywhere.
+  const src = readFileSync(INSTALL, "utf8");
+  assert.doesNotMatch(src, /(?:LaunchAgent|launchctl)[^\n]*usagemeter|usagemeter[^\n]*(?:LaunchAgent|launchctl)/i);
+  assert.equal(src.split("Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist").length - 1, 1, "the only plist install.sh writes is the revive agent's");
 });
 
 test("usagemeter: a build that is not the pointer's sha256 installs nothing and keeps the old binary; the pack still installs", (t) => {
@@ -2597,6 +2601,69 @@ test("--uninstall leaves a unit at the revive service's path that is not the pac
   assert.equal(u.code, 0, u.err + u.out);
   assert.match(u.out, /Left .*automagik-herdr-revive\.service: it is not this installer's\./);
   assert.equal(readFileSync(unit, "utf8"), "[Unit]\nDescription=mine\n");
+});
+
+test("--revive on macOS writes the pack's launchd agent in the person's own LaunchAgents, never starts it; --yes alone or no answer never does (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  // A stand-in launchctl first on PATH: the person's own launchd is never asked, and it logs every call.
+  const log = join(s.root, "launchctl.log");
+  exe(join(s.bin, "launchctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\necho "Could not find service" >&2\nexit 113\n`);
+  const calls = () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : []);
+  const plist = join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+  // No terminal to answer at, and --yes: neither installs a thing that runs at login.
+  const quiet = s.run("--no-usagemeter");
+  assert.equal(quiet.code, 0, quiet.err + quiet.out);
+  assert.match(quiet.out, /Left the revive login service alone; '\S*\/\.local\/bin\/am revive service install' adds it later\./);
+  const yes = s.run("--yes", "--no-usagemeter");
+  assert.equal(yes.code, 0, yes.err + yes.out);
+  assert.match(yes.out, /Left the revive login service alone: --yes never changes what runs at login/);
+  assert.equal(existsSync(plist), false);
+  assert.deepEqual(calls(), []);
+  const no = s.run("--no-revive", "--no-usagemeter");
+  assert.match(no.out, /Left the revive login service alone \(--no-revive\)\./);
+  assert.equal(existsSync(plist), false);
+  // --revive: the plist, written by the installed command; launchd is not asked, so nothing runs now.
+  const r = s.run("--revive", "--no-usagemeter");
+  assert.equal(r.code, 0, r.err + r.out);
+  assert.match(r.out, /Installed the revive login service/);
+  assert.match(r.out, /launchd loads it at your next login/);
+  const text = readFileSync(plist, "utf8");
+  const lines = text.split("\n");
+  assert.match(lines[0], /^<\?xml version="1\.0" encoding="UTF-8"\?>$/);
+  assert.match(lines[1], /^<!-- Automagik Herdr: brings the bots back after a restart of this computer/);
+  assert.ok(text.includes(`<string>${s.link}</string>`), text);
+  assert.ok(text.includes("<string>revive</string>") && text.includes("<string>--boot</string>"), text);
+  assert.deepEqual(calls(), [], "never bootstrapped: the pass never runs at install time");
+  // Installed already: a later run asks nothing and leaves it.
+  const again = s.run("--no-usagemeter");
+  assert.equal(again.code, 0, again.err + again.out);
+  assert.doesNotMatch(again.out, /revive login service/);
+  // A plist at that path that is not the pack's is left as it is.
+  writeFileSync(plist, '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n');
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+  assert.equal(u.code, 0, u.err + u.out);
+  assert.match(u.out, /Left .*automagik-herdr-revive\.plist: it is not this installer's\./);
+  assert.match(readFileSync(plist, "utf8"), /<dict\/>/);
+});
+
+test("--uninstall on macOS boots a loaded LaunchAgent out before it removes the plist (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const log = join(s.root, "launchctl.log");
+  exe(join(s.bin, "launchctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\nexit 0\n`);
+  const calls = () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : []);
+  const plist = join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+  assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+  assert.equal(existsSync(plist), true);
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+  assert.equal(u.code, 0, u.err + u.out);
+  assert.match(u.out, /Removed the revive login service/);
+  assert.equal(existsSync(plist), false, "no orphaned plist");
+  assert.deepEqual(calls(), [`print gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`,
+    `bootout gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`], "booted out, so no label is left");
 });
 
 test("--dsh-tui writes minimumReleaseAgeExclude: [] for a release older than the profile's gate", (t) => {

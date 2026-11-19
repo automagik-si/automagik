@@ -11,7 +11,7 @@
 #   ... | bash -s -- --no-scheduler   leave herdr-automations and its login service alone
 #   ... | bash -s -- --dsh-tui | --no-dsh-tui  install (or leave) dsh-TUI as a Herdr agent
 #   ... | bash -s -- --revive | --no-revive    install (or leave) the login service that brings
-#                                              the bots back after a restart (Linux, #939)
+#                                              the bots back after a restart (Linux or macOS, #939)
 #
 # It checks the OS, Node and Herdr (herdrdev's, dev.herdr.app: offering its own installer from
 # releases.herdr.dev, no sudo, asking first),
@@ -113,9 +113,9 @@ main() {
   DSH_TUI=ask
   # The login service that brings the bots back after a restart of this computer (#939): ask, yes
   # or no. It changes what runs at login, so only --revive or an explicit answer installs it;
-  # --yes never does. Linux (a systemd user unit); the CLI writes and removes it.
+  # --yes never does. Linux (a systemd user unit) or macOS (a launchd agent); the CLI writes and
+  # removes it, and its path is revive_service_file's.
   REVIVE=ask
-  REVIVE_UNIT=$HOME/.config/systemd/user/automagik-herdr-revive.service
 
   YES=0
   ADOPT=0
@@ -200,9 +200,10 @@ the installer asks (unless --yes), and a machine with no dsh gets one line sayin
 --uninstall removes dsh-TUI (the plugin and the shim) when this installer put it there.
 --revive installs the login service that brings the bots back after a restart of this computer
 ('am revive --boot': each bot whose pane is gone or a bare shell is restarted in its
-place, resumed where its agent allows). Linux only for now: a systemd user unit, enabled, never
+place, resumed where its agent allows). Linux: a systemd user unit, enabled. macOS: a launchd
+agent in your own ~/Library/LaunchAgents, which launchd loads at your next login. Neither is
 started on the spot. --no-revive leaves it alone. Without either, the installer asks (--yes never
-installs it). --uninstall removes the unit when it is this pack's.
+installs it). --uninstall removes the unit or the plist when it is this pack's.
 EOF
 }
 
@@ -1290,17 +1291,43 @@ dsh_tui_step() {
   fi
   printf '%s\n' "$dsh_out" | sed 's/^/  /'
 }
-# The login service that runs 'automagik-herdr revive --boot' (#939). The unit is the pack CLI's
+# The login service that runs 'automagik-herdr revive --boot' (#939). The file is the pack CLI's
 # ('automagik-herdr revive service install'); refresh its PATH (#1418), else decide whether to
-# ask. Linux only: on another OS nothing is asked and nothing is written.
+# ask. Linux and macOS only: on another OS nothing is asked and nothing is written.
+#
+# The service file: a systemd user unit on Linux, a plist in the person's own LaunchAgents on
+# macOS; empty on any other system (the caller asks nothing and writes nothing).
+revive_service_file() {
+  case ${REVIVE_OS:-$(uname -s 2>/dev/null)} in
+    Linux) printf '%s\n' "$HOME/.config/systemd/user/automagik-herdr-revive.service" ;;
+    Darwin) printf '%s\n' "$HOME/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist" ;;
+  esac
+}
+# Whether $1 is the service file this pack wrote: the unit's mark is its first line, the plist's
+# its second (an XML declaration must come first).
+revive_file_is_ours() {
+  [ -f "$1" ] || return 1
+  case ${REVIVE_OS:-} in
+    Darwin) sed -n '2p' "$1" 2>/dev/null | grep -q '^<!-- Automagik Herdr: brings the bots back after a restart' ;;
+    *) sed -n '1p' "$1" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart' ;;
+  esac
+}
+# Whether $1 keeps the PATH it was installed with (#1418).
+revive_file_keeps_path() {
+  [ -f "$1" ] || return 1
+  case ${REVIVE_OS:-} in
+    Darwin) grep -q '<key>PATH</key>' "$1" 2>/dev/null ;;
+    *) grep -q '^Environment="PATH=' "$1" 2>/dev/null ;;
+  esac
+}
 revive_step() {
-  [ "$(uname -s)" = Linux ] || return 0
+  REVIVE_OS=$(uname -s 2>/dev/null)
+  REVIVE_UNIT=$(revive_service_file)
+  [ -n "$REVIVE_UNIT" ] || return 0
   [ "$REVIVE" = no ] && { say "Left the revive login service alone (--no-revive)."; return 0; }
   [ -x "$LINK" ] || return 0
   case ":$PATH:" in *":$BIN_DIR:"*) revive_path=$PATH ;; *) revive_path=$PATH:$BIN_DIR ;; esac
-  if [ -f "$REVIVE_UNIT" ] \
-    && sed -n '1p' "$REVIVE_UNIT" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart' \
-    && ! grep -q '^Environment="PATH=' "$REVIVE_UNIT"; then
+  if revive_file_is_ours "$REVIVE_UNIT" && ! revive_file_keeps_path "$REVIVE_UNIT"; then
     revive_rc=0
     revive_out=$(PATH=$revive_path "$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
     if [ "$revive_rc" != 0 ]; then
@@ -1328,11 +1355,16 @@ revive_step() {
   fi
   printf '%s\n' "$revive_out" | sed 's/^/  /'
 }
-# --uninstall: the unit goes through the command that wrote it, while the pack and its link are
-# still in place, and only when its first line is the pack's mark (revive.js UNIT_MARK).
+# --uninstall: the service goes through the command that wrote it, while the pack and its link
+# are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
+# PLIST_MARK in the macOS plist). The fallback removes the file itself: on macOS only after
+# launchd lets go of the label, so a job is never orphaned.
 revive_uninstall() {
+  REVIVE_OS=$(uname -s 2>/dev/null)
+  REVIVE_UNIT=$(revive_service_file)
+  [ -n "$REVIVE_UNIT" ] || return 0
   [ -f "$REVIVE_UNIT" ] || return 0
-  if ! sed -n '1p' "$REVIVE_UNIT" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart'; then
+  if ! revive_file_is_ours "$REVIVE_UNIT"; then
     say "Left $REVIVE_UNIT: it is not this installer's."
     return 0
   fi
@@ -1340,6 +1372,25 @@ revive_uninstall() {
     revive_rc=0
     revive_out=$("$LINK" revive service uninstall <"/dev/null" 2>&1) || revive_rc=$?
     if [ "$revive_rc" = 0 ]; then printf '%s\n' "$revive_out" | sed 's/^/  /'; return 0; fi
+  fi
+  if [ "$REVIVE_OS" = Darwin ]; then
+    label=dev.herdr.automagik-herdr-revive
+    if ! command -v launchctl >/dev/null 2>&1; then
+      say "Left $REVIVE_UNIT: launchctl isn't here, so whether launchd holds $label can't be read."
+      return 0
+    fi
+    launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || {
+      if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+        say "Left $REVIVE_UNIT: launchd still holds $label and it could not be booted out."
+        return 0
+      fi
+    }
+    if rm -f "$REVIVE_UNIT"; then
+      say "Removed $REVIVE_UNIT (launchd drops the job with it)."
+    else
+      say "Warning: $REVIVE_UNIT could not be removed; remove it by hand."
+    fi
+    return 0
   fi
   rm -f "$REVIVE_UNIT" && say "Removed $REVIVE_UNIT (systemctl --user daemon-reload drops it from systemd)."
   return 0

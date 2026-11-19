@@ -44,9 +44,9 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
-import { BORN_SLACK_MS, FIRST_SESSION_MS, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
+import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, ledgerRivals,
-  lastText, pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
+  lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -1379,7 +1379,9 @@ Usage: am <command> [options]                   (every command takes --json and 
   revive service install | uninstall | status
                                 the login service that runs revive --boot (Linux: a systemd
                                 user unit, written and enabled, never started on the spot;
-                                macOS comes next, #939). install.sh asks before it installs it.
+                                macOS: a launchd agent in your own ~/Library/LaunchAgents,
+                                written and left for launchd to load at your next login).
+                                install.sh asks before it installs it.
   restart --queued [--project DIR] [--json]   List queued restarts.
   restart --cancel <bot> [--project DIR] [--json]   Cancel a queued restart.
   restart <bot> [--fresh] [--agent A] [--model M [--save]] [--tree [--fresh-shared]] [--force] [--cwd DIR]
@@ -7946,27 +7948,61 @@ function reviveLast(opts, verb) {
 
 /**
  * `revive service install|uninstall|status`: the login service that runs `revive --boot` after a
- * restart of this computer. Linux: a systemd user unit (revive.js unitText), written and
- * enabled, never started here (starting it would restart bots now). Only a unit this pack wrote
- * is replaced or removed. macOS (launchd) is the next delivery of #939.
+ * restart of this computer. Linux: a systemd user unit (revive.js unitText). macOS: a launchd
+ * agent in the person's own `~/Library/LaunchAgents` (revive.js plistText), never bootstrapped
+ * here (RunAtLoad would run the pass now and restart bots under the person's hands). Neither is
+ * ever started on the spot. Only a file this pack wrote is replaced or removed; any other
+ * system is refused, naming the systems that have one.
  */
 async function reviveService(opts, verb, more = []) {
   if (!["install", "uninstall", "status"].includes(verb) || more.length) throw new CliError(REVIVE_USAGE, 2);
+  const os = await serviceOs();
+  if (os === "Linux") return reviveSystemd(opts, verb);
+  if (os === "Darwin") return reviveLaunchd(opts, verb);
+  throw new CliError(`The revive login service is built for Linux (a systemd user unit) and macOS (a launchd agent), not for ${os}: `
+    + "nothing was written or removed. Run am revive by hand after a restart of this computer.");
+}
+
+/**
+ * Which login service this computer takes: `uname -s`, the same name install.sh reads. A test
+ * fakes `uname` on PATH, so both the installer and this command see one system.
+ */
+async function serviceOs() {
+  const r = await runProgram("uname", ["-s"], { timeout: 10_000 });
+  const name = r.code === 0 ? r.stdout.trim() : "";
+  if (name) return name;
+  return process.platform === "darwin" ? "Darwin" : process.platform === "linux" ? "Linux" : process.platform;
+}
+
+/** The command as people run it (the link install.sh makes, which an update keeps), else the wrapper beside this file. */
+function reviveRunner() {
+  const link = join(binDirOf(), "automagik-herdr");
+  return existsSync(link) ? link : join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr");
+}
+
+/** The PATH a login service keeps (#1418): the caller's, without a pane's guard folders or a project's bins. */
+function reviveKeptPath() {
+  // A pane's guard folders (this copy's, am's, or an older version's) never become the boot pass's.
+  const guardWord = (dir) => isGuardFolder(dir) || looksLikeGuardFolder(dir);
+  return servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
+}
+
+/** The service's environment: the kept PATH, and the app home when it isn't the default. */
+const reviveServiceEnv = (keptPath) => ({ ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath });
+
+/** `revive service ...` on Linux: the systemd user unit in ~/.config/systemd/user. */
+async function reviveSystemd(opts, verb) {
   const unit = unitPath(home());
   const text = readText(unit);
   const systemctl = (args) => runProgram("systemctl", ["--user", ...args], { timeout: 20_000 });
   const said = (r) => (r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`;
   if (verb === "status") {
-    const enabled = process.platform === "linux" && text !== null ? (await systemctl(["is-enabled", UNIT_NAME])).code === 0 : false;
+    const enabled = text !== null ? (await systemctl(["is-enabled", UNIT_NAME])).code === 0 : false;
     const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled,
       ...(text !== null ? { path_kept: unitKeepsPath(text) } : {}) };
     return opts.json ? out : !out.installed ? `The revive login service isn't installed (${unit}).`
       : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`
         + (out.ours && !out.path_kept ? " It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install." : "");
-  }
-  if (process.platform !== "linux") {
-    throw new CliError("The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. "
-      + "Until then, run am revive by hand after a restart of this computer.");
   }
   if (text !== null && !unitIsOurs(text)) throw new CliError(`${unit} is there and isn't one Automagik Herdr wrote, so it was left as it is.`);
   const notes = [];
@@ -7978,13 +8014,9 @@ async function reviveService(opts, verb, more = []) {
     await systemctl(["daemon-reload"]);
     return opts.json ? { path: unit, removed: true, notes } : [`Removed the revive login service (${unit}).`, ...notes].join("\n");
   }
-  // The command as people run it (the link install.sh makes, which an update keeps), else the wrapper beside this file.
-  const link = join(binDirOf(), "automagik-herdr");
-  const runner = existsSync(link) ? link : join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr");
-  // A pane's guard folders (this copy's, am's, or an older version's) never become the boot pass's.
-  const guardWord = (dir) => isGuardFolder(dir) || looksLikeGuardFolder(dir);
-  const keptPath = servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
-  const unitBody = unitText({ runner, env: { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath }, wait: SERVICE_WAIT_S });
+  const runner = reviveRunner();
+  const keptPath = reviveKeptPath();
+  const unitBody = unitText({ runner, env: reviveServiceEnv(keptPath), wait: SERVICE_WAIT_S });
   mkdirSync(dirname(unit), { recursive: true });
   writeFileSync(unit, unitBody, { mode: 0o644 });
   const reload = await systemctl(["daemon-reload"]);
@@ -7994,6 +8026,62 @@ async function reviveService(opts, verb, more = []) {
   notes.push("The unit keeps this PATH to find the agents and hc; rerunning am revive service install refreshes it.");
   return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, kept_path: keptPath, notes }
     : [`Installed the revive login service (${unit}): after a restart it runs ${runner} revive --boot.`, ...notes].join("\n");
+}
+
+/**
+ * `revive service ...` on macOS: a LaunchAgent in the person's own LaunchAgents (#939). Installing
+ * writes the plist only: launchd loads it at the next login, and a bootstrap here would run the
+ * pass now (RunAtLoad). Uninstalling boots the job out before it removes the file, so launchd
+ * never keeps a label whose plist is gone; when it cannot be sure, it refuses and leaves both.
+ */
+async function reviveLaunchd(opts, verb) {
+  const plist = plistPath(home());
+  const text = readText(plist);
+  const domain = `gui/${process.getuid?.() ?? 0}`;
+  const launchctl = (args) => runProgram("launchctl", args, { timeout: 20_000 });
+  const said = (r) => (r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`;
+  const present = text !== null;
+  const ours = plistIsOurs(text);
+  if (verb === "status") {
+    const enabled = present && ours;
+    const out = { path: plist, label: PLIST_LABEL, installed: present, ours, enabled,
+      ...(present ? { path_kept: plistKeepsPath(text) } : {}) };
+    return opts.json ? out : !present ? `The revive login service isn't installed (${plist}).`
+      : `${plist}: ${ours ? "Automagik Herdr's, runs at your next login" : "not one Automagik Herdr wrote"}.`
+        + (ours && !out.path_kept ? " It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install." : "");
+  }
+  if (present && !ours) throw new CliError(`${plist} is there and isn't one Automagik Herdr wrote, so it was left as it is.`);
+  const notes = [];
+  if (verb === "uninstall") {
+    if (!present) return opts.json ? { path: plist, removed: false, notes } : `The revive login service isn't installed (${plist}).`;
+    // launchd is asked first: a job it never loaded (no login since the install) is no label to
+    // remove, and one it still holds is never orphaned by taking the plist away.
+    const held = await launchctl(["print", `${domain}/${PLIST_LABEL}`]);
+    if (held.code === 127 || held.killed) {
+      throw new CliError(`launchctl isn't here, so whether launchd holds ${PLIST_LABEL} can't be read, and ${plist} was left in place: removing it now could orphan the job. `
+        + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+    }
+    const loaded = held.code === 0;
+    if (loaded) {
+      const off = await launchctl(["bootout", `${domain}/${PLIST_LABEL}`]);
+      if (off.code !== 0) {
+        throw new CliError(`launchd still holds ${PLIST_LABEL} and its bootout failed (${said(off)}), so ${plist} was left in place: removing it now would orphan the job. `
+          + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+      }
+    }
+    unlinkSync(plist);
+    return opts.json ? { path: plist, label: PLIST_LABEL, removed: true, loaded, notes } : [`Removed the revive login service (${plist}).`, ...notes].join("\n");
+  }
+  // Install: the file is what launchd loads at the next login, never a bootstrap (RunAtLoad would
+  // run the pass now). A plist already there and ours is replaced; anyone else's was refused above.
+  const runner = reviveRunner();
+  const keptPath = reviveKeptPath();
+  mkdirSync(dirname(plist), { recursive: true });
+  writeFileSync(plist, plistText({ runner, env: reviveServiceEnv(keptPath), wait: SERVICE_WAIT_S }), { mode: 0o644 });
+  notes.push("launchd loads it at your next login after a restart of this computer, and it is not started now.");
+  notes.push("The agent keeps this PATH to find the agents and hc; rerunning am revive service install refreshes it.");
+  return opts.json ? { path: plist, label: PLIST_LABEL, installed: true, enabled: true, runner, kept_path: keptPath, notes }
+    : [`Installed the revive login service (${plist}): after a restart it runs ${runner} revive --boot.`, ...notes].join("\n");
 }
 
 // ---- usagemeter on every linked machine (meterFleet.js) ----

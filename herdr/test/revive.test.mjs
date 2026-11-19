@@ -14,8 +14,8 @@ import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { helperPlan } from "../mods/am-sidebar/restart.js";
 import { AGENTS } from "../mods/am-sidebar/models.js";
-import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
+import { FIRST_SESSION_MS, KEEP_DOWN, PLIST_DECL, PLIST_LABEL, PLIST_MARK, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
+  pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
 import { readJsonLines } from "./log-lines.mjs";
 import { servicePath, unitKeepsPath } from "../mods/am-sidebar/revive.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -197,6 +197,26 @@ test("unitText: a oneshot user unit that runs revive --boot and waits for herdr-
   assert.equal(sameBoot(null, 5), false);
 });
 
+test("plistText: a launchd agent that runs revive --boot at login, marked on its second line, with the kept PATH (#939, #1418)", () => {
+  const text = plistText({ runner: "/Users/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/Users/u/my app/100%", PATH: `/opt/my tools/bin:/opt/$x:/opt/&<>"` }, wait: 600 });
+  assert.ok(text.startsWith(`${PLIST_DECL}\n${PLIST_MARK}\n`), text);
+  assert.ok(text.includes(`<key>Label</key><string>${PLIST_LABEL}</string>`), "the label launchd knows the job by");
+  assert.match(text, /<key>ProgramArguments<\/key><array>\n\s*<string>\/Users\/u\/\.local\/bin\/automagik-herdr<\/string>\n\s*<string>revive<\/string>\n\s*<string>--boot<\/string>\n\s*<string>--wait<\/string>\n\s*<string>600<\/string>\n\s*<\/array>/, text);
+  assert.match(text, /<key>RunAtLoad<\/key><true\/>/, "it runs at login");
+  assert.match(text, /<key>KeepAlive<\/key><false\/>/, "once: it never restarts itself");
+  assert.doesNotMatch(text, /StartInterval|StartCalendarInterval/, "no schedule of its own");
+  assert.match(text, /<key>HERDR_APP_HOME<\/key><string>\/Users\/u\/my app\/100%<\/string>/, "a % is literal in a plist");
+  assert.ok(text.includes(`<key>PATH</key><string>/opt/my tools/bin:/opt/$x:/opt/&amp;&lt;&gt;&quot;</string>`), text);
+  assert.equal(plistIsOurs(text), true);
+  assert.equal(plistKeepsPath(text), true);
+  assert.equal(plistKeepsPath(plistText({ runner: "/r", env: { HERDR_APP_HOME: "/a" } })), false);
+  assert.equal(plistIsOurs(`${PLIST_DECL}\n<plist version="1.0"><dict/></plist>\n`), false, "the declaration alone is anyone's");
+  assert.equal(plistIsOurs(`<?xml version="1.0"?>\n${PLIST_MARK}\n`), false, "a comment may not come before the declaration");
+  assert.equal(plistIsOurs(null), false);
+  assert.equal(plistPath("/Users/u/"), "/Users/u/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist");
+  assert.ok(plistPath("/Users/u").startsWith("/Users/u/Library/LaunchAgents/"), "the person's own launch agents, never a system folder");
+});
+
 test("helperPlan: a helper that is a bare shell names its agent by its launch command only when revive asks", () => {
   const get = { address: "t8", name: "side", cwd: "/p", state: "live", labels: { "agent.session": SID }, argv: ["/usr/bin/env", "PATH=/bin", "claude", "--session-id", SID, "do the thing"],
     foreground: { argv: ["zsh"], cwd: "/p" } };
@@ -229,7 +249,7 @@ const pane = (address, { bot: b, front = ["zsh"], argv = ["claude"], cwd, create
   address, name: address, cwd, state: "live", parent, die_with_parent: die, created_ms: created, argv, labels: { ...(b ? { bot: b } : {}), ...labels },
   foreground: { argv: front, cwd }, status: { app: "claude-code", state: status } });
 
-function world(t, { file = team(), terminals = () => [], attach = null, hcExtra = {} } = {}) {
+function world(t, { file = team(), terminals = () => [], attach = null, hcExtra = {}, os = null } = {}) {
   const root = scratchRoot(t, "hb-revive-");
   const project = scratchProject(root, "proj", { isGit: true, commit: true });
   const bin = join(root, "bin");
@@ -239,6 +259,17 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   exe(join(bin, "pgrep"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_PGREP}" "$@"\n`);
   exe(join(bin, "agy"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
   for (const name of ["claude", "codex", "dsh-tui"]) exe(join(bin, name), "#!/bin/sh\nexit 0\n");
+  // A system that says it is another one (`os`): both the installer and the CLI read uname -s.
+  if (os) exe(join(bin, "uname"), `#!/bin/sh\necho ${os}\n`);
+  // launchd's stand-in: it logs every call. A job is loaded only when the test says so, and a
+  // bootout fails only when it asks for that. The real launchctl is never reached.
+  const lcLog = join(root, "launchctl.log");
+  exe(join(bin, "launchctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${lcLog}"\ncase $1 in
+  print) [ "\${LAUNCHCTL_LOADED:-}" = 1 ] && exit 0; echo "Could not find service" >&2; exit 113 ;;
+  bootout) [ "\${LAUNCHCTL_BOOTOUT_FAIL:-}" = 1 ] && { echo "Boot-out failed: Input/output error" >&2; exit 1; }; exit 0 ;;
+esac
+exit 0
+`);
   const sysLog = join(root, "systemctl.log");
   exe(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${sysLog}"\n[ -n "$SYSTEMCTL_FAIL" ] && { echo "Failed to connect to bus" >&2; exit 1; }\nexit 0\n`);
   const home = join(root, "home");
@@ -280,7 +311,8 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   const attachRows = () => readAttach(readFileSync(attachPath(app), "utf8")).rows;
   const lastReport = () => JSON.parse(readFileSync(join(app, "automagik-herdr/revive-last.json"), "utf8"));
   const sysCalls = () => (existsSync(sysLog) ? readFileSync(sysLog, "utf8").split("\n").filter(Boolean) : []);
-  return { root, project, home, app, env, cli, calls, hcState, ledger, attachRows, lastReport, sysCalls };
+  const lcCalls = () => (existsSync(lcLog) ? readFileSync(lcLog, "utf8").split("\n").filter(Boolean) : []);
+  return { root, project, home, app, env, cli, calls, hcState, ledger, attachRows, lastReport, sysCalls, lcCalls };
 }
 const runsOf = (s) => s.calls().filter((c) => c[0] === "run");
 const wordsOf = (run) => run.slice(run.indexOf("--") + 1);
@@ -562,6 +594,95 @@ test("revive service: installs and enables a systemd user unit that runs revive 
   assert.match(off.out, /written but not enabled \(systemctl --user: Failed to connect to bus\)/);
   assert.equal(unitIsOurs(readFileSync(unitPath(s2.home), "utf8")), true);
   assert.equal(s.cli(["revive", "service", "start"]).code, 2);
+});
+
+test("revive service on macOS: writes the LaunchAgent in the person's own LaunchAgents, starts nothing, and uninstalls only after launchd lets go of the label", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const label = PLIST_LABEL;
+  // The command as install.sh links it: what the agent runs.
+  mkdirSync(join(s.home, ".local/bin"), { recursive: true });
+  exe(join(s.home, ".local/bin/automagik-herdr"), "#!/bin/sh\nexit 0\n");
+  assert.match(s.cli(["revive", "service", "status"]).out, /isn't installed/);
+  assert.deepEqual(s.lcCalls(), [], "status asks launchd nothing");
+
+  const r = s.cli(["revive", "service", "install", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const text = readFileSync(plist, "utf8");
+  assert.equal(plistIsOurs(text), true);
+  assert.ok(text.includes(`<string>${join(s.home, ".local/bin/automagik-herdr")}</string>`), text);
+  assert.ok(text.includes("<string>revive</string>") && text.includes("<string>--boot</string>"), text);
+  assert.ok(text.includes(`<key>HERDR_APP_HOME</key><string>${s.app}</string>`), text);
+  const installed = r.json();
+  assert.equal(installed.enabled, true);
+  assert.equal(installed.label, label);
+  assert.equal(installed.path, plist);
+  assert.ok(installed.kept_path.split(":").includes(join(s.home, ".local/bin")), installed.kept_path);
+  assert.deepEqual(s.lcCalls(), [], "written only: never bootstrapped, so the pass never runs while the person is using the computer");
+  assert.deepEqual(changes(s), [], "no pane was touched");
+  const status = s.cli(["revive", "service", "status", "--json"]).json();
+  assert.deepEqual([status.path, status.installed, status.ours, status.enabled, status.path_kept], [plist, true, true, true, true]);
+  assert.match(s.cli(["revive", "service", "status"]).out, /Automagik Herdr's, runs at your next login/);
+
+  // Not loaded yet (no login since the install): the file goes, and launchd is only asked first.
+  const gone = s.cli(["revive", "service", "uninstall", "--json"]);
+  assert.equal(gone.code, 0, gone.err);
+  assert.equal(existsSync(plist), false);
+  assert.equal(gone.json().loaded, false);
+  assert.deepEqual(s.lcCalls(), [`print gui/${uid}/${label}`]);
+  assert.match(s.cli(["revive", "service", "status"]).out, /isn't installed/);
+
+  // Loaded (a login ran it): bootout comes first, then the plist goes: no label is left behind.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const u2 = s.cli(["revive", "service", "uninstall", "--json"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(u2.code, 0, u2.err);
+  assert.equal(u2.json().loaded, true);
+  assert.equal(existsSync(plist), false);
+  assert.deepEqual(s.lcCalls().slice(-2), [`print gui/${uid}/${label}`, `bootout gui/${uid}/${label}`]);
+
+  // A bootout that fails while launchd holds the job: refused, and the plist is left whole.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const before = readFileSync(plist, "utf8");
+  const no = s.cli(["revive", "service", "uninstall"], { env: { LAUNCHCTL_LOADED: "1", LAUNCHCTL_BOOTOUT_FAIL: "1" } });
+  assert.equal(no.code, 1);
+  assert.match(no.err, /launchd still holds dev\.herdr\.automagik-herdr-revive and its bootout failed \(Boot-out failed: Input\/output error\), so .* was left in place/);
+  assert.ok(no.err.includes(`launchctl bootout gui/${uid}/${label}`), no.err);
+  assert.equal(readFileSync(plist, "utf8"), before, "no orphaned plist: it is left exactly as it was");
+
+  // Someone else's plist at that path is left as it is, by install and by uninstall.
+  writeFileSync(plist, '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n');
+  for (const verb of ["install", "uninstall"]) {
+    const theirs = s.cli(["revive", "service", verb]);
+    assert.equal(theirs.code, 1);
+    assert.match(theirs.err, /isn't one Automagik Herdr wrote, so it was left as it is/);
+  }
+  assert.match(readFileSync(plist, "utf8"), /<dict\/>/);
+});
+
+test("revive service on macOS refuses when it cannot ask launchd, and on a system with no login service it says why and writes nothing", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const plist = plistPath(s.home);
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  assert.equal(existsSync(plist), true);
+  // A PATH with only the fake uname: launchctl is nowhere, so no real one can be reached either.
+  const bare = join(s.root, "bare-bin");
+  mkdirSync(bare);
+  exe(join(bare, "uname"), "#!/bin/sh\necho Darwin\n");
+  const no = s.cli(["revive", "service", "uninstall"], { env: { PATH: bare } });
+  assert.equal(no.code, 1);
+  assert.match(no.err, /launchctl isn't here, so whether launchd holds dev\.herdr\.automagik-herdr-revive can't be read, and .* was left in place/);
+  assert.equal(existsSync(plist), true, "removing it blind could orphan a loaded job");
+
+  // Any other system: every verb refuses, naming the services that exist, and nothing is written.
+  const other = world(t, { os: "FreeBSD" });
+  for (const verb of ["install", "uninstall", "status"]) {
+    const r = other.cli(["revive", "service", verb]);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /The revive login service is built for Linux \(a systemd user unit\) and macOS \(a launchd agent\), not for FreeBSD: nothing was written or removed\./);
+  }
+  assert.equal(existsSync(join(other.home, "Library")), false);
+  assert.equal(existsSync(join(other.home, ".config/systemd")), false);
 });
 
 // ---- #992 review ----
