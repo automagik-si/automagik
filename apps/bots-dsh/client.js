@@ -22454,6 +22454,14 @@ ${tokenCss("body", LEFT_BAR_TOKENS)}
 ${tokenCss("[data-lb-skin=flat]", LEFT_BAR_SKINS.flat)}
 ${tokenCss("[data-lb-skin=stage]", LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS2}${MARKS2}${FACES2}${HOST}`;
 
+// src/client/self-update-flag.js
+var MOCK_FLAG = "mock-1540";
+function mock1540On(location2 = globalThis.location) {
+  const search = typeof location2?.search === "string" ? location2.search : "";
+  const hash = typeof location2?.hash === "string" ? location2.hash : "";
+  return new RegExp(`(?:[?&])${MOCK_FLAG}(?:=|&|$)`).test(search) || hash.includes(MOCK_FLAG);
+}
+
 // src/client/left-bar.js
 var import_react55 = require("react");
 var import_react_dom9 = require("react-dom");
@@ -22627,6 +22635,7 @@ function SpaceNote({ anchor, onClose }) {
   ), document.body);
 }
 function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
+  const mock = mock1540On();
   const shownId = useSessions((list) => list.ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const current = currentKey2(roster, shownId);
   const status = useTeamStatus({ roster, useSessionStatus, useWork });
@@ -22679,12 +22688,16 @@ function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionSta
         (0, import_react55.createElement)(
           "div",
           { className: "lb-head" },
+          // Without the flag: the wordmark and the tools, exactly where dev draws them. With it:
+          // Search and New only, and the tools move to the foot below.
+          mock ? null : (0, import_react55.createElement)("span", { className: "lb-brand" }, (0, import_react55.createElement)(Wordmark, { height: 22 })),
+          mock ? null : tools,
           (0, import_react55.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("Search"), title: t("Search"), onClick: () => actions.openPalette() }, (0, import_react55.createElement)(SearchIcon)),
           (0, import_react55.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react55.createElement)(PlusIcon))
         ),
         notice,
         team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : void 0, label: t("Bot list") }),
-        (0, import_react55.createElement)("div", { className: "lb-foot" }, tools, foot ?? null)
+        mock ? (0, import_react55.createElement)("div", { className: "lb-foot" }, tools, foot ?? null) : foot ? (0, import_react55.createElement)("div", { className: "lb-foot" }, foot) : null
       )
     ),
     note ? (0, import_react55.createElement)(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null
