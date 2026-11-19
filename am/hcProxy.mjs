@@ -520,30 +520,46 @@ function sendAllowed(record, policy) {
 
 /**
  * The rows a `terminal.list` may show (#628): the caller's own pane and every terminal it may
- * type into, which is the send rule. Other teams' and machines' panes are left out of the
- * reply: a sandboxed bot's `hc ls` must not name them. It is a read, so it is filtered rather
- * than refused; its other metadata (no screen text) is unchanged.
+ * type into, which is the send rule. Other teams' panes are left out.
+ *
+ * A linked machine's pane is never in scope, whatever its labels say: the proxy refuses a
+ * machine address on every forwarded verb (get/read/wait/send/kill/rm/label/run), so a
+ * sandboxed bot can neither reach nor type into one, and naming it would only leak another
+ * team's pane (and sometimes the machine's target). The row is rejected by its address, not by
+ * its labels, because a `role=reviewer` label on a stranger's machine row would otherwise pass
+ * the send rule. A row without a local address is not a terminal this pane can use either.
  */
 function listAllowed(record, policy) {
   if (!isObject(record)) return false;
   if (record.address === policy.terminal) return true;
+  if (typeof record.address !== "string" || !record.address || record.address.includes("/")) return false;
   return sendAllowed(record, policy);
 }
 
 /**
  * One `terminal.list` reply line with only the rows `listAllowed` keeps, or a refusal line when
- * the core's answer cannot be read (fail closed, never the unfiltered rows). A core error line
- * passes through unchanged: it carries no rows.
+ * the core's answer cannot be read (fail closed, never the unfiltered rows).
+ *
+ * An error reply carries no rows: a malformed one that also holds a `result` never passes it
+ * through. The `machines` inventory is filtered the same way as the rows: a sandboxed bot may
+ * reach no machine, so the reply's list is empty, never the core's names and ssh targets.
  */
 function listReply(line, id, policy) {
   let reply;
   try { reply = JSON.parse(line); } catch { reply = null; }
-  if (isObject(reply) && reply.error) return line;
+  if (isObject(reply) && reply.error) {
+    const error = { ...reply };
+    delete error.result;
+    return JSON.stringify(error);
+  }
   if (!isObject(reply) || !isObject(reply.result) || !Array.isArray(reply.result.terminals)) {
     return JSON.stringify(refusal(id, "terminal.list: the core's answer could not be read", "unavailable"));
   }
   const terminals = reply.result.terminals.filter((row) => listAllowed(row, policy));
-  return JSON.stringify({ ...reply, result: { ...reply.result, terminals } });
+  const result = { ...reply.result, terminals };
+  // Whatever shape the inventory came in, none of it is information this pane can use.
+  if (Object.hasOwn(reply.result, "machines")) result.machines = [];
+  return JSON.stringify({ ...reply, result });
 }
 
 /** One short upstream call: connect, send one request, read one reply, close. */

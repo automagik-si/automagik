@@ -35,7 +35,9 @@
 // never on the shared-role widening (a send-only rule); `rm` on the caller's own workers only,
 // as the proxy's kill/rm rule; `put` refused, because it writes a file onto the target's
 // machine and the proxy refuses `terminal.put`. Machine targets are refused on every verb but
-// `send`, and `keys`/`attach`/`exec` are refused outright. `ls` and `events` stay cross-pane:
+// `send`, and a name that resolves to one is refused after resolution too (with the proxy off,
+// this guard is the only check). `keys`/`attach`/`exec` are refused outright. `ls` and
+// `events` stay cross-pane:
 // a wrapper cannot filter a table's text or a stream without changing what the real hc
 // printed; the per-pane proxy is where a sandboxed pane's list and events are filtered.
 
@@ -763,6 +765,10 @@ function readProblem(real, args, env, terminal, verb) {
   if (!at) return null;
   const hit = resolvedTargetOf(real, at.word, null, env);
   if (!hit.get) return `the target ${at.word} is not resolvable with hc`;
+  // A name may resolve to a linked machine's pane after the lexical check above has passed
+  // (`hc ls` names it, then `hc get` carries `machine/tN`). The rule is about the resolved
+  // address, not the word the caller typed: with the proxy off this guard is the only check.
+  if (hit.address.includes("/")) return "a machine target is not allowed";
   // The caller's own pane needs no team check (its identity is the pane's, fixed at start):
   // an unbound guarded pane still reads itself, as the pack's CLI does to identify the caller.
   if (hit.address === terminal) return { index: at.index, address: hit.address };
@@ -795,6 +801,9 @@ function rmProblem(real, args, env, terminal) {
   if (caller.worker) return "a worker pane ends no panes; its bot ends it";
   const hit = resolvedTargetOf(real, at.word, null, env);
   if (!hit.get) return `the target ${at.word} is not resolvable with hc`;
+  // The same resolved-address rule as readProblem: a name that resolves to a linked machine
+  // is refused even though it passed the lexical check, and is never forwarded.
+  if (hit.address.includes("/")) return "a machine target is not allowed";
   if (hit.address === terminal) return "the target is the caller's own pane";
   if (hit.get.parent === terminal) return { index: at.index, address: hit.address };
   if (labelsOf(hit.get)[WORKER_OF_LABEL] === caller.bot) return { index: at.index, address: hit.address };

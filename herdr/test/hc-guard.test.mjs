@@ -72,6 +72,10 @@ function scene(t, { caller = "t100" } = {}) {
     { address: "t107", name: "fixer", state: "live" }, { address: "t108", name: "tester", state: "live" },
     { address: "t110", name: "worker-dev", state: "live" },
     { address: "t120", name: "other", state: "live" }, { address: "t121", name: "bare", state: "live" },
+    // Linked machine panes, reachable by name through `hc ls`; the guard must refuse the
+    // resolved `machine/tN` address, never forward it (the proxy-off path, #628).
+    { address: "m/t101", name: "cap-m", state: "live" }, { address: "m/t120", name: "other-m", state: "live" },
+    { address: "m/t105", name: "worker-m", state: "live" },
   ];
   const state = {
     terminals,
@@ -89,6 +93,7 @@ function scene(t, { caller = "t100" } = {}) {
       t121: get("t121", {}, { cwd: project, name: "bare" }),
       "m/t101": get("m/t101", { bot: ID.cap }, { cwd: project, name: "cap" }),
       "m/t120": get("m/t120", { bot: ID.other }, { cwd: project, name: "other" }),
+      "m/t105": get("m/t105", { "worker.of": ID.dev }, { cwd: worktree, name: "worker-m", parent: "t100" }),
     },
   };
   const statePath = join(root, "hc-state.json"), logPath = join(root, "hc.log");
@@ -711,6 +716,24 @@ test("a machine target is refused on every allowed verb but send", (t) => {
     const r = guardRun(s, args);
     assertRefused(r);
     assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+  }
+});
+
+test("with the proxy off, a machine target named by a name is refused (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. The lexical check
+  // above cannot see a name; the resolved address decides, for reads/waits and rm alike.
+  const s = scene(t);
+  for (const [args, address] of [
+    [["read", "cap-m"], "m/t101"], [["get", "cap-m"], "m/t101"], [["wait", "cap-m"], "m/t101"],
+    [["rm", "worker-m"], "m/t105"],
+    [["read", "other-m"], "m/t120"], [["rm", "other-m"], "m/t120"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => same(argv, [args[0], address])), false,
+      `${args.join(" ")} never forwards its machine address`);
   }
 });
 

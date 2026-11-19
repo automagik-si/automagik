@@ -103,13 +103,24 @@ function scene() {
     rec("t112", { bot: ID.jun }, { name: "huge", huge: true }),
     rec("t120", { bot: ID.other }, { name: "other-bot" }),
     rec("t121", { [WORKER_OF_LABEL]: ID.cap }, { name: "cap-worker", parent: "t101", cwd: worktree }),
+    // Linked machines (#628): a stranger's pane whose role=reviewer label would pass the send
+    // rule, the caller's team lead's pane, and the caller's own worker there. The proxy refuses
+    // every machine address on every verb, so none is a terminal the caller may reach or type
+    // into; the list must not name them or their machines.
+    rec("mac/t90", { bot: ID.other, role: "reviewer" }, { name: "reviewer-mac" }),
+    rec("mac/t91", { bot: ID.cap }, { name: "cap-mac" }),
+    rec("mac/t105", { [WORKER_OF_LABEL]: ID.dev }, { name: "worker-mac", parent: "t100", cwd: worktree }),
+  ];
+  const machines = [
+    { name: "mac", target: "mac", state: "connected" },
+    { name: "builder", target: "builder", state: "connected" },
   ];
   const forbiddenRoots = [["the project", project], ["the app home", app], ["the temp folder", paneTmp], ["the runtime folder", runtime]];
   const env = { XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: join(home, ".local", "share"), HOME: home,
     HERDR_APP_HOME: app, TMPDIR: paneTmp, PATH: `${stableGuard}:${shimDir}:${bin}:/usr/bin:/bin` };
   // The approved record every explicit-caller row reads (the by-hand rows keep the ledger).
   approveProject({ project, env, approvedAt: "2026-11-01T00:00:00.000Z", approvedBy: "test" });
-  return { root, app, project, home, runtime, worktree, bin, shimDir, paneTmp, stableRoot, stableGuard, ledger, terminals, env, forbiddenRoots };
+  return { root, app, project, home, runtime, worktree, bin, shimDir, paneTmp, stableRoot, stableGuard, ledger, terminals, machines, env, forbiddenRoots };
 }
 
 /** Start the fake core and, unless proxy: false, the pane t100 proxy; one cleanup for all. */
@@ -125,7 +136,7 @@ async function sceneWithCore(t, { version = "0.1.14", proxy = true, proxyOptions
   };
   t.after(closeAll);
   try {
-    fake = await startFakeCore({ socket: join(s.root, "core.sock"), terminals: s.terminals, version });
+    fake = await startFakeCore({ socket: join(s.root, "core.sock"), terminals: s.terminals, machines: s.machines, version });
     const start = async (terminal = "t100", extra = {}) => {
       const started = await startProxy({ terminal, upstream: fake.socket, appHome: s.app, env: s.env, forbiddenRoots: s.forbiddenRoots, ...extra });
       started.server?.unref?.();
@@ -371,6 +382,19 @@ test("terminal.list answers only the terminals the caller may type into (#628)",
   // its worker, another bot's worker, a bare shell pane and the caller's unrelated pm are out.
   assert.deepEqual(listed.result.terminals.map((row) => row.address).sort(),
     ["t100", "t101", "t102", "t103", "t104", "t105", "t107", "t112"].sort());
+  // Linked machines are out of scope: the fake carries a stranger's reviewer-labelled machine
+  // pane, the caller's team lead's machine pane and its own worker there, and the core's
+  // machine inventory; none of it may be named (#628).
+  assert.equal(fake.state.machines.length, 2, "the fake core really has a machine inventory");
+  for (const hidden of ["mac/t90", "mac/t91", "mac/t105"]) {
+    assert.equal(listed.result.terminals.some((row) => row.address === hidden), false,
+      `the list never names the machine pane ${hidden}`);
+  }
+  for (const hidden of ["reviewer-mac", "cap-mac", "worker-mac"]) {
+    assert.equal(listed.result.terminals.some((row) => row.name === hidden), false,
+      `the list never names the machine pane ${hidden} by name`);
+  }
+  assert.deepEqual(listed.result.machines, [], "no machine name or target reaches the reply");
   assert.equal(fake.calls("terminal.list").length, 1, "the request itself reaches the core");
   assert.deepEqual(fake.calls("terminal.list")[0].params, { all: true },
     "list's own parameters are forwarded unchanged");
@@ -386,6 +410,23 @@ test("terminal.list answers only the terminals the caller may type into (#628)",
     assert.equal(report.result.terminals.some((row) => row.address === hidden), false,
       `a worker's list never names ${hidden}`);
   }
+  assert.deepEqual(report.result.machines, [], "a worker's list names no machine either");
+});
+
+test("terminal.list never passes an error reply's rows through (#628)", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  const clean = await client.call("terminal.list", {});
+  assert.ok(clean.result, "the fake core answers a list first");
+  assert.ok(fake.state.terminals.length > 0, "the fake core's error reply will carry rows");
+  // A malformed core error that also holds a result must not become a way around the filter.
+  fake.state.listError = { code: -32000, message: "the list failed", data: { kind: "unavailable" } };
+  const answer = await client.call("terminal.list", {});
+  client.close();
+  assert.ok(answer.error, "the core's error is kept");
+  assert.equal(answer.error.message, "the list failed");
+  assert.equal(answer.result, undefined, "no terminal rows ride along with an error");
+  fake.state.listError = null;
 });
 
 test("the pm/integrator/fixer send widening is send only", async (t) => {

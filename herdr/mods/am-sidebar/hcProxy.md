@@ -122,7 +122,7 @@ ids are never reused, so a rename between the check and the call cannot redirect
 
 | Method | Rule |
 |---|---|
-| `terminal.list` | the caller's own pane and every terminal it may type into (the `terminal.send` rule): its team graph, its own workers and the shared review roles. Other teams' panes are left out of the reply, whose other fields are unchanged |
+| `terminal.list` | the caller's own pane and every terminal it may type into (the `terminal.send` rule): its team graph, its own workers and the shared review roles. Other teams' panes and every linked-machine row are left out, and the `machines` inventory is empty: a sandboxed bot can reach no machine target, so no machine is named |
 | `terminal.get`, `terminal.read`, `terminal.wait` | the caller itself, hcGuard's `teamOf` graph, and its own workers |
 | `terminal.send` | the same, plus hcGuard's shared send rules: pm/integrator/fixer callers may send to any listed bot; captain callers may send to other captains; tester/reviewer/fixer targets serve every squad. Ranks come from the approved roster. Workers inherit no caller-rank widening |
 | `terminal.kill`, `terminal.rm`, `terminal.label` | the caller's **own workers only**: the target's `parent` is the caller's pane, or its `worker.of` is the caller's bot. A team member, another bot's worker and a worker caller are refused |
@@ -138,9 +138,13 @@ These rules widen only sends; get/read/wait keep the same team graph.
 `terminal.list` is filtered rather than refused (#628): the request reaches the core unchanged, and
 the reply keeps only the rows the caller may type into, plus its own pane. It is the list a
 sandboxed bot's `hc ls` sees, so another team's panes are never named there and `hc send <name>`
-can only resolve a name it may type into. The reply's other fields (`hidden_finished`) are kept
-as the core answered them; a reply that cannot be read is a `hc-proxy:` error, never the
-unfiltered rows.
+can only resolve a name it may type into. A linked machine's pane is never kept, whatever its
+labels say: this proxy refuses every machine address on every forwarded verb, so a sandboxed bot
+can neither read nor type into one, and naming it would only leak another team's pane or the
+machine. For the same reason the reply's `machines` inventory is emptied: a machine's name and
+target are not information this pane can use. The remaining fields (`hidden_finished`) are kept
+as the core answered them; an error reply never carries rows, and a reply that cannot be read is
+a `hc-proxy:` error, never the unfiltered rows.
 
 A worker start needs `--bg`, `parent` = the caller, `cwd` under the caller's project
 `.claude/worktrees/`, `worker.of` = the caller's bot, only the worker labels, and this argv:
