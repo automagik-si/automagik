@@ -14,8 +14,10 @@ export const WORKER_LINE = "You write no code yourself: for each task start one 
   + "`am worker \"<task>\" --branch <branch>` (it runs in the task's worktree, under your pane), "
   + "check its result, and end it with `am worker kill <terminal>` once the task merges.";
 
-export const PLAIN_RUN_LINE = "A plain `hc run` starts an ordinary terminal. `am worker kill` refuses it. "
-  + "Only the project's main bot can end it, including after a handoff or restart. "
+const PLAIN_RUN_START = "A plain `hc run` starts an ordinary terminal.";
+const PLAIN_RUN_CLEANUP = "Only the project's main bot can end it, including after a handoff or restart.";
+
+export const PLAIN_RUN_LINE = `${PLAIN_RUN_START} \`am worker kill\` refuses it. ${PLAIN_RUN_CLEANUP} `
   + "Start with `am worker` when you need to end the worker yourself.";
 
 /** How every bot messages (fleet telemetry, 2026-11-18): no acknowledgements, state is read, not asked. */
@@ -33,8 +35,11 @@ const handoffLines = (self) => (restartAtOf(self) === null ? [] : [HANDOFF_LINE]
 
 // The caller checks git; an omitted flag keeps the existing pure-text default.
 const workerLines = (self, isGit) => {
-  const lines = isGit && self.code !== false ? [WORKER_LINE] : [];
-  if (self.kind !== "main") lines.push(PLAIN_RUN_LINE);
+  const showWorkerGuidance = isGit && self.code !== false;
+  const lines = showWorkerGuidance ? [WORKER_LINE] : [];
+  if (self.kind !== "main") {
+    lines.push(showWorkerGuidance ? PLAIN_RUN_LINE : `${PLAIN_RUN_START} ${PLAIN_RUN_CLEANUP}`);
+  }
   return lines;
 };
 

@@ -1930,8 +1930,9 @@ end.
 
 `am worker` registers the worker to the bot's ID in `worker.of`. The same bot can still end
 its worker from its new seat after a restart. Only the project's main bot can end a terminal
-started with plain `hc run`, including after a handoff or restart. Start with `am worker` when
-you need to end the worker yourself.
+started with plain `hc run`, including after a handoff or restart. In a Git project, seats
+configured for coding (`code` defaults to `true`) can start with `am worker` when they need
+to end the worker themselves.
 
 Before ending a registered worker, the CLI rereads the caller's and target's attach bindings
 and asks hc again for the target's identity, ownership and turn status. hc provides no

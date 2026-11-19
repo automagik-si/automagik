@@ -1484,13 +1484,19 @@ test("the briefing #1129: a member is told a plain hc run child is the main bot'
   assert.match(PLAIN_RUN_LINE, /`am worker kill` refuses it/);
   assert.match(PLAIN_RUN_LINE, /Only the project's main bot can end it, including after a handoff or restart/);
   assert.match(PLAIN_RUN_LINE, /Start with `am worker`/);
+  const cleanup = "A plain `hc run` starts an ordinary terminal. "
+    + "Only the project's main bot can end it, including after a handoff or restart.";
   for (const render of [briefingText, launchBriefingText]) {
     const mine = render({ self: member, file });
     assert.ok(mine.includes(PLAIN_RUN_LINE), `${render.name}: a member`);
     assert.ok(mine.includes(WORKER_LINE), `${render.name}: the worker line stays`);
     assert.ok(mine.length <= BRIEFING_LIMIT);
-    assert.equal(render({ self: member, file, isGit: false }).includes(PLAIN_RUN_LINE), true, `${render.name}: outside git too`);
-    assert.equal(render({ self: main, file }).includes(PLAIN_RUN_LINE), false, `${render.name}: the main bot`);
+    for (const [mode, self, isGit] of [["outside git", member, false], ["opted out", { ...member, code: false }, true]]) {
+      const text = render({ self, file, isGit });
+      assert.ok(text.includes(cleanup), `${render.name}: ${mode}`);
+      assert.doesNotMatch(text, /worker/i, `${render.name}: ${mode}`);
+    }
+    assert.doesNotMatch(render({ self: main, file }), /A plain `hc run`/, `${render.name}: the main bot`);
   }
 });
 
