@@ -955,8 +955,12 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
   const held = [];
   for (let i = 0; i < MAX_CONNECTIONS; i += 1) held.push(await clientFor(proxy.socket));
   // Every held client has answered through its session, so each one is registered before the
-  // next connects; no sleep guesses when the proxy got to accept them.
-  await Promise.all(held.map((client) => client.call("terminal.list")));
+  // next connects; no sleep guesses when the proxy got to accept them. The client's own 5 s
+  // test timeout is the bound: a missing answer fails here, naming the list that never came.
+  await Promise.all(held.map((client) => client.call("terminal.list").catch((e) => {
+    throw new Error("herdr/test/hc-proxy.test.mjs, the connection cap row: a held client's terminal.list answer "
+      + `did not arrive within the client's test timeout: ${e.message}`);
+  })));
   const extra = await clientFor(proxy.socket);
   const answer = JSON.parse(await extra.next());
   assert.match(answer.error.message, new RegExp(`^hc-proxy: too many connections \\(${MAX_CONNECTIONS} max\\)`));

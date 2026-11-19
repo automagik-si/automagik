@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bounded } from "./bounded.mjs";
 
 const here = (f) => new URL(f, import.meta.url).href;
 const FAKE_SWITCH = "data:text/javascript," + encodeURIComponent(`
@@ -1308,7 +1309,10 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
   view.forceLogins = true;
   view.reload(cx);
   release();
-  await cx.settle();
+  // The released round's own state is the proof; bounded() only fails the row, naming the
+  // release, if the held status never settles and the queued round therefore never runs.
+  await bounded(cx.settle(), "the released login round (and the one queued after it) to settle",
+    { where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row' });
   assert.equal(asks(), 4, "one queued round after it, not two");
   assert.match(text(draw()), /dee@example\.com · login 2 Use/);
 });

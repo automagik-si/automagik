@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { discover, limiter, machineGate, within, TimedOut } from "../mods/am-sidebar/discover.js";
+import { bounded } from "./bounded.mjs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const never = () => new Promise(() => {});
@@ -125,21 +126,28 @@ test("discover: this computer's projects are listed before a slow machine answer
     read: (p) => { started[p.key]?.(); return held(p.key); },
     last: (p) => (p.key === "/b" ? undefined : FILE(`last:${p.key}`)),
   }, { limit: 2, onUpdate: (list) => { drawn.push(rows(list)); drawWaiters.shift()?.(); } });
-  await Promise.all([startedListed, startedA]);
+  // Every wait below is for a recorded event (a call opened, a draw made); bounded() is the net
+  // that fails the row in seconds, naming the missing event, if one never comes. It is not the
+  // proof: each assertion after it reads the recorded state.
+  const row = 'herdr/test/discover.test.mjs, the "held answers" row';
+  await Promise.all([
+    bounded(startedListed, "this computer's listing call to start", { where: row }),
+    bounded(startedA, "/a's read call to start", { where: row }),
+  ]);
   assert.deepEqual(Object.keys(hold), ["listed", "/a"]);
   hold.listed.fail(new TimedOut(5));
-  await startedB;
+  await bounded(startedB, "/b's read call to start after the listing timed out", { where: row });
   assert.ok(hold["/b"], "a timeout on this computer doesn't skip its other reads");
   assert.deepEqual(drawn, []);
   const firstDraw = drawnNext();
   hold["/b"].done(FILE("read:/b"));
-  await firstDraw;
+  await bounded(firstDraw, "the draw after /b's read answered", { where: row });
   const shown = [["/a", "last:/a"], ["/b", "read:/b"], ["/saved", "last:/saved"]];
   assert.deepEqual(drawn, [shown]);
   const secondDraw = drawnNext();
   hold["/a"].fail(new TimedOut(5));
-  await secondDraw;
-  assert.deepEqual(rows(await pending), shown);
+  await bounded(secondDraw, "the draw after /a's read timed out", { where: row });
+  assert.deepEqual(rows(await bounded(pending, "discovery to return after the last draw", { where: row })), shown);
   assert.deepEqual(drawn, [shown, shown]);
 });
 
@@ -164,8 +172,7 @@ test("discover: a machine that never answers holds back only its own projects, w
   const updates = [];
   let deadEnded = false;
   let sawBothWhileDeadPending = false;
-  const t0 = Date.now();
-  const found = await discover({ spaces, remembered: [{ key: "/x", machine: "dead" }] }, io,
+  const found = await bounded(discover({ spaces, remembered: [{ key: "/x", machine: "dead" }] }, io,
     { limit: 1, onUpdate: (list) => {
       updates.push(list);
       if (deadEnded) return;
@@ -174,10 +181,10 @@ test("discover: a machine that never answers holds back only its own projects, w
         deadEnded = true;
         endDead();
       }
-    } });
-  // A net against a hang, not the proof: discovery only returns after the deadline released
-  // above ends the dead call, so a return here means that ended it.
-  assert.ok(Date.now() - t0 < 10_000, "discovery ended once the dead machine's deadline was released");
+    } }), "the far project (/y) drawn while the dead call is pending, the event that releases the dead machine's deadline",
+  { where: 'herdr/test/discover.test.mjs, the "dead machine" row' });
+  // The bound above is the anti-hang net, not the proof: discovery only returns after the
+  // deadline released from onUpdate ended the dead call, so the rows below are what prove it.
   assert.ok(sawBothWhileDeadPending, "this computer's and far's projects were drawn while the dead call was pending");
   // One list per read and per machine done but the last. Which list lands first is the
   // scheduler's (under load the dead deadline can land before a local read), so the proof is
@@ -244,8 +251,9 @@ test("machineGate: a call that times out queued never starts; one that answers f
   release("ok"); // the stuck call answers after all
   // The gate's own bookkeeping is the state awaited: a call without a deadline queues behind
   // the stuck one and starts only after it has answered and freed its place. Awaiting that
-  // start is the event; no clock guesses when the gate's `finally` ran.
-  assert.equal(await gate.call(() => "now"), "now");
+  // start is the event; bounded() fails the row, naming the gate release, if it never comes.
+  assert.equal(await bounded(gate.call(() => "now"), "the gate release: the queued call to start after the stuck call answered",
+    { where: 'herdr/test/discover.test.mjs, the "machineGate freed place" row' }), "now");
   assert.equal(ran, false);
   assert.equal(gate.stuck, 0);
   assert.equal(gate.answered, true);
