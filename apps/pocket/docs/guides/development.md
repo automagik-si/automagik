@@ -13,7 +13,7 @@ Build, test and run Automagik Pocket from source. Releases are in [releasing.md]
 
 1. Install JDK 17 (CI uses Temurin 17). Gradle 8.11.1 also runs on JDK 21; it does not run on
    very new JDKs, so point `JAVA_HOME` at 17 or 21 if Android Studio bundles a newer one.
-2. Install the Android SDK: platform 35 and build-tools 35.0.0.
+2. Install Android SDK Platform 36 and Build Tools 35.0.0.
 3. Tell Gradle where the SDK is:
 
    ```sh
@@ -25,12 +25,14 @@ Build, test and run Automagik Pocket from source. Releases are in [releasing.md]
 ## 2. Build, test, lint
 
 ```sh
-cd android
-./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+cd apps/pocket/android
+./gradlew :app:assembleGithubDebug :app:testGithubDebugUnitTest :app:lintGithubDebug \
+  :app:testPlayDebugUnitTest :app:lintPlayDebug
 ```
 
-This is the same gate CI runs. The debug APK is
-`android/app/build/outputs/apk/debug/app-debug.apk`.
+This is the same gate CI runs. From the repository root, use `scripts/capped-run --lock` as
+shown in [AGENTS.md](../../../../AGENTS.md). The GitHub debug APK is
+`android/app/build/outputs/apk/github/debug/app-github-debug.apk` relative to `apps/pocket/`.
 
 **Debug signing.** A local build uses the debug key AGP creates for the worktree, unless the release
 key is present (then it uses that). When the `POCKET_DEBUG_SIGNING_KEYSTORE` repository secret is
@@ -48,8 +50,8 @@ to 5.17.0 (`android/app/build.gradle.kts:147`) because iroh-android 1.2.0 brings
 
 ## 3. Run it
 
-**On a phone:** `adb install -r android/app/build/outputs/apk/debug/app-debug.apk`. Android 8.0
-(API 26) or newer.
+**On a phone:** from `apps/pocket/`, run `adb install -r android/app/build/outputs/apk/github/debug/app-github-debug.apk`.
+The minimum is Android 8.0 (API 26).
 
 **On an emulator:**
 
@@ -69,7 +71,7 @@ first. CI's shared-key PR APKs have the same certificate, so they replace each o
 
 ```sh
 cd android
-HERDR_TEST_HC=/absolute/path/to/hc ./gradlew :app:testDebugUnitTest --rerun
+HERDR_TEST_HC=/absolute/path/to/hc ./gradlew :app:testGithubDebugUnitTest --rerun
 ```
 
 They start their own core sessions with temporary XDG state, config and runtime folders, and stop
@@ -109,8 +111,8 @@ same key.
   own `latest.json`.
 - To test self-update on an emulator, build an older copy with `-Ppocket.versionCode=1` and a
   normal one, both with `-Ppocket.updateUrl=http://10.0.2.2:PORT/latest.json`, and serve the newer
-  APK and its `latest.json` from the computer. Debug builds alone may use plain HTTP, and only to
-  `10.0.2.2` (`android/app/src/debug/`).
+  APK and its `latest.json` from the computer. GitHub debug builds may use plain HTTP to
+  `10.0.2.2` (`android/app/src/githubDebug/`).
 
 ## 6. Where things are
 
@@ -128,8 +130,10 @@ App code, `android/app/src/main/java/ai/namastex/automagik/`:
 | `KeyInput.kt`, `TerminalModes.kt` | Key row modifiers, cursor and paste encoding |
 | `Notify.kt`, `Alerts.kt`, `Prompt.kt`, `WatchService.kt` | Notifications, buttons, background watch |
 | `AssistActivity.kt` | Side-button assistant panel |
-| `Updater.kt`, `UpdatePolicy.kt` | Self-update from GitHub releases: checks, silent install, notifications; the pure rules |
 | `Theme.kt` | Automagik Stage colours, light and dark |
+
+The GitHub updater, its UI and network policy live in `android/app/src/github/` and
+`android/app/src/githubDebug/`. The Play flavor's update hooks live in `android/app/src/play/`.
 
 Desktop mod: `herdr/mods/pocket-link/` — see its [README](../../../../herdr/mods/pocket-link/README.md) and
 [RECIPE](../../../../herdr/mods/pocket-link/RECIPE.md).

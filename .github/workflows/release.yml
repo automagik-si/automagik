@@ -378,7 +378,7 @@ jobs:
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0'
+          packages: 'platforms;android-36 build-tools;35.0.0'
 
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
@@ -633,7 +633,7 @@ jobs:
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0'
+          packages: 'platforms;android-36 build-tools;35.0.0'
 
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
@@ -655,12 +655,12 @@ jobs:
           export POCKET_SIGNING_STORE="$RUNNER_TEMP/pocket.jks"
           trap 'rm -f "$POCKET_SIGNING_STORE"' EXIT
           echo "$KEYSTORE" | base64 -d > "$POCKET_SIGNING_STORE"
-          ./gradlew --stacktrace :app:assembleRelease
+          ./gradlew --stacktrace :app:assembleGithubRelease
 
       - name: The APK and its latest.json
         run: |
           set -euo pipefail
-          meta=apps/pocket/android/app/build/outputs/apk/release/output-metadata.json
+          meta=apps/pocket/android/app/build/outputs/apk/github/release/output-metadata.json
           code=$(jq -r '.elements[0].versionCode' "$meta")
           name=$(jq -r '.elements[0].versionName' "$meta")
           want=$(bun scripts/version.ts code "${VERSION}")
@@ -668,7 +668,7 @@ jobs:
           [ "$code" = "$want" ] || { echo "::error::the APK's versionCode is ${code}, ${VERSION} gives ${want}"; exit 1; }
           mkdir -p pocket
           apk="automagik-pocket-${VERSION}.apk"
-          cp apps/pocket/android/app/build/outputs/apk/release/app-release.apk "pocket/${apk}"
+          cp apps/pocket/android/app/build/outputs/apk/github/release/app-github-release.apk "pocket/${apk}"
           sha=$(sha256sum "pocket/${apk}" | cut -d' ' -f1)
           # What changed in the app: the subjects that touched apps/pocket/ since the build phones have.
           summary=$(git log --no-merges --format='%s' "${SINCE:+${SINCE}..}v${VERSION}" -- apps/pocket | grep -vE '^chore\(release\)' | head -5 | paste -sd ';' - | head -c 400 || true)

@@ -157,9 +157,10 @@ gate_meter_key() {
   bun scripts/meter-lane.ts check-key
 }
 
-# Pocket's unit tests and lint (release.yml's "Pocket's gates").
+# Both Pocket flavors' unit tests and lint (release.yml's "Pocket's gates").
 gate_pocket() {
-  (cd apps/pocket/android && ./gradlew --stacktrace :app:testDebugUnitTest :app:lintDebug)
+  (cd apps/pocket/android && ./gradlew --stacktrace :app:testGithubDebugUnitTest :app:lintGithubDebug \
+    :app:testPlayDebugUnitTest :app:lintPlayDebug)
 }
 
 # Both Pocket signing secrets must be present (release.yml's "Pocket's signing key is in the
