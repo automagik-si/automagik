@@ -80,6 +80,10 @@ const failure = (message, code = 'ACP_AGENT') => ({ message, code })
 // in the one place a step's end is built, whatever built the sentence (#970).
 const finish = (kind, message, code) => ({ type: 'finish', reason: message === undefined ? { kind } : { kind, failure: failure(typeof message === 'string' ? shownText(message) : message, code) } })
 const FINISH = { end_turn: 'stop', max_tokens: 'max-tokens', max_turn_requests: 'stop', refusal: 'stop' }
+const STOP_LINE = Object.freeze({
+  refusal: name => `[${name} declined to go on with this request. Ask again in a new message.]`,
+  max_turn_requests: name => `[${name} stopped at its limit of requests for one turn. Reply to let it go on.]`,
+})
 // An agent whose CLI is not signed in says so with ACP's `auth_required`, at the start of its
 // session or of a prompt. The turn fails with its own code, never ACP_AGENT: a sign-in answers
 // it, another model does not (the Bot team never falls back on it).
@@ -1828,16 +1832,19 @@ export class AcpAdapter extends LlmAdapter {
         const wasOwn = live.own
         live.own = false
         const r = live.run.reviews
-        if (wasOwn && r?.denied > 0 && (r.inRow >= 3 || r.denied >= 10 || (r.last === 'denied' && !r.after))) {
+        const reviewerStopped = wasOwn && r?.denied > 0 && (r.inRow >= 3 || r.denied >= 10 || (r.last === 'denied' && !r.after))
+        if (reviewerStopped) {
           try { dshAgent?.session?.append?.('user/message', reviewerStopNotice(agent.name, r.denied), { surfaceOp: 'append' }) } catch (error) {
             try { this.ctx.logger?.warn?.(`acp-dsh: the reviewer notice was not written: ${error?.message ?? error}`) } catch {}
           }
-          yield* shown()
-          yield* blocks.close()
-          return yield finish('stop')
         }
         yield* shown()
         yield* blocks.close()
+        if (Object.hasOwn(STOP_LINE, event.stopReason)) {
+          yield* blocks.add('text', shownText(STOP_LINE[event.stopReason](agent.name)))
+          yield* blocks.close()
+        }
+        if (reviewerStopped) return yield finish('stop')
         // A cancel the app did not ask for (the turn's Stop would have aborted the signal) while
         // the host itself is stopping came from outside: its SIGTERM reached the agent, which
         // answered with `cancelled`. That is an interruption, not the person's Stop, and not a
