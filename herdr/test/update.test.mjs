@@ -133,6 +133,20 @@ test("packOfPointer refuses what is not this pack's pointer", () => {
   assert.equal(packOf("3.57.1").sequence, 570001);
 });
 
+test("packOfPointer refuses a pointer whose signed publisher, repository or tag is not this pack's", () => {
+  const bad = (extra, re) => assert.throws(() => packOfPointer({ ...JSON.parse(pointerBytes("3.57.1")), ...extra }), re);
+  bad({ publisher: "someone-else" }, /unexpected publisher: refusing it/);
+  bad({ publisher: undefined }, /unexpected publisher/);
+  bad({ repository: "https://github.com/someone/automagik" }, /unexpected repository: refusing it/);
+  bad({ repository: undefined }, /unexpected repository/);
+  bad({ tag: "v3.57.2" }, /must name tag v3\.57\.1: refusing it/);
+  bad({ tag: undefined }, /must name tag v3\.57\.1/);
+  // Both signers' repositories are accepted: the current one and the historical one.
+  for (const repository of ["https://github.com/automagik-si/automagik", "https://github.com/automagik-dev/automagik"]) {
+    assert.equal(packOf("3.57.1", { repository }).version, "3.57.1", repository);
+  }
+});
+
 test("fetchPointer: a good signature names the pack; a bad one, an untrusted key or no signature is refused", async () => {
   assert.equal(POINTER_URL, "https://github.com/automagik-dev/automagik/releases/download/herdr-lane/pack.json");
   assert.equal(POINTER_SIG_URL, `${POINTER_URL}.sig`);
