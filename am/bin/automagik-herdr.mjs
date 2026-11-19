@@ -20,7 +20,7 @@ import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
 import { coreStatus, inTestRoots } from "../coreSocket.mjs";
 
-import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots,
+import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId,
   botsText, parseBots, plannedOf, projectKeyOf, projectOf, squadOf, withListedProject, writeFolderOf } from "../model.js";
 import { UNANSWERED, agentInForeground, attachRefusal, attachWords, detachWords, hcName, isClaude, leadIdOf, leadPane, newest,
@@ -35,15 +35,15 @@ import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrus
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
-  GUARD_DIR, KILL_GUARD_DIR, KILL_GUARD_NAME, SESSION_LABEL, baseCandidates, branchNamesTask, branchSlug, guardPathWith,
+  GUARD_DIR, KILL_GUARD_DIR, KILL_GUARD_NAME, SESSION_LABEL, TRANSCRIPT_LABEL, baseCandidates, branchNamesTask, branchSlug, guardPathWith,
   LEDGER_MODE, endRow, finishedEnds, launchKey, ledgerLine, ledgerPath, optionLike, paneArgs, readLedger, reapCandidates, reapPath, reapRow,
   prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks, forgeHost, forgeOf, workerTaskText,
   sessionRow, stableGuardDir, stableKillDir, stableRootOf,
   parseWorktrees, runsTemplate, startRow, swapArm, swapByte,
   taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
   workLeft, writesWorktree } from "../workers.js";
-import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
-  isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
+import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
+  isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchdNotLoaded, ledgerRivals,
   lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
@@ -53,6 +53,7 @@ import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines
 import { readMeterLane } from "../meterLane.mjs";
 import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, entryLine, meterResults, parseState, probeOn, stateAfter, stateLines, updateOn } from "../machineUpdates.js";
 import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
+import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
 import { CONFIG_VAR, chooseLogin } from "../logins.js";
@@ -1216,11 +1217,89 @@ function shownCodexSetting({ argv, pinned, levels = [], fallback = null, fallbac
   return { value: null, source: null };
 }
 
+/**
+ * The bytes at the end of `path` when it is at or under `max` (all of it), else its last
+ * `max` bytes with a partial first line dropped (#1556): a transcript can be tens of MB.
+ */
+function tailTextOf(path, max) {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const start = size > max ? size - max : 0;
+    const chunks = [];
+    let pos = start;
+    while (pos < size) {
+      const buf = Buffer.alloc(Math.min(1024 * 1024, size - pos));
+      const n = readSync(fd, buf, 0, buf.length, pos);
+      if (!n) break;
+      chunks.push(buf.subarray(0, n));
+      pos += n;
+    }
+    let text = Buffer.concat(chunks).toString("utf8");
+    if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+    return text;
+  } finally { closeSync(fd); }
+}
+
+/**
+ * The context a Claude Code transcript file carries (#1556): its newest assistant usage, or
+ * null. The last 2 MiB answer in the common case (an assistant message near the end, so the
+ * last one there is the file's last); only a tail with none is widened to 64 MiB.
+ */
+function contextTokensAt(path) {
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return null;
+    const size = st.size;
+    const tail = size > 2 * 1024 * 1024 ? tailTextOf(path, 2 * 1024 * 1024) : readFileSync(path, "utf8");
+    const found = contextTokensOf(tail);
+    if (found !== null || size <= 2 * 1024 * 1024) return found;
+    return contextTokensOf(tailTextOf(path, 64 * 1024 * 1024));
+  } catch { return null; }
+}
+
+/** `path` resolved when it is a `.jsonl` transcript strictly inside `root` (a real folder), else null. */
+function transcriptUnder(root, path) {
+  if (!transcriptShape(path)) return null;
+  try {
+    const realRoot = realpathSync(root).replace(/\/+$/, "");
+    const real = realpathSync(path);
+    return real.startsWith(`${realRoot}/`) && real.endsWith(".jsonl") && statSync(real).isFile() ? real : null;
+  } catch { return null; }
+}
+
+/**
+ * The live Claude Code seat's context (#1556): the newest assistant message's input +
+ * cache-read + cache-creation tokens in its session log, or null when it isn't a running
+ * Claude seat here, no log can be found, or nothing in it measures. `ledger`: the workers
+ * ledger rows (the hook's recorded transcript and session). This computer only: a linked
+ * machine's logs live there.
+ */
+function seatContext(project, bot, live, ledger = workerLedgerRows()) {
+  if (project?.machine || !live || resolveAgent(bot?.agent) !== "claude") return null;
+  const env = paneLaunchEnv(live)?.get(CONFIG_VAR);
+  const configDir = typeof env === "string" && isAbsolute(env) ? env : join(home(), ".claude");
+  const root = join(configDir, "projects");
+  const known = ledgerSession(ledger, live.address, "claude", live.created_ms);
+  for (const candidate of [live.labels?.[TRANSCRIPT_LABEL], known?.transcript]) {
+    const real = typeof candidate === "string" ? transcriptUnder(root, candidate) : null;
+    if (real) return { tokens: contextTokensAt(real), transcript: real };
+  }
+  const session = sessionFor("claude", live.labels?.[SESSION_LABEL]) ?? known?.session;
+  const cwd = live.foreground?.cwd ?? live.cwd;
+  if (!session || typeof cwd !== "string" || !cwd.startsWith("/")) return null;
+  const defaultLogin = typeof env !== "string" || !isAbsolute(env);
+  const real = transcriptUnder(root, defaultLogin ? claudeTranscriptPath(home(), cwd, session)
+    : join(configDir, "projects", claudeSlug(cwd), `${session}.jsonl`));
+  return real ? { tokens: contextTokensAt(real), transcript: real } : null;
+}
+
 /** One bot as ls and show print it. With hc failing, the bot is still shown, its pane unknown.
  * `observation` is a linked machine's live lookup; `heldOverride` is the live binding a read
- * resolved beyond the selected ledger (#1128). Both sides of the merge are kept: a linked
- * machine keeps its own observation, and a local show/ls may pass a resolved binding. */
-function describe(project, bot, view, hcError, projects = null, observation = null, heldOverride = undefined) {
+ * resolved beyond the selected ledger (#1128); `context` is the measured Claude Code context
+ * (#1556). Both sides of the merge are kept: a linked machine keeps its own observation, a
+ * local show/ls may pass a resolved binding, and a Claude seat may pass its context. */
+function describe(project, bot, view, hcError, projects = null, observation = null, heldOverride = undefined, context = null) {
   const { file } = project;
   const candidate = observation?.candidate;
   const held = heldOverride !== undefined ? heldOverride
@@ -1310,6 +1389,8 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
     terminal: held?.binding.terminal ?? null, status, duplicate: false, since: held?.binding.at ?? null,
     role: bot.role, rank: bot.rank ?? null, code: bot.code !== false, look: bot.look,
     hcProxy: bot.hcProxy === true,
+    restartAt: restartAtOf(bot), pinnedRestartAt: bot.restartAt ?? null,
+    context_tokens: context && Number.isFinite(context.tokens) ? context.tokens : null,
     autoMode,
     worker,
     ...(seatAgy ? { agyPermissions: { allow: seatAgy.allow, deny: seatAgy.deny, trustedWorkspaces: seatAgy.trustedWorkspaces } } : {}),
@@ -1540,6 +1621,7 @@ const OPTIONS = {
   category: { type: "string" }, "no-category": { type: "boolean" },
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
   model: { type: "string" }, "no-model": { type: "boolean" }, rank: { type: "string" }, "hc-proxy": { type: "string" },
+  "restart-at": { type: "string" }, "no-restart-at": { type: "boolean" }, due: { type: "boolean" },
   "person-features": { type: "string" }, "permission-mode": { type: "string" },
   "agy-mode": { type: "string" }, "worker-agy-mode": { type: "string" },
   "hermes-home": { type: "string" }, "hermes-profile": { type: "string" }, "no-hermes": { type: "boolean" },
@@ -1609,6 +1691,8 @@ Usage: am <command> [options]                   (every command takes --json and 
          [--worker-template T]          (an hc template: owns the command, so it wins)
   edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category]
              [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
+             [--restart-at N | --no-restart-at]   a context threshold in tokens (#1556):
+                                       a main bot defaults to 250000, a member has none
              [--permission-mode=] [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
              [--person-features on|off]   (Claude Code only; default off)
@@ -1661,6 +1745,15 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 install.sh asks before it installs it.
   restart --queued [--project DIR] [--json]   List queued restarts.
   restart --cancel <bot> [--project DIR] [--json]   Cancel a queued restart.
+  restart --due [--all] [--dry-run] [--json]   Restart from a handoff the seats whose Claude Code
+                                context is over their threshold (restartAt; a main bot defaults
+                                to 250000 tokens). Each due seat is asked to write its handoff to
+                                <app home>/automagik-herdr/handoff/<bot>.md and end its turn; an
+                                idle seat restarts from that file now (--fresh --tree), a working
+                                or blocked one queues until its next idle. A seat that doesn't
+                                write the file in time is reported, not restarted. --dry-run
+                                prints the plan and touches nothing; --all covers this CLI's
+                                remembered projects. A timer or the login service runs the pass.
   restart <bot> [--fresh] [--agent A] [--model M [--save]] [--tree [--fresh-shared]] [--force] [--cwd DIR]
                                 the bot's agent again in its pane's place (same space and tab,
                                 same folder, labels kept), launched from its current source
@@ -2076,6 +2169,19 @@ export function entryFrom(opts, base, project, { creating, listOf = null }) {
   if (opts.rank !== undefined) {
     if (opts.rank !== "" && !RANKS.includes(opts.rank)) throw new CliError(`--rank is one of ${RANKS.join(", ")} (or --rank= to clear), not "${opts.rank}".`, 2);
     entry.rank = opts.rank;
+  }
+  // #1556: the context threshold this seat restarts at, in tokens. --no-restart-at clears a
+  // stored one (a member then has none; a main bot falls back to its default).
+  if (opts["restart-at"] !== undefined && opts["no-restart-at"]) {
+    throw new CliError("Give --restart-at or --no-restart-at, not both.", 2);
+  }
+  if (opts["no-restart-at"]) entry.restartAt = "";
+  if (opts["restart-at"] !== undefined) {
+    const tokens = opts["restart-at"];
+    if (!/^[1-9][0-9]*$/.test(tokens) || !Number.isSafeInteger(Number(tokens))) {
+      throw new CliError("--restart-at is a positive whole number of tokens (or --no-restart-at to clear).", 2);
+    }
+    entry.restartAt = Number(tokens);
   }
   if (opts["hc-proxy"] !== undefined) {
     if (!["on", "off"].includes(opts["hc-proxy"])) {
@@ -2533,9 +2639,12 @@ async function cmdLs(opts) {
     let project;
     try { project = loadProject(key); } catch (e) { projects.push({ project: key, error: e.message, categories: [], bots: [], warnings: [] }); continue; }
     if (project.text === null && opts.all && key !== keys[0]) continue; // a remembered project whose file is gone
-    const bots = await Promise.all(project.file.bots.map(async (b) => ({
-      ...describe(project, b, view, hcError, null, null, await readHeld(project, b, view)), duplicate: await duplicateLabel(project, b, view),
-    })));
+    const ledger = workerLedgerRows();
+    const bots = await Promise.all(project.file.bots.map(async (b) => {
+      const held = await readHeld(project, b, view);
+      return { ...describe(project, b, view, hcError, null, null, held, seatContext(project, b, held?.get ?? null, ledger)),
+        duplicate: await duplicateLabel(project, b, view) };
+    }));
     projects.push({ project: key, categories: project.file.categories, warnings: project.warnings, bots });
   }
   if (opts.json) return { projects };
@@ -2652,8 +2761,10 @@ async function cmdShow(opts, [ref]) {
   const bot = await botIn(project, ref, opts);
   warnProject(project, bot.id);
   const { view, hcError } = project.machine ? {} : await viewOrError();
+  const live = !project.machine && !bot.planned && view ? liveFor(view, bot.id, project)?.get ?? null : null;
+  const held = project.machine ? null : await readHeld(project, bot, view, { refuseTwins: true });
   const info = { ...(project.machine ? await describeLinked(project, bot)
-    : { ...describe(project, bot, view, hcError, null, null, await readHeld(project, bot, view, { refuseTwins: true })),
+    : { ...describe(project, bot, view, hcError, null, null, held, seatContext(project, bot, held?.get ?? live)),
       duplicate: await duplicateLabel(project, bot, view) }), instructions: bot.instructions };
   info.hcProxyState = project.machine ? await proxyStateOn(project, bot)
     : approvedProxyState({ project: project.key, bot });
@@ -2690,6 +2801,8 @@ async function cmdShow(opts, [ref]) {
       `  worker agy allow  ${info.workerAgyPermissions.allow.join(", ")}`,
       `  worker agy deny   ${info.workerAgyPermissions.deny.join(", ")}`] : []),
     `  status       ${info.status}${info.terminal ? ` in ${info.terminal} (since ${info.since})` : ""}`,
+    `  context      ${info.context_tokens === null ? "-" : `${info.context_tokens} tokens`}`,
+    `  restartAt    ${info.restartAt === null ? "-" : `${info.restartAt} tokens${info.pinnedRestartAt ? "" : " (default)"}`}`,
     ...(info.duplicate ? ["  warning      duplicate live labels"] : []),
     `  look         ${info.look.character} in ${info.look.colour}`, `  role         ${info.role || "-"}`,
     `  rank         ${info.rank ?? "-"}`, `  code         ${info.code}`,
@@ -5251,7 +5364,22 @@ async function queuedRestarts(opts, ref) {
       }
       return rows.filter((e) => !project || e.project === project);
     });
-    return opts.json ? { queued: entries } : entries.length ? entries.map((e) => `${e.botName} (${e.botId}): queued on ${e.terminal} (${e.reason}${e.dialog ? `: "${e.dialog.question}" — ${e.dialog.who} must answer` : ""}) since ${e.at}`).join("\n") : "No restarts queued.";
+    // #1556: a handoff that failed or was dropped is kept in the app home, so the reader that
+    // already answers "what is queued" also answers "what didn't happen" after the watcher's pane went away.
+    const record = readHandoffFailureRecord();
+    const failures = record.rows.filter((f) => !project || f.project === project);
+    const failureLine = (f) => `${f.botName} (${f.botId ?? "no id"}): handoff restart ${f.kind} at ${f.at}: ${f.why}`
+      + `${f.handoff ? ` (handoff: ${f.handoff})` : ""}`
+      + `${f.notified?.sent ? `; the lead was told in ${f.notified.sent}` : f.notified?.unsent ? `; the lead was not told: ${f.notified.unsent}` : ""}.`;
+    const skippedLine = (s) => `Skipped handoff failure row ${s.row}: ${s.reason}.`;
+    const lines = [
+      ...entries.map((e) => `${e.botName} (${e.botId}): queued on ${e.terminal} (${e.reason}${e.dialog ? `: "${e.dialog.question}" — ${e.dialog.who} must answer` : ""}) since ${e.at}`),
+      ...failures.map(failureLine),
+      ...record.skipped.map(skippedLine),
+    ];
+    return opts.json ? { queued: entries, ...(failures.length ? { handoff_failures: failures } : {}),
+      ...(record.skipped.length ? { handoff_failures_skipped: record.skipped } : {}) }
+      : lines.length ? lines.join("\n") : "No restarts queued.";
   }
   if (!ref) throw new CliError("restart --cancel needs a bot.", 2);
   let bot = null;
@@ -5270,7 +5398,263 @@ async function queuedRestarts(opts, ref) {
     : entry ? `${name}: canceled queued restart for ${entry.terminal}.` : `No restart is queued for ${name}.`;
 }
 
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+// #1556: the handoff a seat writes before it is restarted from a fresh conversation. The file
+// lives under the app home, one per bot, and is emptied just before each request (a stale
+// handoff from an earlier pass, or bytes appended since, are never sent).
+const HANDOFF_DIR = "automagik-herdr/handoff";
+/** How long a seat may take to write its handoff before the pass reports it and leaves it running. */
+const HANDOFF_WAIT_MS = Math.max(50, Number(process.env.AUTOMAGIK_HERDR_HANDOFF_WAIT_MS) || 120_000);
+/** How often the wait looks at the pane and the file. */
+const HANDOFF_POLL_MS = Math.max(10, Math.min(2000, Number(process.env.AUTOMAGIK_HERDR_HANDOFF_POLL_MS) || 500));
+/** The longest handoff sent as a conversation's first message; the file keeps the rest. */
+const HANDOFF_MAX_CHARS = 64 * 1024;
+
+/** A bot's handoff file under the app home (#1556). */
+const handoffPathOf = (botId) => `${appHome()}/${HANDOFF_DIR}/${botId}.md`;
+
+/** What the seat is asked to write (#1556): the handoff's three parts, then end the turn. */
+const handoffRequestText = (bot, path) => `Context handoff for ${bot.name} (${bot.id}): your context is over its restart threshold. `
+  + `Write your handoff to ${path} now: what is in flight, what waits on whom, and your next three actions. `
+  + "Then end your turn; you will be restarted from that file.";
+
+/**
+ * Why the handoff at `path` can't be written (#1556), or null. Checked BEFORE the seat is asked:
+ * a pass that can't keep the handoff refuses instead of half-restarting. A handoff path that is
+ * not a plain file is refused too.
+ */
+function handoffRefusal(path) {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    let held = null;
+    try { held = lstatSync(path); } catch { /* not there yet */ }
+    if (held && !held.isFile()) return `${path} exists and is not a plain file`;
+    // Open it appending (making an empty file when it is absent): the same user's write the seat
+    // needs, with no temp file to sweep. The file is emptied again just before the request.
+    const fd = openSync(path, "a", 0o600);
+    closeSync(fd);
+    return null;
+  } catch (e) { return `${path} can't be written (${e?.message ?? e})`; }
+}
+
+/**
+ * Whether a handoff at `path` could be written, without creating anything (#1556, --dry-run).
+ * The same refusal the real pass gives, checked with lstat/access instead of an append open.
+ */
+function handoffWritable(path) {
+  try {
+    let held = null;
+    try { held = lstatSync(path); } catch { /* not there yet */ }
+    if (held && !held.isFile()) return `${path} exists and is not a plain file`;
+    if (held) { accessSync(path, constants.W_OK); return null; }
+    let dir = dirname(path);
+    for (;;) {
+      let st = null;
+      try { st = statSync(dir); } catch { /* not there */ }
+      if (st) {
+        if (!st.isDirectory()) return `${dir} is not a folder`;
+        accessSync(dir, constants.W_OK);
+        return null;
+      }
+      const up = dirname(dir);
+      if (up === dir) return `${path} can't be written`;
+      dir = up;
+    }
+  } catch (e) { return `${path} can't be written (${e?.message ?? e})`; }
+}
+
+/** Empties the handoff just before the ask (#1556): only bytes written after it can be sent. */
+function clearHandoff(path) {
+  try { const fd = openSync(path, "w", 0o600); closeSync(fd); return null; }
+  catch (e) { return `${path} can't be emptied (${e?.message ?? e})`; }
+}
+
+/** Whether `path` is a non-empty handoff file written at or after `since` (#1556). */
+function handoffReady(path, since) {
+  try { const st = statSync(path); return st.isFile() && st.size > 0 && st.mtimeMs >= since; } catch { return false; }
+}
+
+/** The handoff's text (#1556), or null when it isn't there or is empty. Cut only in the sent copy. */
+function readHandoff(path) {
+  const text = readText(path);
+  if (text === null || text.trim() === "") return null;
+  return text.length > HANDOFF_MAX_CHARS
+    ? `${text.slice(0, HANDOFF_MAX_CHARS)}\n\n[handoff cut at ${HANDOFF_MAX_CHARS} characters; read the whole file at ${path}]`
+    : text;
+}
+
+/**
+ * Waits after the request for a handoff NEWER than it while the pane is idle (#1556). One
+ * `AUTOMAGIK_HERDR_HANDOFF_WAIT_MS` limit; a pane that ends or a seat that keeps working past
+ * it is returned, never restarted. `{ state, get, idle, timedOut }`.
+ */
+async function waitForHandoff({ terminal, path, since, waitMs = HANDOFF_WAIT_MS, pollMs = HANDOFF_POLL_MS }) {
+  const began = Date.now();
+  for (;;) {
+    const state = await hcState(terminal);
+    if (state.state !== "live" || (state.get && state.get.labels && state.get.state === "finished")) {
+      return { state: state.state, get: state.get ?? null, idle: false, timedOut: false };
+    }
+    const screen = state.get?.status?.state !== "blocked" ? await readScreenText(terminal) : null;
+    const idle = isPaneIdle(state.get, screen);
+    if (idle && handoffReady(path, since)) return { state: "live", get: state.get, idle: true, timedOut: false };
+    if (Date.now() - began >= waitMs) return { state: "live", get: state.get, idle, timedOut: true };
+    await sleep(Math.max(10, Math.min(pollMs, waitMs - (Date.now() - began))));
+  }
+}
+
+/**
+ * Sends a written handoff as the new conversation's first message (#1556), once its agent is
+ * ready (hc's own order: wait, then send; a send to a booting agent can be dropped). Never
+ * throws: null, or one warning line naming the file and how to send it by hand.
+ */
+async function sendHandoffMessage(terminal, handoff, path) {
+  let said;
+  try {
+    await hc(["wait", terminal, "--timeout", String(FIRST_TASK_WAIT_S), "--json"], { timeout: (FIRST_TASK_WAIT_S + 10) * 1000 });
+    const r = await hc(["send", terminal, handoff]);
+    if (r.code === 0) return null;
+    said = hcSaid((r.stderr || r.stdout).trim()).split("\n")[0] || `exit ${r.code}`;
+  } catch (e) { said = e?.message ?? String(e); }
+  return `${path} wasn't sent to ${terminal} as its first message (hc send: ${said}); the file is still there: send it by hand with hc send ${terminal} "<handoff>".`;
+}
+
 const RETRY_QUEUED = Symbol("retry-queued");
+
+// ---- #1556: a handoff restart that failed or was dropped is kept, and its owner/lead told ----
+
+/** The last failed handoff restart per bot, under the app home; `am restart --queued` reads it. */
+const HANDOFF_FAILURES_PATH = () => join(appHome(), "automagik-herdr", "handoff-failures.json");
+/** How many failed bots the small record keeps; one per bot, newest first. */
+const HANDOFF_FAILURES_MAX = 20;
+
+const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * One stored row, normalized for printing and rewriting, or why it cannot be. A non-object row
+ * (JSON's null, string, number, array) is skipped, never read through; a row without a usable
+ * botName is skipped too; a row with one keeps its name and fills the fields it did not record
+ * with placeholders, so the reader never prints `undefined`.
+ */
+function handoffFailureRow(raw, index) {
+  const row = index + 1;
+  if (raw === null) return { skipped: { row, reason: "not an object (null)" } };
+  if (Array.isArray(raw)) return { skipped: { row, reason: "not an object (array)" } };
+  if (typeof raw !== "object") return { skipped: { row, reason: `not an object (${typeof raw})` } };
+  if (typeof raw.botName !== "string" || !raw.botName.trim()) return { skipped: { row, reason: "no usable botName" } };
+  const text = (value) => typeof value === "string" && value.trim() ? value : null;
+  return { row: {
+    at: text(raw.at) ?? "(time not recorded)",
+    kind: text(raw.kind) ?? "unknown",
+    botId: text(raw.botId) ?? (typeof raw.botId === "number" ? String(raw.botId) : null),
+    botName: raw.botName,
+    project: text(raw.project),
+    terminal: text(raw.terminal),
+    handoff: text(raw.handoff),
+    why: text(raw.why) ?? "(no reason recorded)",
+    report: text(raw.report),
+    notified: isRecord(raw.notified) ? { sent: text(raw.notified.sent), unsent: text(raw.notified.unsent) } : null,
+  } };
+}
+
+/** The record's usable rows and the malformed ones it skipped, each with its reason. */
+function readHandoffFailureRecord() {
+  const text = readText(HANDOFF_FAILURES_PATH());
+  if (text === null) return { rows: [], skipped: [] };
+  let stored;
+  try { stored = JSON.parse(text)?.failures; } catch { return { rows: [], skipped: [] }; }
+  if (!Array.isArray(stored)) return { rows: [], skipped: [] };
+  const rows = [], skipped = [];
+  for (const [index, raw] of stored.entries()) {
+    const read = handoffFailureRow(raw, index);
+    if (read.row) rows.push(read.row); else skipped.push(read.skipped);
+  }
+  return { rows, skipped };
+}
+
+/** The recorded failures: [{ at, kind, botId, botName, project, terminal, handoff, why, report, notified }]. */
+function readHandoffFailures() {
+  return readHandoffFailureRecord().rows;
+}
+
+/** Keeps `failure` as its bot's only row, newest first, 0600, replaced atomically. */
+async function recordHandoffFailure(failure) {
+  const file = HANDOFF_FAILURES_PATH();
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  await withLockAsync(`${file}.lock`, async () => {
+    const rows = [failure, ...readHandoffFailures().filter((row) => row.botId !== failure.botId)].slice(0, HANDOFF_FAILURES_MAX);
+    const tmp = `${file}.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(tmp, unprinted(`${JSON.stringify({ version: 1, failures: rows })}\n`), { mode: 0o600 });
+      chmodSync(tmp, 0o600);
+      renameSync(tmp, file);
+    } finally { try { unlinkSync(tmp); } catch {} }
+  });
+}
+
+/** Drops a bot's failure row after a later handoff restart reaches its new conversation. */
+async function clearHandoffFailure(botId) {
+  const rows = readHandoffFailures();
+  if (!rows.some((row) => row.botId === botId)) return;
+  const file = HANDOFF_FAILURES_PATH();
+  await withLockAsync(`${file}.lock`, async () => {
+    const left = readHandoffFailures().filter((row) => row.botId !== botId);
+    const tmp = `${file}.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(tmp, unprinted(`${JSON.stringify({ version: 1, failures: left })}\n`), { mode: 0o600 });
+      chmodSync(tmp, 0o600);
+      renameSync(tmp, file);
+    } finally { try { unlinkSync(tmp); } catch {} }
+  });
+}
+
+/**
+ * One line to a project's main bot, the pack's existing report path: the same `hc send` `am
+ * revive` uses, to the live pane the attach ledger binds. Never throws: { sent, unsent }.
+ */
+async function reportToMainBot(projectKey, line) {
+  let project;
+  try { project = loadProject(projectKey); } catch (e) { return { sent: null, unsent: `its project couldn't be read (${e?.message ?? e})` }; }
+  const main = mainBotOf(project.file);
+  if (!main) return { sent: null, unsent: "the project has no main bot that can be read" };
+  let view;
+  try { view = await attachView(); } catch (e) { return { sent: null, unsent: `its attach ledger couldn't be read (${e?.message ?? e})` }; }
+  const held = liveFor(view, main.id, project);
+  if (!held) return { sent: null, unsent: `${main.name} has no pane` };
+  const terminal = held.binding.terminal;
+  try {
+    const state = await hcState(terminal);
+    if (state.state !== "live" || state.get?.created_ms !== held.binding.created_ms || !agentInForeground(state.get)) {
+      return { sent: null, unsent: `${main.name}'s pane ${terminal} runs no agent` };
+    }
+    const r = await hc(["send", terminal, line]);
+    if (r.code === 0) return { sent: terminal, unsent: null };
+    return { sent: null, unsent: `hc send ${terminal} failed (${hcSaid((r.stderr || r.stdout).trim())})` };
+  } catch (e) { return { sent: null, unsent: `the report to ${terminal} couldn't be sent (${e?.message ?? e})` }; }
+}
+
+/**
+ * Persists a handoff restart that failed or was dropped (#1556) and tells the project's main
+ * bot through `reportToMainBot` (the revive path) unless `notify` is false (a pass that already
+ * reported it to the person running it). `kind`: "timeout", "refused", "helpers", "dropped" or
+ * "send". Never throws: a failed record or send must not hide the failure itself.
+ */
+async function noteHandoffFailure({ botId, botName, project, terminal }, kind, why, handoff, { notify = true } = {}) {
+  const said = unprinted(String(why ?? ""));
+  const detail = said.startsWith(`${botName}: `) ? said.slice(botName.length + 2) : said;
+  const report = `${botName}: a handoff restart failed (${kind}): ${firstSentence(detail)}.`;
+  let notified = null;
+  if (notify) {
+    try { notified = await reportToMainBot(project, report); } catch (e) { notified = { sent: null, unsent: `the report wasn't sent (${e?.message ?? e})` }; }
+  }
+  try {
+    await recordHandoffFailure({ at: new Date().toISOString(), kind, botId, botName, project: project ?? null, terminal: terminal ?? null,
+      handoff: handoff ?? null, why: said, report, notified });
+  } catch { /* the thrown error and the queue entry already say it */ }
+  return { report, notified };
+}
+
 
 async function runQueuedRestart(opts) {
   const queueId = opts["run-queued"];
@@ -5281,12 +5665,36 @@ async function runQueuedRestart(opts) {
   let entry = current();
   if (!entry) return PRINTED;
   let helperBlockedSince = null;
+  // #1556: a queued handoff restart asks for the handoff once its seat is idle, waits for a
+  // file newer than the ask, then runs the same --fresh --tree restart and sends the file as
+  // the new conversation's first message. A seat that never writes it is left running.
+  const handoff = entry.options?.handoff === true;
+  const handoffFile = handoff ? handoffPathOf(entry.botId) : null;
+  let askedAt = null;
   const drop = () => editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === queueId); if (i >= 0) rows.splice(i, 1); });
   try {
     for (;;) {
-      if (Date.now() - began >= maxMs) return PRINTED;
+      if (Date.now() - began >= maxMs) {
+        if (handoff) {
+          await noteHandoffFailure(entry, "dropped", `${entry.botName}: its queued handoff restart waited `
+            + `${Math.round(maxMs / 1000)}s without the seat becoming idle, so it was dropped.`, handoffFile);
+        }
+        return PRINTED;
+      }
       const state = await hcState(entry.terminal);
-      if (["gone", "finished"].includes(state.state) || (state.get && entry.created_ms != null && state.get.created_ms !== entry.created_ms)) {
+      const moved = Boolean(state.get && entry.created_ms != null && state.get.created_ms !== entry.created_ms);
+      if (["gone", "finished"].includes(state.state) || moved) {
+        if (handoff) {
+          // A detached watcher's stderr dies with its --rm pane: a seat that ends or is reused
+          // before the restart must leave the same record — and word to the lead — as every
+          // other failed handoff, never a silent return (#1556).
+          const why = state.state === "gone"
+            ? `${entry.botName}: its pane ${entry.terminal} is gone before the queued handoff restart, so it was dropped and not restarted.`
+            : state.state === "finished"
+              ? `${entry.botName}: its pane ${entry.terminal} finished before the queued handoff restart, so it was dropped and not restarted.`
+              : `${entry.botName}: its pane ${entry.terminal} was reused (created_ms ${entry.created_ms} -> ${state.get.created_ms}) before the queued handoff restart, so it was dropped and not restarted.`;
+          await noteHandoffFailure(entry, "dropped", why, handoffFile);
+        }
         return PRINTED;
       }
       // A blocked pane is never idle: skip the screen read (an hc RPC on every poll).
@@ -5298,12 +5706,86 @@ async function runQueuedRestart(opts) {
         ? restartRefusal({ name: entry.botName, old: { ...state.get, status: { state: "idle" } }, helpers,
           force: false, tree: entry.options?.tree })
         : null;
+      if (idle && !helperRefusal && handoff && askedAt === null) {
+        // Emptied before the send: an agent that appends an answer to an earlier handoff, or
+        // merely touches the file, can never have that text sent (#1556).
+        const why = clearHandoff(handoffFile);
+        if (why) {
+          await drop();
+          throw new CliError(`${entry.botName}: ${why}, so it was not asked and was not restarted; `
+            + `the seat still runs in ${entry.terminal}.`, 1, { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
+        }
+        // Stamped BEFORE the send: an agent that writes during the send's own round trip is
+        // still answering this request, never a stale handoff from an earlier pass.
+        askedAt = Date.now();
+        const r = await hc(["send", entry.terminal, handoffRequestText({ name: entry.botName, id: entry.botId }, handoffFile)]);
+        if (r.code !== 0) {
+          await drop();
+          throw new CliError(`${entry.botName}: couldn't be asked for its handoff in ${entry.terminal} (hc send: `
+            + `${hcSaid((r.stderr || r.stdout).trim())}); it is still running and was not restarted.`, 1,
+          { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
+        }
+        // Look again before the first wait: an agent that writes at once ends its turn in it.
+        entry = current();
+        if (!entry) return PRINTED;
+        continue;
+      }
+      if (idle && !helperRefusal && handoff && !handoffReady(handoffFile, askedAt)) {
+        const waited = Date.now() - askedAt;
+        if (waited >= HANDOFF_WAIT_MS) {
+          await drop();
+          throw new CliError(`${entry.botName}: still running in ${entry.terminal}; it didn't write ${handoffFile} `
+            + `within ${Math.round(HANDOFF_WAIT_MS / 1000)}s, so it was not restarted.`, 1,
+          { refused: "handoff", terminal: entry.terminal, handoffKind: "timeout" });
+        }
+        await sleep(Math.max(10, Math.min(HANDOFF_POLL_MS, HANDOFF_WAIT_MS - waited)));
+        entry = current();
+        if (!entry) return PRINTED;
+        continue;
+      }
       if (idle && !helperRefusal) {
+        // The handoff has to be there and readable BEFORE anything starts: an empty or missing
+        // file refuses here, with the seat still running, never a fresh conversation with nothing.
+        const handoffText = handoff ? readHandoff(handoffFile) : null;
+        if (handoff && !handoffText) {
+          await drop();
+          throw new CliError(`${entry.botName}: ${handoffFile} is missing or empty, so it was not restarted; `
+            + `the seat still runs in ${entry.terminal}.`, 1, { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
+        }
         const saved = Object.fromEntries(Object.entries(entry.options ?? {}).filter(([, value]) => value !== null));
         const callOpts = { ...saved, "fresh-shared": saved.freshShared, project: entry.project, force: false,
-          json: opts.json, _queuedTarget: entry };
+          json: handoff ? true : opts.json, _queuedTarget: entry };
         const result = await cmdRestart(callOpts, [entry.botId]);
-        if (result !== RETRY_QUEUED) return result;
+        if (result !== RETRY_QUEUED) {
+          if (!handoff) return result;
+          if (result === PRINTED) {
+            // cmdRestart's fire-time look can find the seat no longer its live pane. A person's
+            // cancel already removed the entry, so only a surviving entry is a drop (#1556).
+            if (current()) {
+              const now = await hcState(entry.terminal);
+              const moved = Boolean(now.get && entry.created_ms != null && now.get.created_ms !== entry.created_ms);
+              const why = ["gone", "finished"].includes(now.state)
+                ? `${entry.botName}: its pane ${now.state === "gone" ? "is gone" : "finished"} at the restart, so the queued handoff restart was dropped and it was not restarted.`
+                : moved
+                  ? `${entry.botName}: its pane was reused (created_ms ${entry.created_ms} -> ${now.get.created_ms}) at the restart, so the queued handoff restart was dropped and it was not restarted.`
+                  : `${entry.botName}: its pane ${entry.terminal} is no longer its live seat at the restart, so the queued handoff restart was dropped and it was not restarted.`;
+              await noteHandoffFailure(entry, "dropped", why, handoffFile);
+            }
+            return PRINTED;
+          }
+          const terminal = typeof result === "object" && result ? result.terminal : null;
+          const warning = terminal
+            ? await sendHandoffMessage(terminal, handoffText, handoffFile)
+            : `${handoffFile} wasn't sent: the restart gave no new terminal; read it by hand.`;
+          if (warning) {
+            report([warning]);
+            await noteHandoffFailure(entry, "send", warning, handoffFile);
+          } else {
+            await clearHandoffFailure(entry.botId);
+          }
+          return opts.json ? { ...result, handoff: handoffFile, ...(warning ? { warning } : {}) }
+            : `${entry.botName}: restarted from ${handoffFile}${terminal ? ` in ${terminal}` : ""}${warning ? `; ${warning}` : ""}.`;
+        }
         // cmdRestart's fire-time check kept it: wait for the helper or the next idle at the slow floor.
         helperRefusal = callOpts._queuedRefusal ?? null;
       }
@@ -5315,7 +5797,7 @@ async function runQueuedRestart(opts) {
           if (isPaneIdle(state.get, screen)) {
             try { await hc(["send", entry.terminal, `${entry.botName}: queued restart refused — ${helperRefusal}`]); } catch {}
           }
-          throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: entry.terminal });
+          throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: entry.terminal, handoffKind: "helpers" });
         }
       } else {
         helperBlockedSince = null;
@@ -5335,6 +5817,14 @@ async function runQueuedRestart(opts) {
       entry = current();
       if (!entry) return PRINTED;
     }
+  } catch (e) {
+    // #1556: a detached watcher's stderr dies with its --rm pane, so a failed or dropped
+    // handoff is kept under the app home and the project's main bot is told before it exits.
+    if (handoff) {
+      const kind = e?.detail?.handoffKind ?? (e instanceof CliError ? "refused" : "dropped");
+      await noteHandoffFailure(entry, kind, e?.message ?? String(e), handoffFile);
+    }
+    throw e;
   } finally {
     // Every exit path leaves no stale entry: fired, canceled, expired, or a failed fire.
     await drop();
@@ -5348,9 +5838,10 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
     const i = rows.findIndex((e) => e.botId === bot.id);
     if (i >= 0) { const [prev] = rows.splice(i, 1); await killQueuedWatcher(prev.watcher); }
     const e = { id: queueId, botId: bot.id, botName: bot.name, project: key, terminal: old.address, created_ms: old.created_ms ?? null,
-      reason: dialog ? "blocked" : "working", dialog, options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
+      reason: opts.handoff ? "due" : dialog ? "blocked" : "working", dialog, options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
         model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
         cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null,
+        ...(opts.handoff ? { handoff: true, contextTokens: opts.contextTokens ?? null, restartAt: opts.restartAt ?? null } : {}),
         ...(recovered ? { recoveredHome: true } : {}) }, watcher: null, at: new Date().toISOString() };
     // Persist before starting: the detached process may read immediately, then takes this lock.
     const file = queuePath(), tmp = `${file}.${process.pid}`;
@@ -5393,8 +5884,239 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
   });
   if (opts.json) return { id: bot.id, queued: true, terminal: old.address, reason: entry.reason, dialog,
     watcher: entry.watcher, mode: plan.mode, agent: plan.agent, model: plan.model };
+  if (opts.handoff) {
+    return `${bot.name}: handoff restart queued for ${old.address} (context ${opts.contextTokens ?? "?"} over restartAt ${opts.restartAt ?? "?"}); `
+      + `it writes its handoff at its next idle, then restarts from ${handoffPathOf(bot.id)} (am restart --queued lists it; am restart --cancel ${bot.id} cancels it).`;
+  }
   const why = dialog ? `blocked on dialog "${dialog.question}" — ${dialog.who} must answer it in ${old.address}; Herdr never answers dialogs` : `${bot.name} is working in ${old.address}`;
   return `${bot.name}: restart queued for ${old.address} (${why}); it will restart and resume at its next idle (am restart --queued lists it; am restart --cancel ${bot.id} cancels it; pass --force to restart now).`;
+}
+
+/** Whether the pane is idle now (#1556): a live get, its screen and the one restart idle rule. */
+async function paneNow(terminal) {
+  const state = await hcState(terminal);
+  if (state.state !== "live") return { state: state.state, get: state.get ?? null, screen: null, idle: false };
+  const screen = state.get?.status?.state !== "blocked" ? await readScreenText(terminal) : null;
+  return { state: "live", get: state.get, screen, idle: isPaneIdle(state.get, screen) };
+}
+
+/**
+ * A handoff restart already queued for `botId` (#1556), which a periodic pass must leave alone.
+ * A queue entry whose watcher is gone can never fire, so that entry is dropped here.
+ */
+async function queuedHandoffFor(botId) {
+  const entry = readRestartQueue().find((e) => e.botId === botId && e.options?.handoff === true);
+  if (!entry) return null;
+  if (entry.watcher) {
+    const state = await hcState(entry.watcher);
+    if (["gone", "finished"].includes(state.state)) {
+      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); });
+      return null;
+    }
+  }
+  return entry;
+}
+
+/**
+ * `am restart --due` (#1556): the seats whose measured Claude Code context is over their
+ * `restartAt`, asked for a handoff and restarted from it. An idle seat goes through the pass
+ * now; a working or blocked one is queued (the watcher asks, waits and restarts at its next
+ * idle). `--dry-run` prints the plan and touches nothing. A seat that doesn't write its
+ * handoff in time is left running and named in the report; a pass that can't keep a handoff
+ * refuses it before asking. This computer only: a linked machine's logs are there.
+ */
+async function cmdRestartDue(opts) {
+  if (opts.machine !== undefined) {
+    throw new CliError("--due measures this computer's Claude Code session logs; run the pass on the machine whose seats it restarts "
+      + "(a linked machine's own am).", 2);
+  }
+  const invalid = ["fresh", "tree", "force", "fresh-shared", "save", "cancel", "queued", "agent", "model", "cwd", "space", "tab"]
+    .filter((k) => opts[k] !== undefined && opts[k] !== false);
+  if (invalid.length) {
+    throw new CliError(`--due restarts from a handoff, fresh, with the seat's helpers: it takes no --${invalid[0]}, `
+      + "--all or --dry-run.", 2);
+  }
+  const dry = opts["dry-run"] === true;
+  const keys = [await commandKeyOf(opts)];
+  if (opts.all) for (const key of rememberedKeys()) if (!keys.includes(key)) keys.push(key);
+  if (dry) return restartDuePass(opts, keys, true);
+  // One pass at a time per app home: two timers must not measure the same seat and race its
+  // restart (#1556). A second pass says so instead of waiting behind a handoff wait.
+  const lock = join(appHome(), "automagik-herdr", "restart-due.lock");
+  mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
+  let token;
+  try { token = await takeLockAsync(lock, LOCK_WAIT, "another restart --due pass"); } catch (e) {
+    const why = `another restart --due pass is already running, so this pass did nothing (${e?.message ?? e}).`;
+    return opts.json ? { due: [], restarted: [], queued: [], failed: [], notes: [why] } : why;
+  }
+  const stop = keepFresh(lock, token);
+  try { return await restartDuePass(opts, keys, false); } finally { stop(); dropLock(lock, token); }
+}
+
+/** The measured, acted-on pass behind `cmdRestartDue` (#1556); `dry` only reports it. */
+async function restartDuePass(opts, keys, dry) {
+  const { view, hcError } = await viewOrError();
+  if (hcError) throw new CliError(`hc couldn't list this computer's panes, so no seat's context was read (${hcError}); nothing was asked or restarted.`);
+  const ledger = workerLedgerRows();
+  const notes = [];
+  const due = [];
+  for (const key of keys) {
+    let project;
+    try { project = loadProject(key); } catch (e) { notes.push(`${key}: ${e.message}`); continue; }
+    for (const bot of project.file.bots) {
+      if (bot.planned) continue;
+      const threshold = restartAtOf(bot);
+      if (threshold === null) continue;
+      const live = view ? liveFor(view, bot.id, project) : null;
+      if (!live) continue;
+      if (process.env.HC_TERMINAL_ID && live.binding.terminal === process.env.HC_TERMINAL_ID) {
+        notes.push(`${bot.name}: the pass runs inside its own pane; run it from a timer or another pane.`);
+        continue;
+      }
+      const context = seatContext(project, bot, live.get, ledger);
+      if (!context || !Number.isFinite(context.tokens)) continue;
+      if (!(context.tokens > threshold)) continue;
+      due.push({ key, project, bot, threshold, tokens: context.tokens, terminal: live.binding.terminal,
+        created_ms: live.get?.created_ms ?? live.binding.created_ms ?? null, live: live.get });
+    }
+  }
+  const line = (r) => `${r.bot.name} (${r.bot.id}) at ${r.terminal} in ${r.key}: context ${r.tokens} > restartAt ${r.threshold}`;
+  if (dry) {
+    const plans = due.map((r) => {
+      const path = handoffPathOf(r.bot.id);
+      return { ...r, path, refusal: handoffWritable(path) };
+    });
+    if (opts.json) return { due: plans.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key,
+      terminal: r.terminal, context_tokens: r.tokens, restart_at: r.threshold, handoff: r.path,
+      refused: r.refusal ?? null })) };
+    return plans.length
+      ? plans.map((r) => `${line(r)}; ${r.refusal ? `would be refused: ${r.refusal}; it would not be asked and not restarted.`
+        : "would be asked for its handoff, then restarted from it."}`).concat(notes).join("\n")
+      : ["No seat is over its context threshold.", ...notes].join("\n");
+  }
+  if (!due.length) {
+    if (opts.json) return { due: [], restarted: [], queued: [], failed: [] };
+    return ["No seat is over its context threshold.", ...notes].join("\n");
+  }
+  const restarted = [], queued = [], failed = [];
+  const say = [];
+  for (const r of due) {
+    const path = handoffPathOf(r.bot.id);
+    const refuse = async (why, kind = "refused") => {
+      failed.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, error: why });
+      say.push(`${r.bot.name}: not restarted: ${why}`);
+      report([`${r.bot.name}: not restarted: ${why}`]);
+      await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, kind, why, path, { notify: false });
+    };
+    // A timer can tick again while this seat's handoff watcher still waits: replacing that
+    // entry would kill the watcher every tick and the seat would never restart (#1556).
+    const already = await queuedHandoffFor(r.bot.id);
+    if (already) {
+      const left = `${r.bot.name}: already queued for a handoff restart on ${already.terminal}; this pass left that queue entry `
+        + "and its watcher alone.";
+      say.push(left);
+      if (opts.json) notes.push(left);
+      continue;
+    }
+    const why = handoffRefusal(path);
+    if (why) {
+      await refuse(`${why}; it was not asked for a handoff and was not restarted.`);
+      continue;
+    }
+    try {
+      const now = await paneNow(r.terminal);
+      if (now.state !== "live") {
+        // The measured seat ended before the ask. A foreground pass tells its person; the record
+        // is also kept so `am restart --queued` can answer for it later (#1556).
+        const why = `not running in ${r.terminal} any more; nothing was asked or restarted.`;
+        say.push(`${r.bot.name}: ${why}`);
+        report([`${r.bot.name}: ${why}`]);
+        await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, "dropped", why, path, { notify: false });
+        continue;
+      }
+      if (!now.idle) {
+        const entry = await queueRestart({ bot: r.bot, key: r.key, old: now.get, screen: now.screen,
+          opts: { ...opts, fresh: true, tree: true, handoff: true, json: true, contextTokens: r.tokens, restartAt: r.threshold },
+          wanted: null, plan: { mode: "fresh", agent: r.bot.agent, model: r.bot.model ?? null }, recovered: false });
+        queued.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, reason: entry.reason, watcher: entry.watcher,
+          context_tokens: r.tokens, restart_at: r.threshold, handoff: path });
+        say.push(`${line(r)}; queued until its next idle, then asked for its handoff and restarted from it `
+          + `(am restart --queued lists it; the handoff is ${path}).`);
+        continue;
+      }
+      // Empty before asking: only what the seat writes for THIS request can be sent (#1556).
+      const cleared = clearHandoff(path);
+      if (cleared) {
+        await refuse(`${cleared}; it was not asked for a handoff and was not restarted.`);
+        continue;
+      }
+      // Ask now, then wait for a file written after the ask and an idle seat.
+      const since = Date.now();
+      const sent = await hc(["send", r.terminal, handoffRequestText(r.bot, path)]);
+      if (sent.code !== 0) throw new CliError(`couldn't ask for its handoff (hc send: ${hcSaid((sent.stderr || sent.stdout).trim())})`);
+      const ready = await waitForHandoff({ terminal: r.terminal, path, since });
+      if (ready.timedOut) {
+        await refuse(`still running in ${r.terminal}; it didn't write ${path} within ${Math.round(HANDOFF_WAIT_MS / 1000)}s, so it was not restarted.`, "timeout");
+        continue;
+      }
+      if (ready.state !== "live") {
+        await refuse(`its pane ended (${ready.state}) before it wrote ${path}; nothing was restarted.`, "dropped");
+        continue;
+      }
+      const handoff = readHandoff(path);
+      if (!handoff) {
+        await refuse(`${path} is empty; it was not restarted and ${r.terminal} still runs it.`);
+        continue;
+      }
+      const result = await cmdRestart({ fresh: true, tree: true, json: true, project: r.key,
+        _targetPin: { terminal: r.terminal, created_ms: r.created_ms } }, [r.bot.id]);
+      if (result === PRINTED) {
+        say.push(`${r.bot.name}: restarted in place from ${path}.`);
+        restarted.push({ id: r.bot.id, name: r.bot.name, terminal: null, handoff: path });
+        continue;
+      }
+      if (result && result.queued) {
+        // The seat took a turn between the check and the restart: take the plain queue entry
+        // back and queue the handoff-aware one instead, so the file is not lost.
+        await cmdRestart({ cancel: true, json: true, project: r.key }, [r.bot.id]);
+        const again = await paneNow(r.terminal);
+        if (again.state !== "live") {
+          // The seat ended between the handoff and the queued restart: the written handoff was
+          // not queued, so record the drop too (the foreground pass reports it as well, #1556).
+          const why = `its pane ended (${again.state}) after the handoff was written, so it was not queued for a handoff restart.`;
+          say.push(`${r.bot.name}: ${why}`);
+          report([`${r.bot.name}: ${why}`]);
+          await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, "dropped", why, path, { notify: false });
+          continue;
+        }
+        const entry = await queueRestart({ bot: r.bot, key: r.key, old: again.get, screen: again.screen,
+          opts: { ...opts, fresh: true, tree: true, handoff: true, json: true, contextTokens: r.tokens, restartAt: r.threshold },
+          wanted: null, plan: { mode: "fresh", agent: r.bot.agent, model: r.bot.model ?? null }, recovered: false });
+        queued.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, reason: entry.reason, watcher: entry.watcher,
+          context_tokens: r.tokens, restart_at: r.threshold, handoff: path });
+        say.push(`${line(r)}; it took a turn, so it is queued until its next idle and restarted from ${path}.`);
+        continue;
+      }
+      const terminal = result && typeof result === "object" ? result.terminal : null;
+      const warning = terminal ? await sendHandoffMessage(terminal, handoff, path) : `${path} wasn't sent: the restart gave no new terminal.`;
+      if (warning) {
+        report([warning]);
+        await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal }, "send", warning, path, { notify: false });
+      } else {
+        await clearHandoffFailure(r.bot.id);
+      }
+      restarted.push({ id: r.bot.id, name: r.bot.name, terminal, handoff: path, context_tokens: r.tokens, restart_at: r.threshold,
+        ...(warning ? { warning } : {}) });
+      say.push(`${r.bot.name}: context ${r.tokens} > restartAt ${r.threshold}; restarted from ${path}`
+        + `${terminal ? ` in ${terminal}` : ""}${warning ? `; ${warning}` : ""}.`);
+    } catch (e) {
+      await refuse(e?.message ?? String(e), e?.detail?.handoffKind ?? (e instanceof CliError ? "refused" : "dropped"));
+    }
+  }
+  if (failed.length) exitAfter.code = 1;
+  if (opts.json) return { due: due.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key, terminal: r.terminal,
+    context_tokens: r.tokens, restart_at: r.threshold })), restarted, queued, failed, notes };
+  return [...say, ...notes].join("\n");
 }
 
 // Read only env's launch prefix. A template command or foreground process cannot vouch for
@@ -5780,6 +6502,10 @@ function recoveredLogin(old, argv) {
 
 async function cmdRestart(opts, [ref]) {
   if (opts["run-queued"]) return runQueuedRestart(opts);
+  if (opts.due) {
+    if (ref) throw new CliError("restart --due takes no bot: it lists every seat over its threshold, or take one with am restart <bot>.", 2);
+    return cmdRestartDue(opts);
+  }
   if (opts.queued || opts.cancel) return queuedRestarts(opts, ref);
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   const swap = opts.agent !== undefined || opts.model !== undefined;
@@ -5862,6 +6588,13 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   const view = await attachView({ readOnly: true });
   const held = target.held;
   let old = held?.get ?? null;
+  // #1556: a due pass restarts only the pane it measured; a person's restart or another pass
+  // may have moved the seat while the handoff was being written.
+  const pin = opts._targetPin ?? null;
+  if (pin && (!old || old.address !== pin.terminal || (pin.created_ms != null && old.created_ms !== pin.created_ms))) {
+    throw new CliError(`${bot.name}: the pane this pass measured (${pin.terminal}) is no longer its live seat, so it was not restarted.`,
+      1, { refused: "handoff", terminal: pin.terminal });
+  }
   const recheck = async (argv) => {
     const current = await restartTarget(project, bot, appHome(), true);
     if ((current.held ? attachKey(current.held.binding) : null) !== (held ? attachKey(held.binding) : null)) {
@@ -9237,7 +9970,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   if (!run) { process.stderr.write(`am: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
   try {
     if (command === "main") checkMainArgs(rest, tokens);
-    if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"]))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
+    if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"] || opts.due))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
     if (opts.machine !== undefined && !ON_MACHINE.has(command)) {
       throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
     }
