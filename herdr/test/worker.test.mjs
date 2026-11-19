@@ -6,7 +6,7 @@ import net from "node:net";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -90,6 +90,13 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   writeFileSync(appLog, "");
   const env = { ...process.env, XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", GIT_CEILING_DIRECTORIES: root };
+  // The dsh-tui install's stable copies a sandboxed worker's PATH names (guard and kill shim).
+  const stable = join(env.XDG_DATA_HOME, "automagik-herdr", "dsh-sandbox");
+  for (const [dir, from] of [["guard", GUARD_DIR], ["hc-kill", KILL_GUARD_DIR]]) {
+    mkdirSync(join(stable, dir), { recursive: true });
+    copyFileSync(join(from, "hc"), join(stable, dir, "hc"));
+    chmodSync(join(stable, dir, "hc"), 0o755);
+  }
   const core = startStatusCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   Object.assign(env, { ...core.env });
   Object.assign(env, { HC_SESSION: "" });
@@ -339,7 +346,8 @@ test("a dsh-tui worker reads its bot's approved switch; other agents keep the or
 
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
 // other words (the tool-cache grants follow the runner's environment, so they are not compared).
-const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+  "-c", "allow_login_shell=false"];
 // #1420: a Codex worker start's per-launch trust word for exactly its worktree.
 const TRUST = (worktree) => ["-c", `projects={"${worktree}"={trust_level="trusted"}}`];
 const grantsApart = (words) => {
@@ -977,6 +985,18 @@ test("start and attach append a seat row to the ledger", (t) => {
   assert.equal(seat.template, null, "a seat runs no template");
 });
 
+test("#1262: a seat start gets the longer hc run timeout too, and a timed-out run is recorded by name", (t) => {
+  const s = scene(t);
+  const done = join(s.root, "seat-run-answered");
+  hcStateExtra(s, { runDelayMs: 16_000, runDelayDone: done });
+  const r = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "20000" } });
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(done), "the seat's hc run was allowed to answer past the old 15 s timeout");
+  const seat = s.ledger().find((x) => x.kind === "seat");
+  assert.equal(seat.terminal, "t100");
+  assert.equal(seat.botId, ID.main);
+});
+
 // ---- hc templates ----
 
 test("worker --template: hc's template form, a child of the bot's pane in the worktree, labelled; ledger names it", (t) => {
@@ -1008,6 +1028,87 @@ test("worker --template: hc's template form, a child of the bot's pane in the wo
   assert.equal(text.code, 0, text.err);
   assert.match(text.out, /template  opus-rev \(runs claude\)/);
   assert.ok(existsSync(join(s.project, ".claude/worktrees/feat-review/.claude/settings.local.json")), "a Claude template gets the hook");
+});
+
+// ---- #1262: hc's first-status wait outlasts the old 15 s program timeout ----
+
+/** Puts `fields` on the scene's fake-hc state (a template that reports no status, say). */
+const hcStateExtra = (s, fields) => {
+  const st = s.hcState();
+  Object.assign(st, fields);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+};
+
+test("#1262: a template worker that reports no status is waited for past hc's 60 s first-status wait and recorded", (t) => {
+  const s = scene(t);
+  // hc itself waits 60 s for a template's new terminal to report a status before it answers.
+  const done = join(s.root, "run-answered");
+  hcStateExtra(s, { runDelayMs: 61_000, runDelayDone: done });
+  const began = Date.now();
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  const took = Date.now() - began;
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(done), "hc's run was allowed to answer, not killed at 15 s");
+  assert.ok(took >= 60_000, `the start waited hc's first-status wait (${took} ms)`);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.doesNotMatch(r.err, /task wasn't delivered/, "hc answered: the task did go in");
+});
+
+test("#1262: an hc run that outlasts its timeout is still recorded: the terminal it started is found by name", (t) => {
+  const s = scene(t);
+  // The fake hc creates and saves the terminal, then waits far past the call's own timeout, as a
+  // program that never reports a status makes hc wait after the terminal already exists.
+  hcStateExtra(s, { runDelayMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.ok(s.hcState().terminals.some((x) => x.address === "t100" && x.state === "live"), "the worker is live");
+});
+
+test("#1262: the late lookup records the worker's own terminal, never a newer one whose name shares its prefix", (t) => {
+  const s = scene(t);
+  // Someone else's newer terminal, named with the worker's prefix: a lookup by prefix (or by the
+  // newest terminal) must not record this one as the worker.
+  const st = s.hcState();
+  st.terminals.push({ address: "t99", name: "e2e-x-helper", cwd: s.project, state: "live", parent: null,
+    created_ms: Date.now() + 1_000_000, labels: {}, foreground: { argv: ["zsh"], cwd: s.project, pid: 4999 },
+    status: { app: "zsh", state: "idle" } });
+  st.runDelayMs = 10_000;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100", "the worker's own terminal, never the newer t99");
+  assert.match(r.err, /hc send t100/);
+});
+
+test("#1262: a timeout with no terminal under the name is a failed start, never a recorded worker", (t) => {
+  const s = scene(t);
+  // The fake waits before it creates the terminal, so the call's timeout leaves nothing behind.
+  hcStateExtra(s, { runDelayBeforeMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /didn't answer within 0.8s and no live terminal is named e2e-x/);
+  assert.equal(s.ledger().some((x) => x.kind === "worker"), false, "no worker row for a terminal that never ran");
+});
+
+test("#1262: hc's first_message sent false is said as started without its task, and the worker is recorded", (t) => {
+  const s = scene(t);
+  hcStateExtra(s, { runFirstMessage: { sent: false, reason: "it never reported its status, so it may be showing a dialog" } });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  assert.equal(s.ledger().find((x) => x.kind === "worker").terminal, "t100");
 });
 
 test("worker --template with --agent, --model or --effort is refused; an unknown template too, before any worktree", (t) => {

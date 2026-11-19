@@ -61,11 +61,21 @@ FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d
 # secrecy scan refuses); the shell and libraries Bots need stay.
 COPY --from=base / /out/rootfs
 
+# `binutils` is build-only (this stage never reaches the runtime image): it strips the distroless
+# Node binary, which ships with its DWARF and static symbol sections (17.8 MB of the 122.5 MB
+# file). Nothing in the image reads them, and --strip-all keeps the dynamic symbol table, so
+# modules load and JS stack traces are unchanged (C++ symbol names in a native trace are gone).
+# The binary is the only unstripped ELF in the base.
 RUN set -eux; \
     rm -rf /out/rootfs/usr/share/doc /out/rootfs/usr/share/man /out/rootfs/usr/share/info /out/rootfs/usr/share/lintian; \
     apt-get update; \
-    apt-get install -y --no-install-recommends bash dash git ripgrep ca-certificates util-linux tar gzip findutils; \
+    apt-get install -y --no-install-recommends bash dash git ripgrep ca-certificates util-linux tar gzip findutils binutils; \
     rm -rf /var/lib/apt/lists/*; \
+    node_before="$(stat -c %s /out/rootfs/nodejs/bin/node)"; \
+    chmod u+w /out/rootfs/nodejs/bin/node; \
+    strip --strip-all /out/rootfs/nodejs/bin/node; \
+    chmod 0555 /out/rootfs/nodejs/bin/node; \
+    echo "node: stripped ${node_before} -> $(stat -c %s /out/rootfs/nodejs/bin/node) bytes"; \
     mkdir -p /out/bin /out/lib /out/data/dsh /out/data/bots /out/data/workspace /out/data/secrets; \
     for f in /bin/bash /bin/dash /usr/bin/git /usr/bin/rg /usr/bin/flock /bin/tar /bin/gzip /usr/bin/find /usr/lib/git-core/*; do ldd "$f" 2>/dev/null || true; done \
       | awk '/=>/ {print $3}' | sort -u > /tmp/libs; \

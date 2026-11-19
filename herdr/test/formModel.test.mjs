@@ -430,6 +430,16 @@ test("formFrom: a stored gemini bot opens on antigravity with its gemini-era pin
   assert.deepEqual([kept.agent, kept.pin], ["claude", "opus"]);
 });
 
+test("#1413: the form keeps a stored Claude permission mode it doesn't edit, and another agent drops it", () => {
+  const stored = { ...FILE.bots.find((b) => b.id === "b-mainaaaaaa"), permissionMode: "bypassPermissions" };
+  const file = { ...FILE, bots: FILE.bots.map((b) => (b.id === stored.id ? stored : b)) };
+  const saved = (state) => applyBotEdit(file, entryOf(state, file).entry).bots.find((b) => b.id === stored.id);
+  assert.equal(saved(formFrom({ mode: "edit", bot: stored })).permissionMode, "bypassPermissions",
+    "a form edit that names no permission mode writes the stored one back");
+  const moved = saved({ ...formFrom({ mode: "edit", bot: stored }), agent: "codex" });
+  assert.equal(moved.permissionMode, undefined, "another agent has no Claude Code permission mode");
+});
+
 test("#1411: the form keeps a stored effort and tier it doesn't edit, and a model or agent change drops what no longer applies", () => {
   const stored = { ...FILE.bots.find((b) => b.id === "b-devaaaaaaa"), effort: "high", tier: "fast" };
   const file = { ...FILE, bots: FILE.bots.map((b) => (b.id === stored.id ? stored : b)) };

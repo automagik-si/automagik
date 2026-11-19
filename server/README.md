@@ -137,7 +137,7 @@ Four preparation/runtime stages, every base digest-pinned (plus the distroless b
 | Stage | What it does |
 |---|---|
 | `builder` | `node:24.22.3-trixie-slim`: installs the pinned harness and pnpm, verifies the release tarballs, installs/prunes the profile, prepares its inspected offline dependency store, writes version/revision metadata |
-| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, `flock`, `tar`, `gzip`, `find`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped |
+| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, `flock`, `tar`, `gzip`, `find`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped. It also strips the distroless Node binary's debug sections with a build-only `binutils` |
 | `gate-deps` | Bun 1.4.4 installs the exact WebAuthn dependency and `server/bun.lock`, with lifecycle scripts disabled, then prunes development files. Bun stays in this stage |
 | `runtime` | `scratch` holding the distroless nodejs24 rootfs (node and glibc), cleaned in the `tools` stage (man pages and changelogs stripped there with coreutils), plus the tools above, the code, nothing else — no apt, npm, curl or build toolchain |
 
@@ -146,6 +146,15 @@ pruned payload keeps everything the composed tree names — office-to-pdf and it
 `libreoffice-kit-wasm` included — and drops the inspector, the voice engine, the musl sharp
 variants, the win32/darwin node-pty prebuilds and the experimental bundles the profile never
 composes.
+
+No debug bytes ship: the `tools` stage strips the distroless Node binary's DWARF sections
+(17,817,400 of its 122,466,960 bytes; `--strip-all` keeps the dynamic symbol table). The
+Emscripten `@img/sharp-wasm32` payload stays: `sharp` falls back to it on an x86-64 CPU without
+v2 and after any native-load failure, so its 9,150,351 bytes are a live fallback, not dead
+weight. On a build of the current tree with content 3.157.2, the strip alone took the image from
+642,998,234 to 625,180,834 bytes flattened (17.0 MiB) and from 216,040,627 to 211,828,001 bytes
+compressed (4.0 MiB); `USER 1000:1000`, the digest-pinned bases and the health check are
+unchanged.
 
 ## Build and smoke
 
@@ -881,8 +890,12 @@ the code and its own workspace id to the exchange URL itself, server to server, 
 workspace token there. The browser never sees the token. A code or token in a URL gets `400`;
 a token in a header or a form field is refused. A code is single use: the gate refuses a code it
 has already seen without asking the Cloud service, and the Cloud service refuses any replay.
-At most 8 exchanges run at once; more get `429` and leave their code unused. Refusals log
-only a status and a generated request id, never a code or a token.
+The gate remembers at most 4096 unexpired codes at a time. At that bound it refuses a new open
+with `429` before it calls Cloud and keeps every code it remembered; it never evicts the oldest
+to make room, because forgetting a live code would make a replay pass the gate's own record. A
+code's 15-minute expiry frees its slot, and the refused code is not consumed. At most 8 exchanges
+run at once; more get `429` and leave their code unused. Refusals log only a status and a
+generated request id, never a code or a token.
 
 **The token.** The gate checks that the token is signed with EdDSA (Ed25519) by a key the
 published key set names, with the token's key id. The set holds one or two keys: the
@@ -937,10 +950,14 @@ subject is refused a new open until a later signed list omits them.
 If the call does not land, the gate polls the list at `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` every
 60 seconds while it holds sessions or a removal is pending. The list body is JSON and its
 `x-automagik-signature` is a detached JWS over the exact body, checked against the same key set.
-A list for another workspace, past `expires_at`, malformed or unverifiable is a failure that
-changes nothing, never an empty list. An entry a newer contract scopes to another workspace is
-ignored. The call is idempotent: a repeat is accepted and changes nothing. The gate keeps no
-Cloud credential and logs only a status and a generated request id.
+A list is applied only while it is current: its `issued_at` may be at most 30 seconds ahead of
+the gate's clock and at most 5 minutes behind it, with no grace. A future-dated list is refused
+rather than being allowed to move the applied-list watermark, which would make every later list
+— a removal included — look stale; a list older than the bound is a stale feed and a failure that
+changes nothing. A list for another workspace, past `expires_at`, malformed or unverifiable is a
+failure that changes nothing, never an empty list. An entry a newer contract scopes to another
+workspace is ignored. The call is idempotent: a repeat is accepted and changes nothing. The gate
+keeps no Cloud credential and logs only a status and a generated request id.
 
 ## Interim Cloudflare Access sign-in
 

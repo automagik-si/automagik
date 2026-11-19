@@ -300,3 +300,46 @@ func TestPutCarriesACommandAndItsBot(t *testing.T) {
 		}
 	})
 }
+
+// A target goes through put as one key, and a new one gets no default agent
+// args: it starts no agent, the bot's launch is the run's (#498).
+func TestPutCarriesATarget(t *testing.T) {
+	hcBase := "backend: hc\nautomations:\n"
+	body := `{"name":"housekeeping","cron":"0 9 * * *","repo":"/x","prompt":"tidy",` +
+		`"target":"bot:b-6jrz4bmxml","target_when_busy":"skip","timeout_minutes":30}`
+	answer, after := runPut(t, hcBase, body)
+	if strings.Contains(answer, `"problem"`) {
+		t.Fatalf("put refused it: %s", answer)
+	}
+	for _, want := range []string{"target: bot:b-6jrz4bmxml", "target_when_busy: skip", "prompt: tidy", "repo: /x"} {
+		if !strings.Contains(after, want) {
+			t.Fatalf("%q not written:\n%s", want, after)
+		}
+	}
+	for _, never := range []string{"agent:", "agent_args:", "workspace:", "--dangerously"} {
+		if strings.Contains(after, never) {
+			t.Fatalf("a target was written with %q:\n%s", never, after)
+		}
+	}
+
+	t.Run("an edit that sends no target keeps it", func(t *testing.T) {
+		_, kept := runPut(t, after, `{"name":"housekeeping","cron":"0 8 * * *"}`, "--original", "housekeeping")
+		if !strings.Contains(kept, "target: bot:b-6jrz4bmxml") || !strings.Contains(kept, `0 8 * * *`) {
+			t.Fatalf("the target was lost:\n%s", kept)
+		}
+	})
+
+	t.Run("an agent key is refused", func(t *testing.T) {
+		answer, same := runPut(t, after, `{"name":"housekeeping","cron":"0 9 * * *","agent":"claude"}`, "--original", "housekeeping")
+		if !strings.Contains(answer, "drop agent") || same != after {
+			t.Fatalf("answer %s\nfile:\n%s", answer, same)
+		}
+	})
+
+	t.Run("sending an empty target removes it", func(t *testing.T) {
+		_, plain := runPut(t, after, `{"name":"housekeeping","cron":"0 9 * * *","repo":"/x","prompt":"tidy","target":""}`, "--original", "housekeeping")
+		if strings.Contains(plain, "target:") || strings.Contains(plain, "target_when_busy:") {
+			t.Fatalf("an empty target left its keys behind:\n%s", plain)
+		}
+	})
+}

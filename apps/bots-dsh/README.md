@@ -429,8 +429,11 @@ operating system refuses the folder, the picture's text asks the person to allow
 access (Files and Folders or Full Disk Access on macOS, or a folder writable by their user
 elsewhere).
 
-When Codex refuses an edit with `edit-not-isolated`, the image card stays failed and the Bot
-gets its read-only copy's path. At Workspace it may use its own tools to make and check a new
+When the locked run cannot be set up — Codex is not signed in, its account is unconfirmed,
+its configuration or switch check fails, its connector or session cannot start, the ACP plugin
+is older, or the adapter does not acknowledge the image profile — the refusal carries
+`edit-not-isolated`, the image card stays failed and the Bot gets its read-only copy's path. At
+Workspace it may use its own tools to make and check a new
 file, and must only claim an edit when that file exists; otherwise it says it could not edit.
 At Read only it tells the person that Workspace in Details allows editing as a file. A copy
 failure gives the OS guidance or says that the picture could not be edited here.
@@ -622,14 +625,14 @@ When a Bot needs an API key, token or password, it calls `request_secret`, and a
 - **Fill in**: the field hides what you type, is not part of a form and is not autofilled. Choose "All Bots" or "Only this Bot" and select Save. A value must have at least 4 characters (a 4-digit PIN works). A value of 8 characters or more is hidden wherever it appears; a shorter one only where no letter or digit touches it, so ordinary words stay intact.
 - **Allow**: if the secret is already saved but this Bot is not allowed to use it, the card only asks whether to allow it. You can also replace the value there.
 - **Use**: the value goes into the Bot's shell environment as `DSH_SECRET_<NAME>` (`$DSH_SECRET_NAME` in bash, `$env:DSH_SECRET_NAME` in PowerShell). `list_secrets` lists the names a Bot can use. An MCP capability can also take `$DSH_SECRET_<NAME>` in its env, its headers and its URL (path or query); in the URL the value is URL-encoded. Use headers when the server accepts them.
-- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value is replaced with `[secret:<NAME>]`.
+- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value that the redactor recognizes is replaced with `[secret:<NAME>]`.
 - **Manage**: Settings → Secrets lists every secret by name, purpose, the Bot that asked and the last use. You can change who may use it, replace the value, delete it or add one. Deleting a Bot removes it from every secret.
 - **Storage**: `<DSH_HOME>/bot/secrets.json`, file mode 600, written atomically. Values are never in `state.json` or logs.
 
 Limits:
 
 - On Windows, the file mode has no effect; the file is protected by your user folder only.
-- Only exact copies of a value are masked. A Bot that encodes, splits or reverses a value can still print it. Do not give important secrets to a Bot you do not trust.
+- Masking covers a value and its JSON-escaped and URL-encoded forms (`src/host/secrets.js`, the redactor). Base64, hex, split and reversed forms are not covered; a Bot that prints one can still leak it. Do not give important secrets to a Bot you do not trust.
 - On a page that is not HTTPS (for example dsh Web opened over http on a LAN), the value crosses the network in clear text. The card warns you.
 - Group chats show no cards; a Bot asks in its own chat.
 

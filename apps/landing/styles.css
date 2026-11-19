@@ -16,9 +16,9 @@ ol,ul{padding:0;list-style:none}
 a{color:inherit;text-underline-offset:.22em;text-decoration-thickness:1px}
 a:hover{color:var(--accent)}
 h1,h2,h3{font-family:var(--head);color:var(--text);text-wrap:balance;hyphens:manual;overflow-wrap:normal;word-break:normal}
-h1{font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;letter-spacing:-.02em}
-h2{font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;letter-spacing:-.016em}
-h3{font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;letter-spacing:-.01em}
+h1{font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;letter-spacing:var(--heading-1-letter-spacing)}
+h2{font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;letter-spacing:var(--heading-2-letter-spacing)}
+h3{font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;letter-spacing:var(--heading-3-letter-spacing)}
 p{text-wrap:pretty}
 code{font:500 .88em/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bt-hover);border:1px solid var(--line);border-radius:6px;padding:.08em .4em;overflow-wrap:anywhere}
 .wrap{width:min(100%,calc(var(--max) + 2 * var(--gutter)));padding-inline:var(--gutter);margin-inline:auto}
@@ -397,7 +397,7 @@ h1 .product-logo{display:block;width:auto;height:min(128px,10.4vw);object-fit:co
 .flow-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:clamp(18px,2.4vw,32px);counter-reset:flow}
 .flow-steps li{counter-increment:flow;min-width:0}
 .flow-steps .window{display:grid;align-items:center;aspect-ratio:390/312;border-radius:16px;background:var(--bg)}
-.flow-steps h3{display:flex;align-items:center;gap:10px;margin-top:20px}
+.flow-steps h3{display:flex;align-items:center;gap:6px;margin-top:20px;font-size:clamp(1.2rem,1.1rem + .2vw,1.3rem)}
 .flow-steps h3::before{content:counter(flow);display:grid;place-items:center;flex:none;width:30px;height:30px;border-radius:10px;background:var(--plum);color:var(--on-plum);font:var(--weight-title) .86rem/1 var(--head)}
 .flow-steps p{color:var(--muted);margin-top:8px;font-size:.98rem}
 .genie-faces{margin:clamp(36px,5vw,56px) auto 0;opacity:.95}

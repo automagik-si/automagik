@@ -6,7 +6,9 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -73,6 +75,60 @@ function encode(source, [x, y, w, h], width, target, alpha) {
     '-compression_level', '6', '-preset', alpha ? 'picture' : 'text', ...(alpha ? ['-pix_fmt', 'yuva420p'] : ['-pix_fmt', 'yuv420p']), '-metadata', 'comment=', '-map_metadata', '-1', target])
   return { width, height }
 }
+// The check below rebuilds the art and compares pictures, not bytes: a stale crop can carry a
+// self-consistent manifest, so the committed bytes alone prove nothing. Each file is encoded
+// again from its source rectangle into a scratch folder and both WebPs are decoded and compared
+// in 16px blocks. Encoder differences between hosts stay small; a crop made from older bytes
+// moves a block by 22/255 or more.
+const BLOCK = 16
+const TOLERANCE = 20
+const rgba = args => execFileSync('ffmpeg', ['-v', 'error', ...args, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-'], { maxBuffer: 1 << 29 })
+const decodeFile = path => rgba(['-i', path])
+// Compared with the alpha applied, so a fully transparent pixel's arbitrary colour is ignored.
+function worstBlockDifference(a, b, width, height, block = BLOCK) {
+  if (a.length !== b.length) return Infinity
+  let worst = 0
+  for (let top = 0; top < height; top += block) for (let left = 0; left < width; left += block) {
+    let sum = 0, count = 0
+    for (let y = top; y < Math.min(top + block, height); y++) for (let x = left; x < Math.min(left + block, width); x++) {
+      const i = (y * width + x) * 4, aWeight = a[i + 3] / 255, bWeight = b[i + 3] / 255
+      sum += Math.abs(a[i] * aWeight - b[i] * bWeight) + Math.abs(a[i + 1] * aWeight - b[i + 1] * bWeight)
+        + Math.abs(a[i + 2] * aWeight - b[i + 2] * bWeight) + Math.abs(a[i + 3] - b[i + 3])
+      count += 4
+    }
+    worst = Math.max(worst, sum / count)
+  }
+  return worst
+}
+// Rebuilds every committed file and returns what the source no longer explains. An empty list
+// means the committed art is the art this source builds; `--check` asserts that.
+export function checkArt({ tolerance = TOLERANCE } = {}) {
+  const failures = []
+  const manifest = JSON.parse(readFileSync(join(out, 'manifest.json'), 'utf8'))
+  const scratch = mkdtempSync(join(tmpdir(), 'landing-art-'))
+  try {
+    for (const [name, source, rect, width] of ART) {
+      const path = join(repo, source)
+      const box = rect === 'trim' ? trimBox(path) : rect
+      const size = probe(path)
+      assert.ok(box[0] + box[2] <= size.width && box[1] + box[3] <= size.height, `${name}: rectangle outside ${source}`)
+      const alpha = !source.includes('/screens/')
+      for (const [suffix, scale] of [['', 1], ['-2x', 2]]) {
+        const file = `${name}${suffix}.webp`, entry = manifest.files?.[file]
+        if (!entry) { failures.push(`${file}: not in assets/art/manifest.json`); continue }
+        if (entry.source !== source) failures.push(`${file}: manifest records ${entry.source}, not ${source}`)
+        if (JSON.stringify(entry.rect) !== JSON.stringify(box)) failures.push(`${file}: manifest rectangle is stale`)
+        const built = join(scratch, file), dims = encode(path, box, Math.min(width * scale, box[2]), built, alpha)
+        if (entry.width !== dims.width || entry.height !== dims.height) failures.push(`${file}: manifest size is stale`)
+        const target = join(out, file)
+        if (!existsSync(target)) { failures.push(`${file}: missing`); continue }
+        const drift = worstBlockDifference(decodeFile(target), decodeFile(built), dims.width, dims.height)
+        if (drift > tolerance) failures.push(`${file}: worst block differs from its rebuild by ${drift.toFixed(1)} (limit ${tolerance}); rebuild the art`)
+      }
+    }
+  } finally { rmSync(scratch, { recursive: true, force: true }) }
+  return failures
+}
 export async function buildArt() {
   await mkdir(out, { recursive: true })
   for (const file of await readdir(out)) if (file.endsWith('.webp')) await rm(join(out, file))
@@ -95,6 +151,12 @@ export async function buildArt() {
   return manifest
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const manifest = await buildArt()
-  for (const [file, entry] of Object.entries(manifest.files)) console.log(file, `${entry.width}x${entry.height}`)
+  if (process.argv[2] === '--check') {
+    const failures = checkArt()
+    assert.deepEqual(failures, [], 'Landing art drift: run node apps/landing/scripts/build-art.mjs')
+    console.log(`PASS derived art: ${ART.length * 2} files re-derive from their sources`)
+  } else {
+    const manifest = await buildArt()
+    for (const [file, entry] of Object.entries(manifest.files)) console.log(file, `${entry.width}x${entry.height}`)
+  }
 }

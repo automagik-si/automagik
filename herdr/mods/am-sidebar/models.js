@@ -582,17 +582,26 @@ export const CODEX_AUTO_ARGS = Object.freeze(["--approve-for-me", "--disable", "
 
 // One Codex launch mode on every machine (#1125, the owner's ruling of 10 and 12 Nov): every
 // Codex seat and every worker the pack starts with --agent codex runs the auto mode above with
-// the workspace-write sandbox on, never --dangerously-bypass-approvals-and-sandbox. Two more
+// the workspace-write sandbox on, never --dangerously-bypass-approvals-and-sandbox. Three more
 // words make it usable there. `--no-daemon`: hc --skill says Codex must run with it (templates
 // included), or its commands run in Codex's shared background server, outside hc and with the
 // environment of whichever pane started that server (HC_TERMINAL_ID included). The sandbox's
-// own `network_access`: on, so hc's socket and GitHub (gh, git's transport) answer. The folders
+// own `network_access`: on, so hc's socket and GitHub (gh, git's transport) answer. And the
+// non-login shell below (`allow_login_shell` false, #1133). The folders
 // it may write besides its working folder are derived per launch (codexGrants, withCodexGrants).
 // A bot's `codexAuto: false` no longer opts out (model.js warns), and the source's own approval
 // and sandbox words are left out by name (codexClean). An hc worker template owns its command,
 // bypass included: the owner's exception for template workers (#1125), never a seat's.
 export const CODEX_NETWORK = "sandbox_workspace_write.network_access=true";
-export const CODEX_MODE_ARGS = Object.freeze([...CODEX_AUTO_ARGS, "--no-daemon", "-c", CODEX_NETWORK]);
+// Codex runs every shell command through the account's login shell unless this is off (codex-cli
+// 0.167 `allow_login_shell`, default true): a login startup that prepends a directory would put
+// another `hc` (or a wrapper of it) ahead of the pane PATH and its hc kill shim (#1133). The
+// pack adds the pane PATH's guard first and needs that ordering at command time, so every launch
+// it builds runs Codex's commands in a non-login shell (`-c`): the shell's own non-login startup
+// still runs and every tool the pane PATH holds still resolves; only the login-only files (a
+// profile that rebuilds PATH) do not, and no startup file is edited.
+export const CODEX_LOGIN_SHELL = "allow_login_shell=false";
+export const CODEX_MODE_ARGS = Object.freeze([...CODEX_AUTO_ARGS, "--no-daemon", "-c", CODEX_NETWORK, "-c", CODEX_LOGIN_SHELL]);
 
 /** Whether a launch of `agentKey` passes Codex's launch mode: every Codex seat and worker the pack builds (#1125: no opt-out). */
 export const codexAutoOn = (agentKey) => agentKey === "codex";
@@ -608,7 +617,7 @@ const CODEX_PACK_WORDS = new Set(["--approve-for-me", "--no-daemon"]);
 const CODEX_BYPASS = new Set(["--dangerously-bypass-approvals-and-sandbox", "--yolo"]);
 const CODEX_VALUED = [["-a", "--ask-for-approval"], ["-s", "--sandbox"], [null, "--remote"], [null, "--remote-auth-token-env"]];
 const CODEX_CONFIG_KEYS = ["sandbox_mode", "approval_policy", "approvals_reviewer", "sandbox_workspace_write",
-  "default_permissions", "permission_profile", "permissions"];
+  "default_permissions", "permission_profile", "permissions", "allow_login_shell"];
 // Codex's other flags that take a value: the word after one is never read as a flag here.
 const CODEX_TAKES_VALUE = new Set(["-m", "--model", "-p", "--profile", "-C", "--cd", "-i", "--image", "--enable", "--disable",
   "--local-provider", "--add-dir"]);
@@ -958,8 +967,8 @@ export function codexDirsExact(args, where) {
  * parent or symlink alias of the home folder or the app home goes too, as does a relative one:
  * its narrowness can't be proved, #1142); one it allows is passed as that canonical value, the
  * one checked. `where` may also be a home folder, compared as written.
- * The pack's own --approve-for-me, --no-daemon and network word go quietly (launchRun puts them
- * back once). Every other word stays as it is, after a `--` too.
+ * The pack's own --approve-for-me, --no-daemon, network and login-shell words go quietly
+ * (launchRun puts them back once). Every other word stays as it is, after a `--` too.
  * Returns { argv, dropped, unproved } (`dropped`: the flags left out, by name, `-c sandbox_mode`,
  * `-c profiles.*.sandbox_mode` or `-c profiles` style: never a value or a profile's name;
  * `unproved`: the --add-dir folders withheld because an observation they
@@ -979,8 +988,9 @@ export function codexClean(run, where = null) {
     if (valued) { drop(valued.flag); if (valued.next) i += 1; continue; }
     const config = codexConfigAt(words, i);
     if (config) {
-      // The pack's own network word goes quietly, as --approve-for-me does: launchRun adds it once.
-      if (config.text.trim() === CODEX_NETWORK) { i += config.span - 1; continue; }
+      // The pack's own network and login-shell words go quietly, as --approve-for-me does:
+      // launchRun adds them once.
+      if (config.text.trim() === CODEX_NETWORK || config.text.trim() === CODEX_LOGIN_SHELL) { i += config.span - 1; continue; }
       // Any other spelling of that word is a config key like the rest: dropped and named (launchRun
       // still adds the exact one).
       if (config.name) drop(`-c ${config.name}`);
@@ -1009,7 +1019,7 @@ export function codexClean(run, where = null) {
 export function codexCleanNote(run, where = null, source = "programs.json's Codex command") {
   const { dropped } = codexClean(run, whereOf(where));
   return dropped.length ? `${source} names ${dropped.join(", ")}: left out. Every Codex seat and worker runs in auto mode `
-    + "(--approve-for-me) with its sandbox on (#1125)." : null;
+    + "(--approve-for-me) with its sandbox on and a non-login shell (#1125, #1133)." : null;
 }
 
 /**
@@ -1307,7 +1317,7 @@ export const AUTO_MODE = Object.freeze({
   codex: Object.freeze({ args: CODEX_MODE_ARGS,
     own: Object.freeze(["--approve-for-me", "-a", "--ask-for-approval", "--yolo", "--dangerously-bypass-approvals-and-sandbox"]),
     what: "Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox with network on, "
-      + "outside Codex's shared server (--no-daemon), with hooks off" }),
+      + "outside Codex's shared server (--no-daemon), with hooks off and commands in a non-login shell (#1133)" }),
   antigravity: Object.freeze({ args: Object.freeze([AGY_SKIP_PERMISSIONS]),
     own: Object.freeze([AGY_SKIP_PERMISSIONS]),
     what: "no permission prompts; the launch's deny list still refuses what it names" }),
@@ -1344,16 +1354,97 @@ function runNames(run, flags) {
   return false;
 }
 
+// ---- A bot's own permission mode (Claude Code, #1413) ----
+//
+// Claude Code's --permission-mode names what a session may run without asking. The pack starts
+// every Claude launch in its auto mode (AUTO_MODE); a bot's record may name another of Claude
+// Code's own modes instead, and the launch passes that one from the definition on every path
+// (start, restart, revive, linked start, worker and a worker's tree helper). It is independent
+// of the model, reasoning effort and service tier. The names are Claude Code 2.1.328's `--help`
+// list; herdr/test/permission-mode.test.mjs reads the `--help` of the Claude Code on the PATH of
+// the gate and fails when the two lists differ, so a CLI upgrade is seen before a mode the newer
+// CLI accepts is refused. Update this list and the README's table together when it fails.
+export const CLAUDE_PERMISSION_MODES = Object.freeze(["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]);
+
+/** What a Claude launch runs without a stored permission mode. */
+export const PERMISSION_MODE_DEFAULT = "auto";
+
+/** One line for each mode: what it runs without asking (Claude Code's own meanings). */
+export const PERMISSION_MODE_WHAT = Object.freeze({
+  acceptEdits: "Claude Code's acceptEdits mode: reads and file edits run without a prompt",
+  auto: "Claude Code's auto mode: its classifier answers permission requests",
+  bypassPermissions: "Claude Code's bypassPermissions mode: every tool call runs without a prompt",
+  manual: "Claude Code's manual mode: it asks before anything but reads",
+  dontAsk: "Claude Code's dontAsk mode: anything not already allowed is refused instead of asked",
+  plan: "Claude Code's plan mode: it reads and plans; edits wait for a person's approval",
+});
+
+/** The agents with a per-bot permission mode, and the names each accepts; null for the others. */
+export const PERMISSION_MODES = Object.freeze({ claude: CLAUDE_PERMISSION_MODES });
+
+/** The permission mode names `agentKey` takes, or null. */
+export function permissionModesOf(agentKey) {
+  return PERMISSION_MODES[agentKey] ?? null;
+}
+
+/** Why `mode` can't be stored for `agentKey`, or null (absent or one of its names: fine). One line. */
+export function permissionModeProblem(agentKey, mode) {
+  if (mode === undefined || mode === null || mode === "") return null;
+  if (typeof mode !== "string") return `permission mode ${JSON.stringify(mode)} isn't text`;
+  const modes = permissionModesOf(agentKey);
+  if (!modes) {
+    if (!agentKey) return "permission mode is Claude Code's (--permission-mode); this bot has no coding agent";
+    const name = AGENTS[agentKey]?.name ?? agentKey;
+    // F2: say what to use instead, so a refusal names the control that does exist.
+    const instead = agentKey === "codex" ? "use its fixed launch mode (#1125) instead"
+      : agentKey === "antigravity" ? "use its execution mode (agyMode) instead" : null;
+    return `permission mode is Claude Code's (--permission-mode); ${name} has none${instead ? `: ${instead}` : ""}`;
+  }
+  return modes.includes(mode) ? null : `permission mode ${JSON.stringify(mode)} isn't one of ${modes.join(", ")}`;
+}
+
+/**
+ * The words that start `agentKey` on permission mode `mode`: Claude Code's own flag, [] for an
+ * agent with no per-bot mode. No mode names the pack's default, auto.
+ */
+export function permissionModeArgs(agentKey, mode = null) {
+  if (!permissionModesOf(agentKey)) return [];
+  return ["--permission-mode", typeof mode === "string" && mode ? mode : PERMISSION_MODE_DEFAULT];
+}
+
+/**
+ * The permission mode a launch's own command line names, or null: the last --permission-mode
+ * before any `--` (Claude Code reads the last one), or bypassPermissions for its older
+ * --dangerously-skip-permissions spelling. Used by `show` to report what a live pane runs.
+ */
+export function permissionModeFrom(argv) {
+  const { args } = agentArgv(argv);
+  let found = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const w = args[i];
+    if (w === "--") break;
+    if (w === "--dangerously-skip-permissions") found = "bypassPermissions";
+    else if (w === "--permission-mode") found = args[i + 1] ?? null;
+    else if (w.startsWith("--permission-mode=")) found = w.slice("--permission-mode=".length);
+  }
+  return found;
+}
+
 /**
  * The words `agentKey`'s automatic mode adds to `run` for `bot`: AUTO_MODE's, [] for an agent
- * with none and for a run that already picks its own approvals (a programs.json override).
- * Codex always gets its launch mode (#1125): launchRun leaves the source's own approval and
- * sandbox words out instead.
+ * with none and for a run that already picks its own approvals (a programs.json override). A
+ * Claude bot whose record names a permission mode (#1413) gets that mode instead of auto, even
+ * when its run names one: the record is the later word and wins. Codex always gets its launch
+ * mode (#1125): launchRun leaves the source's own approval and sandbox words out instead.
  */
 export function autoModeArgs(agentKey, bot = null, run = []) {
-  const mode = AUTO_MODE[agentKey];
   if (agentKey === "codex") return codexAutoArgs(agentKey);
-  if (!mode || runNames(run, mode.own)) return [];
+  const mode = AUTO_MODE[agentKey];
+  if (!mode) return [];
+  if (agentKey === "claude" && typeof bot?.permissionMode === "string" && CLAUDE_PERMISSION_MODES.includes(bot.permissionMode)) {
+    return permissionModeArgs("claude", bot.permissionMode);
+  }
+  if (runNames(run, mode.own)) return [];
   return [...mode.args];
 }
 

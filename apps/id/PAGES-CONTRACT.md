@@ -6,6 +6,26 @@ and `/consent`. An absent page returns plain text `501 page not built yet`.
 Scripts and styles are served from the same origin. No third-party scripts,
 analytics, external fonts, or tokens in browser storage are needed.
 
+## Security headers
+
+Every response the Worker returns carries these, whatever produced it: the pages,
+their files, the API, the well-known metadata, redirects and errors.
+
+| Header | Value |
+| --- | --- |
+| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (no preload) |
+| `Referrer-Policy` | `no-referrer` |
+| `X-Frame-Options` | `DENY` |
+
+The pages also answer with `Cache-Control: no-store`. Status, body, `Location`
+and every `Set-Cookie` pass through unchanged. The policy has no `unsafe-inline`
+or `unsafe-eval`: the pages keep every script and style in their own files under
+`pages/`, never inline, and their own `<meta>` policy may be stricter but never
+looser. A page is served only at its own address: `/sign-in.html`,
+`/consent.html` and any other direct `.html` path answer 404.
+
 ## HTTP conventions
 
 All paths below are relative to the identity service's origin. Use same-origin

@@ -18,10 +18,12 @@ const SIZES = {
   '--lb-tile-r': '12px',
   '--lb-tile-icon': '28px',
   '--lb-rail-gap': '10px',
-  // The rows: one line each. A Bot's and a group's carry art; a channel's and a chat's do not.
+  // The rows: one line each. A Bot's and a group's carry art; a channel carries its glyph, a
+  // chat its person's face.
   '--lb-row-h': '34px',
   '--lb-channel-h': '26px',
   '--lb-chat-h': '25px',
+  '--lb-chat-face': '16px',
   '--lb-label-h': '26px',
   '--lb-label-first-gap': '8px',
   '--lb-row-r': 'var(--st-r-seg,8px)',
@@ -110,7 +112,9 @@ body[data-ds-dark-theme] .lb-tile .lb-on-light,body:not([data-ds-dark-theme]) .l
 // rows lie under it, the line runs the list's whole width and the rows fade over their last
 // --lb-edge-fade before it, so a row cut by the edge reads as scrolling on, not as a row that
 // was sliced. The upper edge does the same once the list has moved. --lb-inset and --lb-chat-inset are where a
-// channel's and a chat's name start: they follow the art by default, and either can be set.
+// channel's and a chat's name start: they follow the art by default, and either can be set. A
+// chat starts one step under its channel: its person's face stands where the channel's name
+// begins, so its own name sits under that.
 const ROWS = `
 .lb-scroll{position:relative;flex:1;display:flex;flex-direction:column;min-height:0}
 .lb-scroll::before,.lb-scroll::after{content:'';position:absolute;left:8px;right:8px;height:14px;pointer-events:none}
@@ -139,13 +143,28 @@ const ROWS = `
 .lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
-.lb-row-chat{height:var(--lb-chat-h);padding-left:var(--lb-chat-inset,calc(16px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph)))}
+.lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
+.lb-row-chat .lb-st{gap:5px}
+.lb-count{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink);font:600 10px/1 var(--bt-font)}
+/* A chat's person: the photo, else their initials, on the incoming tone Omni's chat view uses
+   for the other side; the owner's own chat adds the outgoing tone as a ring. Every chat mark is
+   one tile, so the initials sit like a photo does. Omni shares --oc-in/--oc-out with the bar
+   today, and PR 1777's names --oc-them/--oc-me stand beside them for when it lands; the
+   fallbacks are the formulas its own chat view uses, so a row and that chat agree. */
+.lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--oc-them,var(--bt-card)));color:var(--bt-ink)}
+body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--oc-them,var(--bt-bubble)))}
+.lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,var(--oc-me,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card))))}
+body[data-ds-dark-theme] .lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,var(--oc-me,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble))))}
+.lb-chat-face img{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:50%;object-fit:cover}
+.lb-chat-face-initials{font:600 7.5px/1 var(--bt-head-font,var(--bt-font));letter-spacing:.02em}
+.lb-row-chat .lb-chat-face-initials{color:inherit}
 .lb-row-channel .lb-name,.lb-row-chat .lb-name{font:400 13.5px/1.3 var(--bt-font);letter-spacing:0}
 .lb-row-chat .lb-name{color:var(--lb-muted)}
 .lb-row-chat.lb-row-hot .lb-name,.lb-row-chat[aria-current] .lb-name{color:var(--bt-ink)}
 .lb-glyph{flex:none;display:grid;place-items:center;width:var(--lb-glyph);height:var(--lb-glyph);color:var(--lb-muted)}
 .lb-glyph svg{display:block;width:100%;height:100%}
 .lb-chev{flex:none;display:block;color:var(--lb-muted);opacity:.8}
+.lb-chev-open{transform:rotate(90deg)}
 .lb-sec{flex:none;display:flex;align-items:flex-end;height:var(--lb-label-h);padding:0 10px 5px;box-sizing:border-box;font:var(--bt-weight-title,600) 10.5px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:.16em;text-transform:uppercase;color:var(--lb-muted)}
 .lb-sec-first{margin-top:var(--lb-label-first-gap)}
 `

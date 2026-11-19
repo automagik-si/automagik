@@ -1078,6 +1078,10 @@ export function install(rt) {
       // The greeting round leaves the user's messages for a round of their own.
       if (turns.size === 0 && !round.slots.some(slot => slot.status === 'waiting') && (round.kickoff || waitingLines(agent).length === 0)) break
     }
+    // The loop is over: it takes no more calls. Marked before the first await, so a relay
+    // that waited for this round's `ready` (settled just before the loop ran) always sees
+    // it and sends its call to the group's next round, not into a loop that has ended.
+    round.closed = true
     await Promise.allSettled([...turns])
     delete round.nudge
     // The admin was alone with the user's message and passed: the round ends with
@@ -1249,6 +1253,16 @@ export function install(rt) {
     const round = running.starting ? await running.ready : running
     if (round === undefined) {
       startRound(room, posts, await rt.resolveAgent(rt.sessionOfRoom(room)))
+      return
+    }
+    // The round ended before this call was taken in. What it brought waits for the
+    // group's next round, the same place a call that lands while a round finishes waits;
+    // it is never appended to a loop that is over.
+    if (round.closed === true) {
+      if (posts.length > 0) {
+        if (rt.roomActive(room.id)) laterPosts.set(room.id, [...(laterPosts.get(room.id) ?? []), ...posts])
+        else startRound(room, posts, await rt.resolveAgent(rt.sessionOfRoom(room)))
+      }
       return
     }
     const members = room.members.map(rt.botOf).filter(Boolean)

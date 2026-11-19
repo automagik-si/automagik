@@ -5,7 +5,7 @@ import { startFakeCore } from "./fake-core.mjs";
 // window unless a test opens one). The real hc and window are never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,7 +15,7 @@ import { writeBotsFile, findBot, CliError, listProject, causeLine } from "../mod
 import { GUARD_DIR, KILL_GUARD_DIR, ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
-import { restartAnswer } from "../mods/am-sidebar/restart.js";
+import { claudeSlug, restartAnswer } from "../mods/am-sidebar/restart.js";
 // Start and Restart put each bot's briefing in its agent's command (models.js withBriefing);
 // the tests on the rest of the command compare it with those words out.
 const strip = (words) => withoutBriefing("codex", withoutBriefing("claude", words));
@@ -31,7 +31,8 @@ const plain = (argv) => {
 };
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
 // other words (the tool-cache grants follow the runner's environment, so tests compare the words).
-const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+  "-c", "allow_login_shell=false"];
 const grantsApart = (words) => {
   const rest = [];
   const dirs = [];
@@ -3116,7 +3117,8 @@ test("restart (#341): a teammate re-seated in a worktree still left its omp conv
   seats(moved, wt, "t9");
   const note = fresh(moved);
   assert.match(note, /Captain \(t7, ended\) also ran Oh My Pi in /);
-  assert.doesNotMatch(note, /t9/, "the worktree pane isn't in this folder");
+  // The note quotes the project path, whose random scratch name can itself spell `t9`; match the pane the note names.
+  assert.doesNotMatch(note, /Captain \(t9[,)]/, "the worktree pane isn't in this folder");
 });
 
 test("restart (#328 review): a teammate's omp inside the keep wrapper is a sharer", (t) => {
@@ -3402,7 +3404,7 @@ test("restart #597: a hand-started codex bot comes back from its source, not its
   assert.equal(r.code, 0, r.err);
   const run = runCall(s.calls());
   assert.deepEqual(codexWords(plain(agentWords(run))), ["codex", ...CODEX_MODE, "resume", SID], "the source's command, resumed by its session");
-  assert.match(r.err, /Captain: its pane's command differs from its source now \(drops -m=\*\*\*, -c=\*\*\*; adds --approve-for-me, --disable=\*\*\*, --no-daemon=\*\*\*\)/);
+  assert.match(r.err, /Captain: its pane's command differs from its source now \(drops -m=\*\*\*; adds --approve-for-me, --disable=\*\*\*, --no-daemon=\*\*\*; changes -c=\*\*\*\)/);
   assert.equal(r.err.includes("gpt-a"), false, "the value is masked");
   assert.equal(r.json().session, "***"); // RFC 0021: masked
   assert.equal(run[run.indexOf("--cwd") + 1], s.project);
@@ -3766,7 +3768,8 @@ test("restart --tree: six codex helpers in one folder resume each its own sessio
   assert.match(fresh.json().helpers[0].note, /no session id, and its folder .*integration has other codex sessions \(--fresh-shared\)/);
   // #1125: these panes ran an hc template but are no template worker (no worker.template label):
   // each keeps its command and gets the launch-mode words it lacks after it, through "$@".
-  const lacking = ["--approve-for-me", "--disable", "hooks", "-c", "sandbox_workspace_write.network_access=true"];
+  const lacking = ["--approve-for-me", "--disable", "hooks", "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "allow_login_shell=false"];
   assert.ok(runs(bare).slice(1).every((w) => JSON.stringify(codexWords(agentWords(w))) === JSON.stringify(["sh", "-c", `${cmd} "$@"`, "sh", ...lacking])),
     JSON.stringify(runs(bare).slice(1).map(agentWords)));
   assert.equal(s.cli(["restart", "Genie", "--fresh-shared"]).code, 2, "--fresh-shared goes with --tree");
@@ -5297,6 +5300,99 @@ test("#1411: effort and tier are a Codex bot's: moving to another agent clears t
   assert.equal(s.bots().bots.length, 1, "nothing written");
 });
 
+// ---- #1413: a Claude Code bot's own permission mode ----
+
+test("#1413: a Claude bot's own permission mode is stored, shown, passed on start and restart, cleared, and a value Claude Code doesn't accept is refused", (t) => {
+  const s = scene(t);
+  const made = s.cli(["create", "--name", "Orchestrator", "--agent", "claude", "--permission-mode", "bypassPermissions", "--json"]);
+  assert.equal(made.code, 0, made.err);
+  assert.equal(s.bots().bots[0].permissionMode, "bypassPermissions", "stored on the bot's record");
+  const shown = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([shown.permissionMode, shown.permissionModeSource, shown.pinnedPermissionMode],
+    ["bypassPermissions", "roster", "bypassPermissions"]);
+  assert.match(s.cli(["show", "Orchestrator"]).out, /permission\s+bypassPermissions \(roster\)/);
+  // Start: the record's mode reaches the launch instead of the pack's auto default.
+  const started = s.cli(["start", "Orchestrator", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  const words = plain(agentWords(runCall(s.calls())));
+  assert.equal(words[words.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.equal(s.cli(["show", "Orchestrator", "--json"]).json().permissionModeSource, "detected",
+    "a running pane reports the mode its command line runs");
+  // Restart rebuilds the same words from the record.
+  const restarted = s.cli(["restart", "Orchestrator", "--force", "--json"]);
+  assert.equal(restarted.code, 0, restarted.err);
+  const again = plain(agentWords(s.calls().filter((c) => c[0] === "run").at(-1)));
+  assert.equal(again[again.indexOf("--permission-mode") + 1], "bypassPermissions");
+  // A value Claude Code doesn't accept is refused by name, and nothing is saved.
+  const before = readFileSync(s.botsPath, "utf8");
+  const bad = s.cli(["edit", "Orchestrator", "--permission-mode", "banana"]);
+  assert.equal(bad.code, 2);
+  assert.match(bad.err, /--permission-mode: permission mode "banana" isn't one of acceptEdits, auto, bypassPermissions, manual, dontAsk, plan/);
+  assert.equal(readFileSync(s.botsPath, "utf8"), before, "nothing was saved");
+  // Another agent has no such mode: refused, never dropped.
+  const codex = s.cli(["create", "--name", "Coder", "--agent", "codex", "--permission-mode", "auto"]);
+  assert.equal(codex.code, 2);
+  assert.match(codex.err, /--permission-mode: .*Claude Code.*Codex has none/);
+  assert.equal(s.bots().bots.length, 1, "nothing was written");
+  // Empty clears the record, and the next restart is back on the pack's auto mode.
+  assert.equal(s.cli(["edit", "Orchestrator", "--permission-mode="]).code, 0);
+  assert.equal(s.bots().bots[0].permissionMode, undefined);
+  assert.equal(s.cli(["restart", "Orchestrator", "--force", "--json"]).code, 0);
+  const back = plain(agentWords(s.calls().filter((c) => c[0] === "run").at(-1)));
+  assert.equal(back[back.indexOf("--permission-mode") + 1], "auto");
+  const cleared = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([cleared.permissionMode, cleared.permissionModeSource, cleared.pinnedPermissionMode], ["auto", "detected", null]);
+});
+
+test("#1413: moving a bot off Claude Code clears its permission mode, and naming one again stores it", (t) => {
+  const s = scene(t);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "claude", "--permission-mode", "manual", "--json"]).code, 0);
+  const moved = s.cli(["edit", "Genie", "--agent", "codex"]);
+  assert.equal(moved.code, 0, moved.err);
+  assert.match(moved.err, /its permission mode was cleared/);
+  assert.equal(s.bots().bots[0].permissionMode, undefined);
+  assert.equal(s.cli(["edit", "Genie", "--agent", "claude", "--permission-mode", "plan"]).code, 0);
+  assert.equal(s.bots().bots[0].permissionMode, "plan");
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().permissionMode, "plan");
+});
+
+test("#1413 F1: show never claims a live pane runs the record's permission mode", (t) => {
+  const s = scene(t, { terminals: [term("t1", { bot: ID.main, argv: ["claude"], cwd: "/x" })] });
+  s.seed(team({ bots: [bot(ID.main, "main", { name: "Orchestrator", permissionMode: "bypassPermissions" })] }));
+  const shown = s.cli(["show", "Orchestrator", "--json"]);
+  assert.equal(shown.code, 0, shown.err);
+  const info = shown.json();
+  assert.equal(info.terminal, "t1", "the pane is live, so its command line is what runs");
+  assert.equal(info.permissionMode, null, "a live pane that names no mode has no effective mode to report");
+  assert.equal(info.permissionModeSource, "live");
+  assert.equal(info.pinnedPermissionMode, "bypassPermissions", "the record still says what the next start runs");
+  const text = s.cli(["show", "Orchestrator"]).out;
+  assert.match(text, /permission\s+not named by its live command line/);
+  assert.match(text, /its record's bypassPermissions applies to its next start/);
+  assert.doesNotMatch(text, /permission\s+bypassPermissions \(roster\)/);
+  assert.doesNotMatch(text, /auto mode\s+--permission-mode bypassPermissions/);
+  // The same pane started with a mode of its own is reported as what it runs, never the record.
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify({ terminals: [term("t1", { bot: ID.main, argv: ["claude", "--permission-mode", "plan"] })], next: 100 }));
+  const detected = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([detected.permissionMode, detected.permissionModeSource], ["plan", "detected"]);
+});
+
+test("#1413 F3: a hand-edited bad permission mode warns on start, and the launch uses the default", (t) => {
+  const s = scene(t);
+  s.seed(team({ bots: [bot(ID.main, "main", { name: "Genie", permissionMode: "bypassPermission" })] }));
+  const started = s.cli(["start", "Genie"]);
+  assert.equal(started.code, 0, started.err);
+  const warnings = started.err.split("\n").filter((l) => /permission mode/.test(l));
+  assert.equal(warnings.length, 1, started.err);
+  assert.match(warnings[0], /b-aaaaaaaaaa: permission mode "bypassPermission" isn't one of acceptEdits, auto, bypassPermissions, manual, dontAsk, plan; ignored/);
+  const words = plain(agentWords(runCall(s.calls())));
+  assert.equal(words[words.indexOf("--permission-mode") + 1], "auto", "the dropped value never reaches the launch");
+  // Show reads the same record and says the same sentence, once.
+  const shown = s.cli(["show", "Genie"]);
+  assert.equal(shown.code, 0, shown.err);
+  assert.equal(shown.err.split("\n").filter((l) => /permission mode "bypassPermission"/.test(l)).length, 1, shown.err);
+});
+
 // ---- #1411 FIX-FIRST: a standard model keeps the default tier over a profile's or the host's
 // Fast, and show reads the profile a launch names. ----
 
@@ -5623,4 +5719,674 @@ test("#738 main: displaced external leads on the two edited rows are cleared and
   assert.deepEqual(genie.crossMembers, [{ id: P, project: ext }], "crossMembers untouched");
   assert.deepEqual(ops, JSON.parse(JSON.stringify(seeded.bots[5])), "another row's external link stays");
   assert.equal(readFileSync(join(ext, ".herdr/bots.json"), "utf8"), extText, "the other project's file is never written");
+});
+
+
+// ---- #1556: restart a seat from a handoff at a context threshold ----
+
+/** A Claude Code session log for `sid` in `cwd` under the scratch home's default login. */
+function seatTranscript(s, sid, messages, cwd = s.project) {
+  const dir = join(s.home, ".claude/projects", claudeSlug(cwd));
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${sid}.jsonl`);
+  writeFileSync(path, `${messages.map((m) => JSON.stringify(m)).join("\n")}\n`);
+  return path;
+}
+const assistantUsage = (input, read = 0, created = 0) => ({ type: "assistant",
+  message: { role: "assistant", usage: { input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: created, output_tokens: 5 } } });
+const attachSeat = (s, name, terminal) => {
+  const r = s.cli(["attach", name, terminal]);
+  assert.equal(r.code, 0, r.err);
+};
+async function waitUntil(what, fn, ms = 15_000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (fn()) return;
+    await new Promise((done) => setTimeout(done, 10));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+const handoffFile = (s, botId) => join(s.app, "automagik-herdr/handoff", `${botId}.md`);
+/**
+ * The fake `hc run --bg` records the watcher's launch but never spawns it, so a detached
+ * watcher's timeout is otherwise only code-read. This starts the very argv that call recorded
+ * (past hc's `/bin/sh -c ... sh K=V ...` wrapper), detached, keeping the fake's own env words.
+ */
+function startRecordedWatcher(s, run, extraEnv = {}) {
+  const words = run.slice(run.indexOf("--") + 1);
+  let i = words.indexOf("sh", 3) + 1;
+  const env = {};
+  while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) {
+    const eq = words[i].indexOf("=");
+    env[words[i].slice(0, eq)] = words[i].slice(eq + 1);
+    i += 1;
+  }
+  assert.ok(i < words.length, `the watcher's argv is in ${JSON.stringify(run)}`);
+  return spawn(words[i], words.slice(i + 1), { cwd: s.project, env: { ...s.env, ...env, ...extraEnv },
+    detached: true, stdio: "ignore" });
+}
+
+test("#1556 ls and show report context_tokens from the newest assistant message", (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  seatTranscript(s, SID, [
+    assistantUsage(100, 900, 50),
+    assistantUsage(1000, 4000, 500),
+    "not a transcript line",
+  ]);
+  const main = s.cli(["ls", "--json"]).json().projects[0].bots.find((b) => b.id === ID.main);
+  assert.equal(main.context_tokens, 5500);
+  assert.equal(main.restartAt, 250_000, "a main bot's default threshold is reported");
+  assert.equal(main.pinnedRestartAt, null);
+  const show = s.cli(["show", "Genie", "--json"]).json();
+  assert.equal(show.context_tokens, 5500);
+  assert.match(s.cli(["show", "Genie"]).out, /context +5500 tokens/);
+  assert.match(s.cli(["show", "Genie"]).out, /restartAt +250000 tokens \(default\)/);
+  // A member with no threshold reports none and no context (it is not a running Claude seat).
+  const captain = s.cli(["show", "Captain", "--json"]).json();
+  assert.equal(captain.restartAt, null);
+  assert.equal(captain.context_tokens, null);
+});
+
+test("#1556 edit --restart-at sets a seat's threshold and --no-restart-at clears it", (t) => {
+  const s = scene(t);
+  s.seed(team());
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000", "--json"]).code, 0);
+  assert.equal(s.bots().bots[0].restartAt, 1000);
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().restartAt, 1000);
+  assert.equal(s.cli(["edit", "Genie", "--no-restart-at"]).code, 0);
+  assert.equal(s.bots().bots[0].restartAt, undefined);
+  assert.equal(s.cli(["edit", "Dev", "--restart-at", "500"]).code, 0, "a member may take a threshold");
+  assert.equal(s.bots().bots[2].restartAt, 500);
+  for (const bad of ["0", "-5", "1.5", "1e3"]) {
+    const flag = bad.startsWith("-") ? `--restart-at=${bad}` : "--restart-at";
+    const r = bad.startsWith("-") ? s.cli(["edit", "Genie", flag]) : s.cli(["edit", "Genie", flag, bad]);
+    assert.equal(r.code, 2, bad);
+    assert.match(r.err, /restart-at is a positive whole number/, bad);
+  }
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000", "--no-restart-at"]).code, 2);
+});
+
+test("#1556 restart --due --dry-run names only the seats over their threshold and touches nothing", (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(1200)]);
+  // Captain runs too, with plenty of context and no threshold of its own: not due.
+  const state = s.hcState();
+  state.terminals.push({ ...term("t6", { bot: ID.cap, cwd: s.project }), labels: { bot: ID.cap, "agent.session": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d" } });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  attachSeat(s, "Captain", "t6");
+  seatTranscript(s, "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d", [assistantUsage(900_000)]);
+  const before = s.calls().length;
+  const dry = s.cli(["restart", "--due", "--dry-run", "--json"]);
+  assert.equal(dry.code, 0, dry.err);
+  assert.deepEqual(dry.json().due.map((r) => [r.name, r.context_tokens, r.restart_at]), [["Genie", 1200, 1000]]);
+  // Only reads (hc get/ls/server): nothing is sent, started, ended or relabelled.
+  const changed = s.calls().slice(before).filter((c) => ["send", "run", "kill", "keys", "label", "put", "rm"].includes(c[0]));
+  assert.deepEqual(changed, [], "the dry run touches no pane");
+  assert.equal(existsSync(handoffFile(s, ID.main)), false, "no handoff directory is created");
+  const text = s.cli(["restart", "--due", "--dry-run"]);
+  assert.match(text.out, /Genie/);
+  assert.doesNotMatch(text.out, /Captain/);
+});
+
+test("#1556 restart --due asks an idle seat for its handoff and restarts it fresh from the file", async (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const running = s.cliAsync(["restart", "--due", "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
+  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  const asked = s.calls().find((c) => c[0] === "send" && c[1] === "t5")[2];
+  assert.match(asked, /Write your handoff to .*automagik-herdr\/handoff\/b-aaaaaaaaaa\.md/);
+  assert.match(asked, /what is in flight, what waits on whom/);
+  assert.match(asked, /end your turn/);
+  const path = handoffFile(s, ID.main);
+  writeFileSync(path, "In flight: the wave C change.\nWaits on: Reviewer.\nNext: 1. gate 2. commit 3. report.\n");
+  const r = await running;
+  assert.equal(r.code, 0, r.err);
+  assert.equal(JSON.parse(r.out).restarted[0].name, "Genie");
+  const calls = s.calls();
+  const replacement = calls.find((c) => c[0] === "run" && !c.includes("--run-queued"));
+  assert.ok(replacement, "the seat was restarted");
+  const words = plain(agentWords(replacement));
+  assert.equal(words.some((w) => ["--resume", "--continue"].includes(w)), false, "a fresh conversation, not a resume");
+  assert.ok(replacement.includes("--label") || replacement.includes(`bot=${ID.main}`));
+  assert.equal(at(calls, "kill", "t5") > calls.indexOf(replacement), true, "the old pane ended only after the new one");
+  // The new conversation's first message is the handoff file.
+  const first = calls.filter((c) => c[0] === "send" && c[1] === "t100");
+  assert.equal(first.length, 1);
+  assert.match(first[0][2], /In flight: the wave C change/);
+  assert.equal(existsSync(path), true, "the handoff file is kept");
+});
+
+test("#1556 a seat that never writes its handoff is still running and the pass reports it", async (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const r = s.cli(["restart", "--due"], { env: { AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "120", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /Genie: not restarted: .*didn't write .*b-aaaaaaaaaa\.md/);
+  assert.match(r.err, /Genie: not restarted/);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "live", "the seat kept running");
+  assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false, "nothing was started or ended");
+});
+
+test("#1556 a handoff that can't be written refuses before asking: no message, no restart", (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(s.app, "automagik-herdr", "handoff"), "not a folder");
+  const r = s.cli(["restart", "--due"]);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /not restarted: .*can't be written/);
+  assert.equal(s.calls().some((c) => c[0] === "send"), false, "the seat was never asked");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "live");
+});
+
+test("#1556 a due seat with a helper restarts with its helper under the new pane, from the handoff", async (t) => {
+  const { s } = treeScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const running = s.cliAsync(["restart", "--due", "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
+  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  writeFileSync(handoffFile(s, ID.main), "Helper handoff: fix-213 is in flight.\nNext: 1. merge 2. test 3. report.\n");
+  const r = await running;
+  assert.equal(r.code, 0, r.err);
+  const calls = s.calls();
+  assert.ok(calls.some((c) => c[0] === "run" && c.includes("fix-213-dev")), "the worker ran again");
+  assert.ok(calls.some((c) => c[0] === "run" && c.includes("rev-1")), "the template helper ran again");
+  const replacement = s.hcState().terminals.find((x) => x.address !== "t5" && x.state === "live" && x.labels?.bot === ID.main);
+  assert.ok(replacement, "the bot's new pane runs");
+  assert.ok(calls.some((c) => c[0] === "send" && c[1] === replacement.address && /Helper handoff/.test(c[2])),
+    "the handoff is the new conversation's first message");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
+});
+
+test("#1556 a working seat is queued with a handoff and restarts from it at its next idle", async (t) => {
+  const s = restartScene(t, { status: "working" });
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const due = s.cli(["restart", "--due", "--json"]);
+  assert.equal(due.code, 0, due.err);
+  assert.equal(due.json().restarted.length, 0);
+  assert.equal(due.json().queued[0].name, "Genie");
+  const queued = s.cli(["restart", "--queued", "--json"]).json().queued;
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].reason, "due");
+  assert.equal(queued[0].options.handoff, true);
+  assert.equal(queued[0].options.fresh, true);
+  assert.equal(queued[0].options.tree, true);
+  const entry = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"))[0];
+  const state = s.hcState();
+  state.idleOnWait = "t5";
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const watcher = s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10", AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" } });
+  await waitUntil("the watcher's handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  const path = handoffFile(s, ID.main);
+  writeFileSync(path, "Queued handoff: the reviewer waits.\nNext: 1. read 2. test 3. report.\n");
+  const w = await watcher;
+  assert.equal(w.code, 0, `${w.err}${w.out}`);
+  const calls = s.calls();
+  assert.ok(calls.some((c) => c[0] === "run" && !c.includes("--run-queued")), "the replacement started");
+  const replacement = s.hcState().terminals.find((x) => x.address !== "t5" && x.state === "live" && x.labels?.bot === ID.main);
+  assert.ok(replacement, "the replacement runs as the bot");
+  assert.ok(calls.some((c) => c[0] === "send" && c[1] === replacement.address && /Queued handoff/.test(c[2])),
+    "the handoff is the new conversation's first message");
+  assert.deepEqual(JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8")), []);
+});
+
+test("#1556 a queued seat that never writes its handoff is left running and the watcher reports it", async (t) => {
+  const s = restartScene(t, { status: "working" });
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  assert.equal(s.cli(["restart", "--due", "--json"]).json().queued.length, 1);
+  const entry = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"))[0];
+  const state = s.hcState();
+  state.idleOnWait = "t5";
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const w = await s.cliAsync(["restart", ID.main, "--run-queued", entry.id], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "120", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10", AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" } });
+  assert.equal(w.code, 1);
+  assert.match(w.err, /didn't write .*b-aaaaaaaaaa\.md/);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "live");
+  assert.equal(s.calls().some((c) => c[0] === "kill" || (c[0] === "run" && !c.includes("--run-queued"))), false,
+    "the seat was not restarted (its queue watcher's own run is the only run)");
+  assert.deepEqual(JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8")), []);
+});
+
+test("#1556 a detached watcher's handoff timeout is recorded and the lead is told", async (t) => {
+  const capSession = "5e4f4a3b-8c2d-4e6f-9a8b-7c6d5e4f3a2b";
+  const s = restartScene(t);
+  const captain = term("t6", { bot: ID.cap, cwd: s.project, status: "working" });
+  captain.labels = { ...captain.labels, "agent.session": capSession };
+  const initial = s.hcState();
+  initial.terminals.push(captain);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(initial));
+  attachSeat(s, "Genie", "t5");
+  attachSeat(s, "Captain", "t6");
+  assert.equal(s.cli(["edit", "Captain", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, capSession, [assistantUsage(5000)]);
+  const due = s.cli(["restart", "--due", "--json"]);
+  assert.equal(due.code, 0, due.err);
+  assert.equal(due.json().queued.length, 1, due.out);
+  // The fake hc does not spawn the watcher: take the launch the queue recorded and start it
+  // detached, as hc would, so the ask -> timeout path runs end to end.
+  const run = s.calls().find((c) => c[0] === "run" && c.includes("--run-queued"));
+  assert.ok(run, "the pass started a detached watcher");
+  const state = s.hcState();
+  state.idleOnWait = "t6";
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  startRecordedWatcher(s, run, { AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "120", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10",
+    AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" });
+  const record = join(s.app, "automagik-herdr/handoff-failures.json");
+  const queue = join(s.app, "automagik-herdr/queued-restarts.json");
+  await waitUntil("the detached watcher's failure record", () => existsSync(record)
+    && JSON.parse(readFileSync(queue, "utf8")).length === 0, 20_000);
+  const failure = JSON.parse(readFileSync(record, "utf8")).failures[0];
+  assert.equal(failure.botId, ID.cap);
+  assert.equal(failure.botName, "Captain");
+  assert.equal(failure.kind, "timeout");
+  assert.match(failure.why, /didn't write .*b-.*\.md/);
+  assert.equal(failure.handoff, handoffFile(s, ID.cap));
+  assert.equal(failure.notified?.sent, "t5", "the project's main bot was told");
+  assert.ok(s.hcState().sent.some((m) => m.to === "t5" && /Captain.*handoff restart failed/.test(m.text)),
+    JSON.stringify(s.hcState().sent));
+  // The existing reader shows it after the watcher's --rm pane is gone.
+  const listed = s.cli(["restart", "--queued"]);
+  assert.match(listed.out, /Captain.*handoff restart timeout/);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t6").state, "live", "the seat kept running");
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing restarted it");
+  assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
+});
+
+/** Captain (t6) over its handoff threshold, Genie (the main bot) live in t5. */
+function captainDueScene(t, { status = "working" } = {}) {
+  const capSession = "5e4f4a3b-8c2d-4e6f-9a8b-7c6d5e4f3a2b";
+  const s = restartScene(t);
+  const captain = term("t6", { bot: ID.cap, cwd: s.project, status });
+  captain.labels = { ...captain.labels, "agent.session": capSession };
+  const initial = s.hcState();
+  initial.terminals.push(captain);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(initial));
+  attachSeat(s, "Genie", "t5");
+  attachSeat(s, "Captain", "t6");
+  assert.equal(s.cli(["edit", "Captain", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, capSession, [assistantUsage(5000)]);
+  return s;
+}
+
+/** Queues Captain's handoff restart through --due and returns the queue entry. */
+function queueCaptainDue(s) {
+  const due = s.cli(["restart", "--due", "--json"]);
+  assert.equal(due.code, 0, due.err);
+  assert.equal(due.json().queued.length, 1, due.out);
+  return JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"))[0];
+}
+
+const handoffRecord = (s) => JSON.parse(readFileSync(join(s.app, "automagik-herdr/handoff-failures.json"), "utf8")).failures[0];
+
+/** Waits for a detached watcher to give up, then returns the record. On a silent drop the
+ * failure names both missing signals (the row and the main-bot message) instead of a bare timeout. */
+async function waitForDroppedHandoff(s) {
+  const record = join(s.app, "automagik-herdr/handoff-failures.json");
+  const queue = join(s.app, "automagik-herdr/queued-restarts.json");
+  try {
+    await waitUntil("the dropped handoff's record", () => existsSync(record)
+      && JSON.parse(readFileSync(queue, "utf8")).length === 0, 20_000);
+  } catch (e) {
+    const told = s.hcState().sent?.some((m) => m.to === "t5" && /handoff restart failed/.test(m.text));
+    assert.fail(`${e.message}; record written: ${existsSync(record)}; lead told: ${Boolean(told)}`);
+  }
+  return record;
+}
+
+test("#1556 a queued handoff whose pane is gone before the restart is recorded and the lead is told", async (t) => {
+  const s = captainDueScene(t);
+  const entry = queueCaptainDue(s);
+  const run = s.calls().find((c) => c[0] === "run" && c.includes("--run-queued"));
+  assert.ok(run, "the pass started a detached watcher");
+  // The agent exits before the watcher ever sees it idle: hc no longer knows the terminal.
+  const state = s.hcState();
+  state.terminals = state.terminals.filter((x) => x.address !== "t6");
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  startRecordedWatcher(s, run, { AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" });
+  const record = await waitForDroppedHandoff(s);
+  assert.equal(statSync(record).mode & 0o777, 0o600, "the record stays 0600");
+  const failure = handoffRecord(s);
+  const why = "Captain: its pane t6 is gone before the queued handoff restart, so it was dropped and not restarted.";
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: handoffFile(s, ID.cap), why,
+    report: "Captain: a handoff restart failed (dropped): its pane t6 is gone before the queued handoff restart, so it was dropped and not restarted.",
+    notified: { sent: "t5", unsent: null } });
+  assert.ok(s.hcState().sent.some((m) => m.to === "t5" && /Captain.*handoff restart failed \(dropped\).*pane t6 is gone/.test(m.text)),
+    JSON.stringify(s.hcState().sent));
+  // The existing reader answers after the watcher's --rm pane is gone.
+  assert.match(s.cli(["restart", "--queued"]).out, /Captain \(b-bbbbbbbbbb\): handoff restart dropped at .*: Captain: its pane t6 is gone/);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+  assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
+});
+
+test("#1556 a queued handoff whose pane was reused before the restart is recorded and the lead is told", async (t) => {
+  const s = captainDueScene(t);
+  const entry = queueCaptainDue(s);
+  const run = s.calls().find((c) => c[0] === "run" && c.includes("--run-queued"));
+  assert.ok(run, "the pass started a detached watcher");
+  // Another pane now answers t6: the same address, a different created_ms.
+  const state = s.hcState();
+  state.terminals.find((x) => x.address === "t6").created_ms = entry.created_ms + 1;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  startRecordedWatcher(s, run, { AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" });
+  const record = await waitForDroppedHandoff(s);
+  const failure = handoffRecord(s);
+  const why = `Captain: its pane t6 was reused (created_ms ${entry.created_ms} -> ${entry.created_ms + 1}) before the queued handoff restart, so it was dropped and not restarted.`;
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: handoffFile(s, ID.cap), why,
+    report: `Captain: a handoff restart failed (dropped): its pane t6 was reused (created_ms ${entry.created_ms} -> ${entry.created_ms + 1}) before the queued handoff restart, so it was dropped and not restarted.`,
+    notified: { sent: "t5", unsent: null } });
+  assert.ok(s.hcState().sent.some((m) => m.to === "t5" && /Captain.*handoff restart failed \(dropped\).*reused/.test(m.text)),
+    JSON.stringify(s.hcState().sent));
+  assert.match(s.cli(["restart", "--queued"]).out, /handoff restart dropped at .*: Captain: its pane t6 was reused/);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+});
+
+test("#1556 the direct pass records a pane that ends before the ask", (t) => {
+  const s = captainDueScene(t, { status: "idle" });
+  // The pass measures the seat live, then hc answers finished at paneNow (the pane's next look).
+  const state = s.hcState();
+  state.terminals.find((x) => x.address === "t6").exitAfterGets = 1;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["restart", "--due", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().failed, [], "a seat already gone is not a pass failure");
+  const failure = handoffRecord(s);
+  assert.match(r.err, /Captain: not running in t6 any more; nothing was asked or restarted/);
+  assert.equal(s.calls().some((c) => c[0] === "send" && c[1] === "t6"), false, "the seat was never asked");
+  assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false, "nothing was started or ended");
+  const why = "not running in t6 any more; nothing was asked or restarted.";
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: handoffFile(s, ID.cap), why,
+    report: "Captain: a handoff restart failed (dropped): not running in t6 any more; nothing was asked or restarted.",
+    notified: null }, "a foreground pass reports to the person, not the lead");
+});
+
+test("#1556 the direct pass records a pane that ends after the handoff", (t) => {
+  const s = captainDueScene(t, { status: "idle" });
+  const path = handoffFile(s, ID.cap);
+  const state = s.hcState();
+  // The ask writes the handoff as it lands; the seat then takes a turn, so the restart queues;
+  // the cancel of that plain entry happens just as the pane ends.
+  state.onSendWrite = { terminal: "t6", path, text: "Racing handoff: the pane ends after the ask.\n" };
+  state.onRead = { terminal: "t6", nth: 2, status: "working" };
+  state.afterKill = { terminal: "t6", patch: { state: "finished" } };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["restart", "--due", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().failed, [], "a seat already gone is not a pass failure");
+  const failure = handoffRecord(s);
+  assert.match(r.err, /Captain: its pane ended \(finished\) after the handoff was written/);
+  const why = "its pane ended (finished) after the handoff was written, so it was not queued for a handoff restart.";
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: path, why,
+    report: "Captain: a handoff restart failed (dropped): its pane ended (finished) after the handoff was written, so it was not queued for a handoff restart.",
+    notified: null });
+  assert.equal(readFileSync(path, "utf8"), "Racing handoff: the pane ends after the ask.\n", "the handoff is kept for a person");
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+});
+
+test("#1556 a failed first-message send is a recorded warning, not a failed restart", async (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const state = s.hcState();
+  state.failSend = ["t100"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const running = s.cliAsync(["restart", "--due", "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
+  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  writeFileSync(handoffFile(s, ID.main), "Send-failure handoff: the file stays for a person.\n");
+  const r = await running;
+  assert.equal(r.code, 0, "the restart itself succeeded");
+  const restarted = JSON.parse(r.out).restarted[0];
+  assert.match(restarted.warning, /wasn't sent to t100/);
+  const failure = JSON.parse(readFileSync(join(s.app, "automagik-herdr/handoff-failures.json"), "utf8")).failures[0];
+  assert.equal(failure.botId, ID.main);
+  assert.equal(failure.kind, "send");
+  assert.match(failure.why, /wasn't sent to t100/);
+  const listed = s.cli(["restart", "--queued"]);
+  assert.match(listed.out, /Genie.*handoff restart send/);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live", "the new conversation runs");
+});
+
+// #1556 repair: a handoff row that is not an object, or has no usable botName, is skipped with
+// its reason in both outputs; the next failure is still written after it. Before this, reading
+// `failures: [null]` threw on the reader and the writer swallowed the same throw, so the newest
+// failure was lost.
+const handoffFailuresPath = (s) => join(s.app, "automagik-herdr/handoff-failures.json");
+const seedHandoffFailures = (s, failures) => {
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(handoffFailuresPath(s), `${JSON.stringify({ version: 1, failures })}\n`, { mode: 0o600 });
+};
+
+const malformedRows = [
+  ["a null row", null, "not an object (null)"],
+  ["a string row", "not a row", "not an object (string)"],
+  ["a number row", 42, "not an object (number)"],
+  ["an array row", [{ botName: "Captain" }], "not an object (array)"],
+  ["a row with no botName", { kind: "send", why: "no name" }, "no usable botName"],
+  ["a nested botName", { botName: { name: "Captain" }, kind: "send", why: "nested" }, "no usable botName"],
+];
+
+for (const [label, row, reason] of malformedRows) {
+  test(`#1556 restart --queued skips ${label} in the handoff record`, (t) => {
+    const s = scene(t);
+    seedHandoffFailures(s, [row]);
+    const text = s.cli(["restart", "--queued"]);
+    assert.equal(text.code, 0, text.err);
+    assert.equal(text.out, `Skipped handoff failure row 1: ${reason}.\n`);
+    assert.doesNotMatch(text.err, /Cannot read properties/);
+    const json = s.cli(["restart", "--queued", "--json"]);
+    assert.equal(json.code, 0, json.err);
+    assert.deepEqual(json.json(), { queued: [], handoff_failures_skipped: [{ row: 1, reason }] });
+  });
+}
+
+test("#1556 a handoff row with a botName but no why or kind prints placeholders", (t) => {
+  const s = scene(t);
+  seedHandoffFailures(s, [
+    { at: "2026-11-19T00:00:00.000Z", botName: "Captain", botId: ID.cap, kind: "send" },
+    { at: "2026-11-19T00:01:00.000Z", botName: "Genie", botId: ID.main, why: "its pane went" },
+    { at: "2026-11-19T00:02:00.000Z", botName: "Dev", botId: ID.dev, kind: "dropped", why: { detail: "nested" } },
+  ]);
+  const text = s.cli(["restart", "--queued"]);
+  assert.equal(text.code, 0, text.err);
+  assert.equal(text.out,
+    `Captain (${ID.cap}): handoff restart send at 2026-11-19T00:00:00.000Z: (no reason recorded).\n`
+    + `Genie (${ID.main}): handoff restart unknown at 2026-11-19T00:01:00.000Z: its pane went.\n`
+    + `Dev (${ID.dev}): handoff restart dropped at 2026-11-19T00:02:00.000Z: (no reason recorded).\n`);
+  const json = s.cli(["restart", "--queued", "--json"]);
+  assert.equal(json.code, 0, json.err);
+  assert.deepEqual(json.json().handoff_failures, [
+    { at: "2026-11-19T00:00:00.000Z", kind: "send", botId: ID.cap, botName: "Captain", project: null,
+      terminal: null, handoff: null, why: "(no reason recorded)", report: null, notified: null },
+    { at: "2026-11-19T00:01:00.000Z", kind: "unknown", botId: ID.main, botName: "Genie", project: null,
+      terminal: null, handoff: null, why: "its pane went", report: null, notified: null },
+    { at: "2026-11-19T00:02:00.000Z", kind: "dropped", botId: ID.dev, botName: "Dev", project: null,
+      terminal: null, handoff: null, why: "(no reason recorded)", report: null, notified: null },
+  ]);
+  assert.equal(json.json().handoff_failures_skipped, undefined);
+});
+
+test("#1556 the next failure is written after a handoff record of malformed rows", (t) => {
+  for (const [label, row] of malformedRows) {
+    const s = captainDueScene(t, { status: "idle" });
+    seedHandoffFailures(s, [row]);
+    const state = s.hcState();
+    // The seat ends at the pass's next look: its dropped row is the write under test.
+    state.terminals.find((x) => x.address === "t6").exitAfterGets = 1;
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    const r = s.cli(["restart", "--due", "--json"]);
+    assert.equal(r.code, 0, `${label}: ${r.err}`);
+    assert.equal(statSync(handoffFailuresPath(s)).mode & 0o777, 0o600, `${label}: the record stays 0600`);
+    const failures = JSON.parse(readFileSync(handoffFailuresPath(s), "utf8")).failures;
+    assert.equal(failures.length, 1, `${label}: ${JSON.stringify(failures)}`);
+    assert.equal(failures[0].botId, ID.cap, `${label}: the new row is the newest`);
+    assert.equal(failures[0].kind, "dropped", label);
+    const listed = s.cli(["restart", "--queued", "--json"]);
+    assert.equal(listed.code, 0, listed.err);
+    assert.deepEqual(listed.json().handoff_failures.map((f) => f.botId), [ID.cap], label);
+    assert.equal(listed.json().handoff_failures_skipped, undefined, label);
+  }
+});
+
+test("#1556 restart --due --dry-run does not say a seat would be asked when its handoff home is a file", (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(1200)]);
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(s.app, "automagik-herdr", "handoff"), "not a folder");
+  const dry = s.cli(["restart", "--due", "--dry-run", "--json"]);
+  assert.equal(dry.code, 0, dry.err);
+  assert.match(dry.json().due[0].refused, /is not a folder/);
+  const text = s.cli(["restart", "--due", "--dry-run"]);
+  assert.doesNotMatch(text.out, /would be asked/);
+  assert.match(text.out, /would be refused/);
+  assert.equal(readFileSync(join(s.app, "automagik-herdr", "handoff"), "utf8"), "not a folder", "the dry run touched nothing");
+});
+
+test("#1556 a handoff file left by an earlier pass is emptied before the ask: only the new text is sent", async (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const path = handoffFile(s, ID.main);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "STALE: an earlier pass's handoff.\n");
+  const running = s.cliAsync(["restart", "--due", "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
+  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  // The seat appends its answer, as an agent that keeps notes in the same file does.
+  writeFileSync(path, `${readFileSync(path, "utf8")}NEW: this pass's handoff.\n`);
+  const r = await running;
+  assert.equal(r.code, 0, r.err);
+  const first = s.calls().filter((c) => c[0] === "send" && c[1] === "t100");
+  assert.equal(first.length, 1);
+  assert.match(first[0][2], /NEW: this pass's handoff/);
+  assert.doesNotMatch(first[0][2], /STALE/, "the earlier pass's bytes are never sent");
+});
+
+test("#1556 a queued handoff is emptied before the watcher's ask too", async (t) => {
+  const s = restartScene(t, { status: "working" });
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const path = handoffFile(s, ID.main);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "STALE: an earlier pass's handoff.\n");
+  assert.equal(s.cli(["restart", "--due", "--json"]).json().queued.length, 1);
+  const entry = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"))[0];
+  const state = s.hcState();
+  state.idleOnWait = "t5";
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const watcher = s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10", AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" } });
+  await waitUntil("the watcher's handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  writeFileSync(path, `${readFileSync(path, "utf8")}NEW: the queued pass's handoff.\n`);
+  const w = await watcher;
+  assert.equal(w.code, 0, `${w.err}${w.out}`);
+  const replacement = s.hcState().terminals.find((x) => x.address !== "t5" && x.state === "live" && x.labels?.bot === ID.main);
+  assert.ok(replacement, "the replacement runs as the bot");
+  const first = s.calls().filter((c) => c[0] === "send" && c[1] === replacement.address);
+  assert.equal(first.length, 1);
+  assert.match(first[0][2], /NEW: the queued pass's handoff/);
+  assert.doesNotMatch(first[0][2], /STALE/, "the earlier pass's bytes are never sent");
+});
+
+test("#1556 a second --due pass leaves an already queued handoff and its watcher alone", (t) => {
+  const s = restartScene(t, { status: "working" });
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const first = s.cli(["restart", "--due", "--json"]);
+  assert.equal(first.code, 0, first.err);
+  const watcher = first.json().queued[0].watcher;
+  assert.equal(s.hcState().terminals.find((x) => x.address === watcher).state, "live");
+  const second = s.cli(["restart", "--due", "--json"]);
+  assert.equal(second.code, 0, second.err);
+  assert.equal(second.json().queued.length, 0, "the second pass queued no replacement");
+  assert.match(second.out, /Genie: already queued for a handoff restart/);
+  assert.equal(s.hcState().terminals.find((x) => x.address === watcher).state, "live", "the first watcher is still live");
+  const entries = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"));
+  assert.equal(entries.length, 1, "the queue still holds one entry");
+  assert.equal(entries[0].watcher, watcher);
+  assert.equal(s.calls().filter((c) => c[0] === "run").length, 1, "no second watcher was started");
+});
+
+test("#1556 two --due passes cannot interleave: the second says a pass is already running", async (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const running = s.cliAsync(["restart", "--due", "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10", AUTOMAGIK_HERDR_LOCK_STALE_MS: "60000" } });
+  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  // A stale limit far past this test: the first pass's lock must not look dead under load.
+  const second = s.cli(["restart", "--due", "--json"], { env: { AUTOMAGIK_HERDR_LOCK_STALE_MS: "60000" } });
+  assert.equal(second.code, 0, second.err);
+  assert.match(second.out, /another restart --due pass is already running/);
+  assert.deepEqual(second.json().restarted, []);
+  assert.equal(s.calls().filter((c) => c[0] === "send" && c[1] === "t5").length, 1, "the second pass asked no one");
+  writeFileSync(handoffFile(s, ID.main), "Overlap handoff: only the first pass restarts it.\n");
+  const r = await running;
+  assert.equal(r.code, 0, r.err);
+  assert.equal(JSON.parse(r.out).restarted.length, 1);
+  assert.equal(s.calls().filter((c) => c[0] === "run" && !c.includes("--run-queued")).length, 1, "one replacement");
+});
+
+test("#1556 --due refuses to restart a pane other than the one it measured", async (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const running = s.cliAsync(["restart", "--due", "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
+  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  // The seat is attached elsewhere while the pass waits for the handoff: t9 is its live seat
+  // now, and t5 is no longer labelled for it.
+  const rows = attachOf(s);
+  const state = s.hcState();
+  delete state.terminals.find((x) => x.address === "t5").labels.bot;
+  state.terminals.push({ address: "t9", name: "t9", cwd: s.project, state: "live", created_ms: 77,
+    labels: { bot: ID.main }, foreground: { argv: ["claude"], cwd: s.project }, status: { app: "claude-code", state: "idle" } });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const moved = { ...rows.find((x) => x.terminal === "t5"), terminal: "t9", created_ms: 77, by: "attach", at: new Date().toISOString() };
+  writeFileSync(attachFile(s.app), [...rows, moved].map((x) => `${JSON.stringify(x)}\n`).join(""), { mode: 0o600 });
+  writeFileSync(handoffFile(s, ID.main), "Moved handoff: nothing may restart from this.\n");
+  const r = await running;
+  assert.equal(r.code, 1);
+  assert.match(JSON.parse(r.out).failed[0].error, /the pane this pass measured \(t5\) is no longer its live seat/);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was started");
+  assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t9").state, "live");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "live");
 });

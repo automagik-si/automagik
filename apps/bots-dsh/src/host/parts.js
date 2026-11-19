@@ -2630,17 +2630,21 @@ export function install(rt) {
     checkCurrent()
     await rt.clearAuto?.(bot)
     checkCurrent()
-    const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, previousModel: bot.previousModel }
+    const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, previousModel: bot.previousModel, shellHeld: bot.shellHeld }
     const restore = () => {
       for (const key of ['model', 'effort', 'appliedModel', 'appliedEffort', 'previousModel']) {
         if (previous[key] === undefined) delete bot[key]
         else bot[key] = previous[key]
       }
+      if (previous.shellHeld === undefined) delete bot.shellHeld
+      else bot.shellHeld = previous.shellHeld
     }
     const putRoute = () => {
       bot.model = target
       if (effortId === null) delete bot.effort
       else if (effortId !== undefined) bot.effort = effortId
+      // A route change to a model that uses DSH's tools lifts a load-time shell hold.
+      if (bot.shellHeld !== undefined && (bot.shell === true || !commandCapableAgent(target))) delete bot.shellHeld
     }
     if (!said) {
       rt.noteModelChoice?.(bot, target)
