@@ -78,13 +78,22 @@ const FRONT = { id: 'ch-front', kind: 'telegram', name: 'Front desk', status: 'c
 // A fake channels plugin, registered the way Omni's will be: one source per Bot, chats read only
 // while the Bot is open, and the same faces and status words the real source returns.
 const CHANNELS = { pip: [HELP, STORE], kit: [FRONT] }
-for (const id of Object.keys(CHANNELS)) {
+// Pip's source is the live one below, so the removal case can take a channel away from it.
+for (const id of Object.keys(CHANNELS).filter(id => id !== 'pip')) {
   botChannels.register({
     id: `fixture-channels-${id}`, botId: id,
     useChannels: (_, { open }) => CHANNELS[id].map(channel => (open ? channel : { ...channel, chats: undefined })),
     open: chatId => window.opened.push(`chat:${chatId}`),
   })
 }
+// `liveRow` is the mounted live page's state: a test changes it to remove a channel or a Bot
+// while its row is open, and the source serves the shorter list on the next render.
+let liveRow = null
+botChannels.register({
+  id: 'fixture-channels-pip', botId: 'pip',
+  useChannels: (_, { open }) => (liveRow?.channels ?? CHANNELS.pip).map(channel => (open ? channel : { ...channel, chats: undefined })),
+  open: chatId => window.opened.push(`chat:${chatId}`),
+})
 const JUNO = bot('juno', 'Juno', 'octopus', 'deepseek', { status: 'working' })
 const WREN = bot('wren', 'Wren', 'moon', 'violet', { unread: true })
 const OTTO = bot('otto', 'Otto', 'acorn', 'orange')
@@ -157,14 +166,51 @@ function Page({ kase, skin, fill }) {
     fill || kase === 'empty' || kase === 'marks' ? null : h(View))
 }
 
+// The live case for the row that loses its channel or its Bot: the same Team rows, from data
+// the test changes after they are on screen. `window.mountLive` puts it up; `window.live`
+// removes a channel or a Bot or selects a row, as a plugin update or a roster change would.
+function LiveBar({ skin }) {
+  const [state, setState] = useState(() => ({
+    bots: [JUNO, pip, WREN, OTTO],
+    sections: [{ label: 'Desk', bots: ['pip', 'wren'] }],
+    groups: [CREW],
+    channels: CHANNELS.pip,
+    current: 'bot:pip',
+    folded: new Set(),
+  }))
+  liveRow = state
+  window.live = {
+    removeChannel: id => setState(now => ({ ...now, channels: now.channels.filter(channel => channel.id !== id) })),
+    removeBot: id => setState(now => ({ ...now, bots: now.bots.filter(candidate => candidate.id !== id) })),
+    select: key => setState(now => ({ ...now, current: key })),
+  }
+  return h('div', { className: 'lb-bar', 'data-lb-skin': skin },
+    h('section', { className: 'lb-list' },
+      h(TeamRows, {
+        team: { frontId: 'juno', bots: state.bots, sections: state.sections, groups: state.groups },
+        current: state.current, folded: state.folded, loads: () => true, skin, renderGlyph: channelGlyph,
+        onOpen: row => window.opened.push(row.key),
+      })))
+}
+
 let root = null
 window.opened = []
 // `tokens` is a change of tokens alone, as a later skin or the owner's answer would be.
 window.mount = ({ kase = 'team', skin, fill = false, tokens, theme = 'deepseek' } = {}) => {
   root?.unmount()
   window.opened = []
+  liveRow = null
   extra = tokens ? tokenCss('body', tokens) : ''
   paint(theme)
   root = createRoot(document.getElementById('root'))
   root.render(h(Page, { kase, skin, fill }))
+}
+window.mountLive = ({ skin = 'stage', theme = 'deepseek' } = {}) => {
+  root?.unmount()
+  window.opened = []
+  liveRow = null
+  extra = ''
+  paint(theme)
+  root = createRoot(document.getElementById('root'))
+  root.render(h(LiveBar, { skin }))
 }

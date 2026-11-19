@@ -1,7 +1,7 @@
 // The new left bar's Team rows (left-bar-team.js): the front Bot first, then the Bots no section
 // holds, then each section under a quiet label, then the group chats; a Bot's channels and chats
 // under its row, from the one source that serves it; one line per row with one status; a status
-// said once, where the owner goes.
+// said once, where the owner goes; and a channel or a Bot that disappears while its row is open.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { findAll, hasClass, parts, render, textOf } from './left-bar-load.js'
@@ -248,6 +248,70 @@ test('the registry picks the one source that serves a Bot, by its id or its owne
   assert.equal(teamOf({ roster: rosterOf([pip]), order: [], status: emptyStatus(), marked: {} }).bots[0].channelSource, byOwns)
   offOwns()
   assert.equal(botChannels.entries().length, before, 'the disposer takes it off')
+})
+
+// The row that loses its channel or its Bot while open (#1402 review, MEDIUM evidence gap):
+// the source serves fewer channels on the next read, or the roster drops the Bot while a
+// section and a group still name it. The row goes away through the bar's own re-render, with
+// no thrown error, no row left claiming to be open and no stale chat rows.
+const artProps = {
+  renderArt: (who, size, state) => ({ type: 'i', props: { 'data-art': who.id, 'data-size': size, 'data-state': state }, children: [] }),
+  renderGlyph: channel => ({ type: 'i', props: { 'data-glyph': channel.kind }, children: [] }),
+}
+
+test('a channel removed while its Bot is open leaves no channel row, no chats and no thrown error', () => {
+  let channels = [{ ...HELP }, { ...STORE }]
+  const source = { id: 'removal-source', botId: 'pip', useChannels: () => channels, open: () => {} }
+  const off = botChannels.register(source)
+  try {
+    const shown = () => render(TeamRows({ team: { frontId: 'pip', bots: [bot('pip')] }, current: 'bot:pip', folded: new Set(), loads: () => true, ...artProps }))
+    const before = shown()
+    assert.equal(row(before, 'help').props['aria-expanded'], true, 'the channel is open before the removal')
+    // The source stops returning the channel while its Bot's row is open.
+    channels = channels.slice(1)
+    const after = shown()
+    assert.deepEqual(rowsOf(after), ['pip', 'store', 'd', 'c'], 'only the channel still served stays, with its chats')
+    assert.equal(rowsOf(after).includes('help'), false, 'the removed channel row is gone')
+    assert.deepEqual(rowsOf(after).filter(id => ['a', 'b', 's'].includes(id)), [], 'no chat of the removed channel stays rendered')
+    assert.deepEqual(findAll(after, node => node.props?.['aria-expanded'] !== undefined).map(node => node.props['data-id']), ['store'], 'no stale open channel state')
+    assert.equal(findAll(after, node => node.props?.['aria-current'] === 'page')[0].props['data-id'], 'pip', 'the Bot row still owns the open state')
+  } finally { off() }
+})
+
+test('a Bot removed from the roster while its row is open drops its row, its empty section and its group seat', () => {
+  const team = {
+    frontId: 'pip',
+    bots: [bot('pip', { channels: [HELP] }), bot('kit'), bot('wren')],
+    sections: [{ label: 'Desk', bots: ['pip', 'kit'] }, { label: 'Solo', bots: ['pip'] }],
+    groups: [{ id: 'crew', name: 'Crew', members: ['pip', 'wren'] }],
+  }
+  const before = render(TeamRows({ team, current: 'bot:pip', folded: new Set(), ...artProps }))
+  assert.ok(rowsOf(before).includes('pip'))
+  // The roster drops the Bot; the section and the group still name it.
+  const after = render(TeamRows({ team: { ...team, bots: team.bots.filter(candidate => candidate.id !== 'pip') }, current: 'bot:pip', folded: new Set(), ...artProps }))
+  assert.deepEqual(new Set(rowsOf(after)), new Set(['kit', 'wren', 'crew']), 'the Bot and its channels are gone; the rest of the rows are intact')
+  const labels = findAll(after, hasClass('lb-sec'))
+  assert.deepEqual(labels.map(textOf), ['Desk'], 'the section that held only the removed Bot draws no label')
+  assert.deepEqual(findAll(row(after, 'crew'), node => node.props?.['data-art']).map(node => node.props['data-art']), ['wren'], 'a group loses the removed member and keeps the others')
+  assert.equal(findAll(after, node => node.props?.['aria-current'] === 'page').length, 0, 'no row claims to be open')
+  const buttons = findAll(after, node => node.type === 'button')
+  assert.ok(buttons.length > 0 && buttons.every(button => button.props.type === 'button'), 'every remaining row is still a focusable button')
+})
+
+test('a channel removed while one of its chats is selected leaves no stale open row and does not throw', () => {
+  let channels = [{ ...HELP }, { ...STORE }]
+  const source = { id: 'removal-chat-source', botId: 'pip', useChannels: () => channels, open: () => {} }
+  const off = botChannels.register(source)
+  try {
+    const shown = () => render(TeamRows({ team: { frontId: 'pip', bots: [bot('pip')] }, current: 'chat:pip/help/b', folded: new Set(), loads: () => true, ...artProps }))
+    const before = shown()
+    assert.equal(findAll(before, node => node.props?.['aria-current'] === 'page')[0].props['data-id'], 'b', 'the chat is the open row')
+    channels = channels.slice(1)
+    const after = shown()
+    assert.equal(rowsOf(after).includes('b'), false, 'the selected chat is gone with its channel')
+    assert.equal(findAll(after, node => node.props?.['aria-current'] === 'page').length, 0, 'no disappeared row is left marked open')
+    assert.deepEqual(new Set(rowsOf(after)), new Set(['pip', 'store', 'd', 'c']), 'the bar keeps its other rows')
+  } finally { off() }
 })
 
 function rosterOf (bots) {
