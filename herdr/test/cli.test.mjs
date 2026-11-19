@@ -6578,6 +6578,30 @@ test("#1557 a report mentioning the rate limit is not the dialog: no status, par
   assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
 });
 
+test("#1557 a permission dialog after a limit sentence parks nothing, reports nothing and sends no key", (t) => {
+  // The HIGH: the repo's own permission dialog, preceded by a sentence about the limit. The
+  // cue was read from the sentence, so this seat was reported rate-limited and parked at the
+  // sentence's time. It is the owner's permission question; nothing may be queued or said.
+  const s = restartScene(t);
+  s.seed(team());
+  setScreen(s, "t5", "I checked the rate limit path; the limit resets at 3:00 PM.\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n");
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.deepEqual(sweep.json().rate_limited, []);
+  assert.deepEqual(sweep.json().parked, []);
+  assert.deepEqual(sweep.json().attention, []);
+  assert.deepEqual(s.cli(["restart", "--queued", "--json"]).json().queued, [], "no queue entry for a dialog nobody detected");
+  assert.equal(existsSync(attentionFileOf(s)), false, "no attention item");
+  assert.equal(s.calls().some((c) => ["send", "keys"].includes(c[0])), false, "zero keys ever");
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+  const ls = s.cli(["ls", "--json"]);
+  assert.equal(ls.code, 0, ls.err);
+  const genie = ls.json().projects[0].bots.find((b) => b.id === ID.main);
+  assert.equal(genie.status, "idle", "the permission dialog is not a rate-limit status");
+  assert.equal("rate_limited" in genie, false);
+  assert.equal("core_status" in genie, false);
+});
+
 test("#1557 a past timestamp is unknown and a dialog with no reset parks with no invented wake", async (t) => {
   // An ISO timestamp already gone proves nothing: no resets_at, no wake_at, no restart now.
   const past = restartScene(t);

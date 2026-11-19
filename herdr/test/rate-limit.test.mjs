@@ -2,9 +2,12 @@
 // rules the CLI and the sidebar share (restart.js, model.js), over text alone: no pane, no hc.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
-import { durationMs, rateLimitDialog, rateLimitLine, resetTimeFrom, wakeWait } from "../mods/am-sidebar/restart.js";
+import { durationMs, pendingDialog, rateLimitDialog, rateLimitLine, resetTimeFrom, wakeWait } from "../mods/am-sidebar/restart.js";
 import { checkBots, onRateLimitProblem, parseBots, rateLimitModeOf } from "../mods/am-sidebar/model.js";
+
+const screenFixture = (name) => readFileSync(new URL(`../mods/pocket-link/chat/fixtures/screens/${name}`, import.meta.url), "utf8");
 
 // A fixed local noon, so a clock time in a dialog is the same day and the assertions are too.
 const NOW = new Date(2026, 10, 19, 12, 0, 0).getTime();
@@ -46,6 +49,66 @@ test("the detector is narrow: scrollback, a passing retry line and a permission 
   assert.equal(rateLimitDialog(null, NOW), null);
   // The limit words alone, with no wait and no choice, are a status line, not the dialog.
   assert.equal(rateLimitDialog("rate limit reached\n", NOW), null);
+});
+
+// The repo's own permission dialog text: the question and yes/no choices the restart rules
+// already pin as a dialog the owner answers.
+const PERMISSION = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n";
+const LIMIT_SENTENCE = "I checked the rate limit path; the limit resets at 3:00 PM.";
+
+test("a permission dialog after a limit sentence is never the rate-limit dialog", () => {
+  // The HIGH: the cue was any limit line within ten lines above the options, so a permission
+  // question after the sentence became a rate-limit match with a 3:00 PM reset. The seat can
+  // be labelled rate-limited, parked, switched or force-restarted at that time while
+  // pendingDialog() already knows it is the owner's question. The two rules must not disagree.
+  const screen = `${LIMIT_SENTENCE}\n${PERMISSION}`;
+  assert.equal(pendingDialog(screen)?.question, "Do you want to proceed?");
+  assert.equal(rateLimitDialog(screen, NOW), null);
+  // The same defect on the repo's full permission screen fixture: the limit sentence directly
+  // above its question must not become the dialog's own line.
+  const withCue = screenFixture("claude-dialog.txt").replace(" This command requires approval",
+    ` ${LIMIT_SENTENCE}\n This command requires approval`);
+  assert.equal(pendingDialog(withCue)?.question, "Do you want to proceed?");
+  assert.equal(rateLimitDialog(withCue, NOW), null);
+});
+
+test("a quoted dialog, an unclosed fence and a patch hunk are not the live dialog", () => {
+  // A verbatim quote is text the person is reading, never a modal waiting for an answer.
+  const quote = ["Here is the dialog I saw:", "> Rate limit reached", "> Your limit resets at 3:00 PM.",
+    "> ❯ 1. Wait until it resets", ">   2. Upgrade your plan"].join("\n");
+  assert.equal(rateLimitDialog(quote, NOW), null);
+  // An unclosed fenced code block is still a code block.
+  const fenced = ["Here is the dialog I saw:", "```", "Rate limit reached", "Your limit resets at 3:00 PM.",
+    "❯ 1. Wait until it resets", "  2. Upgrade your plan"].join("\n");
+  assert.equal(rateLimitDialog(fenced, NOW), null);
+  // A patch hunk carries the dialog lines as indented context: the leading space is not a dialog.
+  const patch = ["@@ -1,3 +1,5 @@", " Rate limit reached", " Your limit resets at 3:00 PM.",
+    " ❯ 1. Wait until it resets", "   2. Upgrade your plan"].join("\n");
+  assert.equal(rateLimitDialog(patch, NOW), null);
+});
+
+test("a limit sentence that is not the dialog's own line is not a cue", () => {
+  // Adjacent prose between the sentence and the choices: the cue belongs to a report.
+  const report = [LIMIT_SENTENCE, "Findings:", "❯ 1. Wait until it resets", "  2. Upgrade your plan"].join("\n");
+  assert.equal(rateLimitDialog(report, NOW), null);
+  // Far above the choices is never the dialog's own header.
+  const far = [LIMIT_SENTENCE, ...Array.from({ length: 8 }, (_, i) => `note ${i}`),
+    "❯ 1. Wait until it resets", "  2. Upgrade your plan"].join("\n");
+  assert.equal(rateLimitDialog(far, NOW), null);
+});
+
+test("the rate-limit and permission detectors never both answer one screen", () => {
+  const screens = [
+    DIALOG,
+    `${LIMIT_SENTENCE}\n${PERMISSION}`,
+    "Do you want to proceed?\n❯ 1. Yes\n  2. No\n",
+    "Completed steps:\n1. Read files\n2. Run tests\n❯ ",
+    ...["claude-dialog", "claude-draft", "claude-idle", "codex-draft", "codex-idle", "omp-draft", "omp-idle"]
+      .map((name) => screenFixture(`${name}.txt`)),
+  ];
+  for (const screen of screens) {
+    assert.ok(!(pendingDialog(screen) && rateLimitDialog(screen, NOW)), screen.slice(0, 80));
+  }
 });
 
 test("reset times: ISO, a duration, a local clock, tomorrow, and no guess when the dialog names none", () => {

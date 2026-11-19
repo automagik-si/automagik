@@ -463,9 +463,14 @@ Code's rate-limit options dialog is reported as `rate-limited` by `am ls`, `am s
 sidebar, with the reset time the dialog shows (the field is left out when it shows none). The
 detector matches the dialog's own shape, never a word: at least two numbered options must end the
 pane tail, start at 1 and be consecutive, one must carry the `❯` selection cursor, and the limit
-sentence must sit just above them. An ordinary report whose text says "rate limit" and lists
-findings is therefore not the dialog, and an unreadable or empty tail is never a match. The
-detection reads the pane tail only: the dialog is never answered, and no key is sent. The reaction
+cue must be the dialog's own line: one of the three non-empty lines directly above the choices,
+with only the dialog's limit/reset words between it and them. A limit sentence in a report or in
+scrollback above the options is therefore not a cue, and a screen whose question the permission
+detector owns (a permission/selection dialog) is never a rate-limit match, so the two rules cannot
+disagree. A quoted, fenced or patched transcript is text, not the live dialog. An ordinary report
+whose text says "rate limit" and lists findings is not the dialog, and an unreadable or empty tail
+is never a match. The detection reads the pane tail only: the dialog is never answered, and no key
+is sent. The reaction
 is the project file's top-level `onRateLimit` (`"park"` or `"switch"`, written in the project's
 `.herdr/bots.json` beside `version`): `park` (the default) records the reset and queues
 `am restart <bot>` for one minute after it, so `am restart --queued` lists the seat with its wake

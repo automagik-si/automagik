@@ -816,6 +816,10 @@ const RATE_LIMIT_RESET_WORDS = /\b(?:resets?|reset at|try again|available again|
  */
 const RATE_LIMIT_OPTION = /^[\s│┃|]*([❯›])?\s*(\d+)[.)]\s+(\S.*)$/;
 const RATE_LIMIT_FOOTER = /\b(?:press enter|enter to (?:confirm|continue|select)|esc to (?:cancel|close|exit)|↑↓|up\/down to|select an option|choose an option)\b/i;
+/** A fenced code block, a patch hunk or a `>` quote: text a person is reading, not a modal. */
+const RATE_LIMIT_FENCE = /^\s*(?:```|~~~)/;
+const RATE_LIMIT_PATCH = /^\s*(?:diff --git |@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|(?:\+\+\+|---) [ab]\/)/;
+const RATE_LIMIT_QUOTE = /^\s*>\s/;
 
 /** The visible tail's lines, ANSI-free, blank lines kept (a dialog's blank lines are its shape). */
 const tailLines = (text, keep = 40) => typeof text === "string"
@@ -904,14 +908,20 @@ export function resetTimeFrom(text, now = Date.now()) {
  * ANSI allowed), or null. The test is the dialog's own shape, never a word search: a run of at
  * least two consecutive numbered options must end the visible tail (only a footer may follow),
  * the options must start at 1 and be consecutive, one of them must carry the selection cursor
- * (`❯`/`›`), and a limit cue must sit within the ten lines above them. A markdown numbered list
- * in an ordinary report has no selection cursor and no dialog block, so it cannot match; a
- * permission dialog has the cursor but no limit cue. `resets_at` is the dialog's own ISO time
- * when it shows one, absent when it shows none (never guessed). Detection is read-only:
- * nothing here types into the pane or answers the dialog.
+ * (`❯`/`›`), and the limit cue must be the dialog's own line: one of the three non-empty lines
+ * directly above the choices (the modal's limit line and its reset line), with no other prose
+ * between it and them. A limit sentence in a report or in scrollback ten lines up is therefore
+ * not a cue. A permission/selection question is rejected explicitly with pendingDialog()'s own
+ * evidence, so the two detectors never both claim one screen. A quoted, fenced or patched
+ * transcript is not the live dialog. `resets_at` is the dialog's own ISO time when it shows
+ * one, absent when it shows none (never guessed). Detection is read-only: nothing here types
+ * into the pane or answers the dialog.
  */
 export function rateLimitDialog(screenText, now = Date.now()) {
   if (typeof screenText !== "string" || !screenText.trim()) return null;
+  // A screen with a prompt, confirmation or permission question is the owner's dialog: the
+  // limit rule must never label it rate-limited (the cue may belong to a sentence above it).
+  if (pendingDialog(screenText)) return null;
   const lines = tailLines(screenText, 40);
   const visible = lines.map((line, i) => ({ line, i })).filter(({ line }) => line.trim() !== "");
   // The options end the dialog: after them only a footer (never prose, never an idle prompt).
@@ -927,16 +937,28 @@ export function rateLimitDialog(screenText, now = Date.now()) {
   // have to, and never carries the cursor below.
   if (numbered[0][2] !== "1" || numbered.some((m, i) => Number(m[2]) !== i + 1)) return null;
   if (!numbered.some((m) => m[1])) return null;
-  // The limit statement belongs to this dialog, not to scrollback far above the options.
-  let cue = null;
-  for (let i = first - 1, seen = 0; i >= 0 && seen < 10; i -= 1) {
-    seen += 1;
-    if (RATE_LIMIT_CUE.test(visible[i].line)) { cue = visible[i]; break; }
+  // The limit statement belongs to this dialog, not to scrollback or a report above the options:
+  // it has to be one of the three non-empty lines directly above the choices (the modal's own
+  // limit/reset header). A sentence ten lines up is not the dialog's line.
+  let cueAt = -1;
+  for (let i = first - 1, seen = 0; i >= 0 && seen < 3; i -= 1, seen += 1) {
+    if (RATE_LIMIT_CUE.test(visible[i].line)) { cueAt = i; break; }
   }
-  if (!cue) return null;
-  const dialog = visible.slice(visible.indexOf(cue), last + 1).map(({ line }) => line);
+  if (cueAt < 0) return null;
+  // Only the dialog's own limit/reset words may sit between the cue and the choices. A report's
+  // "Findings:" or a permission question there means the cue belongs to something else.
+  for (let i = cueAt + 1; i < first; i += 1) {
+    if (!RATE_LIMIT_CUE.test(visible[i].line) && !RATE_LIMIT_RESET_WORDS.test(visible[i].line)) return null;
+  }
+  // A quote or a pasted transcript is text, not the modal: no patch hunk or `>` marker around
+  // the block, and the block must not sit inside an open fenced code block.
+  if (visible.slice(0, last + 1).filter(({ line }) => RATE_LIMIT_FENCE.test(line)).length % 2 === 1) return null;
+  for (let i = Math.max(0, cueAt - 5); i <= last; i += 1) {
+    if (RATE_LIMIT_PATCH.test(visible[i].line) || RATE_LIMIT_QUOTE.test(visible[i].line)) return null;
+  }
+  const dialog = visible.slice(cueAt, last + 1).map(({ line }) => line);
   if (!dialog.some((line) => RATE_LIMIT_RESET_WORDS.test(line))) return null;
-  const question = cue.line.trim().replace(/\s+/g, " ").slice(0, 200);
+  const question = visible[cueAt].line.trim().replace(/\s+/g, " ").slice(0, 200);
   const resetsAt = resetTimeFrom(dialog.join("\n"), now);
   return { question, ...(resetsAt ? { resets_at: resetsAt } : {}) };
 }
