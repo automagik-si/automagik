@@ -98,7 +98,10 @@ export function install(rt) {
           return { candidateRoots: record.candidateRoots, editable: false }
         }
         // The association was saved before creation. Its root may be cold.
-        editable = editable && record.continuation
+        // Older member continuations can have the flag set despite their room ownership.
+        const past = rt.pastOwners?.get(id)
+        const groupMember = rt.groupOwners?.has(id) || (past?.roomId !== undefined && past.botId !== undefined)
+        editable = editable && record.continuation && !groupMember
         id = record.rootId
         header = undefined
         continue
@@ -165,7 +168,7 @@ export function install(rt) {
       return undefined
     }
     const sessionId = `session-${randomUUID()}`
-    await publish(sessionId, { rootId: scope.rootId, continuation })
+    await publish(sessionId, { rootId: scope.rootId, continuation: continuation && scope.editable })
     return sessionId
   }
 

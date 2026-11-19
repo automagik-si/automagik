@@ -1586,7 +1586,7 @@ export function install(rt) {
     const dir = rt.workDirOf(job)
     const intended = dir !== undefined && await rt.isFolder(dir) ? dir : rt.teamFolder()
     const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, {
-      dir, group: room !== undefined, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+      dir, group: room !== undefined, botId: job.botId, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
       ...(job.fresh ? {} : { readScopeSource: session.id, continueReadScope: true }),
     })
     const picked = await freshRoute(bot, session, job.target)
