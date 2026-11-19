@@ -84,7 +84,7 @@ func (h *hcHost) targetProvision(a config.Automation) (Session, error) {
 	if err != nil {
 		return Session{}, fmt.Errorf("looking for %s (%s): %w", name, botID, err)
 	}
-	if addr == "" {
+	if addr.Address == "" {
 		if remote != "" {
 			return Session{}, fmt.Errorf("%s (%s) is live on another machine (%s): an automation runs on the "+
 				"computer its scheduler runs on, and never reaches a linked machine's bot", name, botID, remote)
@@ -96,12 +96,13 @@ func (h *hcHost) targetProvision(a config.Automation) (Session, error) {
 			return Session{}, err
 		}
 	}
-	s := Session{PaneID: addr, Target: a.Target, TargetName: name, TargetParent: addr}
+	s := Session{PaneID: addr.Address, Target: a.Target, TargetName: name, TargetParent: addr.Address,
+		TargetCreatedMS: addr.CreatedMS}
 	if kind == config.TargetBot {
 		// Busy is answered before the run is recorded as running: a queue
 		// hands the prompt over now, a skip drops the occurrence.
 		if !a.QueueWhenBusy() {
-			if state := h.botState(addr); state == "working" || state == "blocked" {
+			if state := h.botState(addr.Address); state == "working" || state == "blocked" {
 				return s, fmt.Errorf("%w: %s (%s) was %s, and target_when_busy is skip", ErrTargetBusy, name, botID, state)
 			}
 		}
@@ -111,7 +112,7 @@ func (h *hcHost) targetProvision(a config.Automation) (Session, error) {
 	if err != nil {
 		return s, fmt.Errorf("a worker of %s (%s) needs a worktree: %w", name, botID, err)
 	}
-	terminal, err := h.startWorker(a, project, bot, dir, addr)
+	terminal, err := h.startWorker(a, project, bot, dir, addr.Address)
 	if err != nil {
 		return s, err
 	}
@@ -135,6 +136,13 @@ func (h *hcHost) targetDo(s Session, a config.Automation, timeout time.Duration)
 		defer h.endWorker(s)
 		return h.waitTurn(s, a, timeout)
 	}
+	// Resolution and the send are two steps, and a terminal id can be reused
+	// or its agent can quit between them. Read the pane once more immediately
+	// before the paste; anything but the resolved terminal refuses the send
+	// (#498).
+	if err := h.confirmSend(s, name, botID); err != nil {
+		return err
+	}
 	if err := h.ops.Send(s.PaneID, a.Prompt); err != nil {
 		return fmt.Errorf("the prompt did not reach %s (%s) at %s: %w", name, botID, s.PaneID, err)
 	}
@@ -151,14 +159,18 @@ func (h *hcHost) targetDo(s Session, a config.Automation, timeout time.Duration)
 // `am worker kill`, with the bot's own pane as the caller, so the pack's guard
 // confirms this really is that bot's worker and no bot's seat. The finished
 // terminal stays, so the run's saved PaneID still names where the worker ran.
+// Its refusal is logged, not retried: a worker still mid-turn is deliberately
+// left (ending it would lose its work), so the log says it stays and how to end it.
 func (h *hcHost) endWorker(s Session) {
 	if s.TargetParent == "" {
-		log.Printf("could not end the run's worker %s through am worker kill: the bot's pane is unknown", s.PaneID)
+		log.Printf("could not end the run's worker %s through am worker kill: the bot's pane is unknown; "+
+			"the worker stays until it is ended from its bot's terminal (am worker kill %s)", s.PaneID, s.PaneID)
 		return
 	}
 	if _, err := h.am([]string{"worker", "kill", s.PaneID, "--json"},
 		[]string{"HC_TERMINAL_ID=" + s.TargetParent}); err != nil {
-		log.Printf("could not end the run's worker %s through am worker kill: %v", s.PaneID, err)
+		log.Printf("could not end the run's worker %s through am worker kill: %v; the worker stays until it is ended "+
+			"(wait for its turn, then am worker kill %s from its bot's terminal)", s.PaneID, err, s.PaneID)
 	}
 }
 
@@ -173,18 +185,23 @@ func (h *hcHost) botState(address string) string {
 }
 
 // liveBot is the bot's running terminal on this computer, if it has one.
-// remote names a pane on a linked machine when that is all there is.
+// remote names a pane on a linked machine when that is all there is. The
+// returned terminal is the one the run's send is confirmed against.
 //
-// A label is only a hint: the pack's own Start/attach resolution asks each
-// labelled pane what it is, and so does this. A candidate counts only when
+// A label is only a hint: this reads each labelled pane and keeps it only when
 // `hc get` says it is live, still carries this bot's label, has an agent in
-// front (not a shell left after the agent quit), and its folder belongs to
-// this project. More than one such pane is refused, never guessed between;
-// a duplicate id in another project's roster is not this project's bot.
-func (h *hcHost) liveBot(project, id string) (address, remote string, err error) {
+// front (not a shell left after the agent quit), and its folder belongs to this
+// project. More than one such pane is refused, never guessed between; a
+// duplicate id in another project's roster is not this project's bot.
+//
+// This resolves by the label, not by the pack's attach ledger: a stale
+// `bot=<id>` label on a pane the ledger has moved to another bot can pass here.
+// The send re-reads the pane, which catches a change in the window, but it does
+// not consult the ledger either (see the ADR's remaining limit).
+func (h *hcHost) liveBot(project, id string) (terminal hc.Terminal, remote string, err error) {
 	addrs, err := h.ops.Terminals(map[string]string{"bot": id})
 	if err != nil {
-		return "", "", err
+		return hc.Terminal{}, "", err
 	}
 	var local []string
 	for _, a := range addrs {
@@ -197,14 +214,14 @@ func (h *hcHost) liveBot(project, id string) (address, remote string, err error)
 		}
 		local = append(local, a)
 	}
-	var live []string
+	var live []hc.Terminal
 	for _, a := range local {
 		t, err := h.ops.Get(a)
 		if errors.Is(err, hc.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return "", "", fmt.Errorf("reading the pane %s: %w", a, err)
+			return hc.Terminal{}, "", fmt.Errorf("reading the pane %s: %w", a, err)
 		}
 		if t.Address != "" && t.Address != a {
 			continue
@@ -217,22 +234,70 @@ func (h *hcHost) liveBot(project, id string) (address, remote string, err error)
 		}
 		ours, err := h.inProject(project, t.Cwd)
 		if err != nil {
-			return "", "", err
+			return hc.Terminal{}, "", err
 		}
 		if !ours {
 			continue
 		}
-		live = append(live, a)
+		live = append(live, t)
 	}
 	switch len(live) {
 	case 0:
-		return "", remote, nil
+		return hc.Terminal{}, remote, nil
 	case 1:
 		return live[0], "", nil
 	default:
-		return "", "", fmt.Errorf("bot %s has %d live terminals (%s) in %s; inspect them and leave one, "+
-			"or remove the duplicate label, before targeting it", id, len(live), strings.Join(live, ", "), project)
+		names := make([]string, 0, len(live))
+		for _, t := range live {
+			names = append(names, t.Address)
+		}
+		return hc.Terminal{}, "", fmt.Errorf("bot %s has %d live terminals (%s) in %s; inspect them and leave one, "+
+			"or remove the duplicate label, before targeting it", id, len(live), strings.Join(names, ", "), project)
 	}
+}
+
+// confirmSend reads the resolved bot terminal once more, immediately before the
+// prompt is pasted, and refuses anything but the terminal resolution chose. A
+// terminal id is reused by herdr, and an agent can quit to a shell, in the
+// window between resolution, the run record and the send; `hc send` addresses the
+// pane and would paste into whatever is there now (#498).
+func (h *hcHost) confirmSend(s Session, name, botID string) error {
+	t, err := h.ops.Get(s.PaneID)
+	if err != nil {
+		return fmt.Errorf("the prompt was not sent to %s (%s): cannot read %s again: %w", name, botID, s.PaneID, err)
+	}
+	if why := paneChanged(s.PaneID, s.TargetCreatedMS, botID, t); why != "" {
+		return fmt.Errorf("the prompt was not sent: %s changed between being resolved for %s (%s) and receiving it "+
+			"(%s); inspect it (am show %s) and run the automation again", s.PaneID, name, botID, why, botID)
+	}
+	return nil
+}
+
+// paneChanged says what is no longer the terminal resolution chose, or "".
+func paneChanged(pane string, createdMS int64, botID string, t hc.Terminal) string {
+	var why []string
+	if t.Address != "" && t.Address != pane {
+		why = append(why, "it answers for "+t.Address)
+	}
+	if t.State != "live" {
+		why = append(why, "it is no longer live")
+	}
+	if got := t.Labels["bot"]; got != botID {
+		if got == "" {
+			why = append(why, "its bot label is gone")
+		} else {
+			why = append(why, fmt.Sprintf("its bot label is now %q", got))
+		}
+	}
+	if !agentInForeground(t.Foreground) {
+		why = append(why, "a shell is in front, so the agent quit")
+	}
+	if createdMS == 0 {
+		why = append(why, "it reported no created_ms when it was resolved, so it cannot be told apart from a reused terminal")
+	} else if t.CreatedMS != createdMS {
+		why = append(why, fmt.Sprintf("it is another terminal now (created_ms %d became %d)", createdMS, t.CreatedMS))
+	}
+	return strings.Join(why, "; ")
 }
 
 // inProject reports whether dir is inside project's own checkout, where the
@@ -326,22 +391,22 @@ func (h *hcHost) startBot(project string, bot *rosterBot) error {
 // awaitBot waits for the started bot's terminal to appear. A start that says
 // it worked but leaves no terminal labelled with the bot is a failure, never a
 // fallback to a fresh session.
-func (h *hcHost) awaitBot(project string, bot *rosterBot) (string, error) {
+func (h *hcHost) awaitBot(project string, bot *rosterBot) (hc.Terminal, error) {
 	deadline := time.Now().Add(h.knobs.paneReady)
 	for {
-		address, remote, err := h.liveBot(project, bot.ID)
+		found, remote, err := h.liveBot(project, bot.ID)
 		if err != nil {
-			return "", fmt.Errorf("looking for %s (%s) after starting it: %w", bot.Name, bot.ID, err)
+			return hc.Terminal{}, fmt.Errorf("looking for %s (%s) after starting it: %w", bot.Name, bot.ID, err)
 		}
-		if address != "" {
-			return address, nil
+		if found.Address != "" {
+			return found, nil
 		}
 		if remote != "" {
-			return "", fmt.Errorf("%s (%s) is live on another machine (%s): an automation never reaches a "+
+			return hc.Terminal{}, fmt.Errorf("%s (%s) is live on another machine (%s): an automation never reaches a "+
 				"linked machine's bot", bot.Name, bot.ID, remote)
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("%s (%s) was started but no terminal labelled bot=%s appeared within %s; "+
+			return hc.Terminal{}, fmt.Errorf("%s (%s) was started but no terminal labelled bot=%s appeared within %s; "+
 				"check it with am show %s", bot.Name, bot.ID, bot.ID, h.knobs.paneReady, bot.ID)
 		}
 		time.Sleep(h.knobs.targetPoll)
