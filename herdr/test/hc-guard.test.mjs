@@ -144,7 +144,7 @@ test("every allowed verb reaches the stub unchanged", (t) => {
   const s = scene(t);
   const allowed = [
     ["send", "t101", "hello"], ["read", "t101"], ["ls"], ["get", "t101"], ["wait", "t101"],
-    ["put", "t101", "/tmp/file"], ["label", "t105", "role=dev"], ["rm", "t101"],
+    ["label", "t105", "role=dev"],
     ["events"], ["schema"], ["templates"],
   ];
   for (const args of allowed) {
@@ -162,7 +162,9 @@ test("the allowed call keeps the stub's stdout, stderr and exit code", (t) => {
   assert.equal(r.status, 7);
   assert.equal(r.stdout, 'stub-out ["read","t101"]\n');
   assert.equal(r.stderr, "stub-err read\n");
-  assert.deepEqual(calls(s), [["read", "t101"]]);
+  // The team check resolves the target first (its own `ls`/`get` lookups); the call itself is
+  // forwarded once, unchanged.
+  assert.deepEqual(calls(s).filter((argv) => argv[0] === "read"), [["read", "t101"]]);
 });
 
 test("the doc-only forms pass; a doc flag on a refused command does not", (t) => {
@@ -397,7 +399,7 @@ test("a pm caller cannot send to a pane whose bot= is not listed", (t) => {
   assert.equal(calls(s).some((argv) => argv[0] === "send"), false, "an unlisted bot= target never reaches send");
 });
 
-test("the widening is send only: keys is refused, kill is the main bot's (#955) and rm keeps today's unscoped pass", (t) => {
+test("the widening is send only: keys and rm are refused, kill is the main bot's (#955)", (t) => {
   const s = sharedScene(t);
   writeFileSync(s.logPath, "");
   const keys = guardRun(s, ["keys", "t203", "enter"], { HC_TERMINAL_ID: "t200" });
@@ -407,13 +409,12 @@ test("the widening is send only: keys is refused, kill is the main bot's (#955) 
   writeFileSync(s.logPath, "");
   assertRefused(guardRun(s, ["kill", "t203"], { HC_TERMINAL_ID: "t200" }));
   assert.deepEqual(calls(s).filter((argv) => argv[0] === "kill"), []);
-  // #636 leaves rm unscoped (#628 owns that scope); the widening does not touch it.
-  for (const args of [["rm", "t203"]]) {
-    writeFileSync(s.logPath, "");
-    const r = guardRun(s, args, { HC_TERMINAL_ID: "t200" });
-    assert.equal(r.status, 0, `${args[0]} is unchanged: ${r.stderr}`);
-    assert.ok(calls(s).some((argv) => same(argv, args)), `${args[0]} arrives unchanged`);
-  }
+  // #628: rm is the caller's own workers only; a foreign pane is refused even for a pm.
+  writeFileSync(s.logPath, "");
+  const rm = guardRun(s, ["rm", "t203"], { HC_TERMINAL_ID: "t200" });
+  assertRefused(rm);
+  assert.match(rm.stderr, /own worker/);
+  assert.equal(calls(s).some((argv) => argv[0] === "rm"), false, "a foreign rm never reaches hc");
 });
 
 // ---- kill: a project's main bot only (#955, the owner's rule) ----
@@ -692,7 +693,7 @@ test("a machine target is refused on every allowed verb but send", (t) => {
   const s = scene(t);
   const cases = [
     ["read", "m/t101"], ["read", "--lines", "5", "m/t101"], ["get", "m/t101"], ["wait", "m/t101"],
-    ["put", "m/t101", "/tmp/file"], ["label", "m/t101", "role=reviewer"], ["kill", "m/t101"], ["rm", "m/t101"],
+    ["label", "m/t101", "role=reviewer"], ["kill", "m/t101"], ["rm", "m/t101"],
   ];
   for (const args of cases) {
     writeFileSync(s.logPath, "");
@@ -747,6 +748,84 @@ test("label is the caller's own workers only; a label cannot widen send", (t) =>
   r = guardRun(s, ["label", "t105", "role=dev"]);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(calls(s).some((argv) => same(argv, ["label", "t105", "role=dev"])));
+});
+
+// ---- #628: reads and waits, rm, and put, on the same team boundary as the proxy ----
+
+test("read, get and wait see the caller's pane, its own workers and its team (#628)", (t) => {
+  const s = scene(t);
+  // Its own pane, its lead, a member, the main bot and its own workers: the team graph.
+  for (const args of [["read", "t100"], ["read", "t101"], ["read", "--lines", "5", "t102"],
+    ["get", "t103"], ["wait", "t102"], ["read", "t110"], ["wait", "--timeout", "1", "t105"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, `${args.join(" ")}: ${r.stderr}`);
+  }
+  // A name is resolved once and the checked address is the one forwarded.
+  writeFileSync(s.logPath, "");
+  assert.equal(guardRun(s, ["get", "cap"]).status, 0);
+  assert.ok(calls(s).some((argv) => same(argv, ["get", "t101"])), "the resolved address is forwarded");
+  // The shared send roles stay send only: a reviewer/fixer label, a roster reviewer rank, a
+  // stranger's pane, a bare pane and an unknown target are all refused.
+  for (const args of [["read", "t106"], ["read", "t107"], ["get", "t108"], ["wait", "t108"],
+    ["read", "t120"], ["get", "t120"], ["wait", "t120"], ["read", "t121"], ["read", "t999"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    const verb = args[0];
+    if (verb !== "get") {
+      assert.equal(calls(s).some((argv) => same(argv, [verb, args.at(-1)])), false,
+        `${args.join(" ")} never reaches ${verb}`);
+    }
+  }
+  assert.match(guardRun(s, ["read", "t120"]).stderr, /not in the caller's team/);
+  assert.match(guardRun(s, ["read", "t999"]).stderr, /not resolvable/);
+});
+
+test("rm ends the caller's own workers only (#628)", (t) => {
+  const s = scene(t);
+  for (const target of ["t105", "t110"]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, ["rm", target]);
+    assert.equal(r.status, 0, `rm ${target}: ${r.stderr}`);
+    assert.ok(calls(s).some((argv) => same(argv, ["rm", target])), `rm ${target} arrives at its address`);
+  }
+  for (const target of ["t101", "t102", "t106", "t108", "t120", "t121"]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, ["rm", target]);
+    assertRefused(r);
+    assert.match(r.stderr, /own worker/);
+    assert.equal(calls(s).some((argv) => same(argv, ["rm", target])), false, `rm ${target} never reaches hc`);
+  }
+  const self = guardRun(s, ["rm", "t100"]);
+  assertRefused(self);
+  assert.match(self.stderr, /own pane/);
+  const unknown = guardRun(s, ["rm", "t999"]);
+  assertRefused(unknown);
+  assert.match(unknown.stderr, /not resolvable/);
+  // A worker pane ends nothing, not even a sibling of its own bot.
+  writeFileSync(s.logPath, "");
+  const worker = guardRun(s, ["rm", "t105"], { HC_TERMINAL_ID: "t110" });
+  assertRefused(worker);
+  assert.match(worker.stderr, /worker pane ends no panes/);
+  assert.equal(calls(s).some((argv) => same(argv, ["rm", "t105"])), false);
+});
+
+test("put is refused: a guarded pane writes nothing beside another pane (#628)", (t) => {
+  const s = scene(t);
+  for (const args of [["put", "t101", "/tmp/file"], ["put", "t105", "/tmp/file"],
+    ["put", "t120", "/tmp/file"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /terminal\.put/);
+    assert.deepEqual(calls(s), [], `${args.join(" ")} never reaches hc`);
+  }
+  // Its help still passes, like every other named command's.
+  writeFileSync(s.logPath, "");
+  const help = guardRun(s, ["put", "--help"]);
+  assert.equal(help.status, 0, help.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["put", "--help"])));
 });
 
 // ---- the dsh-tui worker run shape ----
@@ -884,7 +963,8 @@ test("a pair of guard copies never loops: both are skipped and the stub runs onc
   writeFileSync(s.logPath, "");
   const r = guardRun(s, ["read", "t101"], { PATH: `${a.guard}:${b.guard}:${s.bin}:${dirname(process.execPath)}` });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [["read", "t101"]], "the real hc ran once; the guard copies did not");
+  assert.deepEqual(calls(s).filter((argv) => argv[0] === "read"), [["read", "t101"]],
+    "the real hc ran once; the guard copies did not");
   assert.equal(existsSync(a.marker), false, "the first guard copy was skipped");
   assert.equal(existsSync(b.marker), false, "the second guard copy was skipped");
 });
@@ -897,8 +977,11 @@ test("a planted hcGuard.mjs is not a guard: its hc is an ordinary PATH entry, no
   chmodSync(join(guard, "hc"), 0o755);
   writeFileSync(s.logPath, "");
   const r = guardRun(s, ["read", "t101"], { PATH: `${GUARD_DIR}:${guard}:${dirname(process.execPath)}` });
-  assert.equal(r.status, 7, r.stderr);
+  assert.equal(r.status, 2, r.stderr);
   assert.equal(existsSync(marker), true, "the planted hc was reached, not skipped");
+  // The planted hc answered no target record, so the team check fails closed instead of
+  // forwarding a read it could not check.
+  assert.match(r.stderr, /not resolvable/);
   assert.deepEqual(calls(s), [], "the stub never ran: the planted folder was not skipped");
 });
 
@@ -951,7 +1034,7 @@ test("a guard copy that calls its caller stops at once instead of looping", (t) 
   copyFileSync(join(GUARD_DIR, "hc"), join(copyGuard, "hc"));
   chmodSync(join(copyGuard, "hc"), 0o755);
   writeFileSync(s.logPath, "");
-  const r = spawnSync(process.execPath, [s.guard, "read", "t101"], {
+  const r = spawnSync(process.execPath, [s.guard, "ls"], {
     env: envFor(s, { PATH: `${GUARD_DIR}:${copyGuard}:${s.bin}:${dirname(process.execPath)}` }),
     encoding: "utf8", timeout: 15000,
   });

@@ -17,7 +17,8 @@
 // the pane this proxy serves, fixed at start, and every forwarded request has its
 // `params.caller` overwritten with it. Targets are resolved with one short upstream
 // `terminal.get`, checked, and forwarded by resolved address, so a rename between the check
-// and the call cannot redirect it.
+// and the call cannot redirect it. `terminal.list` is filtered the same way (#628): its reply
+// names the caller's own pane and the terminals it may type into, never another team's.
 //
 // Fail closed: a dead upstream is a JSON-RPC error, never a fallback. The upstream core must
 // answer `server.status` with HC_PIN or the proxy refuses to start. A pane whose proxy cannot
@@ -515,6 +516,34 @@ function sendAllowed(record, policy) {
   if (isOwnWorker(record, policy.caller)) return true;
   if (typeof labels.bot === "string" && policy.team.has(labels.bot)) return true;
   return sharedSendAllowed(policy.file, policy.caller, labels);
+}
+
+/**
+ * The rows a `terminal.list` may show (#628): the caller's own pane and every terminal it may
+ * type into, which is the send rule. Other teams' and machines' panes are left out of the
+ * reply: a sandboxed bot's `hc ls` must not name them. It is a read, so it is filtered rather
+ * than refused; its other metadata (no screen text) is unchanged.
+ */
+function listAllowed(record, policy) {
+  if (!isObject(record)) return false;
+  if (record.address === policy.terminal) return true;
+  return sendAllowed(record, policy);
+}
+
+/**
+ * One `terminal.list` reply line with only the rows `listAllowed` keeps, or a refusal line when
+ * the core's answer cannot be read (fail closed, never the unfiltered rows). A core error line
+ * passes through unchanged: it carries no rows.
+ */
+function listReply(line, id, policy) {
+  let reply;
+  try { reply = JSON.parse(line); } catch { reply = null; }
+  if (isObject(reply) && reply.error) return line;
+  if (!isObject(reply) || !isObject(reply.result) || !Array.isArray(reply.result.terminals)) {
+    return JSON.stringify(refusal(id, "terminal.list: the core's answer could not be read", "unavailable"));
+  }
+  const terminals = reply.result.terminals.filter((row) => listAllowed(row, policy));
+  return JSON.stringify({ ...reply, result: { ...reply.result, terminals } });
 }
 
 /** One short upstream call: connect, send one request, read one reply, close. */
@@ -1070,7 +1099,10 @@ class Session {
       return;
     }
     if (method === "terminal.list") {
-      await this.forward(request, method, params);
+      // #628: the reply is filtered to the terminals this caller may type into, so another
+      // team's panes are never named; the request itself reaches the core unchanged.
+      await this.forward(request, method, params,
+        (line) => listReply(line, id, this.policy));
       return;
     }
     if (method === "templates.list" || method === "terminal.run") {
@@ -1168,8 +1200,10 @@ class Session {
     await this.forward(request, method, params);
   }
 
-  /** Forward one request on the client's own upstream and write its reply line back. */
-  async forward(request, method, params) {
+  /** Forward one request on the client's own upstream and write its reply line back. `transform`
+   * rewrites the reply line (the filtered `terminal.list`); it never sees a reply for a
+   * notification, which carries none. */
+  async forward(request, method, params, transform = null) {
     const id = hasId(request) ? request.id : null;
     const forwarded = { jsonrpc: "2.0", method, params };
     if (hasId(request)) forwarded.id = id;
@@ -1209,6 +1243,11 @@ class Session {
       this.readerIn.stop();
       this.client.end();
       return;
+    }
+    if (transform) {
+      // A transform that cannot read its reply fails closed with an error line, never a hang.
+      try { line = transform(line); }
+      catch { line = JSON.stringify(refusal(id, `${method}: the core's answer could not be read`, "unavailable")); }
     }
     await this.writeLine(`${line}\n`);
   }

@@ -333,6 +333,8 @@ test("get/read/wait/send are scoped to the team and its own workers", async (t) 
     allowed("terminal.wait", "t110", { timeout: 1 }),
     allowed("terminal.send", "t110", { text: "not mine" }),
     allowed("terminal.send", "t121", { text: "another bot's worker" }),
+    allowed("terminal.send", "t111", { text: "a plain shell pane" }),
+    allowed("terminal.read", "t111", { lines: 2 }),
     allowed("terminal.get", "t121"),
     allowed("terminal.read", "t104", { lines: 3 }),
     allowed("terminal.read", "t107", { lines: 3 }),
@@ -355,6 +357,35 @@ test("get/read/wait/send are scoped to the team and its own workers", async (t) 
   const forwarded = fake.calls("terminal.wait").at(-1).params;
   assert.equal(forwarded.terminal, undefined);
   assert.equal(forwarded.caller, "t100");
+});
+
+test("terminal.list answers only the terminals the caller may type into (#628)", async (t) => {
+  const { s, fake, proxy, start } = await sceneWithCore(t);
+  fake.clearLog();
+  const client = await clientFor(proxy.socket);
+  const listed = await client.call("terminal.list", { all: true });
+  client.close();
+  assert.ok(listed.result, JSON.stringify(listed));
+  // The caller's own pane, its team graph (lead, member, main), its own worker and the shared
+  // review roles (a roster reviewer-rank bot and a role=labeled pane). Another team's bot and
+  // its worker, another bot's worker, a bare shell pane and the caller's unrelated pm are out.
+  assert.deepEqual(listed.result.terminals.map((row) => row.address).sort(),
+    ["t100", "t101", "t102", "t103", "t104", "t105", "t107", "t112"].sort());
+  assert.equal(fake.calls("terminal.list").length, 1, "the request itself reaches the core");
+  assert.deepEqual(fake.calls("terminal.list")[0].params, { all: true },
+    "list's own parameters are forwarded unchanged");
+  assert.equal(listed.result.hidden_finished, 0, "the reply's other fields are kept");
+
+  // A worker's list is the same scope: its own pane, its bot's team and its own workers.
+  const worker = await start("t105", { caller: { bot: ID.dev, project: s.project, worker: true }, bound: false });
+  const workerClient = await clientFor(worker.socket);
+  const report = await workerClient.call("terminal.list", {});
+  workerClient.close();
+  assert.ok(report.result, JSON.stringify(report));
+  for (const hidden of ["t110", "t120", "t121", "t108", "t111", "t106"]) {
+    assert.equal(report.result.terminals.some((row) => row.address === hidden), false,
+      `a worker's list never names ${hidden}`);
+  }
 });
 
 test("the pm/integrator/fixer send widening is send only", async (t) => {
