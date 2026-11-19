@@ -28,8 +28,9 @@ const inherited = new RegExp([
 const failure = message => Object.assign(new Error(message), { code: 'acp-account/busy' })
 
 export class CliHomes {
-  constructor(root) {
+  constructor(root, { onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup') } = {}) {
     this.root = resolve(root)
+    this.onRecordError = onRecordError
     this.instance = `${process.pid}-${randomUUID()}`
     this.registered = new Map()
     this.changes = new Map()
@@ -342,6 +343,10 @@ export class CliHomes {
       }
     })
     this.collect(vendor)
+    // ACP start: the generation record follows both pointers; a matching record is not rewritten.
+    try { this.generations.ensureRecord() } catch {
+      try { this.onRecordError(vendor) } catch {}
+    }
   }
 
   end(vendor) {

@@ -126,6 +126,45 @@ test("a link under a pack mod's name is the person's, not the pack's, in mods/ a
   assert.ok(groups.find((g) => g.key === "yours").mods.some((m) => m.name === "am-sidebar"), "listed under Yours");
 });
 
+// #219 case 2: x removed the pack's folder but the marker kept the name, so a folder of the
+// person's put there still showed as the pack's and u replaced it (moving it to the rollback set).
+// The record is the marker both the manager and the pack's update read, so x drops the name once.
+test("packMarkerWithout drops one name from mods= and leaves every other line and value as it was (#219)", () => {
+  const text = formatMarker({ version: "0.5.1", mods: [...PACK_MODS], layout: "added", installed: INSTALLED, usagemeter: "0.2.0" });
+  const next = core.packMarkerWithout(text, "am-footer");
+  assert.deepEqual(core.parsePackMarker(next), { ...core.parsePackMarker(text), mods: PACK_MODS.filter((m) => m !== "am-footer") });
+  assert.equal(next, text.replace(`mods=${PACK_MODS.join(",")}`, `mods=${PACK_MODS.filter((m) => m !== "am-footer").join(",")}`));
+  assert.deepEqual(parseMarker(next), { ...parseMarker(text), mods: PACK_MODS.filter((m) => m !== "am-footer") }, "the pack's own parser still reads it");
+  assert.equal(core.packMarkerWithout(next, "am-footer"), null, "already gone");
+  assert.equal(core.packMarkerWithout("version=0.2.2\nbefore=none\n", "spaces-agents"), null, "a v1 marker has no mods= line");
+  assert.match(core.packMarkerWithout(formatMarker({ version: "1.0.0", mods: ["am-mods"] }), "am-mods"), /^mods=$/m, "the last one leaves an empty line, not no line");
+});
+
+test("x on a pack mod forgets it in the pack's record: the person's folder at that name is theirs (#219)", async (t) => {
+  const appHome = home(t);
+  await core.removeLocal(io, { appHome, name: "am-footer", symlink: false, path: "mods/am-footer" });
+  const record = parseMarker(readFileSync(join(appHome, core.PACK_MARKER), "utf8"));
+  assert.deepEqual(record.mods, PACK_MODS.filter((m) => m !== "am-footer"));
+  assert.deepEqual([record.version, record.layout, record.installed], ["0.5.1", "added", INSTALLED], "every other field stays");
+  // The person puts their own folder at the same name.
+  write(join(appHome, "mods", "am-footer", "mod.json"), JSON.stringify({ title: "mine" }));
+  const mods = byName(await core.listMods(io, { appHome, records: [] }));
+  assert.deepEqual([mods["am-footer"].kind, mods["am-footer"].pack, mods["am-footer"].symlink], ["local", null, false]);
+  assert.equal(mods["am-sidebar"].kind, "pack", "the rest of the pack is still the pack's");
+});
+
+test("x on a link under a pack name unlinks it and leaves the pack's record alone (#219)", async (t) => {
+  const appHome = home(t);
+  const ext = realpathSync(mkdtempSync(join(tmpdir(), "am-mods-checkout-")));
+  t.after(() => rmSync(ext, { recursive: true, force: true }));
+  renameSync(join(appHome, "mods", "am-footer"), join(ext, "am-footer"));
+  symlinkSync(join(ext, "am-footer"), join(appHome, "mods", "am-footer"));
+  const before = readFileSync(join(appHome, core.PACK_MARKER), "utf8");
+  await core.removeLocal(io, { appHome, name: "am-footer", symlink: true, path: "mods/am-footer" });
+  assert.equal(readFileSync(join(appHome, core.PACK_MARKER), "utf8"), before, "a link was never the pack's");
+  assert.ok(existsSync(join(ext, "am-footer", "mod.json")), "the folder it points to stays");
+});
+
 test("a marker from before installed= dates the install by the marker file; no version= reads VERSION",
   { skip: process.platform !== "darwin" && "stat -f %m is the macOS form" }, async (t) => {
     const appHome = home(t, { marker: "mods=am-mods,am-sidebar\nlayout=added\nbefore=none\n" });

@@ -40,7 +40,7 @@ const TEAM = {
 
 // The whole team over a fake DSH presets service, as in permissions.test.js. `failing`
 // holds the Sessions whose set throws; `sets` counts every set DSH was asked for.
-function team(t, { acp = true, auto = true, bots = {}, room = {}, tasks, closed = [], presets = true, levels = {}, failing: failingAtStart = [] } = {}) {
+function team(t, { acp = true, auto = true, bots = {}, room = {}, tasks, closed = [], emptySessions = [], presets = true, levels = {}, failing: failingAtStart = [] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-unapplied-agents-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify({ ...TEAM, bots: { m1: { ...TEAM.bots.m1, ...bots.m1 }, b2: { ...TEAM.bots.b2, ...bots.b2 } }, rooms: { r1: { ...TEAM.rooms.r1, ...room } }, ...(tasks ? { tasks } : {}) }))
   const presetOf = new Map(Object.entries(levels))
@@ -88,7 +88,7 @@ function team(t, { acp = true, auto = true, bots = {}, room = {}, tasks, closed 
       create: async () => ({ sessionId: `s${++sessions}` }),
       async resolveAgent(sessionId) {
         if (closed.includes(sessionId)) return { error: { code: 'gateway/internal', message: `resume failed for session "${sessionId}": Error: permission: cannot restore preset "auto" without its active integration` } }
-        const session = { id: sessionId }
+        const session = { id: sessionId, ...(emptySessions.includes(sessionId) ? { deriveMessages: () => [] } : {}) }
         if (!open.has(sessionId)) {
           open.add(sessionId)
           for (const listener of ctx.listeners.get('session/created') ?? []) void Promise.resolve(listener(session)).catch(() => {})
@@ -305,7 +305,8 @@ test('judge verdict parsing accepts only the three decisions', () => {
 })
 
 test('an unmarked route switch makes the old Auto confirmation stale', async t => {
-  const w = team(t, { bots: { m1: { model: 'deepseek/v4', appliedModel: 'deepseek/v4' } } })
+  // No turn or answer precedes this pick; only the Auto confirmation revision exists.
+  const w = team(t, { emptySessions: ['m1'], bots: { m1: { model: 'deepseek/v4', appliedModel: 'deepseek/v4' } } })
   await w.rt.load()
   w.rt.resolveModel = async ref => ref
   w.rt.applyModel = async bot => { bot.appliedModel = bot.model }

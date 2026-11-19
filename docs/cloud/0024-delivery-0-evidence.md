@@ -15,6 +15,10 @@ This is the public half of delivery 0's evidence. It answers the six questions i
 a path in this repository, a published DSH package, an upstream specification, or Pocket ID's
 docs and source. No private note, private host name, address or account is reproduced here.
 
+*Note: [RFC 0032](../rfcs/0032-automagik-id.md) replaces Pocket ID with Automagik ID as Cloud's
+identity provider. Section 6 and the Pocket ID points elsewhere are kept as the record; they no
+longer drive a delivery. Automagik ID's tokens carry no `groups` claim.*
+
 Each section gives the answer, the evidence, the unknown with what it blocks, and what the
 answer changes for the deliveries filed as #905-#912. "Unknown" is used only where a fact is
 not established.
@@ -312,6 +316,9 @@ Cloud sign-in may be promised.
   lands.
 
 ## 6. What can Pocket ID do?
+
+*Superseded: Cloud uses Automagik ID ([RFC 0032](../rfcs/0032-automagik-id.md)), not Pocket ID.
+This section is kept as the record.*
 
 **Answer at a glance.** Pocket ID v2.19.2, the current release (2026-11-02), has flat user
 groups, not organisations. Its API keys are not scoped: a key acts as the admin who made it.

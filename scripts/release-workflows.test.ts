@@ -12,6 +12,9 @@ import { dirname, join } from 'node:path';
 import { pluginNames } from './release-plugins';
 
 const workflow = (name: string) => readFileSync(join(import.meta.dir, '..', '.github', 'workflows', name), 'utf8').split('\n');
+// The cut's lane decision and gates moved into scripts/ (#668), so the cut can re-run them on a
+// moved dev; the shell is still tested as written.
+const script = (name: string) => readFileSync(join(import.meta.dir, name), 'utf8').split('\n');
 
 function bash(script: string, args: string[] = [], env: Record<string, string> = {}, cwd = process.cwd()) {
   const run = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`, 'bash', ...args], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...env } });
@@ -797,24 +800,29 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     expect(lines[at('The meter lane\'s signing key') + 2].trim()).toBe("if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'");
     const key = lines.slice(at('The meter lane\'s signing key'), at('The meter lane\'s signing key') + 6).join('\n');
     expect(key).toContain("METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}");
-    expect(key).toContain('run: bun scripts/meter-lane.ts check-key');
+    expect(key).toContain('run: bash scripts/release-gates.sh meter-key');
+    // The gate script holds the command, so a re-cut on a moved dev runs it again (#1653).
+    expect(script('release-gates.sh').join('\n')).toContain('bun scripts/meter-lane.ts check-key');
     const cut = job('cut').map(line => line.trim());
     expect(cut).toContain('meter: ${{ steps.lane.outputs.meter }}');
     expect(cut).toContain('meter_sign: ${{ steps.meterkey.outputs.sign }}');
   });
 
-  test('the meter is signed with its own key alone, in two places only; the posting job holds no key', () => {
+  test('the meter is signed with its own key alone, in three places only; the posting job holds no key', () => {
     const attach = job('meter-attach').join('\n');
     expect(attach).toContain('METER_LANE_KEY:');
     for (const other of ['PLUGIN_LANE_KEY', 'HERDR_PACK_KEY', 'AM_LANE_KEY']) expect(attach).not.toContain(other);
     expect(job('meter-lane').join('\n')).not.toMatch(/LANE_KEY|PACK_KEY/);
-    // The meter's key reaches no other step: only the key check and the attach step name it.
+    // The meter's key reaches only the key check, the cut step (which re-runs the check on a moved
+    // dev, #1653) and the attach step.
     const named = lines.map((line, i) => [line, i] as const).filter(([line]) => /secrets\.METER_LANE_KEY/.test(line)).map(([, i]) => i);
-    expect(named.length).toBe(2);
+    expect(named.length).toBe(3);
     expect(named[0]).toBeGreaterThan(at('The meter lane\'s signing key'));
     expect(named[0]).toBeLessThan(at('The meter lane\'s signing key') + 5);
-    expect(named[1]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
-    expect(named[1]).toBeLessThan(jobEnds('meter-attach'));
+    expect(named[1]).toBeGreaterThan(at('Version, commit and tag'));
+    expect(named[1]).toBeLessThan(at('Pack am'));
+    expect(named[2]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
+    expect(named[2]).toBeLessThan(jobEnds('meter-attach'));
     // The attach job is gated on the key too, and signs before anything goes up.
     expect(job('meter-attach').map(line => line.trim())).toContain("if: needs.cut.outputs.version != '' && needs.cut.outputs.meter == 'yes' && needs.cut.outputs.meter_sign == 'yes'");
     expect(attach.indexOf('bun scripts/meter-lane.ts verify')).toBeLessThan(attach.indexOf('gh release upload'));
@@ -822,12 +830,15 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
 
   // The Reviewer's L2: the prerelease list is read (never guessed) and passed to meter-since.
   test('meter-since is told which releases are prereleases, and a failure to list them stops the run', () => {
-    const first = lines.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
-    const call = lines.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
+    // The lane decision is release-gates.sh's now, so the cut can re-run it on a new dev (#668).
+    expect(lines.join('\n')).toContain('run: bash scripts/release-gates.sh lane');
+    const gates = script('release-gates.sh');
+    const first = gates.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
+    const call = gates.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
     expect(first).toBeGreaterThan(-1);
     expect(call).toBe(first + 2);
-    expect(lines[first]).toContain('select(.isPrerelease)');
-    const block = lines.slice(first, call + 1).join('\n');
+    expect(gates[first]).toContain('select(.isPrerelease)');
+    const block = gates.slice(first, call + 1).join('\n');
     expect(block).not.toContain('|| true');
     const run = (gh: string) => {
       const dir = mkdtempSync(join(tmpdir(), 'meter-since-'));
@@ -875,8 +886,10 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     // Wherever a herdr patch is told apart, a meter patch is too.
     const herdrOnly = lines.filter(line => /kind != 'herdr'|lane != 'herdr'|LANE != 'herdr'/.test(line));
     for (const line of herdrOnly) expect(line).toMatch(/!= 'meter'/);
-    // And it is a patch: 3.N.P on the newest 3.N.
-    expect(text).toContain('|| "${KIND}" == "meter" ]]; then version=$(bun scripts/lane.ts next-patch)');
+    // And it is a patch: 3.N.P on the newest 3.N (release-cut.sh, where the cut decides).
+    const cut = script('release-cut.sh').join('\n');
+    expect(cut).toContain('" plugins " | " herdr " | " pocket " | " am " | " meter ") bun scripts/lane.ts next-patch');
+    expect(cut).toContain('*) bun scripts/version.ts next');
   });
 
   // The dry run: the attach step as written, with the four binaries the matrix uploads, part.json and

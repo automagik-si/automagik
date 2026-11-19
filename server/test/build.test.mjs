@@ -48,3 +48,16 @@ if [ "$1 $2" = "image inspect" ]; then printf '123\\n'; fi
   assert.match(dockerfile, /org\.opencontainers\.image\.version="\$\{IMAGE_VERSION\}"/)
   assert.match(dockerfile, /org\.opencontainers\.image\.revision="\$\{IMAGE_REVISION\}"/)
 })
+
+// The distroless Node binary ships with its DWARF sections (17.8 MB); the tools stage strips
+// them before the rootfs reaches the runtime image, and the non-root user, the health check and
+// the pinned digests stay.
+test('the tools stage strips the Node debug symbols and keeps the image controls', () => {
+  const dockerfile = readFileSync(join(ROOT, 'server/Dockerfile'), 'utf8')
+  assert.match(dockerfile, /strip --strip-all \/out\/rootfs\/nodejs\/bin\/node/)
+  assert.match(dockerfile, /apt-get install -y --no-install-recommends [^\n]*binutils/)
+  assert.match(dockerfile, /^USER 1000:1000$/m)
+  assert.match(dockerfile, /^HEALTHCHECK --interval=30s /m)
+  const bases = dockerfile.split('\n').filter((line) => line.startsWith('FROM ')).filter((line) => !line.includes('scratch'))
+  for (const line of bases) assert.match(line, /@sha256:[0-9a-f]{64}\b/, line)
+})

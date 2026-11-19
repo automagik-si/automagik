@@ -9,6 +9,7 @@ import { HELD_NOT_SET, HELD_UNREAD } from '../shared/held.js'
 import { AUTO, AUTO_FALLBACK } from '../shared/permission-levels.js'
 import { refusal } from './refusal.js'
 import { narrowerLevel, narrowestOffered, rankOf } from './permission-rank.js'
+import { shellHoldText } from '../shared/routes.js'
 
 export function install(rt) {
   const { ctx } = rt
@@ -568,6 +569,9 @@ export function install(rt) {
   // applyPermission with `start`, for a Session about to start work: rejects with a
   // refusal when its level does not hold.
   async function startPermission(bot, sessionId, room, session) {
+    // A Bot held at load for its shell-off coding CLI does not start work: the CLI brings
+    // its own shell, and the person picks a native model or turns the shell on first.
+    if (bot?.shellHeld !== undefined) throw refusal(shellHoldText(bot))
     try {
       await applyPermission(bot, sessionId, room, session, { starts: true })
     } catch (error) {

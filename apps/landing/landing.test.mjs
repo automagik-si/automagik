@@ -506,8 +506,8 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
   // The site serves byte copies of the brand's font and licence, and the font is the recorded build.
   assert.deepEqual(brandFonts.map(file => file.to.pathname.split('/').pop()), ['fredoka-latin.woff2', 'OFL-Fredoka.txt'])
   for (const { from, to } of brandFonts) assert.ok(readFileSync(to).equals(readFileSync(from)), to.pathname.split('/').pop())
-  assert.equal(createHash('sha256').update(readFileSync(brandFonts[0].to)).digest('hex'), 'd1ceb16007127919aa1900fb85e4b5d612a4f242404a4068d43f3bc628b2aeca')
-  assert.ok(read('../../docs/brand/fonts/README.md').includes('`d1ceb16007127919aa1900fb85e4b5d612a4f242404a4068d43f3bc628b2aeca`'))
+  assert.equal(createHash('sha256').update(readFileSync(brandFonts[0].to)).digest('hex'), '810dcfb6a381d6af829919740868e38b2e1bfdeca74cec7f34526d9dc7662f1b')
+  assert.ok(read('../../docs/brand/fonts/README.md').includes('`810dcfb6a381d6af829919740868e38b2e1bfdeca74cec7f34526d9dc7662f1b`'))
   // The theme takes the family, the file, the size adjustment and the weights from the brand's tokens.
   assert.deepEqual({ family: titleFace.family, weight: titleFace.weight, sizeAdjust: titleFace.sizeAdjust }, { family: 'Fredoka', weight: '300 700', sizeAdjust: '105%' })
   assert.deepEqual(brand.weights.map(weight => [weight.name, weight.value]), [['weight-title', 536], ['weight-strong', 469], ['weight-label', 402]])
@@ -518,9 +518,19 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
   // Nothing set in the title face carries a weight of its own: a heavier Fredoka is heavier than the logo.
   assert.equal(css.match(/font:[^;}]*var\(--head\)/g).length, 37)
   assert.deepEqual(css.match(/font:[^;}]*var\(--head\)/g).filter(rule => !/^font:var\(--weight-(?:title|strong|label)\) /.test(rule)), [])
-  assert.ok(css.includes('\nh1{font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;letter-spacing:-.02em}\n'))
-  assert.ok(css.includes('\nh2{font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;letter-spacing:-.016em}\n'))
-  assert.ok(css.includes('\nh3{font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;letter-spacing:-.01em}\n'))
+  // Each heading's letter spacing is its own brand token's: only the leading zero CSS drops is put back.
+  const headings = brand.groups.find(group => group.name === 'Headings').styles
+  for (const [tag, style, rule] of [
+    ['h1', 'heading-1', 'font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;'],
+    ['h2', 'heading-2', 'font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;'],
+    ['h3', 'heading-3', 'font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;'],
+  ]) {
+    const start = `${tag}{${rule}letter-spacing:`
+    const line = css.split('\n').find(text => text.startsWith(start) && /^[^;}]+\}$/.test(text.slice(start.length)))
+    assert.ok(line, `${tag}: the weight, size and line height are not the brand's`)
+    const spacing = line.slice(start.length, -1).replace(/^(-?)\./, (_, sign) => `${sign}0.`)
+    assert.equal(spacing, headings.find(entry => entry.name === style).letterSpacing, `${tag}: the letter spacing is not ${style}'s`)
+  }
   // Fredoka's own word space is wide; the extra word spacing the old face needed is gone.
   assert.doesNotMatch(css, /word-spacing/)
   // Widths counted in the face's own zero: Fredoka's zero is narrower, so the counts grew to keep the same lines.
