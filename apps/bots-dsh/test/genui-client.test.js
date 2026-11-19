@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
+import { guardBackfillFields } from '../src/host/genui.js'
 
 const bundle = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
@@ -114,4 +115,21 @@ test('one approval posts start_backfill once, and a stop posts one job id', asyn
   await assert.rejects(omni.genui.startBackfill({ chats: ['c1'], from: '2026-03-01', to: '2026-11-15' }))
   await assert.rejects(omni.genui.cancelBackfill({}))
   assert.deepEqual(requests, [])
+})
+
+test('a registered backfill tool card draws the guarded roster from the built client', () => {
+  const hooks = guardBackfillFields({ view: publish => publish, live: publish => publish })
+  const invalid = Array(201).fill(null)
+  const view = hooks.view(() => ({ omniBackfillProposals: [...invalid, { id: 'p1' }] }))
+  const live = hooks.live(() => ({
+    omniBackfills: [...invalid, ...Array.from({ length: 30 }, (_, index) => ({ id: `r${index}`, startedAt: 1 + index }))],
+  }))
+  const omni = load({ fetch: async () => assert.fail('drawing asks nothing') }).omni
+  omni.toolCards.register('propose_backfill', ({ roster }) => omni.genui.BackfillCard({ roster }))
+  const card = omni.toolCards.renderer('propose_backfill')({ roster: { ...view(), ...live() } })
+  const [, proposals, runs] = card.props.children
+  assert.equal(proposals[0].props.key, 'p1')
+  const [, shown, footer] = runs.props.children
+  assert.deepEqual(Array.from(shown, run => run.props.key), ['r0', 'r1', 'r2'])
+  assert.equal(footer.props.children[0], 'Showing only 3 runs')
 })

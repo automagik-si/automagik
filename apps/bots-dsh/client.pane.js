@@ -11978,7 +11978,7 @@ var HOST_ZH = {
   "The backfill could not be stopped.": "无法停止回填。",
   "Started {date}": "开始于 {date}",
   "{count} more chats": "还有 {count} 个聊天",
-  "{count} earlier runs": "更早的 {count} 次运行",
+  "Showing only {count} runs": "仅显示 {count} 次运行",
   "Backfill": "回填",
   "Backfills": "回填记录",
   "All available history": "所有可用的历史记录",

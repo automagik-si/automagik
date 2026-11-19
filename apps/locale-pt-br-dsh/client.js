@@ -2924,7 +2924,7 @@ const pack = createPack({
     "The backfill could not be stopped.": "Não foi possível parar o preenchimento histórico.",
     "Started {date}": "Iniciado em {date}",
     "{count} more chats": "Mais {count} chats",
-    "{count} earlier runs": "Mais {count} execuções anteriores",
+    "Showing only {count} runs": "Mostrando apenas {count} execuções",
     "Backfill": "Preenchimento histórico",
     "Backfills": "Preenchimentos históricos",
     "All available history": "Todo o histórico disponível",

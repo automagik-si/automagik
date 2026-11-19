@@ -7,10 +7,14 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { ptBrLocale } from './fixtures/pt-br-locale.js'
 
 const { outputFiles } = await build({
   stdin: {
-    contents: "export { BackfillCard } from './src/client/genui.js'",
+    contents: [
+      "export { BackfillCard } from './src/client/genui.js'",
+      "export { installLocale } from './src/client/i18n.js'",
+    ].join('\n'),
     resolveDir: fileURLToPath(new URL('..', import.meta.url)),
   },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
@@ -57,7 +61,7 @@ runInNewContext(outputFiles[0].text, {
   TextDecoder,
   fetch: async () => { throw new Error('the card was given its own start and cancel') },
 })
-const { BackfillCard } = module.exports
+const { BackfillCard, installLocale } = module.exports
 
 const mount = (Component, props) => {
   const instance = {
@@ -220,15 +224,23 @@ test('live runs draw their rows and only a running row offers Stop, once', async
   const runs = [RUN([
     ROW('c1', 'Ana', 'j1', 'fetching', null, { fetched: 50, stored: 40, duplicates: 10, mediaDownloaded: 5, mediaMissing: 1, reactions: 2, edits: 1, deletions: 1, unmatched: 0 }),
     ROW('c2', 'Bruno', 'j2', 'done', 'done', { fetched: 80, stored: 80 }),
-  ])]
-  const card = mount(BackfillCard, { roster: { omniBackfillProposals: [], omniBackfills: runs }, start: async () => {}, cancel })
+  ]), ...Array.from({ length: 19 }, (_, index) => ({ id: `extra-${index}`, rows: [] }))]
+  const card = mount(BackfillCard, { roster: { omniBackfillProposals: [], omniBackfills: runs.slice(0, 3) }, start: async () => {}, cancel })
   let tree = card.render()
-  let text = textOf(tree)
+  const text = textOf(tree)
   assert.match(text, /Backfills/)
   assert.match(text, /1 running · 1 done/)
   assert.match(text, /50 fetched/)
   assert.match(text, /Ana/)
   assert.match(text, /Bruno/)
+  assert.equal(byClass(tree, 'bt-genui-more').length, 0)
+  tree = card.render({ ...card.props, roster: { omniBackfills: runs } })
+  assert.deepEqual(byClass(tree, 'bt-genui-run').map(run => run.props.key), [runs[0].id, 'extra-0', 'extra-1'])
+  assert.deepEqual(byClass(tree, 'bt-genui-more').map(textOf), ['Showing only 3 runs'])
+  const offLocale = installLocale(ptBrLocale())
+  try {
+    assert.deepEqual(byClass(card.render(), 'bt-genui-more').map(textOf), ['Mostrando apenas 3 execuções'])
+  } finally { offLocale() }
   const stops = byClass(tree, 'bt-genui-cancel')
   assert.equal(stops.length, 1, 'the done row cannot be stopped')
   assert.match(String(stops[0].props['aria-label']), /Stop the backfill of Ana/)

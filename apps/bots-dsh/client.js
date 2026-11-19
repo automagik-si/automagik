@@ -3045,7 +3045,7 @@ var HOST_ZH = {
   "The backfill could not be stopped.": "无法停止回填。",
   "Started {date}": "开始于 {date}",
   "{count} more chats": "还有 {count} 个聊天",
-  "{count} earlier runs": "更早的 {count} 次运行",
+  "Showing only {count} runs": "仅显示 {count} 次运行",
   "Backfill": "回填",
   "Backfills": "回填记录",
   "All available history": "所有可用的历史记录",
@@ -38452,9 +38452,12 @@ function backfillRowView(row) {
   if (chatId === void 0) return void 0;
   return { ...rowView(row), chatId, jobId: backfillId(row.jobId) ?? null, cancelable: canCancel(row) };
 }
-function runView(value) {
+function backfillRunId(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
-  const id = backfillId(value.id);
+  return backfillId(value.id);
+}
+function runView(value) {
+  const id = backfillRunId(value);
   if (id === void 0) return void 0;
   const rows2 = Array.isArray(value.rows) ? value.rows : [];
   const shown = rows2.slice(0, BACKFILL_ROWS_SHOWN).map(backfillRowView).filter(Boolean);
@@ -38472,11 +38475,12 @@ function runView(value) {
 function backfillView(roster) {
   const proposals = Array.isArray(roster?.omniBackfillProposals) ? roster.omniBackfillProposals : [];
   const runs = Array.isArray(roster?.omniBackfills) ? roster.omniBackfills : [];
-  const shown = runs.slice(0, BACKFILL_RUNS_SHOWN).map(runView).filter(Boolean);
+  const validRuns = runs.filter((run2) => backfillRunId(run2) !== void 0);
+  const shown = validRuns.slice(0, BACKFILL_RUNS_SHOWN).map(runView);
   return {
     proposals: proposals.map(proposalView).filter(Boolean),
     runs: shown,
-    moreRuns: Math.max(0, runs.length - shown.length)
+    moreRuns: validRuns.length - shown.length
   };
 }
 
@@ -38818,7 +38822,7 @@ function BackfillCard({ roster, start: start2, cancel }) {
       run2.more > 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-more" }, t("{count} more chats", { count: countText2(run2.more) })) : null,
       errors[`run:${run2.id}`] !== void 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-foot" }, (0, import_react98.createElement)("span", { className: "bt-genui-error", role: "status" }, errors[`run:${run2.id}`])) : null
     )),
-    view.moreRuns > 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-more" }, t("{count} earlier runs", { count: countText2(view.moreRuns) })) : null
+    view.moreRuns > 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-more" }, t("Showing only {count} runs", { count: countText2(view.runs.length) })) : null
   );
   return (0, import_react98.createElement)(import_react98.Fragment, null, waitingNode, pickers, runsNode);
 }
