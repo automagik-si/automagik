@@ -204,8 +204,8 @@ place, resumed where its agent allows). Linux: a systemd user unit, enabled. mac
 agent in your own ~/Library/LaunchAgents, which launchd loads at your next login. Neither is
 started on the spot. --no-revive leaves it alone. Without either, the installer asks (--yes never
 installs it). --uninstall removes the unit or the plist when it is this pack's; on macOS it asks
-launchd first and refuses, naming the launchctl command, when launchd can't say whether the job
-is still loaded.
+launchd first, also when the plist is already gone, and refuses, naming the launchctl command,
+when launchd can't say whether the job is still loaded.
 EOF
 }
 
@@ -1357,56 +1357,98 @@ revive_step() {
   fi
   printf '%s\n' "$revive_out" | sed 's/^/  /'
 }
+# launchd's own not-found answer, exactly as the CLI's launchdNotLoaded reads it (revive.js):
+# exit 113, or a line that starts "Could not find service" and ends the word there. Every other
+# answer (usage, EPERM, an I/O error, a timeout) is "can't tell", never "not loaded".
+revive_launchd_not_loaded() {
+  if [ "$1" = 113 ]; then return 0; fi
+  printf '%s\n' "$2" | grep -Eq '^Could not find service($|[^[:alnum:]_])'
+}
 # --uninstall: the service goes through the command that wrote it, while the pack and its link
 # are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
-# PLIST_MARK in the macOS plist). The fallback runs only when that command is gone, never after
-# it refused; on macOS it asks launchd first and removes the file only on launchd's own
-# not-found answer (113, or the exact "Could not find service"), so a job is never orphaned. A
-# refusal leaves the file and stops the uninstall, naming the command that finishes by hand.
+# PLIST_MARK in the macOS plist). That command is called even when the plist is gone: it owns the
+# second-run recovery (a label launchd still holds), and its answer is the one to show. The
+# fallback runs only when that command is gone, never after it refused; on macOS it asks launchd
+# even with the plist gone, boots a loaded label out, and reads only launchd's own not-found
+# answer (113, or the exact "Could not find service") as not loaded. A refusal leaves the file
+# (when there is one), stops the uninstall before the pack and link leave, and names the command
+# that finishes by hand.
 revive_uninstall() {
   REVIVE_OS=$(uname -s 2>/dev/null)
   REVIVE_UNIT=$(revive_service_file)
   [ -n "$REVIVE_UNIT" ] || return 0
-  [ -f "$REVIVE_UNIT" ] || return 0
-  if ! revive_file_is_ours "$REVIVE_UNIT"; then
-    say "Left $REVIVE_UNIT: it is not this installer's."
-    return 0
+  revive_present=0
+  if [ -f "$REVIVE_UNIT" ]; then
+    revive_present=1
+    if ! revive_file_is_ours "$REVIVE_UNIT"; then
+      say "Left $REVIVE_UNIT: it is not this installer's."
+      return 0
+    fi
   fi
   if link_ours && [ -f "$PACK/bin/automagik-herdr.mjs" ] && grep -q 'revive service' "$PACK/bin/automagik-herdr.mjs" 2>/dev/null; then
     revive_rc=0
     revive_out=$("$LINK" revive service uninstall <"/dev/null" 2>&1) || revive_rc=$?
     if [ "$revive_rc" = 0 ]; then printf '%s\n' "$revive_out" | sed 's/^/  /'; return 0; fi
-    # The CLI is here and refused: its answer (which names the command that finishes by hand) is
-    # the one to show. The fallback must never overrule it: a blind remove here is how a label
-    # launchd still holds gets orphaned.
-    printf '%s\n' "$revive_out" | sed 's/^/  /'
-    fail "the revive login service was not removed and $REVIVE_UNIT was left in place; the answer above says how to finish."
+    # 126/127: the command did not run at all (no Node 22.7+ or Bun, or a wrapper that cannot
+    # execute), so it is gone for this purpose and the fallback below asks launchd instead. Any
+    # other status is the CLI's own refusal.
+    if [ "$revive_rc" != 126 ] && [ "$revive_rc" != 127 ]; then
+      # The CLI is here and refused: its answer (which names the command that finishes by hand) is
+      # the one to show. The fallback must never overrule it: a blind remove here is how a label
+      # launchd still holds gets orphaned.
+      printf '%s\n' "$revive_out" | sed 's/^/  /'
+      if [ "$revive_present" = 1 ]; then
+        fail "the revive login service was not removed and $REVIVE_UNIT was left in place; the answer above says how to finish."
+      fi
+      fail "the revive login service was not removed; the answer above says how to finish."
+    fi
   fi
   if [ "$REVIVE_OS" = Darwin ]; then
     label=dev.herdr.automagik-herdr-revive
     domain="gui/$(id -u)"
     if ! command -v launchctl >/dev/null 2>&1; then
-      fail "Left $REVIVE_UNIT: launchctl isn't here, so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
+      if [ "$revive_present" = 1 ]; then
+        fail "Left $REVIVE_UNIT: launchctl isn't here, so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
+      fi
+      fail "launchctl isn't here, so whether launchd holds $label can't be read, and no plist is at $REVIVE_UNIT. Run launchctl bootout $domain/$label, then run this again."
     fi
     # Ask first, and read only launchd's own not-found answer as "not loaded": exit 113, or the
     # exact "Could not find service". Every other failure is a refusal, never a removal.
     revive_rc=0
     revive_out=$(launchctl print "$domain/$label" 2>&1) || revive_rc=$?
-    if [ "$revive_rc" = 113 ] || printf '%s\n' "$revive_out" | grep -q '^Could not find service'; then
+    revive_loaded=0
+    if revive_launchd_not_loaded "$revive_rc" "$revive_out"; then
       :
     elif [ "$revive_rc" != 0 ]; then
-      fail "Left $REVIVE_UNIT: launchctl print $domain/$label failed (exit $revive_rc${revive_out:+: $(printf '%s\n' "$revive_out" | sed -n '1p')}), so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
-    elif ! launchctl bootout "$domain/$label" >/dev/null 2>&1; then
-      fail "Left $REVIVE_UNIT: launchd still holds $label and it could not be booted out. Run launchctl bootout $domain/$label, then run this again."
-    fi
-    if rm -f "$REVIVE_UNIT"; then
-      say "Removed $REVIVE_UNIT (launchd no longer holds $label)."
+      if [ "$revive_present" = 1 ]; then
+        fail "Left $REVIVE_UNIT: launchctl print $domain/$label failed (exit $revive_rc${revive_out:+: $(printf '%s\n' "$revive_out" | sed -n '1p')}), so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
+      fi
+      fail "launchctl print $domain/$label failed (exit $revive_rc${revive_out:+: $(printf '%s\n' "$revive_out" | sed -n '1p')}), so whether launchd holds $label can't be read, and no plist is at $REVIVE_UNIT. Run launchctl bootout $domain/$label, then run this again."
     else
-      fail "$REVIVE_UNIT could not be removed; remove it by hand."
+      revive_loaded=1
+      if ! launchctl bootout "$domain/$label" >/dev/null 2>&1; then
+        if [ "$revive_present" = 1 ]; then
+          fail "Left $REVIVE_UNIT: launchd still holds $label and it could not be booted out. Run launchctl bootout $domain/$label, then run this again."
+        fi
+        fail "launchd still holds $label and it could not be booted out, so nothing was removed. Run launchctl bootout $domain/$label, then run this again."
+      fi
+    fi
+    if [ "$revive_present" = 1 ]; then
+      if rm -f "$REVIVE_UNIT"; then
+        say "Removed $REVIVE_UNIT (launchd no longer holds $label)."
+      else
+        fail "$REVIVE_UNIT could not be removed; remove it by hand."
+      fi
+    elif [ "$revive_loaded" = 1 ]; then
+      say "The plist is gone ($REVIVE_UNIT), but launchd still held $label: booted it out, so no orphaned label is left."
+    else
+      say "The revive login service isn't installed ($REVIVE_UNIT)."
     fi
     return 0
   fi
-  rm -f "$REVIVE_UNIT" && say "Removed $REVIVE_UNIT (systemctl --user daemon-reload drops it from systemd)."
+  if [ "$revive_present" = 1 ]; then
+    rm -f "$REVIVE_UNIT" && say "Removed $REVIVE_UNIT (systemctl --user daemon-reload drops it from systemd)."
+  fi
   return 0
 }
 # --uninstall: the plugin and the shim go through the command that put them there, while the pack

@@ -771,8 +771,10 @@ not loaded: exit 113, or its exact "Could not find service". Any other answer �
 EPERM, an I/O error — is a refusal that leaves the plist, exits non-zero and names
 `launchctl bootout gui/<uid>/dev.herdr.automagik-herdr-revive`, so a job launchd still holds is
 never orphaned. It asks even when the plist is already gone, so a second run boots out a label an
-earlier run left behind and says so. `install.sh --uninstall` follows the same rule, and takes
-its own fallback only when the pack's command is gone, never after that command refused.
+earlier run left behind and says so. `install.sh --uninstall` follows the same rule: it calls that
+command first, also when the plist is gone, and only when the command is gone does it ask launchd
+itself — with the same 113/exact-words rule — before it removes the pack and its link. It never
+overrules that command's refusal.
 Panes on a linked machine are that machine's own to bring back.
 
 ## The attach ledger

@@ -70,6 +70,10 @@ function scratch(t, { herdr = true, os = "Darwin", arch = "arm64" } = {}) {
   const brewLog = join(root, "brew.log");
   writeFileSync(brewLog, "");
   exe(join(bin, "uname"), `#!/bin/sh\ncase "$1" in -m) echo ${arch} ;; *) echo ${os} ;; esac\n`);
+  // macOS always has launchctl. Unless a test puts its own (launchctlFake, or one that logs), the
+  // revive label is not loaded: a real Mac's launchd says so, and the installer now asks even
+  // when there is no plist (#939).
+  if (os === "Darwin") exe(join(bin, "launchctl"), `#!/bin/sh\necho "Could not find service" >&2\nexit 113\n`);
   // curl: logs each URL, then the real curl (file:// only: the release URL is a folder here).
   // Herdr's installer is never fetched for real: herdrInstaller() stubs it, else it fails.
   const curlLog = join(root, "curl.log");
@@ -252,6 +256,8 @@ case $1 in
     probe-1) echo "print failed" >&2; exit 1 ;;
     probe-64) echo "usage: launchctl print <domain-target>" >&2; exit 64 ;;
     probe-io) echo "Input/output error" >&2; exit 5 ;;
+    probe-eperm) echo "Operation not permitted" >&2; exit 1 ;;
+    probe-prefix) echo "Could not find servicex" >&2; exit 1 ;;
   esac; exit 0 ;;
   bootout) [ "$m" = bootout-fails ] && { echo "Boot-out failed: Input/output error" >&2; exit 1; }; exit 0 ;;
 esac
@@ -2768,6 +2774,91 @@ test("--uninstall on macOS fallback removes the plist only after launchd's own n
     assert.equal(existsSync(plist), false, `${mode}: launchd says it is not loaded, so the file goes`);
     assert.deepEqual(lc.calls(), [`print gui/${uid}/dev.herdr.automagik-herdr-revive`], `${mode}: asked first, and no bootout for a label that is not there`);
   }
+});
+
+// #939, second run: an earlier uninstall that removed the plist while launchd still held the
+// label leaves the plist absent and the label loaded. The installer asks launchd even then,
+// through the pack's command or its own fallback when that command is gone, and removes the
+// pack and its link only after launchd answered.
+const REVIVE_LABEL = `gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`;
+const REVIVE_PLIST = (s) => join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+
+test("--uninstall on macOS with the plist gone still boots a loaded label out, then removes the pack and link (#939)", (t) => {
+  for (const via of ["pack's command", "fallback"]) {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    const plist = REVIVE_PLIST(s);
+    assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+    unlinkSync(plist); // the state an earlier run left: no plist, label still held
+    if (via === "fallback") unlinkSync(s.link);
+    lc.set("loaded");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+    assert.equal(u.code, 0, `${via}: ${u.out}${u.err}`);
+    assert.match(u.out, /plist is gone .*but launchd still held .*booted it out/, `${via}: says what it did`);
+    assert.equal(existsSync(s.pack), false, `${via}: the pack leaves only after the label did`);
+    assert.equal(existsSync(s.link), false, `${via}: the link leaves too`);
+    assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`, `bootout ${REVIVE_LABEL}`], `${via}: asked, then booted out`);
+  }
+});
+
+test("--uninstall on macOS with no plist and no loaded label asks launchd and exits cleanly (#939)", (t) => {
+  for (const via of ["pack's command", "fallback"]) {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    const plist = REVIVE_PLIST(s);
+    assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+    unlinkSync(plist);
+    if (via === "fallback") unlinkSync(s.link);
+    lc.set("gone");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+    assert.equal(u.code, 0, `${via}: ${u.out}${u.err}`);
+    assert.match(u.out, /revive login service isn't installed/, `${via}: says nothing alarming`);
+    assert.equal(existsSync(s.pack), false, `${via}: the pack is removed`);
+    assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], `${via}: asked once, and no bootout for a label that is not there`);
+  }
+});
+
+test("--uninstall on macOS with no plist and a launchd it cannot ask refuses, keeps everything, and names the command (#939)", (t) => {
+  for (const via of ["pack's command", "fallback"]) {
+    for (const mode of ["probe-1", "probe-64", "probe-io", "probe-eperm", "bootout-fails"]) {
+      const s = scratch(t, { os: "Darwin" });
+      s.addHerdrApp();
+      s.publish("9.9.0");
+      const lc = launchctlFake(s);
+      const plist = REVIVE_PLIST(s);
+      assert.equal(s.run("--revive", "--no-usagemeter").code, 0, `${via}/${mode}`);
+      unlinkSync(plist);
+      if (via === "fallback") unlinkSync(s.link);
+      lc.set(mode);
+      const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+      assert.notEqual(u.code, 0, `${via}/${mode}: a launchd it cannot read is a failed uninstall: ${u.out}${u.err}`);
+      assert.equal(existsSync(s.pack), true, `${via}/${mode}: the pack stays`);
+      if (via === "pack's command") assert.equal(existsSync(s.link), true, `${via}/${mode}: the link stays`);
+      assert.ok((u.out + u.err).includes(`launchctl bootout ${REVIVE_LABEL}`), `${via}/${mode}: names the command (${u.out}${u.err})`);
+      const expected = mode === "bootout-fails" ? [`print ${REVIVE_LABEL}`, `bootout ${REVIVE_LABEL}`] : [`print ${REVIVE_LABEL}`];
+      assert.deepEqual(lc.calls(), expected, `${via}/${mode}: asked, and removed nothing`);
+    }
+  }
+});
+
+test("--uninstall on macOS fallback reads launchd's exact not-found words, not a word that starts them (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  const plist = REVIVE_PLIST(s);
+  assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+  unlinkSync(s.link);
+  lc.set("probe-prefix");
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+  assert.notEqual(u.code, 0, `a word that merely starts the phrase is not not-found: ${u.out}${u.err}`);
+  assert.equal(existsSync(plist), true, "the plist stays when launchd's answer cannot be read");
+  assert.ok((u.out + u.err).includes(`launchctl bootout ${REVIVE_LABEL}`), `names the command (${u.out}${u.err})`);
+  assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "asked first, and never removes on a guess");
 });
 
 test("--dsh-tui writes minimumReleaseAgeExclude: [] for a release older than the profile's gate", (t) => {
