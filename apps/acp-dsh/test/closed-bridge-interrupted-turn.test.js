@@ -11,19 +11,26 @@
 //
 // The real adapter and Backchannel, and the fake agent over stdio, as adapter.test.js.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
+import { AgentRun } from '../src/host/acp.js'
 import { AcpAdapter } from '../src/host/adapter.js'
 import { Backchannel } from '../src/host/backchannel.js'
 import { TOOL_NAME } from '../src/host/tool.js'
 
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-agent.mjs')
 const user = text => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
-const traceEvents = path => (existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
+function traceEvents(path, { live = false } = {}) {
+  if (!existsSync(path)) return []
+  const lines = readFileSync(path, 'utf8').split('\n')
+  // Only a newline commits a live frame. Final reads also validate a nonempty tail.
+  if (live || lines.at(-1) === '') lines.pop()
+  return lines.map(line => JSON.parse(line))
+}
 const textIn = chunks => chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
 
 // Wait for a condition, looked at until it holds, for at most 20 s (another process is on the
@@ -95,8 +102,7 @@ function host(t, { bridge = false, env = {}, hostStopping = () => false } = {}) 
   t.after(() => { close(); rmSync(dir, { recursive: true, force: true }) })
   // One step, read to its end; a step that has not ended after 30 s fails the row and ends the
   // agent, so a regression is a failure and never a hung file.
-  const step = async (messages) => {
-    const chunks = []
+  const step = async (messages, chunks = []) => {
     let giveUp
     const late = new Promise((_, fail) => { giveUp = setTimeout(() => { close(); fail(new Error('the step did not end within 30 s')) }, 30_000) })
     const reading = (async () => {
@@ -105,7 +111,7 @@ function host(t, { bridge = false, env = {}, hostStopping = () => false } = {}) 
     })()
     try { return await Promise.race([reading, late]) } finally { clearTimeout(giveUp) }
   }
-  return { adapter, backchannel, executed, warned, step, tick: ms => timers.tick(ms), live: () => adapter.live.get('s1'), events: () => traceEvents(trace) }
+  return { adapter, backchannel, executed, warned, step, close, tick: ms => timers.tick(ms), live: () => adapter.live.get('s1'), events: options => traceEvents(trace, options) }
 }
 
 const said = text => ({ role: 'assistant', source: { kind: 'model', provider: 'acp-fake', model: 'default' }, content: [{ type: 'text', text }] })
@@ -200,26 +206,100 @@ test('#969: a bridge that is open leaves the session as it is', async (t) => {
   assert.deepEqual(h.warned.filter(line => /lost its/.test(line)), [])
 })
 
+test('the cancel fixture waits for a complete prompt trace record', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-cancel-trace-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const path = join(dir, 'trace.ndjson')
+  const prompt = { event: 'prompt' }
+  writeFileSync(path, JSON.stringify(prompt))
+  assert.deepEqual(traceEvents(path, { live: true }), [])
+  writeFileSync(path, `${JSON.stringify(prompt)}\n{"event":`)
+  assert.deepEqual(traceEvents(path, { live: true }), [prompt])
+  assert.throws(() => traceEvents(path), SyntaxError)
+  writeFileSync(path, 'broken\n{"event":')
+  assert.throws(() => traceEvents(path, { live: true }), SyntaxError)
+})
+
+// Hold only the SDK prompt send. AgentRun still marks the request in flight, and
+// both prompt and cancel travel over the real connection to the same fake.
+async function heldHang(t) {
+  const h = host(t, { hostStopping: () => true })
+  const gate = Promise.withResolvers()
+  const prompt = AgentRun.prototype.prompt
+  let run
+  t.mock.method(AgentRun.prototype, 'prompt', function (blocks) {
+    const send = this.conn.prompt
+    t.mock.method(this.conn, 'prompt', async params => {
+      run = this
+      if (!await gate.promise) throw new Error('fixture closed before prompt send')
+      return send(params)
+    })
+    return prompt.call(this, blocks)
+  })
+
+  const chunks = []
+  const reading = h.step([user('hang')], chunks)
+  const settled = Promise.allSettled([reading])
+  t.after(async () => {
+    gate.resolve(false)
+    h.close()
+    await settled
+  })
+  await until(() => run !== undefined, 'the request to reach the prompt gate')
+  const events = options => h.events(options).filter(e => e.pid === run.child.pid && e.sessionId === run.sessionId
+    && (e.event === 'prompt' || e.event === 'cancel'))
+  return { run, release: () => gate.resolve(true), events, chunks, reading }
+}
+
+test('#1575 control: a cancel sent on local readiness is lost when the fake enters its prompt', async t => {
+  const { run, release, events, chunks, reading } = await heldHang(t)
+  assert.ok(run.prompting !== undefined, 'the original readiness predicate passes')
+  assert.deepEqual(events({ live: true }), [])
+  const cancel = () => run.conn.cancel({ sessionId: run.sessionId })
+  await cancel()
+  await until(() => events({ live: true }).some(e => e.event === 'cancel'), 'the fake to handle the early cancel')
+  release()
+
+  // The last update before the fake waits for cancellation. Have the same fake
+  // answer another request after that update, while its prompt and step remain open.
+  await until(() => textIn(chunks).includes('you said "hang".'), 'the fake to stream its post-reset reply')
+  const { protocolVersion } = run.init
+  const reply = await Promise.race([
+    run.conn.initialize({ protocolVersion, clientCapabilities: {} }),
+    reading.then(() => assert.fail('the step ended before the second cancel')),
+  ])
+  assert.equal(reply.protocolVersion, protocolVersion)
+  assert.ok(run.prompting !== undefined)
+  assert.ok(!chunks.some(chunk => chunk.type === 'finish'))
+  assert.deepEqual(events({ live: true }).map(e => e.event), ['cancel', 'prompt'])
+  t.diagnostic(`After the fake echoed hang and answered initialize, prompt pending: ${run.prompting !== undefined}`)
+  await cancel()
+  const reason = (await reading).at(-1).reason
+  assert.equal(reason.failure.code, 'AGENT_INTERRUPTED')
+  assert.deepEqual(events().map(e => e.event), ['cancel', 'prompt', 'cancel'])
+  t.diagnostic(JSON.stringify({ events: events(), reason }))
+})
+
 // #1575: a prompt the host stopped from outside the app (its process got SIGTERM with the
 // host) ends as an interruption, not as the person's Stop. bots-dsh reads the code by name to
 // resume the task instead of marking it failed, so the exact code is the contract.
 test('#1575: a prompt cancelled from outside the app ends as interrupted, not as a Stop', async (t) => {
-  // The host's SIGTERM reached the agent as it stopped: the app did not ask for this cancel.
-  const h = host(t, { hostStopping: () => true })
-  const reading = h.step([user('hang')])
-  // The agent must have taken the prompt before the cancel reaches it. The fake agent (like a
-  // real CLI) starts each prompt by clearing its cancel flag, so a cancel that wins the race
-  // against the prompt's own start is cleared again and the prompt waits forever: `prompting`
-  // is set when the adapter writes the request, before the agent has read it. The trace's
-  // `prompt` entry is written once the agent has cleared the flag and begun the turn.
-  await until(
-    () => h.live()?.run?.prompting !== undefined && h.events().some(event => event.event === 'prompt'),
-    'the prompt to be in flight at the agent',
-  )
-  // The agent is asked to cancel on the wire, as a CLI that took its host's SIGTERM does; the
-  // adapter did not ask for this cancel.
-  await h.live().run.conn.cancel({ sessionId: h.live().run.sessionId })
+  const { run, release, events, reading } = await heldHang(t)
+  const cancel = t.mock.method(run.conn, 'cancel')
+  // Check readiness with the wire still closed. A locally ready sender will have
+  // called cancel before the next event-loop turn, even if the fake has yet to see it.
+  const cancelsBeforeRelease = new Promise(resolve => setImmediate(() => {
+    resolve(cancel.mock.callCount())
+    release()
+  }))
+  await until(() => events({ live: true }).some(e => e.event === 'prompt' && e.turns === 1 && e.text === 'hang'),
+    'the fake to receive this prompt')
+  await run.conn.cancel({ sessionId: run.sessionId })
+  const earlyCancels = await cancelsBeforeRelease
+  assert.equal(earlyCancels, 0, 'no cancel may be issued before the prompt gate opens')
   const chunks = await reading
+  assert.equal(cancel.mock.callCount(), 1)
+  assert.deepEqual(events().map(e => e.event), ['prompt', 'cancel'])
   assert.deepEqual(chunks.at(-1).reason, {
     kind: 'error',
     failure: {
@@ -227,4 +307,5 @@ test('#1575: a prompt cancelled from outside the app ends as interrupted, not as
       code: 'AGENT_INTERRUPTED',
     },
   })
+  t.diagnostic(JSON.stringify({ earlyCancels, events: events(), reason: chunks.at(-1).reason }))
 })

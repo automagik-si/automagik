@@ -91,6 +91,7 @@ async function start(team, {
   agents = fakeAgents(),
   // Runs between apply() and the first pass, which waits on the team file.
   prepare,
+  emptySessions = [],
 } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-subs-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(team))
@@ -136,7 +137,7 @@ async function start(team, {
     },
     sessionController: {
       create: async () => ({ sessionId: 's1' }),
-      resolveAgent: async sessionId => ({ agent: { session: { id: sessionId }, followup() {}, cancel() {} } }),
+      resolveAgent: async sessionId => ({ agent: { session: { id: sessionId, ...(emptySessions.includes(sessionId) ? { deriveMessages: () => [] } : {}) }, followup() {}, cancel() {} } }),
       selectModel: async request => { selected.push(request) },
       page: async () => ({ records: [], hasMore: false }),
     },
@@ -950,7 +951,8 @@ test('a model the person picks while the pass asks the CLI is kept: the way back
     picked = true
     await team.updateBot('c1', { model: 'deepseek/deepseek-v4-flash' })
   }
-  const host = await gated(seed([movedBot('c1'), movedBot('c2')], MOVED), { agents, prepare: (rt) => { team = rt } })
+  // Seeded migration metadata, no turn/answer: c1's manual pick owns an empty chat.
+  const host = await gated(seed([movedBot('c1'), movedBot('c2')], MOVED), { agents, emptySessions: ['c1'], prepare: (rt) => { team = rt } })
   t.after(host.stop)
   await until(() => host.saved().bots.c2.appliedModel === SOL, { label: 'the other Bot went back' })
   await host.pass()
