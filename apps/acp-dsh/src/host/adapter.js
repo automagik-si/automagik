@@ -778,9 +778,8 @@ export class AcpAdapter extends LlmAdapter {
   /**
    * Whether DSH's tools reach this agent when the setting says nothing. An adapter that can
    * drop its own built-in tools is in the default: today that is Claude Code's. An agent that
-   * keeps them (Codex) is not, unless its Bot's role tools live in DSH: bots-dsh sends that as
-   * `needsDshTools` in the Session's identity, because a Genie's `grant_wish` has no other path
-   * to the model. Such a Session still does not get DSH's twins of the agent's own tools.
+   * keeps them (Codex) bridges by default when its Bot needs DSH's team or role tools.
+   * bots-dsh sends that as `needsDshTools` in the Session's identity.
    */
   bridgeDefault(agent, sessionId) {
     if (agent?.disableBuiltInTools === true) return true
@@ -793,19 +792,23 @@ export class AcpAdapter extends LlmAdapter {
     try { return this.botIdentity(sessionId)?.needsDshTools === true } catch { return false }
   }
 
+  bridgeOn(agent, sessionId) {
+    return this.bridgeDecision(agent, sessionId).on
+  }
+
   /**
    * Whether DSH's tools reach an agent at all: an explicit true/false decides, and an absent
    * setting takes the adapter's own switch (`bridgeDefault`).
    */
-  bridgeOn(agent, sessionId) {
-    if (this.backchannel === undefined) return false
+  bridgeDecision(agent, sessionId) {
+    if (this.backchannel === undefined) return { on: false, setting: undefined }
     // A row that declares no bridge (`bridge: false`, the native agents) gets none, even with
     // `dshTools: true`: its bridge calls would not be recognised, so each would draw a mirror
     // card beside the bridge's rows and ask twice.
-    if (agent?.bridge === false) return false
+    if (agent?.bridge === false) return { on: false, setting: undefined }
     const setting = this.dshTools()
-    if (setting === true || setting === false) return setting
-    return this.bridgeDefault(agent, sessionId)
+    if (typeof setting === 'boolean') return { on: setting, setting }
+    return { on: this.bridgeDefault(agent, sessionId), setting: undefined }
   }
 
   /**
@@ -1434,13 +1437,13 @@ export class AcpAdapter extends LlmAdapter {
               this.sessionFiles.clear(sessionId, { owner: fileOwner })
               state.fileOwner = fileOwner = undefined
             }
-            const bridged = this.bridgeOn(agent, sessionId)
-            // A Bot whose role tools live in DSH is bridged without asking, even on an agent
-            // that keeps its own built-ins (Codex): it is offered DSH's extras only, never a
-            // second copy of the tools it already has. An explicit `dshTools: true` keeps the
-            // whole preset.
+            const decision = this.bridgeDecision(agent, sessionId)
+            const bridged = decision.on
+            state.bridgeDefault = decision.setting === undefined ? bridged : undefined
+            // A Bot whose team or role tools live in DSH gets DSH's extras by default on Codex.
+            // An explicit `dshTools: true` keeps the whole preset.
             const twinsOff = native
-              || (bridged && agent.disableBuiltInTools !== true && this.roleToolsInDsh(sessionId))
+              || (bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId))
             state.twinsOff = twinsOff
             if (bridged) {
               await this.backchannel.listen()

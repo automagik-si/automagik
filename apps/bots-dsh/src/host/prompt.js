@@ -41,11 +41,11 @@ const MAIN_RULES = [
 
 export function install(rt) {
   const { ctx } = rt
-  // A Genie's tools are DSH tools (`grant_wish`), so its ACP Sessions need the bridge even on an
-  // agent that keeps its own built-ins (Codex, #1639). A task (a wish) says no: it must not
-  // grant another wish.
+  // Team tools are DSH tools for every team Bot (#1544). A Bot's current chat and group Sessions
+  // need the bridge even on Codex. A Genie needs it for its role tools too. Tasks keep their
+  // default.
   const roleToolsInDsh = (bot, sessionId) =>
-    bot.kind === 'genie' && rt.taskOwners?.has(sessionId) !== true
+    rt.taskOwners?.has(sessionId) !== true && (bot.kind === 'genie' || rt.isBotSession?.(sessionId) === true)
   const attachIdentity = (sub) => {
     const off = sub.acpAgents?.botIdentity?.(sessionId => {
       const owner = rt.selfOf(sessionId)

@@ -480,6 +480,14 @@ person's words and is carried in the replay once the Bot team has answered that 
 A move off Claude Code still ends its session (and bridge), and the new session on the way back
 gets the chat; the agent's own context beyond the replay cap is the accepted cost.
 
+**Team Bots on Codex get DSH's extras (2026-11-19, #1544).** With `dshTools` absent, a team Bot's
+current own chat and group Sessions get DSH's extras over the bridge, including `message_bot`
+and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions
+keep their default. An explicit `true` gives Codex the whole DSH preset, including on a Genie.
+An explicit `false` still turns the bridge and replay off. A move off Codex keeps its session
+only while that Session has no bridge. A move to DSH from a bridged Codex Session ends the run
+with a "Switching to DSH" row, and the new run on return gets the redacted replay.
+
 ## Amendment: Bots on Claude Code and Codex, switching and sign-in (2026-11-09)
 
 What the Bot team and acp-dsh do so a Bot can move onto and off an agent, say honestly what the

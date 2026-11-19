@@ -15,6 +15,7 @@ import { AGENTS } from '../src/host/agents.js'
 import { Backchannel, NATIVE_TWIN_TOOLS, offeredTools, presetOf } from '../src/host/backchannel.js'
 import { CliHomes } from '../src/host/cli-homes.js'
 import { isAuthRequired, SYNTHETIC_KIND } from '../src/host/names.js'
+import { PermissionDiagnostics } from '../src/host/permission-diagnostics.js'
 import { credentialShapes } from '../src/host/redact.js'
 import { BOUNDARY_KIND, crossed } from '../src/host/switch.js'
 import { optionFor, TOOL_NAME } from '../src/host/tool.js'
@@ -1080,6 +1081,49 @@ test('a Genie on acp-codex keeps its whole DSH tool set, without DSH twins', asy
     plain.close()
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+const TEAM_DSH_TOOLS = ['bash', 'browser_open', 'message_bot', 'read', 'todo_write', 'write']
+for (const [setting, toolsOn, expectedTools, why] of [
+  ['absent', () => undefined, ['browser_open', 'message_bot'], 'agent-default'],
+  ['false', () => false, undefined, 'agent-default'],
+  ['true', () => true, TEAM_DSH_TOOLS, 'setting'],
+]) test(`a team Bot on acp-codex with dshTools ${setting}`, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-team-codex-'))
+  const trace = join(dir, 'codex.ndjson')
+  const h = dshHost({
+    trace,
+    toolsOn,
+    provider: 'acp-codex',
+    base: AGENTS['acp-codex'],
+    env: { FAKE_ACP_MODES: 'read-only,workspace-write,agent,agent-full-access' },
+    definitions: TEAM_DSH_TOOLS.map(name => ({
+      name, description: `${name} tool`, parameters: { type: 'object', properties: {} },
+    })),
+    botIdentity: id => (id === 's1' ? { name: 'Bot', needsDshTools: true } : undefined),
+  })
+  t.after(() => {
+    h.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+  const diagnostics = new PermissionDiagnostics()
+  h.adapter.diagnostics = diagnostics
+  const messages = [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }] }]
+  const chunks = await step(h.adapter, messages, { provider: 'acp-codex' })
+  assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1).reason))
+  const events = traceEvents(trace)
+  const opened = events.find(event => event.event === 'new-session')
+  const bridged = expectedTools !== undefined
+  assert.deepEqual(opened.servers, bridged ? ['dsh'] : [])
+  const listed = events.find(event => event.event === 'mcp-list')
+  assert.deepEqual(listed?.tools, expectedTools)
+  if (setting === 'absent') {
+    for (const name of NATIVE_TWIN_TOOLS) assert.ok(!listed.tools.includes(name), name)
+  }
+  // With explicit false, the reason uses Codex's agent default without reading the identity.
+  const bridge = diagnostics.read('s1').bridge
+  assert.equal(bridge.on, bridged)
+  assert.equal(bridge.why, why)
 })
 
 // UNPROVEN HERE: a saved always-allow rule for `mcp__*` in a real Claude Code profile can only

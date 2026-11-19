@@ -429,6 +429,15 @@ test('own mode: ownModeOf reports a bridged Codex', () => {
   assert.equal(h.services[SERVICE].ownModeOf('acp-codex').bridged, true)
 })
 
+test('own mode: ownModeOf uses the Session identity for the Codex bridge default', () => {
+  const h = harness({ clis: { codex: '/fake/codex' }, bins: { [AGENTS['acp-codex'].adapter]: '/fake/adapter' } })
+  apply(h.ctx, { claude: false, codex: true }, h.deps)
+  const service = h.services[SERVICE]
+  service.botIdentity(id => id === 's1' ? { name: 'Bot', needsDshTools: true } : undefined)
+  assert.deepEqual(service.ownModeOf('acp-codex', 's1'), { mode: 'agent', bridged: true, answerer: false })
+  assert.deepEqual(service.ownModeOf('acp-codex'), { mode: 'agent', bridged: false, answerer: false })
+})
+
 test('own mode service disposers are scoped and competing registrations disable it permanently', () => {
   const h = harness({ clis: { codex: '/fake/codex' }, bins: { [AGENTS['acp-codex'].adapter]: '/fake/adapter' } })
   apply(h.ctx, { claude: false, codex: true }, h.deps)
