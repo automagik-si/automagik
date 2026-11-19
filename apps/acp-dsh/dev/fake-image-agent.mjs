@@ -35,7 +35,8 @@
 //   message. FAKE_TOOLS changes it: `fail`, `garbage`, or JSON { extra: [names offered whatever
 //   the switches say, `ns.name` or a bare name], nested: [names `exec` reaches], hosted: [types
 //   of nameless tools], missing: true (no tool block), item: 'a kind of item', skills: [the
-//   person's skills], sticky: true (a skill turned off by name stays listed) }.
+//   person's skills], sticky: true (a skill turned off by name stays listed), inert: [features
+//   whose switch is listed but does nothing: the tool they should add never appears] }.
 // FAKE_IMAGE_PROFILE=offer|reject|delay|hang offers the selected image profile only from the home.
 // FAKE_PROFILE_RESOLVED=wider|write|missing|odd changes the resolved profile in prompt-input.
 // FAKE_INVALID_CONFIG=mcp|features|debug emits a config warning on that successful check;
@@ -93,7 +94,9 @@ function featuresOf(args) {
 function promptInput(args) {
   const changes = json(process.env.FAKE_TOOLS, {}) ?? {}
   const features = featuresOf(args)
-  const on = name => features[name]?.[1] === true
+  // `inert` is a switch Codex lists and reports as taken, yet the tool it controls never shows:
+  // the silent drop the image run must not rest on.
+  const on = name => !(changes.inert ?? []).includes(name) && features[name]?.[1] === true
   const nested = ['apply_patch', 'clock__curr_time', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource', ...(on('shell_tool') ? ['exec_command', 'write_stdin'] : []), ...(on('view_image') ? ['view_image'] : []), ...(changes.nested ?? [])]
   const fn = name => ({ type: 'function', name, description: `The ${name} tool.`, strict: false, parameters: {} })
   const spaces = new Map([

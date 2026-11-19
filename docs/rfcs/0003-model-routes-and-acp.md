@@ -615,7 +615,9 @@ has no pre-read hook for Codex's image-input paths; output bytes are inline, nev
 `savedPath`. No adapter-controlled input path exists to validate. The [security notes and
 pinned source lines][codex-image-security] list Linux, macOS and Windows grants and the real
 helper read tests. Those tests reconstruct the helper policy; they do not prove the signed-in
-ACP image-tool path. **#870 remains open.** Feature and offered-tool checks stay in place.
+ACP image-tool path. **#870 remains open.** Feature and offered-tool checks stay in place,
+and each required switch is read under the session's whole config and proven by its effect
+before the draw; a switch Codex lists but silently ignores refuses the draw.
 An `Invalid configuration` warning fails a pre-session check.
 The run uses the Bot's isolated Codex home and removes the scratch config with the folder.
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/DnzzL/herdr-automations/internal/command"
 	"github.com/DnzzL/herdr-automations/internal/config"
+	"github.com/DnzzL/herdr-automations/internal/hc"
 	"github.com/DnzzL/herdr-automations/internal/history"
 	"github.com/DnzzL/herdr-automations/internal/host"
 	"github.com/DnzzL/herdr-automations/internal/notify"
@@ -174,7 +175,12 @@ func (r *Runner) report(a config.Automation, rec history.Record) string {
 	}
 	terminal, err := bots.Send(a.Notify, line)
 	if err != nil {
-		log.Printf("%s: its result did not reach %s: %v", a.Name, a.Notify, err)
+		var detail any = err
+		var sendErr *hc.SendError
+		if errors.As(err, &sendErr) {
+			detail = fmt.Sprintf("hc send: %s (%v)", sendErr.Envelope, sendErr.Unwrap())
+		}
+		log.Printf("%s: its result did not reach %s: %v", a.Name, a.Notify, detail)
 		return "not delivered: " + err.Error()
 	}
 	return "sent to " + terminal

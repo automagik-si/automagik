@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // One Codex launch mode (#1125, the owner's ruling of 10 and 12 Nov): every Codex seat and every
 // worker the pack builds runs `--approve-for-me` with the sandbox on, `--no-daemon` (hc --skill:
 // else its commands run in Codex's shared server, outside hc) and the sandbox's network access,
@@ -13,7 +14,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { AGENTS, CODEX_MODE_ARGS, CODEX_NETWORK, absPath, cleanPath, codexClean, codexGrantPlan, codexGrantPaths, codexCleanNote, codexDirAllowed,
+import { AGENTS, CLAUDE_PERSON_SETTINGS, CODEX_MODE_ARGS, CODEX_NETWORK, absPath, cleanPath, codexClean, codexGrantPlan, codexGrantPaths, codexCleanNote, codexDirAllowed,
   codexDirVerdict, codexGrants, codexKeepDirs, codexWhere, codexWithheldWarning, homeWide, launchRun, withCodexGrants, withoutBriefing }
   from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
@@ -235,7 +236,7 @@ test("launchRun: a Codex run always ends in the launch mode, each word once, bef
   }
   assert.deepEqual(launchRun("codex", ["codex", "-m", "x", "--", "task"], {}), ["codex", "-m", "x", ...MODE, "--", "task"]);
   // Only Codex: another agent's run is as before.
-  assert.deepEqual(launchRun("claude", ["claude"], { codexAuto: false }), ["claude", "--permission-mode", "auto"]);
+  assert.deepEqual(launchRun("claude", ["claude"], { codexAuto: false }), ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto"]);
 });
 
 test("--no-daemon and the network word survive every restart shape, the worker plan and a tree helper's rebuild", () => {
@@ -287,6 +288,13 @@ test("codexGrants: the git dirs, herdr-core's state and data folders and the too
   const blind = codexGrantPlan({ home, env: named, isDir: () => true });
   assert.deepEqual(blind.dirs, []);
   assert.equal(blind.unproved.length, codexGrantPaths({ home, env: named }).candidates.length);
+});
+
+test("codex-mode #1261: the hc state and data grants keep a stated, untested case, not a running core", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  assert.match(readme, /#1125's N4 left both out and `hc ls`, `hc get self` and `am brief` still exited 0/);
+  assert.match(readme, /when no core is running and\s+the hc client must start it or take its lock/);
+  assert.match(readme, /no isolated check has shown that case works\s+without them, so they stay until one does \(#1261\)/);
 });
 
 test("codexGrants never grants the root, the home folder, a folder above it, or a whole XDG, cache, GOPATH or Bun folder", () => {
@@ -978,6 +986,8 @@ test("#1142 a Codex seat on a linked machine whose HOME is an alias: both core f
     machines: [{ name: "vm", id: "core-of-vm", state: "connected", uname: "Linux x86_64", home: alias, path: vmBin, env: { ...blank, ...env } }] }));
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     GIT_CEILING_DIRECTORIES: root, XDG_DATA_HOME: "", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const cli = (...args) => {
     writeFileSync(logPath, "");
     const r = spawnSync(process.execPath, [CLI, ...args, "--machine", "vm", "--project", project, "--json"], { cwd: root, env, encoding: "utf8" });
@@ -1085,6 +1095,8 @@ function scene(t, { programs = null, templates = [], env: more = {} } = {}) {
     GIT_CEILING_DIRECTORIES: root, XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"),
     HC_SOCKET: join(root, "unproxied.sock"), AUTOMAGIK_HERDR_TAB_WAIT_MS: "0", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1", ...more };
   env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const cli = (args, { from = "t1" } = {}) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...(from ? { HC_TERMINAL_ID: from } : {}) }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };
@@ -1096,11 +1108,15 @@ function scene(t, { programs = null, templates = [], env: more = {} } = {}) {
   return { root, project, home, app, cli, runs, setState, grants };
 }
 /** What an `hc run` call launches, past `/usr/bin/env NAME=value…` and the seat's briefing. */
+const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
+  + "clean (`git status --porcelain` prints nothing).";
+const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${DONE_LINE}`)
+  ? w.slice(0, -(DONE_LINE.length + 2)) : w);
 const launched = (call) => {
   const words = call.slice(call.indexOf("--") + 1);
   let i = words[0] === "/usr/bin/env" ? 1 : 0;
   while (i && i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
-  return withoutBriefing("codex", words.slice(i));
+  return withoutDone(withoutBriefing("codex", words.slice(i)));
 };
 const addDirs = (argv) => argv.flatMap((w, i) => (w === "--add-dir" ? [argv[i + 1]] : []));
 
@@ -1137,7 +1153,7 @@ test("a Codex worker in a linked worktree may write its own git dir and the main
   // A template without --no-daemon: started in hc's template form (its instructions kept), one warning with the fix.
   const old = s.cli(["worker", "task two", "--branch", "fix/1125-b", "--template", "old-codex", "--json"]);
   assert.equal(old.code, 0, old.err);
-  assert.deepEqual(s.runs().at(-1).slice(-2), ["old-codex", "task two"]);
+  assert.deepEqual(withoutDone(s.runs().at(-1).slice(-2)), ["old-codex", "task two"]);
   assert.match(old.err, /Template old-codex runs Codex without --no-daemon.*Add --no-daemon/);
   // #1142, warning-only: it starts in hc's template form, never with the pack's folders and never classified granted.
   const oldCall = s.runs().at(-1);
@@ -1148,7 +1164,7 @@ test("a Codex worker in a linked worktree may write its own git dir and the main
   // The owner's bypass template: neither refused nor warned, its command untouched.
   const mac = s.cli(["worker", "task three", "--branch", "fix/1125-c", "--template", "mac-dev", "--json"]);
   assert.equal(mac.code, 0, mac.err);
-  assert.deepEqual(s.runs().at(-1).slice(-2), ["mac-dev", "task three"]);
+  assert.deepEqual(withoutDone(s.runs().at(-1).slice(-2)), ["mac-dev", "task three"]);
   assert.equal(/no-daemon/.test(mac.err), false);
 });
 
@@ -1206,7 +1222,7 @@ test("#1142 the CLI refuses a worker template that puts a Codex option after its
   const mac = s.cli(["worker", "task", "--branch", "fix/1142-b", "--template", "mac-dev", "--json"]);
   assert.equal(mac.code, 0, mac.err);
   const call = s.runs().at(-1);
-  assert.deepEqual(call.slice(-2), ["mac-dev", "task"]);
+  assert.deepEqual(withoutDone(call.slice(-2)), ["mac-dev", "task"]);
   assert.equal(call.includes("--add-dir"), false, "no pack-injected --add-dir for a template worker");
   assert.equal("granted" in JSON.parse(mac.out), false);
 });
@@ -1313,6 +1329,8 @@ test("#1142 a Codex seat on a linked machine: its --add-dir words and derived fo
   writeFileSync(logPath, "");
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     GIT_CEILING_DIRECTORIES: root, XDG_DATA_HOME: "", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const r = spawnSync(process.execPath, [CLI, "start", "Dev", "--machine", "vm", "--project", project, "--json"], { cwd: root, env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   const call = readJsonLines(logPath).find((c) => c[0] === "run");

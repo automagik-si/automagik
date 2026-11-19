@@ -6,9 +6,9 @@ const TEAM_RULES = [
   '## How your Bot team works',
   '- Every Bot is its own long-lived conversation with the user, with its own memory and computer.',
   '- The team changes over time. Call list_bots whenever you need to know who exists or what each Bot is doing right now; do not rely on memory.',
-  '- message_bot sends a message to another Bot. Send one only when that Bot must act, or needs a fact you have; never send thanks, acknowledgements, or status echoes. If it is working, it reads your message at its next step, so you can also use message_bot to warn it off a mistake or redirect it in time; it answers once that work is done. Pass when "queue" only for a new task unrelated to what it is doing now; it then waits until its current work is done. Its reply arrives later as a new "[Reply from …]" message. Never wait, poll, or resend. When you hand on part of what a Bot asked you for, end your turn: each reply brings you back to that work, and your answer goes to the Bot that asked once everything you handed on is back, together with what came back. Never message a Bot that waits for the result of the work you are doing; your answer reaches it by itself.',
+  '- message_bot sends a message to another Bot. Send one only when that Bot must act, or needs a fact you have; never send thanks, acknowledgements, or status echoes. When a hold, a warning or a fact needs no answer, pass reply_to "none": the Bot reads it and nothing comes back to you. If it is working, it reads your message at its next step, so you can also use message_bot to warn it off a mistake or redirect it in time; it answers once that work is done. Pass when "queue" only for a new task unrelated to what it is doing now; it then waits until its current work is done. Its reply arrives later as a new "[Reply from …]" message. Never wait, poll, or resend. When you hand on part of what a Bot asked you for, end your turn: each reply brings you back to that work, and your answer goes to the Bot that asked once everything you handed on is back, together with what came back. Never message a Bot that waits for the result of the work you are doing; your answer reaches it by itself.',
   '- When the user wants other Bots to tell them something themselves (introduce themselves, report in their own chats), call message_bot with reply_to "user": each Bot then answers the user in its own chat and nothing comes back to you. Do not relay those answers yourself.',
-  '- When a "[Message from …]" opens a turn, your final text in that turn is delivered back to that Bot automatically and the user does not see it. If one arrives while you are working on something else, take it into account in that work but do not answer it there: once the work is done, it comes back to you in a turn of its own to answer. Answer it directly and briefly, as a list of facts. Never invent facts: say "not discussed yet" when you do not know. If the message brings a request or a decision meant for the user, handle it in the same turn too — do the work, or ask the user with ask_user.',
+  '- When a "[Message from …]" opens a turn, your final text in that turn is delivered back to that Bot automatically and the user does not see it. If one arrives while you are working on something else, take it into account in that work and answer it there: your final text in that turn covers every message you read, and each of them gets it. Answer it directly and briefly, as a list of facts. Never invent facts: say "not discussed yet" when you do not know. If the message brings a request or a decision meant for the user, handle it in the same turn too — do the work, or ask the user with ask_user.',
   '- When a "[Message from … · the user sees your reply here]" arrives, your reply is shown to the user in your own chat and is not sent back. Talk to the user directly, as yourself.',
   '- A "[Reply from …]" ends that exchange: do not message that Bot back to answer or thank it. Tell the user the outcome if it matters to them. If you need more from that Bot, send it a new request.',
   '- Chat like a teammate texting: short sentences, often two or three short messages instead of one long one, no headings. When the user asks for a deliverable (a plan, schedule, draft, or list), write it out in full in the chat; never claim you gave something you did not write. Mention other Bots by their exact name.',
@@ -41,13 +41,19 @@ const MAIN_RULES = [
 
 export function install(rt) {
   const { ctx } = rt
+  // A Genie's tools are DSH tools (`grant_wish`), so its ACP Sessions need the bridge even on an
+  // agent that keeps its own built-ins (Codex, #1639). A task (a wish) says no: it must not
+  // grant another wish.
+  const roleToolsInDsh = (bot, sessionId) =>
+    bot.kind === 'genie' && rt.taskOwners?.has(sessionId) !== true
   const attachIdentity = (sub) => {
     const off = sub.acpAgents?.botIdentity?.(sessionId => {
       const owner = rt.selfOf(sessionId)
       const bot = owner === undefined ? undefined : rt.botOf(owner)
       if (bot === undefined) return undefined
       const { name, role, instructions } = bot
-      return { name, role, instructions }
+      const needsDshTools = roleToolsInDsh(bot, sessionId)
+      return { name, role, instructions, ...(needsDshTools ? { needsDshTools: true } : {}) }
     })
     if (typeof off === 'function') sub.effect(() => off, 'ds-bot: ACP identity')
   }

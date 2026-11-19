@@ -66,6 +66,35 @@ test("liveFrom: label + live + agent in front; newest holder wins and is flagged
   assert.ok(liveFrom(terms)["b-unknownbot"]);
 });
 
+test("liveFrom: the ledger's binding decides the bot, never the pane's bot= label (#223)", () => {
+  const terms = [
+    T("t1", { labels: { bot: "b-mainmainma" }, created_ms: 10 }),
+    T("t2", { labels: { bot: "b-loneloneln" }, created_ms: 20 }),
+    T("t3", { labels: {}, created_ms: 30 }),
+    T("hx/t4", { labels: { bot: "b-devdevdevd" }, created_ms: 40 }),
+    T("t5", { labels: { bot: "b-captaincap" }, created_ms: 50, state: "exited" }),
+  ];
+  const bindings = [
+    { bot: "b-captaincap", terminal: "t1", address: "t1", project: KEY, machine: null, state: "live", created_ms: 10 },
+    { bot: "b-loneloneln", terminal: "t2", address: "t2", project: KEY, machine: null, state: "unknown", created_ms: 20 },
+    { bot: "b-devdevdevd", terminal: "t3", address: "t3", project: KEY, machine: null, state: "live", created_ms: 30 },
+    { bot: "b-mainmainma", terminal: "t4", address: "hx/t4", project: KEY, machine: "hx", state: "live", created_ms: 40 },
+    { bot: "b-testtestte", terminal: "t5", address: "t5", project: KEY, machine: null, state: "live", created_ms: 50 },
+  ];
+  const known = knownBots([{ key: KEY, file }]);
+  const live = liveFrom(terms, known, undefined, undefined, bindings);
+  // The pane says the main bot, the ledger the captain; an unlabelled pane is the dev's; an
+  // away binding is no row, nor is one whose terminal ended.
+  assert.equal(liveOf(live, { key: KEY }, "b-captaincap").terminal, "t1");
+  assert.equal(liveOf(live, { key: KEY }, "b-devdevdevd").terminal, "t3");
+  assert.equal(liveOf(live, { key: KEY }, "b-loneloneln"), null);
+  assert.equal(liveOf(live, { key: KEY }, "b-testtestte"), null);
+  assert.equal(liveOf(live, { key: KEY, machine: "hx" }, "b-mainmainma").terminal, "hx/t4");
+  assert.equal(liveOf(live, { key: KEY }, "b-mainmainma"), null, "no row at the wrong machine");
+  // Without the ledger the label still decides (the fallback until the CLI answers --all).
+  assert.equal(liveOf(liveFrom(terms, known), { key: KEY }, "b-mainmainma").terminal, "t1");
+});
+
 test("an agy pane (#793): agy in front counts even when the table says no agent, and its blocked prompt is needs-you", () => {
   const terms = [T("t1", { labels: { bot: "b-mainmainma" }, status: "blocked", status_ms: NOW,
     program: { key: "agy", name: "agy", agent: false }, foreground: { argv: ["agy", "--model", "gemini-4-argon-high"] } })];
@@ -415,6 +444,12 @@ test("heldTerminalOf: a bot's live terminal for its row's click, shown in a pane
   assert.equal(heldTerminalOf("b-c", rows), null, "no live terminal");
   assert.equal(heldTerminalOf("b-a", [T("t3", { labels: { bot: "b-a" }, state: "exited" })]), null);
   assert.equal(heldTerminalOf(null, rows), null);
+  // The ledger's binding, not the label, says which terminal a row's click holds (#223).
+  const terms = [...rows, T("t5", { created_ms: 40 })];
+  const bindings = [{ bot: "b-a", terminal: "t5", address: "t5", project: null, machine: null, state: "live" }];
+  assert.equal(heldTerminalOf("b-a", terms, [], null, () => null, bindings), "t5");
+  assert.equal(heldTerminalOf("b-b", terms, [], null, () => null, bindings), null, "the label alone counts nothing");
+  assert.equal(heldClickOf("b-a", terms, [], null, () => null, bindings).args.terminal, "t5");
 });
 
 test("argvToAsk: panes that never settle can't starve a stale re-read; the cursor goes round", () => {
