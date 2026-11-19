@@ -202,8 +202,12 @@ test("the release cut runs the check with --strict; PR CI keeps the default", ()
     const end = text.indexOf("\n\n", start);
     return text.slice(start, end === -1 ? undefined : end);
   };
+  // The command is the cut's gates script's (#668), so a re-cut on a moved dev runs it again.
   assert.match(step("release.yml", "Every pack mod loads in herdr-app"),
-    /run: node \.github\/scripts\/herdr-app-check\.mjs --strict/);
+    /run: bash scripts\/release-gates\.sh herdr-app/);
+  const gates = readFileSync(join(REPO, "scripts", "release-gates.sh"), "utf8");
+  const branch = gates.slice(gates.indexOf("\n  herdr-app)"), gates.indexOf("\n  am)"));
+  assert.match(branch, /node \.github\/scripts\/herdr-app-check\.mjs --strict/);
   assert.match(step("ci.yml", "Every pack mod loads in herdr-app"),
     /^        run: node \.github\/scripts\/herdr-app-check\.mjs$/m);
 });
