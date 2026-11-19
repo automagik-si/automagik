@@ -362,7 +362,8 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
   const labels = target.labels ?? {};
   if (bound || labels.bot) return `${address} is a bot's pane, not a worker; worker kill ends only a worker you started`;
   const owner = labels[WORKER_OF_LABEL] ?? null;
-  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label); worker kill ends only a worker you started`;
+  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label). `
+    + "Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started";
   if (!botId || owner !== botId) return `${address} is another bot's worker; worker kill ends only a worker you started`;
   // A worker mid-turn is not ended from here: its work would be lost. The project's main bot can.
   if (target.state !== "finished" && target.status?.state === "working") {

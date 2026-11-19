@@ -1842,11 +1842,13 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 runs it on about one task in three, by rule. Each call then
                                 removes up to 5 ended workers' worktrees made by this command
                                 in the launching repository, keeping unknown ownership or work
-  worker kill <pane>            from a bot's pane: end one worker that bot started (its
-                                worker.of label names the calling bot) once its turn is over.
-                                Any other pane -- a bot's seat, another bot's worker, your own
-                                pane, a worker still working -- is refused. hc kill itself is
-                                for a project's main bot only
+  worker kill <pane>            from a bot's pane: end a worker it started with am worker once
+                                its turn is over. Its worker.of label names the calling bot, which
+                                still owns it after its seat restarts. Bot seats (including your own),
+                                other bots' workers and workers still working are refused. Only the
+                                project's main bot can end a plain hc run child, including after a
+                                handoff or restart. The CLI rechecks the ledger and target before
+                                kill. hc has no conditional kill.
   reap                          explicitly check all ended workers' created worktrees, across
                                 repositories. Remove only with verified ownership and current
                                 HEAD pushed or proven merged, including squash merges. Keep
@@ -8567,11 +8569,37 @@ async function cmdWorkerKill(opts, panes) {
   const self = me.address ?? process.env.HC_TERMINAL_ID;
   const target = await hcGet(pane);
   const address = target ? (target.address ?? pane) : pane;
-  const bound = target ? Boolean((await attachView()).byTerminal.get(address)?.binding?.bot) : false;
+  const view = await attachView();
+  const bound = target ? Boolean(view.byTerminal.get(address)?.binding?.bot) : false;
   const why = workerKillRefusal({ target: target ? { ...target, address } : null, botId: bot.id, self, bound });
   if (why) throw new CliError(`${why === "that isn't a terminal hc knows" ? `${pane} isn't a terminal hc knows` : why}. Nothing was ended.`);
-  if (target.state && target.state !== "live") {
-    return opts.json ? { terminal: address, ended: false, state: target.state } : `${address} has already ended (${target.state}).`;
+
+  let current = target;
+  if (!target.state || target.state === "live") {
+    // Read the ledger again without importing, sweeping or locking it. The first view is cached.
+    try {
+      const { byKey } = foldAttach(readAttachFile(view.path) ?? []);
+      const callerKey = attachKey(view.byTerminal.get(self).binding);
+      const caller = byKey.get(callerKey);
+      if (caller?.bot !== bot.id || addressOf(caller, view.machines) !== self) {
+        throw new CliError(`The attach ledger no longer binds ${self} to ${bot.name}`);
+      }
+      if (byKey.has(attachKey({ core: view.core, terminal: address, created_ms: target.created_ms }))) {
+        throw new CliError(`The attach ledger now binds ${address} to a bot`);
+      }
+      current = await hcGet(address);
+    } catch (e) {
+      throw new CliError(`Couldn't recheck ${address}: ${e?.message ?? e}. Nothing was ended.`);
+    }
+    if (!Number.isSafeInteger(target.created_ms) || current?.address !== address
+        || current.created_ms !== target.created_ms || typeof current.state !== "string" || !current.state) {
+      throw new CliError(`${address} could not be confirmed as the same terminal. Nothing was ended.`);
+    }
+    const changed = workerKillRefusal({ target: current, botId: bot.id, self });
+    if (changed) throw new CliError(`${changed}. Nothing was ended.`);
+  }
+  if (current.state !== "live") {
+    return opts.json ? { terminal: address, ended: false, state: current.state } : `${address} has already ended (${current.state}).`;
   }
   // The real hc (in a sandbox, the proxy's socket, which ends only the caller's own worker):
   // the pane's guard refuses a member's own `hc kill`, and this verb is the checked way around it.

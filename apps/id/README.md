@@ -40,6 +40,19 @@ for the account owning the verified number, or creates a separate phone account.
 The browser's existing passkey account is never selected or modified. The
 receiving number, sender, code and secret are never logged.
 
+A signed-in person can list their own sessions and sign out of one or all of them
+(`/api/auth/list-sessions`, `/revoke-session`, `/revoke-sessions`; see
+PAGES-CONTRACT.md). The list never carries a session token; one session is named
+by its id. The Worker authenticates the caller before it looks an id up and only
+within that caller's sessions, so a signed-out request reads no session row at
+all, and Better Auth refuses to touch a session of another person.
+
+Requesting passkey registration options creates the user row before a passkey
+exists. A scheduled run (hourly cron in `wrangler.toml`, `src/cleanup.ts`) removes
+up to 100 such users per run once they are a day old and still have no passkey,
+phone number, OAuth client or live session, with their sessions, accounts and
+challenges.
+
 Sessions, WebAuthn and WhatsApp challenges, OAuth codes, grants, signing keys,
 and rate limits live in D1. There is no secondary storage or session cookie cache.
 Only Cloudflare's replaced `cf-connecting-ip` header supplies the limiter's IP.
@@ -127,17 +140,18 @@ reuse, select the current session account, restore the session JWT header, disab
 PKCE, relax redirects, enable public registration, move rate limits to memory,
 serve a page file directly as `.html`, take the passkey site name from the host,
 start on (or configure) a host outside it, accept a look-alike host, let CI
-skip the page browser tests, drop the Content-Security-Policy or nosniff, let
-inline script run, send files and API answers without the security headers, let
-a direct `.html` path through, rebuild the headers losing Better Auth's cookies,
-lengthen a token lifetime and allow rotated refresh-token replay, one at a time.
-Further checks edit the pinned OAuth provider's own bundle in `node_modules`
-(replaced, never rewritten in place, since it may be a hard link into the package
-cache) so a version bump that drops one of its refresh checks fails a test:
-issuing a refresh token without `offline_access`, keeping a rotated token alive,
-accepting an expired one, dropping its client binding and ignoring its revocation.
-Each must fail its targeted test; source files are restored
-afterward. Announcements and results are printed to stdout.
+skip the page browser tests, return tokens in the session list, let the cleanup
+ignore the passkey, age, phone-number, live-session or batch-size condition, drop the
+Content-Security-Policy or nosniff, let inline script run, send files and API
+answers without the security headers, let a direct `.html` path through, rebuild
+the headers losing Better Auth's cookies, lengthen a token lifetime and allow
+rotated refresh-token replay, one at a time. Further checks edit the pinned OAuth
+provider's own bundle in `node_modules` (replaced, never rewritten in place, since
+it may be a hard link into the package cache) so a version bump that drops one of
+its refresh checks fails a test: issuing a refresh token without `offline_access`,
+keeping a rotated token alive, accepting an expired one, dropping its client
+binding and ignoring its revocation. Each must fail its targeted test; source
+files are restored afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;
 never replace an already applied migration when upgrading a deployed database.
 
