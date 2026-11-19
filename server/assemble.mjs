@@ -13,7 +13,7 @@
 // builder, where npm and the network exist; the runtime stage carries no package manager but
 // the profile's own pnpm.
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchPlugins, DEFAULT_PACKAGES } from './fetch-plugins.mjs'
@@ -134,29 +134,6 @@ export function applyRuntimePatches(runtimeDir, patchesDir = PATCHES_SOURCE) {
   return results
 }
 
-/**
- * Drop platform payloads the server image can never load. The runtime is glibc linux-x64 and
- * selects native sharp (`apps/desktop/scripts/prune-runtime.mjs`: only the desktop forces the
- * wasm build); npm still installs the Emscripten fallback's 8.7 MiB `.node.wasm`. The JS wrapper
- * stays, so the secrecy scan's exact reviewed exception still names a shipped file. Exported so
- * a test can prune a temp runtime without assembling the image.
- * @param {string} runtimeDir - the runtime folder whose node_modules is pruned
- * @returns {{ file: string, bytes: number }[]} the files removed
- */
-export function pruneUnusedPlatformPayloads(runtimeDir) {
-  const removed = []
-  const lib = join(runtimeDir, 'node_modules', '@img', 'sharp-wasm32', 'lib')
-  if (!existsSync(lib)) return removed
-  for (const name of readdirSync(lib)) {
-    // The sole payload; sharp-wasm32's loader and version metadata are tiny and stay.
-    if (!name.endsWith('.node.wasm')) continue
-    const file = join(lib, name)
-    removed.push({ file, bytes: statSync(file).size })
-    rmSync(file)
-  }
-  return removed
-}
-
 export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-si/automagik', kind = 'release', event = '', manifest = '' }) {
   const input = { kind, event, revision, manifest, repository, version }
   const source = validateInput(input)
@@ -246,11 +223,6 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
     'pnpm/dist/reflink.win32-x64-msvc-J2TZHRQI.node',
   ]
   for (const name of PRUNE) rmSync(join(runtimeDir, 'node_modules', name), { recursive: true, force: true })
-  const platformPruned = pruneUnusedPlatformPayloads(runtimeDir)
-  if (platformPruned.length) {
-    const bytes = platformPruned.reduce((total, entry) => total + entry.bytes, 0)
-    say(`runtime: left out the unused Emscripten sharp payload, ${mib(bytes)}`)
-  }
 
   say('pruning what the runtime and the profile nothing read')
   const runtimePruned = pruneNodeModules(join(runtimeDir, 'node_modules'), { keepDocsOf: (name) => name.startsWith('@deepseek-ai/') })

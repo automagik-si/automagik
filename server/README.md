@@ -147,14 +147,14 @@ pruned payload keeps everything the composed tree names — office-to-pdf and it
 variants, the win32/darwin node-pty prebuilds and the experimental bundles the profile never
 composes.
 
-No debug or unusable-platform bytes ship: the `tools` stage strips the distroless Node binary's
-DWARF sections (17,817,400 of its 122,466,960 bytes; `--strip-all` keeps the dynamic symbol table)
-and the runtime leaves out the Emscripten `@img/sharp-wasm32` payload (9,150,351 bytes) because
-the server selects native sharp on glibc linux-x64. The small wasm loader and its reviewed
-secrecy exception stay. On a build of the current tree with content 3.157.2, the two cuts took
-the image from 642,998,234 to 616,030,483 bytes flattened (25.7 MiB) and from 216,040,627 to
-208,213,114 bytes compressed (7.5 MiB); `USER 1000:1000`, the digest-pinned bases and the health
-check are unchanged.
+No debug bytes ship: the `tools` stage strips the distroless Node binary's DWARF sections
+(17,817,400 of its 122,466,960 bytes; `--strip-all` keeps the dynamic symbol table). The
+Emscripten `@img/sharp-wasm32` payload stays: `sharp` falls back to it on an x86-64 CPU without
+v2 and after any native-load failure, so its 9,150,351 bytes are a live fallback, not dead
+weight. On a build of the current tree with content 3.157.2, the strip alone took the image from
+642,998,234 to 625,180,834 bytes flattened (17.0 MiB) and from 216,040,627 to 211,828,001 bytes
+compressed (4.0 MiB); `USER 1000:1000`, the digest-pinned bases and the health check are
+unchanged.
 
 ## Build and smoke
 

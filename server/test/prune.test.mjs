@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
-import { PRUNE_EXTRA_FILE, pruneExtras, pruneUnusedPlatformPayloads } from '../assemble.mjs'
+import { PRUNE_EXTRA_FILE, pruneExtras } from '../assemble.mjs'
 
 const temps = []
 after(() => {
@@ -48,27 +48,4 @@ test('third-party tests, examples, docs, .yarn and test files go; runtime files 
   for (const kept of ['a/package.json', 'a/dist/keep.js', 'a/node_modules/b/dist/keep.js']) {
     assert.ok(existsSync(join(modules, kept)), kept)
   }
-})
-
-test('the Emscripten sharp payload goes, the native build and the wasm loader stay', () => {
-  const modules = temp()
-  write(modules, 'node_modules/@img/sharp-wasm32/lib/sharp-wasm32-0.35.5.node.js')
-  write(modules, 'node_modules/@img/sharp-wasm32/lib/sharp-wasm32-0.35.5.node.wasm', 'wasm\n')
-  write(modules, 'node_modules/@img/sharp-wasm32/lib/sharp-wasm32-0.35.5.node.wasm.map', 'map\n')
-  write(modules, 'node_modules/@img/sharp-linux-x64/sharp.node')
-  const removed = pruneUnusedPlatformPayloads(modules)
-  assert.deepEqual(removed.map((entry) => entry.file.split('/').pop()), ['sharp-wasm32-0.35.5.node.wasm'])
-  assert.equal(removed[0].bytes, 5)
-  assert.ok(!existsSync(join(modules, 'node_modules/@img/sharp-wasm32/lib/sharp-wasm32-0.35.5.node.wasm')))
-  for (const kept of [
-    'node_modules/@img/sharp-wasm32/lib/sharp-wasm32-0.35.5.node.js',
-    'node_modules/@img/sharp-wasm32/lib/sharp-wasm32-0.35.5.node.wasm.map',
-    'node_modules/@img/sharp-linux-x64/sharp.node',
-  ]) assert.ok(existsSync(join(modules, kept)), kept)
-})
-
-test('a runtime without the sharp wasm fallback is left alone', () => {
-  const modules = temp()
-  write(modules, 'node_modules/@img/sharp-linux-x64/sharp.node')
-  assert.deepEqual(pruneUnusedPlatformPayloads(modules), [])
 })
