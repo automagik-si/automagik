@@ -141,7 +141,8 @@ test("a pane started this way resolves its hc guard binding from that app home (
   const r = guardRun(s, terminal, word.slice(word.indexOf("=") + 1));
   assert.equal(r.status, 0, r.stderr);
   // Bound in the app home's ledger: no worker.of fallback (an hc get of t100), and the send runs.
-  assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t7", "--json"], ["send", "t7", "hi"]], "the allowed send reached the stub");
+  assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t7", "--json"], ["read", "t7", "--lines", "40", "--json"], ["send", "t7", "hi"]],
+    "the allowed send reached the stub after its screen was checked (#1414)");
 });
 
 // #1195: one project, one fake core, two app homes whose Claude records select different
