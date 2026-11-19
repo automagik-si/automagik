@@ -1556,6 +1556,7 @@ export async function briefedLaunch(project, bot, agentKey, argv, appHomeDir = a
   if (!way || agentKeyOfArgv(argv, agents) !== agentKey) return { argv, env: {}, warnings };
   const text = launchBriefingText({
     self: bot,
+    agent: agentKey,
     file: project.file,
     project: project.key,
     projects: localProjectsFor(project, appHomeDir),
@@ -3655,7 +3656,7 @@ async function briefedOn(machine, project, bot, agentKey, argv, boxHome, guard =
   const way = briefingWay(agentKey);
   const agents = agentTable();
   if (!way || briefingOwnConfig(agentKey) || agentKeyOfArgv(argv, agents) !== agentKey) return { argv, env: {}, warnings: [] };
-  const text = launchBriefingText({ self: bot, file: project.file, guard, isGit: await projectIsGit(project) });
+  const text = launchBriefingText({ self: bot, agent: agentKey, file: project.file, guard, isGit: await projectIsGit(project) });
   const warnings = [];
   let launch = null;
   if (way === "file") {
