@@ -240,24 +240,87 @@ jobs:
           set -euo pipefail
           sudo chown -R _apt:root /var/cache/apt/archives
           sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
-          # A stalled mirror must fail and retry, not hold the step open until the job cap.
+
+          # Hard wall-clock bounds, in seconds, around every apt phase. An install gets 240s
+          # (4 min) and `update` 120s (2 min): a cold ffmpeg install on the hosted runner runs
+          # well under a minute, so both are generous for a slow but working mirror, while a
+          # stalled one is killed at the bound. Each bound sends TERM, then KILL 15s later, so
+          # the worst path here (cache try, update, install) is 240+120+240 plus three 15s
+          # graces = 10m45s, far under the job's 20-minute cap. #1686 bounded one connection
+          # (`Acquire::*::Timeout`), not the phase: PR #1688's run 44513936685 sat in this step
+          # 19m50 (job 135524951317) with no output because every apt call was `-qq`.
+          readonly APT_INSTALL_LIMIT=240
+          readonly APT_UPDATE_LIMIT=120
+          readonly APT_KILL_AFTER=15
+
+          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
+          # stall visible in the log while apt still prints no secrets.
           apt_opts=(
             -o Acquire::Retries=2
             -o Acquire::http::Timeout=15
             -o Acquire::https::Timeout=15
           )
-          # ubuntu-24.04 ships apt indexes, so install from them (or the cache) first and refresh
-          # only if that fails: a cache hit then needs no network at all, and a stale index costs
-          # one retry. ffprobe is not a separate package on Ubuntu, so ffmpeg still provides both
-          # binaries; --no-install-recommends only drops the extras this check does not use.
-          for attempt in 1 2; do
-            if sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" install -y -qq --no-install-recommends ffmpeg; then
-              break
+
+          log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
+          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
+          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
+          run_apt() {
+            local limit="$1" phase="$2"
+            shift 2
+            local started="$SECONDS" status=0
+            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
+            local elapsed=$((SECONDS - started))
+            case "${status}" in
+              0)
+                log "apt phase '${phase}' finished in ${elapsed}s"
+                return 0
+                ;;
+              124|137)
+                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+              *)
+                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+            esac
+          }
+
+          # fail_phase <phase> <status>: end the step, naming the phase, instead of retrying.
+          fail_phase() {
+            local phase="$1" status="$2"
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              echo "::error::the ffmpeg dependency phase '${phase}' was killed at its wall-clock bound (exit ${status}); apt must not hang the landing job"
+            else
+              echo "::error::the ffmpeg dependency phase '${phase}' failed (apt exit ${status}); the step fails instead of retrying forever"
             fi
-            if [ "$attempt" = 2 ]; then exit 1; fi
-            echo "::warning::the first ffmpeg install failed; refreshing apt indexes once before retrying"
-            sudo apt-get "${apt_opts[@]}" update -qq
-          done
+            exit 1
+          }
+
+          # A restored cache hit installs from its .debs only: --no-download makes apt use
+          # /var/cache/apt/archives or fail, so a hit needs no mirror at all. ffprobe is not a
+          # separate package on Ubuntu (ffmpeg provides both binaries), and
+          # --no-install-recommends only drops extras this check does not use.
+          status=0
+          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
+            install -y --no-install-recommends --no-download ffmpeg || status=$?
+          if [ "${status}" -eq 0 ]; then
+            :
+          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            fail_phase "cache install (--no-download)" "${status}"
+          else
+            # A miss or an incomplete cache falls through to one bounded update + install; that
+            # is the single retry, and both of its phases stay bounded too.
+            log "apt: the package cache does not cover this image; refreshing indexes once, then installing"
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || fail_phase "update" "$?"
+            run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+              install -y --no-install-recommends ffmpeg || fail_phase "install (after update)" "$?"
+          fi
+
           # Hand the downloaded debs back to the runner user so actions/cache can save them.
           sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
