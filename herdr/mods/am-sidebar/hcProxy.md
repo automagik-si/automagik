@@ -324,10 +324,13 @@ design, as the worker shape. The `terminal.list` caller refusal stays as it is.
 
 ## What a filesystem mask cannot do
 
-The hc proxy filters one Unix socket. It does not filter the network: the network stays open,
-and a path mask cannot hide a listening port without a network namespace (or equivalent). Any
-service that must not be reachable belongs on a root-only Unix socket or behind a network
-namespace.
+The hc proxy filters one Unix socket; it does not filter the network. The sandbox wrapper now
+gives a sandboxed pane its own network namespace (`--unshare-net`), so the host's loopback and
+LAN are not in reach, and the only loopback port the pane gets is the wrapper's egress relay on
+127.0.0.1:3128 (public destinations only, through a host-side CONNECT proxy). The namespace is
+the network boundary (#700, #743); the proxy remains the hc socket boundary. A service that
+must not be reachable from a pane no longer needs a port rule, only the namespace; a root-only
+Unix socket is still the stronger place for an admin endpoint.
 
 The `terminal.run` shape also constrains a process, not the task text: a deliberately forged
 worker start can still choose the task word after `--`. The final fix for that is starting

@@ -1229,8 +1229,14 @@ herdr-core 0.1.14 and refuses any other version; its socket lives in
 `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
 the worktree and the app home. **Fail closed:** if the proxy cannot start, the pane's command is
 never started, so no sandbox exists and `hc` cannot auto-start a core inside one; a proxy that
-dies takes its pane with it. The network stays open: the proxy filters the hc socket, not the
-box's TCP listeners, and localhost admin ports cannot be hidden without a network namespace.
+dies takes its pane with it. The wrapper also gives the pane its own network namespace
+(`--unshare-net`), so the host's loopback, the host's LAN and the host's own addresses are not
+reachable from inside; the only loopback port the pane gets is the wrapper's egress relay on
+127.0.0.1:3128, whose host-side CONNECT proxy allows public destinations only. Raw TCP and SSH
+have no egress, and a host where the namespace cannot be made refuses the pane instead of
+falling back to the host network. The proxy itself still filters the hc socket, not the box's
+listeners; the namespace is the network boundary (#700, #743; `apps/dsh-sandbox/README.md`,
+"The network: own namespace, one loopback relay").
 
 ## The Create form
 

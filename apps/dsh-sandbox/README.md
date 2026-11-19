@@ -1,15 +1,20 @@
 # dsh-sandbox: the hc socket mask for dsh-tui panes
 
-The DSH lane's part of #624 (tracked by #631): a `bwrap` runner wrapper that hides the
-herdr-core socket, the user's `~/.ssh` and the known container runtime sockets from a sandboxed
-dsh-tui pane, and binds the pane's filtering proxy at the exact real core socket path inside
-the sandbox. The Herdr lane owns the proxy itself and the pack/shim integration; this folder
-owns the runner, the profile row snippet and the install/check helper. #631 is a shared wish,
-so its pull requests say `Refs #631`, never `Fixes`.
+The DSH lane's part of #624 (tracked by #631), and the owner's answer to #700 and #743: a
+`bwrap` runner wrapper that gives every sandboxed dsh-tui pane its **own network namespace**,
+hides the herdr-core socket, the user's `~/.ssh` and the known container runtime sockets, and
+binds the pane's filtering proxy at the exact real core socket path inside the sandbox. The
+host's loopback, its LAN and its own addresses are not in the pane's namespace; egress to the
+public internet goes through one explicit CONNECT relay on the namespace's own loopback. The
+Herdr lane owns the hc proxy itself and the pack/shim integration; this folder owns the runner,
+the profile row snippet and the install/check helper. #631, #700 and #743 are shared wishes, so
+pull requests here say `Refs #631` and `Refs #700`/`Refs #743`, never `Fixes`.
 
-The first cut is **Linux/bwrap only**. macOS (Seatbelt rule on the socket folder) and Windows
-(ACL or named-pipe equivalent) need their own mount model and are later steps; this folder
-ships no mask path for them, so there is nothing to enable there until that lands.
+The sandbox is **Linux/bwrap only**. macOS has no network namespace and no bwrap: the pack
+never turns the switch on there, so a pane stays unsandboxed exactly as today. Setting the
+switch on macOS (or Windows) is refused, never silently run on the host network. A macOS
+network rule would be a Seatbelt rule for loopback TCP or a separate VM boundary, which is a
+different design and out of scope here.
 
 ## Ownership
 
@@ -56,8 +61,10 @@ must leave the profile args, the separator and the command intact.
 
 ## What the mask does
 
-With `DSH_SANDBOX_MASK=1` the wrapper inserts these mounts after the profile args and before
-the `--`, in this order:
+With `DSH_SANDBOX_MASK=1` the wrapper first adds `--unshare-net` (unless the profile already
+carries `--unshare-net` or `--unshare-all`), so the pane gets a fresh network namespace whose
+`lo` is only its own. It then inserts these mounts after the profile args and before the
+`--`, in this order:
 
 1. `--tmpfs <dirname(AM_HC_REAL_SOCKET)>` - hides the core socket and the holder sockets beside
    it (and any other listener in the core's runtime folder).
@@ -71,11 +78,19 @@ the `--`, in this order:
    the wrapper cannot name the folder to hide, so another pane's proxy could be impersonated.
    The parent must be the `automagik-hc-proxy` folder; anything else is fatal. The hidden folder
    is the proxy's, never the attach ledger's: the CLI in the pane still reads `attach.jsonl`.
-3. `$HOME/.ssh` when it exists, following symlinks: a directory is shadowed with
+3. The egress slot, inside the core runtime folder the wrapper just hid:
+   `--dir <realDir>/egress`, `--bind <host egress folder> <realDir>/egress` and
+   `--bind <this wrapper> <realDir>/egress/relay.mjs`. The host folder is a 0700 temp folder
+   holding one Unix socket; the wrapper serves the egress proxy on that socket. The command
+   bwrap runs is the relay (this same wrapper file), which listens on `127.0.0.1:3128` inside
+   the pane's namespace and execs the real command. No host path outside the wrapper's own
+   temp folder is mounted for it.
+
+4. `$HOME/.ssh` when it exists, following symlinks: a directory is shadowed with
    `--tmpfs <canonical path>`, anything else is bound over with
    `--bind /dev/null <canonical path>`. Absent, nothing is added (there is nothing to hide).
    `HOME` must be an absolute path.
-4. For each existing container runtime socket, `--bind /dev/null <socket>`, canonicalized and
+5. For each existing container runtime socket, `--bind /dev/null <socket>`, canonicalized and
    deduplicated. The fixed list is:
    - `/var/run/docker.sock`
    - `/run/docker.sock`
@@ -87,7 +102,7 @@ the `--`, in this order:
    Only paths that exist are masked; a test passes its own fake list, so no test looks at a live
    `docker.sock`.
 
-5. When the row carries `--pack-root`, `--ro-bind <its parent> <its parent>`, after the
+6. When the row carries `--pack-root`, `--ro-bind <its parent> <its parent>`, after the
    profile args and the masks above, so it wins over a writable workspace bind. The pack's
    helper, runner and guard and the approved rosters live under that parent (the stable folder
    and `approved/`); without this a sandboxed bot inside the writable project could rewrite them
@@ -96,7 +111,8 @@ the `--`, in this order:
 
 Everything else is the profile's own bwrap policy (`--ro-bind / /`, `--dev /dev`,
 `--unshare-pid`, `--proc /proc`, `--die-with-parent`, the workspace binds). The wrapper adds no
-network or port rule: the sandbox is a file-effect boundary, not a network one.
+port list: the network rule is the namespace itself plus the one loopback relay below, and the
+pane's command gets the proxy environment so proxy-aware clients use it.
 
 ## Fail-closed rules
 
@@ -115,7 +131,16 @@ Before running `bwrap`, the wrapper refuses with one `hc-socket-mask: ` line and
 - the proxy parent is not the `automagik-hc-proxy` folder, or it is the real socket path or an
   ancestor of it (masking it would hide the real socket or a shared system folder);
 - `AM_HC_PROXY_SOCKET` is absolute but its folder is the real socket path or one of its parents
-  (masking that folder would hide the proxy again), whether or not a bind is added.
+  (masking that folder would hide the proxy again), whether or not a bind is added;
+- the platform is not Linux (there is no network namespace to create);
+- a `bwrap --unshare-net` probe cannot create a network namespace (missing privilege, an old
+  kernel or a container that forbids it), or bwrap is missing;
+- the 0700 egress folder cannot be made, or the host-side egress proxy cannot bind its socket.
+
+All of these refuse the pane before any bwrap run: a sandboxed pane never falls back to the
+host's network. When the egress relay cannot listen inside the namespace, or cannot reach the
+host-side proxy, it answers 502 and the pane starts without egress; it never falls back to a
+host route. A refused CONNECT (a host, loopback, link-local or private destination) gets 403.
 
 When `AM_HC_PROXY_SOCKET` is absolute but missing or not a Unix socket, the wrapper prints one
 `hc-socket-mask: ` line, hides the proxy's host folder along with the real folder, `~/.ssh` (if
@@ -128,14 +153,48 @@ the folder mask.
 With the switch off, nothing above applies: the wrapper runs `bwrap` with exactly the argv it
 was handed, which is today's behavior.
 
-## Localhost admin ports
+## The network: own namespace, one loopback relay
 
-This cut cannot deny TCP ports, so an admin endpoint must not listen on localhost TCP from a
-sandboxed pane's point of view. The rule is: admin endpoints stay on **root-only Unix sockets**
-(owned by root, mode 0600), which the pane's uid 1000 cannot connect to. The Caddy admin
-listener was already moved to one. The wrapper masks the known container runtime sockets above;
-any service that still listens on a localhost TCP port is reachable from the sandbox and needs
-its own decision (a process/network boundary, #629 or later), not this wrapper.
+The owner decision (19/11) covers #700 and #743 as one design: sandboxed panes get an **own
+network namespace with filtered loopback** (option 1), not a port-by-port workaround. A port
+list is the fragile half of the pair, so there is no list of admin ports anywhere in this
+wrapper.
+
+- **The namespace is the boundary.** `--unshare-net` gives the pane a fresh netns with its own
+  `lo`. The host's `127.0.0.1` is a different interface in a different namespace, and the host's
+  LAN and its interface addresses have no route in the pane's namespace. A service that listens
+  on the host loopback (the hc core, DSH, a local proxy's admin API) is not reachable even
+  though the pane's uid could open it on the host. A LAN address in the host's subnet fails with
+  `ENETUNREACH`.
+- **The explicit allowlist is the namespace's own loopback and one port.** The pane's own
+  loopback (`127.0.0.0/8`, `::1`) is up inside the namespace, because pane-local tools expect
+  it, and the only listener the wrapper deliberately puts there is the egress relay on
+  `127.0.0.1:3128`. That one TCP port is the smallest allowlist that works: proxy-aware clients
+  need a loopback TCP endpoint, and a Unix socket cannot be named in `HTTPS_PROXY`. Nothing
+  else is added; there is no host loopback, no LAN route and no port list.
+- **The filter is the host-side egress proxy.** The relay forwards every connection to a Unix
+  socket in a 0700 host folder; the wrapper serves an HTTP CONNECT proxy there. The broker
+  resolves the requested name once, checks the resolved address and connects to that literal:
+  loopback, link-local, the RFC 1918/ULA/CGNAT ranges, multicast/reserved ranges, documentation
+  ranges and every address this host itself owns are refused with 403. A name that later
+  changes cannot turn into a LAN destination because the check and the connect use the same
+  address. Only CONNECT is accepted; a plain HTTP absolute-URI request gets 405.
+- **The pane gets a proxy environment.** The wrapper starts bwrap with `HTTPS_PROXY`,
+  `HTTP_PROXY`, `ALL_PROXY` (and their lower-case forms) set to `http://127.0.0.1:3128`,
+  `NO_PROXY=127.0.0.1,localhost,::1`, and `NODE_USE_ENV_PROXY=1`, so DSH's own proxy installer,
+  git over HTTPS and Node's fetch use the relay. Raw TCP, SSH and anything that ignores the
+  proxy environment have no egress: they are outside the design, not silently allowed. The
+  host-side broker connects directly, so a host that itself needs an upstream egress proxy is
+  not chained; that is a separate host setting, not something the pane can turn off.
+- **The check is at launch.** The wrapper probes `bwrap --unshare-net` before it starts the
+  pane. A host where that fails (no unprivileged user namespaces, a kernel without network
+  namespaces, a restrictive container, bwrap missing) refuses the pane with one
+  `hc-socket-mask: ` line; it never falls back to the host network. macOS has no network
+  namespaces at all, and the sandbox switch is never on there (see the first section).
+- **Limitation, stated plainly.** The namespace is created at launch. A privileged process that
+  later adds an interface or a route to the pane's namespace, or moves a process into another
+  namespace, is outside what this wrapper can see or stop; that is out of scope for this
+  design. The wrapper does not watch the namespace after the pane starts.
 
 ## Rollout
 
@@ -147,7 +206,9 @@ Nothing here is installed on a live profile today. The order:
    starts: `DSH_SANDBOX_MASK=1`, `AM_HC_REAL_SOCKET=<the pane's real core socket>` and
    `AM_HC_PROXY_SOCKET=<the absolute host proxy socket>`. It starts the proxy before DSH and
    refuses the pane if the proxy cannot start; the wrapper refuses a pane without an absolute
-   proxy path.
+   proxy path. The egress namespace, relay and proxy environment need no extra variable: the
+   wrapper creates them itself. A sandboxed pane therefore loses its direct network and reaches
+   the public internet only through the relay's proxy environment.
 3. At enablement the pack (`herdr/mods/am-sidebar/dshTui.mjs`) copies `bin/hc-socket-mask.mjs`
    **byte-equal** from the pack release to a stable path, the way
    `node scripts/am-copies.mjs --check` treats the am copies, then runs
@@ -204,8 +265,14 @@ node --check apps/dsh-sandbox/bin/*.mjs
 node --test 'apps/dsh-sandbox/test/*.test.mjs'
 ```
 
-The runner tests put a fake `bwrap` first on a temp `PATH` and assert the argv it records; the
-proxy sockets are real `net.createServer()` sockets under temp folders. CLI-level tests drop the
+The runner tests put a fake `bwrap` first on a temp `PATH` and assert the argv it records,
+including `--unshare-net` and the relay command; the proxy sockets are real
+`net.createServer()` sockets under temp folders. `test/netns.test.mjs` goes further: when the
+host allows bwrap namespaces it starts a real sandbox against fixture listeners on the host's
+loopback and on the host's own LAN address, and asserts the pane reaches neither, reaches the
+relay, and gets 403 from the egress proxy for both; the same probe without the switch reaches
+both, so a skip or a false green is visible. On a host where bwrap cannot make a namespace the
+live test skips with the reason and the hermetic refusal test still runs. CLI-level tests drop the
 host-dependent container `--bind /dev/null` pairs by shape and never stat a live path; their
 exact targets are asserted only by the pure-helper tests with an explicit fake container list.
 So no test reads, creates or connects to a live core, a live `docker.sock` or a live profile.
