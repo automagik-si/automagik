@@ -9710,6 +9710,7 @@ var ZH = {
   "Waiting for {names}": "等 {names} 交回",
   "Unread activity": "有未读",
   "Not read yet": "未读",
+  "Not installed": "未安装",
   Search: "搜索",
   "New chat": "新对话",
   "Back to chat": "返回对话",
@@ -12020,7 +12021,12 @@ Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
-  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
+  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。",
+  // The roster's not-installed reasons (installed.js), worded with the plugin or its error code.
+  "the {name} plugin is missing from this DSH": "这个 DSH 里没有 {name} 插件",
+  "the {name} plugin is switched off in this DSH": "这个 DSH 里已关闭 {name} 插件",
+  "the {name} plugin did not load in this DSH": "{name} 插件在这个 DSH 里没有加载",
+  "the {name} plugin did not load in this DSH ({code})": "{name} 插件在这个 DSH 里没有加载（{code}）"
 });
 Object.assign(ZH, {
   "Automagik official": "Automagik 官方",
@@ -12094,6 +12100,12 @@ var HOST_TEMPLATES = [
   { template: "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}", host: ["reason"] },
   '{bot} changed while Session {session} was joining it (another window or an edit). For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
+  // The roster's not-installed reasons (installed.js): the plugin name, and the load error's
+  // code when DSH gave one, are values in the message.
+  "the {name} plugin is missing from this DSH",
+  "the {name} plugin is switched off in this DSH",
+  "the {name} plugin did not load in this DSH ({code})",
+  "the {name} plugin did not load in this DSH",
   // Auto's refusals that name the Bot (auto.js setBotAuto).
   "{name}'s permissions changed meanwhile, so nothing was saved. Look again and choose.",
   "Auto is not offered for {name} here."
@@ -13049,6 +13061,10 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-badge-main path{fill:var(--bt-star);stroke:var(--bt-sidebar);stroke-width:2.6;stroke-linejoin:round;paint-order:stroke}
 .bt-badge-alert{background:color-mix(in srgb,var(--bt-accent) 78%,var(--bt-sidebar));color:var(--bt-accent-ink,#fff);font-size:8.5px;line-height:12px;font-weight:600;font-family:var(--bt-font)}
 .bt-badge-working{background:color-mix(in srgb,var(--bt-green) 82%,var(--bt-sidebar));width:8px;height:8px;right:1px;bottom:1px}
+.bt-badge-missing{background:color-mix(in srgb,var(--bt-ink-3) 82%,var(--bt-sidebar));color:var(--bt-sidebar)}
+.bt-badge-missing svg{width:8px;height:8px}
+.bt-mark[data-state=not-installed]{filter:grayscale(1);opacity:.62}
+.bt-mark[data-state=not-installed] :is(.bt-b,.bt-eye,.bt-eyes,.bt-pet-cell){animation:none!important}
 .bt-cluster{position:relative;display:inline-block;flex:none;line-height:0}
 .bt-cluster>*{position:absolute}
 .bt-cluster-more,.bt-cluster-you{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;background:var(--bt-active);color:var(--bt-ink-3);font-family:var(--bt-font);font-weight:500;line-height:1;font-variant-numeric:tabular-nums}
@@ -13405,6 +13421,7 @@ html[data-windows-titlebar]:not([data-fullscreen]) :is(.bt-pane,.bt-panel)::befo
 .bt-input:focus{border-color:var(--bt-line-2)}
 .bt-input-area{height:auto;min-height:96px;padding:8px 10px;line-height:18px;resize:vertical}
 .bt-note{font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-note-missing{color:var(--bt-ink-2)}
 .bt-soft-sm{height:28px;padding:0 12px;font-size:12px}
 .bt-set-avatar{display:flex;justify-content:center;padding:4px 0}
 .bt-avatar-anchor{position:relative}

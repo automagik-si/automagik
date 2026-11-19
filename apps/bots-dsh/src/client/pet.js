@@ -50,6 +50,7 @@ const ROW_OF_STATE = Object.freeze({
   review: 'review',
   done: 'jumping',
   failed: 'failed',
+  'not-installed': 'idle',
   poked: 'waving',
   sleeping: 'idle',
 })
@@ -134,16 +135,19 @@ function useLook(ref, enabled) {
 export function PetSprite({ pet, size, state = 'idle', live = false, gaze = false, onOnce }) {
   const ref = useRef(null)
   const asleep = state === 'sleeping' && pet.sleep !== undefined
+  // A Bot that cannot run does not fidget: its mark stays on the idle frame (mark.js's
+  // `not-installed`), greyscaled by the stylesheet, rather than pretending to be alive.
+  const off = state === 'not-installed'
   const row = petRowOf(state)
   const [frame, setFrame] = useState(0)
   const look = useLook(ref, live && gaze && pet.version === 2)
-  const resting = row === 'idle' && !asleep
+  const resting = row === 'idle' && !asleep && !off
   const direction = resting && look !== undefined ? look : undefined
   const onceRef = useRef(onOnce)
   onceRef.current = onOnce
   useEffect(() => { setFrame(0) }, [row, asleep])
   useEffect(() => {
-    if (!live || direction !== undefined) return undefined
+    if (!live || off || direction !== undefined) return undefined
     const { ms } = asleep ? SLEEP : ROWS[row]
     // Reduced motion shows one frame: a loop rests on its first cell. A row that plays once
     // holds its first cell for the row's length and then hands back, so the mark is not left
@@ -160,7 +164,7 @@ export function PetSprite({ pet, size, state = 'idle', live = false, gaze = fals
       setFrame(next % ms.length)
     }, ms[frame % ms.length] * slow)
     return () => clearTimeout(timer)
-  }, [live, row, asleep, frame, direction, state])
+  }, [live, off, row, asleep, frame, direction, state])
   const scale = size / CELL.height
   const width = CELL.width * scale
   const cell = cellOf(row, frame, direction)

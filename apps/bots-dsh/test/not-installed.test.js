@@ -33,9 +33,9 @@ const TEAM = {
 const GENIE = '@automagik/genie-dsh'
 const OMNI = '@automagik/omni-channels-dsh'
 
-function start({ bundles = [] } = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'ds-bot-not-installed-'))
-  writeFileSync(join(home, 'state.json'), JSON.stringify(TEAM))
+function start({ bundles = [], home: givenHome } = {}) {
+  const home = givenHome ?? mkdtempSync(join(tmpdir(), 'ds-bot-not-installed-'))
+  if (givenHome === undefined) writeFileSync(join(home, 'state.json'), JSON.stringify(TEAM))
   const pluginManager = { listBundles: async () => bundles }
   const ctx = fakeContext({ services: { pluginManager } })
   Object.assign(ctx, {
@@ -46,16 +46,28 @@ function start({ bundles = [] } = {}) {
       archiveSession: async () => {},
     },
   })
+  // The client channel's POST route, so a test can read the same view the sidebar draws.
+  let route
+  const register = ctx.connection.fetch.register
+  ctx.connection.fetch.register = (options) => { route = options; return register(options) }
   apply(ctx, { home })
   const rt = ctx.provided.get('omniTeam')
   const listBots = async (agent = 'chief') => ctx.registeredTools.get('list_bots').execute({}, { agent: { id: agent } })
   const message = (args, agent = 'chief') => ctx.registeredTools.get('message_bot').execute(args, { agent: { id: agent } })
   const spaceBots = async () => (await rt.spaceReads.read('space-bots', {}, async () => ({ ok: false }))).items
+  const call = async (endpoint, payload) => {
+    const response = await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
+    return response.json()
+  }
   return {
     rt,
     listBots,
     message,
     spaceBots,
+    call,
+    bundles,
+    home,
+    dispose: async () => { await ctx.dispose() },
     stop: async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) },
   }
 }
@@ -82,6 +94,73 @@ test('a Bot whose plugin is missing is not idle, in list_bots and in the space r
   assert.equal(genie.status, 'not-installed')
   assert.equal(genie.reason, `the ${GENIE} plugin is missing from this DSH`)
   assert.equal(rows.find(row => row.id === 'writer').status, 'idle')
+})
+
+test('a crew Bot whose plugin is missing carries that in the client view', async (t) => {
+  const { call, stop } = start({ bundles: [] })
+  t.after(stop)
+  const view = (await call('state', {})).value
+  const genie = view.bots.find(row => row.id === 'genie')
+  assert.equal(genie.installed, false)
+  assert.equal(genie.reason, `the ${GENIE} plugin is missing from this DSH`)
+  // A plain DSH Bot is not run by a crew plugin and stays installed.
+  assert.equal(view.bots.find(row => row.id === 'writer').installed, true)
+})
+
+// The client applies a full view unless it is the one it already drew (index.js pull): a new
+// revision or a new modelsKey. installationKey() rides in modelsKey, so a changed installation
+// is a new view even when the team's revision and the models did not move.
+const applies = (value, known) => value.unchanged !== true && !(value.revision === known.revision && value.modelsKey === known.modelsKey)
+
+test('a plugin installed after a window polled is a new view that window applies', async (t) => {
+  const { bundles, call, rt, stop } = start({ bundles: [] })
+  t.after(stop)
+  const before = (await call('state', {})).value
+  assert.equal(before.bots.find(bot => bot.id === 'genie').installed, false)
+  bundles.push({ name: GENIE, availability: 'profile', enabled: true }, { name: OMNI, availability: 'profile', enabled: true })
+  await rt.refreshInstallation({ force: true })
+  const after = (await call('state', { since: before.revision, models: before.modelsKey })).value
+  assert.equal(applies(after, before), true, 'the client applies the new roster')
+  assert.notEqual(after.modelsKey, before.modelsKey)
+  assert.equal(after.bots.find(bot => bot.id === 'genie').installed, true)
+  assert.equal(after.bots.find(bot => bot.id === 'genie').reason, undefined)
+})
+
+test('one installation change reaches every open window, not only the first poll', async (t) => {
+  const { bundles, call, rt, stop } = start({ bundles: [] })
+  t.after(stop)
+  const windowA = (await call('state', {})).value
+  const windowB = (await call('state', { since: windowA.revision, models: windowA.modelsKey })).value
+  assert.equal(windowB.unchanged, true, 'both windows start on the same answer')
+  bundles.push({ name: GENIE, availability: 'profile', enabled: true }, { name: OMNI, availability: 'profile', enabled: true })
+  await rt.refreshInstallation({ force: true })
+  // Each window polls with the modelsKey it knows, as the client does. An unchanged answer
+  // carries no modelsKey, so the roster keeps the one from the last full view: windowA's.
+  const a = (await call('state', { since: windowA.revision, models: windowA.modelsKey })).value
+  const b = (await call('state', { since: windowB.revision, models: windowA.modelsKey })).value
+  for (const [name, view] of [['A', a], ['B', b]]) {
+    assert.equal(applies(view, windowA), true, `window ${name} applies the change`)
+    assert.notEqual(view.modelsKey, windowA.modelsKey, `window ${name} sees a new modelsKey`)
+    assert.equal(view.bots.find(bot => bot.id === 'genie').installed, true)
+  }
+})
+
+test('a window open before a host restart applies an installation change the new host reports', async (t) => {
+  const first = start({ bundles: [] })
+  const before = (await first.call('state', {})).value
+  await first.dispose()
+  const second = start({ bundles: [{ name: GENIE, availability: 'profile', enabled: true }, { name: OMNI, availability: 'profile', enabled: true }], home: first.home })
+  t.after(async () => { await second.stop() })
+  const after = (await second.call('state', { since: before.revision, models: before.modelsKey })).value
+  assert.equal(applies(after, before), true, 'the restarted host catches the window up')
+  assert.notEqual(after.modelsKey, before.modelsKey)
+  assert.equal(after.bots.find(bot => bot.id === 'genie').installed, true)
+  // The same installation after another restart is not a new view: only a real change is.
+  await second.dispose()
+  const third = start({ bundles: second.bundles, home: second.home })
+  t.after(async () => { await third.stop() })
+  const steady = (await third.call('state', { since: after.revision, models: after.modelsKey })).value
+  assert.equal(steady.unchanged, true)
 })
 
 test('a crew Bot of a plugin that is installed and on still reports as before', async (t) => {

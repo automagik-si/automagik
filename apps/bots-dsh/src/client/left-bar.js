@@ -60,7 +60,8 @@ const pack = value => JSON.stringify(value)
 // One status per Bot, as left-bar-status.js names them: what asks for the person first, then
 // what failed, then what runs. Each source is picked as text, so the bar redraws only when a
 // status changes.
-export function botStatus({ question, pending, approval, failed, running, away }) {
+export function botStatus({ question, pending, approval, failed, running, away, notInstalled = false }) {
+  if (notInstalled) return 'not-installed'
   if (question || pending || approval) return 'needs'
   if (failed) return 'error'
   if (running || away) return 'working'
@@ -106,10 +107,12 @@ function useTeamStatus({ roster, useSessionStatus, useWork }) {
     Object.values(value.rooms ?? {}).some(entries => entries.some(entry => entry.botId === id)),
   ]))) : '[]')
   const byWork = new Map(work.map(([id, approval, failed, away]) => [id, { approval, failed, away }]))
+  // A crew Bot whose plugin is missing, switched off or did not load cannot run at all.
+  const notInstalled = new Map(roster.bots.map(bot => [bot.id, bot.installed === false]))
   const bots = new Map(sessions.bots.map(([id, running, pending, unread]) => {
     const part = parts.find(([bot]) => bot === id)?.[1]
     const { approval = false, failed = false, away = false } = byWork.get(id) ?? {}
-    return [id, { status: botStatus({ question: roster.questions?.[part] !== undefined, pending, approval, failed, running, away: away && !running }), unread }]
+    return [id, { status: botStatus({ question: roster.questions?.[part] !== undefined, pending, approval, failed, running, away: away && !running, notInstalled: notInstalled.get(id) === true }), unread }]
   }))
   const dsh = new Map(sessions.agents.map(([id, running, unread]) => [id, { status: running ? 'working' : 'idle', unread }]))
   const asked = new Map(roomWork.map(([id, approval, working]) => [id, approval ? 'needs' : working ? 'working' : 'idle']))
