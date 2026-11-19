@@ -202,11 +202,9 @@ jobs:
   landing:
     name: Landing page and browser
     runs-on: ubuntu-24.04
-    # Measured on 2026-11-19: the ffmpeg step was still installing when the old 10-minute cap
-    # cancelled the job 9m57s into that step (run 44488373957: job 08:32:21, step 08:32:40,
-    # cancelled 08:42:37), so bun install, both test files and the Chrome check never ran. Those
-    # steps are short; 20 leaves a cold apt install room to finish, while a genuinely hung step
-    # still fails. A package-cache hit removes the download entirely.
+    # The whole job keeps its 20-minute cap. The ffmpeg step takes at most about 5m15s
+    # (download just under 180s, then verify and unpack up to 120s plus 15s to kill).
+    # Run 44488373957 hit the old 10-minute job cap 9m57s into the ffmpeg step.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -221,117 +219,85 @@ jobs:
         with:
           bun-version: 1.4.4
 
-      # The page gate re-derives every committed WebP from its recorded source; that check
-      # calls ffprobe and ffmpeg, which the runner image does not carry. The archive cache lets
-      # a later run install the packages it already downloaded instead of fetching them again;
-      # the key carries the hosted image (ImageOS/ImageVersion) and a suffix to bump when this
-      # step changes. A miss still installs, bounded below, rather than assuming a hit.
-      - name: Prepare the apt archive cache
-        id: image
-        run: |
-          set -euo pipefail
-          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
-          # here; the cache key must move when the hosted image (and its apt indexes) moves.
-          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
-          sudo mkdir -p /var/cache/apt/archives/partial
-          # actions/cache restores as the runner user; the install then hands the cache to apt.
-          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
-          sudo chmod -R u+rwX /var/cache/apt/archives
-
-      - name: Restore the ffmpeg package cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-v1
-
+      # The page gate re-derives every committed WebP from its recorded source.
+      # apps/landing/scripts/build-art.mjs, via landing.test.mjs, calls ffprobe and ffmpeg
+      # with libwebp. The job provisions both tools from one pinned static build.
+      # In #1736 the first attempt failed in this step on four PRs. The two logs read show
+      # a cold apt install killed at its 240s bound.
+      # Origin: FFmpeg-Builds (BtbN), the "Linux Static Builds" link on ffmpeg.org/download.html.
+      # The project keeps month-end builds for two years and dailies for about two weeks.
+      # Re-pin before 2028-10: take a newer month-end autobuild-* tag, its
+      # ffmpeg-n<release>-...-linux64-gpl-<major.minor>.tar.xz asset and that asset's sha256 digest
+      # from the GitHub release, and run the art check with it.
       - name: ffmpeg for the derived art check
+        env:
+          FFMPEG_TAG: autobuild-2026-10-31-12-59
+          FFMPEG_BUILD: ffmpeg-n8.1.3-27-g8dca1586f4-linux64-gpl-8.1
+          FFMPEG_SHA256: 41e9c565594c390622cf968d82fa4135d9e9a11d06c1515644288cbc844e3380
         run: |
           set -euo pipefail
-          sudo chown -R _apt:root /var/cache/apt/archives
-          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
-
-          # Hard wall-clock bounds, in seconds, around every apt phase. An install gets 240s
-          # (4 min) and `update` 120s (2 min): a cold ffmpeg install on the hosted runner runs
-          # well under a minute, so both are generous for a slow but working mirror, while a
-          # stalled one is killed at the bound. Each bound sends TERM, then KILL 15s later, so
-          # the worst path here (cache try, update, install) is 240+120+240 plus three 15s
-          # graces = 10m45s, far under the job's 20-minute cap. #1686 bounded one connection
-          # (`Acquire::*::Timeout`), not the phase: PR #1688's run 44513936685 sat in this step
-          # 19m50 (job 135524951317) with no output because every apt call was `-qq`.
-          readonly APT_INSTALL_LIMIT=240
-          readonly APT_UPDATE_LIMIT=120
-          readonly APT_KILL_AFTER=15
-
-          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
-          # stall visible in the log while apt still prints no secrets.
-          apt_opts=(
-            -o Acquire::Retries=2
-            -o Acquire::http::Timeout=15
-            -o Acquire::https::Timeout=15
-          )
+          readonly DOWNLOAD_LIMIT=180 UNPACK_LIMIT=120 KILL_AFTER=15
+          url="https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/${FFMPEG_TAG}/${FFMPEG_BUILD}.tar.xz"
+          archive="${RUNNER_TEMP}/${FFMPEG_BUILD}.tar.xz"
+          bin="${RUNNER_TEMP}/ffmpeg/bin"
+          started="$SECONDS"
 
           log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
-          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
-          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
-          run_apt() {
+          bounded() {
             local limit="$1" phase="$2"
             shift 2
             local started="$SECONDS" status=0
-            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
-            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
-              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
-            local elapsed=$((SECONDS - started))
-            case "${status}" in
-              0)
-                log "apt phase '${phase}' finished in ${elapsed}s"
-                return 0
-                ;;
-              124|137)
-                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
-                return "${status}"
-                ;;
-              *)
-                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
-                return "${status}"
-                ;;
-            esac
+            log "ffmpeg phase '$phase' started (bound ${limit}s, kill-after ${KILL_AFTER}s)"
+            timeout --verbose --signal=TERM --kill-after="$KILL_AFTER" "$limit" "$@" || status=$?
+            log "ffmpeg phase '$phase' finished in $((SECONDS - started))s (bound ${limit}s, exit $status)"
+            return "$status"
           }
 
-          # fail_phase <phase> <status>: end the step, naming the phase, instead of retrying.
           fail_phase() {
-            local phase="$1" status="$2"
-            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
-              echo "::error::the ffmpeg dependency phase '${phase}' was killed at its wall-clock bound (exit ${status}); apt must not hang the landing job"
-            else
-              echo "::error::the ffmpeg dependency phase '${phase}' failed (apt exit ${status}); the step fails instead of retrying forever"
-            fi
+            local limit="$1" phase="$2" status="$3" detail
+            case "$status" in
+              124) detail="hit its ${limit}s bound (timeout sent TERM)" ;;
+              137) detail="was killed (SIGKILL, exit 137), normally the bound's kill-after" ;;
+              *) detail="failed (exit $status)" ;;
+            esac
+            printf "::error::the ffmpeg dependency phase '%s' %s\n" "$phase" "$detail"
             exit 1
           }
 
-          # A restored cache hit installs from its .debs only: --no-download makes apt use
-          # /var/cache/apt/archives or fail, so a hit needs no mirror at all. ffprobe is not a
-          # separate package on Ubuntu (ffmpeg provides both binaries), and
-          # --no-install-recommends only drops extras this check does not use.
-          status=0
-          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
-            install -y --no-install-recommends --no-download ffmpeg || status=$?
-          if [ "${status}" -eq 0 ]; then
-            :
-          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
-            fail_phase "cache install (--no-download)" "${status}"
-          else
-            # A miss or an incomplete cache falls through to one bounded update + install; that
-            # is the single retry, and both of its phases stay bounded too.
-            log "apt: the package cache does not cover this image; refreshing indexes once, then installing"
-            run_apt "${APT_UPDATE_LIMIT}" "update" update || fail_phase "update" "$?"
-            run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
-              install -y --no-install-recommends ffmpeg || fail_phase "install (after update)" "$?"
+          bounded "$DOWNLOAD_LIMIT" download \
+            curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 \
+              --output "$archive" "$url" || fail_phase "$DOWNLOAD_LIMIT" download "$?"
+
+          bounded "$UNPACK_LIMIT" 'verify and unpack' bash -s -- "$archive" "$bin" <<'VERIFY' \
+            || fail_phase "$UNPACK_LIMIT" 'verify and unpack' "$?"
+          set -euo pipefail
+          archive=$1
+          bin=$2
+          if ! printf '%s  %s\n' "$FFMPEG_SHA256" "$archive" | sha256sum --check --strict --status; then
+            actual=$(sha256sum < "$archive")
+            printf '::error::the ffmpeg archive does not match its pinned sha256 (expected %s, actual %s)\n' \
+              "$FFMPEG_SHA256" "${actual%% *}"
+            exit 1
           fi
 
-          # Hand the downloaded debs back to the runner user so actions/cache can save them.
-          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          mkdir -p "$bin"
+          tar -xJf "$archive" -C "$bin" --strip-components=2 \
+            "${FFMPEG_BUILD}/bin/ffmpeg" "${FFMPEG_BUILD}/bin/ffprobe"
+          test -x "$bin/ffmpeg"
+          test -x "$bin/ffprobe"
+          "$bin/ffmpeg" -hide_banner -version
+          "$bin/ffprobe" -hide_banner -version
+          encoders="$("$bin/ffmpeg" -hide_banner -encoders)"
+          if ! grep -Eq '^ V[^ ]* libwebp ' <<<"$encoders"; then
+            printf '::error::the pinned ffmpeg build has no libwebp encoder\n'
+            exit 1
+          fi
+          VERIFY
+
+          printf '%s\n' "$bin" >> "$GITHUB_PATH"
+          rm -f "$archive"
+          log "ffmpeg setup finished in $((SECONDS - started))s"
 
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: node --test apps/landing/landing.test.mjs apps/landing/waitlist.test.mjs
