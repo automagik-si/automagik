@@ -471,10 +471,11 @@ export function install(rt) {
       if (checkAccess) await assertModelAccess(found)
       return found
     }
+    if (named.length > 1) {
+      throw refusal(`Model ${wanted} is served by more than one provider; use one of ${named.map(entry => entry.ref).join(', ')}`)
+    }
     const known = entries.map(entry => entry.ref).join(', ') || 'none'
-    throw refusal(named.length > 1
-      ? `Model ${wanted} is served by more than one provider; use one of ${named.map(entry => entry.ref).join(', ')}`
-      : `Model ${wanted} is not available. Available models: ${known}`)
+    throw Object.assign(refusal(`Model ${wanted} is not available. Available models: ${known}`), { modelUnavailable: true })
   }
 
   // Whether a model can run now, read-only: nothing is installed, enabled or signed in, and no

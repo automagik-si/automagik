@@ -9,7 +9,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar } from "gpui-base";
-import { exec, hc, home, theme, terminals, spaces, run, notify, pickFolder, watchFolder, knownAgents } from "herdr";
+import { exec, hc, home, theme, terminals, panes, spaces, run, notify, pickFolder, watchFolder, knownAgents } from "herdr";
 import { offeredAgents, RETIRED } from "./agents.js";
 import { addressWarning, argsText, autoArgs, envText, modeOf, parseArgs, parseEnv, splitPermission, templateMode, withoutPermission } from "./modes.js";
 import { RUNS_AS, parseTarget, targetLine, targetWarning } from "./targets.js";
@@ -192,7 +192,8 @@ export default class Automations extends View {
         const project = JSON.parse(r.stdout)?.projects?.[0];
         if (!project) { const miss = { list: null, note: "The project's bots could not be read: am ls gave no project." }; this.rosters.set(dir, miss); return miss; }
         if (project.error) { const miss = { list: null, note: `The project's bots could not be read: ${project.error}` }; this.rosters.set(dir, miss); return miss; }
-        const list = (project.bots ?? []).map((b) => ({ id: b.id, name: b.name, planned: b.planned ?? null }));
+        const list = (project.bots ?? []).map((b) => ({ id: b.id, name: b.name, planned: b.planned ?? null,
+          status: b.status, terminal: typeof b.terminal === "string" && b.terminal ? b.terminal : null }));
         const ok = { list, note: null };
         this.rosters.set(dir, ok);
         return ok;
@@ -207,11 +208,10 @@ export default class Automations extends View {
     return miss;
   }
 
-  // Existing target entries show their bot's name in the list and detail without opening a
-  // form: one roster read per project, once.
+  // #498: entries and history show bot names from one roster read per project.
   loadTargetRosters(cx) {
     for (const a of this.list?.automations ?? []) {
-      if (!a.target) continue;
+      if (!a.target && !this.runs.some((r) => r.automation === a.name && r.target)) continue;
       const dir = this.rosterDir(a.repo);
       if (!dir || this.rosters.has(dir)) continue;
       this.rosters.set(dir, { list: null, note: null });
@@ -234,6 +234,29 @@ export default class Automations extends View {
     if (!run_.seen && FINISHED.has(run_.status)) this.act(cx, ["seen", run_.run_id]);
     if (run_.terminal && this.live(run_.terminal)) run("pane.focus", { terminal: run_.terminal });
     else { this.view = { kind: "detail", name: run_.automation }; cx.notify(); }
+  }
+
+  // #498: the history target opens the bot's current terminal in this project.
+  openBot(repo, target, cx) {
+    const parsed = parseTarget(target);
+    if (!parsed) return;
+    cx.spawn(async (cx) => {
+      const { list, note } = await this.loadBots(repo, { fresh: true });
+      const bot = list?.find((b) => b.id === parsed.bot);
+      if (!list) this.note = note;
+      else if (!bot) this.note = "That bot is no longer in this project's bots.json.";
+      else if (bot.terminal) {
+        const shown = (panes() ?? []).some((p) => p?.terminal === bot.terminal);
+        run(shown ? "agent.focus" : "terminal.peek", { terminal: bot.terminal });
+        this.note = null;
+      } else {
+        const name = bot.name || bot.id;
+        if (bot.status === "stopped") this.note = `${name} is not running. Start it from the sidebar.`;
+        else if (bot.planned) this.note = `${name} is only planned and starts no runs.`;
+        else this.note = `${name}: ${bot.status || "unknown"}; its terminal is not known.`;
+      }
+      cx.notify();
+    });
   }
 
   // The repair action (#220): runs the shown command, and only from a click on Install. It puts the
@@ -687,11 +710,17 @@ export default class Automations extends View {
         .child(div().pt(4).text_size(11).font_semibold().text_color(t.dim).child("LAST RESULT"))
         .child(this.lastRun(a, t)))
       .child(div().pt(4).text_size(11).font_semibold().text_color(t.dim).child("HISTORY"))
-      .children(runs.length ? runs.map((r) => h_flex().id(`h-${r.run_id}`).gap(8).px(6).py(4).rounded(6).items_center().cursor_pointer()
-        .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(r, cx))
-        .child(div().w(66).flex_none().text_size(11).text_color(r.status === "done" ? t.ansi2 : r.status === "failed" || r.status === "missed" ? t.ansi1 : t.muted).child(r.status))
-        .child(div().id(`h-line-${r.run_id}`).flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(outcome(r) || (r.seconds ? duration(r.seconds) : "")))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.at))))
+      .children(runs.length ? runs.flatMap((r) => {
+        const row = h_flex().id(`h-${r.run_id}`).gap(8).px(6).py(4).rounded(6).items_center().cursor_pointer()
+          .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(r, cx))
+          .child(div().w(66).flex_none().text_size(11).text_color(r.status === "done" ? t.ansi2 : r.status === "failed" || r.status === "missed" ? t.ansi1 : t.muted).child(r.status))
+          .child(div().id(`h-line-${r.run_id}`).flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(outcome(r) || (r.seconds ? duration(r.seconds) : "")))
+          .child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.at)));
+        if (!parseTarget(r.target)) return [row];
+        return [row, div().id(`h-target-${r.run_id}`).pl(80).text_size(11).text_color(t.dim).truncate().cursor_pointer()
+          .hover((s) => s.bg(t.hover)).rounded(6).on_click((_e, cx) => this.openBot(a.repo, r.target, cx))
+          .child(`→ ${targetLine(r.target, (id) => this.botName(a.repo, id))}`)];
+      })
         : [div().text_size(12).text_color(t.dim).child("No runs yet.")]);
   }
 

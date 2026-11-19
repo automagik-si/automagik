@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The interactive backfill card — mock</title>
+<link rel="stylesheet" href="./mock.css">
+<style>
+/* Mock frame only. Not a product surface: it uses the team's tokens and nothing else. */
+html,body{margin:0}
+body{background:var(--bt-main);color:var(--bt-ink);font-family:var(--bt-font);font-size:14px}
+.mock-shell{max-width:1040px;margin:0 auto;padding:28px 24px 48px}
+.mock-head{display:flex;gap:24px;align-items:flex-start;justify-content:space-between}
+.mock-eyebrow{margin:0;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--bt-ink-3)}
+h1{margin:6px 0 8px;font-size:24px;line-height:1.2}
+h2{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--bt-ink-2)}
+.mock-lede{margin:0;max-width:74ch;line-height:1.55;color:var(--bt-ink-2)}
+.mock-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.mock-tabs .bt-soft[aria-selected=true]{background:var(--bt-active)}
+a{color:var(--bt-accent)}
+.mock-stack{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;margin-top:20px;align-items:start}
+.mock-frame{background:var(--bt-main);border:1px solid var(--bt-line);border-radius:18px;padding:14px}
+.mock-frame .bt-q{max-width:none}
+.mock-empty{margin:0;padding:18px 8px;font-size:13px;line-height:1.5;color:var(--bt-ink-3)}
+.mock-live{min-height:20px;margin:16px 0 0;font-size:12.5px;line-height:1.5;color:var(--bt-ink-2)}
+.mock-note{margin:22px 0 0;max-width:78ch;font-size:12px;line-height:1.6;color:var(--bt-ink-3)}
+.mock-gate{max-width:520px;margin:64px auto;padding:24px;background:var(--bt-card);border:1px solid var(--bt-line);border-radius:18px}
+.mock-gate h1{font-size:20px}
+.mock-gate p{line-height:1.55;color:var(--bt-ink-2)}
+@media (max-width:860px){.mock-stack{grid-template-columns:1fr}}
+</style>
+</head>
+<body data-bt-motion="quiet">
+
+<div class="mock-gate" id="gate" hidden>
+  <p class="mock-eyebrow">Design mock</p>
+  <h1>The interactive backfill card</h1>
+  <p>This page is a design mock, not a shipped screen. Open it with
+    <code>?mock=backfill</code> to see it.</p>
+  <p><a id="gate-link" href="?mock=backfill">Open the mock</a></p>
+</div>
+
+<main class="mock-shell" id="mock" hidden>
+  <header class="mock-head">
+    <div>
+      <p class="mock-eyebrow">Design mock · K2 · not shipped</p>
+      <h1>The interactive backfill card</h1>
+      <p class="mock-lede">A Bot proposes reading a chat's history. The person ticks the chats and
+        sets the dates, then presses <b>Start</b> once: that single approval starts one backfill per
+        chat. The runs move live beside it, and a chat that is still running can be stopped.
+        Everything here is sample data, and this page calls nothing.</p>
+    </div>
+    <button type="button" class="bt-soft bt-soft-sm" id="theme">Dark</button>
+  </header>
+
+  <div class="mock-tabs" role="tablist" aria-label="Mock state">
+    <button type="button" class="bt-soft bt-soft-sm" role="tab" data-phase="proposal" aria-selected="true">1 · Choose chats and dates</button>
+    <button type="button" class="bt-soft bt-soft-sm" role="tab" data-phase="starting" aria-selected="false">2 · The approval goes out</button>
+    <button type="button" class="bt-soft bt-soft-sm" role="tab" data-phase="runs" aria-selected="false">3 · Live runs, with a stop</button>
+    <button type="button" class="bt-soft bt-soft-sm" id="reset">Reset</button>
+  </div>
+
+  <p class="mock-live" id="live" role="status" aria-live="polite">A proposal is waiting: nothing is running.</p>
+
+  <div class="mock-stack">
+    <section class="mock-frame" aria-label="The backfill card">
+      <h2>Omni · a Bot's chat</h2>
+      <div id="proposal-card"></div>
+    </section>
+    <section class="mock-frame" aria-label="The live runs">
+      <h2>Runs</h2>
+      <div id="runs-card"></div>
+    </section>
+  </div>
+
+  <p class="mock-note">Sample data only: four invented chats, a sample range and sample counts. The
+    mock has no network code and never reaches an Omni API. The card wears the kit's own
+    <code>.bt-genui-*</code> classes and the team's <code>--bt-*</code> tokens from
+    <code>GENUI_CSS</code>; the frame around it is the mock's own.</p>
+</main>
+
+<script src="./mock.js"></script>
+</body>
+</html>

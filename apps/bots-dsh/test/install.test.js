@@ -79,6 +79,14 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: tool deny retry',
     'on agent/created',
     'on tools/execute',
+    // The four file tools' folder (read-scope.js): prepared before the call, guarded, checked
+    // again at dispatch, a refusal noted, and its two endpoints.
+    'on tools/pre-execute',
+    'tools guard',
+    'on tools/execute',
+    'on tools/result',
+    'effect ds-bot: session-read-scope endpoint',
+    'effect ds-bot: set-session-read-scope endpoint',
     'on tools/execute',
     'effect omni-ui: identity section',
     'prompt bot-identity 640',

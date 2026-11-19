@@ -8,13 +8,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, workerArgs } from "../mods/am-sidebar/workers.js";
+import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, stableRootOf, workerArgs } from "../mods/am-sidebar/workers.js";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
-import { hcVerbOf } from "../mods/am-sidebar/hcGuard.mjs";
+import { hcVerbOf, launchHomeOf } from "../mods/am-sidebar/hcGuard.mjs";
 
 const ID = {
   main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc",
@@ -53,7 +53,18 @@ if (args[0] === "get") {
   process.stdout.write(JSON.stringify(hit) + "\\n"); process.exit(0);
 }
 if (args[0] === "read") {
-  const hit = found(args[1]);
+  // The target is the first positional; #628 reads may name their options before it
+  // (read --lines 5 t102), so skip a value-taking option and its word.
+  const optionValue = new Set(["--lines"]);
+  let at = null;
+  for (let i = 1; i < args.length; i += 1) {
+    const word = args[i];
+    if (optionValue.has(word)) { i += 1; continue; }
+    if (word.startsWith("-")) continue;
+    at = word;
+    break;
+  }
+  const hit = found(at);
   if (!hit) { process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3); }
   if (hit.readFail) { process.stderr.write("the screen could not be read\\n"); process.exit(1); }
   process.stdout.write(JSON.stringify({ text: hit.screen ?? "", complete: true, how: "screen", why: null }) + "\\n"); process.exit(0);
@@ -63,6 +74,7 @@ process.stderr.write("stub-err " + args[0] + "\\n");
 process.exit(Number(process.env.HC_STUB_CODE ?? 0));
 `;
 
+const launchArgv = (app) => ["/usr/bin/env", `HERDR_APP_HOME=${app}`, "dsh-tui"];
 const get = (address, labels, extra = {}) => ({ address, state: "live", created_ms: 100, labels, ...extra });
 
 /** One hermetic scene: temp app home, project, worktree, stub hc and a ledger-bound bot pane. */
@@ -80,6 +92,10 @@ function scene(t, { caller = "t100" } = {}) {
     { address: "t107", name: "fixer", state: "live" }, { address: "t108", name: "tester", state: "live" },
     { address: "t110", name: "worker-dev", state: "live" },
     { address: "t120", name: "other", state: "live" }, { address: "t121", name: "bare", state: "live" },
+    // Linked machine panes, reachable by name through `hc ls`; the guard must refuse the
+    // resolved `machine/tN` address, never forward it (the proxy-off path, #628).
+    { address: "m/t101", name: "cap-m", state: "live" }, { address: "m/t120", name: "other-m", state: "live" },
+    { address: "m/t105", name: "worker-m", state: "live" },
   ];
   const state = {
     terminals,
@@ -97,8 +113,10 @@ function scene(t, { caller = "t100" } = {}) {
       t121: get("t121", {}, { cwd: project, name: "bare" }),
       "m/t101": get("m/t101", { bot: ID.cap }, { cwd: project, name: "cap" }),
       "m/t120": get("m/t120", { bot: ID.other }, { cwd: project, name: "other" }),
+      "m/t105": get("m/t105", { "worker.of": ID.dev }, { cwd: worktree, name: "worker-m", parent: "t100" }),
     },
   };
+  for (const pane of Object.values(state.get)) pane.argv = launchArgv(app);
   const statePath = join(root, "hc-state.json"), logPath = join(root, "hc.log");
   writeFileSync(statePath, JSON.stringify(state));
   writeFileSync(logPath, "");
@@ -147,6 +165,36 @@ const DIALOG_SCREEN = "This command requires approval\nDo you want to proceed?\n
 /** A free pane: its prompt is the last line, with no dialog below it. */
 const FREE_SCREEN = "all done\n❯ ";
 
+test("launchHomeOf reads only the env prefix and resolves the default lazily (#628)", () => {
+  const defaultHome = () => "/default";
+  const unexpectedDefault = () => { throw new Error("default should never be needed"); };
+  for (const argv of [
+    ["/usr/bin/env", "HERDR_APP_HOME=/seat", "dsh-tui"],
+    ["/usr/bin/env", "HERDR_APP_HOME=/seat///", "dsh-tui"],
+    ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR", "HERDR_APP_HOME=/seat", "claude"],
+    ["/usr/bin/env", "-u", "HERDR_APP_HOME", "HERDR_APP_HOME=/old", "HERDR_APP_HOME=/seat", "dsh-tui"],
+  ]) {
+    assert.deepEqual(launchHomeOf(argv, unexpectedDefault), { home: "/seat" }, JSON.stringify(argv));
+  }
+  for (const argv of [
+    ["/usr/bin/env", "-u", "HERDR_APP_HOME", "dsh-tui"],
+    ["/usr/bin/env", "PATH=/bin", "dsh-tui"],
+    ["/usr/bin/env", "dsh-tui", "HERDR_APP_HOME=/ignored"],
+    ["claude", "HERDR_APP_HOME=/ignored"],
+  ]) {
+    assert.deepEqual(launchHomeOf(argv, defaultHome), { home: "/default" }, JSON.stringify(argv));
+  }
+  for (const argv of [
+    null, [], ["claude", 1], ["/usr/bin/env", "-u"], ["/usr/bin/env", "HERDR_APP_HOME=/seat"],
+    ["/usr/bin/env", "HERDR_APP_HOME=relative", "dsh-tui"],
+    ["/usr/bin/env", "HERDR_APP_HOME=/bad\npath", "dsh-tui"],
+  ]) {
+    assert.match(launchHomeOf(argv, defaultHome).error, /caller/, JSON.stringify(argv));
+  }
+  assert.match(launchHomeOf(["claude"], unexpectedDefault).error,
+    /start or restart the bot from the sidebar or with HERDR_APP_HOME set/i);
+});
+
 function assertRefused(r) {
   assert.notEqual(r.status, 0, "a refusal exits non-zero");
   const lines = r.stderr.trim().split("\n");
@@ -177,7 +225,7 @@ test("every allowed verb reaches the stub unchanged", (t) => {
   const s = scene(t);
   const allowed = [
     ["send", "t101", "hello"], ["read", "t101"], ["ls"], ["get", "t101"], ["wait", "t101"],
-    ["put", "t101", "/tmp/file"], ["label", "t105", "role=dev"], ["rm", "t101"],
+    ["label", "t105", "role=dev"],
     ["events"], ["schema"], ["templates"],
   ];
   for (const args of allowed) {
@@ -336,7 +384,7 @@ function sharedScene(t) {
   const state = JSON.parse(readFileSync(s.statePath, "utf8"));
   const add = (address, labels, extra = {}) => {
     state.terminals.push({ address, name: address, state: "live" });
-    state.get[address] = get(address, labels, { cwd: s.project, name: address, ...extra });
+    state.get[address] = get(address, labels, { cwd: s.project, name: address, argv: launchArgv(s.app), ...extra });
   };
   add("t200", { bot: SHARED_ID.pm, role: "pm" });
   add("t201", { bot: SHARED_ID.integrator, role: "integrator" });
@@ -430,7 +478,7 @@ test("a pm caller cannot send to a pane whose bot= is not listed", (t) => {
   assert.equal(calls(s).some((argv) => argv[0] === "send"), false, "an unlisted bot= target never reaches send");
 });
 
-test("the widening is send only: keys is refused, kill is the main bot's (#955) and rm keeps today's unscoped pass", (t) => {
+test("the widening is send only: keys and rm are refused, kill is the main bot's (#955)", (t) => {
   const s = sharedScene(t);
   writeFileSync(s.logPath, "");
   const keys = guardRun(s, ["keys", "t203", "enter"], { HC_TERMINAL_ID: "t200" });
@@ -440,13 +488,12 @@ test("the widening is send only: keys is refused, kill is the main bot's (#955) 
   writeFileSync(s.logPath, "");
   assertRefused(guardRun(s, ["kill", "t203"], { HC_TERMINAL_ID: "t200" }));
   assert.deepEqual(calls(s).filter((argv) => argv[0] === "kill"), []);
-  // #636 leaves rm unscoped (#628 owns that scope); the widening does not touch it.
-  for (const args of [["rm", "t203"]]) {
-    writeFileSync(s.logPath, "");
-    const r = guardRun(s, args, { HC_TERMINAL_ID: "t200" });
-    assert.equal(r.status, 0, `${args[0]} is unchanged: ${r.stderr}`);
-    assert.ok(calls(s).some((argv) => same(argv, args)), `${args[0]} arrives unchanged`);
-  }
+  // #628: rm is the caller's own workers only; a foreign pane is refused even for a pm.
+  writeFileSync(s.logPath, "");
+  const rm = guardRun(s, ["rm", "t203"], { HC_TERMINAL_ID: "t200" });
+  assertRefused(rm);
+  assert.match(rm.stderr, /own worker/);
+  assert.equal(calls(s).some((argv) => argv[0] === "rm"), false, "a foreign rm never reaches hc");
 });
 
 // ---- kill: a project's main bot only (#955, the owner's rule) ----
@@ -488,6 +535,24 @@ test("hc kill (#955): a main bot's seat ends a pane; the roster's kind decides, 
     assert.match(worker.stderr, /hc kill is for a project's main bot only, never a worker/);
     assert.deepEqual(killsSeen(s), []);
   }
+});
+
+test("with the proxy off, a main bot's kill refuses a machine-resolving name and the direct address (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. `worker-m` is a pane
+  // `hc ls` resolves to `m/t105`; the guard refuses the resolved address, never forwards the
+  // name, and the main bot still ends a local pane at the address it checked.
+  const s = killScene(t);
+  for (const args of [["kill", "worker-m"], ["kill", "m/t105"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args, { HC_TERMINAL_ID: "t103" });
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.deepEqual(killsSeen(s), [], `${args.join(" ")} never reaches hc`);
+  }
+  writeFileSync(s.logPath, "");
+  const local = guardRun(s, ["kill", "worker"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(local.status, 0, local.stderr);
+  assert.deepEqual(killsSeen(s), [["kill", "t105"]], "the checked address is the one forwarded");
 });
 
 test("hc kill (#955): a flag before the command is refused for everyone, the main bot too; an unknown caller is refused", (t) => {
@@ -730,7 +795,7 @@ test("a machine target is refused on every allowed verb but send", (t) => {
   const s = scene(t);
   const cases = [
     ["read", "m/t101"], ["read", "--lines", "5", "m/t101"], ["get", "m/t101"], ["wait", "m/t101"],
-    ["put", "m/t101", "/tmp/file"], ["label", "m/t101", "role=reviewer"], ["kill", "m/t101"], ["rm", "m/t101"],
+    ["label", "m/t101", "role=reviewer"], ["kill", "m/t101"], ["rm", "m/t101"],
   ];
   for (const args of cases) {
     writeFileSync(s.logPath, "");
@@ -749,6 +814,60 @@ test("a machine target is refused on every allowed verb but send", (t) => {
     assertRefused(r);
     assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
   }
+});
+
+test("with the proxy off, a machine target named by a name is refused (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. The lexical check
+  // above cannot see a name; the resolved address decides, for reads/waits and rm alike.
+  const s = scene(t);
+  for (const [args, address] of [
+    [["read", "cap-m"], "m/t101"], [["get", "cap-m"], "m/t101"], [["wait", "cap-m"], "m/t101"],
+    [["rm", "worker-m"], "m/t105"],
+    [["read", "other-m"], "m/t120"], [["rm", "other-m"], "m/t120"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => same(argv, [args[0], address])), false,
+      `${args.join(" ")} never forwards its machine address`);
+  }
+});
+
+test("with the proxy off, label and events refuse a machine-resolving name and the direct address (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. A name passes the
+  // lexical check; the address hc resolves decides, and the checked address is what is
+  // forwarded. `worker-m` is the caller's own worker on a machine, so label's own-worker
+  // check passes and only the resolved-address rule refuses it.
+  const s = scene(t);
+  for (const args of [
+    ["label", "worker-m", "role=reviewer"], ["label", "m/t105", "role=reviewer"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => argv[0] === "label"), false, `${args.join(" ")} never reaches hc`);
+  }
+  for (const args of [
+    ["events", "--terminal", "cap-m"], ["events", "--terminal=m/t101"],
+    ["events", "--children-of", "worker-m"], ["events", "--children-of=m/t105"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => argv[0] === "events"), false, `${args.join(" ")} never reaches hc`);
+  }
+  // A local name still passes, at the address the guard checked.
+  writeFileSync(s.logPath, "");
+  const label = guardRun(s, ["label", "worker", "role=dev"]);
+  assert.equal(label.status, 0, label.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["label", "t105", "role=dev"])), JSON.stringify(calls(s)));
+  writeFileSync(s.logPath, "");
+  const events = guardRun(s, ["events", "--terminal", "cap"]);
+  assert.equal(events.status, 0, events.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["events", "--terminal", "t101"])), JSON.stringify(calls(s)));
 });
 
 test("a machine target named by an hc events option is refused", (t) => {
@@ -787,11 +906,206 @@ test("label is the caller's own workers only; a label cannot widen send", (t) =>
   assert.ok(calls(s).some((argv) => same(argv, ["label", "t105", "role=dev"])));
 });
 
+// ---- #628: reads and waits, rm, and put, on the same team boundary as the proxy ----
+
+test("read, get and wait see the caller's pane, its own workers and its team (#628)", (t) => {
+  const s = scene(t);
+  // Its own pane, its lead, a member, the main bot and its own workers: the team graph.
+  for (const args of [["read", "t100"], ["read", "t101"], ["read", "--lines", "5", "t102"],
+    ["get", "t103"], ["wait", "t102"], ["read", "t110"], ["wait", "--timeout", "1", "t105"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, `${args.join(" ")}: ${r.stderr}`);
+  }
+  // A name is resolved once and the checked address is the one forwarded.
+  writeFileSync(s.logPath, "");
+  assert.equal(guardRun(s, ["get", "cap"]).status, 0);
+  assert.ok(calls(s).some((argv) => same(argv, ["get", "t101"])), "the resolved address is forwarded");
+  // The shared send roles stay send only: a reviewer/fixer label, a roster reviewer rank, a
+  // stranger's pane, a bare pane and an unknown target are all refused.
+  for (const args of [["read", "t106"], ["read", "t107"], ["get", "t108"], ["wait", "t108"],
+    ["read", "t120"], ["get", "t120"], ["wait", "t120"], ["read", "t121"], ["read", "t999"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    const verb = args[0];
+    if (verb !== "get") {
+      assert.equal(calls(s).some((argv) => same(argv, [verb, args.at(-1)])), false,
+        `${args.join(" ")} never reaches ${verb}`);
+    }
+  }
+  assert.match(guardRun(s, ["read", "t120"]).stderr, /not in the caller's team/);
+  assert.match(guardRun(s, ["read", "t999"]).stderr, /not resolvable/);
+});
+
+test("rm ends the caller's own workers only (#628)", (t) => {
+  const s = scene(t);
+  for (const target of ["t105", "t110"]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, ["rm", target]);
+    assert.equal(r.status, 0, `rm ${target}: ${r.stderr}`);
+    assert.ok(calls(s).some((argv) => same(argv, ["rm", target])), `rm ${target} arrives at its address`);
+  }
+  for (const target of ["t101", "t102", "t106", "t108", "t120", "t121"]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, ["rm", target]);
+    assertRefused(r);
+    assert.match(r.stderr, /own worker/);
+    assert.equal(calls(s).some((argv) => same(argv, ["rm", target])), false, `rm ${target} never reaches hc`);
+  }
+  const self = guardRun(s, ["rm", "t100"]);
+  assertRefused(self);
+  assert.match(self.stderr, /own pane/);
+  const unknown = guardRun(s, ["rm", "t999"]);
+  assertRefused(unknown);
+  assert.match(unknown.stderr, /not resolvable/);
+  // A worker pane ends nothing, not even a sibling of its own bot.
+  writeFileSync(s.logPath, "");
+  const worker = guardRun(s, ["rm", "t105"], { HC_TERMINAL_ID: "t110" });
+  assertRefused(worker);
+  assert.match(worker.stderr, /worker pane ends no panes/);
+  assert.equal(calls(s).some((argv) => same(argv, ["rm", "t105"])), false);
+});
+
+test("put is refused: a guarded pane writes nothing beside another pane (#628)", (t) => {
+  const s = scene(t);
+  for (const args of [["put", "t101", "/tmp/file"], ["put", "t105", "/tmp/file"],
+    ["put", "t120", "/tmp/file"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /terminal\.put/);
+    assert.deepEqual(calls(s), [], `${args.join(" ")} never reaches hc`);
+  }
+  // Its help still passes, like every other named command's.
+  writeFileSync(s.logPath, "");
+  const help = guardRun(s, ["put", "--help"]);
+  assert.equal(help.status, 0, help.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["put", "--help"])));
+});
+
 // ---- the dsh-tui worker run shape ----
 
 const exactRun = (s, over = {}) => workerArgs({
   botId: ID.dev, branch: "feat/x", role: "dev", name: "feat-x", cwd: s.worktree, parent: "t100",
   agent: "dsh-tui", argv: ["dsh-tui"], task: "do it", path: "/usr/bin:/bin", space: "sp1", ...over,
+});
+
+function forgedMainHome(s) {
+  const app = join(s.root, "forged-app");
+  const ledger = join(s.app, "automagik-herdr", "attach.jsonl");
+  const row = JSON.parse(readFileSync(ledger, "utf8"));
+  mkdirSync(join(app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(app, "automagik-herdr", "attach.jsonl"),
+    `${JSON.stringify({ ...row, bot: ID.main })}\n`, { mode: 0o600 });
+  return { HERDR_APP_HOME: app };
+}
+
+test("a forged invocation home grants neither a foreign send nor a main-only kill (#628)", (t) => {
+  const s = scene(t);
+  const env = forgedMainHome(s);
+  const foreign = guardRun(s, ["send", "t120", "hi"], env);
+  assertRefused(foreign);
+  assert.match(foreign.stderr, /not in the caller's team/);
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+
+  writeFileSync(s.logPath, "");
+  const team = guardRun(s, ["send", "t101", "hi"], env);
+  assert.equal(team.status, 0, team.stderr);
+  assert.deepEqual(calls(s).at(-1), ["send", "t101", "hi"]);
+
+  for (const invoke of [guardRun, shimRun]) {
+    writeFileSync(s.logPath, "");
+    const kill = invoke(s, ["kill", "t120"], env);
+    if (invoke === guardRun) assertRefused(kill);
+    else assertShimRefused(kill);
+    assert.match(kill.stderr, /main bot only/);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+  }
+});
+
+test("guarded sends, kills and worker starts require a live caller with a valid launch record (#628)", (t) => {
+  const cases = [
+    ["not found", null, /not resolvable/],
+    ["different address", { address: "t101" }, /not resolvable/],
+    ["finished", { state: "finished" }, /not live/],
+    ["absent argv", { argv: undefined }, /no valid launch argv/],
+    ["non-array argv", { argv: "dsh-tui" }, /no valid launch argv/],
+    ["absent created_ms", { created_ms: undefined }, /no valid created_ms/],
+    ["unsafe created_ms", { created_ms: Number.MAX_SAFE_INTEGER + 1 }, /no valid created_ms/],
+  ];
+  for (const [name, patch, reason] of cases) {
+    const s = killScene(t);
+    if (patch) editPane(s, "t100", patch);
+    else {
+      const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+      delete state.get.t100;
+      writeFileSync(s.statePath, JSON.stringify(state));
+    }
+    for (const args of [["send", "t101", "hi"], ["kill", "t105"], exactRun(s)]) {
+      writeFileSync(s.logPath, "");
+      const r = guardRun(s, args);
+      assertRefused(r);
+      assert.match(r.stderr, reason, name);
+      assert.deepEqual(calls(s), [["get", "t100", "--json"]], name);
+    }
+    writeFileSync(s.logPath, "");
+    assertShimRefused(shimRun(s, ["kill", "t105"]), reason);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"]], name);
+  }
+});
+
+test("a machine-qualified caller is refused before hc is queried (#628)", (t) => {
+  const s = scene(t);
+  const env = { HC_TERMINAL_ID: "m/t101" };
+  const r = guardRun(s, ["send", "t100", "hi"], env);
+  assertRefused(r);
+  assert.match(r.stderr, /caller.*machine-qualified/);
+  assertShimRefused(shimRun(s, ["kill", "t100"], env), /caller.*machine-qualified/);
+  assert.deepEqual(calls(s), []);
+});
+
+test("a binding from an earlier pane lifetime grants no seat (#628)", (t) => {
+  const s = scene(t);
+  editPane(s, "t100", { created_ms: 101 });
+  const r = guardRun(s, ["send", "t101", "hi"]);
+  assertRefused(r);
+  assert.match(r.stderr, /neither bound in the attach ledger nor a worker pane/);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+});
+
+test("a worker's caller lookup also supplies its worker.of fallback (#628)", (t) => {
+  const s = scene(t);
+  const r = guardRun(s, ["send", "t100", "hi"], { HC_TERMINAL_ID: "t110" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s).filter((argv) => argv[0] === "get" && argv[1] === "t110"),
+    [["get", "t110", "--json"]]);
+});
+
+test("a worker launch cannot set HERDR_APP_HOME in its env prefix (#628)", (t) => {
+  const s = scene(t);
+  const args = exactRun(s);
+  args.splice(args.indexOf("--") + 3, 0, `HERDR_APP_HOME=${s.app}`);
+  const r = guardRun(s, args);
+  assertRefused(r);
+  assert.match(r.stderr, /worker launch cannot set HERDR_APP_HOME/);
+  assert.deepEqual(calls(s), []);
+});
+
+test("a recognized worker program still requires the caller's real ledger binding (#628)", (t) => {
+  const s = scene(t);
+  const env = forgedMainHome(s);
+  const worker = { agent: "codex", argv: ["codex"], path: `${GUARD_DIR}:/usr/bin:/bin` };
+  const wrongBot = guardRun(s, exactRun(s, { ...worker, botId: ID.main }), env);
+  assertRefused(wrongBot);
+  assert.match(wrongBot.stderr, /worker\.of is not the caller's bot/);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+
+  writeFileSync(s.logPath, "");
+  const exact = exactRun(s, worker);
+  const ownBot = guardRun(s, exact, env);
+  assert.equal(ownBot.status, 0, ownBot.stderr);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact]);
 });
 
 test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
@@ -802,7 +1116,7 @@ test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact]);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact]);
 });
 
 // #1011: a dsh-tui lead's full guard starts a worker of any agent the pack launches, not dsh-tui
@@ -818,7 +1132,7 @@ test("a dsh-tui lead's guard accepts a Claude worker with its session label (#10
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact], "the Claude worker launch reached hc unchanged");
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], "the Claude worker launch reached hc unchanged");
 });
 
 test("a dsh-tui lead's guard accepts every other agent kind's worker launch (#1011)", (t) => {
@@ -833,7 +1147,7 @@ test("a dsh-tui lead's guard accepts every other agent kind's worker launch (#10
     writeFileSync(s.logPath, "");
     const r = guardRun(s, exact);
     assert.equal(r.status, 0, `${agent}: ${r.stderr}`);
-    assert.deepEqual(calls(s), [exact], `${agent}: the worker launch reached hc unchanged`);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], `${agent}: the worker launch reached hc unchanged`);
   }
 });
 
@@ -908,7 +1222,7 @@ test("a mixed am+pack guard PATH reaches the real hc once, never a guard as hc",
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact, { PATH: `${amGuard}:${GUARD_DIR}:${s.bin}:${dirname(process.execPath)}` });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact], "the real hc got the mixed-PATH worker argv once");
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], "the real hc got the mixed-PATH worker argv once");
   assert.equal(existsSync(marker), false, "the am guard copy was skipped, not run as hc");
 });
 
@@ -922,7 +1236,8 @@ test("a pair of guard copies never loops: both are skipped and the stub runs onc
   writeFileSync(s.logPath, "");
   const r = guardRun(s, ["read", "t101"], { PATH: `${a.guard}:${b.guard}:${s.bin}:${dirname(process.execPath)}` });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [["read", "t101"]], "the real hc ran once; the guard copies did not");
+  assert.deepEqual(calls(s).filter((argv) => argv[0] === "read"), [["read", "t101"]],
+    "the real hc ran once; the guard copies did not");
   assert.equal(existsSync(a.marker), false, "the first guard copy was skipped");
   assert.equal(existsSync(b.marker), false, "the second guard copy was skipped");
 });
@@ -935,8 +1250,11 @@ test("a planted hcGuard.mjs is not a guard: its hc is an ordinary PATH entry, no
   chmodSync(join(guard, "hc"), 0o755);
   writeFileSync(s.logPath, "");
   const r = guardRun(s, ["read", "t101"], { PATH: `${GUARD_DIR}:${guard}:${dirname(process.execPath)}` });
-  assert.equal(r.status, 7, r.stderr);
+  assert.equal(r.status, 2, r.stderr);
   assert.equal(existsSync(marker), true, "the planted hc was reached, not skipped");
+  // The planted hc answered no target record, so the team check fails closed instead of
+  // forwarding a read it could not check.
+  assert.match(r.stderr, /not resolvable/);
   assert.deepEqual(calls(s), [], "the stub never ran: the planted folder was not skipped");
 });
 
@@ -989,7 +1307,7 @@ test("a guard copy that calls its caller stops at once instead of looping", (t) 
   copyFileSync(join(GUARD_DIR, "hc"), join(copyGuard, "hc"));
   chmodSync(join(copyGuard, "hc"), 0o755);
   writeFileSync(s.logPath, "");
-  const r = spawnSync(process.execPath, [s.guard, "read", "t101"], {
+  const r = spawnSync(process.execPath, [s.guard, "ls"], {
     env: envFor(s, { PATH: `${GUARD_DIR}:${copyGuard}:${s.bin}:${dirname(process.execPath)}` }),
     encoding: "utf8", timeout: 15000,
   });
@@ -1216,9 +1534,9 @@ test("cross-project lead (#850): hc send and proxy require reciprocal crossMembe
     { address: "t201", name: "unrelated", state: "live" },
     { address: "t202", name: "hubtop", state: "live" },
   );
-  st.get.t200 = get("t200", { bot: coordId }, { cwd: hubDir, name: "coord" });
-  st.get.t201 = get("t201", { bot: unrelatedHubId }, { cwd: hubDir, name: "unrelated" });
-  st.get.t202 = get("t202", { bot: hubTopId }, { cwd: hubDir, name: "hubtop" });
+  st.get.t200 = get("t200", { bot: coordId }, { cwd: hubDir, name: "coord", argv: launchArgv(s.app) });
+  st.get.t201 = get("t201", { bot: unrelatedHubId }, { cwd: hubDir, name: "unrelated", argv: launchArgv(s.app) });
+  st.get.t202 = get("t202", { bot: hubTopId }, { cwd: hubDir, name: "hubtop", argv: launchArgv(s.app) });
   writeFileSync(s.statePath, JSON.stringify(st));
   const ledger = join(s.app, "automagik-herdr", "attach.jsonl");
   const rows = [
@@ -1600,4 +1918,80 @@ test("#1414 the kill shim refuses a send to a held pane too", (t) => {
   const r = shimRun(s, ["send", "t105", "the report"], { HC_TERMINAL_ID: "t103" });
   assertHeld(r, "t105");
   assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+});
+
+// Older guard/hc shipped in the tags checked for #1728. Keep its bytes, including the final newline.
+const OLD_GUARD_ENTRY = `#!/usr/bin/env node
+// The guard's executable entry (automagik#624): a tiny shim, so the logic stays in
+// hcGuard.mjs, which the pack's node --check gate covers. Dynamic import works whether this
+// extensionless file loads as CommonJS (an installed pack has no package.json) or as ESM
+// (\`herdr/package.json\` says type module). Apache-2.0.
+"use strict";
+import("../hcGuard.mjs").then(
+  ({ runGuard }) => runGuard(process.argv.slice(2), process.env),
+  () => {
+    process.stderr.write("hc guard: failed closed (#624): the guard's logic did not load; this wrapper is a guardrail, not a boundary (#631).\\n");
+    return 1;
+  },
+).then(
+  (code) => { process.exitCode = Number.isInteger(code) ? code : 1; },
+  () => {
+    process.stderr.write("hc guard: failed closed (#624): internal error; this wrapper is a guardrail, not a boundary (#631).\\n");
+    process.exitCode = 1;
+  },
+);
+`;
+
+test("#1728 the CLI vouches for skewed guard entries only at recognized install paths", async (t) => {
+  const { isGuardFolder, isInstalledGuardFolder } = await import("../mods/am-sidebar/hcGuard.mjs");
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "hc-guard-install-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { HOME: root, AM_HOME: join(root, "am") + "/" };
+  const store = join(env.AM_HOME, "parts", "automagik.am");
+  const app = join(root, ".config", "herdr-app");
+  const pack = join(app, "mods", "am-sidebar");
+  const fixture = (parent, name = "guard", entry = readFileSync(join(GUARD_DIR, "hc"))) => {
+    const dir = join(parent, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(parent, "hcGuard.mjs"), "// a different release\n");
+    writeFileSync(join(dir, "hc"), entry);
+    return dir;
+  };
+  const version = fixture(join(store, "3.158.1"));
+  const reinstall = fixture(join(store, "3.158.1-a1b2"), "hc-kill", readFileSync(join(KILL_GUARD_DIR, "hc")));
+  const named = fixture(join(store, "restored"));
+  symlinkSync(dirname(named), join(store, "current"));
+  symlinkSync(dirname(reinstall), join(store, "previous"));
+  const packGuard = fixture(pack, "guard", OLD_GUARD_ENTRY);
+  const alias = join(root, "pane-tools");
+  symlinkSync(packGuard, alias);
+  const linkedApp = join(root, "linked-app");
+  mkdirSync(join(linkedApp, "mods"), { recursive: true });
+  symlinkSync(pack, join(linkedApp, "mods", "am-sidebar"));
+  for (const [name, dir] of [
+    ["version", version],
+    ["hex reinstall", reinstall],
+    ["current pointing to a non-version child", join(store, "current", "guard")],
+    ["non-version child linked as current", named],
+    ["previous", join(store, "previous", "hc-kill")],
+    ["pack mod with the older shipped entry", packGuard],
+    ["stable root", fixture(stableRootOf(env))],
+    ["alias to the guard folder", alias],
+  ]) assert.equal(isInstalledGuardFolder(dir, env), true, name);
+  assert.equal(isInstalledGuardFolder(packGuard, { ...env, HERDR_APP_HOME: linkedApp + "/" }), true, "symlinked pack mod root");
+  assert.equal(isGuardFolder(version), false, "the #643/#721 byte-equal rule still rejects skew");
+
+  const staging = fixture(join(store, ".staging"));
+  unlinkSync(join(store, "previous"));
+  symlinkSync(dirname(staging), join(store, "previous"));
+  for (const [name, dir] of [
+    ["planted outside the roots", fixture(join(root, "planted"))],
+    ["staging even when linked as previous", join(store, "previous", "guard")],
+    ["unlinked non-version child", fixture(join(store, "unlinked"))],
+    ["other folder basename", fixture(pack, "bin")],
+    ["different entry", fixture(join(store, "3.158.2"), "guard", "#!/bin/sh\nexit 1\n")],
+    ["pack kept for rollback", fixture(join(app, "automagik-herdr", ".prev", "am-sidebar"))],
+    ["missing folder", join(root, "missing")],
+    ["empty path", ""],
+  ]) assert.equal(isInstalledGuardFolder(dir, env), false, name);
 });

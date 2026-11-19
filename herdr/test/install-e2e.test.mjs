@@ -30,8 +30,12 @@ const { keys: TEST_KEYS, pointerBytes, signatureOf } = await import("./pointer.m
 const RELEASE = "3.57.0";
 /** The latest sidebar-only release (v0.2-v0.4.x: automagik-herdr-<v>.tgz, spaces-agents only). */
 const OLD = "0.4.0";
-/** A run's output with its exit code and stderr, for the message of an assertion about its notice. */
-const ran = (r) => `exit ${r.code}\nstderr:\n${r.err}\nstdout:\n${r.out}`;
+/** The suppressed-notice diagnostic lines a run printed (the tests set AUTOMAGIK_HERDR_DIAG=1), from
+ * its stdout and stderr: install.sh prints the updater's log, so they carry the two-space indent. */
+const hooksLines = (r) => `${r.out ?? ""}\n${r.err ?? ""}`.split("\n").map((l) => l.trimStart()).filter((l) => l.startsWith("hooks: "));
+/** A run's output with its exit code, stderr, the hooks diagnostic line and stdout, for the message of
+ * an assertion about its notice (#1250, #1257). */
+const ran = (r) => `exit ${r.code}\nstderr:\n${r.err}\nhooks line:\n${hooksLines(r).join("\n") || "(none)"}\nstdout:\n${r.out}`;
 /** Paths update.mjs carries over from the replaced folder (D10): never in the archive. */
 const PRIVATE = (rel) => rel.split("/").some((s) => s.startsWith(".") || s === "node_modules");
 
@@ -213,9 +217,12 @@ fi
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "test", "fake-hc.mjs")}" "$@"\n`);
 
   const appHome = join(home, ".config", "herdr-app");
+  // AUTOMAGIK_HERDR_DIAG=1: the updater's one line for a suppressed hooks notice reaches the output
+  // here, so a failure to print the notice names its fields instead of showing silence (#1250).
   const env = {
     HOME: home, TMPDIR: root, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
     AUTOMAGIK_HERDR_RELEASE_URL: `file://${rel}`, AUTOMAGIK_HERDR_TTY: join(root, "no-tty"), AUTOMAGIK_HERDR_APPS: apps,
+    AUTOMAGIK_HERDR_DIAG: "1",
     AUTOMAGIK_HERDR_PACK_KEYS: JSON.stringify({ keys: TEST_KEYS }),
     AUTOMAGIK_HERDR_METER_KEYS: meterKeys.keys, HC_FAKE_STATE: hcState, HC_FAKE_LOG: hcLog,
   };
@@ -529,6 +536,7 @@ test("e2e: a project unknown at the upgrade keeps its hook and is warned about; 
   assert.match(lines[at + 1], /keeps the OLD hook and gets NO briefing until it is restarted\. Restart the bot: am restart <bot> \(or the bot row's Restart\)/);
   assert.match(lines[at + 2], /were not rewritten .*open it as a space in Herdr and run the installer again/);
   assert.ok(lines.findIndex((l) => l.startsWith("Done: Automagik Herdr")) > at);
+  assert.deepEqual(hooksLines(up), [], "the notice printed: no suppressed-notice line is logged");
 
   // The person opens it in Herdr and reruns the installer: the same release, the repair path.
   m.openSpace(proj);
@@ -542,8 +550,10 @@ test("e2e: a project unknown at the upgrade keeps its hook and is warned about; 
   assert.ok(from >= 0, ran(again));
   assert.equal(said[from + 1], `  ${proj}: ${file}`);
   assert.ok(!again.out.includes("notice: "), "the tag never shows");
-  // A third run: nothing left to move, and no notice.
+  // A third run: nothing left to move, and no notice; with the diagnostic switch on, the updater's
+  // one line names direction, crossed and the rewritten-file count instead of silence (#1250).
   const third = m.oneLiner("--yes");
   assert.equal(third.code, 0, third.err);
   assert.ok(!third.out.includes("IMPORTANT:"), ran(third));
+  assert.deepEqual(hooksLines(third), ["hooks: notice suppressed (direction=forward, crossed=false, rewritten=0)"], ran(third));
 });

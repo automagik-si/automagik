@@ -63,7 +63,16 @@ lane() {
   # A merge can leave nothing that reaches an install (a revert of everything since the last
   # release): the re-cut then has nothing to cut, and the queued run finds the same.
   ships=$(bun scripts/lane.ts ships "${last}")
-  { echo "kind=${kind}"; echo "herdr=${herdr}"; echo "pocket=${pocket}"; echo "pocket_since=${pocket_since}"; echo "meter=${meter}"; echo "ships=${ships}"; echo "base=${full#v}"; } >> "${out}"
+  {
+    echo "kind=${kind}"
+    echo "herdr=${herdr}"
+    echo "pocket=${pocket}"
+    echo "pocket_since=${pocket_since}"
+    echo "meter=${meter}"
+    echo "meter_since=${meter_since}"
+    echo "ships=${ships}"
+    echo "base=${full#v}"
+  } >> "${out}"
   echo "since ${full:-the start}: ${kind} release; since ${last:-the start}, the herdr pack: ${herdr}; since ${pocket_since:-the start}, Pocket: ${pocket}; since ${meter_since:-the start}, the meter: ${meter}"
 }
 
@@ -148,9 +157,10 @@ gate_meter_key() {
   bun scripts/meter-lane.ts check-key
 }
 
-# Pocket's unit tests and lint (release.yml's "Pocket's gates").
+# Both Pocket flavors' unit tests and lint (release.yml's "Pocket's gates").
 gate_pocket() {
-  (cd apps/pocket/android && ./gradlew --stacktrace :app:testDebugUnitTest :app:lintDebug)
+  (cd apps/pocket/android && ./gradlew --stacktrace :app:testGithubDebugUnitTest :app:lintGithubDebug \
+    :app:testPlayDebugUnitTest :app:lintPlayDebug)
 }
 
 # Both Pocket signing secrets must be present (release.yml's "Pocket's signing key is in the

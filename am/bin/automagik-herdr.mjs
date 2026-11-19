@@ -13,7 +13,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
   readSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, uptime } from "node:os";
-import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
@@ -59,6 +59,7 @@ import { botHistory, historyLines } from "../inspect.js";
 import { CONFIG_VAR, chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
+import { isInstalledGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
@@ -322,19 +323,14 @@ const onPath = (program) => programPath(program) !== null;
  * The `hc kill` shim's folder (#955, `hc-kill`, beside the same hcGuard.mjs) is vouched for by
  * the same byte rule.
  *
- * Version skew (#955): a guard or shim folder of ANOTHER version (am and the pack installed at
- * different versions, or a pane started before an update that moved the folder) is not
- * byte-equal, so this CLI does not skip it and realHcPath takes its `hc` for the real one. The
- * CLI's own kill (hcKill: restart, rm, worker kill) then runs through that other copy's shim
- * or guard, which refuses it for a pane that is not a main bot's seat. It fails closed: the
- * old pane stays and the verb says it wasn't ended; nothing is ended that the rule forbids.
- * The shim's own lookup (hcGuard.mjs hcPastGuards) skips loosely, so bots' other hc calls are
- * not affected. Bringing am and the pack to one version, then restarting the pane, clears it.
+ * Version skew (#1728): am and the pack may run different releases, or a pane may still name a
+ * previous install. isInstalledGuardFolder also skips their shipped guard and shim entries
+ * at recognized install paths. hcKill explains a failure from any guard this CLI reaches.
  */
 function realHcPath() {
   const dirs = [...(process.env.PATH ?? "").split(":"), `${home()}/.local/bin`, dirname(process.execPath)];
   for (const dir of dirs) {
-    if (!dir || isGuardFolder(dir)) continue;
+    if (!dir || isGuardFolder(dir) || isInstalledGuardFolder(dir)) continue;
     const file = `${dir}/hc`;
     try {
       accessSync(file, constants.X_OK);
@@ -349,12 +345,23 @@ async function hcReal(args, { timeout } = {}) {
   return r;
 }
 /**
- * End a pane for one of this CLI's own verbs (restart, rm, a stray pane of a failed start, a
- * --tree helper): the real hc, past the pane's guard and its `hc kill` shim. Those refuse a bot's
- * own `hc kill` unless it is its project's main bot (#955); a restart a member or a lead asks for
- * is this CLI's checked work, as `worker kill` is, and must still end the old pane.
+ * End a pane for a checked CLI verb such as restart or worker kill. The pane's guard or shim
+ * allows direct kills only from a project's main bot (#955). If an unvouched guard fails the
+ * CLI's kill, explain how to resolve the version skew (#1728).
  */
-const hcKill = (terminal, options) => hcReal(["kill", terminal], options);
+async function hcKill(terminal, { timeout } = {}) {
+  const file = realHcPath();
+  const r = await runProgram(hcExecutable(file), ["kill", terminal], { timeout });
+  if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
+  if (r.code === 0 || !file) return r;
+  const dir = dirname(file);
+  let real;
+  try { real = realpathSync(dir); } catch { return r; }
+  const name = basename(real);
+  if ((name !== "guard" && name !== KILL_GUARD_NAME) || !looksLikeGuardFolder(real)) return r;
+  const folder = dir === real ? dir : `${dir} (${real})`;
+  return { ...r, stderr: `the first hc on this pane's PATH is in ${folder}, a guard folder this am cannot vouch for (another version's copy, or one outside the install); update am and the pack to one version, then restart this pane (#1728)` };
+}
 /** `hc <args> --json` through the real hc, parsed; a failed call throws (as hcJson does). */
 async function hcRealJson(args) {
   const r = await hcReal([...args, "--json"]);
@@ -1549,6 +1556,7 @@ export async function briefedLaunch(project, bot, agentKey, argv, appHomeDir = a
   if (!way || agentKeyOfArgv(argv, agents) !== agentKey) return { argv, env: {}, warnings };
   const text = launchBriefingText({
     self: bot,
+    agent: agentKey,
     file: project.file,
     project: project.key,
     projects: localProjectsFor(project, appHomeDir),
@@ -3091,6 +3099,30 @@ function printableHcMessage(text) {
 }
 const report = (warnings) => { for (const w of warnings) process.stderr.write(`am: ${unprinted(w)}\n`); };
 
+function relabelFailureWarning({ terminal, words, result, error }, prefix, warnedRelabels) {
+  if (warnedRelabels) {
+    // Tidy may request the same changes in a different order, or get a different reason.
+    const key = JSON.stringify([terminal, [...words].sort()]);
+    if (warnedRelabels.has(key)) return null;
+    warnedRelabels.add(key);
+    prefix = printableHcMessage(prefix);
+  }
+  const stderr = result?.rawStderr ?? result?.stderr;
+  const output = stderr || (warnedRelabels ? result?.stdout : "");
+  const thrown = error?.message ?? error;
+  const reason = result
+    ? formatHcFailure(result, printableHcMessage(hcFailureMessage(output)))
+    : printableHcMessage(warnedRelabels ? hcFailureMessage(thrown) : thrown).slice(0, HC_FAILURE_MAX) || "no message";
+  return `${prefix} ${reason}`;
+}
+
+async function relabelPane(terminal, words, prefix, warnedRelabels) {
+  let result;
+  try { result = await hc(["label", terminal, ...words]); }
+  catch (error) { return relabelFailureWarning({ terminal, words, error }, prefix, warnedRelabels); }
+  return result.code === 0 ? null : relabelFailureWarning({ terminal, words, result }, prefix, warnedRelabels);
+}
+
 /**
  * Appends one row to the workers ledger (workers.js) with a single O_APPEND write, the file the
  * owner's alone: made 0600, and narrowed to its owner's bits again before every append (a file
@@ -3353,7 +3385,7 @@ async function windowDo(command, args) {
   return r.code === 0 ? null : (r.stderr || r.stdout || `exit ${r.code}`).trim();
 }
 
-async function cmdStart(opts, [ref]) {
+async function cmdStart(opts, [ref], warnedRelabels) {
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   const project = await projectFor(opts);
   const { file, key } = project;
@@ -3375,7 +3407,9 @@ async function cmdStart(opts, [ref]) {
   const held = view.live.get(bot.id) ?? await projectHomeHeld(project, bot);
   const elsewhere = held?.binding.project && held.binding.project !== key ? `, for ${held.binding.project}` : "";
   if (held) return opts.json ? { id: bot.id, running: held.binding.terminal } : `${bot.name} is already running in ${held.binding.terminal}${elsewhere}.`;
-  const seat = await launchSeat(project, bot, { place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined });
+  const seat = await launchSeat(project, bot, {
+    warnedRelabels, place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined,
+  });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   return opts.json ? seatJson(bot, seat) : seat.terminal;
 }
@@ -3622,7 +3656,7 @@ async function briefedOn(machine, project, bot, agentKey, argv, boxHome, guard =
   const way = briefingWay(agentKey);
   const agents = agentTable();
   if (!way || briefingOwnConfig(agentKey) || agentKeyOfArgv(argv, agents) !== agentKey) return { argv, env: {}, warnings: [] };
-  const text = launchBriefingText({ self: bot, file: project.file, guard, isGit: await projectIsGit(project) });
+  const text = launchBriefingText({ self: bot, agent: agentKey, file: project.file, guard, isGit: await projectIsGit(project) });
   const warnings = [];
   let launch = null;
   if (way === "file") {
@@ -4453,7 +4487,8 @@ async function launchSeat(project, bot, over = {}) {
   const tags = seatTags(file, bot.id);
   const logSeat = async (createdMs = started.created_ms) => {
     const unlogged = appendLedger(startRow({ kind: "seat", terminal, pid: started.pid ?? await pidOf(terminal), botId: bot.id, worktree: cwd,
-      project: key, agent: agentKey, model, ...tags, core: await rowCore(), createdMs, session: agentKey === "claude" ? session : null }));
+      project: key, agent: agentKey, model, template: carry[WORKER_TEMPLATE_LABEL] ?? null,
+      ...tags, core: await rowCore(), createdMs, session: agentKey === "claude" ? session : null }));
     if (unlogged) { hook.warnings.push(unlogged); report([unlogged]); }
   };
   if (!over.replacing) await logSeat();
@@ -4472,15 +4507,8 @@ async function launchSeat(project, bot, over = {}) {
     }
   } catch { /* the file can't be read now: the labels it started with stand */ }
   if (words.length) {
-    let reason = null;
-    try {
-      const r = await hc(["label", terminal, ...words]);
-      if (r.code !== 0) reason = formatHcFailure(r, printableHcMessage(hcFailureMessage(r.rawStderr)));
-    } catch (e) {
-      reason = printableHcMessage(e?.message ?? e).slice(0, HC_FAILURE_MAX) || "no message";
-    }
-    if (reason) {
-      const warning = `${terminal}'s labels ${words.join(" ")} weren't set. ${reason}`;
+    const warning = await relabelPane(terminal, words, `${terminal}'s labels ${words.join(" ")} weren't set.`, over.warnedRelabels);
+    if (warning) {
       hook.warnings.push(warning);
       report([warning]); // the hook's warnings were printed before hc run
     }
@@ -4648,12 +4676,15 @@ function workerLedgerRows() {
 }
 
 /** The workers ledger's last seat row for `botId` in project `key`, as the pane it stood for: { address, created_ms, cwd, labels }, or null. */
-function lastSeat(rows, botId, key) {
+function lastSeat(rows, botId, key, agent) {
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const r = rows[i];
     if (r?.event !== "start" || r.kind !== "seat" || r.botId !== botId || !(r.project == null || r.project === key)) continue;
     if (typeof r.terminal !== "string" || !r.terminal) return null;
-    return { address: r.terminal, created_ms: Number.isSafeInteger(r.created_ms) ? r.created_ms : null, cwd: typeof r.worktree === "string" ? r.worktree : null, labels: {} };
+    // #1418: a gone pane's template follows the seat only while it runs the same agent.
+    const labels = r.agent === agent && typeof r.template === "string" && r.template ? { [WORKER_TEMPLATE_LABEL]: r.template } : {};
+    return { address: r.terminal, created_ms: Number.isSafeInteger(r.created_ms) ? r.created_ms : null,
+      cwd: typeof r.worktree === "string" ? r.worktree : null, labels };
   }
   return null;
 }
@@ -5197,7 +5228,7 @@ async function rerunHelpers(plans, parent, say) {
       let tags = seatTags(null, b.bot);
       try { tags = seatTags(loadProject(b.project).file, b.bot); } catch { /* its file can't be read now: no tags */ }
       const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: await pidOf(address), botId: b.bot, worktree: p.cwd, project: b.project,
-        agent: p.agent, model: null, ...tags, core, createdMs, session: p.agent === "claude" ? p.session : null }));
+        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, session: p.agent === "claude" ? p.session : null }));
       if (unlogged) say(unlogged);
     }
     // A session id carried onto the new terminal, any harness (RFC 0021 (f) 5): a session row.
@@ -5267,6 +5298,10 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const planned = helperPlan({ get: h, worker, session: knownSession(h, agentKey)?.session ?? null,
       agents, fresh, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
       launchAgent: revive && isBareShell(h), grants: grantPlan?.dirs ?? [], where: localWhere() });
+    // #1418: an attached helper's native template becomes a label when the seat is rebuilt.
+    if (binding && planned.template && !Object.hasOwn(planned.labels, WORKER_TEMPLATE_LABEL)) {
+      planned.labels[WORKER_TEMPLATE_LABEL] = planned.template;
+    }
     // #1142: a Codex helper run in the launch mode says what its launch withheld; a template
     // worker runs its own command as written and gets nothing of the pack's.
     const templateWorker = Boolean(worker?.template || h.labels?.[WORKER_TEMPLATE_LABEL]);
@@ -6805,7 +6840,9 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   // The old pane's launch and hc template, only to rebuild from the source and to say when they
   // differ from it (#597): a template hc still lists owns the command, with its CURRENT words.
   const oldLaunch = old ? paneCommand(old) : null;
-  const oldTemplate = old ? await paneTemplate(old) : null;
+  // #1418: a gone pane can name its template too. Hermes keeps its own restart path.
+  const templatePane = old ?? (bot.agent === "hermes" ? null : ghost);
+  const oldTemplate = templatePane ? await paneTemplate(templatePane) : null;
   // The folder the replacement starts in: --cwd DIR, else the old pane's folder (#213: a worktree
   // too, where its conversation is), unless it is gone, else the project. Resolved first: the
   // permission file (#884) trusts this folder, not the project, and a symlinked one by realpath.
@@ -7114,7 +7151,7 @@ async function terminalPlace(terminal, project) {
 const noHookThere = (bot, machine) => `${bot.name} runs on ${machine} without its per-turn briefing: the hook needs Automagik Herdr `
   + `installed on ${machine}, which comes next (am machine install ${machine}). Its role and team still come from ${BOTS_PATH}.`;
 
-async function cmdAttach(opts, [ref, terminal]) {
+async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
   if (!terminal) throw new CliError("attach needs a bot and a terminal: am attach <bot> <terminal> [--move].", 2);
   if (terminal.startsWith("-")) throw new CliError(`"${terminal}" isn't a terminal; name one like t7.`, 2);
   const project = await projectFor(opts);
@@ -7175,8 +7212,14 @@ async function cmdAttach(opts, [ref, terminal]) {
   const warnings = [];
   const label = async (t, words) => {
     if (!words.length) return;
+    const message = `the ledger has it, but hc label ${t} ${words.join(" ")} failed:`;
+    if (warnedRelabels) {
+      const warning = await relabelPane(t, words, message, warnedRelabels);
+      if (warning) warnings.push(warning);
+      return;
+    }
     const r = await hc(["label", t, ...words]);
-    if (r.code !== 0) warnings.push(`the ledger has it, but hc label ${t} ${words.join(" ")} failed: ${(r.stderr || r.stdout).trim()}`);
+    if (r.code !== 0) warnings.push(`${message} ${(r.stderr || r.stdout).trim()}`);
   };
   // The labels follow as a display hint: off the old pane, then bot, role, category and a
   // squad copied from the lead (A16) on this one. A label failure only warns.
@@ -7198,7 +7241,7 @@ async function cmdAttach(opts, [ref, terminal]) {
     const argv = get.foreground?.argv;
     const seatAgent = agentKeyOfArgv(argv, agentTable()) ?? (claude ? "claude" : bot.agent ?? null);
     const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: get.foreground?.pid ?? get.pid ?? null, botId: bot.id,
-      worktree: sessionFolder, project: key, agent: seatAgent, model: detectModel(argv, seatAgent), ...seatTags(file, bot.id),
+      worktree: sessionFolder, project: key, agent: seatAgent, model: detectModel(argv, seatAgent), template: paneTemplateName(get), ...seatTags(file, bot.id),
       core: await rowCore(), createdMs: get.created_ms }));
     if (unlogged) hook.warnings.push(unlogged);
   }
@@ -7961,6 +8004,13 @@ async function templateRuns(template, agents) {
   return { runs: templateAgent(hit.command, agents) ?? undefined, command: typeof hit.command === "string" ? hit.command : null };
 }
 
+/** The template name hc gave the pane, or the label a restart leaves on it (#1418). */
+function paneTemplateName(get) {
+  const own = typeof get?.template === "string" && get.template.trim() ? get.template.trim() : null;
+  const labeled = get?.labels?.[WORKER_TEMPLATE_LABEL];
+  return own ?? (typeof labeled === "string" && labeled.trim() ? labeled.trim() : null);
+}
+
 /**
  * The hc template an old pane was started from: `get.template`, else the worker.template label a
  * Restart through a template leaves on its new pane (so the next restart finds it again), with
@@ -7969,9 +8019,7 @@ async function templateRuns(template, agents) {
  * names the template (#597 review F1). Null when the pane names none.
  */
 async function paneTemplate(get) {
-  const own = typeof get?.template === "string" && get.template.trim() ? get.template.trim() : null;
-  const labeled = get?.labels?.[WORKER_TEMPLATE_LABEL];
-  const name = own ?? (typeof labeled === "string" && labeled.trim() ? labeled.trim() : null);
+  const name = paneTemplateName(get);
   if (!name) return null;
   const { list } = await hcTemplates();
   const hit = list?.find((x) => x?.name === name);
@@ -8758,7 +8806,7 @@ async function cmdWorkerKill(opts, panes) {
   }
   // The real hc (in a sandbox, the proxy's socket, which ends only the caller's own worker):
   // the pane's guard refuses a member's own `hc kill`, and this verb is the checked way around it.
-  const r = await hcReal(["kill", address]);
+  const r = await hcKill(address);
   if (r.code !== 0) throw new CliError(`hc kill ${address} failed: ${hcSaid((r.stderr || r.stdout).trim())}`);
   return opts.json ? { terminal: address, ended: true, branch: target.labels?.branch ?? null } : `${address} ended (${bot.name}'s worker${target.labels?.branch ? ` on ${target.labels.branch}` : ""}).`;
 }
@@ -9213,7 +9261,17 @@ function autoSetting(opts, io) {
 
 // ---- tidy (sidebar-rules Group 2) ----
 
-const tidyIo = () => ({ run: runProgram, home: home(), appHome: appHome(), prune: (keys) => unlistProjects(keys) });
+const tidyIo = () => ({ run: runProgram, home: home(), appHome: appHome(), prune: (keys) => unlistProjects(keys),
+  // Read the file again after a command writes it, without importing labels or ending rows.
+  ledger: async () => {
+    const rows = readAttachFile();
+    if (rows === null) return null;
+    const known = [...new Set(rows.filter((row) => row.machine == null).map((row) => row.bot))];
+    const { byBot } = foldAttach(rows);
+    if (!byBot.size) return { bindings: [], known };
+    const core = await coreId();
+    return { bindings: [...byBot.values()].filter((row) => row.core === core), known };
+  } });
 
 /** `tidy`: the plan (tidy.js), read from hc, herdr-app, git and the files; it changes nothing. */
 async function cmdTidy(opts) {
@@ -9228,12 +9286,20 @@ async function cmdTidy(opts) {
  * prune's note only when the command succeeded: a failed one's last stderr line stays its own
  * error (the sidebar shows that line, restart.js restartAnswer).
  */
-async function tidyQuietly() {
+async function tidyQuietly(warnedRelabels) {
+  const warnings = [];
+  const onRelabelFailure = warnedRelabels ? (failure) => {
+    const { terminal, words } = failure;
+    const warning = relabelFailureWarning(failure, `tidy: ${terminal}'s labels ${words.join(" ")} weren't set:`, warnedRelabels);
+    if (warning) warnings.push(warning);
+  } : undefined;
   try {
     const io = tidyIo();
     const actions = tidyPlan(await readState(io, { window: false }), { now: Date.now(), home: io.home, appHome: io.appHome });
-    report(await fixNonVisual(actions.filter((a) => !a.visual), io, { notes: exitAfter.code === 0 }));
+    report(await fixNonVisual(actions.filter((a) => !a.visual), io, { notes: exitAfter.code === 0, onRelabelFailure }));
   } catch (e) { report([`tidy: ${e?.message ?? e}`]); }
+  report(warnings);
+  return warnings;
 }
 const TIDIES = new Set(["start", "restart", "attach", "create"]);
 
@@ -10158,12 +10224,22 @@ export async function main(argv = process.argv.slice(2), io = {}) {
       throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, history, meter, machines and doc.`, 2);
     }
     exitAfter.code = 0;
-    const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest);
+    // Tidy is this computer's window and labels: never after a command on a linked machine.
+    const tidy = TIDIES.has(command) && opts.machine === undefined;
+    const warnedRelabels = tidy && (command === "start" || command === "attach") ? new Set() : undefined;
+    const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest, warnedRelabels);
     if (out === PRINTED) return exitAfter.code;
+    const tidyBeforeJson = warnedRelabels !== undefined && opts.json;
+    if (tidyBeforeJson) {
+      const warnings = await tidyQuietly(warnedRelabels);
+      if (warnings.length) (out.warnings ??= []).push(...warnings);
+    }
     if (opts.json) process.stdout.write(unprinted(`${JSON.stringify(out, null, 2)}\n`));
     else if (out) process.stdout.write(unprinted(`${out}\n`));
-    // Tidy is this computer's window and labels: never after a command on a linked machine.
-    if (TIDIES.has(command) && opts.machine === undefined) { await tidyQuietly(); await recordSessions(); }
+    if (tidy) {
+      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels);
+      await recordSessions();
+    }
     return exitAfter.code;
   } catch (e) {
     const botAction = command === "start" || command === "restart";

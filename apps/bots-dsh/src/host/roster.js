@@ -148,7 +148,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile, group = false, botId } = {}) {
+  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false } = {}) {
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -171,8 +171,13 @@ export function install(rt) {
       }
     }
     const preset = await botPreset(profile, { group })
+    const reserved = readScopeSource === undefined ? undefined
+      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope })
     rt.assertShellChoice?.(undefined, botId)
-    const { sessionId } = await ctx.sessionController.create({ ...place, ...preset })
+    const { sessionId } = await ctx.sessionController.create({
+      ...place, ...preset, ...(reserved === undefined ? {} : { sessionId: reserved }),
+    })
+    if (reserved !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -276,13 +281,13 @@ export function install(rt) {
   // `pickModel` leaves the model to the user: the chat opens on a model card, and the
   // greeting waits until a model is chosen. So does a Bot made when no model it can
   // run on is served.
-  async function createBot(options) {
+  async function createBot(options, { readScopeSource = rt.callerSessionId?.() } = {}) {
     const cleanName = String(options.name ?? '').trim().slice(0, 40)
     const problem = nameProblem(cleanName)
     if (problem !== undefined) throw refusal(problem)
     if (botNameTaken(cleanName)) throw refusal(`A Bot named ${cleanName} already exists`)
     const existing = options.existingSessionId
-    if (existing === undefined) return holdName('bot', cleanName, () => buildBot(cleanName, options))
+    if (existing === undefined) return holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource))
     if (typeof existing !== 'string' || !existing.trim()) throw refusal('An existing Session needs its id')
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) throw refusal(readOnly)
@@ -295,7 +300,7 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -349,9 +354,10 @@ export function install(rt) {
     const permission = existingSessionId !== undefined ? undefined
       : creator !== undefined ? rt.inheritedPermission(creator, opener) ?? state.prefs.permission
         : personPermission
+    if (existingSessionId === undefined && createdBy !== undefined && readScopeSource === undefined) rt.assertNoConfiguredReadScope()
     // A host adapter may already own a configured root Session. Adopt it without creating
     // another Session or moving its workspace; this option is internal, not a user payload.
-    const id = existingSessionId ?? await createSession(cleanName, { dir })
+    const id = existingSessionId ?? await createSession(cleanName, { dir, readScopeSource })
     // Checked against the Session's own tool surface, before the Bot record exists: a name
     // this DSH does not serve refuses the create (the catch below archives the Session).
     if (denyTools) await rt.assertDenyTools(id, denyTools)
@@ -621,16 +627,24 @@ export function install(rt) {
     const flag = patch.private === undefined ? undefined : patch.private === true
     await rt.checkPrivacyChange(bot, { flag, moving, workDir })
     const held = bot.shellHeld !== undefined
+    const entry = actorId === undefined ? 'update-bot' : 'update_bot'
     if (held && patch.shell !== true && (patch.model !== undefined || patch.effort !== undefined)) {
       if (actorId !== undefined || !patch.model || commandCapableAgent(patch.model)) throw refusal(shellHoldText(bot))
       const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
       if (extra.length > 0) throw refusal(`${bot.name} needs a new route, so change only its model in this step.`)
-      await rt.switchRoute(bot.id, patch.model, patch.effort)
+      await rt.switchRoute(bot.id, patch.model, patch.effort, { entry })
       return bot
     }
-    const modelRef = patch.model === undefined ? undefined
-      : patch.model === null || patch.model === '' ? null
-      : await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+    let modelRef = patch.model === '' ? null : patch.model
+    if (modelRef != null) {
+      try {
+        modelRef = await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+      } catch (error) {
+        // Resolution can refuse before the crossing check below.
+        rt.routeUnavailable?.(bot, patch.model, entry, error)
+        throw error
+      }
+    }
     // The shell and the model are one boundary: a Bot without a shell cannot run on an
     // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
     const nextShell = shell === undefined ? bot.shell : shell
@@ -655,7 +669,6 @@ export function install(rt) {
     // own step, and the caller can update them after it.
     const currentModel = bot.model ?? bot.appliedModel
     if (modelRef != null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
-      const entry = actorId === undefined ? 'update-bot' : 'update_bot'
       // The host owns a pinned chat. Refuse before even resolving its agent, including
       // mixed edits whose permission validation could otherwise open that Session.
       if (bot.sessionPinned !== true) {

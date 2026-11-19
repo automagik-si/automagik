@@ -1369,3 +1369,155 @@ test("a scheduler without targets: an agent save carries no target key (#498)", 
     assert.equal("target" in s.yaml()[0], false);
   } finally { s.done(); }
 });
+
+function historyRun(run_id, fields = {}) {
+  return { run_id, automation: targetEntry.name, status: "done", at: "2026-11-19T09:00:00Z", seconds: 3, ...fields };
+}
+
+function historyPanel(automations, history, project = { bots: [] }) {
+  const json = (data) => ({ code: 0, stdout: JSON.stringify(data), stderr: "" });
+  state.exec = async (bin, args) => {
+    if (bin === "am" && args[0] === "ls") return json({ projects: [project] });
+    if (bin === "herdr-automations") {
+      if (args[0] === "version") return { code: 0, stdout: "0.12.1-am.1\n", stderr: "" };
+      if (args[0] === "ls") return json({ automations, scheduler: 1, kinds: ["command"], targets: ["bot", "worker"] });
+      if (args[0] === "history") return json(history);
+      if (args[0] === "seen") {
+        history.find((r) => r.run_id === args[1]).seen = true;
+        return json({});
+      }
+    }
+    return { code: 127, stdout: "", stderr: "not offered" };
+  };
+  return panel();
+}
+
+test("history names bot and worker targets on a second line, including a busy skip (#498)", async () => {
+  const history = [
+    historyRun("bot", { target: targetEntry.target }),
+    historyRun("worker", { target: `worker:${housekeeper.id}` }),
+    historyRun("busy", { target: targetEntry.target, status: "skipped", error: "bot was busy" }),
+  ];
+  const { view, cx } = await historyPanel([targetEntry], history, { bots: [housekeeper] });
+  view.view = { kind: "detail", name: targetEntry.name };
+  const root = index(view.render(cx));
+  const row = nodes.get("h-bot"), target = nodes.get("h-target-bot");
+  assert.ok(row && target);
+  const parent = all(root).find((n) => n.kids.some((k) => k?.__node === row));
+  const at = parent.kids.findIndex((k) => k?.__node === row);
+  assert.equal(parent.kids[at + 1].__node, target);
+  assert.equal(textOf(target), "→ bot Housekeeper");
+  assert.equal(textOf(nodes.get("h-target-worker")), "→ a worker of Housekeeper");
+  assert.equal(textOf(nodes.get("h-busy").kids[0]), "skipped");
+  assert.equal(textOf(nodes.get("h-line-busy")), "bot was busy");
+  assert.equal(textOf(nodes.get("h-target-busy")), "→ bot Housekeeper");
+});
+
+test("history keeps the original run line when there is no valid target (#498)", async () => {
+  const history = [
+    historyRun("legacy"),
+    historyRun("early-failure", { status: "failed", error: "project folder missing" }),
+    historyRun("invalid", { target: "bot:t42" }),
+    historyRun("command", { automation: check.name, result: "3 checks passed" }),
+  ];
+  const { view, draw } = await historyPanel([targetEntry, check], history);
+  view.view = { kind: "detail", name: targetEntry.name };
+  const n = draw();
+  for (const [id, line] of [["legacy", "3s"], ["early-failure", "project folder missing"], ["invalid", "3s"]]) {
+    assert.equal(n.has(`h-target-${id}`), false);
+    assert.equal(textOf(n.get(`h-line-${id}`)), line);
+  }
+  view.view = { kind: "detail", name: check.name };
+  assert.equal(draw().has("h-target-command"), false);
+  assert.equal(textOf(n.get("h-line-command")), "3 checks passed");
+});
+
+test("history loads the current project's roster even after the entry's target is removed (#498)", async () => {
+  const entry = { ...targetEntry, target: undefined, repo: "/current" };
+  const history = [historyRun("old", { target: targetEntry.target })];
+  const { view, cx, draw } = await historyPanel([entry], history, { bots: [housekeeper] });
+  view.view = { kind: "detail", name: entry.name };
+  assert.equal(textOf(draw().get("h-target-old")), "→ bot Housekeeper");
+  await cx.ticks[0](cx);
+  await cx.settle();
+  assert.deepEqual(state.calls.filter(([bin]) => bin === "am"), [["am", "ls", "--json", "--project", entry.repo]]);
+});
+
+test("the history target reads the bot's current terminal and focuses or peeks it (#498)", async () => {
+  const bots = [{ ...housekeeper, terminal: "t1" }];
+  const history = [historyRun("worker", { seen: false, target: `worker:${housekeeper.id}`, terminal: "t2" })];
+  const { view, cx, draw } = await historyPanel([targetEntry], history, { bots });
+  try {
+    view.view = { kind: "detail", name: targetEntry.name };
+    const target = draw().get("h-target-worker");
+    assert.equal(textOf(target), "→ a worker of Housekeeper");
+    bots[0].terminal = "t3";
+    state.panes = [null, { terminal: "t3" }];
+    const callsAt = state.calls.length, runsAt = state.runs.length;
+    view.note = "previous note";
+    target.click({}, cx);
+    await cx.settle();
+    assert.equal(view.note, null);
+
+    state.panes = [{ terminal: "t2" }];
+    target.click({}, cx);
+    await cx.settle();
+    assert.deepEqual(state.runs.slice(runsAt), [["agent.focus", { terminal: "t3" }], ["terminal.peek", { terminal: "t3" }]]);
+    const roster = ["am", "ls", "--json", "--project", targetEntry.repo];
+    assert.deepEqual(state.calls.slice(callsAt), [roster, roster], "both clicks only read the roster");
+  } finally { delete state.panes; }
+});
+
+test("the history target explains unavailable bots and falls back to the id without a roster (#498)", async () => {
+  const bots = [{ ...housekeeper, status: "stopped", terminal: "" }];
+  const history = [historyRun("bot", { target: targetEntry.target })];
+  const project = { bots };
+  const { view, cx, draw } = await historyPanel([targetEntry], history, project);
+  view.view = { kind: "detail", name: targetEntry.name };
+  const target = draw().get("h-target-bot");
+  const runsAt = state.runs.length;
+  for (const [bot, note] of [
+    [bots[0], "Housekeeper is not running. Start it from the sidebar."],
+    [{ ...housekeeper, status: "planned", planned: true }, "Housekeeper is only planned and starts no runs."],
+    [{ ...housekeeper, status: "unreachable", terminal: 1 }, "Housekeeper: unreachable; its terminal is not known."],
+    [housekeeper, "Housekeeper: unknown; its terminal is not known."],
+  ]) {
+    bots[0] = bot;
+    target.click({}, cx);
+    await cx.settle();
+    assert.equal(view.note, note);
+  }
+  bots.length = 0;
+  target.click({}, cx);
+  await cx.settle();
+  assert.equal(view.note, "That bot is no longer in this project's bots.json.");
+
+  project.error = "project unavailable";
+  target.click({}, cx);
+  await cx.settle();
+  assert.equal(view.note, "The project's bots could not be read: project unavailable");
+  assert.equal(textOf(draw().get("h-target-bot")), `→ bot ${housekeeper.id}`);
+  assert.equal(state.runs.length, runsAt);
+});
+
+test("the history row still marks a finished run seen and opens its recorded terminal or detail (#498)", async () => {
+  const history = [historyRun("worker", { seen: false, target: `worker:${housekeeper.id}`, terminal: "t2" })];
+  const { view, cx, draw } = await historyPanel([targetEntry], history, { bots: [{ ...housekeeper, terminal: "t3" }] });
+  try {
+    view.view = { kind: "detail", name: targetEntry.name };
+    state.terminals = [{ address: "t2", state: "live" }];
+    const runsAt = state.runs.length;
+    draw().get("h-worker").click({}, cx);
+    await cx.settle();
+    assert.deepEqual(state.calls.filter(([, cmd]) => cmd === "seen"), [[view.bin, "seen", "worker"]]);
+    assert.deepEqual(state.runs.slice(runsAt), [["pane.focus", { terminal: "t2" }]]);
+
+    const row = draw().get("h-worker");
+    state.terminals = [];
+    view.view = { kind: "list" };
+    row.click({}, cx);
+    await cx.settle();
+    assert.deepEqual(view.view, { kind: "detail", name: targetEntry.name });
+    assert.equal(state.runs.length, runsAt + 1);
+  } finally { delete state.terminals; }
+});

@@ -102,6 +102,60 @@ test('isolated account controls use owner actions, sanitize identities and valid
     assert.deepEqual(h.updates, [])
   })
 
+test('the account view names this installation, so a person can tell whose Bot sign-in it is', async () => {
+  const h = fixture()
+  h.acp.authScope = 'isolated'
+  h.acp.account = async () => ({ signedIn: true, account: { email: 'bot@example.test' } })
+  h.acp.terminalAccount = async () => undefined
+  const read = () => h.actions['cli-login-accounts']({})
+  // A host that does not say which installation it is keeps the old answer.
+  assert.equal(Object.hasOwn(await read(), 'installation'), false)
+  const get = h.rt.ctx.get
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: ' desktop ' } : get(name))
+  assert.equal((await read()).installation, 'desktop')
+  // A name is a name: control characters go, an empty one is not shown at all.
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: '\u0000 private\n' } : get(name))
+  assert.equal((await read()).installation, 'private')
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: ' \u0000 ' } : get(name))
+  assert.equal((await read()).installation, undefined)
+  // Asking the host for its profile must never fail the account read or echo why.
+  h.rt.ctx.get = name => {
+    if (name === 'profileContext') throw new Error('private-profile-path')
+    return get(name)
+  }
+  const unnamed = await read()
+  assert.equal(unnamed.installation, undefined)
+  assert.doesNotMatch(JSON.stringify(unnamed), /private-profile-path/)
+})
+
+test('a refused account change says which refusal it was, never the CLI text', async () => {
+  const h = fixture()
+  h.acp.authScope = 'isolated'
+  // acp-dsh's own fixed sentence is the more precise one: another live session holds it.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('Close other Automagik sessions before changing the Bot account.'), { code: 'acp-account/busy' })
+  }
+  await assert.rejects(h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }), {
+    code: 'bot/refused',
+    message: 'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.',
+  })
+  // A host that carries only the code still names the reason, and the CLI's text never fits.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('private-cli-output token-secret'), { code: 'acp-account/busy' })
+  }
+  const error = await h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }).catch(failure => failure)
+  assert.equal(error.message, 'The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.')
+  assert.doesNotMatch(JSON.stringify({ message: error.message, code: error.code }), /private-cli-output|token-secret/)
+  // A refusal this side has no sentence for keeps the card's own line.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('private-cli-output'), { code: 'acp-account/not-a-known-refusal' })
+  }
+  await assert.rejects(h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }), {
+    code: 'bot/refused',
+    message: 'Account change failed. Close other app windows and try again.',
+  })
+})
+
 test('any Bot view gets the live attempt back; the opener is only its label, and no owner capability exists', async () => {
   const h = fixture()
   const first = await h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex' })

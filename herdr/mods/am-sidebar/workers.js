@@ -825,13 +825,13 @@ const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
  * made the worktree. `swap`: the task ran the bot's other arm (planned swaps); `override`: the
  * bot picked the agent, model, effort or template itself; `override_requested`: on a swap task,
  * the { agent?, model?, effort? } it asked for and didn't get, else null. `pid` is the
- * terminal's foreground pid when hc gave one. `template`: the hc template a worker runs (its
- * agent, model and effort are then null), else null. `role`: a worker's role (ROLES), a seat's
- * pane role at launch (launchArgs.js roleOf: main, captain or a rank), else null.
+ * terminal's foreground pid when hc gave one. `template`: the hc template a worker or seat runs
+ * (#1418), else null. A template worker's agent, model and effort are null. `role`: a worker's
+ * role (ROLES), a seat's pane role at launch (launchArgs.js roleOf: main, captain or a rank), else null.
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. A seat's worker fields are null or false.
+ * --session-id, or the one it resumed), else null. A seat's worker-only fields are null or false.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
   template, role, swap, override, overrideRequested, core, createdMs, squad, session, at }) {

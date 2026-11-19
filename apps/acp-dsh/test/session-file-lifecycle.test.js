@@ -55,16 +55,71 @@ async function world(t, { env = {}, own = false, level = 'read-only' } = {}) {
   t.after(async () => { adapter.dispose(); scope.dispose(); await ctx.root.fiber.dispose(); rmSync(root, { recursive: true, force: true }) })
   const events = () => existsSync(trace) ? readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
   const step = (messages, signal) => collect(adapter.stream(markAgentLoopRequest({ sessionId: 'chat', provider: PROVIDER, model: 'default', messages, signal })))
-  const consent = async () => {
-    await step([said('Open the image, then an unrelated action.')])
+  const approveMirror = async () => {
     const live = adapter.live.get('chat'), tool = live.run.tools.get('native-image'), callId = [...live.calls][0]
     const exec = { agent, callId, name: TOOL_NAME }
     const result = await adapter.tool.execute(callArguments(tool), exec)
     adapter.refusedFirst(exec) // the existing tools/result observer releases the mirror row
     return { live, result, callId, owner: live.fileOwner }
   }
-  return { adapter, agent, session, current, spec, requests, launches, events, step, consent, env, root }
+  const consent = async () => {
+    await step([said('Open the image, then an unrelated action.')])
+    return approveMirror()
+  }
+  return { adapter, agent, session, current, spec, requests, launches, events, step, consent, approveMirror, env, root }
 }
+
+test('a dead agent is remade with the same session-file owner', { timeout: 10000 }, async t => {
+  const w = await world(t, { env: { FILE_QUIET: '1' } })
+  const first = await w.step([said('First turn.')])
+  assert.equal(first.at(-1).reason.kind, 'stop')
+  const live = w.adapter.live.get('chat'), owner = live.fileOwner
+  await live.run.stop()
+  assert.equal(w.adapter.live.get('chat'), live)
+
+  const second = await w.step([said('Next turn.')])
+  assert.equal(second.at(-1).reason.kind, 'stop', JSON.stringify(second.at(-1)))
+  assert.equal(w.events().filter(row => row.event === 'prompt').length, 2)
+  assert.equal(w.adapter.live.get('chat').fileOwner, owner)
+  assert.equal(w.adapter.sessionFiles.valid(owner), true)
+})
+
+test('a prompt that ignores cancel is remade with the same session-file owner', { timeout: 10000 }, async t => {
+  const w = await world(t)
+  w.adapter.cancelWaitMs = 30
+  const first = await w.step([said('Open the outside image.')])
+  assert.equal(first.at(-1).reason.kind, 'tool-calls')
+  const live = w.adapter.live.get('chat'), owner = live.fileOwner
+  assert.equal(live.run.busy, true)
+  w.env.FILE_QUIET = '1'
+
+  const second = await w.step([said('Next turn.')])
+  assert.equal(second.at(-1).reason.kind, 'stop', JSON.stringify(second.at(-1)))
+  assert.equal(w.events().filter(row => row.event === 'prompt').length, 2)
+  assert.equal(w.adapter.live.get('chat').fileOwner, owner)
+  assert.equal(w.adapter.sessionFiles.valid(owner), true)
+})
+
+test('a grant staged during cancellation prevents the replacement prompt', { timeout: 10000 }, async t => {
+  const w = await world(t)
+  const first = await w.step([said('Open the outside image.')])
+  assert.equal(first.at(-1).reason.kind, 'tool-calls')
+  const live = w.adapter.live.get('chat'), owner = live.fileOwner
+  const cancel = live.run.cancel.bind(live.run)
+  let approval
+  t.mock.method(live.run, 'cancel', async () => {
+    await cancel()
+    approval = await w.approveMirror()
+  })
+  w.env.FILE_QUIET = '1'
+
+  const second = await w.step([said('Next turn.')])
+  assert.match(approval.result.text, /has not been opened/)
+  assert.equal(second.at(-1).reason.kind, 'error')
+  assert.match(JSON.stringify(second.at(-1)), /Image permission changed during startup/)
+  assert.equal(w.events().filter(row => row.event === 'prompt').length, 1)
+  assert.equal(w.adapter.sessionFiles.valid(owner), false)
+})
 
 test('real ACP lifecycle: session consent cancels old process; unchanged tool-result guard never spawns; only next user selects exact acknowledged mode', { timeout: 10000 }, async t => {
   const w = await world(t)

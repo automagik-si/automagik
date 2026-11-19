@@ -1209,7 +1209,7 @@ export function install(rt) {
         if (!job.moved) {
           // Restore before dropping the switch marker so a second pick sees the kept route.
           if (routeChange.restore()) await rt.save()
-          routeChange.note('rolled back')
+          routeChange.note('rolled back', job.notServed)
         } else if (failed) routeChange.note('failed', 'fresh conversation did not finish')
         else if (awaiting.get(job.freshId)?.job !== job) routeChange.note('completed')
       }
@@ -1511,6 +1511,22 @@ export function install(rt) {
     const route = session?.requestHeader()?.config
     return route?.provider && route?.model ? { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort } : undefined
   }
+
+  // A route change must not open on the plain model fallback from a stale catalog.
+  async function routeTarget(bot, job) {
+    if (job.routeChange === undefined || typeof rt.catalog !== 'function') return { served: true }
+    const want = bot.model
+    let entries
+    try {
+      entries = await rt.catalog({ fresh: true, remember: false })
+    } catch {
+      return { served: false, reason: 'target availability unknown', want }
+    }
+    return entries.some(entry => entry.ref === want)
+      ? { served: true, want }
+      : { served: false, reason: 'target not served', want }
+  }
+
   // It answers whether the route was selected, and records what the fresh part then runs on.
   // The group's own Session has no Bot: `name` is the group's then, and nothing is recorded.
   const selectRoute = (bot, sessionId, { ref, effort }, name = bot?.name) => rt.selectSessionModel(sessionId, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
@@ -1585,10 +1601,26 @@ export function install(rt) {
     if (signal.aborted) throw signal.reason
     const dir = rt.workDirOf(job)
     const intended = dir !== undefined && await rt.isFolder(dir) ? dir : rt.teamFolder()
-    const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, { dir, group: room !== undefined, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}) })
-    const picked = await freshRoute(bot, session, job.target)
+    const routeChange = job.routeChange !== undefined && bot !== undefined
+    if (routeChange) {
+      const target = await routeTarget(bot, job)
+      if (!target.served) {
+        job.notServed = target.reason
+        return
+      }
+    }
+    const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, {
+      dir, group: room !== undefined, botId: job.botId, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+      ...(job.fresh ? {} : { readScopeSource: session.id, continueReadScope: true }),
+    })
+    // The catalog can change while the Session is being made.
+    const picked = routeChange && bot.model === job.target
+      ? { ref: job.target, effort: await rt.desiredEffort(bot, job.target) }
+      : await freshRoute(bot, session, job.target)
+    const applied = routeChange ? { appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort } : undefined
     const selected = picked === undefined || await selectRoute(bot, freshId, picked, name)
     if (job.routeChange !== undefined && !selected) {
+      if (routeChange) job.notServed = (await routeTarget(bot, job)).reason
       await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
         .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', name, error))
       return
@@ -1604,9 +1636,28 @@ export function install(rt) {
       if (bot !== undefined) await rt.assertNotOffCli?.(bot, freshId, undefined, { owner: { bot, room }, unselected: !selected && job.target === undefined })
     } catch (error) {
       rt.warn('ds-bot: no fresh part for %s: %s', name, error?.message ?? error)
+      if (routeChange) job.notServed = (await routeTarget(bot, job)).reason
       await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
         .catch(failure => rt.warn('ds-bot: unused fresh part of %s not archived: %s', name, failure))
       return
+    }
+    if (applied !== undefined) {
+      const target = await routeTarget(bot, job)
+      if (!target.served) {
+        await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
+          .catch(error => rt.warn('omni-ui: unused fresh part of %s not archived: %s', name, error))
+        // A newer choice can keep the rollback from restoring the Bot's record.
+        let changed = false
+        for (const [key, value] of Object.entries(applied)) {
+          if (bot[key] === value) continue
+          if (value === undefined) delete bot[key]
+          else bot[key] = value
+          changed = true
+        }
+        job.notServed = target.reason
+        if (changed) await rt.save()
+        return
+      }
     }
     // The fresh part took several awaits: a Bot or group deleted meanwhile, a member that
     // left, or a part that is no longer the current one gets no fresh part.
@@ -1650,7 +1701,8 @@ export function install(rt) {
     await rt.save()
     // A model the user picked until now went to the earlier part, which was still the
     // Bot's; from here on a change goes to the fresh one.
-    const now = await freshRoute(bot, session, job.target)
+    let now = await freshRoute(bot, session, job.target)
+    if (routeChange && now?.ref !== bot.model) now = undefined
     if (now !== undefined && (now.ref !== picked?.ref || now.effort !== picked?.effort)) await selectRoute(bot, freshId, now, name)
     if (job.failed !== undefined) rescued.set(freshId, job.bare ? 'bare' : 'carried')
     job.freshId = freshId
@@ -2433,7 +2485,7 @@ export function install(rt) {
 
   // A held route is never asked to generate a handoff. Keep the hold published until
   // the replacement state is on disk, and retain the earlier parts for reading.
-  async function leaveShellHold(bot, model, effort) {
+  async function leaveShellHold(bot, model, effort, entry = 'switch-route') {
     if (rt.pickingModel?.(bot.id)) throw refused('busy', `${bot.name} is already changing models.`)
     if (rt.hostOwned?.(bot) || ![undefined, 'omni', 'genie', 'dsh'].includes(bot.kind)) {
       throw refused('shell', 'Turn on this Bot’s shell to continue using its host’s model.')
@@ -2450,7 +2502,13 @@ export function install(rt) {
         }
       }
       check()
-      const target = await rt.resolveModel(model, { remember: false, keep: bot.model })
+      let target
+      try {
+        target = await rt.resolveModel(model, { remember: false, keep: bot.model })
+      } catch (error) {
+        routeUnavailable(bot, model, entry, error)
+        throw error
+      }
       const route = splitRef(target)
       if (route === undefined || commandCapableAgent(target)) throw refused('shell', shellHoldText(bot))
       await rt.assertModelAccess?.(target)
@@ -2510,6 +2568,7 @@ export function install(rt) {
       } else {
         freshId = await rt.createSession(bot.name, {
           dir: rt.workDirOf({ botId: bot.id }), ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+          readScopeSource: oldId, continueReadScope: true,
         })
         try {
           check()
@@ -2546,6 +2605,16 @@ export function install(rt) {
     })
   }
 
+  // A missing model can stop a crossing before the usual route checks run.
+  function routeUnavailable(bot, requested, entry, error) {
+    if (error?.modelUnavailable !== true) return
+    const from = bot.model ?? bot.appliedModel
+    const wanted = String(requested ?? '').trim()
+    if (typeof from === 'string' && splitRef(wanted)?.model && crossesHarness(from, wanted)) {
+      routeAttempt(bot, from, wanted, entry)('refused', 'not available')
+    }
+  }
+
   async function resolveRouteAgent(bot, note) {
     try {
       const agent = await rt.resolveAgent(rt.chatOf(bot.id))
@@ -2574,7 +2643,7 @@ export function install(rt) {
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
     if (bot.shellHeld !== undefined) {
       if (commandCapableAgent(model)) throw refused('shell', shellHoldText(bot))
-      return leaveShellHold(bot, model, effort)
+      return leaveShellHold(bot, model, effort, entry)
     }
     const current = bot.model ?? bot.appliedModel
     const note = routeAttempt(bot, current, model, entry)
@@ -2927,7 +2996,7 @@ export function install(rt) {
     return true
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
     // A fresh part still waiting for its first answer: its failure goes back with the part.
     awaitingFirstAnswer: id => awaiting.has(id) })
 }
