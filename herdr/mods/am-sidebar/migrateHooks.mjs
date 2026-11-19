@@ -696,6 +696,7 @@ export function hooksRunning(projects, { scripts = [], runners = [], git = runGi
  * loaded; and, after a move forward, how a project the pack doesn't know gets the new hook. A run
  * that crossed the rename (`hooks.crossed`, update.mjs moveHooks) always warns, even with no file
  * rewritten. install.sh, `update.mjs install|update|repair|rollback` and `automagik-herdr update` print it.
+ * A suppressed notice (none) has one line of its own, hooksNoticeSuppressed below.
  */
 export function hooksNotice(hooks) {
   const forward = hooks?.direction === "forward";
@@ -711,6 +712,20 @@ export function hooksNotice(hooks) {
       : "A Claude session already running in those projects keeps the hook it loaded until it is restarted. Restart the bot: am restart <bot> (or the bot row's Restart).",
     ...(forward ? ["Projects the pack doesn't know about were not rewritten and get no briefing. In one, run `am start <bot>` or `am attach <bot>` (either writes the new hook), or open it as a space in Herdr and run the installer again."] : []),
   ];
+}
+
+/**
+ * The one-line diagnostic for a suppressed hooks notice (#1250), logged only with the pack's
+ * AUTOMAGIK_HERDR_DIAG=1 switch on (the install e2e rows set it): a suppressed notice is the normal
+ * case, so a person's run never prints it. Its fields (direction, crossed and the rewritten-file
+ * count) name why the run said nothing, so a report of a missing notice is not silence. None when
+ * the notice prints.
+ */
+export function hooksNoticeSuppressed(hooks) {
+  if (hooksNotice(hooks).length) return null;
+  const forward = hooks?.direction === "forward";
+  const files = (forward ? hooks.rewritten : hooks?.direction === "back" ? hooks.restored : null) ?? [];
+  return `hooks: notice suppressed (direction=${hooks?.direction ?? "none"}, crossed=${hooks?.crossed === true}, rewritten=${files.length})`;
 }
 
 // ---- the entry point and the CLI link ----
