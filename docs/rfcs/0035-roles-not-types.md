@@ -323,7 +323,8 @@ Each delivery is plugin-only (3.N.P), is complete for its users at merge (or hid
 team-level roles setting that P1 introduces), and leaves every Bot's own settings untouched. The
 roles setting is a team-level flag in `state.prefs`, not a Bot setting and not the free-text
 `bot.role` label; `dev` has neither the flag nor a roles group in Bot settings. The acceptance
-check is the one test or observation that proves it; the rollback says what a revert does.
+check to build for each delivery is the one test or observation that proves it; the rollback
+says what a revert does.
 
 ### P1 - one Bot, one Role picker (unchanged)
 
@@ -339,7 +340,7 @@ P1, the temporary install action in P2, and the Roles section and chip in P3.
 
 - **Acceptance:** an ordinary Bot shows Role: none and keeps its model, permission, folder and
   Session; a Genie Bot still grants a wish and draws its wish rows; setting the role to none
-  removes the rows and the tool and changes nothing else. One host test covers both.
+  removes the rows and the tool and changes nothing else. One host test to build covers both.
 - **Rollback:** the role display and the picker are additive; turning roles off returns every
   Bot to its kind's current behaviour. No data is rewritten.
 
@@ -410,8 +411,8 @@ being created and is migrated.
 - **Acceptance:** a Bot with the Genie role grants a wish exactly as a Genie Bot does today,
   including the wish rows and the task level rule; a team with an old `kind: 'genie'` migrates
   with its wishes and Session intact; an ordinary Bot without the role has no wish rows and no
-  `grant_wish`; detaching removes both. The migration test reads a state file written by the
-  previous release.
+  `grant_wish`; detaching removes both. The migration test to build reads a state file written
+  by the previous release.
 - **Rollback:** restore `kind` from the record and leave the package installed; the Bot keeps
   its Session and wishes. The role's tools are the same, so a rollback changes the record, not
   the work.
