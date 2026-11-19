@@ -10,7 +10,9 @@
  *                  remote-tracking refs are never consulted: a stale `origin/*` cannot hide a
  *                  commit the remote no longer advertises. A copy whose local-only commits all
  *                  touch only handoffs/ or docs/ is report-only: those files are copied into
- *                  --preserve before the copy goes
+ *                  --preserve before the copy goes. A symlink is carried as a link, never as
+ *                  its target's bytes. FIFOs, sockets and devices cannot be carried, so a copy
+ *                  that holds one is kept and the path and kind are named
  *   3. idle        nothing in the copy changed in the last --idle-minutes (default 30)
  *   4. unlocked    no `*.lock` file anywhere under the copy's git dir or common dir
  *
@@ -29,8 +31,8 @@
  * 2 invalid usage; 3 a removal or prune failed after a copy was judged removable.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync,
-  rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync,
+  rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -366,17 +368,181 @@ function worktreeInfo(copy, options) {
   return { method: 'worktree-remove', owner };
 }
 
-/** The blob `path` had at `sha`; `missing` when the commit did not change it to a file. */
-function blobAt(copy, sha, path) {
+/** The git tree entry at `sha:path`; `missing` when the commit does not have that path. */
+function treeEntryAt(copy, sha, path) {
   const tree = runGit(copy, ['ls-tree', '-z', sha, '--', path]);
   if (!tree.ok) return { error: `cannot read ${sha.slice(0, 12)}:${path}` };
   const record = tree.out.split('\0').find(Boolean);
   if (!record) return { missing: true };
   const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(record);
-  if (!match || match[2] !== 'blob' || match[1] === '120000') return { missing: true };
-  const blob = runGitBuffer(copy, ['cat-file', 'blob', match[3]]);
+  if (!match) return { error: `cannot read ${sha.slice(0, 12)}:${path}` };
+  return { mode: match[1], type: match[2], object: match[3] };
+}
+
+/**
+ * The blob `path` had at `sha`; `missing` when the commit did not change it to a blob. A symlink
+ * is its target path, never the target's bytes. A submodule gitlink or an unknown mode is
+ * `unsupported`: it cannot be carried into the preserve tree and keeping the copy is the answer.
+ */
+function blobAt(copy, sha, path) {
+  const entry = treeEntryAt(copy, sha, path);
+  if (entry.error) return { error: entry.error };
+  if (entry.missing) return { missing: true };
+  if (entry.type === 'commit') return { unsupported: 'submodule' };
+  if (entry.type !== 'blob') return { unsupported: entry.type };
+  const blob = runGitBuffer(copy, ['cat-file', 'blob', entry.object]);
   if (!blob.ok) return { error: `cannot read blob of ${sha.slice(0, 12)}:${path}` };
-  return { body: blob.out, mode: match[1] === '100755' ? 0o755 : 0o644 };
+  if (entry.mode === '120000') return { symlink: blob.out.toString('utf8') };
+  if (entry.mode === '100644' || entry.mode === '100755') {
+    return { body: blob.out, mode: entry.mode === '100755' ? 0o755 : 0o644 };
+  }
+  return { unsupported: `mode-${entry.mode}` };
+}
+
+/** The kind of a working-tree entry that is neither a file, a directory nor a symlink. */
+function entryKind(info) {
+  if (info.isFIFO()) return 'fifo';
+  if (info.isSocket()) return 'socket';
+  if (info.isBlockDevice()) return 'block-device';
+  if (info.isCharacterDevice()) return 'character-device';
+  return 'unknown';
+}
+
+/**
+ * What the working tree under handoffs/ and docs/ holds that git blobs cannot describe. Symlinks
+ * are carried as links and an empty directory is recreated, because git cannot record either
+ * fact. FIFOs, sockets, devices and anything else non-regular cannot be carried, so they are
+ * reported for a keep instead of disappearing with the copy. Symlinks are never followed.
+ */
+function scanPreservedTree(copy) {
+  const links = [];
+  const emptyDirs = [];
+  const unpreservable = [];
+  for (const prefix of PRESERVED_PREFIXES) {
+    const root = join(copy, prefix);
+    let info;
+    try {
+      info = lstatSync(root);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      return { error: `cannot read ${prefix}: ${error.message}` };
+    }
+    if (info.isSymbolicLink()) {
+      try {
+        links.push({ path: prefix, target: readlinkSync(root) });
+      } catch (error) {
+        return { error: `cannot read link ${prefix}: ${error.message}` };
+      }
+      continue;
+    }
+    if (!info.isDirectory()) {
+      if (!info.isFile()) unpreservable.push({ path: prefix, kind: entryKind(info) });
+      continue;
+    }
+    const stack = [{ abs: root, rel: prefix }];
+    while (stack.length) {
+      const { abs, rel } = stack.pop();
+      let children;
+      try {
+        children = readdirSync(abs);
+      } catch (error) {
+        return { error: `cannot read ${rel}: ${error.message}` };
+      }
+      if (!children.length) emptyDirs.push({ path: rel });
+      for (const child of children) {
+        const childPath = `${rel}/${child}`;
+        const childAbs = join(abs, child);
+        let childInfo;
+        try {
+          childInfo = lstatSync(childAbs);
+        } catch (error) {
+          return { error: `cannot read ${childPath}: ${error.message}` };
+        }
+        if (childInfo.isSymbolicLink()) {
+          try {
+            links.push({ path: childPath, target: readlinkSync(childAbs) });
+          } catch (error) {
+            return { error: `cannot read link ${childPath}: ${error.message}` };
+          }
+        } else if (childInfo.isDirectory()) {
+          stack.push({ abs: childAbs, rel: childPath });
+        } else if (!childInfo.isFile()) {
+          unpreservable.push({ path: childPath, kind: entryKind(childInfo) });
+        }
+      }
+    }
+  }
+  links.sort((a, b) => a.path.localeCompare(b.path));
+  emptyDirs.sort((a, b) => a.path.localeCompare(b.path));
+  unpreservable.sort((a, b) => a.path.localeCompare(b.path));
+  return { links, emptyDirs, unpreservable };
+}
+
+/** The working-tree facts that must be copied into the preserve tree, as preserve entries. */
+function worktreePreserved(special) {
+  return [
+    ...special.links.map(
+      (link) => ({ source: 'worktree', path: link.path, kind: 'symlink', target: link.target })),
+    ...special.emptyDirs.map(
+      (dir) => ({ source: 'worktree', path: dir.path, kind: 'dir' })),
+  ].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/** The commit-preserved paths that are regular files or symlinks; an unsupported one is named. */
+function classifyPreserved(copy, preserved) {
+  const files = [];
+  for (const item of preserved.values()) {
+    const entry = treeEntryAt(copy, item.sha, item.path);
+    if (entry.error) return { error: entry.error };
+    if (entry.missing) continue;
+    if (entry.type === 'commit') return { unsupported: { path: item.path, kind: 'submodule' } };
+    if (entry.type !== 'blob') return { unsupported: { path: item.path, kind: entry.type } };
+    if (entry.mode === '120000') files.push({ ...item, kind: 'symlink' });
+    else if (entry.mode === '100644' || entry.mode === '100755') {
+      files.push({ ...item, kind: 'file' });
+    } else return { unsupported: { path: item.path, kind: `mode-${entry.mode}` } };
+  }
+  return { files };
+}
+
+/**
+ * A preserved symlink cannot also carry preserved paths below it: one ref may hold a link where
+ * another holds a directory. Carrying both would write through the link, so the copy is kept.
+ */
+function preserveConflict(files) {
+  for (const link of files) {
+    if (link.kind !== 'symlink') continue;
+    const below = files.find((file) => file !== link && file.path.startsWith(`${link.path}/`));
+    if (below) return { path: link.path, other: below.path };
+    const above = files.find((file) => file !== link && link.path.startsWith(`${file.path}/`));
+    if (above) return { path: link.path, other: above.path };
+  }
+  return null;
+}
+
+/** The first symlink ancestor of `relative` inside `target`; writing below it would escape. */
+function linkAncestor(target, relative) {
+  let current = target;
+  const parts = relative.split('/');
+  for (const part of parts.slice(0, -1)) {
+    current = join(current, part);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return current;
+    } catch {
+      return null; // the missing ancestor is created below the preserve target
+    }
+  }
+  return null;
+}
+
+/** Remove whatever is at a preserve destination, never following a link. */
+function removeAt(destination) {
+  try {
+    lstatSync(destination);
+  } catch {
+    return;
+  }
+  rmSync(destination, { recursive: true, force: true });
 }
 
 /** Copy the local-only files out of the commits themselves, then record those commits. */
@@ -385,18 +551,43 @@ function preserveFiles(copy, entry, options) {
   const files = entry.preserveFiles
     ?? (entry.preservePaths ?? []).map((path) => ({ sha: entry.sha, path }));
   try {
-    for (const { sha, path } of files) {
-      if (!safeRelativePath(path)) continue;
-      const blob = blobAt(copy, sha, path);
+    for (const file of files) {
+      if (!safeRelativePath(file.path)) continue;
+      const destination = join(target, file.path);
+      const blocker = linkAncestor(target, file.path);
+      if (blocker) {
+        return { ok: false, unsupported: true,
+          error: `${file.path} (preserved link ${blocker} is in the way)` };
+      }
+      if (file.source === 'worktree') {
+        if (file.kind === 'dir') {
+          mkdirSync(destination, { recursive: true });
+          continue;
+        }
+        mkdirSync(dirname(destination), { recursive: true });
+        removeAt(destination);
+        symlinkSync(file.target, destination);
+        continue;
+      }
+      const blob = blobAt(copy, file.sha, file.path);
       if (blob.error) return { ok: false, error: blob.error };
+      if (blob.unsupported) {
+        return { ok: false, unsupported: true, error: `${file.path} (${blob.unsupported})` };
+      }
       if (blob.missing) continue;
-      const destination = join(target, path);
       mkdirSync(dirname(destination), { recursive: true });
-      writeFileSync(destination, blob.body);
-      chmodSync(destination, blob.mode);
+      removeAt(destination);
+      if (blob.symlink !== undefined) {
+        symlinkSync(blob.symlink, destination);
+      } else {
+        writeFileSync(destination, blob.body);
+        chmodSync(destination, blob.mode);
+      }
     }
     mkdirSync(target, { recursive: true });
-    writeFileSync(join(target, PRESERVE_RECORD), `${entry.localCommits.join('\n')}\n`);
+    if (entry.localCommits?.length) {
+      writeFileSync(join(target, PRESERVE_RECORD), `${entry.localCommits.join('\n')}\n`);
+    }
     return { ok: true, target };
   } catch (error) {
     return { ok: false, error: error.message };
@@ -417,6 +608,12 @@ function inspect(copy, options, cache) {
   const head = runGit(copy, ['rev-parse', '--verify', 'HEAD']);
   if (!head.ok) return keep(entry, 'no-head', 'HEAD does not resolve to a commit');
   entry.sha = head.out;
+  const special = scanPreservedTree(copy);
+  if (special.error) return keep(entry, 'inspection-failed', special.error);
+  if (special.unpreservable.length) {
+    const first = special.unpreservable[0];
+    return keep(entry, 'unpreservable', `${first.path} (${first.kind})`, true);
+  }
   const status = runGit(copy,
     ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all']);
   if (!status.ok) return keep(entry, 'inspection-failed', status.err || 'git status failed');
@@ -451,6 +648,17 @@ function inspect(copy, options, cache) {
   }
   const local = [...bySha.keys()];
   if (!local.length) {
+    if (special.links.length || special.emptyDirs.length) {
+      const files = worktreePreserved(special);
+      const conflict = preserveConflict(files);
+      if (conflict) {
+        return keep(entry, 'unpreservable',
+          `${conflict.path} (symlink conflicts with ${conflict.other})`, true);
+      }
+      entry.localCommits = [];
+      entry.preserveFiles = files;
+      entry.preservePaths = files.map((file) => file.path).sort();
+    }
     const info = worktreeInfo(copy, options);
     if (info.error) return keep(entry, info.reason ?? 'worktree-unresolved', info.error);
     entry.method = info.method;
@@ -481,18 +689,57 @@ function inspect(copy, options, cache) {
       `ref ${first.ref} carries unpublished product change ` +
       `${first.sha.slice(0, 12)}:${first.path}`, true);
   }
+  const classified = classifyPreserved(copy, preserved);
+  if (classified.error) return keep(entry, 'inspection-failed', classified.error);
+  if (classified.unsupported) {
+    return keep(entry, 'unpreservable',
+      `${classified.unsupported.path} (${classified.unsupported.kind})`, true);
+  }
+  const files = new Map(classified.files.map((file) => [file.path, file]));
+  for (const file of worktreePreserved(special)) {
+    if (!files.has(file.path)) files.set(file.path, file);
+  }
+  const conflict = preserveConflict([...files.values()]);
+  if (conflict) {
+    return keep(entry, 'unpreservable',
+      `${conflict.path} (symlink conflicts with ${conflict.other})`, true);
+  }
   const info = worktreeInfo(copy, options);
   if (info.error) return keep(entry, info.reason ?? 'worktree-unresolved', info.error);
   entry.method = info.method;
   if (info.owner) entry.owner = info.owner;
   entry.localCommits = local;
-  entry.preserveFiles = [...preserved.values()];
-  entry.preservePaths = [...preserved.keys()].sort();
+  entry.preserveFiles = [...files.values()];
+  entry.preservePaths = [...files.keys()].sort();
   return markForRemoval(entry, 'local-only-handoffs', options);
 }
 
-/** Re-run the cheap gates on a plain clone just before rm -rf; git re-checks a worktree. */
+/** Re-run the cheap gates just before a removal; git re-checks a worktree, git status a clone. */
 function recheck(entry) {
+  const special = scanPreservedTree(entry.path);
+  if (special.error) {
+    return { reason: 'inspection-failed', detail: `recheck: ${special.error}` };
+  }
+  if (special.unpreservable.length) {
+    const first = special.unpreservable[0];
+    return { reason: 'unpreservable', detail: `recheck: ${first.path} (${first.kind})`,
+      lostWork: true };
+  }
+  if (special.links.length || special.emptyDirs.length) {
+    const files = new Map((entry.preserveFiles ?? []).map((file) => [file.path, file]));
+    for (const file of worktreePreserved(special)) {
+      if (!files.has(file.path)) files.set(file.path, file);
+    }
+    const conflict = preserveConflict([...files.values()]);
+    if (conflict) {
+      return { reason: 'unpreservable',
+        detail: `recheck: ${conflict.path} (symlink conflicts with ${conflict.other})`,
+        lostWork: true };
+    }
+    entry.preserveFiles = [...files.values()];
+    entry.preservePaths = [...files.keys()].sort();
+    entry.localCommits ??= [];
+  }
   if (entry.method !== 'rm-rf') return null;
   const gitDir = runGit(entry.path, ['rev-parse', '--git-dir']);
   if (!gitDir.ok) return { reason: 'inspection-failed', detail: 'recheck: git dir unreadable' };
@@ -560,7 +807,7 @@ export function reap(options) {
       if (changed) {
         Object.assign(entry, {
           decision: 'keep', reason: changed.reason, detail: changed.detail,
-          lostWork: Boolean(changed.lostWork),
+          lostWork: Boolean(changed.lostWork), preservedTo: undefined,
         });
         continue;
       }
@@ -568,7 +815,12 @@ export function reap(options) {
         const preserved = preserveFiles(entry.path, entry, options);
         if (!preserved.ok) {
           Object.assign(entry, {
-            decision: 'keep', reason: 'preserve-failed', detail: preserved.error, error: true,
+            decision: 'keep',
+            reason: preserved.unsupported ? 'unpreservable' : 'preserve-failed',
+            detail: preserved.error,
+            error: !preserved.unsupported,
+            lostWork: Boolean(preserved.unsupported),
+            preservedTo: undefined,
           });
           continue;
         }

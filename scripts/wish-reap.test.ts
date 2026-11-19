@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
-  rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, readdirSync,
+  readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseArgs, reap } from './wish-reap.mjs';
@@ -37,7 +37,7 @@ function backdate(target: string, minutes = 120) {
   const walk = (path: string) => {
     const info = lstatSync(path);
     if (info.isDirectory()) for (const child of readdirSync(path)) walk(join(path, child));
-    utimesSync(path, when, when);
+    lutimesSync(path, when, when);
   };
   walk(target);
 }
@@ -368,5 +368,134 @@ describe('wish-reap: no ref may hide unpublished work', () => {
     expect(result.summary.keptForLostWork).toEqual([]);
     expect(result.summary.removalErrors).toEqual(['copy']);
     expect(result.exitCode).toBe(3);
+  });
+});
+
+describe('wish-reap: preserve what is not a regular file', () => {
+  /** A copy whose only unpublished work is a commit on `notes`, HEAD back on dev. */
+  function reportOnlyCopy() {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, 'copy');
+    git(dir, 'clone', '-q', remote, copy);
+    git(copy, 'checkout', '-q', '-b', 'notes');
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  /** Commit a symlink at `path` on the current (local-only) branch; return the commit. */
+  function commitLink(copy: string, path: string, target: string) {
+    mkdirSync(dirname(join(copy, path)), { recursive: true });
+    symlinkSync(target, join(copy, path));
+    git(copy, 'add', '-A');
+    git(copy, 'commit', '-qm', `local link ${path}`);
+    return git(copy, 'rev-parse', 'HEAD');
+  }
+
+  function commitReport(copy: string) {
+    writeFileSync(join(copy, 'handoffs', 'local.md'), 'local report\n');
+    git(copy, 'add', '-A');
+    git(copy, 'commit', '-qm', 'local report');
+    return git(copy, 'rev-parse', 'HEAD');
+  }
+
+  test('a symlink to a file inside the copy is preserved as a link', () => {
+    const f = reportOnlyCopy();
+    const sha = commitLink(f.copy, 'handoffs/inside-link', '../product.txt');
+    git(f.copy, 'checkout', '-q', 'dev');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('remove');
+    expect(entry.reason).toBe('local-only-handoffs');
+    expect(result.exitCode).toBe(0);
+    const link = join(f.preserve, 'copy', 'handoffs', 'inside-link');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe('../product.txt');
+    expect(readFileSync(join(f.preserve, 'copy', '.wish-reap-commits.txt'), 'utf8'))
+      .toContain(sha);
+  });
+
+  test('a dangling symlink is preserved as a link with its target', () => {
+    const f = reportOnlyCopy();
+    commitLink(f.copy, 'handoffs/dangling', 'missing.md');
+    git(f.copy, 'checkout', '-q', 'dev');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    expect(result.copies[0].decision).toBe('remove');
+    const link = join(f.preserve, 'copy', 'handoffs', 'dangling');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe('missing.md');
+  });
+
+  test('a symlink with an absolute target outside the copy is carried as a link', () => {
+    const f = reportOnlyCopy();
+    const outside = join(f.dir, 'outside.txt');
+    writeFileSync(outside, 'outside\n');
+    commitLink(f.copy, 'handoffs/absolute', outside);
+    git(f.copy, 'checkout', '-q', 'dev');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    expect(result.copies[0].decision).toBe('remove');
+    const link = join(f.preserve, 'copy', 'handoffs', 'absolute');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(outside);
+  });
+
+  test('a FIFO keeps the copy and names the path and kind', () => {
+    const f = reportOnlyCopy();
+    commitReport(f.copy);
+    git(f.copy, 'checkout', '-q', 'dev');
+    writeFileSync(join(f.copy, '.git', 'info', 'exclude'), 'pipe.fifo\n');
+    const fifo = join(f.copy, 'handoffs', 'pipe.fifo');
+    const made = spawnSync('mkfifo', [fifo]);
+    expect(made.status).toBe(0);
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('unpreservable');
+    expect(entry.detail).toContain('handoffs/pipe.fifo');
+    expect(entry.detail).toContain('fifo');
+    expect(result.summary.keptForLostWork).toEqual(['copy']);
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(f.copy)).toBe(true);
+    expect(existsSync(fifo)).toBe(true);
+  });
+
+  test('an empty directory that holds a symlink is preserved with its link', () => {
+    const f = reportOnlyCopy();
+    commitLink(f.copy, 'handoffs/empty/deep-link', '../local.md');
+    mkdirSync(join(f.copy, 'handoffs', 'blank'));
+    git(f.copy, 'checkout', '-q', 'dev');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    expect(result.copies[0].decision).toBe('remove');
+    const dir = join(f.preserve, 'copy', 'handoffs', 'empty');
+    expect(lstatSync(dir).isDirectory()).toBe(true);
+    const link = join(dir, 'deep-link');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe('../local.md');
+    expect(lstatSync(join(f.preserve, 'copy', 'handoffs', 'blank')).isDirectory()).toBe(true);
+  });
+
+  test('an ignored working-tree symlink is carried before a head-on-remote copy goes', () => {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, 'copy');
+    git(dir, 'clone', '-q', remote, copy);
+    writeFileSync(join(copy, '.git', 'info', 'exclude'), 'ignored-link\n');
+    symlinkSync('../product.txt', join(copy, 'handoffs', 'ignored-link'));
+    backdate(copy);
+    const preserve = join(dir, 'preserved');
+    const result = reap(parseArgs(['--root', root, '--preserve', preserve, '--apply']));
+    expect(result.copies[0].decision).toBe('remove');
+    expect(result.copies[0].reason).toBe('head-on-remote');
+    expect(result.exitCode).toBe(0);
+    const link = join(preserve, 'copy', 'handoffs', 'ignored-link');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe('../product.txt');
+    expect(existsSync(join(preserve, 'copy', '.wish-reap-commits.txt'))).toBe(false);
   });
 });
