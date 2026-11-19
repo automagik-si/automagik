@@ -56,28 +56,54 @@ it.
 
 ### What a bot target does
 
-1. It resolves the bot's live terminal on this computer through the same
-   checks the pack's Start and attach paths use. `hc ls --label bot=<id>` only
-   supplies candidates; each candidate is then read with `hc get`. It counts
-   only when that answer is live, still carries `bot=<id>`, has an agent in the
-   foreground (a shell in front is a bot that quit), and its folder belongs to
-   this automation's project (the nearest `.herdr/bots.json` above it is the
-   project's). A duplicate id in another project's roster is not this project's
-   bot. More than one such pane is refused with a line naming them: a schedule
-   never guesses which twin to message.
+1. It resolves the bot's live terminal on this computer by its `bot=<id>` label:
+   `hc ls --label bot=<id>` only supplies candidates; each candidate is then read
+   with `hc get`. It counts only when that answer is live, still carries
+   `bot=<id>`, has an agent in the foreground (a shell in front is a bot that
+   quit), and its folder belongs to this automation's project (the nearest
+   `.herdr/bots.json` above it is the project's). A duplicate id in another
+   project's roster is not this project's bot. More than one such pane is refused
+   with a line naming them: a schedule never guesses which twin to message.
+   These are the pane facts the pack's Start path checks, but this is not the
+   pack's resolver: the pack resolves which terminal plays which bot through the
+   attach ledger, where the `bot` label is only a display hint. The scheduler
+   does not read that ledger, so a stale label can still pass this step; the
+   last paragraph of this section says what that leaves open.
 2. When there is none, it starts the bot with the pack's own `am start <id>
    --project <project>` and waits for a terminal carrying the label, up to two
    minutes. A start that leaves no such terminal fails the run; it never falls
    back to a fresh agent.
-3. It hands the prompt over with `hc send`, exactly as one bot messages
-   another. The run is `done` once the bot accepts it; the bot works on its own
-   turn afterwards, and the run's history points at the bot's terminal.
+3. Immediately before it hands the prompt over with `hc send`, it reads that
+   pane once more and refuses anything but the terminal it resolved: still
+   live, still carrying `bot=<id>`, still with an agent in front, and the same
+   `created_ms`. Herdr reuses terminal ids, so a different `created_ms` is a
+   different terminal; a shell in front means the agent quit; a changed label
+   means the pane was relabelled. Any difference refuses the send, fails the run
+   with a line naming the pane and what changed, and sends nothing. The run is
+   `done` once the bot accepts it; the bot works on its own turn afterwards, and
+   the run's history points at the bot's terminal.
 4. A busy bot is answered by `target_when_busy`: `queue` (the default) pastes
    the prompt for the bot's next turn; `skip` drops the occurrence and records
    it `skipped`, the same as an overlapping run. A skipped run is not a failure,
    and it keeps the pane and target already resolved in its history row. A bot
    blocked on a dialog refuses the paste, and the run fails with `hc send`'s own
    line: an unattended run never answers somebody's dialog.
+
+What the confirming read does not see is a stale `bot=<id>` label already in
+place when the run resolves: if the attach ledger has moved the bot to another
+terminal and the old pane still carries the label (a failed or skipped `hc
+label`, or a hand-set one), both the resolution and the confirming read accept
+it. Honouring the ledger means reading and confirming it here — its core,
+machine and `created_ms` — which is a design change, not part of this fix. Until
+then the pack's own paths are the authority: `am show <id>` names the terminal
+the ledger binds, so a person who suspects a stale label can compare and clear
+it with `hc label`/`am attach` before the next run.
+
+What the confirming read also cannot close is the instant between that read and
+`hc send`'s paste: `hc send` takes an address, not the expected identity, so a
+change exactly inside that instant can still land. Closing it takes a send verb
+that verifies the pane atomically; this ADR records the gap rather than claiming
+it away.
 
 ### What a worker target does
 
@@ -90,13 +116,28 @@ then:
    therefore starts the worker exactly as the bot would: the bot's worker
    agent, model, effort, template and permission words, its `worker.of` and
    branch labels, its ledger row, and its tab nested after the bot's.
-3. It waits for the worker's turn, as it waits for any agent run, and ends the
-   worker when the run ends, whether it worked or failed, through the pack's
-   checked `am worker kill <pane> --json` with the bot's pane as the
-   `HC_TERMINAL_ID` caller. That verb confirms the worker is the calling bot's
-   own, is no bot's seat and is not mid-turn; `hc kill` has no such guard. The
-   finished terminal stays, so the run's saved `PaneID` still names where the
-   worker ran. A worker target runs alongside its bot and so has no busy rule.
+3. It waits for the worker's turn, as it waits for any agent run, and then ends
+   the worker through the pack's checked `am worker kill <pane> --json` with the
+   bot's pane as the `HC_TERMINAL_ID` caller. That verb confirms the worker is
+   the calling bot's own, is no bot's seat and is not mid-turn; `hc kill` has no
+   such guard. So the worker is ended when its turn has finished, whether the
+   turn worked, failed or exited — but it is not ended while hc still reports
+   `working`. The finished terminal stays, so the run's saved `PaneID` still
+   names where the worker ran. A worker target runs alongside its bot and so has
+   no busy rule.
+
+The timeout is therefore the one case where the run ends and the worker does
+not. If `timeout_minutes` passes while the worker is still mid-turn, the run
+fails with `the agent was still working after <timeout>` and the deferred
+`am worker kill` refuses the still-working worker by design: its work would be
+lost. The worker stays, nested under its bot, and the only record is one
+scheduler log line (`could not end the run's worker <pane> through am worker
+kill: <pane> is still working; worker kill ends a worker that has finished its
+turn ...; the worker stays until it is ended`). A person seeing that run in the
+panel should expect the worker still in the sidebar under that bot: open it to
+see what it is doing, and once its turn ends, end it from the bot's terminal
+with `am worker kill <pane>`. Ending it mid-turn is left to the project's main
+bot (`hc kill <pane>`); the scheduler never takes that shortcut for a run.
 
 ### Another machine
 

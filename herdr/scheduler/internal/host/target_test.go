@@ -1,8 +1,16 @@
 package host
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +53,7 @@ func botStatus(state string) *struct {
 // labelled with the bot, in the project, with a program in front.
 func livePane(address, cwd, bot, state string, argv ...string) hc.Terminal {
 	t := hc.Terminal{
-		Address: address, State: "live", Cwd: cwd,
+		Address: address, State: "live", Cwd: cwd, CreatedMS: 100,
 		Labels:     map[string]string{"bot": bot},
 		Foreground: &hc.Foreground{Argv: argv},
 	}
@@ -310,9 +318,9 @@ func TestLiveBotIgnoresAStaleShell(t *testing.T) {
 		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "", "/bin/zsh", "-l"),
 	}}
 	h := targetHost(f)
-	addr, remote, err := h.liveBot("/src/project", "b-6jrz4bmxml")
-	if err != nil || addr != "" || remote != "" {
-		t.Fatalf("liveBot = %q %q %v, want no pane", addr, remote, err)
+	found, remote, err := h.liveBot("/src/project", "b-6jrz4bmxml")
+	if err != nil || found.Address != "" || remote != "" {
+		t.Fatalf("liveBot = %+v %q %v, want no pane", found, remote, err)
 	}
 }
 
@@ -338,9 +346,9 @@ func TestLiveBotIgnoresAnotherProjectsPane(t *testing.T) {
 		"t8": livePane("t8", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
 	}}
 	h := targetHost(f)
-	addr, _, err := h.liveBot("/src/project", "b-6jrz4bmxml")
-	if err != nil || addr != "t8" {
-		t.Fatalf("liveBot = %q %v, want t8", addr, err)
+	found, _, err := h.liveBot("/src/project", "b-6jrz4bmxml")
+	if err != nil || found.Address != "t8" {
+		t.Fatalf("liveBot = %+v %v, want t8", found, err)
 	}
 }
 
@@ -352,10 +360,216 @@ func TestLiveBotPicksTheForegroundAgent(t *testing.T) {
 		"t8": livePane("t8", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
 	}}
 	h := targetHost(f)
-	addr, _, err := h.liveBot("/src/project", "b-6jrz4bmxml")
-	if err != nil || addr != "t8" {
-		t.Fatalf("liveBot = %q %v, want t8", addr, err)
+	found, _, err := h.liveBot("/src/project", "b-6jrz4bmxml")
+	if err != nil || found.Address != "t8" {
+		t.Fatalf("liveBot = %+v %v, want t8", found, err)
 	}
+}
+
+// The pane is resolved, the run record is written, and only then is the prompt
+// sent. A bot that quits to its shell inside that window is not sent to: hc send
+// pastes into a shell, and only a dialog refuses a paste (#498).
+func TestBotTargetRefusesAPaneThatQuitBeforeSend(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
+	h := targetHost(f)
+	a := targetAutomation("bot:b-6jrz4bmxml")
+	s, err := h.Provision(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.gets["t7"] = livePane("t7", "/src/project", "b-6jrz4bmxml", "", "/bin/zsh", "-l")
+	err = h.Do(s, a, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "the prompt was not sent") ||
+		!strings.Contains(err.Error(), "a shell is in front, so the agent quit") {
+		t.Fatalf("err %v, want a refused send naming the shell", err)
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("the prompt went into the shell: %v", f.sent)
+	}
+}
+
+// A terminal id is reused: the same address can be another terminal a moment
+// later. The send refuses it when created_ms differs from the resolved pane (#498).
+func TestBotTargetRefusesAReusedAddressBeforeSend(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
+	h := targetHost(f)
+	a := targetAutomation("bot:b-6jrz4bmxml")
+	s, err := h.Provision(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused := livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "codex")
+	reused.CreatedMS = 200
+	f.gets["t7"] = reused
+	err = h.Do(s, a, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "the prompt was not sent") ||
+		!strings.Contains(err.Error(), "another terminal now (created_ms 100 became 200)") {
+		t.Fatalf("err %v, want a refused send naming created_ms", err)
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("the prompt went into the reused address: %v", f.sent)
+	}
+}
+
+// A pane relabelled to another bot between resolution and send is refused too:
+// the send is by address, so the label alone would not stop it (#498).
+func TestBotTargetRefusesARelabelledPaneBeforeSend(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
+	h := targetHost(f)
+	a := targetAutomation("bot:b-6jrz4bmxml")
+	s, err := h.Provision(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.gets["t7"] = livePane("t7", "/src/project", "b-aaaaaaaaaa", "idle", "claude")
+	err = h.Do(s, a, time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "the prompt was not sent") ||
+		!strings.Contains(err.Error(), `its bot label is now "b-aaaaaaaaaa"`) {
+		t.Fatalf("err %v, want a refused send naming the label", err)
+	}
+	if len(f.sent) != 0 {
+		t.Fatalf("the prompt went to the relabelled pane: %v", f.sent)
+	}
+}
+
+// The scheduler resolves a bot by its `bot=<id>` label. The pack's own Start and
+// attach paths resolve through the attach ledger, where the label is only a display
+// hint (`hc label` moves no bot). A stale label on a live pane in this project, with
+// an agent in front, therefore passes resolution and the send confirmation even when
+// the ledger has moved the bot to another terminal. Closing that needs the ledger
+// (a design change); this case records the limit ADR 0014 states.
+func TestBotTargetCannotSeeAStaleLabelTheLedgerMoved(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
+	h := targetHost(f)
+	a := targetAutomation("bot:b-6jrz4bmxml")
+	s, err := h.Provision(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Do(s, a, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.sent) != 1 {
+		t.Fatalf("sent %v", f.sent)
+	}
+}
+
+// The pack refuses to end a worker that is still mid-turn (workers.js
+// workerKillRefusal), and the scheduler only logs that refusal: a run that times out
+// mid-turn fails and the worker stays, visible under its bot. This drives the
+// timeout through endWorker and checks the pack's own refusal is what gets logged.
+// The behaviour is deliberate (ending it would lose its work), so this is a
+// characterization test, not a red one; it fails if the scheduler bypasses the
+// checked verb or the pack stops refusing a mid-turn worker.
+func TestWorkerTimeoutLeavesTheWorkerAndLogsThePackRefusal(t *testing.T) {
+	refusal := packWorkerKillRefusal(t)
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
+	h := targetHost(f)
+	h.knobs.waitSlice = time.Millisecond
+	h.knobs.statusPoll = time.Millisecond
+	var ended []string
+	h.amFn = func(args, _ []string) (string, error) {
+		if len(args) > 1 && args[1] == "kill" {
+			ended = append(ended, strings.Join(args, " "))
+			return "", errors.New(refusal)
+		}
+		return `{"terminal":"t9"}`, nil
+	}
+	f.waits = []hc.Wait{{Ended: true, Reason: "status", Status: "working"}}
+	a := targetAutomation("worker:b-6jrz4bmxml")
+	s, err := h.Provision(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(previous)
+	err = h.Do(s, a, 5*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "still working after") {
+		t.Fatalf("err %v, want the timeout failure", err)
+	}
+	if len(ended) != 1 || !strings.HasPrefix(ended[0], "worker kill t9 --json") {
+		t.Fatalf("ended %v, want the pack's checked end", ended)
+	}
+	if !strings.Contains(logged.String(), "could not end the run's worker t9") || !strings.Contains(logged.String(), refusal) {
+		t.Fatalf("log %q, want the pack's refusal", logged.String())
+	}
+	for _, call := range f.calls {
+		if strings.HasPrefix(call, "kill ") || strings.HasPrefix(call, "rm ") {
+			t.Fatalf("the checked path was bypassed: %v", f.calls)
+		}
+	}
+}
+
+// packWorkersPath finds herdr/mods/am-sidebar/workers.js from the directory the test
+// binary runs in, or from this source file when the binary was built elsewhere.
+func packWorkersPath(t *testing.T) string {
+	t.Helper()
+	candidates := []string{filepath.Join("..", "..", "..", "mods", "am-sidebar", "workers.js")}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		candidates = append(candidates, filepath.Join(filepath.Dir(file), "..", "..", "..", "mods", "am-sidebar", "workers.js"))
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			abs, err := filepath.Abs(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return abs
+		}
+	}
+	t.Fatalf("cannot find the pack's workers.js (looked in %v)", candidates)
+	return ""
+}
+
+// packWorkerKillRefusal asks the pack's own workers.js why it would refuse to end a
+// worker that is still working, so this test pins the real refusal line and not a
+// copy of it. The scheduler is Go; the pack is plain JavaScript, and the test skips
+// only where no node exists to read it.
+func packWorkerKillRefusal(t *testing.T) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is needed to read the pack's workerKillRefusal")
+	}
+	workers := packWorkersPath(t)
+	spec, err := json.Marshal((&url.URL{Scheme: "file", Path: workers}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := json.Marshal(map[string]any{
+		"target": map[string]any{
+			"address": "t9", "state": "live",
+			"labels": map[string]string{"worker.of": "b-6jrz4bmxml"},
+			"status": map[string]string{"state": "working"},
+		},
+		"botId": "b-6jrz4bmxml",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("import { workerKillRefusal } from %s;\n"+
+		"process.stdout.write(workerKillRefusal(%s) ?? \"\");", spec, call)
+	out, err := exec.Command(node, "--input-type=module", "-e", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("reading the pack's refusal: %v (%s)", err, out)
+	}
+	refusal := strings.TrimSpace(string(out))
+	if !strings.Contains(refusal, "still working") {
+		t.Fatalf("the pack did not refuse a mid-turn worker: %q", refusal)
+	}
+	return refusal
 }
 
 // What a person sees when the target cannot be reached: the bot's name, its

@@ -46,6 +46,10 @@ type Session struct {
 	// worker is ended through the pack's checked `am worker kill`, which asks
 	// that pane whose worker this is; a bot target leaves it empty.
 	TargetParent string
+	// TargetCreatedMS identifies the bot's terminal as resolved: hc reuses
+	// terminal ids, so the prompt is re-read against this before it is sent
+	// and a different created_ms refuses the send (#498).
+	TargetCreatedMS int64
 }
 
 // Host provisions somewhere for a run to happen, and does the work there.
