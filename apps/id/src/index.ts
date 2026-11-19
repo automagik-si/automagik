@@ -16,6 +16,30 @@ function publicData(value: unknown): unknown {
   return value;
 }
 
+// Every answer the Worker gives carries these, whatever produced it: a page, a static file,
+// Better Auth, the well-known metadata, an error. PAGES-CONTRACT.md lists them.
+// The CSP is the strictest the pages run under: same-origin script, style, fonts, images and
+// fetch, no inline code, no framing. It goes on every response, not only HTML: an SVG or any
+// file a browser renders as a document gets the same limits, and elsewhere it is inert.
+const SECURITY_HEADERS: Readonly<Record<string, string>> = {
+  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; " +
+    "img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; " +
+    "frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+  'x-content-type-options': 'nosniff',
+  'strict-transport-security': 'max-age=31536000; includeSubDomains',
+  'referrer-policy': 'no-referrer',
+  'x-frame-options': 'DENY',
+};
+
+// Copies the response so its headers can change; status, body, Location and every Set-Cookie
+// stay as they were.
+function withSecurityHeaders(response: Response): Response {
+  if (response.status === 101) return response;
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 // The pages answer only at /sign-in and /consent, where the Worker adds their headers.
 // A direct .html path, however it is spelled, is not a page.
 function directPage(pathname: string): boolean {
@@ -26,8 +50,8 @@ function directPage(pathname: string): boolean {
   }
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+const router = {
+  async route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // A service whose host cannot carry the passkey site name answers nothing else.
     try {
       passkeySiteName(env);
@@ -44,9 +68,7 @@ export default {
         const response = await env.PAGES.fetch(new Request(page, request));
         if (response.ok) {
           const headers = new Headers(response.headers);
-          headers.set('referrer-policy', 'no-referrer');
           headers.set('cache-control', 'no-store');
-          headers.set('x-frame-options', 'DENY');
           return new Response(response.body, { status: response.status, headers });
         }
       }
@@ -126,5 +148,11 @@ export default {
       return new Response(JSON.stringify(body), response);
     }
     return response;
+  },
+};
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return withSecurityHeaders(await router.route(request, env, ctx));
   },
 } satisfies ExportedHandler<Env>;
