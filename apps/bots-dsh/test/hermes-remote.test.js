@@ -1269,6 +1269,107 @@ test('an earlier completion never overrides a fresh snapshot of a newly active r
   await assert.rejects(f.run.submit('Do not submit'), /Reconcile/)
 })
 
+// #1401: an attached reconnect joins while the previous turn may still be finishing. The wire
+// stamps starts and deltas with a turn id but a completion carries none, so the transport
+// derives a completion's turn from the turn it opened. A completion with no open turn belongs
+// to an earlier turn and never ends the reply of the turn submitted after the reconnect.
+function attachedReconnect(t, { earlier = [], replay = {} } = {}) {
+  const f = fixture(t, {
+    attached: true,
+    replay: { latest_seq: 10, events: [], ...replay },
+    handle: (frame, socket) => {
+      if (frame.method !== 'session.activate') return false
+      for (const { text, seq } of earlier) socket.event('message.complete', { text, status: 'complete' }, seq)
+      return false
+    },
+  })
+  Object.assign(f.identity, {
+    storedSessionId: f.snapshot.stored_session_id, runtimeSessionId: f.snapshot.session_id,
+    epoch: 'epoch-a', lastSeq: 10,
+  })
+  return f
+}
+
+const terminalRows = rows => rows.filter(row => ['done', 'error', 'aborted'].includes(row.kind))
+
+test('#1401 a completion recovered during an attached reconnect does not end the next reply', async t => {
+  const f = attachedReconnect(t, { earlier: [{ text: 'Earlier reply', seq: 11 }] })
+  await f.wire.connect()
+  await f.run.submit('New prompt')
+  assert.deepEqual(terminalRows(f.run.queue), [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  assert.deepEqual(f.run.takeRecovered(), ['Earlier reply'], 'the earlier turn’s reply is recovered, not taken as the new turn’s')
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 12)
+  const rows = []
+  for (;;) { const row = await f.run.next(); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1401 a completion landing between the reconnect and the submit does not end the next reply', async t => {
+  const f = attachedReconnect(t)
+  await f.wire.connect()
+  await f.run.prepare()
+  // The reconnect's replay carried no reply; the earlier turn's completion arrives just after it.
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 11)
+  await f.run.submit('New prompt')
+  assert.deepEqual(terminalRows(f.run.queue), [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 12)
+  const rows = []
+  for (;;) { const row = await f.run.next(); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+})
+
+test('#1401 a completion of the turn just submitted still ends its reply', async t => {
+  const f = attachedReconnect(t)
+  await f.wire.connect()
+  await f.run.submit('New prompt')
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 11)
+  f.socket().event('message.delta', { text: 'New ', turn_id: 'turn-new', segment: 0, offset: 0 }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await f.run.next(); rows.push(row); if (terminalRows([row]).length) break }
+  assert.equal(rows.filter(row => row.kind === 'text').map(row => row.text).join(''), 'New reply')
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1401 two reconnects with out-of-order earlier completions never end the next reply', async t => {
+  const first = attachedReconnect(t, { earlier: [{ text: 'Second earlier reply', seq: 12 }] })
+  await first.wire.connect()
+  await first.run.prepare()
+  assert.deepEqual(terminalRows(first.run.queue), [], `the first reconnect ends no reply: ${JSON.stringify(first.run.queue)}`)
+  assert.deepEqual(first.run.takeRecovered(), ['Second earlier reply'])
+  first.run.dispose()
+
+  const second = attachedReconnect(t, { earlier: [{ text: 'First earlier reply', seq: 11 }] })
+  await second.wire.connect()
+  await second.run.submit('New prompt')
+  assert.deepEqual(terminalRows(second.run.queue), [], `the new reply stays open: ${JSON.stringify(second.run.queue)}`)
+  assert.deepEqual(second.run.takeRecovered(), ['First earlier reply'])
+  second.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 12)
+  const rows = []
+  for (;;) { const row = await second.run.next(); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+})
+
+test('#1401 replayed completions stay text-only and the new reply closes on its own completion', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11, events: [{ seq: 11, type: 'message.complete', payload: { text: 'Replayed reply', status: 'complete' } }] } })
+  await f.wire.connect()
+  await f.run.prepare()
+  assert.deepEqual(f.run.takeRecovered(), ['Replayed reply'])
+  assert.deepEqual(terminalRows(f.run.queue), [])
+  await f.run.submit('New prompt')
+  assert.deepEqual(terminalRows(f.run.queue), [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 12)
+  const rows = []
+  for (;;) { const row = await f.run.next(); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+})
+
 test('a Hermes that approves on its own (yolo) connects, and its tool runs with no question from us', async t => {
   for (const metadata of [{ approval_mode: 'off', yolo: true }, { approval_mode: 'smart', yolo: false }, { approval_mode: 'manual', yolo: false }]) {
     let asked = 0
