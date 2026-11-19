@@ -3087,6 +3087,30 @@ function printableHcMessage(text) {
 }
 const report = (warnings) => { for (const w of warnings) process.stderr.write(`am: ${unprinted(w)}\n`); };
 
+function relabelFailureWarning({ terminal, words, result, error }, prefix, warnedRelabels) {
+  if (warnedRelabels) {
+    // Tidy may request the same changes in a different order, or get a different reason.
+    const key = JSON.stringify([terminal, [...words].sort()]);
+    if (warnedRelabels.has(key)) return null;
+    warnedRelabels.add(key);
+    prefix = printableHcMessage(prefix);
+  }
+  const stderr = result?.rawStderr ?? result?.stderr;
+  const output = stderr || (warnedRelabels ? result?.stdout : "");
+  const thrown = error?.message ?? error;
+  const reason = result
+    ? formatHcFailure(result, printableHcMessage(hcFailureMessage(output)))
+    : printableHcMessage(warnedRelabels ? hcFailureMessage(thrown) : thrown).slice(0, HC_FAILURE_MAX) || "no message";
+  return `${prefix} ${reason}`;
+}
+
+async function relabelPane(terminal, words, prefix, warnedRelabels) {
+  let result;
+  try { result = await hc(["label", terminal, ...words]); }
+  catch (error) { return relabelFailureWarning({ terminal, words, error }, prefix, warnedRelabels); }
+  return result.code === 0 ? null : relabelFailureWarning({ terminal, words, result }, prefix, warnedRelabels);
+}
+
 /**
  * Appends one row to the workers ledger (workers.js) with a single O_APPEND write, the file the
  * owner's alone: made 0600, and narrowed to its owner's bits again before every append (a file
@@ -3349,7 +3373,7 @@ async function windowDo(command, args) {
   return r.code === 0 ? null : (r.stderr || r.stdout || `exit ${r.code}`).trim();
 }
 
-async function cmdStart(opts, [ref]) {
+async function cmdStart(opts, [ref], warnedRelabels) {
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   const project = await projectFor(opts);
   const { file, key } = project;
@@ -3371,7 +3395,9 @@ async function cmdStart(opts, [ref]) {
   const held = view.live.get(bot.id) ?? await projectHomeHeld(project, bot);
   const elsewhere = held?.binding.project && held.binding.project !== key ? `, for ${held.binding.project}` : "";
   if (held) return opts.json ? { id: bot.id, running: held.binding.terminal } : `${bot.name} is already running in ${held.binding.terminal}${elsewhere}.`;
-  const seat = await launchSeat(project, bot, { place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined });
+  const seat = await launchSeat(project, bot, {
+    warnedRelabels, place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined,
+  });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   return opts.json ? seatJson(bot, seat) : seat.terminal;
 }
@@ -4468,15 +4494,8 @@ async function launchSeat(project, bot, over = {}) {
     }
   } catch { /* the file can't be read now: the labels it started with stand */ }
   if (words.length) {
-    let reason = null;
-    try {
-      const r = await hc(["label", terminal, ...words]);
-      if (r.code !== 0) reason = formatHcFailure(r, printableHcMessage(hcFailureMessage(r.rawStderr)));
-    } catch (e) {
-      reason = printableHcMessage(e?.message ?? e).slice(0, HC_FAILURE_MAX) || "no message";
-    }
-    if (reason) {
-      const warning = `${terminal}'s labels ${words.join(" ")} weren't set. ${reason}`;
+    const warning = await relabelPane(terminal, words, `${terminal}'s labels ${words.join(" ")} weren't set.`, over.warnedRelabels);
+    if (warning) {
       hook.warnings.push(warning);
       report([warning]); // the hook's warnings were printed before hc run
     }
@@ -6967,7 +6986,7 @@ async function terminalPlace(terminal, project) {
 const noHookThere = (bot, machine) => `${bot.name} runs on ${machine} without its per-turn briefing: the hook needs Automagik Herdr `
   + `installed on ${machine}, which comes next (am machine install ${machine}). Its role and team still come from ${BOTS_PATH}.`;
 
-async function cmdAttach(opts, [ref, terminal]) {
+async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
   if (!terminal) throw new CliError("attach needs a bot and a terminal: am attach <bot> <terminal> [--move].", 2);
   if (terminal.startsWith("-")) throw new CliError(`"${terminal}" isn't a terminal; name one like t7.`, 2);
   const project = await projectFor(opts);
@@ -7028,8 +7047,14 @@ async function cmdAttach(opts, [ref, terminal]) {
   const warnings = [];
   const label = async (t, words) => {
     if (!words.length) return;
+    const message = `the ledger has it, but hc label ${t} ${words.join(" ")} failed:`;
+    if (warnedRelabels) {
+      const warning = await relabelPane(t, words, message, warnedRelabels);
+      if (warning) warnings.push(warning);
+      return;
+    }
     const r = await hc(["label", t, ...words]);
-    if (r.code !== 0) warnings.push(`the ledger has it, but hc label ${t} ${words.join(" ")} failed: ${(r.stderr || r.stdout).trim()}`);
+    if (r.code !== 0) warnings.push(`${message} ${(r.stderr || r.stdout).trim()}`);
   };
   // The labels follow as a display hint: off the old pane, then bot, role, category and a
   // squad copied from the lead (A16) on this one. A label failure only warns.
@@ -9045,12 +9070,20 @@ async function cmdTidy(opts) {
  * prune's note only when the command succeeded: a failed one's last stderr line stays its own
  * error (the sidebar shows that line, restart.js restartAnswer).
  */
-async function tidyQuietly() {
+async function tidyQuietly(warnedRelabels) {
+  const warnings = [];
+  const onRelabelFailure = warnedRelabels ? (failure) => {
+    const { terminal, words } = failure;
+    const warning = relabelFailureWarning(failure, `tidy: ${terminal}'s labels ${words.join(" ")} weren't set:`, warnedRelabels);
+    if (warning) warnings.push(warning);
+  } : undefined;
   try {
     const io = tidyIo();
     const actions = tidyPlan(await readState(io, { window: false }), { now: Date.now(), home: io.home, appHome: io.appHome });
-    report(await fixNonVisual(actions.filter((a) => !a.visual), io, { notes: exitAfter.code === 0 }));
+    report(await fixNonVisual(actions.filter((a) => !a.visual), io, { notes: exitAfter.code === 0, onRelabelFailure }));
   } catch (e) { report([`tidy: ${e?.message ?? e}`]); }
+  report(warnings);
+  return warnings;
 }
 const TIDIES = new Set(["start", "restart", "attach", "create"]);
 
@@ -9975,12 +10008,22 @@ export async function main(argv = process.argv.slice(2), io = {}) {
       throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
     }
     exitAfter.code = 0;
-    const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest);
+    // Tidy is this computer's window and labels: never after a command on a linked machine.
+    const tidy = TIDIES.has(command) && opts.machine === undefined;
+    const warnedRelabels = tidy && (command === "start" || command === "attach") ? new Set() : undefined;
+    const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest, warnedRelabels);
     if (out === PRINTED) return exitAfter.code;
+    const tidyBeforeJson = warnedRelabels !== undefined && opts.json;
+    if (tidyBeforeJson) {
+      const warnings = await tidyQuietly(warnedRelabels);
+      if (warnings.length) (out.warnings ??= []).push(...warnings);
+    }
     if (opts.json) process.stdout.write(unprinted(`${JSON.stringify(out, null, 2)}\n`));
     else if (out) process.stdout.write(unprinted(`${out}\n`));
-    // Tidy is this computer's window and labels: never after a command on a linked machine.
-    if (TIDIES.has(command) && opts.machine === undefined) { await tidyQuietly(); await recordSessions(); }
+    if (tidy) {
+      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels);
+      await recordSessions();
+    }
     return exitAfter.code;
   } catch (e) {
     const botAction = command === "start" || command === "restart";

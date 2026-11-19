@@ -1755,6 +1755,30 @@ test("attach: a label write that fails only warns: the ledger has the move", (t)
   assert.match(r.err, /the ledger has it, but hc label t2 bot=b-cccccccccc failed/);
   assert.equal(s.cli(["whois", "t2", "--json"]).json().bot, ID.dev);
   assert.equal(s.cli(["whois", "t1", "--json"]).json().bot, null);
+
+  // When bot= is already present, Attach first tries role= and tidy retries it.
+  // Both failed writes are one warning, with the first reason retained.
+  const duplicate = scene(t, { terminals: [term("t8", { bot: ID.dev, app: "codex", argv: ["codex"] })] });
+  const ranked = team();
+  ranked.bots.find((bot) => bot.id === ID.dev).rank = "reviewer";
+  delete ranked.bots.find((bot) => bot.id === ID.cap).category;
+  duplicate.seed(ranked);
+  const state = duplicate.hcState();
+  state.failLabel = "t8";
+  state.failLabelReasons = { t8: ["initial refusal", "tidy retry refusal"] };
+  writeFileSync(join(duplicate.root, "hc.json"), JSON.stringify(state));
+  const attached = duplicate.cli(["attach", "Dev", "t8", "--json"]);
+  assert.equal(attached.code, 0, attached.err);
+  assert.equal(attached.json().terminal, "t8");
+  assert.equal(duplicate.cli(["whois", "t8", "--json"]).json().bot, ID.dev);
+  const relabels = labelCalls(duplicate.calls()).filter((call) => call[1] === "t8");
+  assert.equal(relabels.length, 2, JSON.stringify(relabels));
+  assert.deepEqual(relabels, [["label", "t8", "role=reviewer"], ["label", "t8", "role=reviewer"]]);
+  assert.equal(attached.json().warnings.filter((warning) => warning.includes("hc label t8")).length, 1, attached.out);
+  const warning = attached.json().warnings.find((line) => line.includes("hc label t8"));
+  assert.match(warning, /initial refusal \(exit 1\)$/);
+  assert.doesNotMatch(`${attached.out}\n${attached.err}`, /tidy retry refusal/);
+  assert.equal(attached.err.split("\n").filter((line) => line === `am: ${warning}`).length, 1, attached.err);
 });
 
 test("detach unties the bot from its ledger pane and takes the label off every local pane carrying it", (t) => {
@@ -2268,6 +2292,30 @@ test("start: an edit landing during hc run relabels the new pane; a failed relab
   assert.deepEqual(j.json().warnings.filter((w) => w.startsWith("t102's labels")),
     ["t102's labels role=reviewer weren't set. hc (herdr-core) is not on PATH."], j.out);
   seatKept("t102");
+
+  // Start's failed write and tidy's retry get different reasons; the first survives once.
+  // A second pane's distinct failed relabel still gets its own warning.
+  s.seed(team());
+  const st4 = s.hcState();
+  st4.terminals = [term("t9", { bot: ID.cap, cwd: s.project })];
+  st4.failLabelExit = 1;
+  st4.failLabels = ["t103", "t9"];
+  st4.failLabelReasons = { t103: [`first ${"x".repeat(330)}\nignored second line`, "retry reason"], t9: ["other pane\nignored line"] };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st4));
+  const distinct = s.cli(["start", "Dev", "--json"]);
+  assert.equal(distinct.code, 0, distinct.err);
+  assert.equal(distinct.json().terminal, "t103");
+  const warnings = distinct.json().warnings.filter((line) => /^(?:t103's labels|tidy: t9's labels)/.test(line));
+  assert.equal(warnings.length, 2, distinct.out);
+  const first = warnings.find((line) => line.startsWith("t103's labels"));
+  assert.match(first, /role=reviewer weren't set\. first /);
+  assert.equal(first.split("weren't set. ")[1].length, 300, first);
+  assert.match(warnings.find((line) => line.includes("t9's labels")), /other pane \(exit 1\)$/);
+  assert.doesNotMatch(`${distinct.out}\n${distinct.err}`, /retry reason|ignored second line|ignored line/);
+  for (const warning of warnings) {
+    assert.equal(distinct.err.split("\n").filter((line) => line === `am: ${warning}`).length, 1, distinct.err);
+  }
+  seatKept("t103");
 });
 
 // ---- restart ----

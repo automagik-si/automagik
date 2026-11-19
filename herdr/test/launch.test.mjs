@@ -318,6 +318,8 @@ process.stdout.write(${JSON.stringify(JSON.stringify({ core: "c0", bindings: row
 
 test("startBot runs the CLI: hc run in the project's space, a tab of its own, an attach row by start; the sidebar sets no label", async (t) => {
   const w = await world(t, { terminals: (main) => [term("t7", { bot: ID.cap, cwd: main })] });
+  writeFileSync(join(w.app, "claude-logins.json"), "not json");
+  w.setHc({ ...w.hcState(), failLabel: "t7" });
   state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] },
     { id: "s1", folder: w.main, machine: null, active: false, tabs: [{ id: "a", active: false }, { id: "b", active: true }] }];
   const r = await startBot(w.main, ID.dev);
@@ -331,9 +333,14 @@ test("startBot runs the CLI: hc run in the project's space, a tab of its own, an
   assert.deepEqual(rows.map((x) => [x.event, x.bot, x.terminal, x.by]), [["attach", ID.cap, "t7", "import"], ["attach", ID.dev, "t100", "start"]]);
   assert.deepEqual(state.hcCalls, [], "the sidebar itself calls no hc: no label, no run");
   assert.deepEqual(state.shared.get("am.sidebar.projects"), [{ key: w.main, machine: null }]);
+  const notice = (body) => ({ title: "Bots", body, level: "warning", timeout: 15000 });
+  const ordinary = "claude-logins.json: is not valid JSON; started on the default login";
+  const relabel = "tidy: t7's labels role=captain weren't set: label refused on t7 (exit 1)";
+  assert.deepEqual(state.notes, [notice(ordinary), notice(relabel)]);
   // Started already: the ledger's pane is focused, never a second one.
   assert.deepEqual(await startBot(w.main, ID.dev), { focused: "t100" });
   assert.deepEqual(state.runs, [["agent.focus", { terminal: "t100" }]]);
+  assert.deepEqual(state.notes, [notice(ordinary), notice(relabel), notice(relabel)]);
   assert.equal(w.calls().filter((a) => a[0] === "run").length, 1);
   assert.match((await startBot(w.main, ID.plan)).refused, /planned/);
 });

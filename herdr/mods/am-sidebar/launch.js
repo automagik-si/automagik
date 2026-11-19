@@ -359,11 +359,11 @@ async function startOnce(projectKey, botId, place) {
     sweepLateSpaces(projectKey, late, place.sleep, { waitMs: place.lateWaitMs, stepMs: place.lateStepMs }).catch(() => {});
   }
   if (r.code !== 0) return refusedBy(r, "start");
+  warn(r.out?.warnings);
   if (r.out?.running) {
     run("agent.focus", { terminal: r.out.running });
     return { focused: r.out.running };
   }
-  warn(r.out?.warnings);
   rememberProject(projectKey);
   if (spare && r.out?.terminal) {
     const { sleep, ...wait } = place;
