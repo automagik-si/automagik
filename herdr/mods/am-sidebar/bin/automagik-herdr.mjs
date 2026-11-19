@@ -1557,6 +1557,7 @@ export async function briefedLaunch(project, bot, agentKey, argv, appHomeDir = a
   const text = launchBriefingText({
     self: bot,
     agent: agentKey,
+    guard: agentKey === "dsh-tui" ? true : null,
     file: project.file,
     project: project.key,
     projects: localProjectsFor(project, appHomeDir),

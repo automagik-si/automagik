@@ -2140,3 +2140,109 @@ test("#628 checked verbs forward get-only local aliases at their canonical addre
     assert.deepEqual(calls(s).at(-1), expected);
   }
 });
+
+test("#540 a bot can set and clear the owner question on its own pane", (t) => {
+  const s = scene(t);
+  const expected = [
+    ["label", "t100", "automagik-herdr.needs-owner=Ship?"],
+    ["label", "t100", "automagik-herdr.needs-owner="],
+  ];
+  for (const args of expected) {
+    const result = guardRun(s, args);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), expected);
+});
+
+test("#540 the guard forwards the canonical own-pane address returned by hc get", (t) => {
+  const s = scene(t);
+  editPane(s, "t100", { name: "renamed" }); // hc ls still has the old name.
+  const label = "automagik-herdr.needs-owner=Ship?";
+  const result = guardRun(s, ["label", "renamed", label]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(calls(s), [
+    ["ls", "--json"], ["get", "renamed", "--json"], ["label", "t100", label],
+  ]);
+});
+
+test("#540 an unbound pane can label itself without ledger identity or worker labels", (t) => {
+  const s = scene(t, { caller: "t121" });
+  editPane(s, "t121", { labels: undefined });
+  const args = ["label", "t121", "automagik-herdr.needs-owner=Ship?"];
+  const result = guardRun(s, args, { HC_TERMINAL_ID: "t121" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t121", "--json"], args]);
+});
+
+test("#540 a guarded worker can label its own pane", (t) => {
+  const s = scene(t);
+  const args = ["label", "t105", "automagik-herdr.needs-owner=Ship?"];
+  const result = guardRun(s, args, { HC_TERMINAL_ID: "t105" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), [args]);
+});
+
+test("#540 the guard refuses other self-label keys and extra arguments", (t) => {
+  const s = scene(t);
+  const label = "automagik-herdr.needs-owner=Ship?";
+  for (const words of [
+    ["t100", "role=reviewer"],
+    ["t100", "automagik-herdr.needs-owner"],
+    ["t100", label, "role=reviewer"],
+    ["--json", "t100", label],
+    ["t100", label, "--json"],
+    ["--", "t100", label],
+    ["t100", "--", label],
+  ]) {
+    const result = guardRun(s, ["label", ...words]);
+    assertRefused(result);
+    assert.match(result.stderr, /the caller's own pane takes only the automagik-herdr\.needs-owner label/, words.join(" "));
+  }
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 the guard refuses owner questions on a stranger's pane or a worker's sibling", (t) => {
+  const s = scene(t);
+  editPane(s, "t110", { parent: "t100" });
+  const label = "automagik-herdr.needs-owner=Ship?";
+  for (const [caller, target] of [["t100", "t120"], ["t105", "t110"]]) {
+    const result = guardRun(s, ["label", target, label], { HC_TERMINAL_ID: caller });
+    assertRefused(result);
+    assert.match(result.stderr, /the target is not the caller's own worker/);
+  }
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 guard labelling refuses a machine-qualified canonical address", (t) => {
+  const s = scene(t);
+  editPane(s, "t105", { address: "m/t105" });
+  const result = guardRun(s, ["label", "worker", "automagik-herdr.needs-owner=Ship?"]);
+  assertRefused(result);
+  assert.match(result.stderr, /a machine target is not allowed/);
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 a non-self label still needs a verified caller, an address and target labels", (t) => {
+  const s = scene(t);
+  const args = ["label", "t105", "role=dev"];
+  editPane(s, "t105", { labels: undefined });
+  const unbound = guardRun(s, args, { HC_TERMINAL_ID: "t121" });
+  assertRefused(unbound);
+  assert.match(unbound.stderr, /neither bound in the attach ledger nor a worker pane/);
+
+  const noLabels = guardRun(s, args);
+  assertRefused(noLabels);
+  assert.match(noLabels.stderr, /the target is not resolvable with hc/);
+
+  editPane(s, "t105", { labels: { "worker.of": ID.dev }, address: undefined });
+  const noAddress = guardRun(s, args);
+  assertRefused(noAddress);
+  assert.match(noAddress.stderr, /the target is not resolvable with hc/);
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 the guard uses the label key the sidebar and tidy read", async () => {
+  const { OWNER_QUESTION_LABEL } = await import("../mods/am-sidebar/hcGuard.mjs");
+  const { NEEDS_OWNER_LABEL } = await import("../mods/am-sidebar/tidy.js");
+  assert.equal(OWNER_QUESTION_LABEL, NEEDS_OWNER_LABEL);
+});

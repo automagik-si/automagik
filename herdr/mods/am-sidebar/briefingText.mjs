@@ -61,7 +61,7 @@ const workerLines = (self, isGit) => {
  */
 export const GUARD_LINE = "The pack puts a deny-by-default hc guard first on a dsh-tui pane's PATH: "
   + "it allows send, read, get and wait (the caller's own pane, its own workers and its team), ls, "
-  + "label (own workers only), kill, rm on its own workers, events, schema, templates "
+  + "label (own workers, and the needs-owner marker on the caller's own pane), kill, rm on its own workers, events, schema, templates "
   + "and the worker start, and refuses put, exec, other runs, file writes/reads, machine, server, update, connect, "
   + "keys, attach, machine-target addresses on every verb but send, and --on outside an allowed send. "
   + "It is a GUARDRAIL, not a boundary: an absolute hc path, a raw socket or `hc connect` bypasses it. "
@@ -76,6 +76,24 @@ const guardLines = (self, guard = null) => (self?.agent === "dsh-tui" && guard !
 
 /** The block stays under Claude Code's 10,000-character cap on a hook's output. */
 export const BRIEFING_LIMIT = 9900;
+
+/** Keep the paired owner question commands together when a briefing exceeds the limit. */
+function cutBriefing(lines, ownerQuestionIndex = -1) {
+  let text = lines.join("\n");
+  if (text.length <= BRIEFING_LIMIT) return text;
+
+  const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
+  const end = BRIEFING_LIMIT - mark.length;
+  if (ownerQuestionIndex !== -1) {
+    const prefix = lines.slice(0, ownerQuestionIndex + 1).join("\n");
+    if (prefix.length > end) {
+      lines.splice(ownerQuestionIndex, 1);
+      text = lines.join("\n");
+    }
+  }
+  return text.length > BRIEFING_LIMIT ? text.slice(0, end) + mark : text;
+}
+
 /** The longest latest report shown for one member. */
 const REPORT_MAX = 600;
 const REPORT_MIN = 80;
@@ -163,7 +181,7 @@ const indent = (text, pad) => text.split("\n").map((l) => pad + l).join("\n");
  * core status says blocked with kind permission. Reports are other agents' text: each sits in its own
  * <untrusted-report> element with its angle brackets neutralised.
  */
-export function briefingText({ self, file, members = [], lead, helpers = [], guard = null, isGit = true }) {
+export function briefingText({ self, file, members = [], lead, helpers = [], guard = null, isGit = true, ownPane = false }) {
   const kind = self.kind === "main" ? "this project's main bot" : "a team member";
   const instructions = String(self.instructions ?? "");
   const shown = instructions.length > MAX_INSTRUCTIONS ? `${instructions.slice(0, MAX_INSTRUCTIONS)}… [cut at ${MAX_INSTRUCTIONS} characters]` : instructions;
@@ -174,7 +192,10 @@ export function briefingText({ self, file, members = [], lead, helpers = [], gua
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) head.push("Instructions:", shown.trim());
-  head.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE, liveLine(self.id), ...handoffLines(self));
+  head.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE);
+  const ownerQuestionIndex = ownPane ? head.length : -1;
+  if (ownPane) head.push(OWNER_QUESTION_LINE);
+  head.push(liveLine(self.id), ...handoffLines(self));
   const tail = [];
 
   if (lead) {
@@ -213,12 +234,7 @@ export function briefingText({ self, file, members = [], lead, helpers = [], gua
     }
   }
 
-  let text = [...head, ...memberLines, ...tail, "</herdr-bot>"].join("\n");
-  if (text.length > BRIEFING_LIMIT) {
-    const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
-    text = text.slice(0, BRIEFING_LIMIT - mark.length) + mark;
-  }
-  return text;
+  return cutBriefing([...head, ...memberLines, ...tail, "</herdr-bot>"], ownerQuestionIndex);
 }
 
 /** Where a bot finds its team's live state: the briefing at launch is a snapshot. */
@@ -260,8 +276,8 @@ export function launchBriefingText({ self, file, agent = self?.agent ?? null, gu
   ];
   if (shown.trim()) lines.push("Instructions:", shown.trim());
   lines.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE);
-  const showOwnerQuestion = OWNER_QUESTION_AGENTS.includes(agent);
-  const ownerQuestionIndex = lines.length;
+  const showOwnerQuestion = OWNER_QUESTION_AGENTS.includes(agent) || (agent === "dsh-tui" && guard === true);
+  const ownerQuestionIndex = showOwnerQuestion ? lines.length : -1;
   if (showOwnerQuestion) lines.push(OWNER_QUESTION_LINE);
   lines.push(liveLine(self.id), restartLine(self.id), ...handoffLines(self));
   const eff = self.kind === "member" || self.leadProject
@@ -278,17 +294,7 @@ export function launchBriefingText({ self, file, agent = self?.agent ?? null, gu
     for (const m of team) lines.push(`- ${m.name} (bot ${m.id}${m.role ? `, ${m.role}` : ""})`);
   }
   lines.push("</herdr-bot>");
-  let text = lines.join("\n");
-  if (text.length > BRIEFING_LIMIT) {
-    const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
-    const end = BRIEFING_LIMIT - mark.length;
-    if (showOwnerQuestion && !text.slice(0, end).includes(OWNER_QUESTION_LINE)) {
-      lines.splice(ownerQuestionIndex, 1);
-      text = lines.join("\n");
-    }
-    if (text.length > BRIEFING_LIMIT) text = text.slice(0, end) + mark;
-  }
-  return text;
+  return cutBriefing(lines, ownerQuestionIndex);
 }
 
 /** A short, stable hash of a text (53-bit cyrb53, hex): no `node:crypto` in a Herdr mod. */
