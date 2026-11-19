@@ -13,7 +13,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
   readSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, uptime } from "node:os";
-import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
@@ -59,6 +59,7 @@ import { botHistory, historyLines } from "../inspect.js";
 import { CONFIG_VAR, chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
+import { isInstalledGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
@@ -322,19 +323,14 @@ const onPath = (program) => programPath(program) !== null;
  * The `hc kill` shim's folder (#955, `hc-kill`, beside the same hcGuard.mjs) is vouched for by
  * the same byte rule.
  *
- * Version skew (#955): a guard or shim folder of ANOTHER version (am and the pack installed at
- * different versions, or a pane started before an update that moved the folder) is not
- * byte-equal, so this CLI does not skip it and realHcPath takes its `hc` for the real one. The
- * CLI's own kill (hcKill: restart, rm, worker kill) then runs through that other copy's shim
- * or guard, which refuses it for a pane that is not a main bot's seat. It fails closed: the
- * old pane stays and the verb says it wasn't ended; nothing is ended that the rule forbids.
- * The shim's own lookup (hcGuard.mjs hcPastGuards) skips loosely, so bots' other hc calls are
- * not affected. Bringing am and the pack to one version, then restarting the pane, clears it.
+ * Version skew (#1728): am and the pack may run different releases, or a pane may still name a
+ * previous install. isInstalledGuardFolder also skips their shipped guard and shim entries
+ * at recognized install paths. hcKill explains a failure from any guard this CLI reaches.
  */
 function realHcPath() {
   const dirs = [...(process.env.PATH ?? "").split(":"), `${home()}/.local/bin`, dirname(process.execPath)];
   for (const dir of dirs) {
-    if (!dir || isGuardFolder(dir)) continue;
+    if (!dir || isGuardFolder(dir) || isInstalledGuardFolder(dir)) continue;
     const file = `${dir}/hc`;
     try {
       accessSync(file, constants.X_OK);
@@ -349,12 +345,23 @@ async function hcReal(args, { timeout } = {}) {
   return r;
 }
 /**
- * End a pane for one of this CLI's own verbs (restart, rm, a stray pane of a failed start, a
- * --tree helper): the real hc, past the pane's guard and its `hc kill` shim. Those refuse a bot's
- * own `hc kill` unless it is its project's main bot (#955); a restart a member or a lead asks for
- * is this CLI's checked work, as `worker kill` is, and must still end the old pane.
+ * End a pane for a checked CLI verb such as restart or worker kill. The pane's guard or shim
+ * allows direct kills only from a project's main bot (#955). If an unvouched guard fails the
+ * CLI's kill, explain how to resolve the version skew (#1728).
  */
-const hcKill = (terminal, options) => hcReal(["kill", terminal], options);
+async function hcKill(terminal, { timeout } = {}) {
+  const file = realHcPath();
+  const r = await runProgram(hcExecutable(file), ["kill", terminal], { timeout });
+  if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
+  if (r.code === 0 || !file) return r;
+  const dir = dirname(file);
+  let real;
+  try { real = realpathSync(dir); } catch { return r; }
+  const name = basename(real);
+  if ((name !== "guard" && name !== KILL_GUARD_NAME) || !looksLikeGuardFolder(real)) return r;
+  const folder = dir === real ? dir : `${dir} (${real})`;
+  return { ...r, stderr: `the first hc on this pane's PATH is in ${folder}, a guard folder this am cannot vouch for (another version's copy, or one outside the install); update am and the pack to one version, then restart this pane (#1728)` };
+}
 /** `hc <args> --json` through the real hc, parsed; a failed call throws (as hcJson does). */
 async function hcRealJson(args) {
   const r = await hcReal([...args, "--json"]);
@@ -8783,7 +8790,7 @@ async function cmdWorkerKill(opts, panes) {
   }
   // The real hc (in a sandbox, the proxy's socket, which ends only the caller's own worker):
   // the pane's guard refuses a member's own `hc kill`, and this verb is the checked way around it.
-  const r = await hcReal(["kill", address]);
+  const r = await hcKill(address);
   if (r.code !== 0) throw new CliError(`hc kill ${address} failed: ${hcSaid((r.stderr || r.stdout).trim())}`);
   return opts.json ? { terminal: address, ended: true, branch: target.labels?.branch ?? null } : `${address} ended (${bot.name}'s worker${target.labels?.branch ? ` on ${target.labels.branch}` : ""}).`;
 }

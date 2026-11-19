@@ -33,9 +33,10 @@
 // to another listed captain; both ranks come from bots.json, and workers inherit nothing.
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readApprovedRecord } from "./approved.js";
@@ -44,7 +45,7 @@ import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferPr
 import { agentKeyOfArgv, resolveAgent } from "./models.js";
 import { pendingDialog } from "./dialog.js";
 import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL,
-  WORKER_OF_LABEL, isKillGuardWord } from "./workers.js";
+  WORKER_OF_LABEL, isKillGuardWord, stableRootOf } from "./workers.js";
 
 /** The commands a sandboxed bot may call unchanged. */
 export const ALLOWED_VERBS = new Set([
@@ -286,6 +287,42 @@ export function isGuardFolder(dir) {
  */
 export const looksLikeGuardFolder = (dir) => typeof dir === "string" && dir !== ""
   && existsSync(join(dir, "..", "hcGuard.mjs"));
+
+const guardEntryHash = (file) => {
+  try { return createHash("sha256").update(readFileSync(file)).digest("hex"); } catch { return null; }
+};
+const GUARD_ENTRY_HASHES = new Set([
+  guardEntryHash(SELF_ENTRY),
+  guardEntryHash(join(KILL_GUARD_DIR, "hc")),
+  // Older guard/hc variant found in the shipped git tags checked for #1728.
+  "a65edeb17a1df82a586da83f60f07e90cd44727038126e573445010b28bea594",
+].filter(Boolean));
+
+/**
+ * A shipped guard or kill shim in the pack, stable sandbox or am install (#1728 version skew).
+ * Its canonical folder and entry hash let the CLI skip it on PATH. The guard's own byte-equal
+ * rule (#643, #721) stays in isGuardFolder.
+ */
+export function isInstalledGuardFolder(dir, env = process.env) {
+  if (typeof dir !== "string" || dir === "") return false;
+  const real = realOrNull(dir);
+  if (!real) return false;
+  const name = basename(real);
+  if (name !== "guard" && name !== KILL_GUARD_NAME) return false;
+  const parent = dirname(real);
+  if (!existsSync(join(parent, "hcGuard.mjs")) || !GUARD_ENTRY_HASHES.has(guardEntryHash(join(real, "hc")))) return false;
+
+  if (parent === realOrNull(`${appHome(env)}/mods/am-sidebar`)) return true;
+  try { if (parent === realOrNull(stableRootOf(env))) return true; } catch { /* no data home */ }
+
+  const amHome = (env.AM_HOME || join(env.HOME || homedir(), ".automagik")).replace(/\/+$/, "");
+  const store = `${amHome}/parts/automagik.am`;
+  const version = basename(parent);
+  if (version.startsWith(".") || dirname(parent) !== realOrNull(store)) return false;
+  return /^\d+\.\d+\.\d+(-[0-9a-f]+)?$/.test(version)
+    || parent === realOrNull(join(store, "current")) || parent === realOrNull(join(store, "previous"));
+}
+
 /**
  * The env for `real`: the re-entry marker only when that hc looks like a guard this guard
  * cannot vouch for. A stray hcGuard.mjs beside an ordinary real hc also sets it, and the
