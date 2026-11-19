@@ -726,8 +726,8 @@ jobs:
           echo "ran: ${OUTCOMES}"
 
   pocket:
-    # Pocket's phone app (apps/pocket/, the old automagik-pocket android.yml): the debug APK, the
-    # unit tests and lint. Its version is the root package.json's, so a change there builds it too.
+    # Pocket's GitHub debug APK and both flavors' unit tests and lint.
+    # Its version is the root package.json's, so a change there builds it too.
     # Only when apps/pocket/ changed, or the workflows, lane tooling and version that build it:
     # the `changes` job's pocket output decides it before this job takes a runner.
     name: Pocket (build, test, lint)
@@ -748,7 +748,7 @@ jobs:
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0'
+          packages: 'platforms;android-36 build-tools;35.0.0'
 
       # Robolectric fetches its android-all jars into ~/.m2 while the tests run, outside Gradle's
       # cache, so a download miss failed unrelated PRs (#549). The jars depend only on the
@@ -759,7 +759,7 @@ jobs:
           set -euo pipefail
           android=apps/pocket/android
           version="$(grep -oE 'org\.robolectric:robolectric:[0-9][0-9A-Za-z.-]*' "$android/app/build.gradle.kts" | head -n 1 | cut -d: -f3 || true)"
-          sdks="$(grep -rhoE '@Config\(sdk = \[[0-9, ]+\]' "$android/app/src/test" | grep -oE '[0-9]+' | sort -un | paste -sd- - || true)"
+          sdks="$(grep -rhoE '@Config\(sdk = \[[0-9, ]+\]' "$android/app/src"/test* | grep -oE '[0-9]+' | sort -un | paste -sd- - || true)"
           if [ -z "$version" ]; then
             echo "::warning::Robolectric's version not found in $android/app/build.gradle.kts; caching ~/.m2 under 'unknown'"
             version=unknown
@@ -822,7 +822,8 @@ jobs:
         run: |
           set -euo pipefail
           touch "$RUNNER_TEMP/m2-marker"
-          args=(--no-daemon --max-workers=2 --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug)
+          args=(--no-daemon --max-workers=2 --stacktrace :app:assembleGithubDebug
+            :app:testGithubDebugUnitTest :app:lintGithubDebug :app:testPlayDebugUnitTest :app:lintPlayDebug)
           first="$RUNNER_TEMP/gradle-first-attempt.log"
           status=0
           ./gradlew "${args[@]}" 2>&1 | tee "$first" || status=$?
@@ -844,14 +845,14 @@ jobs:
         run: |
           set -euo pipefail
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
-            apps/pocket/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/pocket/android/app/build/outputs/apk/github/debug/app-github-debug.apk
 
       - name: Upload the debug APK
         if: steps.debug_key.outputs.present == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pocket-debug-apk-${{ github.event.pull_request.number || github.run_number }}
-          path: apps/pocket/android/app/build/outputs/apk/debug/app-debug.apk
+          path: apps/pocket/android/app/build/outputs/apk/github/debug/app-github-debug.apk
           retention-days: 14
 
       - name: Remove the shared debug keystore

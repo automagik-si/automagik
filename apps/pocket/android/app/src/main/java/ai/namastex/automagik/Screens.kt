@@ -38,7 +38,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.activity.compose.LocalActivity
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /** Machines a host's core reaches: live from the connection, or remembered from the last one. */
 fun PocketState.linkedFor(host: HostProfile): List<LinkedMachine> =
@@ -191,7 +190,7 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
         Spacer(Modifier.height(34.dp)); HorizontalDivider(color = Border); Spacer(Modifier.height(26.dp))
         SmallLabel("About"); Spacer(Modifier.height(15.dp))
         Row(verticalAlignment = Alignment.CenterVertically) { Brand(36); Spacer(Modifier.width(12.dp)); Column { Text("Automagik", fontWeight = FontWeight.SemiBold); Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · Android companion", color = Muted, fontSize = 12.sp) } }
-        Spacer(Modifier.height(16.dp)); UpdateRow()
+        AppUpdates.Settings()
         CrashRow()
         Spacer(Modifier.height(18.dp)); Text("A native companion for your existing herdr-core, in Automagik’s colors, light or dark as your phone is set. Spaces and tabs follow the desktop’s design.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         Spacer(Modifier.height(10.dp)); Text("With Watch in background on, connections stay open while you’re away and come back on their own after a drop. Otherwise Android may close them; pull down on the agent list or tap Reconnect. Your remote programs keep running.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
@@ -264,47 +263,6 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
             Spacer(Modifier.weight(1f))
             TextButton(onClick = { CrashLog.clear(); report = null }) { Text("Clear", fontSize = 13.sp, color = Muted) }
         }
-    }
-}
-
-/** Settings → About: check for a newer build, install it, and whether updates install on their own. */
-@Composable fun UpdateRow() {
-    val update by Updater.state.collectAsStateWithLifecycle()
-    val auto by Updater.auto.collectAsStateWithLifecycle()
-    val updated by Updater.updated.collectAsStateWithLifecycle()
-    val activity = LocalActivity.current
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        updated?.let { Text(it, color = Muted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
-        when (val u = update) {
-            is UpdateState.Available, is UpdateState.NeedsPermission, is UpdateState.Waiting -> {
-                val release = when (u) { is UpdateState.Available -> u.release; is UpdateState.NeedsPermission -> u.release; else -> (u as UpdateState.Waiting).release }
-                Button(onClick = { activity?.let(Updater::start) }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
-                    Text(if (u is UpdateState.Waiting) "Install ${release.label} now" else "Update to ${release.label}") }
-                if (u is UpdateState.Waiting) Text("Downloaded. It installs on its own when you leave Automagik.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
-                if (release.notes.isNotBlank()) Text(release.notes, color = Muted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                if (u is UpdateState.NeedsPermission) Text("Allow Automagik to install apps, then come back here. Android asks this once.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
-            }
-            is UpdateState.Downloading -> {
-                Text("Downloading ${u.release.label}…", fontSize = 13.sp)
-                LinearProgressIndicator(progress = { u.progress }, Modifier.fillMaxWidth(), color = Accent, trackColor = Border)
-            }
-            is UpdateState.Installing, is UpdateState.Confirm -> Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Installing…", fontSize = 13.sp)
-            }
-            else -> Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = { Updater.check() }, enabled = u != UpdateState.Checking) { Text(if (u == UpdateState.Checking) "Checking…" else "Check for updates") }
-                Spacer(Modifier.width(12.dp))
-                when (u) {
-                    UpdateState.Current -> Text("You have the latest build.", color = Muted, fontSize = 12.sp)
-                    is UpdateState.Failed -> Text(u.message, color = Blocked, fontSize = 12.sp, lineHeight = 17.sp)
-                    else -> {}
-                }
-            }
-        }
-        if ((update as? UpdateState.Failed)?.release != null) TextButton(onClick = { activity?.let(Updater::start) }, contentPadding = PaddingValues(0.dp)) { Text("Try again") }
-        AlertRow("Install updates automatically", if (Build.VERSION.SDK_INT >= UpdatePolicy.SILENT_SDK)
-            "New versions download on Wi-Fi and install while you’re away from the app; a notification says so after. Off, a notification asks first."
-            else "Android ${Build.VERSION.RELEASE} asks before each update: a notification says when one is ready.", auto) { Updater.setAuto(it) }
     }
 }
 
