@@ -19610,7 +19610,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     answerView: (sessionId, viewId, action, values) => after(call2("view-reply", { sessionId: partFor(sessionId), viewId, action, values })),
     dismissView: (sessionId) => after(call2("dismiss-view", { sessionId: partFor(sessionId) })),
     deleteBtw: (sessionId, cardId) => after(call2("btw-delete", { sessionId, cardId })),
-    answerApproval: (id, choice) => after(call2("approval-answer", { id, choice })),
+    answerApproval: (id, choice) => after(call2("approval-answer", { id, choice, client: "web" })),
     computerSetEnabled: (enabled) => after(call2("computer-set-enabled", { enabled })),
     computerSetLevel: (botId, level) => after(call2("computer-set-level", { botId, level })),
     computerRevokeApp: (botId, appKey) => after(call2("computer-revoke-app", { botId, appKey })),

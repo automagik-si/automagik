@@ -2536,17 +2536,21 @@ export function install(rt) {
       : effort === null || effort === '' ? null
       : await rt.resolveEffort(target, effort)
     const agent = await rt.resolveAgent(rt.chatOf(botId))
-    const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort }
+    const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, shellHeld: bot.shellHeld }
     const restore = () => {
       for (const key of ['model', 'effort', 'appliedModel', 'appliedEffort']) {
         if (previous[key] === undefined) delete bot[key]
         else bot[key] = previous[key]
       }
+      if (previous.shellHeld === undefined) delete bot.shellHeld
+      else bot.shellHeld = previous.shellHeld
     }
     const putRoute = () => {
       bot.model = target
       if (effortId === null) delete bot.effort
       else if (effortId !== undefined) bot.effort = effortId
+      // A route change to a model that uses DSH's tools lifts a load-time shell hold.
+      if (bot.shellHeld !== undefined && (bot.shell === true || !commandCapableAgent(target))) delete bot.shellHeld
     }
     let said = true
     // The team's own kickoff is not a conversation yet: a Bot still on its greeting simply
