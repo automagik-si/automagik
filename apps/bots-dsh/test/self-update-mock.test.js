@@ -22,6 +22,36 @@ function dom(t) {
 
 const tick = (ms = 30) => new Promise(resolve => setTimeout(resolve, ms))
 const button = (root, label) => [...root.querySelectorAll('button')].find(node => node.textContent.includes(label))
+const escape = document => document.dispatchEvent(new document.defaultView.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+
+// A preview mounted in the app's footer seat, with the entries the real seat holds, and its own
+// root. This is the branch the close bug lived in: without a seat the nod replaced the layer.
+function seatPage(t) {
+  const document = dom(t)
+  const foot = document.createElement('div')
+  foot.className = 'lb-foot'
+  foot.innerHTML = '<button type="button" aria-label="Account">Account</button>'
+    + '<button type="button" aria-label="Rail">Rail</button>'
+  document.body.append(foot)
+  const root = document.createElement('div')
+  root.id = 'ds-bot-self-update-mock'
+  document.body.append(root)
+  const control = mountSelfUpdateMock(root, { seat: foot, stepMs: 1, successMs: 1 })
+  t.after(() => control.dispose())
+  return { document, foot, root, control }
+}
+
+// What every close owes: no layer in the document or the root, the preview at its nod, and the
+// seat's own entries still there with exactly one nod beside them.
+function assertClosed({ document, foot, root, control }) {
+  assert.equal(document.querySelector('.su-layer'), null)
+  assert.equal(root.querySelector('.su-layer'), null)
+  assert.equal(control.screen(), 'nod')
+  assert.equal(foot.querySelectorAll('.su-nod').length, 1)
+  assert.equal(foot.querySelectorAll('button').length, 3)
+  assert.equal(foot.textContent.includes('Account'), true)
+  assert.equal(foot.textContent.includes('Rail'), true)
+}
 
 test('the preview mounts only with the flag, and leaves a normal start alone', t => {
   const document = dom(t)
@@ -74,18 +104,103 @@ test('the nod joins the seat entries instead of replacing them, and dispose remo
   assert.equal(foot.textContent.includes('Rail'), true)
 })
 
-test('closing the modal leaves exactly one nod in the seat', t => {
+test('Not now closes the modal: the layer leaves the DOM and screen() is the nod again', t => {
+  const page = seatPage(t)
+  button(page.foot, 'Update available').click()
+  assert.equal(page.control.screen(), 'changes')
+  assert.notEqual(page.document.querySelector('.su-layer'), null)
+  button(page.root, 'Not now').click()
+  assertClosed(page)
+})
+
+test('the success Close clears the modal, not only the nod count', async t => {
+  const page = seatPage(t)
+  button(page.foot, 'Update available').click()
+  button(page.root, 'Update now').click()
+  await tick(60)
+  assert.equal(page.control.screen(), 'success')
+  page.root.querySelector('.su-foot .su-primary').click()
+  assertClosed(page)
+})
+
+test('the rollback Close clears the modal, not only the nod count', async t => {
+  const page = seatPage(t)
+  button(page.foot, 'Update available').click()
+  button(page.root, 'Show the failure instead').click()
+  await tick(60)
+  assert.equal(page.control.screen(), 'rollback')
+  page.root.querySelector('.su-foot .su-primary').click()
+  assertClosed(page)
+})
+
+test('Escape dismisses the modal from the announcement and from the running steps', async t => {
+  const page = seatPage(t)
+  button(page.foot, 'Update available').click()
+  assert.equal(page.control.screen(), 'changes')
+  escape(page.document)
+  assertClosed(page)
+
+  // Mid-flow: closing also stops the timers, so no result screen arrives after it.
+  button(page.foot, 'Update available').click()
+  button(page.root, 'Update now').click()
+  assert.equal(page.control.screen(), 'steps')
+  escape(page.document)
+  assertClosed(page)
+  await tick(60)
+  assertClosed(page)
+})
+
+test('reopening after a close starts clean: one layer, one nod, one listener', t => {
   const document = dom(t)
   const foot = document.createElement('div')
   foot.className = 'lb-foot'
+  foot.innerHTML = '<button type="button" aria-label="Account">Account</button>'
+  document.body.append(foot)
+  const root = document.createElement('div')
+  document.body.append(root)
+  // One Escape listener for the whole mount, never one per open.
+  let keydowns = 0
+  const add = document.addEventListener.bind(document)
+  document.addEventListener = (type, fn, opts) => {
+    if (type === 'keydown') keydowns += 1
+    return add(type, fn, opts)
+  }
+  const control = mountSelfUpdateMock(root, { seat: foot, stepMs: 1, successMs: 1 })
+  t.after(() => control.dispose())
+  assert.equal(keydowns, 1)
+
+  button(foot, 'Update available').click()
+  button(root, 'Not now').click()
+  assert.equal(control.screen(), 'nod')
+  assert.equal(document.querySelector('.su-layer'), null)
+
+  button(foot, 'Update available').click()
+  assert.equal(control.screen(), 'changes')
+  assert.equal(document.querySelectorAll('.su-layer').length, 1)
+  assert.equal(document.querySelectorAll('.su-modal').length, 1)
+  assert.equal(foot.querySelectorAll('.su-nod').length, 1)
+  assert.equal(keydowns, 1)
+  escape(document)
+  assert.equal(control.screen(), 'nod')
+  assert.equal(document.querySelector('.su-layer'), null)
+  assert.equal(foot.querySelectorAll('.su-nod').length, 1)
+})
+
+test('the installed preview clears its layer on Not now and keeps the seat entries', t => {
+  const document = dom(t)
+  const foot = document.createElement('div')
+  foot.className = 'lb-foot'
+  foot.innerHTML = '<button type="button" aria-label="Account">Account</button>'
   document.body.append(foot)
   const off = installSelfUpdateMock({ location: { search: '?mock-1540', hash: '' }, document })
-  const open = foot.querySelector('.su-nod')
-  open.click()
-  button(document, 'Not now').click()
+  t.after(off)
+  button(foot, 'Update available').click()
+  assert.notEqual(document.querySelector('.su-layer'), null)
+  button(document.getElementById('ds-bot-self-update-mock'), 'Not now').click()
+  assert.equal(document.querySelector('.su-layer'), null)
   assert.equal(foot.querySelectorAll('.su-nod').length, 1)
-  off()
-  assert.equal(foot.querySelector('.su-nod'), null)
+  assert.equal(foot.querySelectorAll('button').length, 2)
+  assert.equal(foot.textContent.includes('Account'), true)
 })
 
 test('the hash form mounts it too', t => {
