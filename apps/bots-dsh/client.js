@@ -66,6 +66,9 @@ function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) 
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "File-tool folder": "文件工具的文件夹",
+  "Folder for these four file tools": "这四个文件工具使用的文件夹",
+  "Clear folder": "清除文件夹",
   "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "操作系统阻止了对 {folder} 的读取或写入。请允许 Automagik 使用此文件夹：在 macOS 上，打开系统设置 > 隐私与安全性 > 文件与文件夹（或完全磁盘访问权限）；在其他系统上，允许你的用户读取和写入该文件夹。你选择的文件夹已保留。",
   "What will it do?": "它会做什么？",
   "Add instructions": "添加说明",
@@ -541,7 +544,9 @@ var ZH = {
   "Account not shown by the CLI": "CLI 未显示账号",
   "Account change failed. Close other app windows and try again.": "无法更改账号。请关闭其他应用窗口后重试。",
   "Bot accounts": "Bot 账号",
+  "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
+  "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "这台电脑上的其他 Automagik 安装可能使用同一个 Bot 登录。在此更改会同时更改它们的登录。",
   "Your terminal login is separate and stays unchanged.": "终端的登录独立，保持不变。",
   "Bots: {account}": "Bot：{account}",
   "Sign in again in the app to resume Bots": "在应用内重新登录以恢复 Bot",
@@ -3057,6 +3062,37 @@ var HOST_ZH = {
   "The note could not be read.": "无法读取笔记。",
   "Read through {date}": "已读到 {date}",
   "This chat": "这个聊天",
+  // The shared kit's interactive backfill card (#1326 K2): a proposal to read, one approval,
+  // and the live runs with a stop.
+  "Read chat history": "读取聊天记录",
+  "Choose the chats to read, then set the dates. Nothing starts until you press Start.": "选择要读取的聊天并设置日期。在你按下“开始”之前，不会启动任何操作。",
+  "Starting…": "正在开始…",
+  "Sending your approval…": "正在发送你的批准…",
+  "Your approval was sent. One backfill is starting for each chat you chose.": "你的批准已发送。你选择的每个聊天都会开始一次历史记录回填。",
+  "Start date": "开始日期",
+  "End date": "结束日期",
+  "The start date must be before the end date.": "开始日期必须早于结束日期。",
+  "There are no chats to read here.": "这里没有可读取的聊天。",
+  "Chats to read": "要读取的聊天",
+  "Stopping…": "正在停止…",
+  "Stop the backfill of {chat}": "停止 {chat} 的回填",
+  "The backfill could not be started.": "无法开始回填。",
+  "The backfill could not be stopped.": "无法停止回填。",
+  "Started {date}": "开始于 {date}",
+  "{count} more chats": "还有 {count} 个聊天",
+  "Showing only {count} runs": "仅显示 {count} 次运行",
+  "Backfill": "回填",
+  "Backfills": "回填记录",
+  "All available history": "所有可用的历史记录",
+  "From {date}": "从 {date}",
+  "Through {date}": "截至 {date}",
+  "Unnamed chat": "未命名聊天",
+  "{count} chats selected": "已选择 {count} 个聊天",
+  "{count} running": "{count} 个进行中",
+  "{count} done": "{count} 个已完成",
+  "{count} phone did not answer": "{count} 个手机没有响应",
+  "{count} stopped": "{count} 个已停止",
+  "{count} failed": "{count} 个失败",
   // The Bot browser tab beside the conversation (bot-browser-tab.js): the person drives the
   // Bot's own page, then gives it back.
   "Bot browser": "Bot 浏览器",
@@ -4401,10 +4437,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h96 / 2}" width="${w}" height="${h96}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h96 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h96 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h96, tilt]) => `<ellipse cx="${cx}" cy="${cy + h96 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h96 / 2}" width="${w}" height="${h96}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h96 * 0.14}Q0 ${-h96 * 0.42} ${w * 0.62} ${h96 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h97, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h97 / 2}" width="${w}" height="${h97}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h97 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h97 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h97, tilt]) => `<ellipse cx="${cx}" cy="${cy + h97 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h97, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h97 / 2}" width="${w}" height="${h97}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h97, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h97 * 0.14}Q0 ${-h97 * 0.42} ${w * 0.62} ${h97 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -4519,12 +4555,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h96 = dt / steps;
+    const h97 = dt / steps;
     let moving = false;
     for (const [key, value] of values) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h96;
-        value.x += value.v * h96;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h97;
+        value.x += value.v * h97;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -14891,20 +14927,35 @@ var APPLY_FAILED_MS = 8e3;
 // src/shared/cli-account.js
 var ACCOUNT_RECOVERY_CODE = "bot/account-recovery";
 var ACCOUNT_RECOVERY_HINT = "Bot sign-in recovery is needed. Reset Bot sign-in to start fresh.";
+var ACCOUNT_SHARING_HINT = "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.";
+var accountChangeFailure = (error) => error?.code === "bot/refused" && typeof error.message === "string" && error.message.trim() !== "" ? error.message : void 0;
+var installationNameOf = (value) => {
+  if (typeof value !== "string") return void 0;
+  const text2 = [...value].filter((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127).join("").trim();
+  return text2 === "" ? void 0 : [...text2].slice(0, 60).join("");
+};
 
 // src/client/cli-accounts.js
 var import_react38 = require("react");
 var botAccountName = (account) => account?.email ?? account?.org ?? t("Account not shown by the CLI");
 function CliAccounts({ bot, actions }) {
   const [accounts, setAccounts] = (0, import_react38.useState)({});
+  const [installation, setInstallation] = (0, import_react38.useState)(void 0);
   const [pending, setPending] = (0, import_react38.useState)(null);
   const [busy, setBusy] = (0, import_react38.useState)(false);
   const [error, setError] = (0, import_react38.useState)(null);
-  const refresh = async () => setAccounts((await actions.cliLoginAccounts?.())?.accounts ?? {});
+  const shown = (value) => {
+    setAccounts(value?.accounts ?? {});
+    setInstallation(value?.installation);
+  };
+  const refresh = async () => {
+    const value = await actions.cliLoginAccounts?.();
+    shown(value);
+  };
   (0, import_react38.useEffect)(() => {
     let alive = true;
     Promise.resolve(actions.cliLoginAccounts?.()).then((value) => {
-      if (alive) setAccounts(value?.accounts ?? {});
+      if (alive) shown(value);
     }).catch(() => {
     });
     return () => {
@@ -14917,7 +14968,7 @@ function CliAccounts({ bot, actions }) {
       const rows2 = Object.values(actions.cliLogin.getSnapshot().rows);
       if (!rows2.some((row) => row.stage === "done")) return;
       Promise.resolve(actions.cliLoginAccounts?.()).then((value) => {
-        if (alive) setAccounts(value?.accounts ?? {});
+        if (alive) shown(value);
       }).catch(() => {
       });
     });
@@ -14948,7 +14999,7 @@ function CliAccounts({ bot, actions }) {
           recoveryRequired: true
         } }));
         setPending(null);
-      } else setError(t("Account change failed. Close other app windows and try again."));
+      } else setError(accountChangeFailure(error2) ?? t("Account change failed. Close other app windows and try again."));
     } finally {
       setBusy(false);
     }
@@ -14959,7 +15010,13 @@ function CliAccounts({ bot, actions }) {
     "section",
     { className: "bt-set-section" },
     (0, import_react38.createElement)("h3", null, t("Bot accounts")),
+    installation ? (0, import_react38.createElement)(
+      "p",
+      { className: "bt-set-hint" },
+      t("This installation: {installation}", { installation })
+    ) : null,
     (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t("Bots in this installation share these accounts.")),
+    (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t(ACCOUNT_SHARING_HINT)),
     (0, import_react38.createElement)(
       "p",
       { className: "bt-set-hint" },
@@ -17844,6 +17901,9 @@ function splitCanvases(text2) {
 }
 var hasCanvas = (text2) => String(text2 ?? "").includes(`\`\`\`${FENCE2}`);
 
+// src/shared/read-scope.js
+var READ_SCOPE_CODE = "SESSION_READ_SCOPE_DENIED";
+
 // src/client/cells.js
 var import_react46 = require("react");
 var import_react_dom7 = require("react-dom");
@@ -19128,7 +19188,8 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
     return entry ? [[call2.callId, stopLine(entry), entry.why]] : [];
   }))) : "[]";
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]));
-  const drawn2 = calls.filter((call2) => DRAWN.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.renderer(toolName(call2)) || agentImage(call2) || stops.has(call2.callId));
+  const readRefused = (call2) => call2.isError === true && call2.error?.code === READ_SCOPE_CODE;
+  const drawn2 = calls.filter((call2) => readRefused(call2) || DRAWN.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.renderer(toolName(call2)) || agentImage(call2) || stops.has(call2.callId));
   const running2 = root.kind === "tool-result" ? void 0 : calls.findLast((call2) => call2.kind !== "tool-result");
   const note = running2 ? toolActivity(toolName(running2), toolArgs(running2).text, findBot2, roster.byId[sessionId]) : null;
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note);
@@ -19137,6 +19198,13 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot: findBot2, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } };
   return (0, import_react46.createElement)(import_react46.Fragment, null, drawn2.map((call2, index) => {
     const stop3 = stops.get(call2.callId);
+    if (readRefused(call2)) {
+      return (0, import_react46.createElement)(
+        "div",
+        { key: call2.callId ?? index, className: "bt-event bt-event-error", role: "status" },
+        call2.error.reason ?? contentText(call2.content)
+      );
+    }
     return (0, import_react46.createElement)(
       import_react46.Fragment,
       { key: call2.callId ?? index },
@@ -38453,6 +38521,7 @@ var genuiNumber = (value) => {
   return typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : void 0;
 };
 var genuiInstant = (value) => {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return new Date(value);
   if (typeof value !== "string") return void 0;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? new Date(ms) : void 0;
@@ -38703,6 +38772,127 @@ function personView(data) {
     readThrough: shortDate(note.readThrough)
   };
 }
+var BACKFILL_RUNS_SHOWN = 3;
+var BACKFILL_ROWS_SHOWN = 20;
+var BACKFILL_CHATS_MAX = 200;
+var BACKFILL_ID_MAX = 200;
+var backfillId = (value) => genuiLabel(value, BACKFILL_ID_MAX);
+function backfillDay(value) {
+  const date = genuiInstant(value);
+  if (date === void 0) return "";
+  const pad2 = (number) => String(number).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`;
+}
+var backfillDayText = (value) => {
+  const day2 = backfillDay(value);
+  if (day2 === "") return "";
+  const date = genuiInstant(`${day2}T00:00:00.000Z`);
+  if (date === void 0) return "";
+  return new Intl.DateTimeFormat(dateLocale(), {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC"
+  }).format(date);
+};
+function backfillRange(from, to) {
+  const start2 = backfillDayText(from);
+  const end = backfillDayText(to);
+  if (start2 !== "" && end !== "") return start2 === end ? start2 : `${start2} – ${end}`;
+  if (start2 !== "") return t("From {date}", { date: start2 });
+  if (end !== "") return t("Through {date}", { date: end });
+  return t("All available history");
+}
+function canCancel(row) {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+  return backfillId(row.jobId) !== void 0 && row.outcome === null;
+}
+function proposalView(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const id = backfillId(value.id);
+  if (id === void 0) return void 0;
+  const chats = (Array.isArray(value.chats) ? value.chats : []).slice(0, BACKFILL_CHATS_MAX).map((chat) => {
+    if (chat === null || typeof chat !== "object" || Array.isArray(chat)) return void 0;
+    const chatId = backfillId(chat.id);
+    if (chatId === void 0) return void 0;
+    return {
+      id: chatId,
+      name: genuiLabel(chat.name) ?? t("Unnamed chat"),
+      channel: genuiLabel(chat.channel) ?? "",
+      kind: genuiLabel(chat.kind, 24) ?? "",
+      ticked: chat.ticked === true
+    };
+  }).filter(Boolean);
+  return {
+    id,
+    botId: backfillId(value.botId),
+    range: backfillRange(value.from, value.to),
+    from: backfillDay(value.from),
+    to: backfillDay(value.to),
+    chats,
+    ticked: chats.filter((chat) => chat.ticked).map((chat) => chat.id),
+    count: chats.length
+  };
+}
+function backfillSummaryText(summary, rows2) {
+  const list = Array.isArray(rows2) ? rows2 : [];
+  const fromSummary = (key) => {
+    if (summary === null || typeof summary !== "object" || Array.isArray(summary)) return void 0;
+    return genuiNumber(summary[key]);
+  };
+  const counted = (key) => fromSummary(key) ?? 0;
+  const ended = (outcome) => list.filter((row) => row?.outcome === outcome).length;
+  const running2 = fromSummary("running") ?? list.filter((row) => row?.outcome === null).length;
+  const done = fromSummary("done") ?? ended("done");
+  const phone = fromSummary("phoneDidNotAnswer") ?? ended("phone-did-not-answer");
+  const stopped = fromSummary("stopped") ?? ended("stopped");
+  const failed = fromSummary("failed") ?? ended("failed") + ended("not-started");
+  const parts = [];
+  if (running2 > 0) parts.push(t("{count} running", { count: countText2(running2) }));
+  if (done > 0) parts.push(t("{count} done", { count: countText2(done) }));
+  if (phone > 0) parts.push(t("{count} phone did not answer", { count: countText2(phone) }));
+  if (stopped > 0) parts.push(t("{count} stopped", { count: countText2(stopped) }));
+  if (failed > 0) parts.push(t("{count} failed", { count: countText2(failed) }));
+  if (parts.length === 0 && (counted("total") > 0 || list.length > 0)) parts.push(t("{count} chats", { count: countText2(counted("total") || list.length) }));
+  return parts.join(" · ");
+}
+function backfillRowView(row) {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return void 0;
+  const chatId = backfillId(row.chatId);
+  if (chatId === void 0) return void 0;
+  return { ...rowView(row), chatId, jobId: backfillId(row.jobId) ?? null, cancelable: canCancel(row) };
+}
+function backfillRunId(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  return backfillId(value.id);
+}
+function runView(value) {
+  const id = backfillRunId(value);
+  if (id === void 0) return void 0;
+  const rows2 = Array.isArray(value.rows) ? value.rows : [];
+  const shown = rows2.slice(0, BACKFILL_ROWS_SHOWN).map(backfillRowView).filter(Boolean);
+  return {
+    id,
+    botId: backfillId(value.botId),
+    range: backfillRange(value.from, value.to),
+    started: backfillDayText(value.startedAt),
+    summary: backfillSummaryText(value.summary, rows2),
+    total: rows2.length,
+    rows: shown,
+    more: Math.max(0, rows2.length - shown.length)
+  };
+}
+function backfillView(roster) {
+  const proposals = Array.isArray(roster?.omniBackfillProposals) ? roster.omniBackfillProposals : [];
+  const runs = Array.isArray(roster?.omniBackfills) ? roster.omniBackfills : [];
+  const validRuns = runs.filter((run2) => backfillRunId(run2) !== void 0);
+  const shown = validRuns.slice(0, BACKFILL_RUNS_SHOWN).map(runView);
+  return {
+    proposals: proposals.map(proposalView).filter(Boolean),
+    runs: shown,
+    moreRuns: validRuns.length - shown.length
+  };
+}
 
 // src/client/genui.js
 var import_react98 = require("react");
@@ -38721,8 +38911,8 @@ function revisionOf(roster) {
   const revision = roster?.genui?.revision;
   return typeof revision === "number" && Number.isFinite(revision) ? revision : 0;
 }
-function ProgressRow({ row }) {
-  const view = rowView(row);
+function ProgressRow({ row, view: given, action }) {
+  const view = given ?? rowView(row);
   return (0, import_react98.createElement)(
     "li",
     { className: "bt-genui-row", "data-state": view.state },
@@ -38745,7 +38935,9 @@ function ProgressRow({ row }) {
         view.media !== "" ? (0, import_react98.createElement)("span", null, view.media) : null,
         view.marks !== "" ? (0, import_react98.createElement)("span", null, view.marks) : null
       ) : null
-    )
+    ),
+    // A card of the kit's own may hang one action off a row (a backfill's Stop).
+    action === void 0 || action === null ? null : (0, import_react98.createElement)("div", { className: "bt-genui-action" }, action)
   );
 }
 function ProgressRows({ rows: list, label }) {
@@ -38819,6 +39011,231 @@ function PersonCard({ chatId, load, revision }) {
     )
   );
 }
+var START_BACKFILL = "start_backfill";
+var CANCEL_BACKFILL = "cancel_backfill";
+var backfillId2 = (value) => typeof value === "string" ? value.trim() : "";
+var backfillMessage = (error, fallback) => typeof error?.message === "string" && error.message !== "" ? error.message : fallback;
+function startBackfill(payload) {
+  const proposalId = backfillId2(payload?.proposalId);
+  const chats = [...new Set((Array.isArray(payload?.chats) ? payload.chats : []).map(backfillId2).filter((id) => id !== ""))];
+  const from = backfillId2(payload?.from);
+  const to = backfillId2(payload?.to);
+  if (proposalId === "" || chats.length === 0 || from === "" || to === "") {
+    return Promise.reject(new Error("A backfill start needs a proposal, at least one chat and both dates"));
+  }
+  return call(START_BACKFILL, { proposalId, chats, from, to });
+}
+function cancelBackfill(payload) {
+  const jobId = backfillId2(payload?.jobId);
+  if (jobId === "") return Promise.reject(new Error("Cancelling a backfill needs its job id"));
+  return call(CANCEL_BACKFILL, { jobId });
+}
+var toggleChat = (list, id) => list.includes(id) ? list.filter((item) => item !== id) : [...list, id];
+function BackfillCard({ roster, start: start2, cancel }) {
+  const starter = (0, import_react98.useRef)(start2 ?? startBackfill);
+  starter.current = start2 ?? startBackfill;
+  const stopper = (0, import_react98.useRef)(cancel ?? cancelBackfill);
+  stopper.current = cancel ?? cancelBackfill;
+  const [forms, setForms] = (0, import_react98.useState)({});
+  const [busy, setBusy] = (0, import_react98.useState)(void 0);
+  const [sent, setSent] = (0, import_react98.useState)(void 0);
+  const [errors, setErrors] = (0, import_react98.useState)({});
+  const [stopping, setStopping] = (0, import_react98.useState)({});
+  const prefix = (0, import_react98.useId)();
+  const view = backfillView(roster);
+  const formOf = (proposal) => forms[proposal.id] ?? { from: proposal.from, to: proposal.to, chats: proposal.ticked };
+  const update = (proposal, patch) => setForms((all) => ({
+    ...all,
+    [proposal.id]: { ...all[proposal.id] ?? { from: proposal.from, to: proposal.to, chats: proposal.ticked }, ...patch }
+  }));
+  const onStart = async (proposal, form) => {
+    const ready = form.chats.length > 0 && form.from !== "" && form.to !== "" && form.from <= form.to;
+    if (busy !== void 0 || !ready) return;
+    setBusy(proposal.id);
+    setErrors((all) => {
+      const next = { ...all };
+      delete next[proposal.id];
+      return next;
+    });
+    try {
+      const answer = await starter.current({ proposalId: proposal.id, chats: form.chats, from: form.from, to: form.to });
+      setSent({ proposalId: proposal.id, runId: answer?.runId });
+    } catch (error) {
+      setErrors((all) => ({ ...all, [proposal.id]: backfillMessage(error, t("The backfill could not be started.")) }));
+    } finally {
+      setBusy(void 0);
+    }
+  };
+  const onCancel = async (run2, row) => {
+    if (stopping[row.jobId] === true) return;
+    setStopping((all) => ({ ...all, [row.jobId]: true }));
+    setErrors((all) => {
+      const next = { ...all };
+      delete next[`run:${run2.id}`];
+      return next;
+    });
+    try {
+      await stopper.current({ jobId: row.jobId });
+    } catch (error) {
+      setErrors((all) => ({ ...all, [`run:${run2.id}`]: backfillMessage(error, t("The backfill could not be stopped.")) }));
+    } finally {
+      setStopping((all) => {
+        const next = { ...all };
+        delete next[row.jobId];
+        return next;
+      });
+    }
+  };
+  const waiting = sent !== void 0 && !view.runs.some((run2) => run2.id === sent.runId) ? sent : void 0;
+  if (waiting === void 0 && view.proposals.length === 0 && view.runs.length === 0) return null;
+  const pickers = view.proposals.filter((proposal) => waiting?.proposalId !== proposal.id).map((proposal) => {
+    const form = formOf(proposal);
+    const starting = busy === proposal.id;
+    const held = busy !== void 0;
+    const ordered = form.chats.length > 0 && form.from !== "" && form.to !== "" && form.from <= form.to;
+    const backwards = form.from !== "" && form.to !== "" && form.from > form.to;
+    return (0, import_react98.createElement)(
+      "section",
+      { key: proposal.id, className: "bt-q bt-genui-backfill", "aria-busy": starting ? "true" : void 0 },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-q-head" },
+        (0, import_react98.createElement)(
+          "div",
+          { className: "bt-q-text" },
+          (0, import_react98.createElement)("p", { className: "bt-q-title" }, t("Read chat history")),
+          (0, import_react98.createElement)("div", { className: "bt-q-detail" }, proposal.range)
+        ),
+        (0, import_react98.createElement)("button", {
+          type: "button",
+          className: "bt-genui-start",
+          disabled: held || !ordered,
+          onClick: () => onStart(proposal, form)
+        }, starting ? t("Starting…") : t("Start"))
+      ),
+      (0, import_react98.createElement)("p", { className: "bt-genui-note" }, t("Choose the chats to read, then set the dates. Nothing starts until you press Start.")),
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-dates" },
+        (0, import_react98.createElement)(
+          "label",
+          { className: "bt-genui-date-label", htmlFor: `${prefix}-${proposal.id}-from` },
+          t("Start date"),
+          (0, import_react98.createElement)("input", {
+            id: `${prefix}-${proposal.id}-from`,
+            type: "date",
+            className: "bt-genui-date",
+            value: form.from,
+            disabled: held,
+            "aria-label": t("Start date"),
+            onChange: (event) => update(proposal, { from: event.target.value })
+          })
+        ),
+        (0, import_react98.createElement)(
+          "label",
+          { className: "bt-genui-date-label", htmlFor: `${prefix}-${proposal.id}-to` },
+          t("End date"),
+          (0, import_react98.createElement)("input", {
+            id: `${prefix}-${proposal.id}-to`,
+            type: "date",
+            className: "bt-genui-date",
+            value: form.to,
+            disabled: held,
+            "aria-label": t("End date"),
+            onChange: (event) => update(proposal, { to: event.target.value })
+          })
+        )
+      ),
+      proposal.chats.length === 0 ? (0, import_react98.createElement)("p", { className: "bt-genui-muted" }, t("There are no chats to read here.")) : (0, import_react98.createElement)(
+        "ul",
+        { className: "bt-genui-picks", "aria-label": t("Chats to read") },
+        proposal.chats.map((chat) => (0, import_react98.createElement)(
+          "li",
+          { key: chat.id, className: "bt-genui-pick" },
+          (0, import_react98.createElement)(
+            "label",
+            { className: "bt-genui-pick-label" },
+            (0, import_react98.createElement)("input", {
+              type: "checkbox",
+              checked: form.chats.includes(chat.id),
+              disabled: held,
+              onChange: () => update(proposal, { chats: toggleChat(form.chats, chat.id) })
+            }),
+            (0, import_react98.createElement)("span", { className: "bt-genui-name" }, chat.name),
+            chat.channel !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, chat.channel) : null
+          )
+        ))
+      ),
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-foot" },
+        (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("{count} chats selected", { count: countText2(form.chats.length) })),
+        backwards ? (0, import_react98.createElement)("span", { className: "bt-genui-error" }, t("The start date must be before the end date.")) : null,
+        errors[proposal.id] !== void 0 ? (0, import_react98.createElement)("span", { className: "bt-genui-error", role: "status" }, errors[proposal.id]) : null,
+        starting ? (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("Sending your approval…")) : null
+      )
+    );
+  });
+  const waitingNode = waiting === void 0 ? null : (0, import_react98.createElement)(
+    "section",
+    { className: "bt-q bt-genui-backfill", "aria-busy": "true" },
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-q-head" },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-q-text" },
+        (0, import_react98.createElement)("p", { className: "bt-q-title" }, t("Backfill")),
+        (0, import_react98.createElement)("div", { className: "bt-q-detail" }, t("Your approval was sent. One backfill is starting for each chat you chose."))
+      )
+    ),
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-genui-foot" },
+      (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("Starting…"))
+    )
+  );
+  const runsNode = view.runs.length === 0 ? null : (0, import_react98.createElement)(
+    "section",
+    { className: "bt-q bt-genui-backfill-runs" },
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-q-head" },
+      (0, import_react98.createElement)("div", { className: "bt-q-text" }, (0, import_react98.createElement)("p", { className: "bt-q-title" }, t("Backfills")))
+    ),
+    view.runs.map((run2) => (0, import_react98.createElement)(
+      "div",
+      { key: run2.id, className: "bt-genui-run" },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-run-head" },
+        (0, import_react98.createElement)("span", { className: "bt-genui-run-range" }, run2.range),
+        (0, import_react98.createElement)("span", { className: "bt-genui-num" }, t("{count} chats", { count: countText2(run2.total) })),
+        run2.summary !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-word" }, run2.summary) : null,
+        run2.started !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("Started {date}", { date: run2.started })) : null
+      ),
+      (0, import_react98.createElement)(
+        "ul",
+        { className: "bt-genui-rows", "aria-label": run2.range },
+        run2.rows.map((row) => (0, import_react98.createElement)(ProgressRow, {
+          key: row.chatId,
+          view: row,
+          action: row.cancelable ? (0, import_react98.createElement)("button", {
+            type: "button",
+            className: "bt-genui-cancel",
+            disabled: stopping[row.jobId] === true,
+            "aria-label": t("Stop the backfill of {chat}", { chat: row.name }),
+            onClick: () => onCancel(run2, row)
+          }, stopping[row.jobId] === true ? t("Stopping…") : t("Stop")) : null
+        }))
+      ),
+      run2.more > 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-more" }, t("{count} more chats", { count: countText2(run2.more) })) : null,
+      errors[`run:${run2.id}`] !== void 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-foot" }, (0, import_react98.createElement)("span", { className: "bt-genui-error", role: "status" }, errors[`run:${run2.id}`])) : null
+    )),
+    view.moreRuns > 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-more" }, t("Showing only {count} runs", { count: countText2(view.runs.length) })) : null
+  );
+  return (0, import_react98.createElement)(import_react98.Fragment, null, waitingNode, pickers, runsNode);
+}
 var GENUI_CSS = `
 .bt-genui-row{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:8px;border-radius:10px;font:inherit}
 .bt-genui-row+.bt-genui-row{box-shadow:inset 0 1px 0 var(--bt-q-rule-2,var(--bt-line-weak))}
@@ -38851,6 +39268,30 @@ var GENUI_CSS = `
 .bt-genui-retry:focus-visible{outline:2px solid var(--bt-accent);outline-offset:-2px}
 .bt-genui-person{max-width:560px}
 @keyframes bt-genui-pulse{50%{opacity:.45}}
+.bt-genui-backfill,.bt-genui-backfill-runs{max-width:560px}
+.bt-genui-note{margin:0;font-size:13px;line-height:18px;color:var(--bt-ink-2)}
+.bt-genui-dates{display:flex;flex-wrap:wrap;gap:10px}
+.bt-genui-date-label{display:flex;flex-direction:column;gap:4px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--bt-ink-3)}
+.bt-genui-date{height:30px;padding:0 8px;border:1px solid var(--bt-line-2);border-radius:8px;background:var(--bt-card);color:var(--bt-ink);font:inherit;font-size:13px;color-scheme:light}
+body[data-ds-dark-theme] .bt-genui-date{color-scheme:dark}
+.bt-genui-picks{display:flex;flex-direction:column;gap:1px;max-height:220px;overflow:auto;margin:0 -8px;padding:0;list-style:none}
+.bt-genui-pick{min-width:0}
+.bt-genui-pick-label{display:flex;align-items:center;gap:8px;min-width:0;padding:7px 8px;border-radius:10px;cursor:pointer;font-size:13.5px;line-height:19px}
+.bt-genui-pick-label:hover{background:var(--bt-hover)}
+.bt-genui-pick-label input{flex:none;width:15px;height:15px;margin:0;accent-color:var(--bt-accent)}
+.bt-genui-start{flex:none;height:30px;padding:0 12px;border:0;border-radius:999px;background:var(--bt-accent);color:var(--bt-accent-ink);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.bt-genui-start:disabled{opacity:.5;cursor:default}
+.bt-genui-start:focus-visible,.bt-genui-cancel:focus-visible{outline:2px solid var(--bt-accent);outline-offset:2px}
+.bt-genui-cancel{flex:none;height:26px;padding:0 10px;border:1px solid var(--bt-line-2);border-radius:999px;background:none;color:var(--bt-ink-2);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.bt-genui-cancel:hover{background:var(--bt-hover);color:var(--bt-ink)}
+.bt-genui-cancel:disabled{opacity:.5;cursor:default}
+.bt-genui-action{flex:none;margin-top:1px}
+.bt-genui-run{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bt-genui-run+.bt-genui-run{padding-top:10px;border-top:1px solid var(--bt-q-rule-2,var(--bt-line-weak))}
+.bt-genui-run-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 8px;padding:0 8px;font-size:12.5px;line-height:17px}
+.bt-genui-run-range{font-weight:600;color:var(--bt-ink)}
+.bt-genui-more{padding:2px 8px 0;font-size:12.5px;line-height:17px;color:var(--bt-ink-3)}
+.bt-genui-error{color:var(--st-bad-strong,var(--bt-danger))}
 @media (prefers-reduced-motion:reduce){.bt-genui-row[data-state=work] .bt-genui-dot{animation:none}}
 body[data-bt-motion=quiet] .bt-genui-row[data-state=work] .bt-genui-dot{animation:none}
 `;
@@ -39322,6 +39763,103 @@ function singleFlight(map, key, run2) {
   return tracked;
 }
 
+// src/client/read-scope.js
+var import_react101 = require("react");
+var import_react_dom18 = require("react-dom");
+var READ_FOLDER_LABEL = "Folder for these four file tools";
+function ReadScopeControl({ sessionId }) {
+  return typeof sessionId === "string" ? (0, import_react101.createElement)(SessionReadScope, { key: sessionId, sessionId }) : null;
+}
+function SessionReadScope({ sessionId }) {
+  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu();
+  const [scope, setScope] = (0, import_react101.useState)(null);
+  const [draft, setDraft] = (0, import_react101.useState)("");
+  const [error, setError] = (0, import_react101.useState)("");
+  const [saving, setSaving] = (0, import_react101.useState)(false);
+  const load = async (signal) => {
+    try {
+      const value = await call("session-read-scope", { sessionId }, signal);
+      setScope(value);
+      setDraft(value.folder ?? "");
+      setError("");
+    } catch (failure) {
+      if (!signal?.aborted) setError(failure.message);
+    }
+  };
+  (0, import_react101.useEffect)(() => {
+    const lifetime = new AbortController();
+    void load(lifetime.signal);
+    return () => lifetime.abort();
+  }, [sessionId]);
+  if (scope?.editable === false || scope === null && error === "") return null;
+  const save = async (folder) => {
+    setSaving(true);
+    setError("");
+    try {
+      const value = await call("set-session-read-scope", { sessionId, folder });
+      setScope(value);
+      setDraft(value.folder ?? "");
+      close();
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (0, import_react101.createElement)(
+    import_react101.Fragment,
+    null,
+    (0, import_react101.createElement)("button", {
+      ref: button,
+      type: "button",
+      className: "bt-plus",
+      "aria-expanded": isOpen,
+      "aria-label": t("File-tool folder"),
+      title: scope?.folder ?? t(READ_FOLDER_LABEL),
+      onClick: () => {
+        if (isOpen) close();
+        else {
+          setDraft(scope?.folder ?? "");
+          if (scope === null) void load();
+          open();
+        }
+      }
+    }, (0, import_react101.createElement)(FolderIcon)),
+    shownPlace ? (0, import_react_dom18.createPortal)((0, import_react101.createElement)(
+      "form",
+      {
+        ref: menu,
+        className: "bt-menu bt-folder-menu",
+        "aria-label": t(READ_FOLDER_LABEL),
+        style: shownPlace,
+        "data-leaving": leaving || void 0,
+        onSubmit: (event) => {
+          event.preventDefault();
+          if (scope?.editable && !saving && draft !== "") void save(draft);
+        }
+      },
+      (0, import_react101.createElement)(
+        "label",
+        { className: "bt-folder-view bt-folder-here" },
+        t(READ_FOLDER_LABEL),
+        (0, import_react101.createElement)("span", { className: "bt-folder-path" }, "read, read_image, glob, grep"),
+        (0, import_react101.createElement)("input", {
+          className: "bt-folder-input",
+          value: draft,
+          spellCheck: false,
+          autoComplete: "off",
+          placeholder: t("Full path of a folder"),
+          disabled: scope === null || saving,
+          onChange: (event) => setDraft(event.target.value)
+        })
+      ),
+      (0, import_react101.createElement)("button", { type: "submit", className: "bt-folder-use", disabled: scope === null || saving || draft === "" }, t("Use this folder")),
+      (0, import_react101.createElement)("button", { type: "button", disabled: scope?.folder == null || saving, onClick: () => void save(null) }, t("Clear folder")),
+      error ? (0, import_react101.createElement)("div", { className: "bt-folder-error", role: "alert" }, error) : null
+    ), document.body) : null
+  );
+}
+
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 var LIVE_OWN = /* @__PURE__ */ new Set(["revision", "unchanged", "activity", "work", "memoryNews", "memoryReviews", "liveKey", "computerLive"]);
@@ -39358,18 +39896,32 @@ var omni = Object.freeze({
     ProgressRow,
     ProgressRows,
     CoverageRow,
+    BackfillCard,
     rows: genuiRows,
     revisionOf,
     loadReadingNote,
     READING_NOTE,
+    // The backfill card's actions (#1326 K2): one approval, and one job's stop.
+    startBackfill,
+    cancelBackfill,
+    START_BACKFILL,
+    CANCEL_BACKFILL,
+    backfillView,
     model: Object.freeze({
+      backfillDay,
+      backfillRange,
+      backfillSummaryText,
+      backfillView,
+      canCancel,
       coverageLine,
       coverageOf,
       countText: countText2,
       parseReadingNote,
       percentOf,
       personView,
+      proposalView,
       rowView,
+      runView,
       shortDate,
       spanOf: spanOf2,
       stateId,
@@ -40554,6 +41106,7 @@ function apply(ctx) {
     () => shadow("conversation.composer.dock", { id: "btw", order: 2, priority: BOT_PRIORITY, inject: face }, BtwDock),
     () => shadow("conversation.input.left", { id: "bot-plus", order: -100, inject: face }, ComposerPlus),
     () => shadow("conversation.input.left", { id: "bot-permission-chip", order: -99, inject: face }, ComposerPermission),
+    () => shadow("conversation.input.left", { id: "session-read-scope", order: -98 }, ReadScopeControl),
     () => shadow("conversation.input.right", { id: "bot-voice", order: 100, inject: face }, ComposerVoice),
     () => shadow("conversation.composer", {
       priority: BOT_PRIORITY,

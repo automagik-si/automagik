@@ -17,7 +17,7 @@ before 2026-11, [automagik-si/automagik-pocket](https://github.com/automagik-si/
 - The app connects your phone to **your own computers**. We run no server for it and have no
   account system.
 - **No analytics, no ads, no tracking.** The app contains no analytics or advertising library.
-- The only other services it contacts: **GitHub**, to check for updates, and **n0's iroh
+- The only other services it contacts: **GitHub**, to check for updates in the GitHub APK, and **n0's iroh
   services**: relays, which carry Pocket Link traffic they cannot read, and an address lookup,
   where the phone and the Pocket Link bridge on your computer each publish their public key and
   the n0 relay they currently use (no IP addresses).
@@ -37,7 +37,7 @@ before 2026-11, [automagik-si/automagik-pocket](https://github.com/automagik-si/
 | Usage meter summary: token counts and estimated $ per repository, branch, model and hour (the `herdr-meter` document, if you run the meter) | Read from your own machines and kept in memory; never written, never sent anywhere else | To show spend on Home and Code |
 | Space Row stats in that document (merges with their PR/MR links, time to merge, first pass, $ and tokens per model, per bot) and bot and category names from each project's `.herdr/bots.json` | Read from your own machines and kept in memory; never written, never sent anywhere else | To show each space's stats line and its bots' cards, as the desktop sidebar does |
 | Teams: each project's bots from its `.herdr/bots.json` (id, name, main or member, look), their live state, Herdr's space icons and colours (`shared.json` and its `space-icons/` images) and the bots' pets (`~/.automagik/bots/pets`) | Read from your own machines, never written there. A copy of the projects, bots and their last known state, the space images and the pets stays on the phone | So Teams opens at once, and offline, as you last saw it |
-| Update check (app version in the request) | GitHub | To offer a newer release |
+| Update check (GitHub APK only, app version in the request) | GitHub | To offer a newer release |
 
 Nothing else is collected. We, the developers, receive none of this data.
 
@@ -50,12 +50,13 @@ Nothing else is collected. We, the developers, receive none of this data.
    publish their public key and the n0 relay they currently use to n0's address lookup, iroh's
    default, so the phone finds the computer after its IP address changes. No IP addresses are
    published, though n0's servers see the address each request comes from.
-2. **GitHub.** When the app opens (at most every 15 minutes), every 6 hours while it or **Watch in
+2. **GitHub.** When the GitHub APK opens (at most every 15 minutes), every 6 hours while it or **Watch in
    background** runs, and when you tap **Settings → About → Check for updates**, the app downloads
-   `latest.json` from this repo's latest GitHub release. When a newer version is out it downloads
+   `latest.json` from this repo's rolling `pocket-lane` release. When a newer version is out it downloads
    the APK from GitHub too: on its own on Wi-Fi with **Install updates automatically** on, otherwise
    when you tap **Install**. GitHub sees your IP address and a User-Agent with the app version. The
-   check itself can't be turned off in the current version.
+   check itself can't be turned off in the current version. Google Play manages updates for
+   copies installed from the Play Store.
 3. **Web links.** A link you tap in a terminal opens in your browser. In a chat, a link shows its
    address and opens only after you tap it and confirm; a chat loads no image or other web content
    by itself, and shows HTML as plain text.
@@ -116,8 +117,8 @@ phone. No picture is stored or sent.
 | Run at startup | **Watch in background**: after the phone restarts and you unlock it, reconnect the machines it was watching, only if watching was on ([RFC 0007](rfcs/0007-watch-after-reboot.md)) |
 | Microphone | Speak a message in the chat or terminal composer, or in the side-button panel |
 | Camera | Scan the pairing QR code (added by the ZXing scanner library) |
-| Install packages, update without asking again | Install updates from GitHub releases; Android asks once |
-| Network state | Download automatic updates only on Wi-Fi and other unmetered networks |
+| Install packages, update without asking again (GitHub APK only) | Install updates from GitHub releases; Android asks once |
+| Network state | Check that the phone is online before dictation and the link; in the GitHub APK, download automatic updates only on Wi-Fi and other unmetered networks |
 
 ## Children
 

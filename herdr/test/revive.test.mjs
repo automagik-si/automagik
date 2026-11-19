@@ -502,6 +502,83 @@ test("revive: a pane that is gone whole comes back in its seat row's folder, res
   assert.match(s2.hcState().sent[0].text, /Back on a new conversation: Genie \(t101\), its conversation couldn't be resumed/);
 });
 
+/** #1418: the pane is gone whole, so only its seat row can name its template. */
+function goneSeat(t, { seat = {}, bot = {}, templates = [], hcExtra = {} } = {}) {
+  const agent = bot.agent ?? "omp";
+  const s = world(t, { file: team({ main: { agent, ...bot } }),
+    attach: () => [{ bot: ID.main, terminal: "t5", created_ms: 50 }], hcExtra: { templates, ...hcExtra } });
+  exe(join(s.root, "bin", agent), "#!/bin/sh\nexit 0\n");
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "seat", terminal: "t5", botId: ID.main, project: s.project,
+    worktree: s.project, agent, core: CORE, created_ms: 50, at: "2026-11-01T10:00:00.000Z", ...seat })}\n`, { mode: 0o600 });
+  return s;
+}
+
+function assertRevivedSeat(s, address, argv, template, agent = "omp") {
+  const get = s.hcState().terminals.find((p) => p.address === address);
+  const at = get.argv.findIndex((word, i) => i > 0 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  assert.deepEqual(get.argv.slice(at).filter((w) => !w.startsWith("--append-system-prompt=<herdr-bot>")), argv);
+  assert.equal(get.labels["worker.template"], template ?? undefined);
+  const rows = s.ledger().filter((r) => r.event === "start" && r.kind === "seat" && r.terminal === address);
+  assert.deepEqual(rows.map((r) => [r.botId, r.agent, r.template, r.created_ms]), [[ID.main, agent, template, get.created_ms]]);
+}
+
+const seatTemplate = { name: "dev-kimi", command: "/opt/agents/omp --auto-approve --model kimi/k3" };
+
+for (const args of [["revive"], ["revive", "--boot"]]) {
+  test(`#1418: ${args.join(" ")} runs the current template command when the pane is gone`, (t) => {
+    const s = goneSeat(t, { seat: { template: seatTemplate.name }, templates: [seatTemplate] });
+    const r = s.cli([...args, "--json"], { env: { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) } });
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(r.json().projects[0].results.map((x) => [x.outcome, x.terminal]), [["resumed", "t100"]]);
+    assert.equal(runsOf(s).length, 1);
+    assertRevivedSeat(s, "t100", ["sh", "-c", `${seatTemplate.command} "$@"`, "sh", "--continue"], seatTemplate.name);
+    assert.doesNotMatch(r.err, /differs from its source/);
+  });
+}
+
+for (const { why, seat, templates, lookups } of [
+  { why: "the template is no longer listed", seat: { template: seatTemplate.name }, templates: [], lookups: 1 },
+  { why: "an old seat row has no template field", seat: {}, templates: [seatTemplate], lookups: 0 },
+  { why: "the seat row names another agent", seat: { agent: "claude", template: seatTemplate.name }, templates: [seatTemplate], lookups: 0 },
+]) {
+  test(`#1418: revive uses the agent row when ${why}`, (t) => {
+    const s = goneSeat(t, { seat, templates });
+    const r = s.cli(["revive", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(r.json().projects[0].results.map((x) => [x.outcome, x.terminal]), [["resumed", "t100"]]);
+    assert.equal(runsOf(s).length, 1);
+    assert.equal(s.calls().filter((c) => c[0] === "templates").length, lookups);
+    assertRevivedSeat(s, "t100", ["omp", "--continue"], null);
+  });
+}
+
+test("#1418: a gone paired Hermes seat resumes Bot Chat even when its row names a template", (t) => {
+  const bot = { agent: "hermes", hermes: { home: "/srv/research", profile: "default" } };
+  const s = goneSeat(t, { bot, seat: { template: "research" }, templates: [{ name: "research", command: "hermes --tui" }],
+    hcExtra: { noStatus: ["hermes"] } });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.outcome, x.terminal]), [["resumed", "t100"]]);
+  assert.equal(runsOf(s).length, 1);
+  assert.equal(s.calls().filter((c) => c[0] === "templates").length, 0);
+  assert.ok(wordsOf(runsOf(s)[0]).includes("HERMES_HOME=/srv/research"));
+  assertRevivedSeat(s, "t100", ["hermes", "--profile", "default", "--tui", "--continue", "Bot Chat"], null, "hermes");
+});
+
+test("#1418: when a gone seat's template resume exits, revive keeps the template on its --fresh retry", (t) => {
+  const s = goneSeat(t, { seat: { template: seatTemplate.name, session: SID }, templates: [seatTemplate],
+    hcExtra: { runQueue: [{ runAs: "exit", screen: "No conversation found with session ID\n" }] } });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const res = r.json().projects[0].results[0];
+  assert.deepEqual([res.outcome, res.terminal], ["fresh", "t101"]);
+  assert.match(res.why, /^its conversation couldn't be resumed \(/);
+  assert.equal(runsOf(s).length, 2);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t100").state, "finished");
+  assertRevivedSeat(s, "t100", ["sh", "-c", `${seatTemplate.command} "$@"`, "sh", `--resume=${SID}`], seatTemplate.name);
+  assertRevivedSeat(s, "t101", ["sh", "-c", seatTemplate.command], seatTemplate.name);
+});
+
 test("revive brings a bot's helpers back under its new pane (--tree): a helper at a bare shell is run again from its launch command, resumed by its own session", (t) => {
   const s = world(t, { terminals: (p) => [
     pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),

@@ -16,10 +16,13 @@ import { promisify } from "node:util";
 
 import { state } from "./use-stubs.mjs";
 import { parseBots } from "../mods/am-sidebar/model.js";
+import { briefingLaunch } from "../mods/am-sidebar/models.js";
+import { NEEDS_OWNER_LABEL } from "../mods/am-sidebar/tidy.js";
 import {
   briefingText, directMembers, mergeHook, hookCommand, legacyHookCommand, directHookCommand, briefingPath, stableBriefingPath, withExclude, EXCLUDE_LINE, BRIEFING_LIMIT,
   botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE, MESSAGE_LINE,
   amPartEntryPath, amPartHookCommand, amPartRunnerPath, hookTargetOf, installHook, isAmPartEntry, scriptOf, statusWord, PERMISSION_WORD,
+  OWNER_QUESTION_LINE,
 } from "../mods/am-sidebar/briefingText.mjs";
 import { BUDGET_MS, CALL_MS, GUARD_MS, COMPACT_MARK, compactedSince, timeScale, gatherBriefing } from "../mods/am-sidebar/briefing.mjs";
 import { assertSafeTmpdir, scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -58,6 +61,88 @@ const team = () => ({
 const byId = (f, id) => f.bots.find((b) => b.id === id);
 
 // ---- pure ----
+
+const SET_OWNER_QUESTION = `hc label "$HC_TERMINAL_ID" 'automagik-herdr.needs-owner=Which release should ship?'`;
+const CLEAR_OWNER_QUESTION = 'hc label "$HC_TERMINAL_ID" automagik-herdr.needs-owner=';
+
+test("#540 launch briefings put owner question guidance after the messaging line for supported agents", () => {
+  const file = team();
+  for (const [id, agent] of [
+    [ID.main, "claude"], [ID.cap, "claude"], [ID.dev, "codex"],
+    [ID.dev, "omp"], [ID.dev, "pi"], [ID.dev, "grok"],
+  ]) {
+    const self = { ...byId(file, id), agent };
+    const lines = launchBriefingText({ self, file }).split("\n");
+    const message = lines.indexOf(MESSAGE_LINE);
+    assert.ok(message >= 0, `${agent} ${self.kind}`);
+    assert.equal(lines[message + 1], OWNER_QUESTION_LINE, `${agent} ${self.kind}`);
+  }
+});
+
+test("#540 dsh-tui, Hermes and unknown agents launch without owner question guidance", () => {
+  const file = team();
+  for (const agent of ["dsh-tui", "hermes", "custom-agent"]) {
+    const self = { ...byId(file, ID.main), agent };
+    assert.ok(!launchBriefingText({ self, file }).includes(NEEDS_OWNER_LABEL), agent);
+  }
+});
+
+test("#540 launch guidance follows the effective agent when a restart swaps agents", () => {
+  const file = team();
+  const self = byId(file, ID.main);
+  assert.ok(!launchBriefingText({ self, file, agent: "dsh-tui" }).includes(NEEDS_OWNER_LABEL));
+  assert.ok(launchBriefingText({ self: { ...self, agent: "dsh-tui" }, file, agent: "claude" }).includes(OWNER_QUESTION_LINE));
+});
+
+test("#540 the hook and am brief text omit owner question guidance for every agent", () => {
+  const file = team();
+  for (const agent of ["claude", "codex", "omp", "pi", "grok", "dsh-tui", "hermes", "custom-agent"]) {
+    const self = { ...byId(file, ID.main), agent };
+    assert.ok(!briefingText({ self, file }).includes(NEEDS_OWNER_LABEL), agent);
+  }
+});
+
+test("#540 both owner question commands use tidy's label key", () => {
+  const keys = Array.from(OWNER_QUESTION_LINE.matchAll(/hc label "\$HC_TERMINAL_ID" '?([^=]+)=/g), (match) => match[1]);
+  assert.deepEqual(keys, [NEEDS_OWNER_LABEL, NEEDS_OWNER_LABEL]);
+});
+
+test("#540 both owner question commands fit in a launch briefing with 4,000-character instructions and twelve members", () => {
+  const self = bot(ID.main, "main", { instructions: "i".repeat(4000) });
+  const members = Array.from({ length: 12 }, (_, i) => bot(`b-${String(i).padStart(10, "k")}`, "member", {
+    lead: self.id, name: `Member ${i}`, role: "x".repeat(80),
+  }));
+  const text = launchBriefingText({ self, file: { ...team(), bots: [self, ...members] } });
+  assert.ok(text.length <= BRIEFING_LIMIT);
+  assert.ok(text.includes(SET_OWNER_QUESTION));
+  assert.ok(text.includes(CLEAR_OWNER_QUESTION));
+});
+
+test("#540 a launch briefing that would cut through the owner question line drops it whole", () => {
+  const file = team();
+  const self = byId(file, ID.main);
+  const normal = launchBriefingText({ self, file });
+  const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
+  // Lengthen the role so the cut would fall just after the complete set command.
+  const setEnd = normal.indexOf(SET_OWNER_QUESTION) + SET_OWNER_QUESTION.length;
+  const longRole = { ...self, role: self.role + "x".repeat(BRIEFING_LIMIT - mark.length - setEnd) };
+  const text = launchBriefingText({ self: longRole, file });
+  assert.ok(text.length <= BRIEFING_LIMIT);
+  assert.ok(!text.includes(NEEDS_OWNER_LABEL));
+  assert.equal(text, launchBriefingText({ self: longRole, file, agent: "hermes" }));
+});
+
+test("#540 the Codex developer instructions preserve the two shell commands", () => {
+  const file = team();
+  const self = { ...byId(file, ID.main), agent: "codex" };
+  const text = launchBriefingText({ self, file });
+  const { args } = briefingLaunch("codex", { text });
+  assert.equal(args[0], "-c");
+  assert.match(args[1], /^developer_instructions="/);
+  const instructions = JSON.parse(args[1].slice("developer_instructions=".length));
+  assert.ok(instructions.includes(SET_OWNER_QUESTION));
+  assert.ok(instructions.includes(CLEAR_OWNER_QUESTION));
+});
 
 test("statusWord: a pane blocked on a permission says so; nothing else changes", () => {
   assert.equal(PERMISSION_WORD, "stuck (needs a person to answer a permission)");

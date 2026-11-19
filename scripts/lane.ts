@@ -150,7 +150,7 @@ export const HERDR_SHIPPING_SCRIPTS = /^herdr\/scripts\/pack\.mjs$/;
 const NEVER_SHIPPED = [/^am\/[^/]+\.md$/, /^\.github\//, /^scripts\//, /^plugin-lane\//, /(^|\/)test\//, /^[^/]+\.md$/, /^\.gitignore$/, /^\.automagik-toolchain\.json$/, /^apps\/automagik-pets\//, /^docs\//, /^apps\/unfold-[^/]+\//,
   /^herdr\/[^/]+\.md$/, /^herdr\/NOTICE$/, /^herdr\/(\.genie|docs|mockup|catalog)\//, /^herdr\/scheduler\//, /^herdr\/scripts\//,
   /^herdr-layout\/(RECIPE\.md|preview\.png)$/,
-  /^apps\/pocket\/[^/]+\.md$/, /^apps\/pocket\/(docs|android\/scripts)\//, /^apps\/desktop\/wslc\//,
+  /^apps\/pocket\/[^/]+\.md$/, /^apps\/pocket\/(docs|android\/scripts|android\/app\/src\/testGithub)\//, /^apps\/desktop\/wslc\//,
   /^meter\/(statusline|schema)\//, /^meter\/usagemeter\/[^/]+\.md$/, /^meter\/usagemeter\/tests\//,
   /^apps\/landing\//, /^apps\/id\//, /^server\//, /^apps\/dsh-sandbox\//, /^\.genie\//, /^\.claude\//,
   /^skills\//];

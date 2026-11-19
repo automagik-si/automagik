@@ -115,6 +115,35 @@ test('the tool exposes editing, resolves before service calls, and returns edite
   assert.equal(calls, 1)
 })
 
+test('generate_image returns the Codex draw isolation refusal and saves nothing', async t => {
+  const teamFolder = folder(t)
+  const message = 'The Codex image run could not be isolated, so the image was not started. Update Automagik and try again.'
+  let draws = 0
+  const acpAgents = {
+    authScope: 'isolated',
+    imageAccess: async () => ({ ready: true }),
+    generateImage: async () => {
+      draws++
+      throw Object.assign(new Error(message), { code: 'acp/image-unavailable' })
+    },
+  }
+  const rt = {
+    teamTools: [], teamFolder,
+    sharedUploads: { save: () => assert.fail('a refused draw cannot hand off a copy') },
+    ctx: { inject() {}, get: name => ({ credentials: credentials({}), acpAgents })[name] },
+  }
+  install(rt)
+  const tool = rt.teamTools.find(tool => tool.name === 'generate_image')
+  const callId = 'draw-isolation'
+  assert.equal(await tool.execute({ prompt: 'A clay fox' }, { callId }), message)
+  assert.equal(draws, 1)
+  const progress = rt.images.progress(callId)
+  assert.equal(progress.phase, 'failed')
+  assert.equal(progress.error, message)
+  assert.equal(progress.id, undefined)
+  assert.deepEqual(readdirSync(teamFolder()), [])
+})
+
 test('each edit keeps a distinct output without modifying the uploaded bytes', async t => {
   const original = Buffer.from(PNG)
   const uploaded = Buffer.from(PNG)

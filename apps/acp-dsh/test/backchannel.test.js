@@ -75,10 +75,14 @@ async function serve() {
   const record = bc.mint({ sessionId: 's1', agent: host_.agent, name: 'Fake agent' })
   // As after `session/new` in a real turn: the bridge may announce from now on.
   bc.announce(record)
-  const post = async (op, body = {}, credential = record.credential, url = bc.urlFor(record)) => {
+  const post = async (op, body = {}, credential = record.credential, url = bc.urlFor(record), attachment) => {
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(credential === null ? {} : { authorization: `Bearer ${credential}` }) },
+      headers: {
+        'content-type': 'application/json',
+        ...(credential === null ? {} : { authorization: `Bearer ${credential}` }),
+        ...(attachment === undefined ? {} : { 'x-dsh-bridge-attachment': attachment }),
+      },
       body: JSON.stringify({ op, ...body }),
     })
     return { status: response.status, body: await response.json() }
@@ -306,20 +310,28 @@ test('a request without a credential, with another Session\'s, or after revocati
   }
 })
 
-// #969 finding 8, verified: a bridge process that ends says `bye`, and that revokes its
-// credential, so a respawn with the same env is refused. The next turn ends that agent session
-// and starts a new one with the chat replayed (closed-bridge-interrupted-turn.test.js). Keeping
-// the credential across a restart is the issue's open owner decision (8b), not asked for here.
-test('#969 finding 8: a bridge that says bye revokes its credential, and a respawn is refused', async () => {
+// A process ending leaves the Session credential for its replacement. The host revokes it.
+test('#969 8b: a bridge that says bye detaches, and its respawn re-attaches with the same credential', async () => {
   const h = await serve()
   try {
     const bye = await h.post('bye')
     assert.equal(bye.status, 200)
     assert.deepEqual(bye.body, { ok: true })
-    assert.equal(h.record.closed, true)
-    // A respawn of bridge.js gets the same env and credential; the credential is gone.
+    assert.equal(h.record.closed, false)
+    assert.equal(h.record.disconnected, true)
+    assert.equal((await h.post('hello')).status, 200)
+    assert.equal((await h.post('list')).status, 200)
+    const a = op => h.post(op, {}, undefined, undefined, 'a'.repeat(32))
+    const b = op => h.post(op, {}, undefined, undefined, 'b'.repeat(32))
+    assert.equal((await a('list')).status, 200)
+    assert.equal(h.record.disconnected, false)
+    assert.equal((await a('bye')).status, 200)
+    assert.equal(h.record.disconnected, true)
+    assert.equal((await b('list')).status, 200)
+    assert.equal(h.record.disconnected, false)
+    assert.equal((await a('list')).status, 401)
+    h.bc.revoke(h.record)
     assert.equal((await h.post('hello')).status, 401)
-    assert.equal((await h.post('list')).status, 401)
   } finally {
     h.bc.dispose()
   }

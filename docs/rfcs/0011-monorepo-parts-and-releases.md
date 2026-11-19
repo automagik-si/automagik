@@ -58,7 +58,8 @@ The pack's layout is its own top-level entry folder, `herdr-layout/` (`layouts/a
 folder holds `layouts/`, and a skip deletes a listing it had (probe-confirmed, t22n and t259). A
 herdr-mod entry folder is any folder holding `mods/<name>/main.js`, as the mod manager reads a
 package. `herdr/scripts/entries.mjs --check` fails when one holds `layouts/`; CI runs it on every
-pull request and the release with the pack's gates. The probe's layout test
+pull request and the release with the pack's gates. It also refuses a mod's own `mods/<name>/layouts/`,
+defensively: the probe did not test that shape, and no mod needs one (#207). The probe's layout test
 settled the shape: herdr.dev lists a layout only from its entry folder's `layouts/<name>.json`
 and ignores a `.json` at the folder's root (e2 went unlisted for want of `layouts/`, not because of
 its root `.json`: 60 listed layout entries hold one), and the entry needs no `mods/` of its own
@@ -233,9 +234,9 @@ unknown slot, the selected secret is missing or empty, or its public key is abse
 - am-quota's Keychain tests run against the stand-in `security` in `herdr/test/am-quota-keychain.mjs`,
   and `am-quota-keychain-guard.test.mjs` fails any that could reach the real one.
 - The old repository's workflows were deleted at the import (`herdr/.github/`).
-- Pocket: `ci.yml`'s `pocket` job (JDK 17, the Android SDK 35) runs automagik-pocket's
-  `android.yml` gate from `apps/pocket/android` (`:app:assembleDebug :app:testDebugUnitTest
-  :app:lintDebug`) and the terminal page's Playwright test. It runs when `apps/pocket/`, the root
+- Pocket: `ci.yml`'s `pocket` job (JDK 17, Android SDK Platform 36) builds `githubDebug`, runs
+  unit tests and lint for `githubDebug` and `playDebug`, and tests the terminal page with
+  Playwright. It runs when `apps/pocket/`, the root
   `package.json` (the version Gradle reads), the CI or release workflow, or `scripts/lane.ts` or
   `scripts/version.ts` changed. The `pocket-link` job (Linux and macOS, Node 22) runs the old
   `pocket-link.yml`, syntax and bridge tests, when `herdr/mods/pocket-link/` or `ci.yml` changed.
@@ -323,7 +324,7 @@ README, recipe, keys, licence and preview beside the mod, as the pack's mods kee
 
 - Before the cut, when `pocket` is yes: the `cut` job checks that `POCKET_SIGNING_KEYSTORE` and
   `POCKET_SIGNING_PASSWORD` exist (it reads only whether they are set) and runs the unit tests and
-  lint, so a failing app or a missing key stops the run before a tag.
+  lint for `githubDebug` and `playDebug`, so a failing app or a missing key stops the run before a tag.
 - After it, the `Pocket` job builds the release APK from the tag, signed with the key from those
   secrets (decoded to the runner's temp folder and removed after the build). It checks the APK's
   versionName (the tag) and versionCode (the formula), then attaches `automagik-pocket-<v>.apk` and

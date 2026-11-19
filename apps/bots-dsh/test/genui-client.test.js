@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
+import { guardBackfillFields } from '../src/host/genui.js'
 
 const bundle = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
@@ -79,4 +80,56 @@ test('the kit hands a plugin its rows and the slice revision, and draws one row'
   assert.equal(row.props['data-state'], 'work')
   assert.equal(omni.genui.ProgressRows({ rows: [] }), null)
   assert.equal(omni.genui.CoverageRow({ coverage: null }), null)
+})
+
+test('one approval posts start_backfill once, and a stop posts one job id', async () => {
+  const requests = []
+  const omni = load({
+    fetch: async (url, options) => {
+      requests.push({ url, options })
+      return { ok: true, json: async () => ({ ok: true, value: { runId: 'r1', jobs: [{ chatId: 'c1', jobId: 'j1', state: 'queued' }] } }) }
+    },
+  }).omni
+  assert.equal(typeof omni.genui.BackfillCard, 'function')
+  assert.equal(omni.genui.START_BACKFILL, 'start_backfill')
+  assert.equal(omni.genui.CANCEL_BACKFILL, 'cancel_backfill')
+  const started = await omni.genui.startBackfill({ proposalId: 'p1', chats: ['c1', 'c1', 'c2'], from: '2026-03-01', to: '2026-11-15' })
+  assert.deepEqual(started, { runId: 'r1', jobs: [{ chatId: 'c1', jobId: 'j1', state: 'queued' }] })
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].url, 'api/omni-ui')
+  assert.equal(requests[0].options.method, 'POST')
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    endpoint: 'start_backfill',
+    payload: { proposalId: 'p1', chats: ['c1', 'c2'], from: '2026-03-01', to: '2026-11-15' },
+  })
+  await omni.genui.cancelBackfill({ jobId: 'j1' })
+  assert.equal(requests.length, 2)
+  assert.deepEqual(JSON.parse(requests[1].options.body), {
+    endpoint: 'cancel_backfill',
+    payload: { jobId: 'j1' },
+  })
+  // A call that breaks the contract asks nothing: no empty proposal, no empty approval.
+  requests.length = 0
+  await assert.rejects(omni.genui.startBackfill({ proposalId: 'p1', chats: [], from: '2026-03-01', to: '2026-11-15' }))
+  await assert.rejects(omni.genui.startBackfill({ proposalId: 'p1', chats: ['c1'], from: '', to: '2026-11-15' }))
+  await assert.rejects(omni.genui.startBackfill({ chats: ['c1'], from: '2026-03-01', to: '2026-11-15' }))
+  await assert.rejects(omni.genui.cancelBackfill({}))
+  assert.deepEqual(requests, [])
+})
+
+test('a registered backfill tool card draws the guarded roster from the built client', () => {
+  const hooks = guardBackfillFields({ view: publish => publish, live: publish => publish })
+  const invalid = Array(201).fill(null)
+  const view = hooks.view(() => ({ omniBackfillProposals: [...invalid, { id: 'p1' }] }))
+  const live = hooks.live(() => ({
+    omniBackfills: [...invalid, ...Array.from({ length: 30 }, (_, index) => ({ id: `r${index}`, startedAt: 1 + index }))],
+  }))
+  const omni = load({ fetch: async () => assert.fail('drawing asks nothing') }).omni
+  omni.toolCards.register('propose_backfill', ({ roster }) => omni.genui.BackfillCard({ roster }))
+  const card = omni.toolCards.renderer('propose_backfill')({ roster: { ...view(), ...live() } })
+  const [, proposals, runs] = card.props.children
+  assert.equal(proposals[0].props.key, 'p1')
+  const [, shown, footer] = runs.props.children
+  assert.deepEqual(Array.from(shown, run => run.props.key), ['r0', 'r1', 'r2'])
+  assert.equal(footer.props.children[0], 'Showing only 3 runs')
 })

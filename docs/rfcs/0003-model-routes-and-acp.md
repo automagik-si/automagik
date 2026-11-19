@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09 and 2026-11-10; delivery 7's replay at a harness change to be replaced by [RFC 0030](0030-code-mode-in-the-app.md)'s handoff note, owner 2026-11-10, its Q7) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); delivery 7's replay at a harness change to be replaced by [RFC 0030](0030-code-mode-in-the-app.md)'s handoff note, owner 2026-11-10, its Q7) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -170,12 +170,12 @@ patch is removed in the release whose DSH carries the change.
   `{ name, value }`. The bridge itself never listens on a port. It reaches DSH over a per-session
   back-channel to acp-dsh, authenticated with `DSH_BRIDGE_CREDENTIAL`: a per-session, unguessable
   value minted by acp-dsh at spawn and passed only in that bridge's `env`. It binds a request to
-  its Session and is revoked when that bridge exits; a fork mints a new one. It is not a boundary
-  against same-user code: third-party code running as the person can read the bridge's
-  environment. What holds regardless is server-side: the credential carries no approval, and
-  every DSH tool call enters DSH's approval service keyed to the Session. It offers the Session's
-  preset's tools, filtered by the Session's level, and answers every DSH tool call through DSH's
-  approval service. Its failure is the turn's: a bridge the adapter skipped (a same-named server
+  its Session. A bridge process exit detaches it, and a respawn can re-attach with the same
+  credential. The host revokes it when the ACP session ends, its agent process exits, a fork
+  replaces it, or the probe ends. Code running as the same user can read the bearer and
+  impersonate a replacement. The bridge offers the Session's preset tools filtered by its level,
+  and answers every DSH tool call through DSH's server-side approval service. Its failure is
+  the turn's: a bridge the adapter skipped (a same-named server
   in the person's Codex config) fails the turn instead of running with half a tool set.
 - Setting `dshTools` (absent means the per-agent default; false is the kill switch): the bridge
   and live
@@ -205,11 +205,11 @@ means the per-agent default (Contracts).
   no listen socket (no port, so no address another process on the machine can reach) and dies
   with the adapter. "Nothing on the machine can address it" is true of this leg only: the
   bridge→DSH leg is a per-session back-channel that has an address by construction. Its
-  credential `DSH_BRIDGE_CREDENTIAL` binds a request to its Session and is revoked with the
-  bridge; it is not a boundary against third-party code running as the person, which can read the
-  bridge's environment (Amendments, "The bridge"). The boundary that does not depend on it is
-  server-side: the credential cannot approve, and DSH's approval service owns every DSH tool call
-  for the Session. The stdio leg's transport is spiked; the credential-bearing back-channel shipped
+  credential `DSH_BRIDGE_CREDENTIAL` binds a request to its Session. A bridge process exit
+  detaches it, and the same credential lets a respawn re-attach. The host owns revocation
+  (Amendments, "The bridge"). Code running as the same user can read the bearer and impersonate
+  a replacement. DSH's server-side approval service owns every DSH tool call for the Session.
+  The stdio leg's transport is spiked; the credential-bearing back-channel shipped
   (#537), and delivery 6 probes both refusals (Deliveries, 6). (`dshTools` off.) No
   bridge exists, so neither leg does.
 - **Credentials.** Stored with mode 0600 or in the OS keychain. Never returned to the client.
@@ -351,12 +351,14 @@ own arguments, named `dsh`. Two legs, one credential story:
   acp-dsh, authenticated with `DSH_BRIDGE_CREDENTIAL`: a per-session, unguessable value minted by
   acp-dsh at spawn and passed only in that bridge's `session/new` `env`. DSH accepts a request
   only with the value minted for that Session; it refuses a missing or another Session's value.
-  The credential is revoked when that bridge exits, and a fork mints a new one. It is not a
-  boundary against same-user code: a process running as the person can read the bridge's
-  environment and reuse the value. The boundary that does not depend on it is server-side: the
-  credential has no approval, every DSH tool call enters DSH's approval service under the
-  Session's level, and a call waits for the person exactly as DSH's own tools do. Delivery 6
-  probes the refusal without the credential, the revocation on fork, and that a credential alone
+  The host revokes the credential when the ACP session ends, its agent process exits, a fork
+  replaces it, or the probe ends. Each bridge process has its own attachment ID. An exit detaches
+  that process and ends its calls. A replacement can list tools with the same credential and a
+  new ID. Only the current attachment can act, and the host revokes the credential on the 65th
+  retirement. Code running as the same user can read the bearer and impersonate a replacement.
+  Approval stays server-side under the Session's level, and a call waits for the person exactly
+  as DSH's own tools do. Delivery 6 probes the refusal without the credential, the revocation on
+  fork, and that a credential alone
   cannot approve. The spike's server was an echo with no DSH link, so no part of this leg ran.
 
 Each call arrives with the ACP session it belongs to; the bridge resolves it to DSH's Session and
@@ -479,6 +481,14 @@ its "Switching to X" row, so Codex → API → Codex loses nothing; and a Bot pa
 person's words and is carried in the replay once the Bot team has answered that first turn itself.
 A move off Claude Code still ends its session (and bridge), and the new session on the way back
 gets the chat; the agent's own context beyond the replay cap is the accepted cost.
+
+**Team Bots on Codex get DSH's extras (2026-11-19, #1544).** With `dshTools` absent, a team Bot's
+current own chat and group Sessions get DSH's extras over the bridge, including `message_bot`
+and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions
+keep their default. An explicit `true` gives Codex the whole DSH preset, including on a Genie.
+An explicit `false` still turns the bridge and replay off. A move off Codex keeps its session
+only while that Session has no bridge. A move to DSH from a bridged Codex Session ends the run
+with a "Switching to DSH" row, and the new run on return gets the redacted replay.
 
 ## Amendment: Bots on Claude Code and Codex, switching and sign-in (2026-11-09)
 
@@ -605,12 +615,12 @@ before; without one, the Codex CLI on its own ChatGPT sign-in (acp-dsh `generate
 session with a per-draw permission profile using Codex's image tool). A ChatGPT grant stored by an earlier version's DSH
 sign-in is read last. CLI auto-updates stay on (D-h).
 
-**Image read boundary (#870).** Each draw writes an owner-only project config in its scratch
-folder with a fresh permission profile and `default_permissions`. It denies `:root`, reads
-only `:workspace_roots`, and has no network table, `extends` or `:minimal`. The adapter must
-offer and acknowledge `permission-profile:<id>` before the prompt. This is containment, not a
-scratch-only read boundary: Codex adds `:minimal` and helper-executable read grants, with
-platform runtime roots. Images there remain readable. Automagik passes only prompt text and
+**Image read boundary (#870).** Each draw uses a fresh scratch folder and selects the image
+permission profile from the Bot's isolated Codex home through its session overrides. The
+folder starts with no project config. The profile denies `:root`, reads `:workspace_roots`,
+and has no network table, `extends` or `:minimal`. The adapter must offer and acknowledge
+`permission-profile:<id>` before the prompt. Codex adds runtime read grants for its helper
+and platform runtime roots. Images there remain readable. Automagik passes only prompt text and
 has no pre-read hook for Codex's image-input paths; output bytes are inline, never opened from
 `savedPath`. No adapter-controlled input path exists to validate. The [security notes and
 pinned source lines][codex-image-security] list Linux, macOS and Windows grants and the real
@@ -618,8 +628,9 @@ helper read tests. Those tests reconstruct the helper policy; they do not prove 
 ACP image-tool path. **#870 remains open.** Feature and offered-tool checks stay in place,
 and each required switch is read under the session's whole config and proven by its effect
 before the draw; a switch Codex lists but silently ignores refuses the draw.
-An `Invalid configuration` warning fails a pre-session check.
-The run uses the Bot's isolated Codex home and removes the scratch config with the folder.
+An `Invalid configuration` warning fails a pre-session check. A base-config failure retries
+the check sequence once with the same profile. A profile-specific config failure refuses the
+draw or edit before session start. Scratch cleanup is best effort.
 
 **Accepted image security risk (owner decision, 2026-11-11).** If the profile mode is absent
 or rejected, drawing continues in `read-only` with one warning and an internal not-isolated
@@ -628,6 +639,16 @@ could return a readable local image in the picture. The owner keeps this fallbac
 A Codex Bot's ordinary chat image tool (`agent-image.js`) is outside this per-draw profile
 and retains the risk under its chat permissions. Signed-in enforcement on the actual
 per-turn adapter path still needs verification in the app.
+
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. A config change is
+one visible at the post-acknowledgement check, which also rejects a scratch `.codex` entry.
+With no profile, the preliminary checks and session may start. Windows has no profile modes.
+Readiness can report ready there even though the one-off Codex draw is refused with
+“Update Automagik and try again.”
 
 An OpenAI API key avoids `generate_image`'s one-off Codex session by using the Images API;
 the API still receives the prompt. Prompt text is outside the file boundary. A Bot running
@@ -941,12 +962,12 @@ ChatGPT grants cannot edit; older ACP services must update or use an OpenAI key.
 For edits, the Image read boundary's text-only-input statement gains this exception:
 bots-dsh reads the person's verified upload from DSH's store and acp-dsh passes it inline
 when image prompts are supported and writes a 0400 copy in the per-draw scratch. No read
-root is added. Only an acknowledged per-draw profile permits an edit; fallback refuses it
-(D3's recommended default). Any edit the locked run cannot be set up for (sign-in, account,
+root is added. An edit requires an acknowledged per-draw profile before any prompt.
+Any edit the locked run cannot be set up for (sign-in, account,
 configuration, switch check, profile acknowledgement, an older ACP service, a connector or
 session that cannot start) is refused with
 `reason: edit-not-isolated`, so bots-dsh gives the Bot its own verified copy to edit the file
-itself; the original stays unchanged. The scratch and input copy are removed afterwards. Codex still
+itself; the original stays unchanged. Scratch cleanup, including its input copy, is best effort. Codex still
 selects its image-tool paths without an adapter pre-read hook; acknowledgement is not proof
 of scratch-only reads, and #870 remains open. Real-app acceptance must demonstrate that
 Codex preserves the reference picture's distinctive shapes and text before this ships.

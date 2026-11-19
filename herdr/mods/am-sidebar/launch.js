@@ -201,7 +201,12 @@ async function keyedSpaces(list, projectKey) {
 }
 
 // Spaces being opened now, one per project: a second Start in that project waits for it.
-const opening = new Map(); // project key -> Promise<space | null>
+const opening = new Map(); // project key -> promise of the shared create and placement result
+
+const shownSpace = () => {
+  const mine = localSpaces();
+  return mine.find((s) => s.id === focused()?.space) ?? mine.find((s) => s.active) ?? null;
+};
 
 // A space's tabs as spareTab reads them: each tab's id, the terminals its panes show and
 // `count`, every pane in it: panes() lists a mod pane too (with no terminal), and the tab's own
@@ -220,24 +225,91 @@ const shellIdleIn = (terminal) => {
   return program?.shell === true && program.agent !== true;
 };
 
-// A new space on the project, named after its folder: space.new, then (run() answers
-// nothing) looked for in spaces() every stepMs for up to waitMs. `spare`: the shell space.new
-// started, alone in the space's first tab (spareTab), or null. Two starts at once can each
-// open one: every start then uses the first space on the project, and this one closes the
-// space it opened when it isn't that first one. `late`: the spaces there when this start
-// asked, for a space that shows after the wait (sweepLateSpaces); null when one showed.
+// Only a failure before sending the request allows the old run() path. A timeout or lost reply
+// can leave the window still processing the create.
+async function requestSpace(args) {
+  let r;
+  try {
+    r = await exec("env", [`HERDR_APP_HOME=${appHome()}`, "herdr-app", "do", "space.new", JSON.stringify(args)], { timeout: 5000 });
+  } catch (e) {
+    const spawnFailed = /^cannot run env: /.test(e?.message ?? "") || (e?.code === "ENOENT" && e.syscall === "spawn env");
+    return { fallback: spawnFailed, ack: null };
+  }
+  const err = (r.stderr ?? "").trim();
+  if (!(r.stdout ?? "").trim()) {
+    const noWindow = (r.code === 1 || r.code === 2)
+      && /^herdr-app: (?:no window is open|no Herdr window at [^\n]+: [^\n]+)$/.test(err);
+    const missing = r.code === 127 && /^env: (?:herdr-app|'herdr-app'|‘herdr-app’): No such file or directory$/.test(err);
+    if (noWindow || missing) return { fallback: true, ack: null };
+  }
+  let ack = null;
+  if (r.code === 0 && !err.includes("hung up")) {
+    try { ack = JSON.parse(r.stdout); } catch { /* the reply may have been lost */ }
+  }
+  if (!local(ack?.terminal) || !ack.terminal.trim() || Object.hasOwn(ack, "error")) ack = null;
+  return { fallback: false, ack };
+}
+
+// Two starts can each open a space: use the first space on the project, or the shown space
+// after the wait. The acknowledgement identifies the create's shell for cleanup.
 async function openSpace(projectKey, sleep, { waitMs = 5000, stepMs = 100 } = {}) {
   const before = new Set(localSpaces().map((s) => s.id));
-  try { run("space.new", { name: projectKey.replace(/\/+$/, "").split("/").pop(), folder: projectKey, machine: "" }); } catch { return null; }
+  const args = { name: projectKey.replace(/\/+$/, "").split("/").pop(), folder: projectKey, machine: "" };
+  const { fallback, ack } = await requestSpace(args);
+  if (fallback) {
+    console.error("Sidebar Start: herdr-app could not send space.new, falling back to run().");
+    try { run("space.new", args); } catch { return null; }
+  } else if (!ack) {
+    console.error("Sidebar Start: herdr-app did not acknowledge space.new with a terminal id.");
+  }
+  let space = null, spare = null, late = null;
   for (let waited = 0; ; waited += stepMs) {
     const here = localSpaces();
     const fresh = await keyedSpaces(here.filter((s) => !before.has(s.id)), projectKey);
     if (fresh.length) {
       const [first] = await keyedSpaces(here, projectKey);
-      for (const s of fresh) if (s.id !== first?.id) closeMadeSpace(s);
-      if (first) return { space: first, spare: before.has(first.id) ? null : spareOf(first), late: null };
+      if (fallback) {
+        for (const s of fresh) if (s.id !== first?.id) closeMadeSpace(s);
+      }
+      if (first) {
+        space = first;
+        if (fallback && !before.has(first.id)) spare = spareOf(first);
+        break;
+      }
     }
-    if (waited >= waitMs) return { space: null, spare: null, late: before };
+    if (waited >= waitMs) {
+      if (fallback) late = before;
+      break;
+    }
+    await sleep(stepMs);
+  }
+  if (!fallback) space ??= shownSpace();
+  if (ack && space) {
+    const tab = acknowledgedTab(space, tabsOf(space), ack);
+    if (tab) spare = { space: space.id, tab: tab.id, terminal: ack.terminal };
+  }
+  return { space, spare, late, ack, fallback };
+}
+
+function acknowledgedTab(space, tabs, ack) {
+  if (ack.space !== undefined && space.id !== ack.space) return null;
+  return tabs.find((tab) => (ack.tab === undefined || tab.id === ack.tab) && tab.terminals.includes(ack.terminal)) ?? null;
+}
+
+async function closeAcknowledgedSpace(ack, usedSpace, sleep, { waitMs = 60_000, stepMs = 1000 } = {}) {
+  for (let waited = 0; ; waited += stepMs) {
+    // Read the current layout without yielding between inspecting it and asking to close.
+    for (const space of localSpaces()) {
+      if (ack.space !== undefined && space.id !== ack.space) continue;
+      const tabs = tabsOf(space);
+      const tab = acknowledgedTab(space, tabs, ack);
+      if (!tab) continue;
+      if (space.id !== usedSpace && tabs.length === 1 && tab.count === 1 && shellIdleIn(ack.terminal)) {
+        run("space.close", { id: space.id, confirmed: true });
+      }
+      return;
+    }
+    if (waited >= waitMs) return;
     await sleep(stepMs);
   }
 }
@@ -296,25 +368,20 @@ async function closeSpare(spare, terminal, sleep, { waitMs = 5000, stepMs = 100 
 }
 
 // Where a started bot opens: the first space of this computer whose folder keys to the
-// project, else a space opened on it (only with a `sleep` to wait for it by, so a space
-// is never left behind empty), else the shown space; in a tab of its own there (no --tab).
-// `spare`: the new space's spare shell (openSpace), for closeSpare once the bot shows.
-// `late`: the spaces there when opening was asked, for a space that shows after the wait.
+// project, else a space opened on it (with a `sleep` to wait for it), else the shown space;
+// in a tab of its own there (no --tab).
 async function placeFor(projectKey, { sleep = null, ...wait } = {}) {
   let space = (await keyedSpaces(localSpaces(), projectKey))[0] ?? null;
-  let spare = null, late = null;
+  let opened = null;
   if (!space && sleep) {
     if (!opening.has(projectKey)) {
       opening.set(projectKey, openSpace(projectKey, sleep, wait).finally(() => opening.delete(projectKey)));
     }
-    const opened = await opening.get(projectKey);
+    opened = await opening.get(projectKey);
     space = opened?.space ?? null;
-    spare = opened?.spare ?? null;
-    late = opened?.late ?? null;
   }
-  const mine = localSpaces();
-  space ??= mine.find((s) => s.id === focused()?.space) ?? mine.find((s) => s.active) ?? null;
-  return { space: space?.id ?? null, spare, late };
+  if (!opened || opened.fallback) space ??= shownSpace();
+  return { space: space?.id ?? null, opened };
 }
 
 // Bots being started now: a second click waits for nothing and is refused.
@@ -350,20 +417,30 @@ async function startOn(projectKey, botId, machine) {
 }
 
 async function startOnce(projectKey, botId, place) {
-  const { space, spare, late } = await placeFor(projectKey, place);
+  const { space, opened } = await placeFor(projectKey, place);
+  // Without --space the CLI can ask for another create of its own.
+  if (!space && opened?.fallback === false) {
+    return { refused: "Herdr has no visible space for this Start. Wait for the project space to appear, or open a space and try again." };
+  }
   const where = space ? ["--space", space] : [];
   const r = await runCli(["start", botId, "--project", projectKey, ...where]);
+  const { ack, spare, late } = opened ?? {};
+  const lateWait = { waitMs: place.lateWaitMs, stepMs: place.lateStepMs };
+  if (ack && !spare && ack.space !== space && !opened.closing) {
+    opened.closing = true;
+    closeAcknowledgedSpace(ack, space, place.sleep, lateWait).catch(() => {});
+  }
   // A space that showed after openSpace gave up is closed once it holds only its shell.
   // Started with no --space, the CLI may have used it for the bot: then it holds more.
   if (late && place.sleep) {
-    sweepLateSpaces(projectKey, late, place.sleep, { waitMs: place.lateWaitMs, stepMs: place.lateStepMs }).catch(() => {});
+    sweepLateSpaces(projectKey, late, place.sleep, lateWait).catch(() => {});
   }
   if (r.code !== 0) return refusedBy(r, "start");
+  warn(r.out?.warnings);
   if (r.out?.running) {
     run("agent.focus", { terminal: r.out.running });
     return { focused: r.out.running };
   }
-  warn(r.out?.warnings);
   rememberProject(projectKey);
   if (spare && r.out?.terminal) {
     const { sleep, ...wait } = place;

@@ -68,7 +68,7 @@ export const Config = z.object({
   }).default({ ...SIDE_MODEL }).volatile().description("The model that writes a Session's title when the Session is on an agent and DSH's default model is an agent too. Never an agent."),
   fakeAgent: z.string().description('Tests only: a script that speaks ACP, served as the acp-fake model. The command comes from these host settings, never from a client route.'),
   // No schema default: absent is the per-agent default (Claude Code on, because only its
-  // adapter can drop the built-in tool set; Codex off, so it never runs two tool sets), and an
+  // adapter can drop the built-in tool set; Codex on for team Bots that need DSH's extras), and an
   // explicit true/false is the person's word. False is also the kill switch and the 2026-11-03
   // behaviour. A schema default would materialise true and erase the difference. Hidden from
   // settings forms (`.hidden()`): it is a rollback lever, not a preference, and stays writable
@@ -77,8 +77,8 @@ export const Config = z.object({
     "Hand DSH's own tools to the agent over a per-session MCP bridge named dsh (the Session's",
     "preset, filtered by its level), approve every DSH tool call in DSH whatever the agent's own",
     "rules say, and turn the agent's built-in tools off where its adapter allows. On by default",
-    "for Claude Code; an agent whose adapter cannot drop its own tools (Codex) bridges only on an",
-    'explicit true. The transcript reaches either agent when a Session moves to it, whatever the',
+    "for Claude Code. Codex bridges on an explicit true or for a team Bot that needs DSH's extras.",
+    'The transcript reaches either agent when a Session moves to it, whatever the',
     'bridge, unless this is false. False is the kill switch and the behaviour without it: each',
     'agent keeps its own tools and approvals, and sees only its own session.',
   ].join(' ')),
@@ -1429,10 +1429,10 @@ export function apply(ctx, config = {}, {
       return () => { if (ownAnswerer === entry) ownAnswerer = undefined }
     },
     /** Read the provider's own mode, bridge status and answerer availability. */
-    ownModeOf(provider) {
+    ownModeOf(provider, sessionId) {
       const agent = agents.get(provider)
       if (agent?.ownMode === undefined) return undefined
-      return { mode: agent.ownMode, bridged: adapter.bridgeOn(agent), answerer: ownAnswerer !== undefined && !ownContested }
+      return { mode: agent.ownMode, bridged: adapter.bridgeOn(agent, sessionId), answerer: ownAnswerer !== undefined && !ownContested }
     },
     /** Whether a Session is busy on a prompt in its own mode. */
     ownModeIn: sessionId => adapter.ownModeIn(sessionId),

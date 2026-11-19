@@ -32,6 +32,7 @@ import { hasCanvas, splitCanvases } from './canvas-text.js'
 import { CanvasSlot } from './canvas-slot.js'
 import { TaskCard, endLabel } from './task-card.js'
 import { toolCards } from './extend.js'
+import { READ_SCOPE_CODE } from '../shared/read-scope.js'
 
 export { clockLabel }
 
@@ -1324,7 +1325,8 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
     return entry ? [[call.callId, stopLine(entry), entry.why]] : []
   }))) : '[]'
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]))
-  const drawn = calls.filter(call => DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
+  const readRefused = call => call.isError === true && call.error?.code === READ_SCOPE_CODE
+  const drawn = calls.filter(call => readRefused(call) || DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
   // The newest call still running names the work, so a program reads as the tool it is in.
   const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result')
   const note = running ? toolActivity(toolName(running), toolArgs(running).text, findBot, roster.byId[sessionId]) : null
@@ -1335,6 +1337,10 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } }
   return h(Fragment, null, drawn.map((call, index) => {
     const stop = stops.get(call.callId)
+    if (readRefused(call)) {
+      return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status' },
+        call.error.reason ?? contentText(call.content))
+    }
     // A call that draws nothing leaves the empty mark: one of this plugin's own, or a
     // card another plugin registered (extend.js) that returned nothing.
     return h(Fragment, { key: call.callId ?? index }, renderCall(call, env) ?? h(CellEmpty),

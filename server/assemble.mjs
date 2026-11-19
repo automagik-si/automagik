@@ -21,6 +21,7 @@ import { readCheckoutPlugins, validateInput, verifyCheckoutDirectory } from './c
 import { profileDirOf, PROFILE, pinStore } from './lib.mjs'
 import { pruneNodeModules } from '../apps/desktop/scripts/prune-runtime.mjs'
 import { patchRuntime } from '../apps/desktop/scripts/runtime-patches.mjs'
+import { writeShippedProfilePatch } from '../apps/desktop/src/profile-patch.mjs'
 import { buildOfflineStore } from './offline-store.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -210,7 +211,7 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
   const profile = readJson(join(PROFILE_SOURCE, 'package.json'))
   for (const name of DEFAULT_PACKAGES) profile.dependencies[name] = `file:vendor/${fetched.plugins[name].file}`
   writeFileSync(join(installDir, 'package.json'), `${JSON.stringify(profile, null, 2)}\n`)
-  for (const file of ['cordis.patch.yml', 'pnpm-workspace.yaml']) cpSync(join(PROFILE_SOURCE, file), join(installDir, file))
+  cpSync(join(PROFILE_SOURCE, 'pnpm-workspace.yaml'), join(installDir, 'pnpm-workspace.yaml'))
   pinStore(installDir, dshHome)
 
   say('installing the profile with dsh plugin')
@@ -224,6 +225,7 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
     const installed = readJson(join(installDir, 'node_modules', ...name.split('/'), 'package.json')).version
     if (installed !== version) throw new Error(`${name} installed at ${installed}, not the release's ${version}`)
   }
+  writeShippedProfilePatch(PROFILE_SOURCE, installDir, runtimeDir)
 
   // DSH's record of this build's install is not part of what ships; the profile is seeded at
   // the first start, not installed there.

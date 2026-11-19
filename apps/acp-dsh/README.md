@@ -29,15 +29,18 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   (`approval/asked`, `approval/decided`) and gives the agent DSH's answer. On DSH's Auto
   review level that answer is the review. A call the reviewer allowed, or that the person
   allowed in the dialog the reviewer raised, gets `allow_once` for the agent's first question
-  about it, with no second dialog; this holds in a subagent child too. These still ask as before:
-  a later question, a call the agent changed after its review (in its question or after it), an
-  agent that offers no `allow_once`, and a level that changed since the call.
+  about it, with no second dialog; this holds in a subagent child too. Later questions, calls
+  the agent changes after review, and level changes can still raise a dialog. When the mirror
+  body gets a question offering `allow_always` without `allow_once`, it replies with `reject_once`
+  if offered or cancels the question, skips its dialog, and explains why in the result text.
 - **DSH's own tools over the bridge (`dshTools`).** On, the agent gets the Session's preset tool
   set (standard, or cordis in creator mode) over one stdio MCP server per ACP session, named
   `dsh` and spawned by the adapter with that session's arguments. The bridge has no port; it
   reaches this plugin over a loopback back-channel with a per-session credential
-  (`DSH_BRIDGE_CREDENTIAL`), which binds a request to its Session and is revoked with the
-  bridge. Every DSH tool call is approved in DSH under the Session's level before it runs,
+  (`DSH_BRIDGE_CREDENTIAL`), which binds a request to its Session. A bridge process that exits
+  detaches, and a respawn can re-attach with the same credential. The host revokes it when the
+  ACP session ends, its agent process exits, a fork replaces it, or the probe ends.
+  Every DSH tool call is approved in DSH under the Session's level before it runs,
   whatever the agent's own allow rules or hooks say, and the bridge writes the `tool/call` and
   `tool/result` rows the chat shows. `acp-claude` runs with its built-in tools off
   (`_meta.disableBuiltInTools`); a structured call that is not an MCP name is recorded as
@@ -45,11 +48,11 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   start, and it detects and cancels because the update arrives after the call began.
   DSH's `read_image` works for Claude Code because acp-dsh declares its models as taking images;
   other ACP agents keep no declaration.
-  `acp-codex` has no such switch, so it is bridged only with an explicit `dshTools: true`, or
-  when the Session's Bot needs DSH's role tools (a Genie's `grant_wish`): then the bridge offers
-  DSH's extras only, never a second copy of the tools Codex already has. Until a structured
-  name is proven in its tool calls, it draws no ACP card for an MCP call. The person's
-  own MCP servers load beside the bridge with their own tools and sign-ins: DSH hands the session
+  `acp-codex` keeps its own tools. A team Bot gets DSH's extras over the bridge by default,
+  with Codex's own tools taking the place of DSH's twins. An explicit `dshTools: true` gives
+  Codex the whole DSH preset. Until a structured name is proven in its tool calls, it draws no
+  ACP card for an MCP call. The person's own MCP servers load beside the bridge with their own
+  tools and sign-ins: DSH hands the session
   only the `dsh` bridge, so any other `mcp__<server>__<tool>` is the CLI's own user-scope config
   (claude-agent-acp merges the person's settings MCP servers into the session), it passes the
   drift allowlist by design, and DSH's Auto review does not gate it: the agent's own rules and
@@ -303,17 +306,14 @@ differs from Claude Code and Codex:
   a model switch reaches them like any agent.
 
 `dshTools` (live, no schema default) is the bridge, its DSH approval, the drift detector and live
-switching above. Absent means the per-agent default: `acp-claude` bridges because its adapter can
-drop its own built-in tools; `acp-codex` does not, because it cannot, unless the Session's Bot
-needs DSH's role tools: the Bot team sends that as `needsDshTools` in the Bot identity, today for
-a Genie, whose `grant_wish` is a DSH tool. Codex is otherwise bridged only with an explicit
-`true`; absent or `false` means no bridge, and Codex keeps its own built-in tools as its only
-tool set. A role-tools bridge offers DSH's extras only, without twins of Codex's own tools, so it
-never runs two tool sets. An explicit `false` is the kill switch for Claude too: the 2026-11-03
-behaviour, where each agent keeps its own tools and its own approvals. The key is public and
-stays writable through
-DSH's settings service or the profile patch, but it is hidden from settings forms (`.hidden()`):
-it is a rollback lever, not a preference. Flipping it either way ends the running agent sessions
+switching above. Absent means the per-agent default. `acp-claude` bridges because its adapter can
+drop its own built-in tools. `acp-codex` keeps its own tools and bridges when the Bot team sends
+`needsDshTools` in the Session's identity. That bridge serves DSH's extras, with Codex's own
+tools taking the place of DSH's twins. An explicit `true` gives Codex the whole DSH preset,
+including on a Genie. An explicit `false` is the kill switch for both agents. It keeps the
+2026-11-03 behaviour, where each agent keeps its own tools and its own approvals. This rollback
+lever stays writable through DSH's settings service or the profile patch. Settings forms hide it
+with `.hidden()`. Flipping it either way ends the running agent sessions
 and revokes their bridges at once; the DSH Session keeps its transcript and the next turn starts
 afresh under the new setting. A flip is also announced on the plugin context as
 `acp-dsh/dsh-tools-changed` with `{ on }`: DSH delivers `loader/volatile-update` only to the
@@ -328,7 +328,7 @@ The transcript replay is independent of the bridge: only an explicit `false` tur
 
 | `dshTools` | Claude Code: tools | Claude Code: replay | Codex: tools | Codex: replay |
 |---|---|---|---|---|
-| absent | DSH bridge, its own off | yes | its own only (a Genie: DSH extras too) | yes |
+| absent | DSH bridge, its own off | yes | its own only, a team Bot: DSH extras too | yes |
 | `true` | DSH bridge | yes | DSH bridge and its own | yes |
 | `false` | its own only | no | its own only | no |
 
@@ -338,16 +338,18 @@ To confirm delivery, check the receiving Bot’s chat. If your team has a native
 (such as `@browse`), you can ask it directly to open a page. In a Bot conversation that offers
 a **Browser** tab, you can also open it from **Details → Browser**.
 
-So with `dshTools` absent Codex sees the chat but not the team's tools; those need an explicit
-`true` (two tool sets). A Genie is the exception: its role tools live in DSH, so its Codex
-Session gets DSH's extras over the bridge with no setting, and without the twins of Codex's own
-tools. A replay reaches an agent in each of these cases, redacted and capped at
+With `dshTools` absent, a team Bot gets DSH's extras, including `message_bot` and the Bot Browser
+tools, in its current own chat and in group Sessions. Task Sessions keep their agent's default.
+A replay reaches an agent in each of these cases, redacted and capped at
 120,000 characters, the oldest messages dropped first with a marker: a move from another
 provider (with its "Switching to X" row); a new agent session in a chat that already has answers
 (after a restart, or a session a crossing or a flip ended), with no row since the chat stayed on
-that agent; and a live session resumed after the chat answered elsewhere (a move off Codex keeps
-its session), which gets only the turns it missed, from its own last answer on, with the row. A
-Bot part's handoff package (a relay marked `handoff`) is carried as the record it is: in the
+that agent; and a live session resumed after the chat answered elsewhere, which gets only the
+turns it missed, from its own last answer on, with the row. A move off Codex keeps its session
+only while that Session has no bridge. Moving to DSH from a bridged Codex Session ends the run
+with a "Switching to DSH" row. The new run on return gets the redacted replay.
+
+A Bot part's handoff package (a relay marked `handoff`) is carried as the record it is: in the
 part's first turn it stays in the prompt beside the person's words, and once the Bot team has
 answered that turn itself, the next new session gets it in the replay. Both pass the redactor.
 With `false`, an agent sees only its own session, and a new one in a chat with answers writes the
@@ -378,11 +380,11 @@ A settings page reads the agents through this host service; the plugin stays hos
 | `account(id, { fresh? })` | For the DSH owner's views only: `{ id, signedIn?, consent?, ref?, account?: { kind: 'account' \| 'key', email?, org?, plan? }, notice? }`. Who the CLI is signed in as, read from the CLI itself (below); never on a `status()` or `inspect()` row, in a log or in an event. `ref` names the account read and goes back with `accountConfirm`. |
 | `accountConfirm(id, { ref? })` | The person's word that the app may use the account this CLI is signed in to. Asks the CLI again, records the consent and announces `acp-dsh/login-ready`. Another account than `ref` is refused (`acp-account/changed`); a signed-out CLI too (`acp-account/signed-out`). |
 | `accountNoticed(id)` | The one-time notice of a vendor carried through an upgrade was shown. |
-| `imageAccess()` | `{ ready, signedIn?, reason?, unsupported? }`: whether Codex can draw an image now, on its own ChatGPT sign-in (Codex on, its CLI found, its connector installed, `codex login status` says signed in; an unknown sign-in is asked once; the person confirmed its account, else `reason: 'account'`; the image run's checks hold for this Codex, else not ready, with `reason`: `unsupported` (and `unsupported: true`), `config` or `unreadable`). Reads no credential and starts no sign-in. |
+| `imageAccess()` | `{ ready, signedIn?, reason?, unsupported? }`: preliminary readiness on Codex's own ChatGPT sign-in (Codex on, its CLI found, its connector installed, `codex login status` says signed in; an unknown sign-in is asked once; the person confirmed its account, else `reason: 'account'`; the preliminary checks hold for this Codex, else not ready, with `reason`: `unsupported` (and `unsupported: true`), `config` or `unreadable`). Selecting the permission profile is checked separately for each draw. Reads no credential and starts no sign-in. |
 | `generateImage({ prompt, size?, quality?, background?, signal?, timeoutMs? })` | Draws one image with the Codex CLI (`src/host/image.js`) and resolves `{ base64, mimeType: 'image/png' }`. Refusals carry an `acp/image-*` code (`signed-out`, `usage-limit`, `timeout`, `unavailable`, `failed`, `stopped`, `refused`) and a message to show as it is. |
 | `keepImages(keeper)` | Where an image an agent makes in a chat is kept, so the chat can show it (`src/host/agent-image.js`). `keeper` is `{ start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) -> Promise<{ file }>, fail?({ callId, sessionId, error }) }`; one at a time, and the call returns its disposer. The Bot team registers its images folder. |
 | `ownMode(answer)` | Registers one answerer for an unbridged Workspace Session's own mode. Only exact `true` within two seconds counts, twice per prompt. Returns a disposer for that registration; competing registrations disable own mode permanently. |
-| `ownModeOf(provider)` | `{ mode, bridged, answerer }` for a provider offering its own mode, otherwise undefined. |
+| `ownModeOf(provider, sessionId?)` | `{ mode, bridged, answerer }` for a provider offering its own mode, otherwise undefined. Pass the Session id to include its Bot's bridge default. |
 | `ownModeIn(sessionId)` | Whether that Session is busy on a prompt in its own mode. |
 | `holdTurns(gate)` | A veto on agent turns, for a plugin that must keep an agent from acting in a Session (the Bot team: a Session whose permission level could not be set). `gate({ sessionId, agent, provider })` is asked before every model step on an agent's route and again right before a turn's prompt is sent; it answers undefined to let the Session go, or the sentence the step answers with. It can only refuse: a gate that throws, takes longer than ten seconds, or answers anything else holds the Session with a fixed sentence, and a held Session's agent session is ended. Several plugins may register: any refusal wins, and the returned disposer removes only its own gate. With none registered nothing is asked. |
 | `endSession(sessionId, why?)` | Ends one Session's agent session now, a turn under way included: the agent's process is stopped, its bridge credential revoked, and the step answers `why`. The DSH Session and its transcript stay; the next turn starts a fresh agent session, which takes its permission mode again. Answers whether one was live. |
@@ -489,26 +491,29 @@ or `:minimal` roots. Before the session starts, the draw reads Codex's resolved 
 `debug prompt-input` and accepts only root deny, scratch read and at most Codex's own helper
 folder under that home's `tmp/arg0-…/codex-arg0…`. Other grants or unknown forms fail the check.
 After `session/new`, the run selects `permission-profile:<id>` and waits for acknowledgement
-before sending the prompt. The scratch is removed afterwards. `CODEX_HOME` comes from
+before sending the prompt. Scratch cleanup is best effort. `CODEX_HOME` comes from
 `cli-homes.js`; the terminal's config is never written. The same checked overrides go through
 codex-acp's `CODEX_CONFIG`.
 
-If the profile is unavailable, its config is refused, its resolved grants are wider, or the
-adapter does not offer or acknowledge its mode, drawing continues in `read-only` mode under
-the owner's policy (`ALLOW_IMAGE_READ_ONLY_FALLBACK`). Windows keeps this fallback and refuses
-edits. One warning names the reason without private details, in the logger and stderr, and the
-result is marked internally as not isolated. There is no UI change. A passing `imageAccess()`
-check means drawing is available; it does not establish that this draw can select a profile.
-The internal `isolated=true` flag means the resolved grants passed and the mode was acknowledged;
-it does not prove that the hosted image tool reads through that profile.
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. One warning in the
+logger and stderr names the reason without private details. With no profile, the checks and
+the session may start before the refusal. Windows has no profile modes, so `imageAccess()` can
+report ready and a one-off Codex draw still returns “Update Automagik and try again.” The
+OpenAI-key path and a Codex Bot's own chat image tool are separate routes. The internal
+`isolated=true` flag records the passed grants check and the mode acknowledgement. The hosted
+tool's filesystem access also depends on Codex's runtime grants.
 
 The draw fingerprints the local config sources Codex reads for the session before the check
 and again after mode acknowledgement. These are the home's `config.toml`; on Linux and macOS,
 also `/etc/codex/config.toml`, `/etc/codex/managed_config.toml`, `/etc/codex/requirements.toml`,
-and each scratch ancestor's `.codex/config.toml` and `.git` marker. It checks at both points
-that the scratch has no `.codex` entry (including a dangling symlink). Changed or unreadable
-sources, or a scratch `.codex` entry, take the same fallback/refusal path. Change and restore
-inside that window, and changes after acknowledgement, are not covered. Neither are macOS
+and each scratch ancestor's `.codex/config.toml` and `.git` marker. At the post-acknowledgement
+check, changed or unreadable sources or a scratch `.codex` entry (including a dangling symlink)
+refuse the draw or edit before any prompt. The check covers changes visible at that point.
+Change and restore inside that window and later changes are outside its coverage, as are macOS
 managed preferences (MDM), cloud requirements or cloud-managed config. A process that can
 already write these sources controls this Codex's configuration; the image lock cannot defend
 against it.
@@ -526,12 +531,11 @@ PNG, JPEG or WebP from DSH's verified attachment store: bots-dsh resolves it in 
 chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw scratch and sends
 an inline image block when the agent advertises image prompts. No read root is added. Edits
 run only when the adapter acknowledged the Bot home's image profile and Codex's resolved
-profile matched it; the read-only fallback refuses
-an edit. An edit whose pre-session setup stops before a prompt (a connector that cannot spawn, a
+profile matched it. An edit whose setup stops before a prompt (a connector that cannot spawn, a
 scratch folder that cannot be made, an unreadable configuration, an inert switch, a missing or
 unacknowledged profile, a signed-out Codex, a session that does not start in time) is refused
 with `reason: edit-not-isolated` too, so bots-dsh hands the Bot its own verified copy to edit as
-a file. The scratch, including the input copy, is removed afterwards.
+a file. The run attempts to remove the scratch, including the input copy, afterwards.
 
 `drawImage` accepts no user-selected local image-input path, registers no ACP filesystem-read
 callback, and receives no pre-read image-tool arguments. Codex selects and reads
@@ -629,10 +633,10 @@ the tested Read only flow, not Workspace `/tmp` denial, other versions/platforms
 application acceptance. Unsupported ordinary sessions retain their existing base behavior;
 they cannot fall back to another mode to activate a session-file grant.
 
-**Security warning (#870): full-disk reads remain in the legacy fallback.** Auto keeps `agent`:
+**Security warning (#870): legacy chat modes can read across the disk.** Auto keeps `agent`:
 codex-acp 2.6.0 gives profile modes one reviewer per session. Full access is unrestricted by
 design. Windows keeps legacy modes, as do older adapters or a config that cannot offer the
-profiles. Those modes and the one-off drawing fallback can read wherever the OS user can;
+profiles. Those legacy modes can read wherever the OS user can;
 an injected request could put a local file's contents into a picture shown in chat. Files in
 `/tmp` and `$TMPDIR` remain readable at Workspace, and no native macOS run is recorded.
 Tool checks and permission refusals alone do not prevent these reads. Prompt text itself is
@@ -653,15 +657,17 @@ when a check does not hold; Codex's profile plus runtime grants supply filesyste
   the model (`debug prompt-input`). Nothing is sent to a model, and nothing of the answers is
   kept or logged but names. The checks read the Bot's isolated Codex home, signed in or not, as
   the session will, and run in the session's own scratch folder with the trust codex-acp gives
-  it. Together they have 40 seconds; a stop from the caller ends them, and a command that
+  it. Each check sequence has 40 seconds. A stop from the caller ends it, and a command that
   hangs is killed with the Codex it started.
   - `shell_tool` and `view_image` must be listed, not removed, and off; `image_generation` must
     be on.
   - Every tool offered must be on a fixed list (`IMAGE_TOOLS_ALLOWED`, `IMAGE_NESTED_ALLOWED`)
     or be the image tool. A command tool, image viewing, an MCP tool, a tool this version does
     not know, an item of an unknown kind or no tool block at all stops the draw.
-  - An `Invalid configuration` line on check stderr stops the draw, even if Codex exits
-    successfully and uses defaults.
+  - An `Invalid configuration` line on check stderr fails the check, even if Codex exits
+    successfully and uses defaults. A config failure from a command without the profile
+    retries the sequence once, keeping the same profile when one is available. A config
+    failure from a command carrying the profile refuses the draw or edit before the session.
   - The list must be in the form this code knows. A tool of an unknown kind or with a field it
     does not know stops the draw. So does a tool `exec` reaches that is not written as Codex
     0.167 writes it (one `declare const tools: { name(…) }` block per tool, one tool per block,
@@ -690,22 +696,25 @@ when a check does not hold; Codex's profile plus runtime grants supply filesyste
 A check that does not hold answers `acp/image-unavailable`, with what the person can do: update
 Automagik (this Codex does not take the lockdown), fix Codex's config file
 (Codex could not load it), or try again (the check itself broke). One `warn` log line names the
-feature or tool; the message shown does not. `imageAccess` makes the same check, remembered per
-Codex and adapter for five minutes, and answers `{ ready: false, signedIn: true, reason }` when
+feature, tool or isolation failure. `imageAccess` makes a preliminary check without selecting
+a profile, remembers it per Codex and adapter for five minutes, and answers
+`{ ready: false, signedIn: true, reason }` when
 it does not hold (`reason`: `unsupported`, with `unsupported: true`; `config`; `unreadable`), so
 the Bot team goes on to its next image source, or says which it was. Only a check that ran out
 of time leaves Codex ready. A draw always makes its own check.
 
-**Security notes: containment limits and accepted fallback risk (#870).**
+**Security notes: containment limits (#870).**
 
-- **The image tool's own input in the fallback (risk accepted).** A prompt injection can
+- **The hosted image tool's input.** A prompt injection can
   ask Codex to use a readable local image file as input and return its contents in chat.
   codex-acp reports the image call without its arguments. No feature switch disables that
   input. In `read-only` mode codex-acp sends a full-disk `readOnly` policy on every turn;
-  `CODEX_CONFIG` cannot narrow it. The per-home image profile mode instead sends the profile id
+  `CODEX_CONFIG` cannot narrow it. The per-home image profile mode sends the profile id
   on every turn. Codex's image accessor uses a sandboxed helper, whose runtime grants widen
-  the profile's requested read boundary. The owner chose to keep the fallback enabled when
-  that mode is unavailable or rejected; that decision does not establish scratch-only reads.
+  the profile's requested read boundary. Images in permitted runtime directories remain
+  readable. The 2026-11-11 owner decision accepted the risk of continuing in legacy
+  `read-only` for draws when the profile mode was unavailable or rejected. The draft
+  proposes refusing those draws before any prompt.
   Ordinary chat images (`agent-image.js`) use the chat profiles above at Read only and
   Workspace when offered. Signed-in enforcement on the actual per-turn path still needs
   verification in the app.
@@ -1035,7 +1044,7 @@ tool name `acp_tool` are public: Sessions keep them.
 
 `acpAgents.ownMode` can request Claude Code's `auto` mode or Codex's `agent` mode, including bridged sessions. Two exact `true` answers are required before a prompt. Strict sessions retain their existing mode handling.
 
-A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits an automatic one-shot decision. The person's answer retains the existing `allow_always` fallback.
+A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits a one-shot allow in the mirror body. Questions with no allow option keep their flow. The bridge's own answers and DSH's Auto review before the mirror body keep their existing behavior.
 
 Codex review events are counted per prompt. When an own-mode prompt ends after three consecutive or ten total refusals, or immediately after a refusal without subsequent activity, an `acp-session` notice with `stop: 'refusals'` explains that replying can continue; refused steps stay refused. The turn finishes as `stop`. Strict prompts keep their existing ending.
 

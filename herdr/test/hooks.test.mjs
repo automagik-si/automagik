@@ -666,12 +666,14 @@ test("relink: am's link follows the sidebar folder on a rollback, is made when m
   assert.equal(lstatSync(am, { throwIfNoEntry: false }), undefined);
 });
 
-/** The pack's sidebar folder as an am-sidebar release tarball (PACK_MODS overridden), at `version`. */
-function amSidebarPack(root, version) {
+/** The pack's sidebar folder as an am-sidebar release tarball (PACK_MODS overridden), at `version`;
+ * `entry: false` leaves out the briefing entry point (a release with nothing to move hooks onto). */
+function amSidebarPack(root, version, { entry = true } = {}) {
   const tree = join(root, `pack-${version}`);
   const dir = join(tree, "am-sidebar");
   cpSync(PACK, dir, { recursive: true });
   assertNoFixtureManifest(dir);
+  if (!entry) rmSync(join(dir, "briefingEntry.mjs"));
   renameSync(join(dir, "release.js"), join(dir, "releaseFull.js"));
   write(join(dir, "release.js"), 'export * from "./releaseFull.js";\nexport const PACK_MODS = ["am-sidebar"];\n');
   write(join(dir, "VERSION"), `${version}\n`);
@@ -760,4 +762,43 @@ test("hooksNotice: every file with its project, the running sessions, unknown pr
   assert.match(silent[0], /^IMPORTANT: the sidebar moved to a new folder, and no settings file's briefing hook was rewritten/);
   assert.match(silent[1], /a bot's project keeps the OLD hook and gets NO briefing/);
   assert.match(silent[2], /^Projects the pack doesn't know about were not rewritten/);
+});
+
+/** An install of `tgz` into a scratch home through update.mjs's own entry point, the diagnostic
+ * switch AUTOMAGIK_HERDR_DIAG on or off (the suppressed-notice line is printed only with it on). */
+function installForDiag(s, tgz, diag) {
+  return spawnSync(process.execPath, [UPDATE, "install", "--from", tgz, "--version", "9.9.9", "--mods", s.mods],
+    { env: { HOME: join(s.root, "home"), PATH: `${NODE_DIR}:/usr/bin:/bin`, AUTOMAGIK_HERDR_NO_UPDATE: "1", ...(diag ? { AUTOMAGIK_HERDR_DIAG: "1" } : {}) }, encoding: "utf8" });
+}
+
+/** The suppressed-notice diagnostic lines a run printed, from its stdout and stderr. */
+const hooksLines = (r) => `${r.stdout}\n${r.stderr}`.split("\n").map((l) => l.trimStart()).filter((l) => l.startsWith("hooks: "));
+
+test("#1250: with AUTOMAGIK_HERDR_DIAG=1 a suppressed hooks notice logs one line (direction, crossed, rewritten), crossed or not", (t) => {
+  // No rename crossed: the entry point is placed, no settings file is rewritten, so the notice is
+  // suppressed and its one line names the fields it would have said.
+  const a = scratch(t);
+  const r = installForDiag(a, amSidebarPack(a.root, "9.9.9"), true);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(hooksLines(r), ["hooks: notice suppressed (direction=forward, crossed=false, rewritten=0)"]);
+  assert.ok(!r.stderr.includes("notice: "), `a suppressed notice is never the notice: ${r.stderr}`);
+  // The rename crossed, and the release has no entry point for the hooks to move onto (they would
+  // go back): still no notice, and the line says crossed=true, with nothing to rewrite either.
+  const b = scratch(t);
+  cpSync(PACK, join(b.mods, "spaces-agents"), { recursive: true });
+  rmSync(join(b.mods, "spaces-agents", "briefingEntry.mjs"));
+  write(join(b.app, "automagik-herdr", "installed-by-install.sh"), "version=0.3.0\nmods=spaces-agents\nbefore=none\n");
+  const back = installForDiag(b, amSidebarPack(b.root, "9.9.9", { entry: false }), true);
+  assert.equal(back.status, 0, back.stderr);
+  assert.deepEqual(hooksLines(back), ["hooks: notice suppressed (direction=back, crossed=true, rewritten=0)"]);
+  assert.ok(!back.stderr.includes("notice: "), `a suppressed notice is never the notice: ${back.stderr}`);
+});
+
+test("#1250: without AUTOMAGIK_HERDR_DIAG a suppressed hooks notice logs no line, in stdout or stderr", (t) => {
+  const s = scratch(t);
+  const r = installForDiag(s, amSidebarPack(s.root, "9.9.9"), false);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(hooksLines(r), []);
+  assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, /hooks: notice suppressed/, "the person's screen never shows the diagnostic line");
+  assert.ok(!r.stderr.includes("notice: "), `a suppressed notice is never the notice: ${r.stderr}`);
 });

@@ -2,13 +2,22 @@
 import assert from 'node:assert/strict'
 import childProcess from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { registerHooks, syncBuiltinESMExports } from 'node:module'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { AgentRun } from '../src/host/acp.js'
 import { chatProfileModes, chatProfileModesFor, chatProfilesConfig, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { configArgs, drawImage, IMAGE_PROFILE_DESCRIPTION, IMAGE_PROFILE_GRANTS, IMAGE_TITLE, imageOverrides, imageProfileFor, imageSupport, UNAVAILABLE } from '../src/host/image.js'
+import { imageWith20261111Policy } from './support/image-policy-2026-11-11.mjs'
+
+const { drawImage: drawWith20261111Policy } = await imageWith20261111Policy()
+
+test('the shipped image policy fails closed', () => {
+  const source = readFileSync(new URL('../src/host/image.js', import.meta.url), 'utf8')
+  assert.match(source, /^const ALLOW_IMAGE_READ_ONLY_FALLBACK = false$/m)
+})
+
 
 const FAKE = join(import.meta.dirname, '../dev/fake-image-agent.mjs')
 const HEX = 'a'.repeat(32)
@@ -27,20 +36,10 @@ function fixture(t, env = {}) {
   }
 }
 const refusedEdit = error => error.code === UNAVAILABLE && error.reason === 'edit-not-isolated'
+const refused = reason => `the Codex image run is not isolated (${reason}); the image was refused`
 const fallback = reason => `the Codex image run is not isolated (${reason}); falling back to read-only`
 // A render with one required switch on is a feature-effect proof, not a session check.
 const isProof = args => args.some(arg => arg.startsWith('features=') && /(?:^|[ {,])(shell_tool|view_image) = true/.test(arg))
-async function withoutFallback() {
-  const suffix = '?image-home-no-fallback'
-  const hook = registerHooks({ load(url, context, next) {
-    const result = next(url, context)
-    if (!url.endsWith(suffix)) return result
-    const policy = 'const ALLOW_IMAGE_READ_ONLY_FALLBACK = true'
-    assert.ok(String(result.source).includes(policy))
-    return { ...result, source: String(result.source).replace(policy, 'const ALLOW_IMAGE_READ_ONLY_FALLBACK = false') }
-  } })
-  try { return await import(`../src/host/image.js${suffix}`) } finally { hook.deregister() }
-}
 
 // Exercise missing failure combinations at the CLI/session boundary without a child
 // transport. The fake-agent cases still cover the actual ACP exchange.
@@ -177,7 +176,7 @@ for (const missing of ['profileModes', 'CODEX_HOME', 'home file']) test(`missing
     if (missing === 'profileModes') delete f.launch.profileModes
     else if (missing === 'CODEX_HOME') delete f.launch.env.CODEX_HOME
     else rmSync(join(f.home, 'config.toml'))
-    const drawing = drawImage({ ...f.request, ...(edit ? { input } : {}) })
+    const drawing = drawWith20261111Policy({ ...f.request, ...(edit ? { input } : {}) })
     if (edit) await assert.rejects(drawing, refusedEdit)
     else assert.equal((await drawing).isolated, false)
     assert.deepEqual(f.logs, [fallback('profile unavailable')])
@@ -188,7 +187,7 @@ for (const missing of ['profileModes', 'CODEX_HOME', 'home file']) test(`missing
 for (const resolved of ['wider', 'write', 'missing', 'odd']) test(`resolved profile ${resolved} retries without the profile and refuses edits`, async t => {
   for (const edit of [false, true]) {
     const f = fixture(t, { FAKE_PROFILE_RESOLVED: resolved })
-    const drawing = drawImage({ ...f.request, ...(edit ? { input } : {}) })
+    const drawing = drawWith20261111Policy({ ...f.request, ...(edit ? { input } : {}) })
     if (edit) await assert.rejects(drawing, refusedEdit)
     else assert.equal((await drawing).isolated, false)
     const trace = f.trace(), checks = trace.filter(row => row.event === 'cli' && row.args[0] === 'debug' && !isProof(row.args))
@@ -199,8 +198,8 @@ for (const resolved of ['wider', 'write', 'missing', 'odd']) test(`resolved prof
     assert.deepEqual(f.logs, [fallback('profile wider than requested')])
     assert.equal(trace.some(row => row.event === 'prompt'), !edit)
   }
-  const strict = await withoutFallback(), f = fixture(t, { FAKE_PROFILE_RESOLVED: resolved })
-  await assert.rejects(strict.drawImage(f.request), error => error.code === UNAVAILABLE)
+  const f = fixture(t, { FAKE_PROFILE_RESOLVED: resolved })
+  await assert.rejects(drawImage(f.request), error => error.code === UNAVAILABLE)
   assert.equal(f.trace().some(row => row.event === 'start'), false)
 })
 
@@ -208,7 +207,7 @@ test('a lost concurrent home suffix never offers the other image mode', async t 
   for (const edit of [false, true]) {
     const f = fixture(t)
     f.launch.profileModes = chatProfileModesFor(HEX)
-    const drawing = drawImage({ ...f.request, ...(edit ? { input } : {}) })
+    const drawing = drawWith20261111Policy({ ...f.request, ...(edit ? { input } : {}) })
     if (edit) await assert.rejects(drawing, refusedEdit)
     else assert.equal((await drawing).isolated, false)
     assert.deepEqual(f.logs, [fallback('profile mode not offered')])
@@ -226,14 +225,14 @@ test('home bytes changed during mode acknowledgement fall back before the prompt
   })
   for (const policy of ['draw', 'edit', 'strict']) {
     const f = fixture(t)
-    const draw = policy === 'strict' ? (await withoutFallback()).drawImage : drawImage
+    const draw = policy === 'strict' ? drawImage : drawWith20261111Policy
     const drawing = draw({ ...f.request, ...(policy === 'edit' ? { input } : {}) })
     if (policy === 'edit') await assert.rejects(drawing, refusedEdit)
     else if (policy === 'strict') await assert.rejects(drawing, error => error.code === UNAVAILABLE)
     else assert.equal((await drawing).isolated, false)
     const trace = f.trace()
     assert.equal(trace.some(row => row.event === 'prompt'), policy === 'draw')
-    if (policy === 'strict') assert.deepEqual(f.logs, [])
+    if (policy === 'strict') assert.deepEqual(f.logs, [refused('profile config changed')])
     else {
       assert.deepEqual(f.logs, [fallback('profile config changed')])
       assert.equal(trace.filter(row => row.event === 'mode-ack').at(-1).modeId, 'read-only')
@@ -255,9 +254,58 @@ test('concurrent draws share an image id, keep separate scratch folders, and pre
 test('readiness passes when only the profile override is refused and drawing retries', async t => {
   const f = fixture(t, { FAKE_INVALID_CONFIG: 'profile' })
   assert.deepEqual(await imageSupport()(f.launch), { ok: true })
-  assert.equal((await drawImage(f.request)).isolated, false)
+  assert.equal((await drawWith20261111Policy(f.request)).isolated, false)
   assert.deepEqual(f.logs, [fallback('profile config refused')])
 })
+
+const strictRefusals = [
+  { reason: 'profile unavailable', unavailable: true },
+  { reason: 'profile config refused', env: { FAKE_INVALID_CONFIG: 'profile' }, cli: ['mcp', 'features', 'debug'] },
+  { reason: 'profile wider than requested', env: { FAKE_PROFILE_RESOLVED: 'wider' }, cli: ['mcp', 'features', 'debug'] },
+  { reason: 'profile mode not offered', env: { FAKE_IMAGE_PROFILE: '' } },
+  { reason: 'profile mode selection rejected', env: { FAKE_IMAGE_PROFILE: 'reject' }, selectsProfile: true },
+  { reason: 'profile config changed', change: 'home', selectsProfile: true },
+  { reason: 'profile config changed', change: 'scratch', selectsProfile: true },
+]
+for (const scenario of strictRefusals) for (const edit of [false, true]) {
+  test(`shipped policy refuses a ${edit ? 'edit' : 'draw'} for ${scenario.reason}${scenario.change ? ` (${scenario.change})` : ''}`, async t => {
+    const f = fixture(t, scenario.env)
+    const profile = imageProfileFor(f.launch.profileModes)
+    if (scenario.unavailable) delete f.launch.profileModes
+    if (scenario.change) {
+      const setMode = AgentRun.prototype.setMode
+      t.mock.method(AgentRun.prototype, 'setMode', async function (mode, options) {
+        await setMode.call(this, mode, options)
+        if (mode !== profile.mode) return
+        if (scenario.change === 'home') writeFileSync(join(f.home, 'config.toml'), '# changed\n')
+        else mkdirSync(join(f.scratches[0], '.codex'))
+      })
+    }
+    await assert.rejects(drawImage({ ...f.request, ...(edit ? { input } : {}) }), error => {
+      assert.equal(error.code, UNAVAILABLE)
+      assert.equal(Object.hasOwn(error, 'reason'), edit)
+      if (edit) assert.equal(error.reason, 'edit-not-isolated')
+      assert.equal(error.message, edit
+        ? 'Codex can edit a picture only inside its locked image run, which could not be set up on this computer, so the picture was not edited.'
+        : 'The Codex image run could not be isolated, so the image was not started. Update Automagik and try again.')
+      return true
+    })
+    const trace = f.trace()
+    const checks = trace.filter(row => row.event === 'cli')
+    assert.deepEqual(checks.map(row => row.args[0]),
+      scenario.cli ?? ['mcp', 'features', 'debug', 'features', 'debug', 'debug'])
+    if (scenario.cli) {
+      assert.deepEqual(checks.map(row => row.args.some(arg => arg.startsWith('default_permissions='))), [false, false, true])
+    }
+    assert.equal(trace.some(row => row.event === 'start'), scenario.cli === undefined)
+    assert.deepEqual(trace.filter(row => row.event === 'mode').map(row => row.modeId),
+      scenario.selectsProfile ? [profile.mode] : [])
+    assert.equal(trace.some(row => row.event === 'prompt'), false)
+    assert.deepEqual(f.logs, [refused(scenario.reason)])
+    assert.equal(f.scratches.length, 1)
+    assert.equal(existsSync(f.scratches[0]), false)
+  })
+}
 
 test('adding the image table preserves the complete chat tables, default, and mode mapping', () => {
   const config = chatProfilesConfig('/chat/home', HEX, '/codex/runtime')
@@ -296,14 +344,14 @@ for (const original of ["permissions = {}\n", "default_permissions = 'personal'\
 for (const modes of ['absent', 'legacy', 'reject']) for (const policy of ['draw', 'edit', 'strict']) {
   test(`older adapter ${modes} mode: ${policy} never claims isolation`, async t => {
     const f = boundary(t, { modes })
-    const draw = policy === 'strict' ? (await withoutFallback()).drawImage : drawImage
+    const draw = policy === 'strict' ? drawImage : drawWith20261111Policy
     const drawing = draw({ ...f.request, ...(policy === 'edit' ? { input } : {}) })
     if (policy === 'edit') await assert.rejects(drawing, refusedEdit)
     else if (policy === 'strict') await assert.rejects(drawing, error => error.code === UNAVAILABLE)
     else assert.equal((await drawing).isolated, false)
     assert.equal(f.events.some(row => row.event === 'prompt'), policy === 'draw')
     const reason = modes === 'reject' ? 'profile mode selection rejected' : 'profile mode not offered'
-    assert.deepEqual(f.logs, policy === 'strict' ? [] : [fallback(reason)])
+    assert.deepEqual(f.logs, policy === 'strict' ? [refused(reason)] : [fallback(reason)])
     const selected = f.events.filter(row => row.event === 'mode').map(row => row.mode)
     const profileMode = imageProfileFor(f.launch.profileModes).mode
     assert.deepEqual(selected, [...(modes === 'reject' ? [profileMode] : []), ...(policy === 'strict' ? [] : ['read-only'])])
@@ -314,12 +362,12 @@ for (const modes of ['absent', 'legacy', 'reject']) for (const policy of ['draw'
 
 for (const policy of ['edit', 'strict']) test(`profile-only config refusal: ${policy} sends no prompt`, async t => {
   const f = boundary(t, { refuseConfig: true })
-  const draw = policy === 'strict' ? (await withoutFallback()).drawImage : drawImage
+  const draw = policy === 'strict' ? drawImage : drawWith20261111Policy
   await assert.rejects(draw({ ...f.request, ...(policy === 'edit' ? { input } : {}) }), policy === 'edit' ? refusedEdit : error => error.code === UNAVAILABLE)
   assert.equal(f.events.some(row => row.event === 'prompt'), false)
   assert.deepEqual(f.events.filter(row => row.event === 'check' && !row.proof).map(row => row.profile), policy === 'strict' ? [true] : [true, false])
   assert.equal(f.events.some(row => row.event === 'start'), policy === 'edit')
-  assert.deepEqual(f.logs, policy === 'strict' ? [] : [fallback('profile config refused')])
+  assert.deepEqual(f.logs, policy === 'strict' ? [refused('profile config refused')] : [fallback('profile config refused')])
 })
 
 for (const entry of ['directory', 'file', 'dangling symlink']) for (const timing of ['check', 'acknowledgement']) for (const policy of ['draw', 'edit', 'strict']) {
@@ -332,13 +380,13 @@ for (const entry of ['directory', 'file', 'dangling symlink']) for (const timing
     }
     const f = boundary(t, timing === 'check' ? { onCheck: addEntry }
       : { onMode: (f, mode) => { if (mode.startsWith('permission-profile:')) addEntry(f) } })
-    const draw = policy === 'strict' ? (await withoutFallback()).drawImage : drawImage
+    const draw = policy === 'strict' ? drawImage : drawWith20261111Policy
     const drawing = draw({ ...f.request, ...(policy === 'edit' ? { input } : {}) })
     if (policy === 'edit') await assert.rejects(drawing, refusedEdit)
     else if (policy === 'strict') await assert.rejects(drawing, error => error.code === UNAVAILABLE)
     else assert.equal((await drawing).isolated, false)
     assert.equal(f.events.some(row => row.event === 'prompt'), policy === 'draw')
-    assert.deepEqual(f.logs, policy === 'strict' ? [] : [fallback('profile config changed')])
+    assert.deepEqual(f.logs, policy === 'strict' ? [refused('profile config changed')] : [fallback('profile config changed')])
     if (policy !== 'strict') assert.equal(f.events.filter(row => row.event === 'ack').at(-1).mode, 'read-only')
     if (policy === 'draw') assert.ok(f.events.findIndex(row => row.event === 'ack' && row.mode === 'read-only') < f.events.findIndex(row => row.event === 'prompt'))
     assert.deepEqual(readFileSync(join(f.home, 'config.toml')), f.original)
@@ -350,13 +398,13 @@ for (const timing of ['during check', 'unreadable at acknowledgement']) for (con
     const f = boundary(t, timing === 'during check'
       ? { onCheck: f => writeFileSync(join(f.home, 'config.toml'), '# changed before mode acknowledgement\n') }
       : { onMode: (f, mode) => { if (mode.startsWith('permission-profile:')) rmSync(join(f.home, 'config.toml')) } })
-    const draw = policy === 'strict' ? (await withoutFallback()).drawImage : drawImage
+    const draw = policy === 'strict' ? drawImage : drawWith20261111Policy
     const drawing = draw({ ...f.request, ...(policy === 'edit' ? { input } : {}) })
     if (policy === 'edit') await assert.rejects(drawing, refusedEdit)
     else if (policy === 'strict') await assert.rejects(drawing, error => error.code === UNAVAILABLE)
     else assert.equal((await drawing).isolated, false)
     assert.equal(f.events.some(row => row.event === 'prompt'), policy === 'draw')
-    assert.deepEqual(f.logs, policy === 'strict' ? [] : [fallback('profile config changed')])
+    assert.deepEqual(f.logs, policy === 'strict' ? [refused('profile config changed')] : [fallback('profile config changed')])
     if (policy !== 'strict') assert.equal(f.events.filter(row => row.event === 'ack').at(-1).mode, 'read-only')
     if (policy === 'draw') assert.ok(f.events.findIndex(row => row.event === 'ack' && row.mode === 'read-only') < f.events.findIndex(row => row.event === 'prompt'))
   })

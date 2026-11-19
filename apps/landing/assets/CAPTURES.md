@@ -192,7 +192,7 @@ the Genie pet bundling task reads, plus the root `package.json`) into a scratch 
 `git archive`, put the test in its `app/src/test/java/ai/namastex/automagik/`, give it a
 `local.properties` with the SDK path, and set `pocket.updateUrl` in its `gradle.properties` to a
 closed loopback address so the updater sends nothing. Then, with `POCKET_SHOTS` naming an
-output folder, run `./gradlew --no-daemon :app:testDebugUnitTest --tests
+output folder, run `./gradlew --no-daemon :app:testGithubDebugUnitTest --tests
 'ai.namastex.automagik.PocketDemoShotsTest'` there. The test never goes into `apps/pocket`.
 Checkout, renderer and digests are under `pocketCapture` and `images` in the manifest.
 

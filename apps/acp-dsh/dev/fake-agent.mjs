@@ -5,7 +5,8 @@
 // A fake ACP agent for tests. Each prompt: two text chunks, one shell-like tool call that asks
 // permission first, then a line saying whether it ran. A prompt that says "twice" makes two
 // calls; one that says "hang" waits until it is cancelled; one that says "bridge <tool>" calls
-// that tool on the `dsh` MCP server it was given and reports what it answered; one that says
+// that tool on the `dsh` MCP server it was given and reports what it answered. "bridge-respawn
+// <tool>" restarts that server first, and "bridge-drop" closes it. One that says
 // "drift" announces a built-in tool call (a call `tools: []` should have removed) and waits;
 // one that says "image-call" makes an image the way Codex's image tool reports it.
 //
@@ -94,6 +95,17 @@ function connect(server, sessionId) {
   child.stdin.on('error', () => {})
   let seq = 0
   const pending = new Map()
+  let failure
+  const exited = new Promise(resolve => {
+    const end = error => {
+      failure = error
+      for (const { reject } of pending.values()) reject(error)
+      pending.clear()
+      resolve()
+    }
+    child.once('error', end)
+    child.once('exit', (code, signal) => end(new Error(`${server.name} exited (${signal ?? code})`)))
+  })
   let buffer = ''
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', (chunk) => {
@@ -114,12 +126,14 @@ function connect(server, sessionId) {
       const waiter = pending.get(message.id)
       if (waiter === undefined) continue
       pending.delete(message.id)
-      waiter(message)
+      if (message.error === undefined) waiter.resolve(message.result)
+      else waiter.reject(new Error(message.error.message))
     }
   })
   const request = (method, params) => new Promise((resolve, reject) => {
+    if (failure !== undefined) return reject(failure)
     const id = ++seq
-    pending.set(id, (message) => (message.error === undefined ? resolve(message.result) : reject(new Error(message.error.message))))
+    pending.set(id, { resolve, reject })
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
   })
   const notify = (method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`)
@@ -129,19 +143,32 @@ function connect(server, sessionId) {
     const listed = await request('tools/list', {})
     return Array.isArray(listed?.tools) ? listed.tools : []
   })()
-  return { name: server.name, child, request, tools: ready, close: () => { try { child.stdin.end() } catch {} ; try { child.kill('SIGTERM') } catch {} } }
+  const stop = () => {
+    child.stdin.end()
+    return exited
+  }
+  const close = () => {
+    try { child.stdin.end() } catch {}
+    try { child.kill('SIGTERM') } catch {}
+  }
+  return { request, tools: ready, stop, close }
+}
+
+async function attachServer(session, server, sessionId) {
+  const connection = connect(server, sessionId)
+  session.mcp.set(server.name, connection)
+  const tools = await connection.tools.catch(() => [])
+  trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name) })
 }
 
 async function attach(session, servers, sessionId) {
   session.mcp = new Map()
   if (SKIP_MCP) return
   for (const server of servers ?? []) {
-    const connection = connect(server, sessionId)
-    session.mcp.set(server.name, connection)
-    const tools = await connection.tools.catch(() => [])
+    if (server.name === 'dsh') session.dshServer = server
     // The adapter's first `tools/list` for this session, before its `session/new` (or fork)
     // answer: the delivery 6 probes read this order from the trace.
-    trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name) })
+    await attachServer(session, server, sessionId)
   }
 }
 
@@ -456,7 +483,17 @@ const implementation = {
     // A tool call on the `dsh` bridge, by the name Claude Code puts on the wire. With "permit"
     // the call first asks session/request_permission, as Claude Code does in Manual; without it
     // the call runs with no ACP-level request at all, as it would in Auto.
-    const bridged = /bridge(-permit)? (\S+)/.exec(said)
+    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
+    const respawn = /\bbridge(-respawn) (\S+)/.exec(current)
+    const drop = /\bbridge-drop\b/.test(current)
+    if (respawn !== null || drop) {
+      const connection = session.mcp.get('dsh')
+      session.mcp.delete('dsh')
+      await connection?.stop()
+      if (drop) return { stopReason: 'end_turn' }
+      if (session.dshServer !== undefined) await attachServer(session, session.dshServer, sessionId)
+    }
+    const bridged = respawn ?? /bridge(-permit)? (\S+)/.exec(said)
     if (bridged !== null) {
       const permit = bridged[1] === '-permit'
       const name = bridged[2]
