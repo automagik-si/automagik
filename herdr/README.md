@@ -1106,8 +1106,8 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 A pack-started dsh-tui bot pane, and every worker it starts, gets
 `mods/am-sidebar/guard/` first on its PATH (`startArgs` and `workerArgs` add it for the
 `dsh-tui` agent only). Its `hc` is a deny-by-default wrapper around the real `hc` (#624; the
-full send/keys/attach scope is #628): it scans PATH past every guard folder and passes an
-allowed call through unchanged — same stdio, same exit code, same stdout and stderr. It allows
+full send/keys/attach scope is #628): it scans PATH past every guard folder and forwards
+allowed calls with the same stdio and exit code. It allows
 `send`, `read`, `ls`, `get`, `wait`, `label` (the caller's own workers only), `kill`,
 `rm` (the caller's own workers only), `events`, `schema`, `templates`, the doc-only
 `--help`/`-h`/`--version`/`--skill` forms,
@@ -1117,10 +1117,10 @@ caller as `--parent`, `worker.of=<the caller's bot>`, a `--cwd` under the projec
 refused with one stderr line naming #624, #628 and #631, and the real `hc` is never called:
 `exec`, any other `run` (including a template or another agent), file writes, edits and reads,
 `machine`, `server`, `update`, `connect`, `put`, `keys`, `attach`, a `machine/t7` target on
-every verb but `send` — typed as an address or reached by a name that `hc ls` resolves to one
-(`read`, `get`, `wait`, `label`, `kill`, `rm` and both `hc events` target options resolve the
-target and refuse a machine address before the real `hc` runs) — and any `--on` outside
-an allowed `send`.
+every verb but `send` (whether typed or returned by `hc get`), and any `--on` outside an allowed
+`send`. Herdr-core types keys after about 3 seconds of quiet with no condition, so a guard
+check can go stale before delivery. Attach opens a persistent keyboard. Both wait on
+herdr-core for delivery checks or caller binding.
 
 `send` is scoped to the caller's team: its lead chain (`effectiveLead` up), its declared lead
 chain (`bot.lead`, then that bot's lead, while each id is listed in the project's bots.json,
@@ -1144,8 +1144,10 @@ authority; a worker pane has no ledger row, so its `worker.of` label names its b
 cwd's project. The target is resolved with the real `hc` (`ls` for a name, `get` for the
 labels). Any target outside that team is refused. `read`, `get` and `wait` are scoped to the
 same graph — the caller's own pane, its own workers and its team — and the shared send roles do
-not widen them: the verified address is the one forwarded, so a rename between the check and the
-call cannot redirect it. `rm` ends the caller's own workers only (`parent` is the caller's pane,
+not widen them. For `send`, `read`, `get`, `wait`, `label`, `kill`, `rm` and both `hc events`
+target options, the guard forwards the checked address from `hc get`. A rename between the check
+and the call cannot redirect it. With `--on`, the guard verifies that address is on the named
+machine and forwards its bare terminal ID. `rm` ends the caller's own workers only (`parent` is the caller's pane,
 or `worker.of` is the caller's bot); a team member's seat, another bot's worker and every
 stranger are refused, and a worker pane ends nothing. The launch briefing carries the guard
 paragraph only for a dsh-tui bot; a claude, omp or hermes briefing is unchanged. On a linked
@@ -1158,8 +1160,8 @@ reads the target's herdr-core status and, when it is neither working nor blocked
 sign-in dialog gets one JSON error line on stderr, kind `blocked`, naming the pane, and exit 9
 (hc's own `blocked` code), so a relay can tell it from a transport error and route the message
 elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
-it. A free pane's send is unchanged; a screen that cannot be read is left to hc's own send, so
-nothing is queued or dropped. This is the pack's wrapper: a sender that bypasses it with an
+it. A free pane's message is forwarded as given. When the screen cannot be read, hc handles
+delivery. This is the pack's wrapper: a sender that bypasses it with an
 absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
 hold belongs.
 
