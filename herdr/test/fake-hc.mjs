@@ -153,6 +153,7 @@ if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
 
 switch (words[0]) {
   case "ls": {
+    if (Object.hasOwn(state, "lsReply")) { out(state.lsReply); break; }
     const want = [];
     for (let i = 1; i < words.length; i += 1) if (words[i] === "--label") want.push(words[++i]);
     // --all: finished terminals too (a removed one, hc rm, is in neither list).
@@ -169,12 +170,13 @@ switch (words[0]) {
       if (state.addAfterLs.seen === state.addAfterLs.nth) {
         state.terminals.push(state.addAfterLs.terminal);
         delete state.addAfterLs;
-        save();
       }
+      save();
     }
     break;
   }
   case "get": {
+    if (Object.hasOwn(state.getReply ?? {}, words[1])) { out(state.getReply[words[1]]); break; }
     // state.failGet: terminals hc can't answer for (a server error, not "no such terminal"); with
     // state.failGetExit, that exit code and hc's JSON error of another kind instead of exit 1.
     if ((state.failGet ?? []).includes(words[1])) {
