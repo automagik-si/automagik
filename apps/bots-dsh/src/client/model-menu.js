@@ -8,7 +8,7 @@ import { SPRING_POP, SPRING_SHAPE, spring, stepMenuFocus, useLinger, useViewport
 import { hostText, t } from './i18n.js'
 import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
-import { crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
 
@@ -90,6 +90,11 @@ export function modelStateLine(state, roster) {
 
 // The line under a Bot's model in its settings. `state`: the host's model state for this Bot.
 export function modelHint(bot, roster, state) {
+  // A Bot held at load: its shell is off and its model is a coding CLI that brings its own
+  // shell. It does not start until the person picks a native model or turns the shell on.
+  if (bot.shellHeld !== undefined) {
+    return t('This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.', { cli: bot.shellHeld.cli })
+  }
   // A Bot whose model its plugin owns: the DSH model saved on it answers nothing. The hint
   // names what answers now, from the plugin's menu, or says nothing.
   const host = roster.hostModels?.[bot.id]
@@ -99,6 +104,16 @@ export function modelHint(bot, roster, state) {
   }
   const shown = modelOf(bot, roster)
   if (shown === undefined) return t('Pick the model this Bot runs on.')
+  // A Bot a subscription move had to leave on its plan route: its shell is off, so the CLI
+  // that would bring its own shell cannot take it. The notice names the reason; when the
+  // plan route itself is gone, the Bot asks for a model instead of looking like it works.
+  const held = bot.subscriptionShellHeld
+  if (held !== undefined) {
+    if (!shown.served) {
+      return t('This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.', { cli: held.cli })
+    }
+    return t('This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness\'s tools.', { model: shown.name, cli: held.cli })
+  }
   if (!shown.served && (roster.models ?? []).length > 0) return t('This model is not available now. Pick another one.')
   const served = servedOf(roster, shown.ref)
   if (served?.needsSignIn) return t('{model} needs a sign-in before it can answer.', { model: served.name })
@@ -722,6 +737,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // A Bot already saved (settings, details, the chat bar) crosses; a Bot being created does
   // not: `onPick` alone says nothing about whether the conversation exists yet.
   const crossing = ref => Boolean(current) && saved && ref !== current && crossesHarness(current, ref)
+  const recovery = ref => saved && bot.shellHeld !== undefined && !commandCapableAgent(ref)
   const pickModel = (ref, effort, { routeChange = false, level = false } = {}) => {
     // A crossing started from a saved Bot's settings still goes through the picker's own
     // action: the settings wrapper needs to keep its sign-in/account handling.
@@ -751,9 +767,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     return run(actions.updateBot(bot.id, { model: ref, ...(level || effort !== undefined ? { effort: effort ?? null } : {}) }))
   }
   const commit = (model, effort) => {
-    if (model.ref !== undefined && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    const routeChange = model.ref !== undefined && recovery(model.ref)
+    if (!routeChange && model.ref !== undefined && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
     finish()
-    void Promise.resolve(pickModel(model.ref, effort)).catch(() => {})
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange })).catch(() => {})
   }
   // A model with levels opens its level step; one without applies now. Levels not known yet
   // are asked for first. A model that needs an API key asks for it, a signed-out agent opens
@@ -783,9 +800,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // A level of the current model changes the level only; on another model, the model and its
   // level go together, and a crossing asks first.
   const onLevel = (model, effort) => {
-    if (crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    const routeChange = recovery(model.ref)
+    if (!routeChange && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
     finish()
-    void Promise.resolve(pickModel(model.ref, effort, { level: true })).catch(() => {})
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {})
   }
   const onKeyDown = (event) => {
     const rows = menuRows(event.currentTarget)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,6 +176,33 @@ func TestRunRecordsAFailureToProvision(t *testing.T) {
 	}
 	if last.Error == "" {
 		t.Error("a failed run has to say why")
+	}
+}
+
+// A busy bot target told to skip is a dropped occurrence, not a failure: the
+// Provision error keeps the pane it already resolved and the target it names,
+// so the row says where the skipped run would have gone (#498).
+func TestRunRecordsABusySkippedTargetAsSkipped(t *testing.T) {
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+	h := &fakeHost{provision: func(config.Automation) (host.Session, error) {
+		return host.Session{PaneID: "t7", Target: "bot:b-6jrz4bmxml", TargetName: "Housekeeper"},
+			fmt.Errorf("housekeeping: %w: Housekeeper was working", host.ErrTargetBusy)
+	}}
+
+	if err := New(h).Run(automation(), "cron"); err == nil {
+		t.Fatal("want the busy skip returned")
+	}
+	want := []history.Status{history.StatusScheduled, history.StatusSkipped}
+	got := statuses(t, "triage")
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("trail = %v, want %v", got, want)
+	}
+	last := runs(t)[0]
+	if last.Error == "" {
+		t.Error("a skipped run has to say why")
+	}
+	if last.PaneID != "t7" || last.Target != "bot:b-6jrz4bmxml" {
+		t.Errorf("the skipped run lost its pane or target: %+v", last)
 	}
 }
 
@@ -350,6 +378,12 @@ func TestStatusForSeparatesACancellationFromAFailure(t *testing.T) {
 	}
 	if got := statusFor(errors.New("start claude agent: boom")); got != history.StatusFailed {
 		t.Errorf("a real failure recorded as %q, want failed", got)
+	}
+	// A bot that was busy when its automation was told to skip is a dropped
+	// occurrence, not a failure that toasts at 3am (#498).
+	busy := fmt.Errorf("housekeeping: %w: Housekeeper was working", host.ErrTargetBusy)
+	if got := statusFor(busy); got != history.StatusSkipped {
+		t.Errorf("a busy bot target recorded as %q, want skipped", got)
 	}
 }
 
@@ -596,23 +630,111 @@ func TestACommandsResultGoesToItsBot(t *testing.T) {
 	}
 }
 
+// The refusal goes through the real hc.Client.Send: a fake hc finds the bot's
+// terminal, then refuses the send with what hc wrote, and exits 9. A JSON
+// envelope is told in its message, on one line, in the history, and kept whole
+// in the log; any other refusal reads as it always did.
 func TestAReportThatCannotBeDeliveredLeavesTheStatusAlone(t *testing.T) {
-	t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
-	r := New(refusingHost{t})
-	r.bots = &fakeBots{err: errors.New("hc send: the program is blocked")}
-	a := commandAutomation(`echo fine`)
-	a.Notify = "b-captain"
+	// The envelope is fake-hc.mjs's refusal of a blocked terminal.
+	const envelope = `{"error":{"kind":"blocked","message":"t9 is blocked"}}`
+	for _, c := range []struct {
+		name, stderr, stdout, notified, logged string
+	}{
+		{name: "an hc envelope", stderr: envelope,
+			notified: "not delivered: hc send: t9 is blocked",
+			logged:   "hc send: " + envelope + " (exit status 9)"},
+		{name: "an envelope with a hint over lines",
+			stderr:   "{\"error\":{\"kind\":\"blocked\",\"message\":\"t9 is\\n  blocked\",\"hint\":\"close the dialog\"}}\n",
+			notified: "not delivered: hc send: t9 is blocked",
+			logged:   `"hint":"close the dialog"}} (exit status 9)`},
+		{name: "an envelope on stdout", stdout: envelope,
+			notified: "not delivered: hc send: t9 is blocked",
+			logged:   "hc send: " + envelope + " (exit status 9)"},
+		{name: "plain text", stderr: "the program is blocked\n",
+			notified: "not delivered: hc send: the program is blocked (exit status 9)"},
+		{name: "nothing said",
+			notified: "not delivered: hc send:  (exit status 9)"},
+		{name: "malformed json", stderr: `{"error":{"kind":"blocked"`,
+			notified: `not delivered: hc send: {"error":{"kind":"blocked" (exit status 9)`},
+		{name: "an envelope with a blank message", stderr: `{"error":{"kind":"blocked","message":"  "}}`,
+			notified: `not delivered: hc send: {"error":{"kind":"blocked","message":"  "}} (exit status 9)`},
+		{name: "other json", stderr: `{"error":"blocked"}`,
+			notified: `not delivered: hc send: {"error":"blocked"} (exit status 9)`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+			t.Setenv("HC_BIN", fakeRefusingHC(t, c.stderr, c.stdout))
+			var logs strings.Builder
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	if err := r.Run(a, "cron"); err != nil {
-		t.Fatalf("an undelivered report failed the run: %v", err)
+			r := New(refusingHost{t})
+			r.bots = notify.NewBots()
+			a := commandAutomation(`echo fine`)
+			a.Notify = "b-captain"
+			if err := r.Run(a, "cron"); err != nil {
+				t.Fatalf("an undelivered report failed the run: %v", err)
+			}
+
+			all := runs(t)
+			if len(all) != 1 {
+				t.Fatalf("history holds %d runs, want 1: %+v", len(all), all)
+			}
+			run := all[0]
+			if run.Status != history.StatusDone || run.Result != "fine" || run.Error != "" {
+				t.Fatalf("run = %+v", run)
+			}
+			if run.Notified != c.notified {
+				t.Fatalf("notified = %q\nwant        %q", run.Notified, c.notified)
+			}
+			if strings.ContainsAny(run.Notified, "\r\n") {
+				t.Fatalf("notified spans lines: %q", run.Notified)
+			}
+			if c.logged != "" && strings.Contains(run.Notified, "{") {
+				t.Fatalf("notified kept the envelope: %q", run.Notified)
+			}
+			if n := strings.Count(logs.String(), "did not reach b-captain"); n != 1 {
+				t.Fatalf("logged the refusal %d times, want once:\n%s", n, logs.String())
+			}
+			want := c.logged
+			if want == "" {
+				want = strings.TrimPrefix(c.notified, "not delivered: ")
+			}
+			if n := strings.Count(logs.String(), want); n != 1 {
+				t.Fatalf("the log holds %q %d times, want once:\n%s", want, n, logs.String())
+			}
+			if c.logged != "" && strings.Count(logs.String(), "exit status 9") != 1 {
+				t.Fatalf("the log lost the exit status once:\n%s", logs.String())
+			}
+		})
 	}
-	run := runs(t)[0]
-	if run.Status != history.StatusDone || run.Result != "fine" {
-		t.Fatalf("run = %+v", run)
+}
+
+// fakeRefusingHC writes a scratch hc that finds bot b-captain at t9 and
+// refuses every send with the given output and exit status 9.
+func fakeRefusingHC(t *testing.T, stderr, stdout string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range map[string]string{"stderr": stderr, "stdout": stdout} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if run.Notified != "not delivered: hc send: the program is blocked" {
-		t.Fatalf("notified = %q", run.Notified)
+	bin := filepath.Join(dir, "hc")
+	script := `#!/bin/sh
+dir=$(dirname "$0")
+case $1 in
+ls) [ "$2 $3 $4" = "--json --label bot=b-captain" ] || exit 64
+    printf '{"terminals":[{"address":"t9"}]}\n' ;;
+send) [ "$2 $3 $4" = "--json -- t9" ] || exit 64
+    cat "$dir/stderr" >&2; cat "$dir/stdout"; exit 9 ;;
+*) exit 64 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
 	}
+	return bin
 }
 
 // A seen mark written while the report is on its way must survive the

@@ -6,6 +6,7 @@
 // a long poll open (`browser-wait`) that reports which Bots have a page open and carries read
 // requests back; the client answers with `browser-result`. The browser a Bot drives itself
 // (browser-plugins.js) keeps its holds here too, wherever it runs.
+import { randomUUID } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { output } from './tools.js'
 import { browserPluginOf } from './browser-default.js'
@@ -27,9 +28,9 @@ const ITEMS_MAX = 80
  * @param {{ now?: () => number, waitMs?: number, staleMs?: number, readTimeoutMs?: number, resendMs?: number }} [options]
  */
 export function createBrowserChannel({ now = Date.now, waitMs = WAIT_MS, staleMs = CLIENT_STALE_MS, readTimeoutMs = READ_TIMEOUT_MS, resendMs = RESEND_MS } = {}) {
-  /** @type {Map<string, {open: Record<string, {url?:string, title?:string}>, seen:number, queue:{id:string, botId:string, sentAt?:number}[], wake?:() => void, end?:() => void}>} */
+  /** @type {Map<string, {open: Record<string, {url?:string, title?:string}>, seen:number, native?:boolean, queue:{id:string, botId:string, held?:boolean, sentAt?:number}[], wake?:() => void, end?:() => void}>} */
   const clients = new Map()
-  /** @type {Map<string, {client:any, resolve:(value:any) => void, timer:any}>} */
+  /** @type {Map<string, {client:any, held?:boolean, resolve:(value:any) => void, timer:any}>} */
   const pending = new Map()
   const holds = new Map()
   const holdListeners = new Set()
@@ -62,11 +63,12 @@ export function createBrowserChannel({ now = Date.now, waitMs = WAIT_MS, staleMs
    * there are some, else when one arrives or a handed-out one is due again, or after
    * `waitMs`. A newer poll from the same window ends the older one empty.
    */
-  function wait(clientId, open) {
+  function wait(clientId, open, native = false) {
     const client = clients.get(clientId) ?? { open: {}, seen: 0, queue: [], holdVersion: 0 }
     clients.set(clientId, client)
     client.open = open && typeof open === 'object' ? open : {}
     client.seen = now()
+    client.native = native
     client.end?.()
     const ready = due(client)
     if (client.holdVersion !== holdVersion) {
@@ -102,9 +104,16 @@ export function createBrowserChannel({ now = Date.now, waitMs = WAIT_MS, staleMs
     return true
   }
 
-  /** What a window reports for one request: `{ id, ok, page }` or `{ id, ok: false, error }`. */
+  /** Native control replies echo the request id, clientId and held value with a boolean ok. */
   function result(payload) {
-    return settle(String(payload?.id ?? ''), payload?.ok === true
+    const id = String(payload?.id ?? '')
+    const entry = pending.get(id)
+    if (entry?.held !== undefined) {
+      if (payload.id !== id || clients.get(payload.clientId) !== entry.client
+        || payload.held !== entry.held || typeof payload.ok !== 'boolean') return false
+      return settle(id, { ok: payload.ok })
+    }
+    return settle(id, payload?.ok === true
       ? { page: payload.page }
       : { error: String(payload?.error ?? 'The page could not be read') })
   }
@@ -116,13 +125,35 @@ export function createBrowserChannel({ now = Date.now, waitMs = WAIT_MS, staleMs
   function read(botId, request = {}) {
     const client = clientFor(botId)
     if (client === undefined) return Promise.resolve({ absent: true })
-    const id = `read-${++nextId}`
+    return requestView(client, botId, request)
+  }
+
+  function requestView(client, botId, request) {
+    const id = request.held === undefined ? `read-${++nextId}` : `hold-${randomUUID()}`
     return new Promise((resolve) => {
       const timer = setTimeout(() => settle(id, { error: 'The Desktop app did not answer in time. Its window may be closed or busy.' }), readTimeoutMs)
-      pending.set(id, { client, resolve, timer })
+      pending.set(id, { client, held: request.held, resolve, timer })
       client.queue.push({ ...request, id, botId })
       client.wake?.()
     })
+  }
+
+  // A native hold belongs to the desktop window, even when its browser pane is closed.
+  function nativeClient() {
+    let latest
+    for (const [id, client] of clients) {
+      if (client.native && present(client) && (!latest || client.seen >= latest.client.seen)) latest = { id, client }
+    }
+    return latest?.id
+  }
+
+  async function holdView(clientId, botId, held) {
+    const client = clients.get(clientId)
+    if (client?.native && present(client)) {
+      const result = await requestView(client, botId, { held })
+      if (result.ok === true) return
+    }
+    throw Object.assign(new Error('The Desktop app could not change control of this browser. Try again.'), { code: 'bot/refused' })
   }
 
   /** Which Bots have a browser page open in a present window, newest report first. */
@@ -137,7 +168,15 @@ export function createBrowserChannel({ now = Date.now, waitMs = WAIT_MS, staleMs
 
   function setHold(botId, hold) {
     if (hold === null) holds.delete(botId)
-    else holds.set(botId, { by: hold.by, reason: hold.reason, note: hold.note, ...(typeof hold.callId === 'string' ? { callId: hold.callId.slice(0, 200) } : {}) })
+    // `panel` marks a hold the app's own panel drives: unlike a webview takeover it keeps the
+    // Bot's browser (with its page) alive, so the person can open a page and hand it back.
+    else holds.set(botId, {
+      by: hold.by,
+      reason: hold.reason,
+      note: hold.note,
+      ...(typeof hold.callId === 'string' ? { callId: hold.callId.slice(0, 200) } : {}),
+      ...(hold.panel === true ? { panel: true } : {}),
+    })
     holdVersion += 1
     for (const client of clients.values()) client.wake?.()
     for (const listener of holdListeners) {
@@ -160,7 +199,7 @@ export function createBrowserChannel({ now = Date.now, waitMs = WAIT_MS, staleMs
     holdListeners.add(listener)
     return () => holdListeners.delete(listener)
   }
-  return { wait, result, read, openPages, setHold, holdOf, holdSnapshot, subscribeHolds, dispose }
+  return { wait, result, read, nativeClient, holdView, openPages, setHold, holdOf, holdSnapshot, subscribeHolds, dispose }
 }
 
 const clean = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max)

@@ -93,6 +93,10 @@ fun terminalSendEnabled(draft: String, sending: Boolean): Boolean = draft.isNotB
     // The Chat tab (RFC 0015 delivery 5): the same agent as a chat, over the terminal's place; Show terminal comes back.
     val chatOffered = !state.demo && Chat.offered(terminal)
     var chatView by remember(ref) { mutableStateOf(state.chatFirst) }
+    val snackbar = remember { SnackbarHostState() }
+    val snackbarScope = rememberCoroutineScope()
+    // Dictation's messages belong to the app, above the composer, not to a system toast over the keys (#1068).
+    val say: (String) -> Unit = { text -> snackbarScope.launch { snackbar.showSnackbar(text) } }
     if (chatView && chatOffered) {
         ChatPane(vm, ref, onShowTerminal = { chatView = false }, onBack = vm::backToList, modifier = Modifier.fillMaxSize().displayCutoutPadding().then(swipeable))
         return
@@ -125,13 +129,18 @@ fun terminalSendEnabled(draft: String, sending: Boolean): Boolean = draft.isNotB
             if (!offline) PromptChoices(vm, ref, terminal, bottom = !keys && fullscreen && !controls)
             if (offline) OfflineStrip(vm.hostName(ref.hostId), machine?.connecting == true) { vm.reconnect(ref.hostId) }
             if (keys) TerminalKeys(vm, state)
-            if (showComposer) Row(Modifier.fillMaxWidth().background(Chrome).padding(10.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(message, { message = it }, placeholder = { Text("Message this agent…", fontSize = 12.sp) }, modifier = Modifier.weight(1f).focusRequester(composerFocus), maxLines = 4, shape = RoundedCornerShape(12.dp))
-                Dictate { heard -> message = dictated(message, heard) }
-                IconButton(onClick = { val draft = message; vm.sendMessage(draft) { if (message == draft) message = "" } }, enabled = terminalSendEnabled(message, state.sending)) {
-                    if (state.sending) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Outlined.Send, "Send message", tint = Accent)
+            if (showComposer) {
+                SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 10.dp))
+                Row(Modifier.fillMaxWidth().background(Chrome).padding(10.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(message, { message = it }, placeholder = { Text("Message this agent…", fontSize = 12.sp) }, modifier = Modifier.weight(1f).focusRequester(composerFocus), maxLines = 4, shape = RoundedCornerShape(12.dp))
+                    Dictate(onHeard = { heard -> message = dictated(message, heard) }, onSay = say)
+                    val enabled = terminalSendEnabled(message, state.sending)
+                    IconButton(onClick = { val draft = message; vm.sendMessage(draft) { if (message == draft) message = "" } }, enabled = enabled) {
+                        if (state.sending) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Outlined.Send, "Send message", tint = if (enabled) Accent else Muted)
+                    }
+                    IconButton(onClick = { showComposer = false; keyboard?.hide() }) { Icon(Icons.Outlined.Close, "Close composer", tint = Muted) }
                 }
-                IconButton(onClick = { showComposer = false; keyboard?.hide() }) { Icon(Icons.Outlined.Close, "Close composer", tint = Muted) }
             }
             if (!fullscreen || controls) Row(Modifier.fillMaxWidth().background(Chrome).then(swipeable).padding(horizontal = 10.dp).navigationBarsPadding(), verticalAlignment = Alignment.CenterVertically) {
                 Text(state.terminalStatus, color = if (state.terminalStatus.startsWith("Live")) Muted else Accent, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)

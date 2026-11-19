@@ -4,7 +4,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { channelOf, cleanStaleCache, compareVersions, feedFileOf, feedOverride, isReleasePage, isTransient, pickUpdate, QUICK_RETRIES, QUICK_RETRY_MS, RETRY_MS, startUpdates, updaterCacheDir, updateMode, updatesEnabled, versionFromArtifact } from '../src/update.js'
+import { channelOf, cleanStaleCache, compareVersions, feedFileOf, feedOverride, fetchReleases, isReleasePage, isTransient, MAX_RELEASE_PAGES, nextPage, pickUpdate, QUICK_RETRIES, QUICK_RETRY_MS, RELEASES_URL, RETRY_MS, startUpdates, updaterCacheDir, updateMode, updatesEnabled, versionFromArtifact } from '../src/update.js'
 
 const release = (tag, assets = ['latest-mac.yml', 'latest-linux.yml'], extra = {}) => ({ tag_name: tag, draft: false, assets: assets.map(name => ({ name })), ...extra })
 
@@ -362,6 +362,157 @@ test('a releases API 5xx or 429 is transient; other 4xx are not; the network pat
   }
   assert.equal(isTransient(new Error('sha512 checksum mismatch')), false)
   assert.equal(isTransient(undefined), false)
+})
+
+test("GitHub's Link header names the next page, and nothing when there is none or another host", () => {
+  assert.equal(nextPage(`<${RELEASES_URL}&page=2>; rel="next", <${RELEASES_URL}&page=9>; rel="last"`), `${RELEASES_URL}&page=2`)
+  assert.equal(nextPage(`<${RELEASES_URL}&page=1>; rel="prev"`), null)
+  assert.equal(nextPage('<https://evil.example/repos/x/releases?page=2>; rel="next"'), null)
+  assert.equal(nextPage('<http://api.github.com/repos/x/releases?page=2>; rel="next"'), null)
+  assert.equal(nextPage(''), null)
+  assert.equal(nextPage(undefined), null)
+})
+
+test('the release list is read past its first page, so an older feed is never hidden', async () => {
+  const first = Array.from({ length: 100 }, (_, i) => release(`v3.${900 - i}.0`, []))
+  const second = [release('v3.50.0', ['latest-mac.yml']), release('v3.49.0')]
+  const calls = []
+  const page = async url => {
+    calls.push(url)
+    if (calls.length === 1) {
+      return { ok: true, status: 200, headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` }, json: async () => first }
+    }
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => second }
+  }
+  const list = await fetchReleases(page)
+  assert.deepEqual(calls, [RELEASES_URL, `${RELEASES_URL}&page=2`])
+  assert.equal(list.length, 102)
+  // The first page is all patches without a feed; the older page still gives the update.
+  assert.equal(pickUpdate(list, { current: '3.1.0', platform: 'darwin' }).version, '3.50.0')
+})
+
+test('one page with no next is the whole list, and a failed later page fails the check', async () => {
+  const calls = []
+  const list = await fetchReleases(async url => {
+    calls.push(url)
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => [release('v3.1.0')] }
+  })
+  assert.deepEqual(calls, [RELEASES_URL])
+  assert.equal(list.length, 1)
+
+  const failed = []
+  await assert.rejects(
+    fetchReleases(async url => {
+      failed.push(url)
+      if (failed.length === 1) {
+        return { ok: true, status: 200, headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` }, json: async () => [release('v3.1.0')] }
+      }
+      return { ok: false, status: 503, headers: { get: () => null }, json: async () => [] }
+    }),
+    /GitHub answered 503 for the desktop releases/,
+  )
+})
+
+test('the list stops at MAX_RELEASE_PAGES, and says so instead of hiding the rest', async () => {
+  const original = console.warn
+  const warnings = []
+  console.warn = message => warnings.push(message)
+  try {
+    let calls = 0
+    const list = await fetchReleases(async () => {
+      calls += 1
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => `<${RELEASES_URL}&page=${calls + 1}>; rel="next"` },
+        json: async () => [release(`v3.${1000 - calls}.0`)],
+      }
+    })
+    assert.equal(calls, MAX_RELEASE_PAGES)
+    assert.equal(list.length, MAX_RELEASE_PAGES)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /older feed may be hidden/)
+  } finally {
+    console.warn = original
+  }
+})
+
+test('a later page that is not a release list fails the check, never hides the pages before it', async () => {
+  const calls = []
+  await assert.rejects(
+    fetchReleases(async url => {
+      calls.push(url)
+      if (calls.length === 1) {
+        return { ok: true, status: 200, headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` }, json: async () => [release('v3.1.0')] }
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ message: 'rate limited' }) }
+    }),
+    /other than a release list/,
+  )
+  assert.equal(calls.length, 2)
+})
+
+test('a next page on another host ends the list instead of being followed', async () => {
+  const calls = []
+  const list = await fetchReleases(async url => {
+    calls.push(url)
+    return { ok: true, status: 200, headers: { get: () => '<https://evil.example/releases?page=2>; rel="next"' }, json: async () => [release('v3.1.0')] }
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(list.length, 1)
+})
+
+test('paging stops once the running release and a usable feed are in hand', async () => {
+  const calls = []
+  const page = async url => {
+    calls.push(url)
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.102.0', ['latest-mac.yml']), release('v3.101.0')],
+    }
+  }
+  const enough = list => pickUpdate(list, { current: '3.101.0', platform: 'darwin', channel: channelOf(list, { current: '3.101.0' }) }) !== null
+  const list = await fetchReleases(page, enough)
+  assert.equal(calls.length, 1)
+  assert.equal(list.length, 2)
+})
+
+test('an up-to-date app reads one page, not the whole list', async (t) => {
+  let calls = 0
+  stubFetch(t, () => {
+    calls += 1
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.101.0'), release('v3.100.0')],
+    }
+  })
+  const { timers } = recordingTimers()
+  const updates = startUpdates({ updater: fakeUpdater(), current: '3.101.0', platform: 'darwin', env: {}, timers, log: quiet, onState() {} })
+  t.after(() => updates.stop())
+  assert.deepEqual(await updates.check(), { result: 'latest' })
+  assert.equal(calls, 1)
+})
+
+test('a check reads one page when that page already holds the update', async (t) => {
+  let calls = 0
+  stubFetch(t, () => {
+    calls += 1
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.102.0', ['latest-mac.yml']), release('v3.101.0')],
+    }
+  })
+  const { timers } = recordingTimers()
+  const updates = startUpdates({ updater: fakeUpdater(), current: '3.101.0', platform: 'darwin', env: {}, timers, log: quiet, onState() {} })
+  t.after(() => updates.stop())
+  assert.deepEqual(await updates.check(), { result: 'found', version: '3.102.0' })
+  assert.equal(calls, 1)
 })
 
 async function quickRetryEvidence(t, status) {

@@ -134,7 +134,7 @@ export function applyRuntimePatches(runtimeDir, patchesDir = PATCHES_SOURCE) {
   return results
 }
 
-export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-dev/automagik', kind = 'release', event = '', manifest = '' }) {
+export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-si/automagik', kind = 'release', event = '', manifest = '' }) {
   const input = { kind, event, revision, manifest, repository, version }
   const source = validateInput(input)
   if (kind === 'checkout') verifyCheckoutDirectory(join(HERE, 'checkout-input'), input)

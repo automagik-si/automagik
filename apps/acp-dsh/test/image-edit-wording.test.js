@@ -23,10 +23,18 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
   const checked = []
   const mock = t.mock.method(childProcess, 'execFile', (_command, args, _opts, callback) => {
     checked.push(args)
+    // The switch's effect is read too: with one required feature on, its tool must appear.
+    const table = args.find((arg, index) => args[index - 1] === '-c' && arg.startsWith('features=')) ?? ''
+    const on = name => new RegExp(`(?:^|[ {,])${name} = true`).test(table)
+    const nested = ['apply_patch', ...(on('shell_tool') ? ['exec_command'] : []), ...(on('view_image') ? ['view_image'] : [])]
+    const tools = [
+      { type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'imagegen', description: '', parameters: { type: 'object' } }] },
+      { type: 'namespace', name: 'functions', description: '', tools: [{ type: 'custom', name: 'exec', description: nested.map(name => `declare const tools: { ${name}(args: {}): Promise<unknown>; };`).join('\n') }] },
+    ]
     const answer = args.includes('features')
       ? 'shell_tool stable false\nview_image stable false\nimage_generation stable true\n'
       : args.includes('debug')
-        ? JSON.stringify([{ type: 'additional_tools', role: 'developer', tools: [{ type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'imagegen', description: '', parameters: { type: 'object' } }] }] }, { type: 'message', content: [{ type: 'input_text', text: `<permission_profile type="managed"><file_system type="restricted"><entry access="deny" escalatable="false"><special>:root</special></entry><entry access="read"><path>${_opts.cwd}</path></entry><entry access="read"><path>${realpathSync(home)}/tmp/arg0-linux/codex-arg0hEg6rp</path></entry></file_system></permission_profile>` }] }])
+        ? JSON.stringify([{ type: 'additional_tools', role: 'developer', tools }, { type: 'message', content: [{ type: 'input_text', text: `<permission_profile type="managed"><file_system type="restricted"><entry access="deny" escalatable="false"><special>:root</special></entry><entry access="read"><path>${_opts.cwd}</path></entry><entry access="read"><path>${realpathSync(home)}/tmp/arg0-linux/codex-arg0hEg6rp</path></entry></file_system></permission_profile>` }] }])
         : '[]'
     queueMicrotask(() => callback(null, answer, ''))
     return { kill() {} }
@@ -58,7 +66,7 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
     return true
   })
   assert.equal(prompts, 0)
-  assert.equal(checked.length, 3)
+  assert.equal(checked.length, 6)
   assert.equal(selected.at(-1), 'read-only')
   assert.equal(selected.length, mode === 'selection-rejected' ? 2 : 1)
 })

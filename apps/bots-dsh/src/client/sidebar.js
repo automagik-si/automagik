@@ -891,6 +891,30 @@ export function FooterAccount(props) {
   return h('span', { className: 'bt-foot-account' }, h(AccountLauncher, { ...props, seat: false }))
 }
 
+// The footer and DSH's rail share one toggle seat; carry keyboard focus between their nodes.
+export function RailToggle({ wide, actions }) {
+  const button = useRef(null)
+  const hadFocus = useRef(false)
+  useLayoutEffect(() => {
+    const native = document.querySelector('[data-sidebar-toggle]')
+    if (!wide && hadFocus.current) {
+      hadFocus.current = false
+      native?.focus({ preventScroll: true })
+    } else if (wide && native === document.activeElement
+      && !document.documentElement.matches('[data-windows-titlebar],[data-platform=darwin]')
+      && !button.current?.closest('[data-sidebar-drawer]')) {
+      button.current?.focus({ preventScroll: true })
+    }
+  }, [wide])
+  if (!wide) return null
+  return h('button', {
+    ref: button, type: 'button', className: 'bt-round bt-side-collapse bt-foot-toggle',
+    'aria-label': t('Collapse sidebar'), title: t('Collapse sidebar'),
+    onFocus: () => { hadFocus.current = true }, onBlur: () => { hadFocus.current = false },
+    onClick: () => actions.toggleSidebar(),
+  }, h(SidebarIcon))
+}
+
 // The only entry registered in every mode: in Agent mode the whole Bot surface is
 // withdrawn, and this button in the shell's own footer is the way back. It carries the
 // app's mark, so the name beside it is the app's, Automagik (#1160): Omni is one of its Bots.
@@ -957,6 +981,22 @@ html[data-automagik-desktop=darwin] .bt-panel{-webkit-app-region:no-drag}
 [class*="_root"][class*="_collapsed"]{margin:6px!important;padding-left:0!important;padding-right:0!important}
 [class*="_collapsed"]>[class*="_logoRow"],[class*="_collapsed"] [class*="_regionArea"]{width:100%;display:flex;justify-content:center}
 [class*="_collapsed"]>[class*="_footArea"]{width:100%;justify-items:center;padding-left:0!important;padding-right:0!important}
+/* The rail's card keeps its 6px inset, so its native toggle shares the footer's viewport box. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"][class*="_collapsed"]{position:relative;height:calc(100% - 12px)}
+/* The toggle leaves the logo row without reserving an empty seat above the Bot list. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_logoRow"]{height:0!important;margin:0!important}
+/* DSH keeps the badge and keyboard hints while the control moves below every footer entry. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle]{position:absolute;left:4px;bottom:12px;margin:0}
+/* Footer entries need a whole control's height above the bottom seat, even on short windows. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_footArea"]{padding-bottom:calc(12px + 36px + var(--lb-rail-gap))!important}
+/* A horizontal rail entrance would move the toggle away from the seat it just replaced. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:bt-rail-toggle-in 150ms var(--ds-ease-in-out) backwards}
+/* Only opacity changes so a mid-animation press still lands on the same control. */
+@keyframes bt-rail-toggle-in{from{opacity:0}}
+/* Quiet motion leaves the native toggle immediately ready in its bottom seat. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) body[data-bt-motion=quiet] [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}
+/* Respect the system's motion choice without changing the drawer or caption controls. */
+@media (prefers-reduced-motion:reduce){html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}}
 /* rc.2 nests the Bot list in a scrolling grid. Bound its row so only bt-list
    scrolls; the search and sidebar buttons stay above it. Native sessions keep their grid. */
 [class*="_scrollArea"]:has(.bt-side){grid-template-rows:8px max-content 2px minmax(0,1fr);overflow-y:hidden}
@@ -1031,10 +1071,6 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
    .bt-update-dot, a card of .bt-update-* rows, and .bt-update-notes as a button. */
 .bt-side-tool{position:relative}
 .bt-update-pop button.bt-update-notes{padding:0;border:0;background:none;font-family:inherit;cursor:pointer}
-/* A card row may lead with its product's mark (BotMark), beside its name and status. */
-.bt-power-who{display:flex;align-items:center;gap:10px}
-.bt-power-who>.bt-mark{flex:none}
-.bt-power-what{min-width:0}
 
 /* A DSH bot's row and its expanding Session list. It wears DSH's own whale, the mark a
    Bot with no look of its own wears too. */
