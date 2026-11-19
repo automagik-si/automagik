@@ -2,10 +2,10 @@
 // The DSH sandbox runner wrapper (apps/dsh-sandbox; issues #631, #700 and #743, the DSH lane
 // of #624). Linux/bwrap only: every sandboxed pane gets its own network namespace, so loopback
 // and the local networks of the host are not in it, and the wrapper hides the herdr-core
-// runtime folder, the user's ~/.ssh and the known container runtime sockets. The pane's egress
-// is an explicit HTTP CONNECT proxy on the namespace's own loopback port 3128; the wrapper
-// serves that proxy over a Unix socket it binds into the sandbox, and the socket's host-side
-// end refuses loopback, link-local, private and host addresses. Nothing else has a route.
+// runtime folder at its canonical path, the user's ~/.ssh, and fixed and env-named runtime
+// sockets. The pane's egress is an explicit HTTP CONNECT proxy on its own loopback port 3128.
+// The wrapper serves that proxy over a Unix socket it binds into the sandbox, and the socket's
+// host-side end refuses loopback, link-local, private and host addresses. Nothing else has a route.
 //
 // The local sandbox provider composes its runner argv as
 // [...runnerCommand, ...bwrapProfileArgs(policy), '--', ...argv]. This wrapper finds that '--',
@@ -17,7 +17,7 @@
 // runnerFailureSignatures entry: 'hc-socket-mask: '.
 import { spawn, spawnSync } from 'node:child_process';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { chmodSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { BlockList, createServer, connect as netConnect, isIP } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
@@ -76,6 +76,20 @@ export function containerSocketPaths(uid = process.getuid?.()) {
   return paths;
 }
 
+/** Additional fixed runtime sockets, with the same launch-time mask as Docker and Podman. */
+export const MORE_RUNTIME_SOCKETS = Object.freeze([
+  '/var/run/crio/crio.sock',
+  '/run/crio/crio.sock',
+  '/run/k3s/containerd/containerd.sock',
+  '/run/containerd/containerd.sock.ttrpc',
+  '/run/buildkit/buildkitd.sock',
+]);
+
+/** All fixed runtime paths the wrapper checks by default. */
+export function runtimeSocketPaths(uid) {
+  return [...containerSocketPaths(uid), ...MORE_RUNTIME_SOCKETS];
+}
+
 /** Split the provider's argv at the first '--': the bwrap profile args, then the command. */
 export function splitRunnerArgs(args) {
   const at = args.indexOf('--');
@@ -97,7 +111,7 @@ export function ownArgs(args) {
 /** Whether `dir` is `target` itself or one of its ancestors (both absolute paths). */
 export function isSameOrAncestor(dir, target) {
   const rel = relative(dir, target);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
 }
 
 /**
@@ -354,11 +368,11 @@ const failed = (args, message) => ({
  * socket. The pane still starts with no core socket, and the caller always hides the proxy's
  * folder. An unset or relative proxy is fatal in maskArgs, never a notice.
  */
-export function proxyNotice(proxy) {
+export function proxyNotice(proxy, stat = statSync) {
   const tail = 'starting the pane with no herdr-core socket (hc will fail closed)';
   let info;
   try {
-    info = statSync(proxy);
+    info = stat(proxy);
   } catch {
     return `${PROXY_SOCKET} ${proxy} does not exist: ${tail}`;
   }
@@ -366,18 +380,40 @@ export function proxyNotice(proxy) {
   return null;
 }
 
+/** Socket paths explicitly named by container clients or the SSH agent. */
+function envSocketPaths(env) {
+  const paths = [];
+  for (const host of [env.DOCKER_HOST, env.CONTAINER_HOST]) {
+    if (typeof host !== 'string' || !host.startsWith('unix://')) continue;
+    const path = host.slice('unix://'.length);
+    if (isAbsolute(path)) paths.push(path);
+  }
+  if (typeof env.SSH_AUTH_SOCK === 'string' && isAbsolute(env.SSH_AUTH_SOCK)) {
+    paths.push(env.SSH_AUTH_SOCK);
+  }
+  return paths;
+}
+
+function existingPath(path, realpath) {
+  try {
+    return realpath(path);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The pure helper the tests drive: given the runner argv and an environment, return the argv to
  * run, the fatal line (no bwrap run), or the one non-fatal notice (bwrap still runs, without a
- * proxy). `options.containerSockets` must be explicit in tests: the default only reads fixed
- * paths, and a test passes fake ones under its temp folder. `fatal` is a single unprefixed line;
- * the CLI adds MSG_PREFIX.
+ * proxy). `options.containerSockets` overrides the fixed defaults; env-named paths are always
+ * checked. Tests can pass fixture paths or inject filesystem lookups. Socket masks apply to
+ * readable endpoints at launch. `fatal` is a single unprefixed line; the CLI adds MSG_PREFIX.
  */
 export function maskArgs(args, env = process.env, options = {}) {
   const {
-    containerSockets = containerSocketPaths(options.uid),
+    containerSockets = runtimeSocketPaths(options.uid),
     stat = statSync,
-    realpath = realpathSync,
+    realpath = realpathSync.native,
     packRoot = null,
     egressDir = null,
     relaySource = RELAY_SOURCE,
@@ -411,13 +447,21 @@ export function maskArgs(args, env = process.env, options = {}) {
       `${REAL_SOCKET} is not set (and HC_TERMINAL_SOCKET is absent): cannot hide the core socket`);
   }
   if (!isAbsolute(real)) return failed(args, `the real core socket path is not absolute: ${real}`);
-  const realDir = dirname(real);
-  if (realDir === real || realDir === '/') {
+  const realInputDir = dirname(real);
+  const canonicalRealDir = existingPath(realInputDir, realpath);
+  const realDir = canonicalRealDir ?? realInputDir;
+  if (realInputDir === real || realInputDir === '/' || realDir === '/') {
     return failed(args, `the real core socket path has no folder of its own to hide: ${real}`);
+  }
+  const realDest = canonicalRealDir === null ? real : join(realDir, basename(real));
+  const realTarget = existingPath(real, realpath);
+  if (realTarget !== null && dirname(realTarget) !== realDir) {
+    return failed(args, `the real core socket ${real} is a link to ${realTarget} outside its folder: `
+      + 'the mask cannot hide it');
   }
   // Order matters: hide the real runtime folder; hide the proxy's shared host folder too (after
   // the bind, when the socket is live, so the bind resolved its source first); then ~/.ssh and
-  // the container sockets, which are independent masks. The proxy path is not optional: without
+  // the runtime sockets, which are independent masks. The proxy path is not optional: without
   // it the wrapper cannot name the folder to hide, so another pane's proxy could be impersonated.
   const proxy = env[PROXY_SOCKET];
   if (!proxy) {
@@ -429,7 +473,8 @@ export function maskArgs(args, env = process.env, options = {}) {
       + "folder cannot be hidden (another pane's proxy could be impersonated)");
   }
   const proxyDir = dirname(proxy);
-  if (isSameOrAncestor(proxyDir, real)) {
+  const canonicalProxyDir = existingPath(proxyDir, realpath) ?? proxyDir;
+  if (isSameOrAncestor(proxyDir, real) || isSameOrAncestor(canonicalProxyDir, realDest)) {
     return failed(args,
       `the proxy folder ${proxyDir} holds the real socket path: the mask would hide the proxy`);
   }
@@ -443,8 +488,13 @@ export function maskArgs(args, env = process.env, options = {}) {
   if (basename(shared) !== PROXY_ROOT_NAME) {
     return failed(args, `the proxy parent ${shared} is not the ${PROXY_ROOT_NAME} folder`);
   }
-  if (isSameOrAncestor(shared, real)) {
+  const canonicalShared = existingPath(shared, realpath) ?? shared;
+  if (isSameOrAncestor(shared, real) || isSameOrAncestor(canonicalShared, realDest)) {
     return failed(args, `the proxy parent ${shared} holds the real socket path: the mask would hide the real socket`);
+  }
+  if (isSameOrAncestor(realDir, canonicalShared)) {
+    return failed(args, `the real core folder ${realDir} holds the proxy parent ${canonicalShared}: `
+      + 'the mask would hide the proxy');
   }
   // The egress side: a 0700 host folder whose Unix socket is the egress proxy, and this same
   // wrapper file as the relay inside the namespace. Both are named by the caller (the CLI makes
@@ -474,10 +524,10 @@ export function maskArgs(args, env = process.env, options = {}) {
   }
   const mounts = ['--tmpfs', realDir];
   const notices = [];
-  const notice = proxyNotice(proxy);
+  const notice = proxyNotice(proxy, stat);
   if (notice) notices.push(notice);
-  else mounts.push('--bind', proxy, real);
-  mounts.push('--tmpfs', shared);
+  else mounts.push('--bind', proxy, realDest);
+  mounts.push('--tmpfs', canonicalShared);
   // The egress slot lives inside the masked core runtime folder (a tmpfs the wrapper just
   // mounted), so no host folder is shadowed for it and nothing else in the host's /run is
   // needed. The socket is the host-side proxy; relay.mjs is this wrapper, run in the pane.
@@ -487,9 +537,19 @@ export function maskArgs(args, env = process.env, options = {}) {
   mounts.push('--dir', egressInsideDir);
   mounts.push('--bind', canonicalEgress, egressInsideDir);
   mounts.push('--bind', canonicalRelay, relayInside);
+  // A profile may have hidden the leaf link with its own tmpfs. Recreate it using the exact
+  // link text, which bwrap also accepts when the read-only root already has that link.
+  try {
+    if (lstatSync(realInputDir, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      mounts.push('--symlink', readlinkSync(realInputDir), realInputDir);
+    }
+  } catch {
+    return failed(args, `the real core folder ${realInputDir} could not be checked for a symlink`);
+  }
+  const protectedPaths = ['/', realDir, canonicalShared, canonicalEgress, canonicalRelay];
   // The data parent (automagik-herdr: the stable execution folder and the approved rosters)
   // may sit inside the writable workspace/app home; shadow that grant with one read-only bind
-  // of the parent, last so it wins. Both children stay outside a sandbox's writable set.
+  // of the parent after the profile, so both children stay outside a sandbox's writable set.
   if (packRoot !== null) {
     if (!isAbsolute(packRoot)) return failed(args, `${PACK_ROOT_FLAG} must be an absolute folder: ${packRoot}`);
     if (packRoot === '/') return failed(args, `${PACK_ROOT_FLAG} / would make the whole sandbox read-only`);
@@ -506,6 +566,12 @@ export function maskArgs(args, env = process.env, options = {}) {
       return failed(args,
         `${PACK_ROOT_FLAG} ${packRoot} is not a <data home>/automagik-herdr/dsh-sandbox folder`);
     }
+    for (const hidden of [realDir, canonicalShared]) {
+      if (isSameOrAncestor(parent, hidden) || isSameOrAncestor(hidden, parent)) {
+        return failed(args, `the pack data parent ${parent} overlaps the masked folder ${hidden}: refusing`);
+      }
+    }
+    protectedPaths.push(parent);
     mounts.push('--ro-bind', parent, parent);
   }
   // ~/.ssh exists on most machines, but a fresh one may have none: then there is nothing to
@@ -516,22 +582,28 @@ export function maskArgs(args, env = process.env, options = {}) {
     mounts.push(...(stat(canonical).isDirectory()
       ? ['--tmpfs', canonical]
       : ['--bind', '/dev/null', canonical]));
+    protectedPaths.push(canonical);
   } catch {
     // No ~/.ssh (or no readable one): add no mask.
   }
   const seen = new Set();
-  for (const candidate of containerSockets) {
+  for (const candidate of [...containerSockets, ...envSocketPaths(env)]) {
     if (typeof candidate !== 'string' || !isAbsolute(candidate)) continue;
     let canonical;
+    let info;
     try {
       canonical = realpath(candidate);
-      stat(canonical);
+      info = stat(canonical);
     } catch {
       continue;
     }
     if (seen.has(canonical)) continue;
     seen.add(canonical);
-    mounts.push('--bind', '/dev/null', canonical);
+    const covered = protectedPaths.find((path) => isSameOrAncestor(canonical, path));
+    if (covered) return failed(args, `the socket path ${candidate} would cover ${covered}: refusing`);
+    if (isSameOrAncestor(realDir, canonical) || isSameOrAncestor(canonicalShared, canonical)) continue;
+    if (info.isDirectory()) mounts.push('--tmpfs', canonical);
+    else mounts.push('--bind', '/dev/null', canonical);
   }
   // The pane's own network namespace. When the profile already unshares the network (or all
   // namespaces), it is there already and no second switch is added; a profile that also carries

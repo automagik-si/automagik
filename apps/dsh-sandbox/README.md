@@ -2,7 +2,7 @@
 
 The DSH lane's part of #624 (tracked by #631), and the owner's answer to #700 and #743: a
 `bwrap` runner wrapper that gives every sandboxed dsh-tui pane its **own network namespace**,
-hides the herdr-core socket, the user's `~/.ssh` and the known container runtime sockets, and
+hides the herdr-core socket, the user's `~/.ssh` and fixed and env-named runtime sockets, and
 binds the pane's filtering proxy at the exact real core socket path inside the sandbox. The
 host's loopback, its LAN and its own addresses are not in the pane's namespace; egress to the
 public internet goes through one explicit CONNECT relay on the namespace's own loopback. The
@@ -50,9 +50,9 @@ different design and out of scope here.
 - `--pack-root <dir>`: the wrapper's own leading word before the bwrap profile args, written by
   `dsh-sandbox install` into the row. It names the stable execution folder
   (`<data home>/automagik-herdr/dsh-sandbox`); the wrapper binds its parent
-  (`<data home>/automagik-herdr`) read-only last, so the pack's `hcPane.mjs`, `bin/run.sh`,
-  guard and the approved rosters under `approved/` cannot be rewritten from inside a writable
-  workspace.
+  (`<data home>/automagik-herdr`) read-only after the profile mounts, so the pack's
+  `hcPane.mjs`, `bin/run.sh`, guard and approved rosters under `approved/` cannot be rewritten
+  from inside a writable workspace.
 - `hc-socket-mask: `: the prefix of every wrapper line. It is the profile row's
   `runnerFailureSignatures` entry, so DSH reports a wrapper refusal as a runner failure.
 
@@ -67,13 +67,13 @@ carries `--unshare-net` or `--unshare-all`), so the pane gets a fresh network na
 would re-enable the host network, and the wrapper never starts a pane on it. It then inserts
 these mounts after the profile args and before the `--`, in this order:
 
-1. `--tmpfs <dirname(AM_HC_REAL_SOCKET)>` - hides the core socket and the holder sockets beside
-   it (and any other listener in the core's runtime folder).
-2. `--tmpfs <dirname(dirname(AM_HC_PROXY_SOCKET))>` - hides the shared `automagik-hc-proxy`
-   folder, so every other pane's proxy socket is unreachable. When the path is also a live Unix
-   socket, the bind comes first: `--bind <proxy> <real>` (the proxy answers at the path the
-   client already uses, so `HC_TERMINAL_SOCKET`, `core.lock` and the client's address check need
-   no rewrite), then the shared folder's tmpfs; the bind resolves its source before that tmpfs.
+1. `--tmpfs <realDir>` hides the core socket and other listeners in its runtime folder.
+   `realDir` is the resolved path of the socket's folder when it exists, or the given folder
+   path otherwise.
+2. `--tmpfs <canonical shared proxy folder>` hides the shared `automagik-hc-proxy` folder, so
+   every other pane's proxy socket is unreachable. When `AM_HC_PROXY_SOCKET` names a live Unix
+   socket, `--bind <proxy> <realDir>/<real socket name>` comes first so the bind can resolve
+   its source before the shared folder is hidden.
    When the socket is missing or not a socket, the shared folder is still hidden (with no bind),
    and the pane starts with no core socket. An unset or relative path is fatal before `bwrap`:
    the wrapper cannot name the folder to hide, so another pane's proxy could be impersonated.
@@ -86,29 +86,36 @@ these mounts after the profile args and before the `--`, in this order:
    bwrap runs is the relay (this same wrapper file), which listens on `127.0.0.1:3128` inside
    the pane's namespace and execs the real command. No host path outside the wrapper's own
    temp folder is mounted for it.
-
-4. `$HOME/.ssh` when it exists, following symlinks: a directory is shadowed with
-   `--tmpfs <canonical path>`, anything else is bound over with
-   `--bind /dev/null <canonical path>`. Absent, nothing is added (there is nothing to hide).
-   `HOME` must be an absolute path.
-5. For each existing container runtime socket, `--bind /dev/null <socket>`, canonicalized and
-   deduplicated. The fixed list is:
+4. If the core socket's immediate folder is a symlink, `--symlink` recreates it with its
+   original link text so the client can use the same path even when a profile tmpfs hid the
+   link. The wrapper recreates only that link. A symlink higher in the path must still be
+   visible after the profile mounts.
+5. When the row carries `--pack-root`, `--ro-bind <its parent> <its parent>` wins over a
+   writable workspace bind. The pack's helper, runner and guard and the approved rosters live
+   under that parent (the stable folder and `approved/`). A sandboxed bot inside the writable
+   project could otherwise rewrite them and start a worker outside the sandbox with a changed
+   file or forge its next approval.
+6. `$HOME/.ssh` when it exists, following symlinks. A directory gets `--tmpfs <canonical path>`;
+   any other entry gets `--bind /dev/null <canonical path>`. `HOME` must be an absolute path.
+7. Fixed runtime sockets, then the sockets named by `DOCKER_HOST` and `CONTAINER_HOST` (only
+   `unix://` with an absolute path) and by `SSH_AUTH_SOCK` (absolute paths only). The wrapper
+   resolves and deduplicates these paths together. A directory gets `--tmpfs <canonical path>`;
+   any other entry gets `--bind /dev/null <canonical path>`. Paths already inside the masked
+   core or shared proxy folders need no extra mount. The fixed list is:
    - `/var/run/docker.sock`
    - `/run/docker.sock`
    - `/run/containerd/containerd.sock`
    - `/run/podman/podman.sock`
    - `/run/user/<uid>/docker.sock` (rootless Docker, only when the platform has a uid)
    - `/run/user/<uid>/podman/podman.sock` (rootless Podman, only with a uid)
+   - `/var/run/crio/crio.sock` and `/run/crio/crio.sock`
+   - `/run/k3s/containerd/containerd.sock`
+   - `/run/containerd/containerd.sock.ttrpc`
+   - `/run/buildkit/buildkitd.sock`
 
-   Only paths that exist are masked; a test passes its own fake list, so no test looks at a live
-   `docker.sock`.
-
-6. When the row carries `--pack-root`, `--ro-bind <its parent> <its parent>`, after the
-   profile args and the masks above, so it wins over a writable workspace bind. The pack's
-   helper, runner and guard and the approved rosters live under that parent (the stable folder
-   and `approved/`); without this a sandboxed bot inside the writable project could rewrite them
-   and start a worker that runs the changed file outside the sandbox, or forge its next
-   approval.
+The socket masks cover readable endpoints that exist when the pane starts. A socket created
+later in a visible host folder remains reachable. The core and shared proxy folders are
+hidden by tmpfs for the life of the pane, including sockets created there after launch.
 
 Everything else is the profile's own bwrap policy (`--ro-bind / /`, `--dev /dev`,
 `--unshare-pid`, `--proc /proc`, `--die-with-parent`, the workspace binds). The wrapper adds no
@@ -122,7 +129,9 @@ Before running `bwrap`, the wrapper refuses with one `hc-socket-mask: ` line and
 
 - the real socket path (`AM_HC_REAL_SOCKET`, else `HC_TERMINAL_SOCKET`) is absent or not
   absolute;
-- the real socket path has no folder of its own to hide (`dirname` is `/`);
+- the real socket path has no folder of its own to hide (its folder is `/` or resolves to `/`);
+- the real socket resolves to a link target outside its canonical folder, or checking the
+  folder's leaf symlink fails;
 - `AM_HC_PROXY_SOCKET` is unset or not absolute (the shared proxy folder cannot be hidden, so
   another pane's proxy could be impersonated);
 - `HOME` is absent or not absolute (the runner will not guess where `~/.ssh` is);
@@ -131,10 +140,17 @@ Before running `bwrap`, the wrapper refuses with one `hc-socket-mask: ` line and
   would re-enable the host network, so the pane would not have its own namespace;
 - `--pack-root` is relative, missing or not a folder, or is not
   `<data home>/automagik-herdr/dsh-sandbox` (the data parent could not be made read-only);
+- the pack's data parent overlaps the canonical core or shared proxy folder in either
+  direction (the read-only bind would expose paths under a mask);
 - the proxy parent is not the `automagik-hc-proxy` folder, or it is the real socket path or an
   ancestor of it (masking it would hide the real socket or a shared system folder);
 - `AM_HC_PROXY_SOCKET` is absolute but its folder is the real socket path or one of its parents
   (masking that folder would hide the proxy again), whether or not a bind is added;
+- the resolved core and shared proxy folders contain one another, or the resolved proxy
+  folder holds the core socket path;
+- a fixed or env-named socket path resolves to `/` or would cover a protected path: the
+  canonical core folder, shared proxy folder, host egress folder, relay source, pack data
+  parent or masked `~/.ssh`;
 - the platform is not Linux (there is no network namespace to create);
 - a `bwrap --unshare-net` probe cannot create a network namespace (missing privilege, an old
   kernel or a container that forbids it), or bwrap is missing;
@@ -147,8 +163,8 @@ host route. A refused CONNECT (a host, loopback, link-local or private destinati
 
 When `AM_HC_PROXY_SOCKET` is absolute but missing or not a Unix socket, the wrapper prints one
 `hc-socket-mask: ` line, hides the proxy's host folder along with the real folder, `~/.ssh` (if
-present) and the container sockets, and runs `bwrap` with **no core socket**: the pane starts
-and its `hc` calls fail closed. This is the "proxy not up yet" case and a non-socket path; it
+present) and the fixed and env-named runtime sockets, and runs `bwrap` with **no core socket**.
+The pane starts and its `hc` calls fail closed. This is the "proxy not up yet" case and a non-socket path; it
 never falls back to the real socket. **The pack must always set an absolute
 `AM_HC_PROXY_SOCKET`**: an unset or relative one refuses the pane instead of starting it without
 the folder mask.
@@ -279,10 +295,14 @@ host allows bwrap namespaces it starts a real sandbox against fixture listeners 
 loopback and on the host's own LAN address, and asserts the pane reaches neither, reaches the
 relay, and gets 403 from the egress proxy for both; the same probe without the switch reaches
 both, so a skip or a false green is visible. On a host where bwrap cannot make a namespace the
-live test skips with the reason and the hermetic refusal test still runs. CLI-level tests drop the
-host-dependent container `--bind /dev/null` pairs by shape and never stat a live path; their
-exact targets are asserted only by the pure-helper tests with an explicit fake container list.
-So no test reads, creates or connects to a live core, a live `docker.sock` or a live profile.
+live test skips with the reason and the hermetic refusal test still runs.
+`test/mask.test.mjs` uses real bwrap and fixture Unix listeners to check the core proxy through
+both spellings of a symlinked runtime path, including under a profile `--tmpfs /tmp`, and checks
+that the core sibling, SSH agent and Docker listeners are hidden. The unmasked control reaches
+the same fixtures. CLI-level tests drop host-dependent `--bind /dev/null` masks by shape and
+drop `--tmpfs` masks only at resolved fixed runtime paths. Pure-helper tests assert the exact
+socket mount targets with fixture paths. No test connects to a live core or runtime socket,
+or uses a live profile.
 The helper tests write only temp profiles. `ci.yml`'s
 `dsh-sandbox` job runs both on every change under `apps/dsh-sandbox/` and on every change to
 the workflow itself.
