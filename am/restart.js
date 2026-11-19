@@ -875,16 +875,20 @@ export function resetTimeFrom(text, now = Date.now()) {
  * directly above the choices (the modal's limit line and its reset line), with no other prose
  * between it and them. A limit sentence in a report or in scrollback ten lines up is therefore
  * not a cue. A permission/selection question is rejected explicitly with pendingDialog()'s own
- * evidence, so the two detectors never both claim one screen. A quoted, fenced or patched
- * transcript is not the live dialog. `resets_at` is the dialog's own ISO time when it shows
- * one, absent when it shows none (never guessed). Detection is read-only: nothing here types
- * into the pane or answers the dialog.
+ * evidence; the footer both Claude Code dialogs may show is not a question, so the options/limit
+ * shape decides it. A quoted, fenced or patched transcript is not the live dialog, and a patch
+ * stays text however far its hunk header sits above the dialog. `resets_at` is the dialog's own
+ * ISO time when it shows one, absent when it shows none (never guessed). Detection is read-only:
+ * nothing here types into the pane or answers the dialog.
  */
 export function rateLimitDialog(screenText, now = Date.now()) {
   if (typeof screenText !== "string" || !screenText.trim()) return null;
   // A screen with a prompt, confirmation or permission question is the owner's dialog: the
   // limit rule must never label it rate-limited (the cue may belong to a sentence above it).
-  if (pendingDialog(screenText)) return null;
+  // The one shared case is the footer both Claude Code dialogs show: it is only a footer, so
+  // the options/limit shape below decides. A permission question or choice still wins here.
+  const pending = pendingDialog(screenText);
+  if (pending && !pending.footer) return null;
   const lines = tailLines(screenText, 40);
   const visible = lines.map((line, i) => ({ line, i })).filter(({ line }) => line.trim() !== "");
   // The options end the dialog: after them only a footer (never prose, never an idle prompt).
@@ -913,12 +917,15 @@ export function rateLimitDialog(screenText, now = Date.now()) {
   for (let i = cueAt + 1; i < first; i += 1) {
     if (!RATE_LIMIT_CUE.test(visible[i].line) && !RATE_LIMIT_RESET_WORDS.test(visible[i].line)) return null;
   }
-  // A quote or a pasted transcript is text, not the modal: no patch hunk or `>` marker around
-  // the block, and the block must not sit inside an open fenced code block.
+  // A quote or a pasted transcript is text, not the modal: the block must not sit inside an
+  // open fenced code block, and no unified-diff marker may sit anywhere in the visible tail.
+  // The marker's distance from the cue never decides: a hunk header can be many context lines
+  // above the dialog, so the whole visible tail is scanned.
   if (visible.slice(0, last + 1).filter(({ line }) => RATE_LIMIT_FENCE.test(line)).length % 2 === 1) return null;
-  for (let i = Math.max(0, cueAt - 5); i <= last; i += 1) {
-    if (RATE_LIMIT_PATCH.test(visible[i].line) || RATE_LIMIT_QUOTE.test(visible[i].line)) return null;
-  }
+  for (let i = 0; i <= last; i += 1) if (RATE_LIMIT_PATCH.test(visible[i].line)) return null;
+  // A `>` quote is adjacent evidence: the cue is at most three visible lines above the choices,
+  // so a window above it covers every quoted form this rule can see.
+  for (let i = Math.max(0, cueAt - 5); i <= last; i += 1) if (RATE_LIMIT_QUOTE.test(visible[i].line)) return null;
   const dialog = visible.slice(cueAt, last + 1).map(({ line }) => line);
   if (!dialog.some((line) => RATE_LIMIT_RESET_WORDS.test(line))) return null;
   const question = visible[cueAt].line.trim().replace(/\s+/g, " ").slice(0, 200);
