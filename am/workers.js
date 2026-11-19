@@ -5,7 +5,7 @@
 // usagemeter reads. Pure: no `herdr`, `gpui-*` or `fs`, so `node --test`, the CLI and the
 // briefing hook share it. Apache-2.0.
 
-import { AGENTS, AGY_MODE_DEFAULT, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
+import { AGENTS, AGY_MODE_DEFAULT, CODEX_LOGIN_SHELL, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
   hasEffortFlag, launchRun, modelArgs, modelRefusal, promptArgs, resolveAgent } from "./models.js";
 import { TEMPLATE_SHAPE } from "./model.js";
 import { envWords } from "./logins.js";
@@ -648,6 +648,9 @@ export function codexCommandCheck(command, agents = AGENTS, where = null) {
   if (!all((a) => pair(a, "--disable", "hooks") || config(a, "features.hooks=false"))) missing.push("--disable", "hooks");
   if (!all((a) => a.includes("--no-daemon"))) missing.push("--no-daemon");
   if (!all((a) => config(a, CODEX_NETWORK))) missing.push("-c", CODEX_NETWORK);
+  // #1133: a command the pack builds must keep the pane PATH's hc kill shim first at command
+  // time, so its shell never runs as a login shell that can prepend another `hc`.
+  if (!all((a) => config(a, CODEX_LOGIN_SHELL))) missing.push("-c", CODEX_LOGIN_SHELL);
   const inexact = options.some((a) => !codexDirsExact(a, where)) ? ["--add-dir"] : [];
   const conflicts = [...new Set([...options.flatMap((a) => codexClean(["codex", ...a], where).dropped), ...inexact])];
   const lost = [...new Set(runs.flatMap((r) => split(r.args)[1].map(optionName).filter((n) => CODEX_LOST_OPTIONS.has(n))))];
@@ -674,15 +677,24 @@ export function codexTemplateRefusal(template, command, agents = AGENTS) {
 
 /**
  * The warning for a worker template whose command runs Codex without --no-daemon among its
- * options (#1125): hc says Codex must run with it, or its commands run outside hc. The owner's
- * template exception keeps the command as it is (never rewritten, rerouted or refused): this
- * names the fix.
+ * options (#1125), or in a login shell (#1133): hc says Codex must run with --no-daemon, and a
+ * login startup can prepend another `hc` ahead of the pane's kill shim. The owner's template
+ * exception keeps the command as it is (never rewritten, rerouted or refused): this names the
+ * fix.
  */
 export function codexTemplateWarning(template, command, agents = AGENTS) {
   const check = codexCommandCheck(command, agents);
-  if (!check || !check.missing.includes("--no-daemon")) return null;
-  return `Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
-    + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`;
+  if (!check) return null;
+  const lines = [];
+  if (check.missing.includes("--no-daemon")) {
+    lines.push(`Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
+      + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`);
+  }
+  if (check.missing.includes(CODEX_LOGIN_SHELL)) {
+    lines.push(`Template ${template} runs Codex in a login shell, so a profile that prepends a directory can put another hc ahead of `
+      + `the pane's hc kill shim (#1133). Add \`-c ${CODEX_LOGIN_SHELL}\` to the codex command in that template's file (hc templates lists it).`);
+  }
+  return lines.length ? lines.join(" ") : null;
 }
 
 /**

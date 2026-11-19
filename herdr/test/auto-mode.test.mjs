@@ -32,7 +32,8 @@ const SKIP_ALL = ["--dangerously-skip-permissions", "--dangerously-bypass-approv
 // What each kind's launch adds, written out here so a change to the table is a change to this list.
 const EXPECTED = {
   claude: ["--permission-mode", "auto"],
-  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"],
+  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "allow_login_shell=false"],
   antigravity: ["--dangerously-skip-permissions"],
 };
 

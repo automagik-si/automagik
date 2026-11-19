@@ -1415,7 +1415,7 @@ nothing to it (a Codex seat's template excepted, see [Codex's launch mode](#code
 | Agent | What its launch adds | What that does |
 | --- | --- | --- |
 | Claude Code (`claude`) | `--permission-mode auto` | Claude Code's auto mode: its classifier answers permission requests. |
-| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true`, `--add-dir <folder>` per derived folder; worker starts only: `-c 'projects={"<worktree>"={trust_level="trusted"}}'` when the checks below allow it | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). Worker starts pre-trust only their worktree path (#1420); a withheld trust word gets a warning. No opt-out from the launch mode. |
+| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true -c allow_login_shell=false`, `--add-dir <folder>` per derived folder; worker starts only: `-c 'projects={"<worktree>"={trust_level="trusted"}}'` when the checks below allow it | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). Its commands run in a non-login shell, so a login startup cannot shadow the pane's hc kill shim (#1133). Worker starts pre-trust only their worktree path (#1420); a withheld trust word gets a warning. No opt-out from the launch mode. |
 | Antigravity (`agy`) | `--dangerously-skip-permissions`, `--mode <agyMode>`, `--settings <file>` | No permission prompt and no classifier: everything the file's deny list does not name runs (see [what runs without a prompt](#antigravitys-permission-list)). The file's `trustedWorkspaces` answers the folder-trust question. |
 | dsh-TUI (`dsh-tui`) | nothing | Its DSH profile on the machine it runs on sets the approval policy; dsh-tui takes no such flag. |
 | Oh My Pi (`omp`) | nothing | omp 18.14.2 has only skip-all flags (`--auto-approve`, `--approval-mode=yolo`). |
@@ -1510,6 +1510,15 @@ a worker and a Restart --tree helper:
   Codex captain's `isn't a terminal hc knows` refusal; it was not reproduced in isolation.
 - `-c sandbox_workspace_write.network_access=true`: the sandbox's own network switch, so `hc`'s
   socket and GitHub (`gh`, git's transport) answer. It is off by default under the auto mode.
+- `-c allow_login_shell=false` (#1133): Codex runs every command through the account's login
+  shell by default, and a login startup that prepends a folder (macOS's `/etc/zprofile`, a
+  person's `.bash_profile` or `.zprofile`) puts its own `hc` or `automagik-herdr` ahead of the
+  pane PATH, hiding the hc kill shim. A non-login shell keeps the launch PATH's guard first at
+  command time. The shell's non-login startup and every tool the pane PATH holds still resolve;
+  no shell startup file is edited. A template worker keeps its own command and is warned when
+  it does not name this word. A start, restart, worker or `--tree` helper also refuses to run
+  when the PATH it built does not resolve `hc` to the pack's guard shim by absolute path (a
+  shadowing first folder, a missing shim), instead of starting the agent unguarded.
 - Worker starts only (#1420): `-c 'projects={"<worktree>"={trust_level="trusted"}}'`, after the
   mode words and before any extra folders, subcommand or task. Checked on codex-cli 0.169.0:
   this inline TOML table keeps dots in paths literal, merges with the person's projects table,
@@ -1821,6 +1830,10 @@ What the shim does not do, plainly:
 - It stops the honest path only. The real `hc` by its full path, a copy of it, a raw socket,
   `hc connect`, or a `PATH` the agent changes goes around it, as it goes around the guard and
   the deny list. **The boundary is the hc-proxy sandbox, never the shim.**
+- A shell a command starts can still prepend a folder. The pack's Codex launch tells Codex not
+  to use a login shell for its commands (`-c allow_login_shell=false`, #1133), and a launch
+  refuses a PATH whose first word is not the pack's guard or whose first `hc` is not the shim;
+  a template worker that keeps its own command is warned, not rewritten.
 - A worker started from an hc template in hc's own form (`<template> <task>`) keeps the
   template's command and environment, so it gets no shim; a template the pack rebuilds for a
   Claude login has no PATH word either.

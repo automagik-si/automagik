@@ -225,6 +225,8 @@ async function runStartedByName(name) {
  * failed start; a timeout with no live terminal under `name`, or any other failure, throws.
  */
 async function hcStartRun(run, args, name) {
+  const guardWhy = launchGuardProblem(args, name);
+  if (guardWhy) throw new CliError(guardWhy);
   const r = await run(args, { timeout: HC_RUN_TIMEOUT_MS });
   let late = null;
   if (r.killed) {
@@ -385,6 +387,70 @@ function launchPath(program, cwd = null) {
   if (dir && !dirs.includes(dir)) dirs.push(dir);
   for (const d of ["/usr/bin", "/bin"]) if (!dirs.includes(d)) dirs.push(d);
   return { path: dirs.join(":"), note: runPath.note };
+}
+
+/**
+ * Why a launch's PATH word does not resolve `hc` to the pack's guard shim by absolute path, or
+ * null. The pack puts the guard folder (an absolute path) first on a guarded pane's PATH; this
+ * resolves the first `hc` on that same PATH and requires it to be the guard folder's own shim.
+ * A guard folder with no executable shim, or a first `hc` that is some other file (a wrapper a
+ * login startup would have put ahead of it), refuses the launch instead of starting the agent
+ * with its kill guard shadowed (#1133). A linked machine's `--on` start is checked there, so it
+ * is left to that machine. A launch with no PATH word (a template that owns its env, an unguarded
+ * pane) is unchanged.
+ */
+export function launchGuardProblem(args, who = null) {
+  const list = Array.isArray(args) ? args.map(String) : [];
+  if (list.includes("--on")) return null;
+  const word = list.find((w) => w.startsWith("PATH="));
+  if (!word) return null;
+  const dirs = word.slice("PATH=".length).split(":");
+  const guard = dirs[0];
+  if (!guard || !isAbsolute(guard)) return `the launch PATH's first word ${guard ? `(${guard})` : "(none)"} is not an absolute guard folder; refusing to start ${who ?? "the agent"} (#1133)`;
+  // The absolute path the pack put first must be one of its own: the mod's guard or kill shim,
+  // or the dsh-tui sandbox's stable copy. A shadow folder named first is refused, never trusted.
+  // A launch with no guard at all (an agentless helper, say) has no shim to preserve: its first
+  // word is no guard-looking folder, and it is left as it is.
+  const known = new Set([realDir(GUARD_DIR), realDir(KILL_GUARD_DIR)]);
+  let stableGuard = null, stableKill = null;
+  try {
+    stableGuard = stableGuardDir(stableRootOf());
+    stableKill = stableKillDir(stableRootOf());
+    known.add(realDir(stableGuard));
+    known.add(realDir(stableKill));
+  } catch { /* no HOME/XDG_DATA_HOME: this copy has no stable guard */ }
+  const realGuard = realDir(guard);
+  const belongs = (realGuard !== null && known.has(realGuard))
+    || (stableGuard !== null && guard === stableGuard) || (stableKill !== null && guard === stableKill);
+  if (!belongs) {
+    if (!/(^|\/)(guard|hc-kill)\/?$/.test(guard)) return null;
+    return `the launch PATH's first word ${guard} is not the pack's guard folder; refusing to start ${who ?? "the agent"} `
+      + `with a shadowing folder ahead of its hc kill shim (#1133). Reinstall or repair the pack, then try again.`;
+  }
+  const shim = join(guard, "hc");
+  let shimReal = null;
+  try {
+    if (statSync(shim).isFile()) { accessSync(shim, constants.X_OK); shimReal = realpathSync(shim); }
+  } catch { shimReal = null; }
+  if (!shimReal) {
+    return `the pack's hc kill shim is missing or not executable at ${shim}; refusing to start ${who ?? "the agent"} without its kill guard (#1133). `
+      + "Reinstall the pack, and for the dsh-tui sandbox's stable copy run `am dsh-tui install`.";
+  }
+  // The absolute path the shell will run first: not a name lookup, the first `hc` on this PATH.
+  let first = null;
+  for (const dir of dirs) {
+    if (!dir || !isAbsolute(dir)) continue;
+    const file = join(dir, "hc");
+    try {
+      if (statSync(file).isFile() && (accessSync(file, constants.X_OK), true)) { first = realpathSync(file); break; }
+    } catch { /* the next word */ }
+  }
+  if (!first) return `no hc is on the launch PATH for ${who ?? "the agent"}; refusing to start it with no kill guard (#1133)`;
+  if (first !== shimReal) {
+    return `the hc this launch would run resolves to ${first}, not the pack's kill shim at ${shimReal}; `
+      + `refusing to start ${who ?? "the agent"} with its kill guard shadowed (#1133). Reinstall or repair the pack, then try again.`;
+  }
+  return null;
 }
 
 // ---- the definitions file ----
@@ -4860,7 +4926,10 @@ async function rerunHelpers(plans, parent, say) {
       try { writeAgySettingsFile(p.agySettings, { name: p.name ?? p.replaced }); }
       catch (e) { failed(e.message); continue; }
     }
-    const r = await hc(helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login }));
+    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login });
+    const guardWhy = launchGuardProblem(helperRun, name ?? p.name);
+    if (guardWhy) { failed(guardWhy); continue; }
+    const r = await hc(helperRun);
     let address = null;
     try { address = JSON.parse(r.stdout).address ?? null; } catch { address = null; }
     if (r.code !== 0 || !address) { failed(`hc run failed (${(r.stderr || r.stdout).trim()})`); continue; }

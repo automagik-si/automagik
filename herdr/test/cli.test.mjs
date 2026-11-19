@@ -31,7 +31,8 @@ const plain = (argv) => {
 };
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
 // other words (the tool-cache grants follow the runner's environment, so tests compare the words).
-const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+  "-c", "allow_login_shell=false"];
 const grantsApart = (words) => {
   const rest = [];
   const dirs = [];
@@ -3402,7 +3403,7 @@ test("restart #597: a hand-started codex bot comes back from its source, not its
   assert.equal(r.code, 0, r.err);
   const run = runCall(s.calls());
   assert.deepEqual(codexWords(plain(agentWords(run))), ["codex", ...CODEX_MODE, "resume", SID], "the source's command, resumed by its session");
-  assert.match(r.err, /Captain: its pane's command differs from its source now \(drops -m=\*\*\*, -c=\*\*\*; adds --approve-for-me, --disable=\*\*\*, --no-daemon=\*\*\*\)/);
+  assert.match(r.err, /Captain: its pane's command differs from its source now \(drops -m=\*\*\*; adds --approve-for-me, --disable=\*\*\*, --no-daemon=\*\*\*; changes -c=\*\*\*\)/);
   assert.equal(r.err.includes("gpt-a"), false, "the value is masked");
   assert.equal(r.json().session, "***"); // RFC 0021: masked
   assert.equal(run[run.indexOf("--cwd") + 1], s.project);
@@ -3766,7 +3767,8 @@ test("restart --tree: six codex helpers in one folder resume each its own sessio
   assert.match(fresh.json().helpers[0].note, /no session id, and its folder .*integration has other codex sessions \(--fresh-shared\)/);
   // #1125: these panes ran an hc template but are no template worker (no worker.template label):
   // each keeps its command and gets the launch-mode words it lacks after it, through "$@".
-  const lacking = ["--approve-for-me", "--disable", "hooks", "-c", "sandbox_workspace_write.network_access=true"];
+  const lacking = ["--approve-for-me", "--disable", "hooks", "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "allow_login_shell=false"];
   assert.ok(runs(bare).slice(1).every((w) => JSON.stringify(codexWords(agentWords(w))) === JSON.stringify(["sh", "-c", `${cmd} "$@"`, "sh", ...lacking])),
     JSON.stringify(runs(bare).slice(1).map(agentWords)));
   assert.equal(s.cli(["restart", "Genie", "--fresh-shared"]).code, 2, "--fresh-shared goes with --tree");
