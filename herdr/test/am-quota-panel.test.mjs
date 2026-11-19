@@ -1308,6 +1308,20 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
   view.reload(cx);
   view.forceLogins = true;
   view.reload(cx);
+  // Both reloads arrive while the round is held: the panel queues them (`probeAgain`) instead
+  // of starting a round beside it. The queue marker is the proof; bounded() only turns a panel
+  // that never handled the reload into a named failure instead of a hang. A panel that starts
+  // the round anyway is named by the asks assertion. The wait ends on either outcome so a
+  // broken panel fails on that assertion, not on the queue marker's 10 s net.
+  await bounded(new Promise((resolve) => {
+    const seen = () => (view.probeAgain || asks() > 2 ? resolve() : setImmediate(seen));
+    seen();
+  }), "the reloads asked for while a round runs to reach its queue", {
+    where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row',
+  });
+  assert.equal(asks(), 2, "no round beside the one running");
+  assert.equal(view.probeAgain, true, "the reload is queued behind the held round");
+  assert.equal(view.probing, true, "the held round is still the one running");
   release();
   // The released round's own state is the proof; bounded() only fails the row, naming the
   // release, if the held status never settles and the queued round therefore never runs.
