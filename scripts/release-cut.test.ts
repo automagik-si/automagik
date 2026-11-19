@@ -229,6 +229,84 @@ describe('a cut that dev has not moved past', () => {
       repo.cleanup();
     }
   });
+
+  test('logs the one attempt and its accepted push, with no timing variables set (#1663)', () => {
+    const repo = repository();
+    try {
+      const run = repo.run();
+      expect(run.status).toBe(0);
+      expect(run.err).toMatch(/::notice::Cut v3\.0\.1 attempt 1 of 3: push accepted after \d+s/);
+      expect(run.err).not.toContain('Skipping retry');
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
+describe('the cut budget (#1663)', () => {
+  const now = () => Math.floor(Date.now() / 1000);
+
+  test('a retry the budget cannot fit stops cleanly before any re-cut, with no tag', () => {
+    const repo = repository();
+    try {
+      repo.move();
+      const t = now();
+      const run = repo.run({ RELEASE_CUT_STARTED: String(t - 600), RELEASE_CUT_DEADLINE: String(t + 300) });
+      expect(run.status).toBe(0);
+      expect(run.err).toMatch(/::notice::Cut v3\.0\.1 attempt 1 of 3: push rejected after \d+s/);
+      expect(run.err).toMatch(/::notice::Skipping retry for v3\.0\.1: attempt 1 of 3 took \d+s, with -?\d+s left in the release cut budget/);
+      // Not a re-cut: no lane decision, no gates, and no success output.
+      expect(run.gates).toEqual([]);
+      expect(run.output).toBe('');
+      expect(repo.remote('tag', '--list')).toBe('v3.0.0');
+      expect(repo.remote('log', '-1', '--format=%s', 'dev')).toBe('fix: a merge during the cut');
+      // Not the bounded-attempts outcome either: only one attempt ran.
+      expect(run.out + run.err).not.toContain('on each of');
+      expect(run.out).not.toContain('re-cutting');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  test('a retry that fits re-cuts as before and logs both attempts', () => {
+    const repo = repository();
+    try {
+      repo.move();
+      const t = now();
+      const run = repo.run({ RELEASE_CUT_STARTED: String(t), RELEASE_CUT_DEADLINE: String(t + 3600) });
+      expect(run.status).toBe(0);
+      expect(run.out).toContain('re-cutting on the new tip (attempt 2 of 3)');
+      expect(run.err).toMatch(/::notice::Cut v3\.0\.1 attempt 1 of 3: push rejected after \d+s/);
+      expect(run.err).toMatch(/::notice::Cut v3\.0\.1 attempt 2 of 3: push accepted after \d+s/);
+      expect(run.err).not.toContain('Skipping retry');
+      expect(run.gates.length).toBe(2);
+      expect(run.gates[0].startsWith('lane ')).toBe(true);
+      expect(run.gates[1]).toBe('all plugins no no no');
+      expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\npocket=no\nmeter=no\n');
+      expect(repo.remote('log', '-1', '--format=%s', 'dev^')).toBe('fix: a merge during the cut');
+      expect(repo.remote('rev-parse', 'refs/tags/v3.0.1^{commit}')).toBe(repo.remote('rev-parse', 'refs/heads/dev'));
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  for (const [name, value] of [['RELEASE_CUT_DEADLINE', 'abc'], ['RELEASE_CUT_STARTED', 'abc']] as const) {
+    test(`a ${name} that is not epoch seconds fails before any commit or tag`, () => {
+      const repo = repository();
+      try {
+        const run = repo.run({ [name]: value });
+        expect(run.status).toBe(1);
+        expect(run.err).toContain(`::error::${name} must be an epoch timestamp in seconds`);
+        expect(run.output).toBe('');
+        expect(run.gates).toEqual([]);
+        expect(repo.remote('tag', '--list')).toBe('v3.0.0');
+        expect(repo.remote('log', '-1', '--format=%s', 'dev')).toBe('chore: the base');
+        expect(spawnSync('git', ['log', '-1', '--format=%s'], { cwd: repo.work, encoding: 'utf8' }).stdout.trim()).toBe('chore: the base');
+      } finally {
+        repo.cleanup();
+      }
+    });
+  }
 });
 
 describe('a pointer that advances after the gates (#668)', () => {
@@ -553,6 +631,28 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
     expect(workflow).toContain("needs.cut.outputs.pocket == 'yes'");
     expect(workflow).toContain("needs.cut.outputs.meter == 'yes'");
     expect(workflow).toContain('pocket_since: ${{ steps.lane.outputs.pocket_since }}');
+  });
+
+  test('the cut job starts its clock first and passes a deadline inside its timeout (#1663)', () => {
+    const jobAt = workflow.indexOf('\n  cut:\n');
+    expect(jobAt).toBeGreaterThan(-1);
+    const nextJob = workflow.slice(jobAt + 1).search(/\n  [A-Za-z0-9_-]+:\n/);
+    const job = workflow.slice(jobAt, nextJob < 0 ? undefined : jobAt + 1 + nextJob);
+    const timeout = Number(job.match(/\n    timeout-minutes: (\d+)\n/)?.[1]);
+    expect(timeout).toBeGreaterThan(0);
+    // The first step of the job is the clock, before the checkout.
+    const steps = job.slice(job.indexOf('\n    steps:\n'));
+    expect(steps).toMatch(/^\n    steps:\n      - name: Start the release cut clock\n        id: clock\n/);
+    const clock = step('Start the release cut clock');
+    const budget = Number(clock.match(/deadline=\$\(\( started \+ (\d+) \* 60 \)\)/)?.[1]);
+    expect(budget).toBeGreaterThan(0);
+    expect(budget).toBeLessThan(timeout);
+    expect(clock).toContain('echo "started=${started}" >> "$GITHUB_OUTPUT"');
+    expect(clock).toContain('echo "deadline=${deadline}" >> "$GITHUB_OUTPUT"');
+    // Without these the budget turns off silently.
+    const cut = step('Version, commit and tag');
+    expect(cut).toContain('RELEASE_CUT_STARTED: ${{ steps.clock.outputs.started }}');
+    expect(cut).toContain('RELEASE_CUT_DEADLINE: ${{ steps.clock.outputs.deadline }}');
   });
 
   test('the herdr key check, the cut and the signing step select the same slot, with no fallback to the primary', () => {

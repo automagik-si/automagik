@@ -17,8 +17,26 @@
 # Environment (the lane's decision): KIND, HERDR, POCKET, POCKET_SINCE, METER, METER_SINCE.
 # GITHUB_OUTPUT receives the version, SHA and effective build flags after a successful push.
 #   RELEASE_CUT_ATTEMPTS  whole attempts, default 3 (1 turns the retry off)
+#   RELEASE_CUT_STARTED   first attempt's start in epoch seconds, default script start
+#   RELEASE_CUT_DEADLINE  optional retry deadline in epoch seconds
 #   RELEASE_GATES         the gates command, default "bash scripts/release-gates.sh" (a test's own)
 set -euo pipefail
+
+attempt_started=${RELEASE_CUT_STARTED-$(date +%s)}
+if [[ ! "${attempt_started}" =~ ^[0-9]+$ ]]; then
+  echo "::error::RELEASE_CUT_STARTED must be an epoch timestamp in seconds" >&2
+  exit 1
+fi
+attempt_started=$((10#${attempt_started}))
+
+deadline=''
+if [[ -v RELEASE_CUT_DEADLINE ]]; then
+  if [[ ! "${RELEASE_CUT_DEADLINE}" =~ ^[0-9]+$ ]]; then
+    echo "::error::RELEASE_CUT_DEADLINE must be an epoch timestamp in seconds" >&2
+    exit 1
+  fi
+  deadline=$((10#${RELEASE_CUT_DEADLINE}))
+fi
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${root}"
@@ -74,8 +92,16 @@ build_is_covered() {
 pocket_since="${POCKET_SINCE-unknown}"
 meter_since="${METER_SINCE-unknown}"
 version=''
+longest_duration=0
 for (( attempt = 1; attempt <= attempts; attempt++ )); do
   if (( attempt > 1 )); then
+    attempt_started=$(date +%s)
+    if [[ -n "${deadline}" ]] && (( attempt_started + longest_duration > deadline )); then
+      remaining=$((deadline - attempt_started))
+      echo "::notice::Skipping retry for v${version}: attempt $((attempt - 1)) of ${attempts} took ${attempt_duration}s, with ${remaining}s left in the release cut budget (longest attempt: ${longest_duration}s)" >&2
+      exit 0
+    fi
+
     # The last attempt's commit and tag are local only. Drop both before the new tip's decision, or
     # its tag would count as a release and skew the version and the lane.
     git tag -d "v${version}" >/dev/null 2>&1 || true
@@ -135,7 +161,13 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
   # Atomic: when dev moved meanwhile (a second merge), neither lands, so no tag names a release
   # commit dev never got (v3.5.0 did, on 2026-10-25). That is the race this retries; after the
   # bounded attempts the newer merge's own queued run releases these changes with it.
-  if git push -q --atomic origin HEAD:refs/heads/dev "refs/tags/v${version}"; then
+  push_result=accepted
+  if ! git push -q --atomic origin HEAD:refs/heads/dev "refs/tags/v${version}"; then
+    push_result=rejected
+  fi
+  attempt_duration=$(( $(date +%s) - attempt_started ))
+  echo "::notice::Cut v${version} attempt ${attempt} of ${attempts}: push ${push_result} after ${attempt_duration}s" >&2
+  if [[ "${push_result}" == accepted ]]; then
     {
       echo "version=${version}"
       echo "sha=$(git rev-parse HEAD)"
@@ -143,6 +175,9 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
       echo "meter=${meter}"
     } >> "${GITHUB_OUTPUT}"
     exit 0
+  fi
+  if (( attempt_duration > longest_duration )); then
+    longest_duration=${attempt_duration}
   fi
   git fetch -q origin dev
   if [[ "$(git rev-parse origin/dev)" == "$(git rev-parse HEAD~1)" ]]; then
