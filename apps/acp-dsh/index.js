@@ -159,7 +159,7 @@ export function apply(ctx, config = {}, {
 } = {}) {
   const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
     onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
-    onRetired: (vendor, kept) => info(ctx, retiredLine(vendor, kept)),
+    onRetired: (vendor, retired) => info(ctx, retiredLine(vendor, retired)),
   })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.

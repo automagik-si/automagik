@@ -2,7 +2,7 @@
 // pointer and writes the retirement note, never a delete. Collection reports what it keeps
 // and refuses an ambiguous home instead of guessing. Temp homes only.
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -120,22 +120,129 @@ test('a home whose path is not provably its own is refused, never collected', t 
   assert.equal(readFileSync(join(elsewhere, 'keep'), 'utf8'), 'someone else')
 })
 
+test('a missing retirement note is refused, not read as healthy', t => {
+  const { homes } = place(t)
+  const old = homes.environment('codex')
+  mkdirSync(join(old.CODEX_HOME, 'sessions'), { recursive: true })
+  writeFileSync(join(old.CODEX_HOME, 'sessions', 'session.jsonl'), 'native session')
+  homes.reset('codex')
+  rmSync(join(old.HOME, 'RETIRED.json'))
+  const [row] = homes.retired('codex')
+  assert.equal(row.state, 'refused')
+  assert.equal(row.kept, true)
+  assert.equal(row.noteState, 'missing')
+  assert.match(row.reason, /missing/i)
+  assert.match(row.reason, /cannot tell/i)
+  assert.equal(existsSync(join(old.HOME, 'RETIRED.json')), false, 'nothing is written in its place')
+  assert.equal(existsSync(old.HOME), true, 'the home stays at its bound path')
+  assert.equal(readFileSync(join(old.CODEX_HOME, 'sessions', 'session.jsonl'), 'utf8'), 'native session')
+})
+
+test('an invalid-JSON retirement note is refused, distinct from a missing one', t => {
+  const { homes } = place(t)
+  const old = homes.environment('codex')
+  homes.reset('codex')
+  const note = join(old.HOME, 'RETIRED.json')
+  writeFileSync(note, '{ not the disposition')
+  const [row] = homes.retired('codex')
+  assert.equal(row.state, 'refused')
+  assert.equal(row.kept, true)
+  assert.equal(row.noteState, 'invalid')
+  assert.match(row.reason, /cannot tell/i)
+  assert.equal(readFileSync(note, 'utf8'), '{ not the disposition', 'the note is untouched')
+})
+
+test('an unreadable retirement note is refused, not read as healthy', { skip: process.getuid?.() === 0 ? 'root reads a 0000 file' : false }, t => {
+  const { homes } = place(t)
+  const old = homes.environment('codex')
+  homes.reset('codex')
+  const note = join(old.HOME, 'RETIRED.json')
+  chmodSync(note, 0o000)
+  t.after(() => { try { chmodSync(note, 0o600) } catch {} })
+  const [row] = homes.retired('codex')
+  assert.equal(row.state, 'refused')
+  assert.equal(row.kept, true)
+  assert.equal(row.noteState, 'unreadable')
+  assert.match(row.reason, /cannot tell/i)
+  assert.equal(statSync(note).mode & 0o777, 0o000, 'the note keeps the mode the person left')
+})
+
+test('a note naming another home is refused, never read as healthy', t => {
+  const { root, homes } = place(t)
+  const old = homes.environment('codex')
+  homes.reset('codex')
+  const note = join(old.HOME, 'RETIRED.json')
+  const written = JSON.parse(readFileSync(note, 'utf8'))
+  written.home = join(root, 'somewhere-else')
+  writeFileSync(note, `${JSON.stringify(written, null, 2)}\n`)
+  const [row] = homes.retired('codex')
+  assert.equal(row.state, 'refused')
+  assert.equal(row.kept, true)
+  assert.equal(row.noteState, 'unrecognised')
+  assert.match(row.reason, /cannot tell/i)
+})
+
 test('startup reports a kept retired home once, for the log, without a path', t => {
   const { root, homes } = place(t)
   homes.environment('codex')
   homes.reset('codex')
   homes.dispose()
   const seen = []
-  const again = new CliHomes(join(root, 'bots'), { onRetired: (vendor, kept) => seen.push({ vendor, kept }) })
+  const again = new CliHomes(join(root, 'bots'), { onRetired: (vendor, rows) => seen.push({ vendor, rows }) })
   t.after(() => again.dispose())
   again.startup('codex')
   assert.equal(seen.length, 1)
   assert.equal(seen[0].vendor, 'codex')
-  assert.equal(seen[0].kept.length, 1)
-  assert.equal(seen[0].kept[0].state, 'kept')
-  const line = retiredLine('codex', seen[0].kept)
+  assert.equal(seen[0].rows.length, 1)
+  assert.equal(seen[0].rows[0].state, 'kept')
+  const line = retiredLine('codex', seen[0].rows)
   assert.match(line, /kept 1 retired codex Bot sign-in home/)
   assert.match(line, /RETIRED\.json/)
+  assert.equal(line.includes(root), false, 'the log line carries no local path')
+})
+
+test('startup says a marker with no home has no history at its bound path', t => {
+  const { root, homes } = place(t)
+  homes.environment('codex')
+  homes.reset('codex')
+  const gone = homes.retired('codex')[0].home
+  homes.dispose()
+  rmSync(gone, { recursive: true, force: true })
+  const seen = []
+  const again = new CliHomes(join(root, 'bots'), { onRetired: (vendor, rows) => seen.push({ vendor, rows }) })
+  t.after(() => again.dispose())
+  again.startup('codex')
+  assert.equal(seen.length, 1)
+  const [row] = seen[0].rows
+  assert.equal(row.state, 'missing')
+  assert.equal(row.kept, false)
+  const line = retiredLine('codex', seen[0].rows)
+  assert.match(line, /found 1 retired codex marker with no home/)
+  assert.match(line, /the bound path is gone, so no session or usage history is there/)
+  assert.match(line, /removed nothing/)
+  assert.doesNotMatch(line, /keeps its session and usage history/)
+  assert.equal(line.includes(root), false, 'the log line carries no local path')
+  assert.equal(existsSync(gone), false, 'nothing is written at the gone home')
+  assert.equal(existsSync(row.marker), true, 'the marker stays')
+})
+
+test('startup reports a refused home as left untouched, never as kept', t => {
+  const { root, homes } = place(t)
+  homes.environment('codex')
+  homes.reset('codex')
+  const refused = homes.retired('codex')[0]
+  writeFileSync(join(refused.home, 'RETIRED.json'), 'not the disposition')
+  homes.dispose()
+  const seen = []
+  const again = new CliHomes(join(root, 'bots'), { onRetired: (vendor, rows) => seen.push({ vendor, rows }) })
+  t.after(() => again.dispose())
+  again.startup('codex')
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].rows[0].state, 'refused')
+  const line = retiredLine('codex', seen[0].rows)
+  assert.match(line, /found 1 retired codex home that cannot be proved/)
+  assert.match(line, /left untouched, nothing removed/)
+  assert.doesNotMatch(line, /keeps its session and usage history/)
   assert.equal(line.includes(root), false, 'the log line carries no local path')
 })
 

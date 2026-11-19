@@ -434,8 +434,12 @@ path, keeps the vendor's session files and the usage history recorded there, say
 time limit, and says how to inspect it and that a `KEEP` file beside it opts out of any future
 collection. A later start removes nothing: the measurement side's complete post-last-write
 scan with the root frozen, its retirement record, and the session-absorption receipt are not
-available here yet, so the default is keep. A folder whose marker or bound path cannot be
-proved to be the retired generation's own is refused and left untouched. Unproved folders,
+available here yet, so the default is keep. A folder whose marker, note or bound path cannot be
+proved to be the retired generation's own is refused and left untouched; a missing, unreadable
+or unparseable `RETIRED.json` is refused too, because the record of what was decided is then
+ambiguous. An absent note is reported as absent and a corrupt one as corrupt. A startup line
+counts kept, missing and refused homes separately: it claims retention at a bound path only for
+a home that is still there. Unproved folders,
 including Windows crash records, remain retained. To inspect them, each 0-byte marker under
 `acp/cli-homes/retired/<vendor>/` names a retired generation; its home is
 `acp/cli-homes/homes/<vendor>/<generation>` (the legacy home is `acp/cli-homes/<vendor>`), and

@@ -182,8 +182,8 @@ export class CliHomes {
   // home's last write with the root frozen, the measurement retirement record, and the
   // session-absorption receipt. The last three belong to the measurement side and to the
   // skill's receipt, so none is available here yet and the default is keep. The report is for
-  // inspection and for that later gate; it never deletes, and a home whose marker or bound
-  // path cannot be proved to be its own is refused and left untouched.
+  // inspection and for that later gate; it never deletes, and a home whose marker, note or
+  // bound path cannot be proved to be its own is refused and left untouched.
   collect(vendor) {
     if (!vendors.has(vendor)) return []
     return retiredHomes(this.root, vendor)
@@ -321,9 +321,9 @@ export class CliHomes {
         }
       }
     })
-    const kept = this.collect(vendor)
-    if (kept.length > 0) {
-      try { this.onRetired(vendor, kept) } catch {}
+    const retired = this.collect(vendor)
+    if (retired.length > 0) {
+      try { this.onRetired(vendor, retired) } catch {}
     }
     // ACP start: the generation record follows both pointers; a matching record is not rewritten.
     try { this.generations.ensureRecord() } catch {

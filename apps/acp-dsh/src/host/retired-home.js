@@ -4,9 +4,11 @@
 // every retired home for inspection. Collection on a later start removes nothing: the issue's
 // other conditions - a complete measurement scan taken after the home's last write with the root
 // frozen, the measurement retirement record, and the session-absorption receipt - are not
-// available on this side yet, so the default is keep. A home whose path cannot be proved to be
-// the retired generation's own is refused and left untouched. A KEEP file in the home opts out
-// of any future collection. Apache-2.0.
+// available on this side yet, so the default is keep. A home whose marker, note or path cannot
+// be proved to be the retired generation's own is refused and left untouched: that includes a
+// note that is missing, unreadable or not a readable disposition, because the record of what was
+// decided is then ambiguous. A KEEP file in the home opts out of any future collection.
+// Apache-2.0.
 
 import { existsSync, lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -14,10 +16,35 @@ import { join, resolve } from 'node:path'
 export const RETIRED_NOTE = 'RETIRED.json'
 export const RETIRED_KEEP = 'KEEP'
 
-/** One log line for a startup that found retired homes: no path, no account detail. */
-export const retiredLine = (vendor, kept) => `kept ${kept.length} retired ${vendor} Bot sign-in home`
-  + `${kept.length === 1 ? '' : 's'}: each keeps its session and usage history at its bound path; `
-  + `see ${RETIRED_NOTE} in it`
+const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`
+
+/**
+ * One log line for a startup that found retired homes: no path, no account detail. It reports
+ * every disposition it saw, and claims retention at a bound path only for a home still there;
+ * a marker whose folder is gone is reported as gone, never as keeping history it does not have.
+ */
+export const retiredLine = (vendor, rows = []) => {
+  const count = state => rows.filter(row => row.state === state).length
+  const kept = count('kept')
+  const missing = count('missing')
+  const refused = count('refused')
+  const parts = []
+  if (kept > 0) {
+    parts.push(`kept ${plural(kept, `retired ${vendor} Bot sign-in home`, `retired ${vendor} Bot sign-in homes`)}: `
+      + 'each keeps its session and usage history at its bound path; '
+      + `see ${RETIRED_NOTE} in it`)
+  }
+  if (missing > 0) {
+    parts.push(`found ${plural(missing, `retired ${vendor} marker with no home`, `retired ${vendor} markers with no home`)}: `
+      + 'the bound path is gone, so no session or usage history is there; '
+      + 'this side removed nothing')
+  }
+  if (refused > 0) {
+    parts.push(`found ${plural(refused, `retired ${vendor} home that cannot be proved`, `retired ${vendor} homes that cannot be proved`)}: `
+      + 'left untouched, nothing removed')
+  }
+  return parts.join('; ')
+}
 
 const NOTE_VERSION = 1
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
@@ -71,23 +98,58 @@ const plainDirectory = path => {
 const plainMarker = path => {
   try { const stat = lstatSync(path); return stat.isFile() && !stat.isSymbolicLink() && stat.size === 0 } catch { return false }
 }
+const noteRefusal = (noteState, reason) => ({ refused: true, noteState, reason })
+
+// A note is the record of what this side decided for the home. If it is absent, cannot be read
+// or cannot be recognised, this side cannot tell what was decided, so the home is refused and
+// left untouched like any other ambiguity. Each case keeps its own `noteState`, so an absent
+// note stays distinguishable from a corrupt one.
 const noteAt = (home, vendor, generation) => {
+  const path = join(home, RETIRED_NOTE)
+  let stat
   try {
-    const path = join(home, RETIRED_NOTE)
-    const stat = lstatSync(path)
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > NOTE_MAX) return { refused: true }
-    const note = JSON.parse(readFileSync(path, 'utf8'))
-    if (note?.version !== NOTE_VERSION || note.vendor !== vendor || note.generation !== generation
-      || resolve(note.home) !== resolve(home)) return { refused: true }
-    return { note }
-  } catch { return { note: null } }
+    stat = lstatSync(path)
+  } catch (error) {
+    return error.code === 'ENOENT'
+      ? noteRefusal('missing', 'The retirement note is missing, so this side cannot tell what was decided for this home; nothing here is touched.')
+      : noteRefusal('unreadable', 'The retirement note cannot be read, so this side cannot tell what was decided for this home; nothing here is touched.')
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    return noteRefusal('unreadable', 'The retirement note is not a plain file this side can read, so this side cannot tell what was decided for this home; nothing here is touched.')
+  }
+  if (stat.size > NOTE_MAX) {
+    return noteRefusal('invalid', 'The retirement note is too large to be a disposition this side can read, so this side cannot tell what was decided for this home; nothing here is touched.')
+  }
+  let text
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return noteRefusal('unreadable', 'The retirement note cannot be read, so this side cannot tell what was decided for this home; nothing here is touched.')
+  }
+  let note
+  try {
+    note = JSON.parse(text)
+  } catch {
+    return noteRefusal('invalid', 'The retirement note is not valid JSON, so this side cannot tell what was decided for this home; nothing here is touched.')
+  }
+  let own = false
+  try {
+    own = note?.version === NOTE_VERSION && note.vendor === vendor
+      && note.generation === generation && resolve(note.home) === resolve(home)
+  } catch { own = false }
+  if (!own) {
+    return noteRefusal('unrecognised', 'This side cannot tell whether the retirement note belongs to this home, so nothing here is touched.')
+  }
+  return { note, noteState: 'present' }
 }
 
 /**
  * Every retired home this installation has marked, read only: the marker proves the retirement,
  * the note says what is kept and how to inspect or keep it. `state` is `kept` (left alone),
- * `refused` (this side cannot tell whether the folder is the retired home's own) or `missing`
- * (the home is no longer at its bound path). Nothing here removes anything.
+ * `refused` (this side cannot tell whether the folder is the retired home's own, or cannot read
+ * the note saying so) or `missing` (the home is no longer at its bound path). A refused note also
+ * names what was wrong in `noteState` (`missing`, `unreadable`, `invalid` or `unrecognised`);
+ * a kept one has `present`. Nothing here removes anything.
  */
 export function retiredHomes(root, vendor) {
   const base = resolve(root)
@@ -120,10 +182,13 @@ export function retiredHomes(root, vendor) {
     }
     const read = noteAt(home, vendor, generation)
     if (read.refused) {
-      Object.assign(row, { state: 'refused', kept: true, note: null, reason: 'This side cannot tell whether the retirement note belongs to this home, so nothing here is touched.' })
+      Object.assign(row, {
+        state: 'refused', kept: true, noteState: read.noteState, reason: read.reason,
+      })
       rows.push(row)
       continue
     }
+    row.noteState = read.noteState
     if (read.note?.retiredAt) row.retiredAt = read.note.retiredAt
     try { row.optedOut = lstatSync(join(home, RETIRED_KEEP)) !== null } catch {}
     row.reason = row.optedOut
