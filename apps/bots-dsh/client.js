@@ -734,6 +734,35 @@ var ZH = {
   "This coding agent is not signed in any more. Sign in to use it.": "此编程助手已不再登录。请登录后使用。",
   "The account could not be confirmed. Try again.": "无法确认账号，请重试。",
   "The model could not be selected.": "无法选择此模型。",
+  // The web self-update preview (#1540): nod, modal, steps, success and rollback.
+  "Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.": "点击“立即更新”时，正在进行的工作会停止，更新完成后会自动继续。不会丢失任何内容。",
+  "A Bot that moves to a new part of its chat keeps what it was doing.": "Bot 换到对话的新段落时会保留它正在做的事。",
+  "A new version is ready. From now on it updates itself from this menu.": "新版本已就绪。从现在起，它会从这个菜单自行更新。",
+  "Back to the previous version": "已回到上一个版本",
+  "Checking that it is healthy": "正在检查运行状态",
+  "Checking the signature": "正在校验签名",
+  "Done: you are on the new version.": "完成：你已在新版本上。",
+  "Downloading the new version": "正在下载新版本",
+  "Example data": "示例数据",
+  "Example data: nothing is downloaded in this preview.": "示例数据：此预览不下载任何内容。",
+  "In the real thing the instance restarts here, and the chat you had open comes back where it was.": "实际运行时会在这里重启，你打开的对话会回到原来的位置。",
+  "In this preview the steps are timers and nothing is downloaded.": "在此预览中这些步骤只是计时器，不会下载任何内容。",
+  "Installing beside the current version": "正在当前版本旁边安装",
+  "Keep working. Your chats, Bots and files are where they were.": "继续使用。你的对话、Bot 和文件都在原处。",
+  "Restarting": "正在重启",
+  "See the announcement again": "再看一次更新说明",
+  "Show the failure instead": "改为演示失败",
+  "Signing in to a coding agent is one click, and a failure says why.": "登录编程助手只需一次点击，失败时会说明原因。",
+  "The new version did not answer the health check.": "新版本没有通过运行状态检查。",
+  "The new version did not start well. Automagik went back to the one that worked. Nothing was lost: your chats, Bots and files are where they were.": "新版本启动不正常。Automagik 回到了原本可用的版本。什么都没有丢失：你的对话、Bot 和文件都在原处。",
+  "The previous version stays kept for the rollback.": "上一个版本会保留，用于回滚。",
+  "This menu gets the update button, so you stop updating by hand.": "这个菜单里会有更新按钮，你不用再手动更新。",
+  "Update Automagik": "更新 Automagik",
+  "Updating Automagik": "正在更新 Automagik",
+  "What changes": "有什么变化",
+  "You are on": "你当前在",
+  "You have": "你当前",
+  "Your previous version stays kept. If the new one does not start, Automagik goes back by itself.": "上一个版本会保留。如果新版本起不来，Automagik 会自行退回。",
   // A Bot's model: what it really did (model-state.js), and a model that cannot run now.
   "the new model": "新模型",
   "{model} could not take over this conversation. This Bot stays on {kept}.": "{model} 无法接手这段对话。此 Bot 仍使用 {kept}。",
@@ -11936,9 +11965,9 @@ function chartData(node, lookup) {
 }
 var csvCell = (value) => /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 function chartCsv({ categories, series, unit }, t2 = (key) => key) {
-  const head = ["", ...series.map((item, index) => item.name || (series.length === 1 ? unit || t2("Value") : `${t2("Series")} ${index + 1}`))];
+  const head2 = ["", ...series.map((item, index) => item.name || (series.length === 1 ? unit || t2("Value") : `${t2("Series")} ${index + 1}`))];
   const rows2 = categories.map((label, at) => [label, ...series.map((item) => String(item.values[at]))]);
-  return [head, ...rows2].map((row) => row.map((cell) => csvCell(String(cell))).join(",")).join("\n");
+  return [head2, ...rows2].map((row) => row.map((cell) => csvCell(String(cell))).join(",")).join("\n");
 }
 function valueAxis(values, zero) {
   const finite = values.length > 0 ? values : [0];
@@ -12141,7 +12170,7 @@ function ChartTable({ data }) {
     (0, import_react24.createElement)(
       "table",
       null,
-      (0, import_react24.createElement)("thead", null, (0, import_react24.createElement)("tr", null, (0, import_react24.createElement)("th", { scope: "col" }), heads.map((head, index) => (0, import_react24.createElement)("th", { key: index, scope: "col", className: "dv-num" }, head)))),
+      (0, import_react24.createElement)("thead", null, (0, import_react24.createElement)("tr", null, (0, import_react24.createElement)("th", { scope: "col" }), heads.map((head2, index) => (0, import_react24.createElement)("th", { key: index, scope: "col", className: "dv-num" }, head2)))),
       (0, import_react24.createElement)("tbody", null, categories.map((label, at) => (0, import_react24.createElement)(
         "tr",
         { key: at },
@@ -12998,7 +13027,7 @@ function WidgetCard({ title, icon: icon3, footStart, view, onSubmit, onDismiss, 
   const { charts, registerChart, refreshCharts } = useChartHandles();
   const framed = raised2 || hasControls(view);
   const className = ["dv-view", framed ? "dv-q" : "dv-view-bare", settled ? "dv-q-settled" : "", raised2 ? "dv-q-raised" : ""].filter(Boolean).join(" ");
-  const head = title || icon3 || onDismiss || countType(view, "chart") > 0 ? (0, import_react26.createElement)(
+  const head2 = title || icon3 || onDismiss || countType(view, "chart") > 0 ? (0, import_react26.createElement)(
     "div",
     { className: "dv-view-head" },
     icon3 ? (0, import_react26.createElement)("span", { className: "dv-view-icon", "aria-hidden": true }, icon3) : null,
@@ -13015,7 +13044,7 @@ function WidgetCard({ title, icon: icon3, footStart, view, onSubmit, onDismiss, 
       "aria-label": title ? void 0 : ui2.t("View"),
       "aria-busy": busy || void 0
     },
-    head,
+    head2,
     (0, import_react26.createElement)("div", { className: "dv-view-body" }, (0, import_react26.createElement)(WidgetView, { view, onSubmit, settled, answer, busy, footStart: settled ? null : footStart, registerChart, refreshCharts }))
   );
 }
@@ -13263,8 +13292,8 @@ function viewCardText(args) {
   if (!shown2.interactive && card?.await_reply === true) return "";
   if (shown2.interactive && card?.await_reply === false) return "";
   const summary = viewSummary(shown2.view);
-  const head = shown2.title === "" ? "[View card]" : `[View card] ${shown2.title}`;
-  return summary === "" ? head : `${head}
+  const head2 = shown2.title === "" ? "[View card]" : `[View card] ${shown2.title}`;
+  return summary === "" ? head2 : `${head2}
 ${summary}`;
 }
 function viewReply(record, action, values, sourceKind = REPLY_KIND) {
@@ -15492,9 +15521,9 @@ function MoveMenu({ menuRef, moving, view, move: move2, leaving }) {
   const { entry, box } = moving;
   const here = view.keys[entry.scope];
   const item = (key, label) => (0, import_react37.createElement)("button", { key, type: "button", role: "menuitem", onClick: () => move2(entry, key) }, (0, import_react37.createElement)("span", { className: "bt-menu-label" }, label));
-  const list = (kind, head) => {
+  const list = (kind, head2) => {
     const places = view.places.filter((place) => place.kind === kind && place.key !== here);
-    return places.length === 0 ? null : (0, import_react37.createElement)(import_react37.Fragment, { key: kind }, (0, import_react37.createElement)("div", { className: "bt-menu-sub-head" }, head), places.map((place) => item(place.key, place.name)));
+    return places.length === 0 ? null : (0, import_react37.createElement)(import_react37.Fragment, { key: kind }, (0, import_react37.createElement)("div", { className: "bt-menu-sub-head" }, head2), places.map((place) => item(place.key, place.name)));
   };
   return (0, import_react37.createElement)(
     "div",
@@ -18365,9 +18394,9 @@ function parseReplies(text2) {
   } catch {
   }
   const replies = [];
-  const head = RELAY_LIST.exec(text2);
-  if (head) {
-    for (const piece of text2.slice(head.index + head[0].length).split(PRUNE_MARKER)) {
+  const head2 = RELAY_LIST.exec(text2);
+  if (head2) {
+    for (const piece of text2.slice(head2.index + head2[0].length).split(PRUNE_MARKER)) {
       const first = piece.indexOf('{"');
       if (first !== -1) scanReplies(piece, first, replies);
     }
@@ -18471,20 +18500,20 @@ function foldView(text2, limit = FOLD_AT, markdown = true) {
   if (text2.length <= limit.chars && !moreLines(text2, limit.lines)) return null;
   const body = text2.replace(/^(\s*\n)+/, "");
   if (body.trim() === "") return null;
-  let head = body.split("\n", PREVIEW_LINES).join("\n");
-  if (head.length > PREVIEW_CHARS) {
-    const cut = head.lastIndexOf("\n", PREVIEW_CHARS);
-    head = cutAt(head, cut > 0 ? cut : PREVIEW_CHARS);
+  let head2 = body.split("\n", PREVIEW_LINES).join("\n");
+  if (head2.length > PREVIEW_CHARS) {
+    const cut = head2.lastIndexOf("\n", PREVIEW_CHARS);
+    head2 = cutAt(head2, cut > 0 ? cut : PREVIEW_CHARS);
   }
-  if (head.trim() === "") head = cutAt(body, PREVIEW_CHARS);
-  if (!markdown) return { head };
-  let opened = openedFence(head.split("\n"));
-  if (opened !== null && head.split("\n").slice(opened.line + 1).join("").trim() === "") {
-    head = cutAt(body, PREVIEW_CHARS);
-    opened = openedFence(head.split("\n"));
+  if (head2.trim() === "") head2 = cutAt(body, PREVIEW_CHARS);
+  if (!markdown) return { head: head2 };
+  let opened = openedFence(head2.split("\n"));
+  if (opened !== null && head2.split("\n").slice(opened.line + 1).join("").trim() === "") {
+    head2 = cutAt(body, PREVIEW_CHARS);
+    opened = openedFence(head2.split("\n"));
   }
-  if (opened === null) return { head };
-  const lines = head.split("\n");
+  if (opened === null) return { head: head2 };
+  const lines = head2.split("\n");
   lines[opened.line] = opened.marker;
   return {
     head: `${lines.join("\n")}
@@ -20028,10 +20057,10 @@ function ThinkingRow({ text: text2, live, at, ms, viewKey }) {
     if (viewKey !== void 0) rowViews.set(viewKey, { ...rowViews.get(viewKey), ...patch });
   };
   const measure = () => {
-    const el = box.current;
-    atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 2;
-    remember({ atEnd: atEnd.current, top: el.scrollTop });
-    const above = el.scrollTop > 0;
+    const el2 = box.current;
+    atEnd.current = el2.scrollHeight - el2.scrollTop - el2.clientHeight < 2;
+    remember({ atEnd: atEnd.current, top: el2.scrollTop });
+    const above = el2.scrollTop > 0;
     setFade(above && !atEnd.current ? "both" : above ? "top" : !atEnd.current ? "bottom" : void 0);
   };
   const toggle = (event) => {
@@ -20042,11 +20071,11 @@ function ThinkingRow({ text: text2, live, at, ms, viewKey }) {
   };
   (0, import_react48.useLayoutEffect)(() => {
     if (!open) return;
-    const el = box.current;
+    const el2 = box.current;
     const restore = view.current;
     view.current = void 0;
-    if (atEnd.current) el.scrollTop = el.scrollHeight;
-    else if (restore?.top !== void 0) el.scrollTop = restore.top;
+    if (atEnd.current) el2.scrollTop = el2.scrollHeight;
+    else if (restore?.top !== void 0) el2.scrollTop = restore.top;
     measure();
   }, [text2, open]);
   const title = live ? t("Thinking") : t("Thought it through");
@@ -20094,7 +20123,7 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
   if (texts2.length === 0 && !reasoning && relays.length === 0 && activity.length === 0) return (0, import_react48.createElement)(CellEmpty);
   const selfId = roster.byId[sessionId]?.id ?? sessionId;
   const speaker = layoutOf(roster.prefs) === "flat" ? roster.byId[sessionId] : void 0;
-  const head = speaker !== void 0 && opensReply(steps, data, shown2) && (reasoning !== "" || texts2.length > 0 && !(groupPart === "response" && shown2 && turnReasoning(steps, data) !== ""));
+  const head2 = speaker !== void 0 && opensReply(steps, data, shown2) && (reasoning !== "" || texts2.length > 0 && !(groupPart === "response" && shown2 && turnReasoning(steps, data) !== ""));
   return (0, import_react48.createElement)(
     import_react48.Fragment,
     null,
@@ -20111,7 +20140,7 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
         whole: true
       });
     }),
-    head ? (0, import_react48.createElement)(SpeakerHead, { bot: speaker, time: data.time }) : null,
+    head2 ? (0, import_react48.createElement)(SpeakerHead, { bot: speaker, time: data.time }) : null,
     activity.length ? (0, import_react48.createElement)("div", { className: "bt-agent-activity" }, activity.map((line, index) => (0, import_react48.createElement)("div", { key: index, className: "bt-agent-act", title: line }, (0, import_react48.createElement)("span", { className: "bt-agent-act-mark", "aria-hidden": true }), (0, import_react48.createElement)("span", { className: "bt-agent-act-text" }, activityParts(line))))) : null,
     reasoning ? (0, import_react48.createElement)(ThinkingRow, {
       text: reasoning,
@@ -20197,9 +20226,9 @@ function scheduleGroupChains(flow) {
 function GroupMessage({ bot, text: text2, texts: texts2 = [text2], room: room2, roster, actions, msgKey, useUi, whole, time, duration: duration2 }) {
   const ref = (0, import_react48.useRef)(null);
   (0, import_react48.useLayoutEffect)(() => {
-    const el = ref.current;
-    if (!el?.closest) return void 0;
-    const flow = el.closest("[data-chat-flow]");
+    const el2 = ref.current;
+    if (!el2?.closest) return void 0;
+    const flow = el2.closest("[data-chat-flow]");
     if (!flow) return void 0;
     scheduleGroupChains(flow);
     return () => scheduleGroupChains(flow);
@@ -21436,6 +21465,337 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
   };
 }
 
+// src/client/self-update-mock.js
+var MOCK_FLAG = "mock-1540";
+var PARAM_FLAG = "mock-1540";
+var MOCK_STEPS = Object.freeze([
+  { key: "download", label: () => t("Downloading the new version") },
+  { key: "signature", label: () => t("Checking the signature") },
+  { key: "install", label: () => t("Installing beside the current version") },
+  { key: "restart", label: () => t("Restarting") },
+  { key: "health", label: () => t("Checking that it is healthy") }
+]);
+var MOCK_DATA = Object.freeze({
+  current: "3.151.0",
+  next: "3.152.0",
+  downloadMb: 42,
+  seconds: 3
+});
+var STEP_MS = 900;
+var SUCCESS_MS = 700;
+var CSS2 = `
+/* The nod is one of the bar's own round buttons (.bt-round), seated in the bottom row like the
+   other footer entries, never a floating pill of its own: same 36px circle, same --bt-* colours. */
+.su-nod{position:relative}
+.su-nod .su-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:var(--bt-accent);box-shadow:0 0 0 2px var(--bt-main)}
+.su-nod .su-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.su-layer{position:fixed;inset:0;z-index:80;display:flex;background:var(--bt-main);animation:su-veil .18s ease-out;font-family:var(--bt-font,system-ui)}
+.su-modal{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bt-main);color:var(--bt-ink);animation:su-pop .22s cubic-bezier(.34,1.3,.64,1)}
+.su-head{display:flex;align-items:flex-start;gap:12px;padding:20px max(24px,calc((100vw - 760px)/2)) 0}
+.su-head h2{margin:0;font-size:17px;line-height:24px;font-weight:600}
+.su-close{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 13px/18px var(--bt-font,system-ui);cursor:pointer;padding:2px 4px;border-radius:8px}
+.su-close:hover{background:var(--bt-hover);color:var(--bt-ink)}
+.su-body{flex:1;overflow:auto;padding:18px max(24px,calc((100vw - 760px)/2)) 24px;display:flex;flex-direction:column;gap:14px}
+.su-body.su-fill{justify-content:center}
+.su-body.su-center{align-items:center;text-align:center}
+.su-body.su-center .su-example{align-self:center}
+.su-example{align-self:flex-start;padding:2px 8px;border-radius:999px;background:var(--bt-accent-soft);color:var(--bt-accent);font:600 11px/16px var(--bt-font,system-ui);letter-spacing:.02em;text-transform:uppercase}
+.su-line{margin:0;font-size:14px;line-height:21px;color:var(--bt-ink)}
+.su-versions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--bt-ink-2)}
+.su-version{padding:3px 8px;border-radius:8px;background:var(--bt-tag-bg);font-variant-numeric:tabular-nums;color:var(--bt-ink)}
+.su-changes{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:14px;line-height:21px}
+.su-steps{display:flex;flex-direction:column;gap:2px}
+.su-step{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:14px;line-height:20px;color:var(--bt-ink-2)}
+.su-step[data-state=active]{background:var(--bt-accent-soft);color:var(--bt-ink)}
+.su-step[data-state=active] .su-mark{border-color:var(--bt-accent);background:var(--bt-accent-soft);color:var(--bt-accent)}
+.su-step[data-state=done]{color:var(--bt-ink)}
+.su-mark{width:20px;height:20px;flex:none;border-radius:50%;border:1.5px solid var(--bt-line-2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.su-step[data-state=done] .su-mark{border-color:transparent;background:var(--bt-accent);color:var(--bt-accent-ink)}
+.su-step[data-state=failed] .su-mark{border-color:transparent;background:var(--bt-danger);color:var(--bt-accent-ink)}
+.su-step[data-state=failed]{color:var(--bt-ink)}
+.su-note{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
+.su-caution{margin:0;padding:9px 11px;border-radius:10px;background:var(--bt-accent-soft);color:var(--bt-ink);font:500 13px/20px var(--bt-font,system-ui)}
+.su-foot{display:flex;gap:10px;align-items:center;padding:14px max(24px,calc((100vw - 760px)/2)) 18px;border-top:.5px solid var(--bt-line);background:var(--bt-main)}
+.su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-accent-ink);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
+.su-primary:hover{filter:brightness(1.05)}
+.su-ghost{border:.5px solid var(--bt-line-2);border-radius:10px;padding:9px 14px;background:transparent;color:var(--bt-ink);font:500 14px/18px var(--bt-font,system-ui);cursor:pointer}
+.su-ghost:hover{background:var(--bt-hover)}
+.su-link{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 12px/18px var(--bt-font,system-ui);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.su-result{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8vh 0 4px;text-align:center}
+.su-result .su-badge{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--bt-accent-ink);background:var(--bt-accent)}
+.su-result[data-kind=rollback] .su-badge{background:var(--bt-danger)}
+.su-result h3{margin:0;font-size:16px;line-height:22px;font-weight:600}
+.su-result p{margin:0;max-width:52ch;font-size:13px;line-height:20px;color:var(--bt-ink-2)}
+@keyframes su-nod-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes su-pulse{0%{transform:scale(.9);opacity:.5}70%{transform:scale(1.5);opacity:0}100%{opacity:0}}
+@keyframes su-veil{from{opacity:0}to{opacity:1}}
+@keyframes su-pop{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.su-nod,.su-modal,.su-layer,.su-dot::after{animation:none}}
+`;
+function installStyle(css, doc) {
+  const style = doc.createElement("style");
+  style.dataset.mock = MOCK_FLAG;
+  style.textContent = css;
+  doc.head.append(style);
+  return () => style.remove();
+}
+var arrowSvg = () => {
+  const svg2 = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg2.setAttribute("viewBox", "0 0 20 20");
+  svg2.setAttribute("width", "18");
+  svg2.setAttribute("height", "18");
+  svg2.setAttribute("fill", "none");
+  svg2.setAttribute("stroke", "currentColor");
+  svg2.setAttribute("stroke-width", "1.5");
+  svg2.setAttribute("stroke-linecap", "round");
+  svg2.setAttribute("stroke-linejoin", "round");
+  svg2.setAttribute("aria-hidden", "true");
+  const path2 = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path2.setAttribute("d", "M10 3v8.5M6.5 8.5 10 12l3.5-3.5M4 16h12");
+  svg2.append(path2);
+  return svg2;
+};
+var el = (tag, className, text2) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text2 !== void 0) node.append(document.createTextNode(text2));
+  return node;
+};
+var EXAMPLE = () => el("span", "su-example", t("Example data"));
+function modal() {
+  const layer = el("div", "su-layer");
+  const box = el("div", "su-modal");
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-modal", "true");
+  box.setAttribute("aria-label", t("Update Automagik"));
+  layer.append(box);
+  return { layer, box };
+}
+function head(box, title, onClose) {
+  const row = el("div", "su-head");
+  row.append(el("h2", null, title));
+  const close = el("button", "su-close", t("Close"));
+  close.type = "button";
+  close.addEventListener("click", onClose);
+  row.append(close);
+  box.append(row);
+}
+function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, successMs = SUCCESS_MS, seat = null } = {}) {
+  let timers = [];
+  let seatButton = null;
+  const stop3 = () => {
+    for (const id of timers) clearTimeout(id);
+    timers = [];
+  };
+  const later = (fn, ms) => {
+    timers.push(setTimeout(fn, ms));
+  };
+  const place = (node) => {
+    root.replaceChildren(node);
+  };
+  const nod = () => {
+    stop3();
+    const button2 = el("button", "su-nod bt-round");
+    button2.type = "button";
+    button2.dataset.mock = MOCK_FLAG;
+    button2.title = t("Update available");
+    button2.setAttribute("aria-label", t("Update available"));
+    button2.append(arrowSvg(), el("span", "su-dot"), el("span", "su-label", t("Update available")));
+    button2.addEventListener("click", () => open());
+    if (seat) {
+      seatButton?.remove();
+      seat.append(button2);
+      seatButton = button2;
+    } else {
+      place(button2);
+    }
+  };
+  const open = () => changes();
+  const changes = () => {
+    stop3();
+    const { layer, box } = modal();
+    head(box, t("Update Automagik"), nod);
+    const body = el("div", "su-body");
+    body.append(EXAMPLE());
+    body.append(el("p", "su-line", t("A new version is ready. From now on it updates itself from this menu.")));
+    const versions = el("div", "su-versions");
+    versions.append(
+      el("span", null, t("You have")),
+      el("span", "su-version", sample.current),
+      el("span", null, "→"),
+      el("span", "su-version", sample.next)
+    );
+    body.append(versions);
+    body.append(el("h3", null, t("What changes")));
+    const list = el("ul", "su-changes");
+    for (const line of [
+      t("Signing in to a coding agent is one click, and a failure says why."),
+      t("A Bot that moves to a new part of its chat keeps what it was doing."),
+      t("This menu gets the update button, so you stop updating by hand.")
+    ]) list.append(el("li", null, line));
+    body.append(list);
+    body.append(el("p", "su-note", t("Your previous version stays kept. If the new one does not start, Automagik goes back by itself.")));
+    const caution = el("p", "su-caution", t("Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost."));
+    caution.setAttribute("role", "note");
+    body.append(caution);
+    box.append(body);
+    const foot = el("div", "su-foot");
+    const primary = el("button", "su-primary", t("Update now"));
+    primary.type = "button";
+    primary.addEventListener("click", () => steps());
+    const ghost = el("button", "su-ghost", t("Not now"));
+    ghost.type = "button";
+    ghost.addEventListener("click", nod);
+    const failure = el("button", "su-link", t("Show the failure instead"));
+    failure.type = "button";
+    failure.addEventListener("click", () => steps({ failAtHealth: true }));
+    foot.append(primary, ghost, failure);
+    box.append(foot);
+    place(layer);
+  };
+  const steps = ({ failAtHealth = false } = {}) => {
+    stop3();
+    const { layer, box } = modal();
+    head(box, t("Updating Automagik"), nod);
+    const body = el("div", "su-body");
+    body.append(EXAMPLE());
+    const list = el("div", "su-steps");
+    const rows2 = MOCK_STEPS.map((step2, index2) => {
+      const row = el("div", "su-step");
+      row.dataset.step = step2.key;
+      row.dataset.state = "waiting";
+      row.append(el("span", "su-mark", String(index2 + 1)), el("span", null, step2.label()));
+      list.append(row);
+      return row;
+    });
+    body.append(list);
+    body.append(el("p", "su-note", t("In this preview the steps are timers and nothing is downloaded.")));
+    body.classList.add("su-fill");
+    box.append(body);
+    const foot = el("div", "su-foot");
+    foot.append(el("span", "su-note", t("The previous version stays kept for the rollback.")));
+    box.append(foot);
+    place(layer);
+    const mark2 = (row, state2, glyph) => {
+      row.dataset.state = state2;
+      row.querySelector(".su-mark").textContent = glyph;
+    };
+    let index = 0;
+    const advance = () => {
+      if (index >= rows2.length) {
+        later(success, successMs);
+        return;
+      }
+      const row = rows2[index];
+      const key = MOCK_STEPS[index].key;
+      mark2(row, "active", "•");
+      index += 1;
+      later(() => {
+        if (failAtHealth && key === "health") {
+          mark2(row, "failed", "!");
+          body.append(el("p", "su-note", t("The new version did not answer the health check.")));
+          later(rollback, successMs);
+          return;
+        }
+        mark2(row, "done", "✓");
+        advance();
+      }, stepMs);
+    };
+    advance();
+  };
+  const result = (kind, badge, title, text2, extra = []) => {
+    const { layer, box } = modal();
+    head(box, t("Update Automagik"), nod);
+    const body = el("div", "su-body");
+    const card = el("div", "su-result");
+    card.dataset.kind = kind;
+    card.append(el("span", "su-badge", badge));
+    card.append(el("h3", null, title));
+    card.append(el("p", null, text2));
+    body.append(card, EXAMPLE());
+    body.classList.add("su-fill", "su-center");
+    for (const node of extra) body.append(node);
+    box.append(body);
+    return { layer, box, body };
+  };
+  const success = () => {
+    stop3();
+    const { layer, box } = result(
+      "success",
+      "✓",
+      t("Done: you are on the new version."),
+      t("Keep working. Your chats, Bots and files are where they were."),
+      [el("p", "su-note", t("In the real thing the instance restarts here, and the chat you had open comes back where it was."))]
+    );
+    const foot = el("div", "su-foot");
+    const primary = el("button", "su-primary", t("Close"));
+    primary.type = "button";
+    primary.addEventListener("click", nod);
+    foot.append(primary);
+    box.append(foot);
+    place(layer);
+  };
+  const rollback = () => {
+    stop3();
+    const versions = el("div", "su-versions");
+    versions.append(el("span", null, t("You are on")), el("span", "su-version", sample.current));
+    const { layer, box } = result(
+      "rollback",
+      "↩",
+      t("Back to the previous version"),
+      t("The new version did not start well. Automagik went back to the one that worked. Nothing was lost: your chats, Bots and files are where they were."),
+      [versions]
+    );
+    const foot = el("div", "su-foot");
+    const primary = el("button", "su-primary", t("Close"));
+    primary.type = "button";
+    primary.addEventListener("click", nod);
+    const retry = el("button", "su-ghost", t("See the announcement again"));
+    retry.type = "button";
+    retry.addEventListener("click", changes);
+    foot.append(primary, retry);
+    box.append(foot);
+    place(layer);
+  };
+  nod();
+  return {
+    open,
+    close: nod,
+    /** The screen the preview is on: nod, changes, steps, success or rollback. */
+    screen: () => {
+      if (root.querySelector(".su-layer") === null) return "nod";
+      if (root.querySelector(".su-result[data-kind=success]") !== null) return "success";
+      if (root.querySelector(".su-result[data-kind=rollback]") !== null) return "rollback";
+      if (root.querySelector(".su-steps") !== null) return "steps";
+      return "changes";
+    },
+    dispose: () => {
+      stop3();
+      seatButton?.remove();
+      seatButton = null;
+      root.remove();
+    }
+  };
+}
+function installSelfUpdateMock({ location: location2 = globalThis.location, document: doc = globalThis.document } = {}) {
+  if (!doc || !location2) return () => {
+  };
+  const search = typeof location2.search === "string" ? location2.search : "";
+  const hash = typeof location2.hash === "string" ? location2.hash : "";
+  if (!new RegExp(`(?:[?&])${PARAM_FLAG}(?:=|&|$)`).test(search) && !hash.includes(MOCK_FLAG)) return () => {
+  };
+  const offStyles = installStyle(CSS2, doc);
+  const root = doc.createElement("div");
+  root.id = "ds-bot-self-update-mock";
+  doc.body.append(root);
+  const seat = doc.querySelector(".lb-foot") ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div') ?? doc.querySelector("[data-mock-seat]");
+  const control2 = mountSelfUpdateMock(root, { seat });
+  return () => {
+    control2.dispose();
+    offStyles();
+  };
+}
+
 // src/client/team-actions.js
 function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession, loginState, panelFolded }) {
   const openCliLogin = (botId, provider, ref) => {
@@ -21861,13 +22221,13 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
 
 // src/client/styles.js
 var SHELL_CSS = `
-body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
+body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
 /* The --bt-glass-* tokens keep upstream's names, which its cards, menus and docks read, and
    hold solid surfaces here: this look is clay depth on a plain ground, not frosted glass. */
 /* iOS waits out a double-tap zoom on buttons; the plugin's own controls never zoom. */
 :is(.bt-tool,.bt-uaction,.bt-menu button,.bt-menu-item,.bt-icon-btn,.bt-round,.bt-pill,.bt-account,.bt-set-row,.bt-settings-item,.bt-react-strip button,.bt-palette-row,.bt-palette-clear,.bt-tab,.bt-ptab,.bt-ptab-x,.bt-bcard-x,.bt-plus,.bt-q-btn,.bt-q-x,.bt-x,.bt-nc-send,.bt-send,.bt-soft,.bt-mini,.bt-side-send,.bt-shape,.bt-swatch,.bt-color,.bt-newchat,.bt-task-day,.bt-task-remove,.bt-fb-btn){touch-action:manipulation}
 :is(.bt-round,.bt-you,.bt-account,.bt-color,.bt-color span,.bt-swatch,.bt-icon-btn,.bt-avatar-trigger,.bt-avatar-pencil,.bt-plus,.bt-mic,.bt-voice){corner-shape:round}
-body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent)}
+body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff}
 body{--bt-gold:#f2b84b;--bt-gold-edge:#c98a1a;--bt-gold-band:#e9a636;--bt-gold-shine:#fff3d4;--bt-gem:#8fdcec;--bt-gem-2:#f0bddf;--bt-role-bg:#fbe7bf;--bt-role-ink:#8a5a12;--bt-role-edge:#e7c88a;--bt-role-shine:#fff6e2;--bt-magic-cyan:#3ccbf4;--bt-magic-violet:#9a6cf6;--bt-magic-pink:#ff4fa0;--bt-arena:#120f24;--bt-arena-2:#231a44;--bt-arena-ink:#f4f1ff}
 body[data-ds-dark-theme]{--bt-role-bg:#4a3a1c;--bt-role-ink:#f6d48f;--bt-role-edge:#2a1f0c;--bt-role-shine:rgba(255,240,200,.12)}
 ${Object.entries(INKS).map(([name, [light2]]) => `body{--bt-ink-${name}:${light2}}`).join("")}
@@ -23252,24 +23612,24 @@ function botOwnCss(css) {
       else if (css[close] === "}") depth -= 1;
       close += 1;
     }
-    const head = css.slice(index, open).replace(/\/\*[\s\S]*?\*\//g, "").trim();
+    const head2 = css.slice(index, open).replace(/\/\*[\s\S]*?\*\//g, "").trim();
     const body = css.slice(open + 1, close - 1);
     index = close;
-    if (head.startsWith("@keyframes") || head.startsWith("@font-face")) {
-      out += `${head}{${body}}
+    if (head2.startsWith("@keyframes") || head2.startsWith("@font-face")) {
+      out += `${head2}{${body}}
 `;
       continue;
     }
-    if (head.startsWith("@")) {
+    if (head2.startsWith("@")) {
       const inner = botOwnCss(body);
-      if (inner.trim() !== "") out += `${head}{${inner}}
+      if (inner.trim() !== "") out += `${head2}{${inner}}
 `;
       continue;
     }
-    const selectors = splitTopLevel(head, ",").map((part) => part.trim());
+    const selectors = splitTopLevel(head2, ",").map((part) => part.trim());
     if (selectors.every((selector) => ROOT_SELECTOR.test(selector))) {
       const custom = splitTopLevel(body, ";").map((part) => part.trim()).filter((part) => part.startsWith("--"));
-      if (custom.length > 0) out += `${head}{${custom.join(";")}}
+      if (custom.length > 0) out += `${head2}{${custom.join(";")}}
 `;
       continue;
     }
@@ -24423,8 +24783,8 @@ function BotChannels({ row, source, renderRow, folded, loads }) {
 }
 function BotRows({ row, channels, source, renderRow, folded = NO_FOLDS }) {
   const bot = { ...row.bot, channels };
-  const head = { ...row, bot, status: botRowStatus(bot), channelSource: source ?? row.bot.channelSource };
-  return [renderRow(head), ...channelRows(bot, channels, folded).map(renderRow)];
+  const head2 = { ...row, bot, status: botRowStatus(bot), channelSource: source ?? row.bot.channelSource };
+  return [renderRow(head2), ...channelRows(bot, channels, folded).map(renderRow)];
 }
 function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label, skin, renderArt: renderArt2 = drawBot, renderGlyph, worded = WORDED, quiet: quiet2 = QUIET, folded = NO_FOLDS, loads }) {
   const ref = (0, import_react57.useRef)(null);
@@ -24758,11 +25118,11 @@ ${tokenCss("[data-lb-skin=flat]", LEFT_BAR_SKINS.flat)}
 ${tokenCss("[data-lb-skin=stage]", LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS2}${MARKS2}${FACES3}${HOST}`;
 
 // src/client/self-update-flag.js
-var MOCK_FLAG = "mock-1540";
+var MOCK_FLAG2 = "mock-1540";
 function mock1540On(location2 = globalThis.location) {
   const search = typeof location2?.search === "string" ? location2.search : "";
   const hash = typeof location2?.hash === "string" ? location2.hash : "";
-  return new RegExp(`(?:[?&])${MOCK_FLAG}(?:=|&|$)`).test(search) || hash.includes(MOCK_FLAG);
+  return new RegExp(`(?:[?&])${MOCK_FLAG2}(?:=|&|$)`).test(search) || hash.includes(MOCK_FLAG2);
 }
 
 // src/client/left-bar.js
@@ -27991,8 +28351,8 @@ function parseSideLine(line) {
   return { args, bare: args.trim() === "" };
 }
 function sideQueryMatches(query) {
-  const head = String(query ?? "").trim().toLowerCase().split(/\s/, 1)[0] ?? "";
-  return head === "" || "side".startsWith(head);
+  const head2 = String(query ?? "").trim().toLowerCase().split(/\s/, 1)[0] ?? "";
+  return head2 === "" || "side".startsWith(head2);
 }
 function matchSideSpace(roster, sessionId, token) {
   if (!SIDE_COMMANDS.has(token) || sideSurface(roster, sessionId) !== "bot") return void 0;
@@ -38624,10 +38984,10 @@ function readPage(limits) {
   let chars = 0;
   let stop3 = "";
   const collapse = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const isSecret = (el) => {
-    if (el.localName !== "input" && el.localName !== "textarea") return false;
-    const auto = String(el.getAttribute("autocomplete") || "").toLowerCase();
-    return el.type === "password" || /(^|\s)(cc-|one-time-code)/.test(auto) || SECRET_HINT.test(`${el.getAttribute("name") || ""} ${el.id || ""}`);
+  const isSecret = (el2) => {
+    if (el2.localName !== "input" && el2.localName !== "textarea") return false;
+    const auto = String(el2.getAttribute("autocomplete") || "").toLowerCase();
+    return el2.type === "password" || /(^|\s)(cc-|one-time-code)/.test(auto) || SECRET_HINT.test(`${el2.getAttribute("name") || ""} ${el2.id || ""}`);
   };
   const keep = (text3, end = "") => {
     if (text3 === "") return "";
@@ -38642,14 +39002,14 @@ function readPage(limits) {
   const flow = (text3) => text3.split("\n").map((line) => line.replace(/[ \t\f\v\u00a0\u2028\u2029]+/g, " ").trim().replace(/^· /, "")).join("\n").replace(/\n{3,}/g, "\n\n").replace(/\u0003\n\n(?=\u0001\d+\u0003)/g, "\n").trim();
   const block = (text3) => expand(flow(text3));
   const oneLine = (text3) => block(text3).replace(/\s*\n+\s*/g, " ").trim();
-  const styleOf = (el) => (el.ownerDocument.defaultView || window).getComputedStyle(el);
-  const childrenOf = (el) => {
-    if (el.shadowRoot) return el.shadowRoot.childNodes;
-    if (el.localName === "slot" && typeof el.assignedNodes === "function") {
-      const assigned = el.assignedNodes();
+  const styleOf = (el2) => (el2.ownerDocument.defaultView || window).getComputedStyle(el2);
+  const childrenOf = (el2) => {
+    if (el2.shadowRoot) return el2.shadowRoot.childNodes;
+    if (el2.localName === "slot" && typeof el2.assignedNodes === "function") {
+      const assigned = el2.assignedNodes();
       if (assigned.length > 0) return assigned;
     }
-    return el.childNodes;
+    return el2.childNodes;
   };
   const over = () => {
     if (stop3) return true;
@@ -38658,25 +39018,25 @@ function readPage(limits) {
     else if (stats.nodes % 512 === 0 && performance.now() - started > limits.ms) stop3 = `reading took longer than ${limits.ms} ms`;
     return stop3 !== "";
   };
-  const roleOf = (el) => el.getAttribute("role") || ROLES[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
-  const sized = (el) => {
-    const box = el.getBoundingClientRect();
+  const roleOf = (el2) => el2.getAttribute("role") || ROLES[el2.localName] || (el2.localName === "input" ? INPUT_ROLES[el2.type] || "textbox" : el2.isContentEditable ? "textbox" : el2.localName);
+  const sized = (el2) => {
+    const box = el2.getBoundingClientRect();
     return box.width > 0 && box.height > 0;
   };
-  const itemFor = (el, style) => {
-    if (items.length >= limits.items || style.visibility !== "visible" || !el.matches(ITEM) || !sized(el)) return null;
-    const item = { role: roleOf(el) };
-    const secret = isSecret(el);
-    if (el.href) item.href = String(el.href);
-    if ((el.localName === "input" || el.localName === "textarea") && !secret && !NO_VALUE_TYPES.has(el.type) && el.value) item.value = String(el.value).slice(0, 120);
-    if (el.localName === "select" && el.selectedOptions?.length) item.value = collapse([...el.selectedOptions].map((option) => option.label || option.text).join(", ")).slice(0, 120);
-    if (el.checked) item.checked = true;
-    if (el.disabled) item.disabled = true;
+  const itemFor = (el2, style) => {
+    if (items.length >= limits.items || style.visibility !== "visible" || !el2.matches(ITEM) || !sized(el2)) return null;
+    const item = { role: roleOf(el2) };
+    const secret = isSecret(el2);
+    if (el2.href) item.href = String(el2.href);
+    if ((el2.localName === "input" || el2.localName === "textarea") && !secret && !NO_VALUE_TYPES.has(el2.type) && el2.value) item.value = String(el2.value).slice(0, 120);
+    if (el2.localName === "select" && el2.selectedOptions?.length) item.value = collapse([...el2.selectedOptions].map((option) => option.label || option.text).join(", ")).slice(0, 120);
+    if (el2.checked) item.checked = true;
+    if (el2.disabled) item.disabled = true;
     items.push(item);
     return { item, number: items.length, secret };
   };
-  const nameOf3 = (el, text3, secret) => collapse(
-    el.getAttribute("aria-label") || text3 || (el.localName === "input" && !secret && NO_VALUE_TYPES.has(el.type) ? el.value : "") || el.getAttribute("placeholder") || el.title || el.getAttribute("alt") || el.querySelector?.("img[alt]")?.alt || el.getAttribute("name") || ""
+  const nameOf3 = (el2, text3, secret) => collapse(
+    el2.getAttribute("aria-label") || text3 || (el2.localName === "input" && !secret && NO_VALUE_TYPES.has(el2.type) ? el2.value : "") || el2.getAttribute("placeholder") || el2.title || el2.getAttribute("alt") || el2.querySelector?.("img[alt]")?.alt || el2.getAttribute("name") || ""
   ).slice(0, 80);
   const fenced = (code, lang) => {
     const longest = Math.max(2, ...(code.match(/`{3,}/g) || []).map((run3) => run3.length));
@@ -38685,15 +39045,15 @@ function readPage(limits) {
 ${code.replace(/\n+$/, "")}
 ${fence}`;
   };
-  const langOf = (el) => {
-    const names = `${el.className || ""} ${el.querySelector?.("code")?.className || ""}`;
+  const langOf = (el2) => {
+    const names = `${el2.className || ""} ${el2.querySelector?.("code")?.className || ""}`;
     return /(?:^|\s)(?:lang|language)-([\w+#.-]+)/.exec(names)?.[1] || "";
   };
-  const list = (el, ctx) => {
-    const ordered2 = el.localName === "ol";
-    let number = ordered2 ? Number(el.getAttribute("start") || 1) || 1 : 1;
+  const list = (el2, ctx) => {
+    const ordered2 = el2.localName === "ol";
+    let number = ordered2 ? Number(el2.getAttribute("start") || 1) || 1 : 1;
     const lines = [];
-    for (const child of childrenOf(el)) {
+    for (const child of childrenOf(el2)) {
       if (over()) break;
       if (child.nodeType !== 1 || child.localName !== "li") {
         const loose = block(render(child, ctx));
@@ -38771,18 +39131,18 @@ ${caption}
 
 Table: ${caption}` : ""}${keep(out.join("\n"))}`;
   };
-  const frame = (el, ctx) => {
+  const frame = (el2, ctx) => {
     let doc = null;
     try {
-      doc = el.contentDocument;
+      doc = el2.contentDocument;
     } catch {
       doc = null;
     }
     const address = (() => {
       try {
-        return doc?.location?.href || el.src || el.getAttribute("src") || "about:blank";
+        return doc?.location?.href || el2.src || el2.getAttribute("src") || "about:blank";
       } catch {
-        return el.src || "about:blank";
+        return el2.src || "about:blank";
       }
     })();
     if (!doc) return `
@@ -38796,15 +39156,15 @@ Table: ${caption}` : ""}${keep(out.join("\n"))}`;
 
 `;
     stats.frames += 1;
-    const title = collapse(el.title || doc.title);
+    const title = collapse(el2.title || doc.title);
     const body2 = doc.body ? block(children(doc.body, { ...ctx, frames: ctx.frames + 1, depth: ctx.depth + 1, shown: true, pre: false })) : "";
     return keep(`[iframe: ${title ? `${title} (${address})` : address}]
 ${body2 || "(no text)"}
 [iframe end]`);
   };
-  function children(el, ctx) {
+  function children(el2, ctx) {
     let out = "";
-    for (const child of childrenOf(el)) {
+    for (const child of childrenOf(el2)) {
       if (over()) break;
       out += render(child, ctx);
     }
@@ -38820,57 +39180,57 @@ ${body2 || "(no text)"}
       return text3;
     }
     if (node.nodeType !== 1) return "";
-    const el = node;
-    const tag = el.localName;
+    const el2 = node;
+    const tag = el2.localName;
     if (SKIP.has(tag) || ctx.depth > limits.depth || over()) return "";
-    const style = styleOf(el);
+    const style = styleOf(el2);
     const display = style.display;
     if (display === "none" || style.contentVisibility === "hidden") return "";
     const shown2 = style.visibility === "visible";
     const keepsSpace = String(style.whiteSpace || "").startsWith("pre") || style.whiteSpace === "break-spaces";
     const next = { ...ctx, depth: ctx.depth + 1, shown: shown2 };
-    if (display === "contents" && !SEMANTIC.test(tag) && !el.matches(ITEM)) return children(el, next);
+    if (display === "contents" && !SEMANTIC.test(tag) && !el2.matches(ITEM)) return children(el2, next);
     if (style.overflowX !== "visible" || style.overflowY !== "visible") {
-      const box = el.getBoundingClientRect();
+      const box = el2.getBoundingClientRect();
       if (box.width === 0 || box.height === 0) return "";
     }
     if (tag === "br") return "\n";
     if (tag === "hr") return "\n\n---\n\n";
     if (tag === "img") {
-      const alt = collapse(el.getAttribute("alt"));
+      const alt = collapse(el2.getAttribute("alt"));
       return shown2 && alt ? `[image: ${alt}]` : "";
     }
     if (tag === "canvas") {
-      const box = el.getBoundingClientRect();
+      const box = el2.getBoundingClientRect();
       return box.width >= 200 && box.height >= 100 ? "\n\n[canvas: drawn content, not readable]\n\n" : "";
     }
     if (tag === "iframe" || tag === "frame") {
-      const box = el.getBoundingClientRect();
-      return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el, next);
+      const box = el2.getBoundingClientRect();
+      return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el2, next);
     }
-    const found = itemFor(el, style);
+    const found = itemFor(el2, style);
     const mark2 = found ? `[#${found.number}]` : "";
     if (tag === "input" || tag === "textarea" || tag === "select") {
-      if (found) found.item.name = nameOf3(el, tag === "select" ? "" : el.labels?.[0] ? collapse(el.labels[0].textContent) : "", found.secret);
+      if (found) found.item.name = nameOf3(el2, tag === "select" ? "" : el2.labels?.[0] ? collapse(el2.labels[0].textContent) : "", found.secret);
       return mark2 ? ` ${mark2} ` : "";
     }
     let body2;
     if (tag === "pre") {
-      const code = shown2 ? String(el.innerText || el.textContent || "") : "";
+      const code = shown2 ? String(el2.innerText || el2.textContent || "") : "";
       chars += code.length;
-      body2 = code.trim() ? keep(fenced(code, langOf(el))) : "";
+      body2 = code.trim() ? keep(fenced(code, langOf(el2))) : "";
     } else if (tag === "table") {
-      body2 = tableMarkdown(el, next);
+      body2 = tableMarkdown(el2, next);
     } else if (tag === "ul" || tag === "ol") {
-      body2 = list(el, next);
-    } else if (tag === "details" && !el.open) {
-      const summary = [...el.children].find((child) => child.localName === "summary");
+      body2 = list(el2, next);
+    } else if (tag === "details" && !el2.open) {
+      const summary = [...el2.children].find((child) => child.localName === "summary");
       body2 = summary ? render(summary, next) : "";
     } else {
-      body2 = children(el, { ...next, pre: keepsSpace });
+      body2 = children(el2, { ...next, pre: keepsSpace });
     }
-    if (found) found.item.name = nameOf3(el, oneLine(body2), found.secret);
-    const level = /^h([1-6])$/.exec(tag)?.[1] || (el.getAttribute("role") === "heading" ? el.getAttribute("aria-level") || "2" : "");
+    if (found) found.item.name = nameOf3(el2, oneLine(body2), found.secret);
+    const level = /^h([1-6])$/.exec(tag)?.[1] || (el2.getAttribute("role") === "heading" ? el2.getAttribute("aria-level") || "2" : "");
     if (level) {
       const title = oneLine(body2);
       return title ? `
@@ -43812,6 +44172,7 @@ function apply(ctx) {
       groups.dispose();
     };
   }, "ds-bot: surface");
+  ctx.effect(() => installSelfUpdateMock(), "ds-bot: self-update preview (issue 1540)");
 }
 return Object.defineProperty({ ...module.exports }, Symbol.toStringTag, { value: 'Module' })
   },
