@@ -460,8 +460,9 @@ nothing.
 
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
-`hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a
-**Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
+`hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
+A bot started by the pack as Claude Code, Codex, omp, pi or grok is told to set and clear it in its launch briefing.
+The sidebar draws a **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
 the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when

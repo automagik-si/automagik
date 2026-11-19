@@ -56,8 +56,9 @@ One scrolling column, `chrome` background, 13 px text.
   off only what it set.
 - **Needs-owner marker** (`rows.js` `ownerQuestionOf`): a stopped agent sets
   `automagik-herdr.needs-owner=<short text>` on its own pane with `hc label`, and clears it when
-  answered. The sidebar reads it from the one terminal snapshot it already takes (local and
-  linked machines), never by scanning a screen, and draws a **Question** chip while the pane is
+  answered. A bot started by the pack as Claude Code, Codex, omp, pi or grok is told to set and
+  clear it in its launch briefing. The sidebar reads it from the one terminal snapshot it already
+  takes (local and linked machines), never by scanning a screen, and draws a **Question** chip while the pane is
   live and not working, blocked or failed, so the chip clears when the agent works again even
   before the label is removed. A pane that exited or left the snapshot, or a label past the
   pack's stale window (tidy.js's `needsOwnerStale`: a day), draws none.

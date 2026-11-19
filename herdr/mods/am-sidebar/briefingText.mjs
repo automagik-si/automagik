@@ -25,6 +25,16 @@ export const MESSAGE_LINE = "Messages: send a task, a result or a blocker. Never
   + "acknowledgement, a \"holding\" or a status-only note. Read another bot's state with `am brief` or "
   + "`hc get` instead of asking it.";
 
+const NEEDS_OWNER_KEY = "automagik-herdr.needs-owner";
+const OWNER_QUESTION_AGENTS = ["claude", "codex", "omp", "pi", "grok"];
+
+export const OWNER_QUESTION_LINE = "Waiting on the person: when you end your turn because only the person can unblock you "
+  + "(a question or a choice, not a permission prompt), ask it in your reply and also mark your own pane so the Herdr "
+  + "sidebar shows a Question, with a short paraphrase in single quotes and no apostrophe, e.g. "
+  + `\`hc label "$HC_TERMINAL_ID" '${NEEDS_OWNER_KEY}=Which release should ship?'\`. Clear it `
+  + `with \`hc label "$HC_TERMINAL_ID" ${NEEDS_OWNER_KEY}=\` as soon as you work again or the `
+  + "question is withdrawn. If HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+
 /** #1556: what a seat with a context threshold does when `am restart --due` asks for its handoff. */
 export const HANDOFF_LINE = "When `am` asks for your handoff, write it to the path its message names "
   + "(what is in flight, what waits on whom, and your next three actions) and end your turn; you will be "
@@ -238,7 +248,7 @@ export const restartLine = (botId) => `To restart you, the person runs \`am rest
  * `am brief`. The hook's once-only print compares this text, so it changes only
  * when the file does.
  */
-export function launchBriefingText({ self, file, guard = null, isGit = true, project = null, projects = null, lead: givenLead = null }) {
+export function launchBriefingText({ self, file, agent = self?.agent ?? null, guard = null, isGit = true, project = null, projects = null, lead: givenLead = null }) {
   const kind = self.kind === "main" ? "this project's main bot" : "a team member";
   const instructions = String(self.instructions ?? "");
   const shown = instructions.length > MAX_INSTRUCTIONS ? `${instructions.slice(0, MAX_INSTRUCTIONS)}… [cut at ${MAX_INSTRUCTIONS} characters]` : instructions;
@@ -249,7 +259,11 @@ export function launchBriefingText({ self, file, guard = null, isGit = true, pro
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) lines.push("Instructions:", shown.trim());
-  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE, liveLine(self.id), restartLine(self.id), ...handoffLines(self));
+  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE);
+  const showOwnerQuestion = OWNER_QUESTION_AGENTS.includes(agent);
+  const ownerQuestionIndex = lines.length;
+  if (showOwnerQuestion) lines.push(OWNER_QUESTION_LINE);
+  lines.push(liveLine(self.id), restartLine(self.id), ...handoffLines(self));
   const eff = self.kind === "member" || self.leadProject
     ? effectiveLead(file, self.id, { project, projects })
     : { lead: "", leadProject: null, leadBot: null, warning: null };
@@ -263,10 +277,16 @@ export function launchBriefingText({ self, file, guard = null, isGit = true, pro
     lines.push("", "Your team (bots that report to you, from .herdr/bots.json):");
     for (const m of team) lines.push(`- ${m.name} (bot ${m.id}${m.role ? `, ${m.role}` : ""})`);
   }
-  let text = [...lines, "</herdr-bot>"].join("\n");
+  lines.push("</herdr-bot>");
+  let text = lines.join("\n");
   if (text.length > BRIEFING_LIMIT) {
     const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
-    text = text.slice(0, BRIEFING_LIMIT - mark.length) + mark;
+    const end = BRIEFING_LIMIT - mark.length;
+    if (showOwnerQuestion && !text.slice(0, end).includes(OWNER_QUESTION_LINE)) {
+      lines.splice(ownerQuestionIndex, 1);
+      text = lines.join("\n");
+    }
+    if (text.length > BRIEFING_LIMIT) text = text.slice(0, end) + mark;
   }
   return text;
 }
