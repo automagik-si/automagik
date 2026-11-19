@@ -256,6 +256,9 @@ switch (words[0]) {
     break;
   }
   case "run": {
+    // state.runDelayBeforeMs: the answer waits that long before the terminal exists, so a call
+    // killed at its own timeout leaves no terminal behind (the other half of #1262).
+    if (state.runDelayBeforeMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.runDelayBeforeMs);
     const labels = {};
     let name = null, cwd = null, parent = null, outlive = false, on = null, noParent = false;
     let i = 1;
@@ -315,9 +318,18 @@ switch (words[0]) {
     // state.onRunWrite: { path, text }: a file edit that lands while this run happens.
     if (state.onRunWrite) writeFileSync(state.onRunWrite.path, state.onRunWrite.text);
     save();
+    // state.runDelayMs: the answer waits that long, as hc's own does for a template whose program
+    // never reports a status (its first-status wait). The terminal is saved before the wait, so a
+    // call killed at its own timeout still leaves the terminal behind (#1262). state.runDelayDone
+    // names a file holding one line when the fake got to its answer, never when it was killed.
+    if (state.runDelayMs) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.runDelayMs);
+      if (state.runDelayDone) appendLine(state.runDelayDone, name ?? "");
+    }
     // state.runNoAddress: the pane starts, but the answer carries no address.
     if (state.runNoAddress) { out({}); break; }
-    out({ address });
+    // state.runFirstMessage: hc's first_message on a template run (what it delivered, or why not).
+    out({ address, ...(state.runFirstMessage ? { first_message: state.runFirstMessage } : {}) });
     break;
   }
   case "send": {
