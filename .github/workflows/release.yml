@@ -188,10 +188,10 @@ jobs:
       sha: ${{ steps.cut.outputs.sha }}
       lane: ${{ steps.lane.outputs.kind }}
       herdr: ${{ steps.lane.outputs.herdr }}
-      pocket: ${{ steps.lane.outputs.pocket }}
+      pocket: ${{ steps.cut.outputs.pocket }}
       pocket_since: ${{ steps.lane.outputs.pocket_since }}
       am_sign: ${{ steps.amkey.outputs.sign }}
-      meter: ${{ steps.lane.outputs.meter }}
+      meter: ${{ steps.cut.outputs.meter }}
       meter_sign: ${{ steps.meterkey.outputs.sign }}
     env:
       DO_NOT_TRACK: '1'
@@ -389,7 +389,9 @@ jobs:
           KIND: ${{ steps.lane.outputs.kind }}
           HERDR: ${{ steps.lane.outputs.herdr }}
           POCKET: ${{ steps.lane.outputs.pocket }}
+          POCKET_SINCE: ${{ steps.lane.outputs.pocket_since }}
           METER: ${{ steps.lane.outputs.meter }}
+          METER_SINCE: ${{ steps.lane.outputs.meter_since }}
           # A re-cut re-runs the signing-key gates on the new tip: they read the key lists, which a
           # merge in the window can change, so the same secrets the key-check steps got are here.
           HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
@@ -459,8 +461,8 @@ jobs:
           SHA: ${{ steps.cut.outputs.sha }}
           KIND: ${{ steps.lane.outputs.kind }}
           HERDR: ${{ steps.lane.outputs.herdr }}
-          POCKET: ${{ steps.lane.outputs.pocket }}
-          METER: ${{ steps.lane.outputs.meter }}
+          POCKET: ${{ steps.cut.outputs.pocket }}
+          METER: ${{ steps.cut.outputs.meter }}
         run: |
           set -euo pipefail
           notes="\`@automagik/acp-dsh\`, \`@automagik/bots-dsh\`, \`@automagik/locale-pt-br-dsh\`, \`@automagik/welcome-dsh\` for DeepSeek Harness, and the Automagik desktop app. Install the plugins from the [Automagik market](https://github.com/automagik-si/dsh-marketplace) or from an Omni's own market; \`plugins.json\` lists each tarball's integrity. The desktop builds follow when they are done."

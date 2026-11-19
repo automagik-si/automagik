@@ -14,7 +14,8 @@
 # after the bounded attempts -- a dev that keeps moving -- the run steps aside cleanly with the last
 # attempt's version and no tag.
 #
-# Environment (the lane's decision): KIND, HERDR, POCKET, METER, GITHUB_OUTPUT.
+# Environment (the lane's decision): KIND, HERDR, POCKET, POCKET_SINCE, METER, METER_SINCE.
+# GITHUB_OUTPUT receives the version, SHA and effective build flags after a successful push.
 #   RELEASE_CUT_ATTEMPTS  whole attempts, default 3 (1 turns the retry off)
 #   RELEASE_GATES         the gates command, default "bash scripts/release-gates.sh" (a test's own)
 set -euo pipefail
@@ -41,6 +42,37 @@ lane_value() {
   sed -n "s/^$1=//p" "$2" | head -1
 }
 
+# A pointer can advance while the gates run. It nominates a baseline for the existing shipping
+# predicate only after a direct lookup confirms the local tag names a published stable release.
+# An uncertain read keeps the gated build. A pointer posted after this check can still race.
+build_is_covered() {
+  local part="$1" since="$2" asset="$3" field="$4"
+  local quoted_version tag newest ships
+  local version_pattern='^"3\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})"$'
+  local baseline_pattern='^v3\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
+  [[ -n "${GITHUB_REPOSITORY:-}" ]] || return 1
+  # Keep the JSON quotes so command substitution cannot strip newlines from the version.
+  quoted_version=$(timeout --kill-after=5s 20s gh release download "${part}-lane" --repo "${GITHUB_REPOSITORY}" -p "${asset}" -O - 2>/dev/null \
+    | jq -cse --arg field "${field}" 'select(length == 1) | .[0][$field]' 2>/dev/null) || return 1
+  [[ "${quoted_version}" =~ ${version_pattern} && "${KIND}" != "${part}" ]] || return 1
+  tag="v${quoted_version:1:-1}"
+  if [[ -n "${since}" ]]; then
+    [[ "${since}" =~ ${baseline_pattern} && "${tag}" != "${since}" ]] || return 1
+    newest=$(printf '%s\n' "${since}" "${tag}" | LC_ALL=C sort -V | tail -n 1) || return 1
+    [[ "${newest}" == "${tag}" ]] || return 1
+  fi
+  git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" >/dev/null || return 1
+  timeout --kill-after=5s 20s gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>/dev/null \
+    | jq -se --arg tag "${tag}" 'length == 1 and (.[0] |
+        .tag_name == $tag and .draft == false and .prerelease == false and
+        (.published_at | fromdateiso8601 | type == "number"))' >/dev/null 2>&1 || return 1
+  ships=$(bun scripts/lane.ts "${part}" "${tag}") || return 1
+  [[ "${ships}" == no ]] || return 1
+  echo "::notice::${part}-lane advanced to ${tag} and covers this checkout; skipping the ${part} build for this attempt"
+}
+
+pocket_since="${POCKET_SINCE-unknown}"
+meter_since="${METER_SINCE-unknown}"
 version=''
 for (( attempt = 1; attempt <= attempts; attempt++ )); do
   if (( attempt > 1 )); then
@@ -65,6 +97,8 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
       echo "::notice::dev moved on while this run cut v${previous} and changed the lane, so the run for the newer merge releases these changes too"
       exit 0
     fi
+    pocket_since=$(lane_value pocket_since "${lane_file}")
+    meter_since=$(lane_value meter_since "${lane_file}")
     rm -f "${lane_file}"
     echo "::notice::dev moved on while this run cut v${previous}; re-cutting on the new tip (attempt ${attempt} of ${attempts})"
     # The new tip's tree, on which this attempt's tag will name the release commit. The signing-key
@@ -75,6 +109,16 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
       trap 'rm -f "${recheck_output}"' EXIT
       GITHUB_OUTPUT="${recheck_output}" "${gates_cmd[@]}" all "${KIND}" "${HERDR}" "${POCKET}" "${METER}"
     )
+  fi
+
+  # Start each attempt with its gate inputs. A rejected push discards this checkout's decision.
+  pocket="${POCKET}"
+  meter="${METER}"
+  if [[ "${POCKET}" == yes ]] && build_is_covered pocket "${pocket_since}" latest.json versionName; then
+    pocket=no
+  fi
+  if [[ "${METER}" == yes ]] && build_is_covered meter "${meter_since}" meter.json version; then
+    meter=no
   fi
 
   version=$(next_version)
@@ -92,8 +136,12 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
   # commit dev never got (v3.5.0 did, on 2026-10-25). That is the race this retries; after the
   # bounded attempts the newer merge's own queued run releases these changes with it.
   if git push -q --atomic origin HEAD:refs/heads/dev "refs/tags/v${version}"; then
-    echo "version=${version}" >> "${GITHUB_OUTPUT}"
-    echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+    {
+      echo "version=${version}"
+      echo "sha=$(git rev-parse HEAD)"
+      echo "pocket=${pocket}"
+      echo "meter=${meter}"
+    } >> "${GITHUB_OUTPUT}"
     exit 0
   fi
   git fetch -q origin dev
