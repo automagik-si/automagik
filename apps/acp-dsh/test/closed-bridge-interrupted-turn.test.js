@@ -207,7 +207,15 @@ test('#1575: a prompt cancelled from outside the app ends as interrupted, not as
   // The host's SIGTERM reached the agent as it stopped: the app did not ask for this cancel.
   const h = host(t, { hostStopping: () => true })
   const reading = h.step([user('hang')])
-  await until(() => h.live()?.run?.prompting !== undefined, 'the prompt to be in flight')
+  // The agent must have taken the prompt before the cancel reaches it. The fake agent (like a
+  // real CLI) starts each prompt by clearing its cancel flag, so a cancel that wins the race
+  // against the prompt's own start is cleared again and the prompt waits forever: `prompting`
+  // is set when the adapter writes the request, before the agent has read it. The trace's
+  // `prompt` entry is written once the agent has cleared the flag and begun the turn.
+  await until(
+    () => h.live()?.run?.prompting !== undefined && h.events().some(event => event.event === 'prompt'),
+    'the prompt to be in flight at the agent',
+  )
   // The agent is asked to cancel on the wire, as a CLI that took its host's SIGTERM does; the
   // adapter did not ask for this cancel.
   await h.live().run.conn.cancel({ sessionId: h.live().run.sessionId })
