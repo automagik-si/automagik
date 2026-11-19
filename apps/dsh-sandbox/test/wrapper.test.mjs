@@ -16,6 +16,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import net from 'node:net';
@@ -51,6 +52,7 @@ import {
   proxyEnvironment,
   REAL_SOCKET,
   RELAY_FLAG,
+  runtimeSocketPaths,
   splitRunnerArgs,
   startEgressBroker,
   startRelay,
@@ -200,15 +202,27 @@ function bwrapRan(fixture) {
 }
 
 /**
- * Drop the host-dependent container masks by shape, so a CLI test never stats a live path.
- * Their exact targets are asserted only by the pure-helper tests with an explicit fake list.
+ * Drop host-dependent /dev/null binds by shape and tmpfs mounts only at resolved fixed paths.
+ * The pure-helper tests assert the exact socket mount targets using fixture paths.
  * `keep` holds one real `--bind /dev/null` target to compare (the ~/.ssh file case).
  */
 function withoutContainerBinds(args, keep = null) {
+  const fixedPaths = new Set();
+  for (const path of runtimeSocketPaths(process.getuid())) {
+    try {
+      fixedPaths.add(realpathSync.native(path));
+    } catch {
+      // The wrapper also skips missing or unreadable paths.
+    }
+  }
   const kept = [];
   for (let at = 0; at < args.length; at += 1) {
     if (args[at] === '--bind' && args[at + 1] === '/dev/null' && args[at + 2] !== keep) {
       at += 2;
+      continue;
+    }
+    if (args[at] === '--tmpfs' && fixedPaths.has(args[at + 1])) {
+      at += 1;
       continue;
     }
     kept.push(args[at]);
@@ -917,6 +931,207 @@ test('an egress folder that is missing or not absolute fails closed', () => {
   });
   assert.match(absent.fatal, /egress folder .* is not a readable folder/);
   assert.equal(relative.netns, false);
+});
+
+test('the default fixed socket list masks CRI-O, K3s containerd, ttrpc and BuildKit paths', () => {
+  const fixture = makeFixture({ ssh: 'missing' });
+  const paths = [
+    '/var/run/crio/crio.sock',
+    '/run/crio/crio.sock',
+    '/run/k3s/containerd/containerd.sock',
+    '/run/containerd/containerd.sock.ttrpc',
+    '/run/buildkit/buildkitd.sock',
+  ];
+  const defaults = new Map(paths.map((path, index) => [path, join(fixture.root, `runtime-${index}`)]));
+  const targets = new Set(defaults.values());
+  const statCalls = [];
+  const result = maskArgs(RUNNER_ARGS, {
+    [SWITCH]: '1', HOME: fixture.home, [REAL_SOCKET]: fixture.real, [PROXY_SOCKET]: fixture.proxy,
+  }, {
+    uid: 1000,
+    egressDir: fixture.egress,
+    realpath(path) {
+      if (defaults.has(path)) return defaults.get(path);
+      if (path.startsWith(`${fixture.root}/`) || path === WRAPPER) return realpathSync.native(path);
+      throw new Error(`no fixture for ${path}`);
+    },
+    stat(path) {
+      if (!targets.has(path)) return statSync(path);
+      statCalls.push(path);
+      return { isDirectory: () => false };
+    },
+  });
+  assert.equal(result.fatal, null);
+  assert.deepEqual(statCalls, [...targets]);
+  const separator = result.args.indexOf('--');
+  assert.deepEqual(result.args.slice(separator - 3 * paths.length, separator),
+    [...targets].flatMap((target) => ['--bind', '/dev/null', target]));
+});
+
+test('fixed and env-named sockets share canonical masks in fixed-then-env order', () => {
+  const fixture = makeFixture({ ssh: 'missing' });
+  const fixed = join(fixture.root, 'docker.sock');
+  const docker = join(fixture.root, 'docker-alias.sock');
+  const container = join(fixture.root, 'podman.sock');
+  const agent = join(fixture.root, 'agent.sock');
+  const agentLink = join(fixture.root, 'agent-alias.sock');
+  writeFileSync(fixed, '');
+  symlinkSync('docker.sock', docker);
+  mkdirSync(container);
+  writeFileSync(agent, '');
+  symlinkSync('agent.sock', agentLink);
+
+  const result = pureMask(fixture, {
+    DOCKER_HOST: `unix://${docker}`,
+    CONTAINER_HOST: `unix://${container}`,
+    SSH_AUTH_SOCK: agentLink,
+  }, { containerSockets: [fixed] });
+  assert.equal(result.fatal, null);
+  const first = result.args.indexOf(fixed) - 2;
+  assert.deepEqual(result.args.slice(first, result.args.indexOf('--')), [
+    '--bind', '/dev/null', fixed,
+    '--tmpfs', container,
+    '--bind', '/dev/null', agent,
+  ]);
+
+  const envOnly = pureMask(fixture, { DOCKER_HOST: `unix://${docker}`, SSH_AUTH_SOCK: agent });
+  assert.equal(envOnly.fatal, null);
+  assert.deepEqual(envOnly.args.slice(envOnly.args.indexOf('--') - 6, envOnly.args.indexOf('--')), [
+    '--bind', '/dev/null', fixed,
+    '--bind', '/dev/null', agent,
+  ]);
+});
+
+test('TCP, SSH, named-pipe and relative hosts and missing or relative agents add no masks', () => {
+  const fixture = makeFixture({ ssh: 'missing' });
+  const baseline = pureMask(fixture);
+  assert.equal(baseline.fatal, null);
+  for (const env of [
+    { DOCKER_HOST: 'tcp://127.0.0.1:2375', SSH_AUTH_SOCK: join(fixture.root, 'missing.sock') },
+    { DOCKER_HOST: 'ssh://host', SSH_AUTH_SOCK: 'relative-agent.sock' },
+    { DOCKER_HOST: 'npipe:////./pipe/docker_engine', CONTAINER_HOST: 'unix://relative.sock' },
+  ]) {
+    assert.deepEqual(pureMask(fixture, env), baseline, JSON.stringify(env));
+  }
+});
+
+test('a socket path covering a protected path is fatal, even through an alias', () => {
+  const fixture = makeFixture({ ssh: 'symlink' });
+  const parent = join(fixture.root, 'automagik-herdr');
+  const packRoot = join(parent, 'dsh-sandbox');
+  mkdirSync(packRoot, { recursive: true });
+  const alias = join(fixture.root, 'socket-alias');
+  for (const path of ['/', fixture.coreDir, fixture.proxyRoot, fixture.egress, realpathSync.native(WRAPPER),
+    parent, realpathSync.native(fixture.ssh)]) {
+    symlinkSync(path, alias);
+    const result = pureMask(fixture, { SSH_AUTH_SOCK: alias }, { packRoot });
+    assert.equal(result.fatal, `the socket path ${alias} would cover ${path}: refusing`);
+    assert.deepEqual(result.args, RUNNER_ARGS);
+    unlinkSync(alias);
+  }
+  const fixed = pureMask(fixture, {}, { containerSockets: [fixture.root] });
+  assert.equal(fixed.fatal, `the socket path ${fixture.root} would cover ${fixture.coreDir}: refusing`);
+});
+
+test('endpoints inside either masked runtime folder are already hidden', () => {
+  const fixture = makeFixture();
+  writeFileSync(fixture.real, '');
+  writeFileSync(fixture.proxy, '');
+  const hidden = join(fixture.coreDir, '..state');
+  mkdirSync(hidden);
+  const baseline = pureMask(fixture);
+  assert.equal(baseline.fatal, null);
+  for (const path of [fixture.real, hidden, fixture.proxy]) {
+    assert.deepEqual(pureMask(fixture, { SSH_AUTH_SOCK: path }), baseline, path);
+  }
+});
+
+test('a symlink to the runtime folder keeps the client path and mounts at the canonical folder', () => {
+  const fixture = makeFixture({ ssh: 'missing' });
+  const alias = join(fixture.root, 'alias');
+  symlinkSync('core', alias);
+  const result = pureMask(fixture, { [REAL_SOCKET]: join(alias, 'default.sock') }, {
+    stat: (path) => (path === fixture.proxy ? { isSocket: () => true } : statSync(path)),
+  });
+  const inside = join(fixture.coreDir, EGRESS_DIR_NAME);
+  assert.equal(result.fatal, null);
+  assert.deepEqual(result.args, [
+    ...PROFILE_ARGS,
+    NETNS_FLAG,
+    '--tmpfs', fixture.coreDir,
+    '--bind', fixture.proxy, fixture.real,
+    '--tmpfs', fixture.proxyRoot,
+    '--dir', inside,
+    '--bind', fixture.egress, inside,
+    '--bind', realpathSync.native(WRAPPER), join(inside, EGRESS_RELAY_NAME),
+    '--symlink', 'core', alias,
+    '--', ...relayArgs(fixture),
+  ]);
+});
+
+test('a runtime folder resolves symlinks before dot-dot components', () => {
+  const fixture = makeFixture();
+  const child = join(fixture.coreDir, 'child');
+  mkdirSync(child);
+  const alias = join(fixture.root, 'alias');
+  symlinkSync(child, alias);
+  const result = pureMask(fixture, { [REAL_SOCKET]: `${alias}/../default.sock` });
+  assert.equal(result.fatal, null);
+  assert.deepEqual(result.args.slice(PROFILE_ARGS.length, PROFILE_ARGS.length + 3),
+    [NETNS_FLAG, '--tmpfs', fixture.coreDir]);
+});
+
+test('a real socket path linked outside the runtime folder is fatal', () => {
+  const fixture = makeFixture();
+  const target = join(fixture.root, 'outside.sock');
+  writeFileSync(target, '');
+  symlinkSync(target, fixture.real);
+  const result = pureMask(fixture);
+  assert.equal(result.fatal,
+    `the real core socket ${fixture.real} is a link to ${target} outside its folder: the mask cannot hide it`);
+});
+
+test('the canonical core and shared proxy folders cannot contain each other', () => {
+  const fixture = makeFixture();
+  const alias = join(fixture.root, 'alias');
+  symlinkSync(fixture.proxyDir, alias);
+  const inProxy = pureMask(fixture, { [REAL_SOCKET]: join(alias, 'default.sock') });
+  assert.match(inProxy.fatal, /the proxy folder .* holds the real socket path/);
+
+  const shared = join(fixture.coreDir, 'shared');
+  mkdirSync(shared);
+  const host = join(fixture.root, 'host');
+  mkdirSync(host);
+  const proxyRoot = join(host, 'automagik-hc-proxy');
+  symlinkSync(shared, proxyRoot);
+  const inCore = pureMask(fixture, { [PROXY_SOCKET]: join(proxyRoot, 't7', 'pane.sock') });
+  assert.match(inCore.fatal, /the real core folder .* holds the proxy parent/);
+});
+
+test('the pack data parent cannot overlap either canonical masked runtime folder', () => {
+  for (const folder of ['core', 'shared']) {
+    for (const placement of ['above', 'inside']) {
+      const fixture = makeFixture();
+      const hidden = folder === 'core' ? fixture.coreDir : fixture.proxyRoot;
+      const parent = join(placement === 'above' ? fixture.root : hidden, 'automagik-herdr');
+      const packRoot = join(parent, 'dsh-sandbox');
+      mkdirSync(packRoot, { recursive: true });
+      const overrides = {};
+      if (placement === 'above') {
+        const canonical = join(parent, 'runtime');
+        mkdirSync(canonical);
+        const alias = join(fixture.root, 'alias');
+        mkdirSync(alias);
+        const link = join(alias, folder === 'core' ? 'core' : 'automagik-hc-proxy');
+        symlinkSync(canonical, link);
+        if (folder === 'core') overrides[REAL_SOCKET] = join(link, 'default.sock');
+        else overrides[PROXY_SOCKET] = join(link, 't7', 'pane.sock');
+      }
+      const result = pureMask(fixture, overrides, { packRoot });
+      assert.match(result.fatal, /the pack data parent .* overlaps the masked folder .*: refusing/,
+        `${folder}, ${placement}`);
+    }
+  }
 });
 
 test('the platform and the bwrap namespace check fail closed, never the host network', () => {
