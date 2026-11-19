@@ -541,7 +541,9 @@ var ZH = {
   "Account not shown by the CLI": "CLI 未显示账号",
   "Account change failed. Close other app windows and try again.": "无法更改账号。请关闭其他应用窗口后重试。",
   "Bot accounts": "Bot 账号",
+  "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
+  "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "这台电脑上的其他 Automagik 安装可能使用同一个 Bot 登录。在此更改会同时更改它们的登录。",
   "Your terminal login is separate and stays unchanged.": "终端的登录独立，保持不变。",
   "Bots: {account}": "Bot：{account}",
   "Sign in again in the app to resume Bots": "在应用内重新登录以恢复 Bot",
@@ -14892,20 +14894,35 @@ var APPLY_FAILED_MS = 8e3;
 // src/shared/cli-account.js
 var ACCOUNT_RECOVERY_CODE = "bot/account-recovery";
 var ACCOUNT_RECOVERY_HINT = "Bot sign-in recovery is needed. Reset Bot sign-in to start fresh.";
+var ACCOUNT_SHARING_HINT = "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.";
+var accountChangeFailure = (error) => error?.code === "bot/refused" && typeof error.message === "string" && error.message.trim() !== "" ? error.message : void 0;
+var installationNameOf = (value) => {
+  if (typeof value !== "string") return void 0;
+  const text2 = [...value].filter((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127).join("").trim();
+  return text2 === "" ? void 0 : [...text2].slice(0, 60).join("");
+};
 
 // src/client/cli-accounts.js
 var import_react38 = require("react");
 var botAccountName = (account) => account?.email ?? account?.org ?? t("Account not shown by the CLI");
 function CliAccounts({ bot, actions }) {
   const [accounts, setAccounts] = (0, import_react38.useState)({});
+  const [installation, setInstallation] = (0, import_react38.useState)(void 0);
   const [pending, setPending] = (0, import_react38.useState)(null);
   const [busy, setBusy] = (0, import_react38.useState)(false);
   const [error, setError] = (0, import_react38.useState)(null);
-  const refresh = async () => setAccounts((await actions.cliLoginAccounts?.())?.accounts ?? {});
+  const shown = (value) => {
+    setAccounts(value?.accounts ?? {});
+    setInstallation(value?.installation);
+  };
+  const refresh = async () => {
+    const value = await actions.cliLoginAccounts?.();
+    shown(value);
+  };
   (0, import_react38.useEffect)(() => {
     let alive = true;
     Promise.resolve(actions.cliLoginAccounts?.()).then((value) => {
-      if (alive) setAccounts(value?.accounts ?? {});
+      if (alive) shown(value);
     }).catch(() => {
     });
     return () => {
@@ -14918,7 +14935,7 @@ function CliAccounts({ bot, actions }) {
       const rows2 = Object.values(actions.cliLogin.getSnapshot().rows);
       if (!rows2.some((row) => row.stage === "done")) return;
       Promise.resolve(actions.cliLoginAccounts?.()).then((value) => {
-        if (alive) setAccounts(value?.accounts ?? {});
+        if (alive) shown(value);
       }).catch(() => {
       });
     });
@@ -14949,7 +14966,7 @@ function CliAccounts({ bot, actions }) {
           recoveryRequired: true
         } }));
         setPending(null);
-      } else setError(t("Account change failed. Close other app windows and try again."));
+      } else setError(accountChangeFailure(error2) ?? t("Account change failed. Close other app windows and try again."));
     } finally {
       setBusy(false);
     }
@@ -14960,7 +14977,13 @@ function CliAccounts({ bot, actions }) {
     "section",
     { className: "bt-set-section" },
     (0, import_react38.createElement)("h3", null, t("Bot accounts")),
+    installation ? (0, import_react38.createElement)(
+      "p",
+      { className: "bt-set-hint" },
+      t("This installation: {installation}", { installation })
+    ) : null,
     (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t("Bots in this installation share these accounts.")),
+    (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t(ACCOUNT_SHARING_HINT)),
     (0, import_react38.createElement)(
       "p",
       { className: "bt-set-hint" },
