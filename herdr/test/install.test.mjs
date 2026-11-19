@@ -2244,13 +2244,14 @@ test("--uninstall doesn't wait for a herdr-app status that never answers", (t) =
   const s = scratch(t);
   s.publish("9.9.0");
   assert.equal(s.run("--yes").code, 0);
-  writeFileSync(join(s.bin, "herdr-app"), "#!/bin/sh\nexec sleep 30\n");
+  // The status answer, written only if the fake runs the full 30 s: the bound must kill it first.
+  const answered = join(s.root, "herdr-app-answered");
+  writeFileSync(join(s.bin, "herdr-app"), `#!/bin/sh\nsleep 30\nprintf 'answered\\n' > "${answered}"\n`);
   chmodSync(join(s.bin, "herdr-app"), 0o755);
   s.extraEnv.AUTOMAGIK_HERDR_STATUS_SECONDS = "1";
-  const began = Date.now();
   const r = s.run("--uninstall");
   assert.equal(r.code, 0, r.err);
-  assert.ok(Date.now() - began < 20_000, "well under the fake's 30 s");
+  assert.equal(existsSync(answered), false, "the status bound killed herdr-app before it answered");
   assert.equal(existsSync(s.pack), false);
 });
 
@@ -3056,20 +3057,22 @@ test("--uninstall on macOS doesn't block on a command whose status never answers
   const lc = launchctlFake(s);
   assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
   const said = join(s.root, "cli.log");
+  // Written only if the fake runs the full 30 s: the probe's 3 s SIGKILL must stop it first, so
+  // a completed marker means the installer waited, and its absence is the causal proof that it
+  // did not. No elapsed budget decides this row.
+  const answered = join(s.root, "cli-answered");
   writeFileSync(said, "");
   exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
 printf '%s\\n' "$*" >> "${said}"
 case "$*" in
-  "revive service status --json") exec sleep 30 ;;
+  "revive service status --json") sleep 30; printf 'answered\\n' > "${answered}" ;;
 esac
 exit 0
 `);
   lc.set("gone");
-  const started = Date.now();
   const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
-  const took = Date.now() - started;
   assert.equal(u.code, 0, `the installer must not block on the command: ${u.out}${u.err}`);
-  assert.ok(took < 10_000, `the probe bounded the hung command (took ${took}ms)`);
+  assert.equal(existsSync(answered), false, "the probe bounded the hung command before it answered");
   assert.equal(existsSync(s.pack), false, "the pack leaves after the installer's own probe");
   assert.equal(existsSync(s.link), false, "the link leaves too");
   assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, "it treats no answer as no answer");

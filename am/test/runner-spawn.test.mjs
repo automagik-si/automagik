@@ -203,13 +203,13 @@ test("the scope gets MemoryMax and TasksMax, and the child enters cwd after the 
 
 test("a run past its timeout ends with SIGKILL and the timeout marker", async (t) => {
   const s = await serve(t);
-  const started = Date.now();
   const result = await run(s, ["/bin/sh", "-c", "sleep 5"], {}, { timeoutMs: 150 });
+  // The timeout's own report is the proof: a run that ignored the deadline would come back as a
+  // plain exit 0 from the 5 s sleep, never as a SIGKILL with timedOut set.
   assert.equal(result.exit.timedOut, true);
   assert.equal(result.exit.code, null);
   assert.equal(result.exit.signal, "SIGKILL");
   assert.equal(clientExit(result), 124);
-  assert.ok(Date.now() - started < 3000);
 });
 
 test("output past the cap is cut and the run is stopped", async (t) => {
@@ -308,9 +308,13 @@ test("a second shell over the concurrency cap is BUSY", async (t) => {
   const s = await serve(t, { config: { maxConcurrent: 1 } });
   const go = join(s.root, "go");
   const first = run(s, ["/bin/sh", "-c", `while [ ! -e ${go} ]; do sleep 0.1; done`], {}, { timeoutMs: 10000 });
-  for (let tries = 0; tries < 100 && s.bin.calls("systemd-run").length === 0; tries += 1) {
+  // A net, not the proof: the spawn call is the state awaited, and the BUSY answer below is the
+  // real evidence that the first run held the cap.
+  const until = Date.now() + 10_000;
+  while (s.bin.calls("systemd-run").length === 0 && Date.now() < until) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  assert.ok(s.bin.calls("systemd-run").length > 0, "the first run started before the second asks");
   const second = await run(s, ["/bin/sh", "-c", "true"]);
   assert.equal(second.error.code, "BUSY");
   writeFileSync(go, "");

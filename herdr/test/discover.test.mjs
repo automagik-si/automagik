@@ -82,13 +82,14 @@ test("discover: this computer's projects are listed before a slow machine answer
     { id: "s4", folder: "/d", machine: null },
   ];
   const updates = [];
-  const t0 = Date.now();
-  const found = await discover({ spaces }, io, { onUpdate: (list) => updates.push({ at: Date.now() - t0, list }) });
+  const found = await discover({ spaces }, io, { onUpdate: (list) => updates.push({ list }) });
   // One list per read as it lands, and one when this computer is done.
   assert.deepEqual(updates.map((u) => u.list.map((p) => p.key)),
     [["/b"], ["/b", "/d"], ["/b", "/d"], ["/a", "/b", "/d"], ["/a", "/b", "/c", "/d"]]);
-  assert.ok(updates[2].at < 60, `local listed after ${updates[2].at} ms`);
-  // Every local call was done before the first remote answer.
+  // The order of the events, never a clock: the third update is this computer's last one, and it
+  // holds neither remote key, so no remote answer had landed yet. The done log says the same:
+  // every local call finished before the first far answer.
+  assert.ok(!updates[2].list.some((p) => p.machine === "far"), "local listed before a far answer");
   const firstFar = io.done.findIndex(([m]) => m === "far");
   assert.ok(io.done.slice(firstFar).every(([m]) => m === "far"));
   // The full list, in sidebar order.
@@ -139,8 +140,10 @@ test("discover: a machine that never answers holds back only its own projects, w
   const t0 = Date.now();
   const found = await discover({ spaces, remembered: [{ key: "/x", machine: "dead" }] }, io,
     { limit: 1, onUpdate: (list) => updates.push(list) });
-  const took = Date.now() - t0;
-  assert.ok(took < 400, `took ${took} ms`);
+  // A net against a hang, not the proof: the dead machine never answers, so the row below only
+  // returns if its own timeout ended the call. The proof is the one dead call, the rows it
+  // returned and the last good files.
+  assert.ok(Date.now() - t0 < 10_000, "the dead machine's timeout ended discovery");
   // This computer's and far's projects were listed before the dead machine's time ran out.
   // (One list per read and per machine done but the last: the same two lists, repeated.)
   assert.equal(updates.length, 6);

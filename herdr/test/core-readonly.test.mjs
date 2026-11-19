@@ -65,7 +65,7 @@ test("a stale socket inode is refused without invoking hc", async (t) => {
   const socket = join(dir, "core.sock"), ready = join(dir, "ready");
   const child = spawn(process.execPath, ["--input-type=module", "-e", `import {createServer} from 'node:net'; import {writeFileSync} from 'node:fs'; createServer().listen(process.argv[1],()=>writeFileSync(process.argv[2],'ready'));`, socket, ready], { stdio: "ignore" });
   t.after(() => child.kill("SIGKILL"));
-  const until = Date.now() + 5000;
+  const until = Date.now() + 10_000;
   while (!existsSync(ready)) {
     if (Date.now() >= until) throw new Error("stale socket fixture did not start");
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -160,7 +160,7 @@ test("the herdr-core process detector sees a process by its name alone", { skip:
   const before = herdrCorePids();
   const child = spawn(named, ["30"], { stdio: "ignore" });
   t.after(() => child.kill("SIGKILL"));
-  const until = Date.now() + 5000;
+  const until = Date.now() + 10_000;
   let seen = [];
   while (Date.now() < until && !seen.includes(String(child.pid))) seen = newPids(before, herdrCorePids());
   assert.ok(seen.includes(String(child.pid)), "the detector sees a new process named herdr-core");

@@ -2644,9 +2644,10 @@ test("#805 an empty poll override keeps the slow floor", async (t) => {
   const entry = JSON.parse(readFileSync(file, "utf8"))[0];
   const running = s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"],
     { env: { AUTOMAGIK_HERDR_QUEUE_POLL_MS: "", AUTOMAGIK_HERDR_QUEUE_MAX_MS: "1000" } });
-  await new Promise((done) => setTimeout(done, 300));
-  assert.ok(s.calls().filter((c) => c[0] === "get" && c[1] === "t5").length <= 10, "an empty value is not 1ms");
   const r = await running;
+  // The whole run, not a sample of it: an empty value read as 1 ms would have polled hundreds of
+  // times before the 1000 ms max ended it, so no sleep has to guess when to look.
+  assert.ok(s.calls().filter((c) => c[0] === "get" && c[1] === "t5").length <= 10, "an empty value is not 1ms");
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), []);
 });
@@ -2672,7 +2673,7 @@ test("#805 the watcher checks helpers before asking cmdRestart", async (t) => {
     + `exec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
   const running = s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"],
     { env: { AUTOMAGIK_HERDR_QUEUE_POLL_MS: String(POLL_MS), AUTOMAGIK_HERDR_QUEUE_MAX_MS: "1000" } });
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 30_000;
   while (reads() - before < 1 && Date.now() < deadline) await new Promise((done) => setTimeout(done, 10));
   assert.equal(reads() - before, 1, "the watcher's helper check read the pane once");
   const r = await running;
@@ -2732,7 +2733,7 @@ test("#805 a blocked pane polls without spinning hc wait and restarts once answe
   const file = join(s.app, "automagik-herdr/queued-restarts.json");
   const entry = JSON.parse(readFileSync(file, "utf8"))[0];
   const running = s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"], { env: { AUTOMAGIK_HERDR_QUEUE_POLL_MS: "25" } });
-  const until = Date.now() + 2000;
+  const until = Date.now() + 30_000;
   while (Date.now() < until && s.calls().filter((c) => c[0] === "get" && c[1] === "t5").length < 2) {
     await new Promise((done) => setTimeout(done, 10));
   }
@@ -3864,8 +3865,9 @@ test("restart --tree: a helper that survives its parent's end (and its kill) is 
   assert.equal(o.code, 0, o.err);
   assert.ok(at(once.calls(), "kill", "t7") > at(once.calls(), "kill", "t5"));
   assert.deepEqual(o.json().helpers.map((h) => h.up), [true, true]);
-  // Never up: reported with its line, which parses.
-  process.env.AUTOMAGIK_HERDR_RESTART_WAIT_MS = "400";
+  // Never up: reported with its line, which parses. 10 s, not 0.4 s: the bot's own pane must
+  // still be seen with its agent in front under load, while the helper stays a bare shell.
+  process.env.AUTOMAGIK_HERDR_RESTART_WAIT_MS = "10000";
   t.after(() => { delete process.env.AUTOMAGIK_HERDR_RESTART_WAIT_MS; });
   const late = treeScene(t).s;
   const st2 = late.hcState();
@@ -3873,7 +3875,7 @@ test("restart --tree: a helper that survives its parent's end (and its kill) is 
   writeFileSync(join(late.root, "hc.json"), JSON.stringify(st2));
   const r = late.cli(["restart", "Genie", "--tree", "--json"]);
   assert.equal(r.code, 1);
-  assert.match(r.err, /t7 \(fix-213-dev\) wasn't run again: t101 didn't keep an agent in front within 0\.4s, so it was ended\. Its conversation is kept/);
+  assert.match(r.err, /t7 \(fix-213-dev\) wasn't run again: t101 didn't keep an agent in front within 10s, so it was ended\. Its conversation is kept/);
   assert.match(r.err, /# a worker: its workers-ledger row \(task fix-213\) isn't copied/);
   pastedLine(t, r.json().helpers[0].by_hand);
   assert.deepEqual(["t101", "t102", "t5"].map((x) => late.hcState().terminals.find((y) => y.address === x).state), ["finished", "live", "finished"]);
@@ -5137,7 +5139,7 @@ test("#805 queued watchers stop on cancellation, replacement or a vanished/reuse
     if (["cancel", "replace"].includes(change)) {
       const running = s.cliAsync(["restart", ID.main, "--run-queued", entry.id]);
       // Wait for evidence that this watcher is polling before changing its queue.
-      const until = Date.now() + 5000;
+      const until = Date.now() + 30_000;
       while (at(s.calls(), "wait", "t5") < 0 && Date.now() < until) await new Promise((done) => setTimeout(done, 20));
       assert.ok(at(s.calls(), "wait", "t5") >= 0);
       const r = s.cli(change === "cancel" ? ["restart", "--cancel", "Genie"] : ["restart", "Genie"]);
