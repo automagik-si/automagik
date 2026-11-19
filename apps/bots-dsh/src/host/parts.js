@@ -2485,7 +2485,7 @@ export function install(rt) {
 
   // A held route is never asked to generate a handoff. Keep the hold published until
   // the replacement state is on disk, and retain the earlier parts for reading.
-  async function leaveShellHold(bot, model, effort) {
+  async function leaveShellHold(bot, model, effort, entry = 'switch-route') {
     if (rt.pickingModel?.(bot.id)) throw refused('busy', `${bot.name} is already changing models.`)
     if (rt.hostOwned?.(bot) || ![undefined, 'omni', 'genie', 'dsh'].includes(bot.kind)) {
       throw refused('shell', 'Turn on this Bot’s shell to continue using its host’s model.')
@@ -2502,7 +2502,13 @@ export function install(rt) {
         }
       }
       check()
-      const target = await rt.resolveModel(model, { remember: false, keep: bot.model })
+      let target
+      try {
+        target = await rt.resolveModel(model, { remember: false, keep: bot.model })
+      } catch (error) {
+        routeUnavailable(bot, model, entry, error)
+        throw error
+      }
       const route = splitRef(target)
       if (route === undefined || commandCapableAgent(target)) throw refused('shell', shellHoldText(bot))
       await rt.assertModelAccess?.(target)
@@ -2599,6 +2605,16 @@ export function install(rt) {
     })
   }
 
+  // A missing model can stop a crossing before the usual route checks run.
+  function routeUnavailable(bot, requested, entry, error) {
+    if (error?.modelUnavailable !== true) return
+    const from = bot.model ?? bot.appliedModel
+    const wanted = String(requested ?? '').trim()
+    if (typeof from === 'string' && splitRef(wanted)?.model && crossesHarness(from, wanted)) {
+      routeAttempt(bot, from, wanted, entry)('refused', 'not available')
+    }
+  }
+
   async function resolveRouteAgent(bot, note) {
     try {
       const agent = await rt.resolveAgent(rt.chatOf(bot.id))
@@ -2627,7 +2643,7 @@ export function install(rt) {
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
     if (bot.shellHeld !== undefined) {
       if (commandCapableAgent(model)) throw refused('shell', shellHoldText(bot))
-      return leaveShellHold(bot, model, effort)
+      return leaveShellHold(bot, model, effort, entry)
     }
     const current = bot.model ?? bot.appliedModel
     const note = routeAttempt(bot, current, model, entry)
@@ -2980,7 +2996,7 @@ export function install(rt) {
     return true
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
     // A fresh part still waiting for its first answer: its failure goes back with the part.
     awaitingFirstAnswer: id => awaiting.has(id) })
 }

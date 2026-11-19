@@ -627,16 +627,24 @@ export function install(rt) {
     const flag = patch.private === undefined ? undefined : patch.private === true
     await rt.checkPrivacyChange(bot, { flag, moving, workDir })
     const held = bot.shellHeld !== undefined
+    const entry = actorId === undefined ? 'update-bot' : 'update_bot'
     if (held && patch.shell !== true && (patch.model !== undefined || patch.effort !== undefined)) {
       if (actorId !== undefined || !patch.model || commandCapableAgent(patch.model)) throw refusal(shellHoldText(bot))
       const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
       if (extra.length > 0) throw refusal(`${bot.name} needs a new route, so change only its model in this step.`)
-      await rt.switchRoute(bot.id, patch.model, patch.effort)
+      await rt.switchRoute(bot.id, patch.model, patch.effort, { entry })
       return bot
     }
-    const modelRef = patch.model === undefined ? undefined
-      : patch.model === null || patch.model === '' ? null
-      : await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+    let modelRef = patch.model === '' ? null : patch.model
+    if (modelRef != null) {
+      try {
+        modelRef = await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+      } catch (error) {
+        // Resolution can refuse before the crossing check below.
+        rt.routeUnavailable?.(bot, patch.model, entry, error)
+        throw error
+      }
+    }
     // The shell and the model are one boundary: a Bot without a shell cannot run on an
     // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
     const nextShell = shell === undefined ? bot.shell : shell
@@ -661,7 +669,6 @@ export function install(rt) {
     // own step, and the caller can update them after it.
     const currentModel = bot.model ?? bot.appliedModel
     if (modelRef != null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
-      const entry = actorId === undefined ? 'update-bot' : 'update_bot'
       // The host owns a pinned chat. Refuse before even resolving its agent, including
       // mixed edits whose permission validation could otherwise open that Session.
       if (bot.sessionPinned !== true) {
