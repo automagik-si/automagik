@@ -16,7 +16,13 @@
  *                  commits all touch only handoffs/ or docs/ is report-only: those files are
  *                  copied into --preserve before the copy goes. A symlink is carried as a link,
  *                  never as its target's bytes. FIFOs, sockets and devices cannot be carried, so
- *                  a copy that holds one is kept and the path and kind are named
+ *                  a copy that holds one is kept and the path and kind are named. Two refs that
+ *                  disagree about a path keep the copy instead of letting the visit order pick
+ *                  a side: a file on one ref where another needs a directory (or anything below
+ *                  that path), the same path with a different mode, or the same path with
+ *                  different bytes at the same commit time all name the path and both refs. The
+ *                  rule is order-independent; identical bytes and mode at the same path are one
+ *                  fact and need no choice
  *   3. idle        nothing in the copy changed in the last --idle-minutes (default 30)
  *   4. unlocked    no `*.lock` file anywhere under the copy's git dir or common dir
  *
@@ -257,15 +263,27 @@ function existingCommits(copy, shas) {
 }
 
 /**
- * Every local ref that resolves to a commit, plus HEAD itself; null on failure. Everything under
- * `refs/` counts, so a stash, a note and a replace ref cannot hide unpublished work, except
- * `refs/remotes/*`: those are cached copies of an earlier remote answer, not the remote's current
- * advertisement. Trusting one could hide a commit the remote no longer has, and one cannot hold
- * work that exists only locally, so it is neither proof of publication nor lost work.
+ * Every local ref that resolves to a commit, plus HEAD itself; `{ error }` on failure or on a
+ * ref that does not resolve to a commit. Everything under `refs/` counts, so a stash, a note and
+ * a replace ref cannot hide unpublished work, except `refs/remotes/*`: those are cached copies of
+ * an earlier remote answer, not the remote's current advertisement. Trusting one could hide a
+ * commit the remote no longer has, and one cannot hold work that exists only locally, so it is
+ * neither proof of publication nor lost work. A dangling ref (or one pointing at a tree or blob)
+ * was silently skipped before, which let a copy whose only trace of work was that ref be removed;
+ * it now keeps the copy as a read failure.
  */
 function localRefs(copy, head) {
   const listed = runGit(copy, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/']);
-  if (!listed.ok) return null;
+  if (!listed.ok) return { error: listed.err || 'local refs cannot be listed' };
+  // `for-each-ref` drops a ref whose object is missing and warns on stderr. A ref that cannot
+  // be resolved is a ref whose work cannot be read, so the copy is kept rather than skipped.
+  // `refs/remotes/*` stays cache even when it is broken: it is not local work.
+  const broken = [...listed.err.matchAll(/ignoring broken ref (\S+)/g)]
+    .map((match) => match[1])
+    .filter((ref) => !ref.startsWith('refs/remotes/'));
+  if (broken.length) {
+    return { error: `ref ${broken[0]} does not resolve to a commit` };
+  }
   const refs = [];
   const seen = new Set();
   for (const line of listed.out.split('\n')) {
@@ -273,13 +291,19 @@ function localRefs(copy, head) {
     if (!ref || !sha) continue;
     if (ref.startsWith('refs/remotes/')) continue;
     const commit = runGit(copy, ['rev-parse', '--verify', `${ref}^{commit}`]);
-    if (!commit.ok) continue; // a ref to a tree, blob or missing object carries no commits
+    if (!commit.ok) {
+      // A ref can exist and point at a tree or a blob; that is still not readable as commits.
+      const object = runGit(copy, ['rev-parse', '--verify', ref]);
+      const type = object.ok ? runGit(copy, ['cat-file', '-t', object.out]) : null;
+      const kind = type?.ok ? ` (it points to a ${type.out})` : '';
+      return { error: `ref ${ref} does not resolve to a commit${kind}` };
+    }
     if (seen.has(ref)) continue;
     seen.add(ref);
     refs.push({ ref, sha: commit.out });
   }
   refs.push({ ref: 'HEAD', sha: head });
-  return refs;
+  return { refs };
 }
 
 /** Commits reachable from `sha` that no advertised commit reaches; null on failure. */
@@ -531,25 +555,89 @@ function classifyPreserved(copy, preserved) {
   return { files };
 }
 
+/** The ref (or working tree) a preserve entry came from, for naming a conflict. */
+function preservedSource(item) {
+  if (item.source === 'worktree') return 'the working tree';
+  return item.ref ?? 'HEAD';
+}
+
+/** A stable order for two preserve entries: path first, then the ref that carries it. */
+function preserveOrder(a, b) {
+  if (a.path !== b.path) return a.path < b.path ? -1 : 1;
+  const left = preservedSource(a);
+  const right = preservedSource(b);
+  return left === right ? 0 : left < right ? -1 : 1;
+}
+
 /**
- * A preserved symlink cannot also carry preserved paths below it: one ref may hold a link where
- * another holds a directory. Carrying both would write through the link, so the copy is kept.
+ * One preserved path cannot also be a file (or a symlink) with paths below it: one ref may hold
+ * a regular file where another holds a directory and a file inside it. Writing both made the
+ * outcome depend on which ref was visited first -- usually the child's bytes were deleted by
+ * removeAt to make room for the file, but the reverse order failed with EEXIST -- so the copy is
+ * kept and both refs are named instead. The rule is order-independent: entries are sorted by
+ * path and ref, and any non-directory entry whose path is a prefix of another entry's path is a
+ * conflict, no matter how the refs are named or visited. Identical bytes at the same path are
+ * not a conflict (they are one fact); a same path with a different mode is handled by
+ * preservedWinner, which keeps the copy too. An empty directory is a directory, so a file may be
+ * written below it.
  */
 function preserveConflict(files) {
-  for (const link of files) {
-    if (link.kind !== 'symlink') continue;
-    const below = files.find((file) => file !== link && file.path.startsWith(`${link.path}/`));
-    if (below) return { path: link.path, other: below.path };
-    const above = files.find((file) => file !== link && link.path.startsWith(`${file.path}/`));
-    if (above) return { path: link.path, other: above.path };
+  const sorted = [...files].sort(preserveOrder);
+  for (let index = 0; index < sorted.length; index += 1) {
+    const ancestor = sorted[index];
+    for (let next = index + 1; next < sorted.length; next += 1) {
+      const descendant = sorted[next];
+      if (descendant.path === ancestor.path) {
+        if (descendant.kind === ancestor.kind) continue;
+        return { path: ancestor.path, other: ancestor.path, ref: preservedSource(ancestor),
+          otherRef: preservedSource(descendant), kind: ancestor.kind,
+          otherKind: descendant.kind };
+      }
+      if (!descendant.path.startsWith(`${ancestor.path}/`)) continue;
+      if (ancestor.kind === 'dir') continue;
+      return { path: ancestor.path, other: descendant.path, ref: preservedSource(ancestor),
+        otherRef: preservedSource(descendant), kind: ancestor.kind,
+        otherKind: descendant.kind };
+    }
   }
   return null;
+}
+
+/** Name a preserve conflict so both the path and the two refs appear in the detail. */
+function describePreserveConflict(conflict) {
+  if (conflict.kind === 'content') {
+    return `${conflict.path} differs between ${conflict.ref} and ${conflict.otherRef} ` +
+      'at the same commit time';
+  }
+  if (conflict.mode) {
+    return `${conflict.path} has mode ${conflict.mode} on ${conflict.ref} and mode ` +
+      `${conflict.otherMode} on ${conflict.otherRef}`;
+  }
+  if (conflict.other === conflict.path) {
+    return `${conflict.path} is a ${conflict.kind} on ${conflict.ref} and a ` +
+      `${conflict.otherKind} on ${conflict.otherRef}`;
+  }
+  return `${conflict.path} is a ${conflict.kind} on ${conflict.ref}, but ` +
+    `${conflict.otherRef} needs a directory there for ${conflict.other}`;
+}
+
+/** The two sides of a same-path conflict, sorted by ref so the wording is order-independent. */
+function modeConflict(path, current, a, candidate, b) {
+  const sides = [
+    { ref: preservedSource(current), mode: a.mode },
+    { ref: preservedSource(candidate), mode: b.mode },
+  ].sort((left, right) => (left.ref === right.ref ? 0 : left.ref < right.ref ? -1 : 1));
+  return { path, ref: sides[0].ref, mode: sides[0].mode,
+    otherRef: sides[1].ref, otherMode: sides[1].mode };
 }
 
 /**
  * A preserved path may be changed by commits on two different local refs. Carrying whichever was
  * visited last would silently choose one, so the newest committer time wins; equal times with
- * different bytes are ambiguous and the caller keeps the copy instead.
+ * different bytes are ambiguous and the caller keeps the copy instead. Identical bytes and mode
+ * need no choice. A different mode at the same path is a conflict like a file-versus-directory
+ * one: it is kept with both refs named rather than silently picking the mode of the last ref
+ * visited, whatever the commit times say.
  */
 function preservedWinner(copy, current, candidate) {
   const a = treeEntryAt(copy, current.sha, current.path);
@@ -557,7 +645,11 @@ function preservedWinner(copy, current, candidate) {
   if (a.error) return { error: a.error };
   if (b.error) return { error: b.error };
   if (a.missing && b.missing) return { item: current };
-  if (a.object !== undefined && a.object === b.object) return { item: current };
+  const both = a.object !== undefined && b.object !== undefined;
+  if (both && a.mode !== b.mode) {
+    return { conflict: modeConflict(current.path, current, a, candidate, b) };
+  }
+  if (both && a.object === b.object) return { item: current };
   const ta = commitTime(copy, current.sha);
   if (ta === null) return { error: `cannot read the commit time of ${current.sha.slice(0, 12)}` };
   const tb = commitTime(copy, candidate.sha);
@@ -566,7 +658,8 @@ function preservedWinner(copy, current, candidate) {
   }
   if (tb > ta) return { item: candidate };
   if (ta > tb) return { item: current };
-  return { conflict: true };
+  return { conflict: { path: current.path, kind: 'content', ref: preservedSource(current),
+    otherRef: preservedSource(candidate) } };
 }
 
 /** Committer time of a commit in seconds; null when it cannot be read. */
@@ -693,11 +786,11 @@ function inspect(copy, options, cache) {
   if (!refs.ok) return keepUnreadable(entry, 'remote-check-failed', refs.error);
   const advertised = existingCommits(copy, refs.advertised);
   const localRefList = localRefs(copy, head.out);
-  if (!localRefList) {
-    return keepUnreadable(entry, 'inspection-failed', 'local refs cannot be listed');
+  if (localRefList.error) {
+    return keepUnreadable(entry, 'inspection-failed', localRefList.error);
   }
   const bySha = new Map();
-  for (const { ref, sha } of localRefList) {
+  for (const { ref, sha } of localRefList.refs) {
     const commits = localOnlyCommits(copy, sha, advertised);
     if (!commits) {
       return keepUnreadable(entry, 'inspection-failed',
@@ -714,8 +807,7 @@ function inspect(copy, options, cache) {
       const files = worktreePreserved(special);
       const conflict = preserveConflict(files);
       if (conflict) {
-        return keep(entry, 'unpreservable',
-          `${conflict.path} (symlink conflicts with ${conflict.other})`, true);
+        return keep(entry, 'preserve-conflict', describePreserveConflict(conflict), true);
       }
       entry.localCommits = [];
       entry.preserveFiles = files;
@@ -754,7 +846,7 @@ function inspect(copy, options, cache) {
         }
         if (winner.conflict) {
           return keep(entry, 'preserve-conflict',
-            `${path} differs between ${current.ref} and ${ref} at the same commit time`, true);
+            describePreserveConflict(winner.conflict), true);
         }
         preserved.set(path, winner.item);
       } else {
@@ -776,12 +868,21 @@ function inspect(copy, options, cache) {
   }
   const files = new Map(classified.files.map((file) => [file.path, file]));
   for (const file of worktreePreserved(special)) {
-    if (!files.has(file.path)) files.set(file.path, file);
+    const existing = files.get(file.path);
+    if (!existing) {
+      files.set(file.path, file);
+      continue;
+    }
+    if (existing.kind !== file.kind) {
+      return keep(entry, 'preserve-conflict', describePreserveConflict({
+        path: file.path, other: file.path, ref: preservedSource(existing),
+        otherRef: preservedSource(file), kind: existing.kind, otherKind: file.kind,
+      }), true);
+    }
   }
   const conflict = preserveConflict([...files.values()]);
   if (conflict) {
-    return keep(entry, 'unpreservable',
-      `${conflict.path} (symlink conflicts with ${conflict.other})`, true);
+    return keep(entry, 'preserve-conflict', describePreserveConflict(conflict), true);
   }
   const info = worktreeInfo(copy, options);
   if (info.error) return keep(entry, info.reason ?? 'worktree-unresolved', info.error);

@@ -775,4 +775,159 @@ describe('wish-reap: two refs, one preserved path', () => {
     expect(record).toContain(newer);
     expect(result.exitCode).toBe(0);
   });
+
+  test('the same docs path at the same commit time keeps the copy and names both refs', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'a-same');
+    commitDocs(f.copy, 'same time a\n', '2026-03-01T00:00:00 +0000');
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'checkout', '-q', '-b', 'z-same');
+    commitDocs(f.copy, 'same time z\n', '2026-03-01T00:00:00 +0000');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('preserve-conflict');
+    expect(entry.detail).toContain('docs/note.md');
+    expect(entry.detail).toContain('refs/heads/a-same');
+    expect(entry.detail).toContain('refs/heads/z-same');
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(f.copy)).toBe(true);
+  });
+});
+
+describe('wish-reap: a file cannot share a path with anything below it', () => {
+  function copyOf() {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, 'copy');
+    git(dir, 'clone', '-q', remote, copy);
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  /** One local branch adds `handoffs/shared` as a file, one adds `handoffs/shared/x.md`. */
+  function fileVsChild(fileRef: string, childRef: string) {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', fileRef, 'dev');
+    writeFileSync(join(f.copy, 'handoffs', 'shared'), 'the file\n');
+    git(f.copy, 'add', '-A');
+    git(f.copy, 'commit', '-qm', `file ${fileRef}`);
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'checkout', '-q', '-b', childRef, 'dev');
+    mkdirSync(join(f.copy, 'handoffs', 'shared'));
+    writeFileSync(join(f.copy, 'handoffs', 'shared', 'x.md'), 'the child\n');
+    git(f.copy, 'add', '-A');
+    git(f.copy, 'commit', '-qm', `child ${childRef}`);
+    git(f.copy, 'checkout', '-q', 'dev');
+    backdate(f.copy);
+    return f;
+  }
+
+  function expectKept(f: ReturnType<typeof fileVsChild>, fileRef: string, childRef: string) {
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('preserve-conflict');
+    expect(entry.detail).toContain('handoffs/shared');
+    expect(entry.detail).toContain(`refs/heads/${fileRef}`);
+    expect(entry.detail).toContain(`refs/heads/${childRef}`);
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(f.copy)).toBe(true);
+    // Nothing was written into the preserve tree: the conflict was caught before it could
+    // silently pick a side.
+    expect(existsSync(join(f.preserve, 'copy'))).toBe(false);
+  }
+
+  test('a file named before the child ref keeps the copy, naming both refs', () => {
+    const f = fileVsChild('a-file', 'z-child');
+    expectKept(f, 'a-file', 'z-child');
+  });
+
+  test('the same conflict with the ref names reversed also keeps the copy', () => {
+    const f = fileVsChild('z-file', 'a-child');
+    expectKept(f, 'z-file', 'a-child');
+  });
+});
+
+describe('wish-reap: a same-path mode difference is a conflict too', () => {
+  function copyOf() {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, 'copy');
+    git(dir, 'clone', '-q', remote, copy);
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  /** The same bytes on two local branches, one executable and one not. */
+  function modeBranches(execRef: string, plainRef: string) {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', execRef, 'dev');
+    writeFileSync(join(f.copy, 'docs', 'note.md'), 'same bytes\n');
+    chmodSync(join(f.copy, 'docs', 'note.md'), 0o755);
+    git(f.copy, 'add', '-A');
+    git(f.copy, 'commit', '-qm', `executable ${execRef}`);
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'checkout', '-q', '-b', plainRef, 'dev');
+    writeFileSync(join(f.copy, 'docs', 'note.md'), 'same bytes\n');
+    chmodSync(join(f.copy, 'docs', 'note.md'), 0o644);
+    git(f.copy, 'add', '-A');
+    git(f.copy, 'commit', '-qm', `plain ${plainRef}`);
+    git(f.copy, 'checkout', '-q', 'dev');
+    backdate(f.copy);
+    return f;
+  }
+
+  test('a mode-only same-path winner keeps the copy and names both refs', () => {
+    const f = modeBranches('a-exec', 'z-plain');
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('preserve-conflict');
+    expect(entry.detail).toContain('docs/note.md');
+    expect(entry.detail).toContain('refs/heads/a-exec');
+    expect(entry.detail).toContain('refs/heads/z-plain');
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(f.copy)).toBe(true);
+  });
+
+  test('the mode conflict is the same with the ref names reversed', () => {
+    const f = modeBranches('z-exec', 'a-plain');
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('preserve-conflict');
+    expect(entry.detail).toContain('docs/note.md');
+    expect(entry.detail).toContain('refs/heads/z-exec');
+    expect(entry.detail).toContain('refs/heads/a-plain');
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(f.copy)).toBe(true);
+  });
+});
+
+describe('wish-reap: a ref that does not resolve to a commit', () => {
+  function copyOf() {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, 'copy');
+    git(dir, 'clone', '-q', remote, copy);
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  test('a dangling local ref keeps the copy with a read failure instead of being skipped', () => {
+    const f = copyOf();
+    writeFileSync(join(f.copy, '.git', 'refs', 'heads', 'broken'), `${'0'.repeat(40)}\n`);
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.readFailure).toBe(true);
+    expect(entry.detail).toContain('refs/heads/broken');
+    expect(result.summary.readErrors).toEqual(['copy']);
+    expect(result.exitCode).toBe(3);
+    expect(existsSync(f.copy)).toBe(true);
+    expect(existsSync(join(f.copy, '.git', 'refs', 'heads', 'broken'))).toBe(true);
+  });
 });
