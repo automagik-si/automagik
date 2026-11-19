@@ -4,9 +4,11 @@ import {
   ASLEEP_MS, liveFrom, poseOf, nextWake, helpersOf, buildTree, placeTrees, placesOf, withSpaceless, visibleRows, botFold, categoryFold, knownBots, projectId,
   secondLine, modelDefaultsFrom, modelTextsUpdate, argvToAsk, argvEntry, argvAfter, argvReader, heldClickOf, heldTerminalOf, liveOf, paneCounts, listedKeyOf, parentMarkOf, parentMarkText,
   programForApp, needsYouText, NEEDS_YOU, NEEDS_YOU_PERMISSION,
+  NEEDS_OWNER_LABEL, OWNER_QUESTION, ownerQuestionOf,
 } from "../mods/am-sidebar/rows.js";
 import { waitsOnPermission } from "../mods/am-sidebar/launchArgs.js";
 import { parseBots } from "../mods/am-sidebar/model.js";
+import { NEEDS_OWNER_LABEL as TIDY_NEEDS_OWNER_LABEL } from "../mods/am-sidebar/tidy.js";
 
 const look = { character: "star", colour: "blue" };
 const bot = (id, more = {}) => ({ id, name: id.slice(2), kind: "member", look, role: `${id} role`, instructions: "", agent: "claude", ...more });
@@ -44,6 +46,31 @@ test("a blocked chip names a permission only when herdr-core's report says block
   }
 });
 
+test("a stopped pane's needs-owner label is the owner question, and a working or blocked pane has none", () => {
+  // The marker tidy.js already reports on, held equal: one label, two readers.
+  assert.equal(NEEDS_OWNER_LABEL, "automagik-herdr.needs-owner");
+  assert.equal(NEEDS_OWNER_LABEL, TIDY_NEEDS_OWNER_LABEL);
+  assert.equal(OWNER_QUESTION, "Question");
+  const row = (label, status = "done") => ({ address: "t1", status, labels: label === null ? {} : { [NEEDS_OWNER_LABEL]: label } });
+  assert.equal(ownerQuestionOf(row("ship it?")), "ship it?");
+  assert.equal(ownerQuestionOf(row("  which database?  ", "idle"), "idle"), "which database?");
+  // No status reported is not an agent working: the label still speaks.
+  assert.equal(ownerQuestionOf(row("waiting", null), null), "waiting");
+  // Working, blocked and error are not waiting on an answer.
+  for (const status of ["working", "blocked", "error"]) {
+    assert.equal(ownerQuestionOf(row("x", status), status), null, status);
+    assert.equal(ownerQuestionOf(row("x"), status), null, status);
+  }
+  for (const label of [null, undefined, "", "   "]) assert.equal(ownerQuestionOf(row(label), "done"), null, JSON.stringify(label));
+  assert.equal(ownerQuestionOf(null, "done"), null);
+  assert.equal(ownerQuestionOf({ address: "t1", status: "done" }, "done"), null);
+  // One line, and short enough for a chip's tooltip.
+  assert.equal(ownerQuestionOf(row("which\n  database?")), "which database?");
+  const long = ownerQuestionOf(row("x".repeat(500)));
+  assert.equal(long.length, 160);
+  assert.match(long, /\.\.\.$/);
+});
+
 test("liveFrom: label + live + agent in front; newest holder wins and is flagged; remote counts", () => {
   const terms = [
     T("t1", { labels: { bot: "b-mainmainma" }, status: "working", status_ms: NOW - 5 }),
@@ -64,6 +91,35 @@ test("liveFrom: label + live + agent in front; newest holder wins and is flagged
   assert.equal(live["b-devdevdevd"].terminal, "box/t4");
   // No filter: any label counts.
   assert.ok(liveFrom(terms)["b-unknownbot"]);
+});
+
+test("liveFrom: the ledger's binding decides the bot, never the pane's bot= label (#223)", () => {
+  const terms = [
+    T("t1", { labels: { bot: "b-mainmainma" }, created_ms: 10 }),
+    T("t2", { labels: { bot: "b-loneloneln" }, created_ms: 20 }),
+    T("t3", { labels: {}, created_ms: 30 }),
+    T("hx/t4", { labels: { bot: "b-devdevdevd" }, created_ms: 40 }),
+    T("t5", { labels: { bot: "b-captaincap" }, created_ms: 50, state: "exited" }),
+  ];
+  const bindings = [
+    { bot: "b-captaincap", terminal: "t1", address: "t1", project: KEY, machine: null, state: "live", created_ms: 10 },
+    { bot: "b-loneloneln", terminal: "t2", address: "t2", project: KEY, machine: null, state: "unknown", created_ms: 20 },
+    { bot: "b-devdevdevd", terminal: "t3", address: "t3", project: KEY, machine: null, state: "live", created_ms: 30 },
+    { bot: "b-mainmainma", terminal: "t4", address: "hx/t4", project: KEY, machine: "hx", state: "live", created_ms: 40 },
+    { bot: "b-testtestte", terminal: "t5", address: "t5", project: KEY, machine: null, state: "live", created_ms: 50 },
+  ];
+  const known = knownBots([{ key: KEY, file }]);
+  const live = liveFrom(terms, known, undefined, undefined, bindings);
+  // The pane says the main bot, the ledger the captain; an unlabelled pane is the dev's; an
+  // away binding is no row, nor is one whose terminal ended.
+  assert.equal(liveOf(live, { key: KEY }, "b-captaincap").terminal, "t1");
+  assert.equal(liveOf(live, { key: KEY }, "b-devdevdevd").terminal, "t3");
+  assert.equal(liveOf(live, { key: KEY }, "b-loneloneln"), null);
+  assert.equal(liveOf(live, { key: KEY }, "b-testtestte"), null);
+  assert.equal(liveOf(live, { key: KEY, machine: "hx" }, "b-mainmainma").terminal, "hx/t4");
+  assert.equal(liveOf(live, { key: KEY }, "b-mainmainma"), null, "no row at the wrong machine");
+  // Without the ledger the label still decides (the fallback until the CLI answers --all).
+  assert.equal(liveOf(liveFrom(terms, known), { key: KEY }, "b-mainmainma").terminal, "t1");
 });
 
 test("an agy pane (#793): agy in front counts even when the table says no agent, and its blocked prompt is needs-you", () => {
@@ -415,6 +471,12 @@ test("heldTerminalOf: a bot's live terminal for its row's click, shown in a pane
   assert.equal(heldTerminalOf("b-c", rows), null, "no live terminal");
   assert.equal(heldTerminalOf("b-a", [T("t3", { labels: { bot: "b-a" }, state: "exited" })]), null);
   assert.equal(heldTerminalOf(null, rows), null);
+  // The ledger's binding, not the label, says which terminal a row's click holds (#223).
+  const terms = [...rows, T("t5", { created_ms: 40 })];
+  const bindings = [{ bot: "b-a", terminal: "t5", address: "t5", project: null, machine: null, state: "live" }];
+  assert.equal(heldTerminalOf("b-a", terms, [], null, () => null, bindings), "t5");
+  assert.equal(heldTerminalOf("b-b", terms, [], null, () => null, bindings), null, "the label alone counts nothing");
+  assert.equal(heldClickOf("b-a", terms, [], null, () => null, bindings).args.terminal, "t5");
 });
 
 test("argvToAsk: panes that never settle can't starve a stale re-read; the cursor goes round", () => {

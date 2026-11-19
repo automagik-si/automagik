@@ -29,6 +29,7 @@ test('a subdomain of automagik.si is configured with PASSKEY_RP_ID automagik.si'
   expect(written).toContain('BETTER_AUTH_URL = "https://id.automagik.si"');
   expect(written).toContain('PASSKEY_RP_ID = "automagik.si"');
   expect(written).toContain('workers_dev = false');
+  expect(written).toContain('crons = ["17 * * * *"]');
   expect((await stat(resolve(dir, 'wrangler.local.toml'))).mode & 0o777).toBe(0o600);
 });
 

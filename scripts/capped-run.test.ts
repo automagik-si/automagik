@@ -81,11 +81,10 @@ function cappedRun(args: string[], options: RunOptions = {}): Outcome {
   };
 }
 
-// A dd writing to /dev/shm keeps its pages charged to the scope but not in its RSS, so the
-// kernel can take the in-scope monitor as a second victim and the wrapper prints the honest
-// monitor-ended line instead of CAPPED (the documented limit, #1465). The cap rows retry a
-// bounded number of times: a silent 137, a wrong line, two lines or three attempts without a
-// CAPPED line still fail.
+// The monitor runs in a sibling scope of the per-run slice (#1465), outside the capped cgroup,
+// so a kill at the payload's MemoryMax cannot select it. The retry for the honest monitor-ended
+// line is kept unchanged as a bounded tolerance and each retry is printed, so a gate can count
+// them: a silent 137, a wrong line, two lines or three attempts without a CAPPED line still fail.
 async function cappedKillAttempt(args: string[], options: RunOptions = {}): Promise<Outcome> {
   const state = options.state ?? scratch('state');
   const env: Record<string, string | undefined> = {
@@ -333,15 +332,33 @@ function startTracked(command: string, args: string[], options: SpawnOptions = {
   return child;
 }
 
+// Shell lines that list the pids in the run's sibling scopes (the monitor), never the payload's
+// own scope. Hard guard: outside a per-run app-cappedrun_* slice the list stays empty, so an
+// older wrapper (scope directly under app.slice) can never reach another app.slice scope.
+const SIBLING_PIDS = [
+  'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+  'slice=${cg%/*}',
+  'sibling_pids=',
+  'case ${slice##*/} in',
+  '  app-cappedrun_*.slice)',
+  '    for procs in "/sys/fs/cgroup$slice"/*.scope/cgroup.procs; do',
+  '      [ "$procs" = "/sys/fs/cgroup$cg/cgroup.procs" ] && continue',
+  '      [ -r "$procs" ] || continue',
+  '      sibling_pids="$sibling_pids $(cat "$procs" 2>/dev/null)"',
+  '    done',
+  '    ;;',
+  'esac',
+];
+
 function compareAdjScript(): string {
   const script = join(scratch('oom-score'), 'compare-adj.sh');
   writeFileSync(
     script,
     [
-      'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+      ...SIBLING_PIDS,
       'self_adj=$(cat /proc/self/oom_score_adj 2>/dev/null)',
       'monitor_adj=',
-      'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+      'for pid in $sibling_pids; do',
       '  [ "$pid" = "$$" ] && continue',
       '  comm=$(cat "/proc/$pid/comm" 2>/dev/null) || continue',
       '  case $comm in',
@@ -853,15 +870,19 @@ describe('capped-run', () => {
   });
 
   test('the payload shim text is valid sh and bash', () => {
-    const generated = spawnSync('sh', ['-c', '. "$1"; capped_run_shim', 'sh', SHIM_FILE], {
-      encoding: 'utf8',
-    });
-    expect(generated.status).toBe(0);
-    const file = join(scratch('shim-syntax'), 'shim.sh');
-    writeFileSync(file, generated.stdout);
-    for (const shell of ['sh', 'bash']) {
-      const checked = spawnSync(shell, ['-n', file], { encoding: 'utf8' });
-      expect(checked.status).toBe(0);
+    // Both generated texts: the payload shim and the sibling-scope monitor.
+    for (const fn of ['capped_run_shim', 'capped_run_monitor']) {
+      const generated = spawnSync('sh', ['-c', `. "$1"; ${fn}`, 'sh', SHIM_FILE], {
+        encoding: 'utf8',
+      });
+      expect(generated.status).toBe(0);
+      expect(generated.stdout.trim()).not.toBe('');
+      const file = join(scratch('shim-syntax'), `${fn}.sh`);
+      writeFileSync(file, generated.stdout);
+      for (const shell of ['sh', 'bash']) {
+        const checked = spawnSync(shell, ['-n', file], { encoding: 'utf8' });
+        expect(checked.status).toBe(0);
+      }
     }
   });
 
@@ -1017,16 +1038,16 @@ describe('capped-run', () => {
   });
 
   test.skipIf(!scope)(
-    'a 137 after the in-scope monitor is killed prints the monitor-ended line',
+    'a 137 after the monitor is killed prints the monitor-ended line',
     () => {
       const state = scratch('monitor-killed-state');
       const script = join(scratch('monitor-killed'), 'kill-monitor.sh');
       writeFileSync(
         script,
         [
-          'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+          ...SIBLING_PIDS,
           '[ -n "$cg" ] || kill -9 $$',
-          'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+          'for pid in $sibling_pids; do',
           '  case $pid in',
           '    "" | *[!0-9]*) continue ;;',
           '  esac',
@@ -1048,16 +1069,16 @@ describe('capped-run', () => {
   );
 
   test.skipIf(!scope)(
-    'a 1 exit after the in-scope monitor is killed prints the monitor-ended line and passes 1',
+    'a 1 exit after the monitor is killed prints the monitor-ended line and passes 1',
     () => {
       const state = scratch('monitor-killed-one-state');
       const script = join(scratch('monitor-killed-one'), 'kill-monitor.sh');
       writeFileSync(
         script,
         [
-          'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+          ...SIBLING_PIDS,
           '[ -n "$cg" ] || exit 1',
-          'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+          'for pid in $sibling_pids; do',
           '  case $pid in "" | *[!0-9]*) continue ;; esac',
           '  [ "$pid" -gt 1 ] || continue',
           '  [ "$pid" = "$$" ] || kill -9 "$pid" 2>/dev/null',

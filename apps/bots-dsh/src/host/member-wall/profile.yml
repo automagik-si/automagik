@@ -1,0 +1,18 @@
+# The member wall's profile rows. Nothing applies them yet: members stay off until the whole
+# wall, the three safeguards of RFC 0024 (f) and the isolation review hold. With `members` off
+# the entry is DSH's own sandboxed filesystem, unchanged.
+#
+# The read fence replaces DSH's `fs-sandbox` row with a subclass of it.
+- id: fs-sandbox
+  disabled: true
+- insert:
+    - id: member-wall-fs
+      name: '@automagik/bots-dsh/member-wall/fs'
+      config:
+        members: false
+        # Absolute paths, required once members are on.
+        principalsFile: ''
+        membersRoot: ''
+        sharedReadRoots: []
+        # DSH's own data folder belongs here: no member reads it, even inside a shared root.
+        denyReadRoots: []

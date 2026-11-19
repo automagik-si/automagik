@@ -203,9 +203,9 @@ test("--machine refusals: no --project, a relative one, a folder not there, a ma
   assert.match(s.cli(["ls", "--all", ...s.on]).err, /without --all/);
 });
 
-test("--machine with a command still on this computer only (worker, brief, history, tidy) is refused, never run here instead", (t) => {
+test("--machine with a command still on this computer only (worker, brief, tidy) is refused, never run here instead", (t) => {
   const s = scene(t);
-  for (const args of [["history", "Hedge"], ["brief", "Hedge"], ["worker", "task", "--branch", "x"], ["tidy"]]) {
+  for (const args of [["brief", "Hedge"], ["worker", "task", "--branch", "x"], ["tidy"]]) {
     const r = s.cli([...args, ...s.on]);
     assert.equal(r.code, 2, args.join(" "));
     assert.match(r.err, /works on this computer only for now/);
@@ -260,6 +260,148 @@ test("--machine: a create that landed there before the link dropped is reported 
   const r = s.cli(["create", ...s.on, "--name", "Hedge", "--agent", "claude"]);
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(s.bots().bots.map((b) => b.name), ["Hedge"]);
+});
+
+// ---- #738 main --machine: one exact hc file edit, or none ----
+const TRADER = "b-dddddddddd", AIDE = "b-gggggggggg";
+const handTeam = () => ({
+  version: 1, categories: [], bots: [
+    { id: MAIN, name: "Main", kind: "main" },
+    { id: TRADER, name: "Trader", kind: "member" },
+    { id: AIDE, name: "Aide", kind: "member", lead: MAIN },
+    { id: PLAN, name: "Studio", kind: "member", planned: { wave: 3 } },
+  ].map((b) => ({ look: { character: "star", colour: "blue" }, role: "", instructions: "", agent: "claude", ...b })),
+});
+const fileEdits = (s) => s.calls().filter((c) => c[0] === "file" && c[1] === "edit");
+const editArg = (call, name) => call.find((a) => a.startsWith(`--${name}=`)).slice(name.length + 3);
+const nothingHere = (s) => {
+  assert.equal(existsSync(join(s.local, ".herdr")), false, "nothing written on this computer");
+  assert.equal(existsSync(join(s.app, PROJECTS_FILE)), false, "no app listing");
+};
+
+test("#738 main --machine: one hc file edit with the exact old and new text; read back there", (t) => {
+  const s = scene(t);
+  seedFallbackTeam(s, handTeam());
+  const before = readFileSync(s.botsPath, "utf8");
+  const r = s.cli(["main", "Trader", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { id: TRADER, project: s.project, machine: "vm", previousMain: MAIN, oldLead: TRADER,
+    implicitMembers: [{ id: PLAN, name: "Studio" }], displacedLinks: [], saved: true, relabelled: [] });
+  assert.match(r.err, /^am: Main \(b-aaaaaaaaaa\) becomes a member reporting to Trader \(b-dddddddddd\)\.\n/);
+  const edits = fileEdits(s);
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].at(-1), s.botsPath);
+  assert.equal(editArg(edits[0], "old"), before);
+  assert.equal(editArg(edits[0], "new"), readFileSync(s.botsPath, "utf8"));
+  // Besides the read and that edit: only the folder and git probes, no create, remove or relabel.
+  const calls = s.calls();
+  assert.deepEqual(calls.filter((c) => c[0] === "file").map((c) => c[1]).filter((op) => op !== "read"), ["edit"]);
+  for (const c of calls.filter((x) => x[0] !== "file")) {
+    const words = c.slice(c.indexOf("--") + 1);
+    assert.ok(c[0] === "exec" && (words[0] === "test" || words[0] === "git"), JSON.stringify(c));
+  }
+  const [main, trader] = s.bots().bots;
+  assert.deepEqual([main.kind, Object.hasOwn(main, "lead"), trader.kind], ["member", false, "main"]);
+  assert.equal(s.cli(["show", "Main", ...s.on, "--json"]).json().lead, TRADER);
+  nothingHere(s);
+});
+
+test("#738 main --machine: validation refusals and dry runs send no edit and keep the bytes", (t) => {
+  const s = scene(t);
+  seedFallbackTeam(s, handTeam());
+  const before = readFileSync(s.botsPath, "utf8");
+  for (const [args, why] of [
+    [["Main"], /Main is already the main bot/],
+    [["Studio"], /Studio is planned, so it can't be the main bot yet/],
+    [["Trader", "--old-lead", "Main"], /Main can't lead itself/],
+    [["Trader", "--old-lead", "Aide"], /Not saved: .*leads back to this bot/],
+  ]) {
+    const r = s.cli(["main", ...args, ...s.on]);
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.err}`);
+    assert.match(r.err, why);
+    assert.equal(r.out, "");
+  }
+  const dry = [1, 2].map(() => s.cli(["main", "Trader", "--dry-run", ...s.on]));
+  assert.equal(dry[0].code, 0, dry[0].err);
+  assert.deepEqual([dry[1].code, dry[1].out, dry[1].err], [dry[0].code, dry[0].out, dry[0].err]);
+  assert.match(dry[0].out, /^Main \(b-aaaaaaaaaa\) becomes a member reporting to Trader/);
+  assert.deepEqual(fileEdits(s), [], "no edit sent");
+  assert.equal(readFileSync(s.botsPath, "utf8"), before);
+  nothingHere(s);
+});
+
+test("#738 main --machine: a competing edit since the read is kept, never overwritten, no local fallback", (t) => {
+  const s = scene(t);
+  seedFallbackTeam(s, handTeam());
+  const theirs = `${JSON.stringify({ ...handTeam(), categories: [{ id: "x", title: "Theirs" }] }, null, 2)}\n`;
+  s.setState((st) => { st.editRace = theirs; });
+  const r = s.cli(["main", "Trader", ...s.on]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /Not saved: .*bots\.json on vm changed since it was read/);
+  assert.equal(readFileSync(s.botsPath, "utf8"), theirs);
+  assert.equal(fileEdits(s).length, 1, "no retry");
+  nothingHere(s);
+});
+
+test("#738 main --machine: a lost reply is read back: saved, original text (not saved) or state unknown", (t) => {
+  const s = scene(t);
+  seedFallbackTeam(s, handTeam());
+  const original = readFileSync(s.botsPath, "utf8");
+  // Not landed, the original text read back: not saved, said so.
+  s.setState((st) => { st.dropEditAnswer = true; });
+  const unchanged = s.cli(["main", "Trader", ...s.on, "--json"]);
+  assert.equal(unchanged.code, 1, unchanged.err);
+  assert.match(unchanged.err, /^am: Not saved: .*read-back found the original text\n$/m);
+  assert.match(unchanged.json().error, /^Not saved: .*read-back found the original text$/);
+  assert.equal(readFileSync(s.botsPath, "utf8"), original);
+  assert.equal(fileEdits(s).length, 1, "no retry");
+  // Someone else's text read back: state unknown, non-zero.
+  const theirs = `${JSON.stringify({ ...handTeam(), categories: [{ id: "x", title: "Theirs" }] }, null, 2)}\n`;
+  s.setState((st) => { st.dropEditAnswer = theirs; });
+  const unknown = s.cli(["main", "Trader", ...s.on]);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.err, /^am: State unknown: .*check .*bots\.json on vm before trying again/m);
+  assert.equal(readFileSync(s.botsPath, "utf8"), theirs);
+  // Landed, then the answer lost: the new text read back is a success.
+  seedFallbackTeam(s, handTeam());
+  s.setState((st) => { st.loseEditAnswer = true; });
+  const landed = s.cli(["main", "Trader", ...s.on]);
+  assert.equal(landed.code, 0, landed.err);
+  assert.equal(s.bots().bots[1].kind, "main");
+  assert.equal(fileEdits(s).length, 3, "one edit per run");
+  nothingHere(s);
+});
+
+test("#738 the original-text read-back is main's alone: edit's lost reply that didn't land stays State unknown", (t) => {
+  const s = scene(t);
+  seedFallbackTeam(s, handTeam());
+  const original = readFileSync(s.botsPath, "utf8");
+  s.setState((st) => { st.dropEditAnswer = true; });
+  const r = s.cli(["edit", "Trader", ...s.on, "--role", "trades"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^am: State unknown: /m);
+  assert.doesNotMatch(r.err, /read-back found the original text/);
+  assert.equal(readFileSync(s.botsPath, "utf8"), original);
+});
+
+test("#738 main --machine: a linked read that fails never falls back to this computer's roster", (t) => {
+  const s = scene(t);
+  seedFallbackTeam(s, handTeam());
+  const remote = readFileSync(s.botsPath, "utf8");
+  // The same roster on this computer, in the folder the command runs from.
+  mkdirSync(join(s.local, ".herdr"));
+  writeFileSync(join(s.local, ".herdr/bots.json"), remote);
+  s.setState((st) => { st.machines[0].state = "disconnected"; });
+  for (const extra of [[], ["--dry-run"]]) {
+    const r = s.cli(["main", "Trader", ...s.on, ...extra]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /vm can't be reached|not connected/);
+    assert.equal(r.out, "", "no preview from a local roster");
+  }
+  assert.equal(readFileSync(join(s.local, ".herdr/bots.json"), "utf8"), remote);
+  assert.equal(readFileSync(s.botsPath, "utf8"), remote);
+  assert.deepEqual(fileEdits(s), []);
+  assert.equal(existsSync(join(s.app, PROJECTS_FILE)), false);
 });
 
 test("create, edit and rm --machine keep the file's tabs there (#230); a new file there is two spaces", (t) => {

@@ -20,11 +20,16 @@ function host(t, injected = false) {
   const bots = new Map([
     ['ada', { name: 'Ada', role: 'Reviewer', instructions: 'Check files.', main: true }],
     ['someone', { name: 'Someone', role: 'Writer', instructions: 'Write notes.' }],
+    ['genie', {
+      name: 'Genie', role: 'Grants your wishes', instructions: 'Grant wishes.', kind: 'genie',
+    }],
   ])
   const owners = new Map([
     ['private', 'ada'], ['group-member', 'ada'], ['task', 'ada'], ['other', 'someone'],
+    ['wish-chat', 'genie'], ['wish-task', 'genie'], ['wish-group', 'genie'],
   ])
-  install({ ctx, selfOf: id => owners.get(id), botOf: id => bots.get(id) })
+  const taskOwners = new Map([['wish-task', { botId: 'genie' }]])
+  install({ ctx, taskOwners, selfOf: id => owners.get(id), botOf: id => bots.get(id) })
   t.after(() => ctx.dispose())
   return { ctx, bots, read: id => reader?.(id), disposed: () => disposed }
 }
@@ -40,6 +45,15 @@ test('identity reader returns only the owning Bot identity and a fresh copy', t 
   assert.deepEqual(h.read('private'), identity)
   h.bots.get('ada').instructions = 'Read the diff.'
   assert.equal(h.read('private').instructions, 'Read the diff.')
+})
+
+test('a Genie says its role tools live in DSH, and a wish task does not (#1639)', t => {
+  const h = host(t)
+  const genie = { name: 'Genie', role: 'Grants your wishes', instructions: 'Grant wishes.' }
+  assert.deepEqual(h.read('wish-chat'), { ...genie, needsDshTools: true })
+  assert.deepEqual(h.read('wish-group'), { ...genie, needsDshTools: true })
+  // A task is a wish: it must not grant another, so it keeps its agent's own tools.
+  assert.deepEqual(h.read('wish-task'), genie)
 })
 
 test('unowned sessions receive no identity', t => {

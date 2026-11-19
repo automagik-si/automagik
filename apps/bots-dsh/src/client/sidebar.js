@@ -459,8 +459,9 @@ export function TeamSidebar(props) {
     // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
     const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
     const open = row => (row.bot?.seat ? rowActions.openSeat(row.bot)
-      : row.kind === 'group' ? rowActions.openSession(row.id)
-      : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
+      : row.kind === 'chat' ? row.source?.open?.(row.id)
+        : row.kind === 'group' ? rowActions.openSession(row.id)
+          : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
     const menu = (row, event) => {
       // A seat is read here and run in Herdr: it has no Bot settings or context menu.
       if (row.bot?.seat) return
@@ -474,7 +475,10 @@ export function TeamSidebar(props) {
         return agent ? h(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null
       }
       const bot = roster.byId[row.id]
-      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotChildren, { ...rowProps, bot })) : null
+      // A channel source draws the Bot's channels as the bar's own rows; the team's old rows
+      // under it come off for that Bot, so the two never draw the same channels twice.
+      const children = row.channelSource ?? row.bot?.channelSource ? null : h(BotChildren, { ...rowProps, bot })
+      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), children) : null
     }
     return h(LeftBar, {
       roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
@@ -805,7 +809,7 @@ export function AccountLauncher({ seat = true, settingsOpen, openSettings, openO
     [
       [t('Usage'), GaugeIcon, () => actions.openSettings('usage')],
       [t('Plugins'), PlugIcon, () => actions.selectPanel('plugins')],
-      [t('Connectors'), ConnectorIcon, () => actions.openConnectors()],
+      [t('Apps'), ConnectorIcon, () => actions.openConnectors()],
       // Rows other Omni plugins add (extend.js), such as Automations.
       ...navRows.map(row => [row.label(), row.icon, () => row.run(actions)]),
       [t('Bot settings'), GearIcon, () => actions.openSettings('general')],
@@ -1071,10 +1075,6 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
    .bt-update-dot, a card of .bt-update-* rows, and .bt-update-notes as a button. */
 .bt-side-tool{position:relative}
 .bt-update-pop button.bt-update-notes{padding:0;border:0;background:none;font-family:inherit;cursor:pointer}
-/* A card row may lead with its product's mark (BotMark), beside its name and status. */
-.bt-power-who{display:flex;align-items:center;gap:10px}
-.bt-power-who>.bt-mark{flex:none}
-.bt-power-what{min-width:0}
 
 /* A DSH bot's row and its expanding Session list. It wears DSH's own whale, the mark a
    Bot with no look of its own wears too. */

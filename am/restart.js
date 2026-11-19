@@ -4,13 +4,17 @@
 // sidebar's Restart runs the CLI. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
 import { agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
-  modelArgs, ownsSession, resumeArgs, resumesById, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
+  modelArgs, ownsSession, resumeArgs, resumesById, seatSettingsArgs, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
 import { SQUAD_LABEL, SQUAD_MARK } from "./launchArgs.js";
 import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
   codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
 import { CONFIG_VAR, envWords } from "./logins.js";
 import { hermesPairRun } from "./hermesPair.js";
 import { actionError } from "./actionError.js";
+import { isPromptLine, pendingDialog, screenLines } from "./dialog.js";
+
+/** The prompt and dialog helpers stay available from here, their old home (#805, #1414). */
+export { isPromptLine, pendingDialog };
 
 /** The pane label the briefing hook sets to the Claude session a terminal runs (workers.js SESSION_LABEL). */
 const SESSION = "agent.session";
@@ -156,9 +160,20 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
     ? agySettingsPlan({ bot, scope: "seat", folder: agy.folder ?? "", settingsDir: agySettingsDir(agy.appHomeDir),
       realpath: agy.realpath ?? null, homeDir: agy.homeDir ?? null }) : null;
   const settingsWords = agySettingsArgs(key, settings?.path);
+  // #1411: the bot's own reasoning effort and service tier (Codex's), after its own words so
+  // they win over a profile, and after a template's own words so the roster wins there too. A
+  // stored tier goes with the model it was picked for: a restart's model swap (the one path that
+  // changes the model with no tier option) runs the new model on Codex's default tier, said
+  // explicitly as standard, so neither the record's Fast nor a profile's can stay on it.
+  const storedModel = typeof bot.model === "string" && bot.model ? bot.model : null;
+  const modelSwitch = model !== undefined && (model || null) !== storedModel;
+  // A Codex seat's own record carries the tier; a bot changing agent (or one that was never
+  // Codex's) has none of its own, so it keeps inheriting as before.
+  const seatSwap = modelSwitch && bot.agent === "codex" && key === "codex";
+  const seatWords = seatSettingsArgs(key, seatSwap ? { ...bot, tier: "standard" } : bot);
   // The source a pane's launch is compared with names no settings file: that one is this
   // launch's own, never a change a restart should report.
-  const source = [...run, ...modeWords, ...modelArgs(key, pin)];
+  const source = [...run, ...modeWords, ...modelArgs(key, pin), ...seatWords];
   // A template owns its command only when it runs the bot's own agent, whatever the pane's
   // foreground says (unknown included): a template for another agent, a swap or a pane on
   // another agent starts from the agent row (the template would cross them).
@@ -182,9 +197,9 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
   // fresh and say why, as a helper does.
   const blocked = "its template's command ends in a separator or a comment, so it can't take resume words";
   const plan = (mode, extra = [], note = null) => {
-    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin)],
+    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin), ...seatWords],
       source, template: null, agySettings: settings, note, templateNote, granted: false };
-    const words = [...codexWords, ...settingsWords, ...extra];
+    const words = [...codexWords, ...settingsWords, ...extra, ...seatWords];
     const argv = commandArgv({ shell: tpl.command }, words);
     if (argv) return { mode, agent: key, model: null, resume: extra, argv, source, template: tpl.name, agySettings: settings, note, templateNote, granted };
     // Nothing past the template's own command: neither the permission list nor resume words.
@@ -336,6 +351,37 @@ export function launchChange({ name, launch, agent, argv, template = null, usedT
  */
 export const claudeSlug = (folder) => String(folder ?? "").replace(/[^A-Za-z0-9]/g, "-");
 
+/** Where Claude Code keeps `session`'s log for a pane launched in `cwd` (#1556), as a path. */
+export const claudeTranscriptPath = (home, cwd, session) =>
+  `${String(home ?? "").replace(/\/+$/, "")}/.claude/projects/${claudeSlug(cwd)}/${session}.jsonl`;
+
+/**
+ * The context a Claude Code session's next request carries (#1556): input + cache-read +
+ * cache-creation tokens of the NEWEST assistant message in the session log's JSONL text.
+ * Later assistant messages win; a line that isn't JSON, isn't an assistant message or carries
+ * no usable usage is skipped. Null when the text holds no such message: nothing is measured,
+ * never zero.
+ */
+export function contextTokensOf(text) {
+  const lines = String(text ?? "").split("\n");
+  let tokens = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let row;
+    try { row = JSON.parse(trimmed); } catch { continue; }
+    if (row?.type !== "assistant") continue;
+    const usage = row?.message?.usage;
+    if (!usage || typeof usage !== "object" || Array.isArray(usage)) continue;
+    const parts = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+      .map((k) => usage[k])
+      .filter((n) => typeof n === "number" && Number.isFinite(n) && n >= 0);
+    if (!parts.length) continue;
+    tokens = parts.reduce((sum, n) => sum + n, 0);
+  }
+  return tokens;
+}
+
 /** The old pane's Claude session id (its agent.session label, UUID-shaped), or null. */
 export const sessionOf = (get) => sessionId(get?.labels?.[SESSION]);
 
@@ -411,50 +457,8 @@ export function sharedFresh({ name, old, cwd, sharers = [], agent, words, anywhe
 /** The helpers (hc get answers) that end with their parent's pane: live, die_with_parent. */
 export const doomedHelpers = (helpers = []) => helpers.filter((h) => h?.state === "live" && h.die_with_parent !== false && h.address);
 
-// Only the visible tail matters: old scrollback is not a current prompt or dialog.
-const screenLines = (text) => typeof text === "string" ? text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split("\n").slice(-40) : [];
-
 /** A turn still running: its spinner or interrupt hint, never an idle prompt. */
 const MID_TURN_SCREEN = /\b(?:esc to interrupt|ctrl\+c to interrupt|ctrl\+b to run in background)\b|(?:working|running|thinking)(?:[.…]+)?\s*\(\d+\s*(?:s|sec|m|min)\b/i;
-
-const CONFIRM_FOOTER = /\[y\/n\]|\(y\/n\)|enter to confirm|esc to cancel/i;
-const NUMBERED_DIALOG_CHOICE = /^\s*(?:[>❯›]\s*\d+[.)]\s+|\d+[.)]\s+(?:yes\b|no\b|allow\b|deny\b|proceed\b|cancel\b|skip\b))/i;
-const DIALOG_HEADER = /\?|^\s*(?:choose|select|pick|allow|run|do you|would you|are you sure)\b/i;
-const DIALOG_QUESTION = /(?:run this command\?|do you want to (?:proceed|make this edit|create|delete|run|execute|allow|overwrite)\b.*\?|would you like to run the following command\?|do you trust the contents of\b.*\?|requesting permission for:|^\s*allow\s+[^\n?]+\?|\d+\/\d+ answered.*(?:select|confirm))/i;
-
-/** A prompt glyph, unboxed or inside a frame: `> `, `│ > │`, `⌸ ❯ … ⛶`, `› Ask …`, omp's `╰─`. */
-export function isPromptLine(line) {
-  if (typeof line !== "string" || NUMBERED_DIALOG_CHOICE.test(line) || CONFIRM_FOOTER.test(line)) return false;
-  if (/^\s*╰─(?!─)/.test(line)) return true;
-  const bare = line.replace(/^[\s│┃|⌸]+|[\s│┃|⛶]+$/g, "");
-  if (/^(?:[>❯›$%](?:\s.*)?|.*[>❯›$%])$/.test(bare)) return true;
-  return /^\s*[│┃|⌸].*[│┃|⛶]\s*$/.test(line)
-    && (/[>❯›$%]/.test(line) || /\b(?:ask|type|enter|message|prompt|try)\b/i.test(line));
-}
-
-/** A visible permission or selection dialog belongs to the owner, never Herdr. */
-export function pendingDialog(screenText) {
-  const lines = screenLines(screenText).slice(-15).filter((line) => line.trim() !== "");
-  const isDialogLine = (line) => DIALOG_QUESTION.test(line) || CONFIRM_FOOTER.test(line) || NUMBERED_DIALOG_CHOICE.test(line);
-  let p = -1;
-  for (let i = lines.length - 1; i >= 0; i -= 1) if (isPromptLine(lines[i])) { p = i; break; }
-  // A prompt with only footer lines below it is idle: reply text above it is scrollback, not a
-  // live dialog (a real dialog hides the input line or sits below scrollback prompts).
-  if (p >= 0 && lines.length - 1 - p <= 5 && !lines.slice(p + 1).some(isDialogLine)) return null;
-  // No prompt at the bottom: scan the visible tail (a prompt there made this scrollback).
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (DIALOG_QUESTION.test(lines[i])) return { question: lines[i].trim().slice(0, 200), who: "the owner" };
-    if (!isDialogLine(lines[i])) continue;
-    // A choice belongs to a dialog only with no idle prompt below it (we would have returned).
-    for (let j = i - 1, seen = 0; j >= 0 && seen < 6; j -= 1) {
-      if (lines[j].trim() === "") continue;
-      seen += 1;
-      if (DIALOG_HEADER.test(lines[j])) return { question: lines[j].trim().slice(0, 200), who: "the owner" };
-    }
-    if (CONFIRM_FOOTER.test(lines[i])) return { question: lines[i].trim().slice(0, 200), who: "the owner" };
-  }
-  return null;
-}
 
 /** Missing captures retain the historic status-only behavior. */
 export function hasAgentPrompt(screenText) {

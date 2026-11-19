@@ -1,4 +1,4 @@
-// Settings → IM. Laid out like Connectors: requests that wait for the owner on top,
+// Settings → IM. Laid out like Apps: requests that wait for the owner on top,
 // the IM bots already added, then a grid of platforms. A platform opens its own view
 // with setup steps and the form; an added IM bot opens a view with its Bot, accounts
 // and chats.

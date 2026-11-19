@@ -13,8 +13,10 @@ import { promisify } from "node:util";
 import { state } from "./use-stubs.mjs";
 import { hcName, parentArgs, startRefusal, startArgs, agentInForeground, isClaude, newest, attachRefusal, parseCommand, freshSpare, shellIdle, spareTab, unwrapKeep } from "../mods/am-sidebar/launchArgs.js";
 import { GUARD_DIR, stableGuardDir, stableHelper, stableRunner } from "../mods/am-sidebar/workers.js";
-const { startBot, attachBot, liveTerminalOf, botOfTerminal, runCli } = await import("../mods/am-sidebar/launch.js");
+import { botTerminals, liveFrom } from "../mods/am-sidebar/rows.js";
+const { startBot, attachBot, liveTerminalOf, botOfTerminal, ledgerBindings, runCli } = await import("../mods/am-sidebar/launch.js");
 import { briefingFilePath } from "../mods/am-sidebar/briefingText.mjs";
+import { removePath } from "../mods/am-sidebar/layoutSafe.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", plan: "b-eeeeeeeeee" };
@@ -239,6 +241,9 @@ async function world(t, { file = team(), terminals = () => [] } = {}) {
   delete process.env.HERDR_APP_HOME;
   t.after(() => {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    // The fixture's mods/am-sidebar is a link to this checkout: unlink it before the folder that
+    // holds it goes, so teardown never hands a link to rmSync (removePath, #550).
+    removePath(join(app, "mods/am-sidebar"), { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   });
   Object.assign(state, { spaces: [], panes: [], shared: new Map(), setSharedCalls: 0, offline: new Set(), calls: [], terminals: [], focused: null,
@@ -249,6 +254,18 @@ async function world(t, { file = team(), terminals = () => [] } = {}) {
   const ledger = () => { try { return readFileSync(join(app, "automagik-herdr/attach.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   return { root, main, app, calls, hcState, setHc, ledger };
 }
+
+// world() links the app home's mods/am-sidebar to this checkout. A test that hands the sidebar a
+// stand-in CLI replaces that link with a real folder, so the CLI it runs is the test's, not this
+// checkout's. removePath unlinks the link (#550): on Node 24.0 to 24.9 rmSync follows a link to a
+// folder, names it a directory and throws ERR_FS_EISDIR. Never rmSync this path.
+function standInMod(w) {
+  const mod = join(w.app, "mods/am-sidebar");
+  removePath(mod, { recursive: true, force: true });
+  mkdirSync(join(mod, "bin"), { recursive: true });
+  return mod;
+}
+
 const term = (address, { bot: b, cwd = "/x", argv = ["claude"], created = 1 } = {}) => ({ address, name: address, cwd, state: "live", parent: null,
   created_ms: created, labels: b ? { bot: b } : {}, foreground: { argv, cwd }, status: { app: "claude-code", state: "idle" } });
 
@@ -256,6 +273,47 @@ test("the fake hc is the one the CLI runs here: never the real one", async (t) =
   await world(t);
   const { stdout } = await run("sh", ["-c", "command -v hc; command -v herdr-app"]);
   assert.match(stdout.trim(), /automagik-herdr-.*\/bin\/hc\n.*automagik-herdr-.*\/bin\/herdr-app$/);
+});
+
+test("ledgerBindings: an older CLI refuses --all, and the labels still draw the rows (#223)", async (t) => {
+  const w = await world(t);
+  const mod = standInMod(w);
+  // The CLI at this head has no --all (it lands with #1616): `whois --all --json` is a usage
+  // error, exit 2, and no answer. The sidebar reads null and keeps its bot= labels.
+  const seen = join(w.root, "older-cli-args.log");
+  exe(join(mod, "bin/automagik-herdr.mjs"), `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(seen)}, JSON.stringify(args) + "\\n");
+if (!(args.length === 3 && args[0] === "whois" && args[1] === "--all" && args[2] === "--json")) process.exit(1);
+process.stderr.write("am: whois needs a terminal or --bot <id>: am whois <terminal> | whois --bot <id>.\\n");
+process.exit(2);
+`);
+  exe(join(mod, "bin/run.sh"), `#!/bin/sh\nexec "${process.execPath}" "$@"\n`);
+  assert.equal(await ledgerBindings(), null);
+  assert.deepEqual(JSON.parse(readFileSync(seen, "utf8").trim()), ["whois", "--all", "--json"]);
+  // Null is the fallback rows.js already draws: a bot= label still names its pane and no row
+  // is lost.
+  const known = new Set([ID.main]);
+  const terms = [term("t1", { bot: ID.main, cwd: w.main })];
+  assert.equal(botTerminals(terms, known, null).get("t1"), ID.main);
+  assert.equal(liveFrom(terms, known, undefined, undefined, null)[ID.main]?.terminal, "t1");
+});
+
+test("ledgerBindings: a CLI with --all answers the ledger's bindings (#223)", async (t) => {
+  const w = await world(t);
+  const mod = standInMod(w);
+  const rows = [{ terminal: "t7", core: "c0", created_ms: 1, bot: ID.main, project: w.main, since: "2026-01-01T00:00:00Z",
+    address: "t7", machine: null, state: "live" }];
+  // A stand-in for the CLI #1616 lands: it answers only `whois --all --json`, so passing the
+  // exact call is what the test proves.
+  exe(join(mod, "bin/automagik-herdr.mjs"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (!(args.length === 3 && args[0] === "whois" && args[1] === "--all" && args[2] === "--json")) process.exit(2);
+process.stdout.write(${JSON.stringify(JSON.stringify({ core: "c0", bindings: rows }))});
+`);
+  exe(join(mod, "bin/run.sh"), `#!/bin/sh\nexec "${process.execPath}" "$@"\n`);
+  assert.deepEqual(await ledgerBindings(), rows);
 });
 
 test("startBot runs the CLI: hc run in the project's space, a tab of its own, an attach row by start; the sidebar sets no label", async (t) => {
@@ -396,6 +454,74 @@ test("startBot: two bots of one project started at once open one space and both 
   const runs = w.calls().filter((a) => a[0] === "run");
   assert.equal(runs.length, 2);
   assert.ok(runs.every((a) => a.includes("herdr.space=s5")));
+});
+
+test("startBot: a space another start made while this one asked is the one space both use (#217)", async (t) => {
+  const w = await world(t);
+  state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] }];
+  let looks = 0;
+  // space.new was asked for s5; a CLI start opened s4 on the project in the same moment.
+  const sleep = async () => {
+    if (++looks === 1) {
+      state.spaces = [...state.spaces,
+        { id: "s4", folder: w.main, machine: null, active: false, tabs: [{ id: "t4", active: false }] },
+        { id: "s5", folder: w.main, machine: null, active: true, tabs: [{ id: "t5", active: true }] }];
+      state.panes = [
+        { pane: "p4", terminal: "t-sh4", tab: "t4", program: { key: "shell", shell: true, agent: false } },
+        { pane: "p5", terminal: "t-sh5", tab: "t5", program: { key: "shell", shell: true, agent: false } },
+      ];
+    }
+  };
+  assert.deepEqual(await startBot(w.main, ID.main, { sleep, waitMs: 100, stepMs: 10 }), { terminal: "t100" });
+  const runArgs = w.calls().find((a) => a[0] === "run");
+  assert.ok(runArgs.includes("herdr.space=s4"), runArgs.join(" "));
+  assert.deepEqual(state.runs, [["space.new", { name: "proj", folder: w.main, machine: "" }],
+    ["space.close", { id: "s5", confirmed: true }]], "the duplicate this start made is closed");
+});
+
+test("startBot: a duplicate space with a bot in its second tab is never closed (#217)", async (t) => {
+  const w = await world(t);
+  state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] }];
+  let looks = 0;
+  // This start's space.new made s5; the CLI's start opened a bot in s5's second tab, while
+  // s4 (the space on the project both starts converge on) holds only its own shell.
+  const sleep = async () => {
+    if (++looks === 1) {
+      state.spaces = [...state.spaces,
+        { id: "s4", folder: w.main, machine: null, active: false, tabs: [{ id: "t4", active: false }] },
+        { id: "s5", folder: w.main, machine: null, active: true,
+          tabs: [{ id: "t5", active: false }, { id: "t6", active: true }] }];
+      state.panes = [
+        { pane: "p4", terminal: "t-sh4", tab: "t4", program: { key: "shell", shell: true, agent: false } },
+        { pane: "p5", terminal: "t-sh5", tab: "t5", program: { key: "shell", shell: true, agent: false } },
+        { pane: "p6", terminal: "t-bot5", tab: "t6", program: { key: "claude", agent: true } },
+      ];
+    }
+  };
+  assert.deepEqual(await startBot(w.main, ID.main, { sleep, waitMs: 100, stepMs: 10 }), { terminal: "t100" });
+  // The first tab is the spare shell, but the second holds a bot: the whole space stays.
+  assert.deepEqual(state.runs, [["space.new", { name: "proj", folder: w.main, machine: "" }]]);
+  assert.ok(state.spaces.some((s) => s.id === "s5" && s.tabs.length === 2), "the space holding the bot stays whole");
+});
+
+test("startBot: a space that shows after the wait is closed when nothing runs there (#217)", async (t) => {
+  const w = await world(t);
+  state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] }];
+  let looks = 0;
+  // The wait gives up; the space Herdr was making shows after the bot started in the shown one.
+  const sleep = async () => {
+    if (++looks === 14) {
+      state.spaces = [...state.spaces, { id: "s9", folder: w.main, machine: null, active: false, tabs: [{ id: "t9", active: false }] }];
+      state.panes = [{ pane: "p9", terminal: "t-sh9", tab: "t9", program: { key: "shell", shell: true, agent: false } }];
+    }
+  };
+  const r = await startBot(w.main, ID.main, { sleep, waitMs: 100, stepMs: 10, lateWaitMs: 100, lateStepMs: 10 });
+  assert.equal(r.terminal, "t100");
+  // The sweep reads each late space's folder (git), so give it a moment, never a fixed sleep.
+  const until = Date.now() + 2000;
+  while (Date.now() < until && !state.runs.some(([name]) => name === "space.close")) await new Promise((done) => setTimeout(done, 10));
+  assert.deepEqual(state.runs, [["space.new", { name: "proj", folder: w.main, machine: "" }],
+    ["space.close", { id: "s9", confirmed: true }]], "the late space is closed, its shell still alone");
 });
 
 test("startBot: two Starts at once open one pane", async (t) => {

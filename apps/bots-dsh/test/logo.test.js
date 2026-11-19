@@ -22,6 +22,10 @@ const APPROVED = {
   'automagik-lockup-three-colours-cream-header.svg': 'e8dd0d21e42d7b2722386738972d46432f083895fb2bf00a990ee7588d3561f7',
   'automagik-wordmark-ink.svg': '862047b28e1086337552118196572b8dff69eee255a64b8e12e987c59e1bfa7e',
   'automagik-wordmark-cream.svg': 'a61a32f40807e6a72536de7dc44a88aaa524079499171206388cab04b81a2ea1',
+  'omni-mark-ink-32.svg': '9de3588852dc64ae54783e63fbb53de22b83626ad47139c17655a1e943cb9e2e',
+  'omni-mark-cream-32.svg': '6fb43b5a6fc57c4365bbfc37b696def28fab5cdd8b739d97907621ef5293a5d9',
+  'genie-lamp-ink.svg': 'a837a92a18fb4a319ce17b1d91e0f3f347c2feb3e8c49aaa696ea1e5154b6914',
+  'genie-lamp-cream.svg': 'ef94842939a9219c21d1c75b6570605500e9dcb03ec133b3e9a2b527d5514724',
 }
 const file = name => readFileSync(join(BRAND, name))
 const dataUrl = name => `data:image/svg+xml;base64,${file(name).toString('base64')}`
@@ -85,14 +89,18 @@ test('every logo file is the approved set\'s, byte for byte', () => {
   for (const [name, entry] of Object.entries(source.files)) {
     assert.equal(entry.sha256, APPROVED[name], `SOURCE.json: ${name}`)
     assert.equal(entry.bytes, file(name).length, `SOURCE.json: ${name}`)
-    assert.match(entry.from, name.startsWith('triskle-') ? /^svg\/triskle-three-colours(-\d+)?\.svg$/ : /^lockups\/svg\/automagik-/)
+    assert.match(entry.from, name.startsWith('triskle-') ? /^svg\/triskle-three-colours(-\d+)?\.svg$/ : name.startsWith('omni-mark-') || name.startsWith('genie-lamp-') ? /^svg\/(?:omni-mark-(?:ink|cream)-32|genie-lamp-(?:ink|cream))\.svg$/ : /^lockups\/svg\/automagik-/)
     assert.ok(entry.from.endsWith(`/${name}`), `${name} keeps its name in the set`)
   }
 })
 
 test('the logo is Automagik\'s: three colours, and the violet sparkle', () => {
-  // Genie's and Omni's sparkle colours are not decided, so none of their files is here.
-  for (const name of Object.keys(APPROVED)) assert.match(name, /^(triskle-three-colours|automagik-)/)
+  // The product files are the brand's own flat marks, never the triskle (brand rule 1) and
+  // never a pet (rule 3): one filled shape in ink or cream, no mask, gradient or filter.
+  for (const name of Object.keys(APPROVED)) assert.match(name, /^(?:triskle-three-colours(?:-\d+)?|automagik-[\w-]+|omni-mark-(?:ink|cream)-32|genie-lamp-(?:ink|cream))\.svg$/)
+  for (const name of ['omni-mark-ink-32.svg', 'omni-mark-cream-32.svg', 'genie-lamp-ink.svg', 'genie-lamp-cream.svg']) {
+    assert.doesNotMatch(file(name).toString('utf8'), /<mask|<filter|gradient/i, `${name} is a flat one-colour mark`)
+  }
   for (const letters of ['ink', 'cream']) {
     const wordmark = file(`automagik-wordmark-${letters}.svg`).toString('utf8')
     assert.match(wordmark, /fill="#b586e7"/, `${letters}: the sparkle is violet`)
@@ -167,9 +175,9 @@ test('the sidebar draws the lockup to fit its top row, and the brand slots in th
   const name = draw({ type: BrandName, props: {} })
   // Beside a 24px mark the wordmark is 25px tall: the mark's square is 257.7 of the lockup's 264.
   assert.equal(draw(name.children[0]).props.height, 25)
-  // The top row holds up to five buttons beside the lockup (test/power-shortcut-browser.test.js
-  // measures it). At 21px the lockup is 130px wide: with its padding (6 + 4) it takes 140px,
-  // no more than the picture it replaces did (141px), so the row fits wherever it did.
+  // The top row holds up to five buttons beside the lockup. At 21px the lockup is 130px wide:
+  // with its padding (6 + 4) it takes 140px, no more than the picture it replaced did (141px),
+  // so the row fits wherever it did.
   const source = readFileSync(join(PLUGIN, 'src', 'client', 'sidebar.js'), 'utf8')
   assert.match(source, /h\('span', \{ className: 'bt-brand' \}, h\(Lockup, \{ height: 21 \}\)\)/)
   assert.match(SIDEBAR_CSS, /\.bt-side-top \.bt-brand\{cursor:default;padding-left:6px;padding-right:4px\}/)

@@ -3,6 +3,23 @@
 Until now a new install got only the bot sidebar. From 0.5.0 one download installs, updates and
 rolls back every Automagik mod together, renamed `am-*`.
 
+> **Current install and upgrade instructions (2026-11-18).** Automagik Herdr moved to the
+> `herdr/` folder of the Automagik monorepo. The archived URL below still serves a full installer
+> from the old repository, whose header points to the monorepo. For new installs and legacy
+> upgrades, use the monorepo installer shown here.
+>
+> ```sh
+> curl -fsSL https://raw.githubusercontent.com/automagik-dev/automagik/main/herdr/install.sh | bash
+> ```
+>
+> See [From v0.2 to v0.4.x](../README.md#from-v02-to-v04x) for the migration details.
+>
+> If a linked Linux host still runs a v0.2–v0.4.x sidebar, run the current installer on that host.
+> Its old updater cannot select the renamed pack asset. Upgrading the desktop app alone does not
+> perform the migration. The current sidebar runs each connected machine's own updater.
+
+**Historical 0.5.0 release notes.** The original command and upgrade instructions follow.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/automagik-dev/automagik-herdr/main/install.sh | bash
 ```

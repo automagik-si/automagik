@@ -18,22 +18,19 @@
 #     `systemd-run --user --scope --collect -p MemoryMax=... -p MemorySwapMax=0 -p
 #     OOMPolicy=continue`, with `nice -n 10` and `ionice -c 3`. There is no MemoryHigh: the only
 #     limit is the kill at MemoryMax (a MemoryHigh would quietly throttle a run that is allowed
-#     to reach the cap). OOMPolicy=continue keeps the in-scope monitor alive after the kernel's
-#     OOM kill so it can read the cause (the default stop policy kills the monitor first). Before
-#     exec the payload raises its own oom_score_adj by 500 over what it inherits (capped at 1000,
-#     never lowered); the monitor is forked first and keeps the inherited value, so the kernel
-#     prefers the payload even when a tmpfs payload's pages are not its RSS, unless the inherited
-#     value is already 1000 (then there is no edge and the wrapper just runs). The unit Description (what the user journal shows as "Started ...")
-#     is the command name and the run name only, never argv: a gate's argv may carry a token.
+#     to reach the cap). Before exec the payload raises its own oom_score_adj by 500 over
+#     what it inherits (capped at 1000, never lowered). The monitor runs in a sibling scope
+#     in the same per-run slice and keeps its inherited value. The user journal's "Started"
+#     description includes the command and run names only, since argv may carry a token.
 #     systemd-run execs the command itself, so the wrapper sees the command's exit status and
 #     the scope's memory kill (137).
 #   - Anywhere else (macOS, CI runners, a distroless image, a failing systemd-run) it runs the
 #     command UNCAPPED after one `UNCAPPED: <reason>` line on stderr, and keeps its exit status.
 #     A missing cap never fails a gate, and a capped run is never reported as a pass.
 #   - CAPPED is claimed only when the kernel says the scope hit its memory limit: the monitor
-#     keeps reading the scope's memory.events oom_kill count every tick, so the cause survives
-#     the scope. Whenever that count is above zero -- the run's own command or any process in
-#     the run -- one line on stderr says `CAPPED: a process in the run was killed at the memory
+#     keeps the per-run slice alive after the payload scope empties, and reads the slice's
+#     hierarchical memory.events oom_kill count at the end. A positive count means one line
+#     on stderr says `CAPPED: a process in the run was killed at the memory
 #     limit (limit=..., peak>=..., last sample ..., command=...)`: `limit=`, the peak floor
 #     `peak>=` (a kill means the scope reached MemoryMax, so the measured value is only a lower
 #     bound) with the measured `last sample` named, and the command name (the basename only) --
@@ -50,7 +47,7 @@
 #     monitor's done word) prints neither. Both lines go to the log too, and the command's own
 #     exit code passes through. The CAPPED line's text is built by the pure function in
 #     `capped-run-wording.sh` next to this script (the tests source it too); the payload shim
-#     text is the function in `capped-run-shim.sh`, checked by the tests with sh -n and bash -n.
+#     and monitor text live in `capped-run-shim.sh`.
 #   - A signal from outside (INT, TERM, HUP) stops this run's own scope and removes its scratch
 #     folders and peak file before the wrapper exits.
 #   - With --lock, the log also gets one line at the start and one at the end of every run:
@@ -146,7 +143,8 @@ while [ $# -gt 0 ]; do
         '  --mem SIZE  raise the memory cap (default 4G, ceiling 8G)' \
         '  --lock      take the full-gate lock for the run' \
         '  --name N    name the scope unit' \
-        '  CAPPED is certain only while the monitor survives; the run is never silent when the monitor dies'
+        '  A sibling scope holds the per-run slice open so the monitor can read the final memory-kill count' \
+        '  The run reports when the monitor ends before its final read'
       exit 0
       ;;
     --mem)
@@ -204,6 +202,8 @@ if [ -n "$mem_arg" ]; then
   fi
 fi
 stamp=$(date +%s)
+slice_name=app-cappedrun_$$_${stamp}.slice
+monitor_name=cappedmon-$$-${stamp}
 unit_name=capped-run-$$-${stamp}
 if [ -n "$name" ]; then
   case $name in
@@ -295,12 +295,12 @@ expand_opt=
 # a user scope with a memory cap, not merely that systemd-run exists.
 probe_run() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout 15 systemd-run --user --scope --collect --quiet "$@" \
+    timeout 15 systemd-run --user --scope --collect --quiet --slice="$slice_name" "$@" \
       -p MemoryMax=64M -p MemorySwapMax=0 -p OOMPolicy=continue \
       --description="capped-run: true (probe)" true \
       </dev/null >/dev/null 2>&1
   else
-    systemd-run --user --scope --collect --quiet "$@" \
+    systemd-run --user --scope --collect --quiet --slice="$slice_name" "$@" \
       -p MemoryMax=64M -p MemorySwapMax=0 -p OOMPolicy=continue \
       --description="capped-run: true (probe)" true \
       </dev/null >/dev/null 2>&1
@@ -397,20 +397,43 @@ take_lock() {
 have_ionice=0
 command -v ionice >/dev/null 2>&1 && have_ionice=1
 
-# The payload runs as a shim so a small monitor can read the scope's memory.peak while the
-# promise not to lose the peak still holds: the monitor lives in the scope and keeps the cgroup
-# alive until it has written the final value. It only ever writes the peak (and the final
-# `done` marker) to the run's state folder, and its stderr is /dev/null: no job-status text from
-# the monitor (a `Killed` from one of its children under memory pressure) can reach the wrapper.
-# `parent` is the shim's PID, which the exec chain keeps, so the monitor can tell when the
-# command has gone.
-# The payload shim text lives in capped-run-shim.sh: the wrapper captures it here and the tests
-# source the same function to check it with sh -n and bash -n.
+# The shim raises the payload's OOM score before exec. The monitor runs in a sibling scope
+# and holds the parent slice open while the payload scope can be collected.
 SHIM=$(capped_run_shim)
+MONITOR=$(capped_run_monitor)
+
+start_monitor() {
+  set -- --user --scope --collect --quiet --slice="$slice_name" --unit="$monitor_name" \
+    --description='capped-run: monitor' -- sh -c "$MONITOR" capped-run-monitor "$peek" "$unit_name" "$$"
+  if [ -n "$expand_opt" ]; then
+    set -- "$expand_opt" "$@"
+  fi
+  exec systemd-run "$@"
+}
+
+stop_monitor() {
+  [ -n "${mon:-}" ] || return 0
+  kill -KILL "$mon" 2>/dev/null
+  wait "$mon" 2>/dev/null
+  mon=
+}
+
+wait_monitor_ready() {
+  tries=0
+  while [ "$tries" -lt 30 ]; do
+    if [ -r "$peek" ] && read -r kind <"$peek" 2>/dev/null && [ "$kind" = ready ]; then
+      return 0
+    fi
+    kill -0 "$mon" 2>/dev/null || return 1
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  return 1
+}
 
 run_systemd() {
   # Extra options come first, then the scope properties, then the payload after --.
-  set -- --user --scope --collect --quiet \
+  set -- --user --scope --collect --quiet --slice="$slice_name" \
     -p "MemoryMax=${mib}M" -p MemorySwapMax=0 -p OOMPolicy=continue \
     --description="$description" -- "$@"
   if [ -n "$unit_name" ]; then
@@ -506,6 +529,7 @@ on_signal() {
     *) kill "$child" 2>/dev/null ;;
   esac
   [ "${locked:-0}" = 1 ] && log_event end " exit=$1"
+  stop_monitor
   cleanup_scratch
   [ -n "${peek:-}" ] && rm -f "$peek" "$peek.tmp" 2>/dev/null
   exit "$1"
@@ -544,10 +568,22 @@ fi
 capped=0
 peek=
 if detect_scope; then
-  capped=1
   if ensure_state; then
     peek=$state_dir/peak.$$
+    if rm -f "$peek" "$peek.tmp"; then
+      start_monitor 9>&- 2>/dev/null &
+      mon=$!
+      if wait_monitor_ready; then
+        capped=1
+      else
+        stop_monitor
+        rm -f "$peek" "$peek.tmp" 2>/dev/null
+      fi
+    fi
   fi
+  uncapped_reason='could not start the memory monitor scope'
+fi
+if [ "$capped" = 1 ]; then
   run_capped "$@" &
   child=$!
   wait "$child" 2>/dev/null
@@ -561,7 +597,10 @@ code=$?
 
 capped_oom=0
 if [ "$capped" = 1 ]; then
+  kill -TERM "$mon" 2>/dev/null
   read_peak
+  stop_monitor
+  rm -f "$peek" "$peek.tmp" 2>/dev/null
   case ${oom_state:-} in
     '' | unknown | *[!0-9]*) capped_oom=0 ;;
     *) capped_oom=$oom_state ;;
@@ -597,11 +636,6 @@ elif [ "$capped" = 1 ] && [ "${oom_state:-}" = unknown ]; then
     printf '%s\n' "$cause_line" >&2
     log_capped "$cause_line"
   fi
-fi
-
-# read_peak above already waited for the monitor's last word; the scratch file goes now.
-if [ "$capped" = 1 ] && [ -n "$peek" ]; then
-  rm -f "$peek" "$peek.tmp" 2>/dev/null
 fi
 
 if [ "$locked" = 1 ]; then

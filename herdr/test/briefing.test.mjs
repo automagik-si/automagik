@@ -18,7 +18,7 @@ import { state } from "./use-stubs.mjs";
 import { parseBots } from "../mods/am-sidebar/model.js";
 import {
   briefingText, directMembers, mergeHook, hookCommand, legacyHookCommand, directHookCommand, briefingPath, stableBriefingPath, withExclude, EXCLUDE_LINE, BRIEFING_LIMIT,
-  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE,
+  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE, MESSAGE_LINE,
   amPartEntryPath, amPartHookCommand, amPartRunnerPath, hookTargetOf, installHook, isAmPartEntry, scriptOf, statusWord, PERMISSION_WORD,
 } from "../mods/am-sidebar/briefingText.mjs";
 import { BUDGET_MS, CALL_MS, GUARD_MS, COMPACT_MARK, compactedSince, timeScale, gatherBriefing } from "../mods/am-sidebar/briefing.mjs";
@@ -1074,6 +1074,7 @@ test("worker instruction: launch and full briefings agree on code and git scope"
       for (const render of [launchBriefingText, briefingText]) {
         const text = render({ self, file, isGit });
         assert.equal(text.includes(WORKER_LINE), expected);
+        assert.ok(text.includes(MESSAGE_LINE));
         if (!expected) assert.doesNotMatch(text, /worker/i);
         assert.match(text, /Keep the board green/);
       }
@@ -1489,4 +1490,17 @@ test("#805 briefing gives the Herdr restart path and explains Claude's /restart 
   assert.match(text, /am restart b-main/);
   assert.match(text, /Update installed · \/restart to apply/);
   assert.match(text, /never works.*--append-system-prompt-file.*--settings/);
+});
+
+test("#1556 a seat with a context threshold is told how to hand off; one with none is not", () => {
+  const { file } = parseBots(JSON.stringify(team()));
+  const main = byId(file, ID.main);
+  const member = byId(file, ID.dev);
+  const everyone = { file };
+  assert.match(launchBriefingText({ self: main, ...everyone }), /When `am` asks for your handoff, write it to the path its message names/);
+  assert.match(briefingText({ self: main, ...everyone }), /When `am` asks for your handoff/);
+  assert.doesNotMatch(launchBriefingText({ self: member, ...everyone }), /asks for your handoff/);
+  // A member with its own threshold is told too.
+  const told = { ...member, restartAt: 1000 };
+  assert.match(launchBriefingText({ self: told, ...everyone }), /asks for your handoff/);
 });

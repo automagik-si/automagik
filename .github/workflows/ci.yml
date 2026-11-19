@@ -4,17 +4,170 @@ on:
   push:
     branches: [dev, main]
   pull_request:
+  # A manual run checks everything, exactly like a push: every area's output is true.
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# The paths each area is made of, in one place: the `changes` job below reads them at the start
+# of the run, and each gated job's "Assert the steps ran" step reads the same rule a second time,
+# so a skip in the first read cannot hide a change from the second (#895). The values are the
+# rules the gated jobs used to carry in their own first step, unchanged. Two are not just their
+# folder: Pocket's rule covers the pet art and poses the APK bundles
+# (apps/pocket/docs/decisions/teams-v1.md), and Pocket Link's covers the shared transcript
+# fixture, its only repository input outside its own folder.
+env:
+  HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
+  SCHEDULER_CHANGED_PATHS: '^(herdr/scheduler/|\.github/workflows/ci\.yml$)'
+  AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
+  POCKET_CHANGED_PATHS: '^(apps/pocket/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
+  POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|\.github/workflows/ci\.yml$)'
+  METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
+  USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
+  SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # One job decides what changed, once: the same git diff and grep rules (the workflow-level
+    # env above), read here instead of in every gated job's own first step. A job-level `if:`
+    # is evaluated before any step runs and before a runner is allocated, so an area with no
+    # changes now reads `skipped` instead of claiming a runner to check out and skip.
+    # A failed `changes` job must not hide a check: a gated job's `if` skips only an explicit
+    # `false` output, so a failed detection (an empty output) runs the area instead (fail-open).
+    # A push, and a manual run, check every area: no dev check and no release is ever silently
+    # skipped. Each gated job keeps its own "Assert the steps ran" step, which reads the same
+    # diff a second time (#895). Nothing else moves: the rules and the checks are unchanged.
+    name: Changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      herdr: ${{ steps.paths.outputs.herdr }}
+      scheduler: ${{ steps.paths.outputs.scheduler }}
+      am: ${{ steps.paths.outputs.am }}
+      pocket: ${{ steps.paths.outputs.pocket }}
+      link: ${{ steps.paths.outputs.link }}
+      meter: ${{ steps.paths.outputs.meter }}
+      usagemeter: ${{ steps.paths.outputs.usagemeter }}
+      sandbox: ${{ steps.paths.outputs.sandbox }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Which areas changed
+        id: paths
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          areas=(herdr scheduler am pocket meter usagemeter sandbox link)
+          report="${RUNNER_TEMP}/areas.md"
+          printf '| area | changed |\n| --- | --- |\n' > "${report}"
+          # Every area is written, changed or not: each job-level `if` reads one output.
+          record() {
+            printf '%s=%s\n' "$1" "$2" >> "${GITHUB_OUTPUT}"
+            printf '| %s | %s |\n' "$1" "$2" >> "${report}"
+          }
+          every=''
+          # Only a pull request narrows the run: a push (dev included) and a manual run check
+          # everything, so a dev check is never skipped.
+          if [[ "${EVENT}" != pull_request ]]; then
+            every="${EVENT} checks every area"
+          elif [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] ||
+            ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            # A push that opens a branch, or a base this checkout lacks, checks every area too.
+            every="the base ${BASE:-none} cannot be compared, so every area is checked"
+          fi
+          if [[ -n "${every}" ]]; then
+            echo "${every}."
+            for area in "${areas[@]}"; do record "${area}" true; done
+          else
+            # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the
+            # first match, and pipefail reads that as "did not change" (#895).
+            names="${RUNNER_TEMP}/changed-names.txt"
+            if ! git diff --name-only "${BASE}...HEAD" > "${names}"; then
+              echo "::error::git diff ${BASE}...HEAD failed"
+              exit 1
+            fi
+            # Pocket Link's own rule: complete before/after trees, never a rename followed.
+            link_names="${RUNNER_TEMP}/link-changed-names.txt"
+            if ! git diff --no-renames --name-only \
+              "${BASE}...${HEAD_SHA}" > "${link_names}"; then
+              echo "::error::git diff ${BASE}...${HEAD_SHA} failed"
+              exit 1
+            fi
+            grep_area() {
+              local status=0
+              grep -E "$2" "$3" > /dev/null || status=$?
+              case "${status}" in
+                0) record "$1" true ;;
+                1) record "$1" false ;;
+                *)
+                  echo "::error::grep for $1 over the changed paths failed (${status})"
+                  exit 1
+                  ;;
+              esac
+            }
+            grep_area herdr "${HERDR_CHANGED_PATHS}" "${names}"
+            grep_area scheduler "${SCHEDULER_CHANGED_PATHS}" "${names}"
+            grep_area am "${AM_CHANGED_PATHS}" "${names}"
+            grep_area pocket "${POCKET_CHANGED_PATHS}" "${names}"
+            grep_area meter "${METER_CHANGED_PATHS}" "${names}"
+            grep_area usagemeter "${USAGEMETER_CHANGED_PATHS}" "${names}"
+            grep_area sandbox "${SANDBOX_CHANGED_PATHS}" "${names}"
+            grep_area link "${POCKET_LINK_CHANGED_PATHS}" "${link_names}"
+          fi
+          cat "${report}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            cat "${report}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  nodes:
+    # The Node versions the herdr and am gates run on, read once from .github/node-versions.json
+    # (#1645). The release cut reads the same file, so the version a release runs is always a
+    # version a pull request ran: CI's 22 + latest 24 missed the release's 24.9.0, where a
+    # symlink/rmSync difference (24.0-24.13 followed the link, 24.18 unlinked it) failed every
+    # release for hours with every PR check green. Its own job, not an output of `changes`: a
+    # failed detection must still run every area (#895), so the matrix cannot live there.
+    name: Node versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read the gates' Node versions
+        id: read
+        run: |
+          set -euo pipefail
+          matrix=$(jq -c '.ci' .github/node-versions.json)
+          release=$(jq -r '.release' .github/node-versions.json)
+          # The release must be an exact version that is a matrix leg, or it can float away from
+          # what a pull request ran: that is the skew this file exists to end.
+          if [[ ! "${release}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release Node version '${release}' in .github/node-versions.json is not exact x.y.z"
+            exit 1
+          fi
+          if ! jq -e --arg version "${release}" '.ci | index($version)' .github/node-versions.json > /dev/null; then
+            echo "::error::release Node version '${release}' is not one of the ci matrix legs in .github/node-versions.json"
+            exit 1
+          fi
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
   repo:
-    # One version everywhere, the release tooling's tests, and the market index: DSH's own
+    # One version everywhere, release tooling tests and lint, and the market index: DSH's own
     # parser, and every pinned commit holds the package it lists (so it needs history).
     name: Versions and market index
     runs-on: ubuntu-24.04
@@ -25,10 +178,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Lint release scripts
+        run: |
+          bash -n scripts/release-gates.sh
+          bash -n scripts/release-cut.sh
+          shellcheck scripts/release-gates.sh scripts/release-cut.sh
+
       # scripts/test-guard.test.ts runs real `node --test` runs, on the plugins' Node.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -40,7 +199,12 @@ jobs:
   landing:
     name: Landing page and browser
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Measured on 2026-11-19: the ffmpeg step was still installing when the old 10-minute cap
+    # cancelled the job 9m57s into that step (run 44488373957: job 08:32:21, step 08:32:40,
+    # cancelled 08:42:37), so bun install, both test files and the Chrome check never ran. Those
+    # steps are short; 20 leaves a cold apt install room to finish, while a genuinely hung step
+    # still fails. A package-cache hit removes the download entirely.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -48,11 +212,123 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
+
+      # The page gate re-derives every committed WebP from its recorded source; that check
+      # calls ffprobe and ffmpeg, which the runner image does not carry. The archive cache lets
+      # a later run install the packages it already downloaded instead of fetching them again;
+      # the key carries the hosted image (ImageOS/ImageVersion) and a suffix to bump when this
+      # step changes. A miss still installs, bounded below, rather than assuming a hit.
+      - name: Prepare the apt archive cache
+        id: image
+        run: |
+          set -euo pipefail
+          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
+          # here; the cache key must move when the hosted image (and its apt indexes) moves.
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /var/cache/apt/archives/partial
+          # actions/cache restores as the runner user; the install then hands the cache to apt.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          sudo chmod -R u+rwX /var/cache/apt/archives
+
+      - name: Restore the ffmpeg package cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-v1
+
+      - name: ffmpeg for the derived art check
+        run: |
+          set -euo pipefail
+          sudo chown -R _apt:root /var/cache/apt/archives
+          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
+
+          # Hard wall-clock bounds, in seconds, around every apt phase. An install gets 240s
+          # (4 min) and `update` 120s (2 min): a cold ffmpeg install on the hosted runner runs
+          # well under a minute, so both are generous for a slow but working mirror, while a
+          # stalled one is killed at the bound. Each bound sends TERM, then KILL 15s later, so
+          # the worst path here (cache try, update, install) is 240+120+240 plus three 15s
+          # graces = 10m45s, far under the job's 20-minute cap. #1686 bounded one connection
+          # (`Acquire::*::Timeout`), not the phase: PR #1688's run 44513936685 sat in this step
+          # 19m50 (job 135524951317) with no output because every apt call was `-qq`.
+          readonly APT_INSTALL_LIMIT=240
+          readonly APT_UPDATE_LIMIT=120
+          readonly APT_KILL_AFTER=15
+
+          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
+          # stall visible in the log while apt still prints no secrets.
+          apt_opts=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+
+          log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
+          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
+          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
+          run_apt() {
+            local limit="$1" phase="$2"
+            shift 2
+            local started="$SECONDS" status=0
+            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
+            local elapsed=$((SECONDS - started))
+            case "${status}" in
+              0)
+                log "apt phase '${phase}' finished in ${elapsed}s"
+                return 0
+                ;;
+              124|137)
+                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+              *)
+                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+            esac
+          }
+
+          # fail_phase <phase> <status>: end the step, naming the phase, instead of retrying.
+          fail_phase() {
+            local phase="$1" status="$2"
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              echo "::error::the ffmpeg dependency phase '${phase}' was killed at its wall-clock bound (exit ${status}); apt must not hang the landing job"
+            else
+              echo "::error::the ffmpeg dependency phase '${phase}' failed (apt exit ${status}); the step fails instead of retrying forever"
+            fi
+            exit 1
+          }
+
+          # A restored cache hit installs from its .debs only: --no-download makes apt use
+          # /var/cache/apt/archives or fail, so a hit needs no mirror at all. ffprobe is not a
+          # separate package on Ubuntu (ffmpeg provides both binaries), and
+          # --no-install-recommends only drops extras this check does not use.
+          status=0
+          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
+            install -y --no-install-recommends --no-download ffmpeg || status=$?
+          if [ "${status}" -eq 0 ]; then
+            :
+          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            fail_phase "cache install (--no-download)" "${status}"
+          else
+            # A miss or an incomplete cache falls through to one bounded update + install; that
+            # is the single retry, and both of its phases stay bounded too.
+            log "apt: the package cache does not cover this image; refreshing indexes once, then installing"
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || fail_phase "update" "$?"
+            run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+              install -y --no-install-recommends ffmpeg || fail_phase "install (after update)" "$?"
+          fi
+
+          # Hand the downloaded debs back to the runner user so actions/cache can save them.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: node --test apps/landing/landing.test.mjs apps/landing/waitlist.test.mjs
@@ -87,7 +363,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -130,7 +406,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
@@ -156,7 +432,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - run: node herdr/scripts/privacy-check.mjs
 
@@ -171,17 +447,22 @@ jobs:
     # it is: no install, no dependencies. On the newest Node 22 and on 24, the tests' floor: the
     # pack's users run it on 22.7 or later (AGENTS.md), but the test stubs need
     # module.registerHooks (22.15+).
-    # Only when herdr/ changed, or the workflows and lane tooling that test and pack it.
+    # Only when herdr/ changed, or the workflows and lane tooling that test and pack it: the
+    # `changes` job's herdr output decides it before this job takes a runner.
     name: herdr pack (Node ${{ matrix.node }})
+    needs: [changes, nodes]
+    if: ${{ !cancelled() && needs.changes.outputs.herdr != 'false' }}
     runs-on: ubuntu-24.04
-    # The full CLI/worker suites plus the local/linked start matrix exceed ten minutes.
-    timeout-minutes: 15
-    env:
-      HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
+    # Measured: 10m58 on Node 22, 12m32 on Node 24, whose leg also runs the herdr-app
+    # system-libraries apt-get (2m33 in the slow run). At 15 that leg was cancelled at its cap
+    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 keeps the
+    # suite, the install and a slow runner's variance under the cap. Do not trim it back.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
+      # One list for CI and the release (#1645): .github/node-versions.json.
       matrix:
-        node: ['22', '24']
+        node: ${{ fromJSON(needs.nodes.outputs.matrix) }}
     defaults:
       run:
         working-directory: herdr
@@ -191,35 +472,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Whether herdr/ changed
-        id: changed
-        working-directory: .
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          # A push that opens a branch, or a base this checkout lacks, tests the pack anyway.
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "herdr=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the first
-          # match, and pipefail reads that as "did not change" (#895).
-          diff_file="${RUNNER_TEMP}/herdr-changed.txt"
-          if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
-            echo "::error::git diff ${BASE}...HEAD failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${HERDR_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "herdr=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "herdr/ did not change: nothing to test" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        if: steps.changed.outputs.herdr == 'true'
         with:
           node-version: ${{ matrix.node }}
 
@@ -229,13 +482,13 @@ jobs:
       # One matrix leg is enough: the loader does not depend on the job's Node. libxkbcommon-x11-0
       # is the app's one missing library (libxcb-xkb1 comes with it); check needs no X server.
       - name: herdr-app system libraries
-        if: steps.changed.outputs.herdr == 'true' && matrix.node == '24'
+        if: matrix.node == '24'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libxkbcommon-x11-0 libxcb-xkb1
 
       - name: Every pack mod loads in herdr-app
-        if: steps.changed.outputs.herdr == 'true' && matrix.node == '24'
+        if: matrix.node == '24'
         working-directory: .
         run: node .github/scripts/herdr-app-check.mjs
 
@@ -243,12 +496,10 @@ jobs:
       # PATH; am-quota-keychain-guard.test.mjs fails any that could reach the real `security`.
       - name: Tests
         id: tests
-        if: steps.changed.outputs.herdr == 'true'
         run: node --test 'test/*.test.mjs'
 
       - name: Syntax
         id: syntax
-        if: steps.changed.outputs.herdr == 'true'
         run: |
           set -euo pipefail
           for f in mods/*/*.js mods/*/*.mjs mods/*/bin/*.mjs mods/*/pack/*.mjs scripts/*.mjs scripts/*/*.mjs; do
@@ -264,13 +515,11 @@ jobs:
 
       - name: Catalog
         id: catalog
-        if: steps.changed.outputs.herdr == 'true'
         run: node scripts/catalog.mjs --check
 
       # The Automations panel installs our scheduler release and pins its darwin sha256s
       # (mods/am-automations/scheduler.js): checked against that release's checksums.txt.
       - name: Scheduler pin
-        if: steps.changed.outputs.herdr == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/scheduler-pin.mjs
@@ -285,14 +534,12 @@ jobs:
         run: node scripts/parts.mjs --check
 
       - name: One version (the root's)
-        if: steps.changed.outputs.herdr == 'true'
         run: node scripts/version.mjs check
 
       # am (am/, RFC 0012) carries byte-equal copies of the sidebar's CLI and briefing: a herdr
       # change that drifts from them fails here, in its own pull request. The fix is to run
       # `node scripts/am-copies.mjs --write` at the repository's root and commit am/.
       - name: am's copies of the CLI and briefing
-        if: steps.changed.outputs.herdr == 'true'
         run: node ../scripts/am-copies.mjs --check
 
       # The change check and this assertion read the same diff in two independent steps: a skip
@@ -341,66 +588,37 @@ jobs:
     # source the pack never carries. Its binary ships from its own release lane
     # (scheduler-release.yml), and a scheduler change cuts no monorepo release (scripts/lane.ts
     # NEVER_SHIPPED). Go's vet and tests, and a CGO-free build of the four release targets.
-    # Only when herdr/scheduler/ changed, or this workflow.
+    # Only when herdr/scheduler/ changed, or this workflow: the `changes` job's scheduler output
+    # decides it before this job takes a runner.
     name: Scheduler (Go)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.scheduler != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      SCHEDULER_CHANGED_PATHS: '^(herdr/scheduler/|\.github/workflows/ci\.yml$)'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Whether herdr/scheduler/ changed
-        id: changed
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          # A push that opens a branch, or a base this checkout lacks, tests the scheduler anyway.
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "scheduler=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the first
-          # match, and pipefail reads that as "did not change" (#895).
-          diff_file="${RUNNER_TEMP}/scheduler-changed.txt"
-          if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
-            echo "::error::git diff ${BASE}...HEAD failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${SCHEDULER_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "scheduler=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "herdr/scheduler/ did not change: nothing to test" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: steps.changed.outputs.scheduler == 'true'
         with:
           go-version: '1.26.10'
           cache-dependency-path: herdr/scheduler/go.sum
 
       - name: Vet
         id: vet
-        if: steps.changed.outputs.scheduler == 'true'
         working-directory: herdr/scheduler
         run: go vet ./...
 
       - name: Tests
         id: tests
-        if: steps.changed.outputs.scheduler == 'true'
         working-directory: herdr/scheduler
         run: go test ./...
 
       # The four targets scheduler-release.yml builds: no cgo, so nothing to cross-compile against.
       - name: Cross builds (CGO off)
         id: builds
-        if: steps.changed.outputs.scheduler == 'true'
         working-directory: herdr/scheduler
         run: |
           set -euo pipefail
@@ -454,16 +672,18 @@ jobs:
     # am, the one command (am/, RFC 0012), which every release carries: its tests, a syntax check,
     # shellcheck on its launchers and its copies of the pack's CLI and briefing. Plain JavaScript
     # like the pack: its users run Node 22.7 or later; the tests run on the newest Node 22 and 24.
-    # Only when am/, what it copies, or the workflows and tooling that release it changed.
+    # Only when am/, what it copies, or the workflows and tooling that release it changed: the
+    # `changes` job's am output decides it before this job takes a runner.
     name: am (Node ${{ matrix.node }})
+    needs: [changes, nodes]
+    if: ${{ !cancelled() && needs.changes.outputs.am != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
     strategy:
       fail-fast: false
+      # One list for CI and the release (#1645): .github/node-versions.json.
       matrix:
-        node: ['22', '24']
+        node: ${{ fromJSON(needs.nodes.outputs.matrix) }}
     defaults:
       run:
         working-directory: am
@@ -473,54 +693,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Whether am/ changed
-        id: changed
-        working-directory: .
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "am=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the first
-          # match, and pipefail reads that as "did not change" (#895).
-          diff_file="${RUNNER_TEMP}/am-changed.txt"
-          if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
-            echo "::error::git diff ${BASE}...HEAD failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${AM_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "am=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "am/ did not change: nothing to test" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        if: steps.changed.outputs.am == 'true'
         with:
           node-version: ${{ matrix.node }}
 
       # First, so a herdr change that drifted from am's copies fails here, naming the fix.
       - name: Copies of the pack's CLI and briefing
         id: copies
-        if: steps.changed.outputs.am == 'true'
         run: node ../scripts/am-copies.mjs --check
 
       - name: Tests
         id: tests
-        if: steps.changed.outputs.am == 'true'
         run: node --test 'test/*.test.mjs'
 
       - name: Syntax
         id: syntax
-        if: steps.changed.outputs.am == 'true'
         run: |
           set -euo pipefail
-          for f in *.js *.mjs bin/*.mjs lib/*.mjs; do
+          for f in *.js *.mjs bin/*.mjs lib/*.mjs runner/*.mjs; do
             node --check "$f"
           done
           shellcheck -s sh bin/am bin/run.sh bin/automagik-herdr
@@ -569,53 +759,25 @@ jobs:
   pocket:
     # Pocket's phone app (apps/pocket/, the old automagik-pocket android.yml): the debug APK, the
     # unit tests and lint. Its version is the root package.json's, so a change there builds it too.
-    # Only when apps/pocket/ changed, or the workflows, lane tooling and version that build it.
+    # Only when apps/pocket/ changed, or the workflows, lane tooling and version that build it:
+    # the `changes` job's pocket output decides it before this job takes a runner.
     name: Pocket (build, test, lint)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.pocket != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      POCKET_CHANGED_PATHS: '^(apps/pocket/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # Also Genie's art and the pet poses, which the APK bundles and its tests check (apps/pocket/docs/decisions/teams-v1.md).
-      - name: Whether apps/pocket/ changed
-        id: changed
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          # A push that opens a branch, or a base this checkout lacks, builds the app anyway.
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "pocket=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the first
-          # match, and pipefail reads that as "did not change" (#895).
-          diff_file="${RUNNER_TEMP}/pocket-changed.txt"
-          if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
-            echo "::error::git diff ${BASE}...HEAD failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${POCKET_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "pocket=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "apps/pocket/ did not change: nothing to build" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        if: steps.changed.outputs.pocket == 'true'
         with:
           distribution: temurin
           java-version: '17'
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-        if: steps.changed.outputs.pocket == 'true'
         with:
           packages: 'platforms;android-35 build-tools;35.0.0'
 
@@ -624,7 +786,6 @@ jobs:
       # Robolectric version and the SDKs the tests ask for (@Config(sdk = ...)), so those are the key.
       - name: Robolectric cache key
         id: robolectric
-        if: steps.changed.outputs.pocket == 'true'
         run: |
           set -euo pipefail
           android=apps/pocket/android
@@ -641,7 +802,6 @@ jobs:
       # A miss still builds and tests: Robolectric downloads what is missing and the job saves it.
       - name: Cache Robolectric's jars (~/.m2)
         id: m2
-        if: steps.changed.outputs.pocket == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.m2/repository
@@ -649,15 +809,29 @@ jobs:
           restore-keys: |
             robolectric-m2-${{ runner.os }}-${{ steps.robolectric.outputs.version }}-
 
-      # Validates the wrapper checksum and caches Gradle's dependencies.
+      # Gradle's dependencies and wrapper, keyed on the files that can change resolution: a Gradle
+      # file change starts a fresh key (the restore-key still seeds it) and a source-only change
+      # reuses the warm cache, so a normal run resolves nothing over the network (#1675).
+      - name: Cache Gradle's dependencies and wrapper (~/.gradle)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-pocket-${{ runner.os }}-${{ hashFiles('apps/pocket/android/**/*.gradle.kts', 'apps/pocket/android/**/*.toml', 'apps/pocket/android/gradle/wrapper/gradle-wrapper.properties', 'apps/pocket/android/gradle.properties') }}
+          restore-keys: |
+            gradle-pocket-${{ runner.os }}-
+
+      # Wrapper checksum validation only: the explicit cache above owns ~/.gradle, and setup-gradle
+      # stands down when that directory already exists, so its own cache is off here (#1675).
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
-        if: steps.changed.outputs.pocket == 'true'
+        with:
+          cache-disabled: true
 
       # One shared debug key for PR APKs (docs/decisions/shared-debug-signing-key.md). With the
       # secret, the job signs with it and publishes the APK; without it (a fork), the default key.
       - name: Materialize the shared debug keystore
         id: debug_key
-        if: steps.changed.outputs.pocket == 'true'
         env:
           KEYSTORE: ${{ secrets.POCKET_DEBUG_SIGNING_KEYSTORE }}
         run: |
@@ -675,22 +849,36 @@ jobs:
 
       - name: Build the debug APK, run the unit tests and lint
         id: build
-        if: steps.changed.outputs.pocket == 'true'
         working-directory: apps/pocket/android
         run: |
+          set -euo pipefail
           touch "$RUNNER_TEMP/m2-marker"
-          ./gradlew --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+          args=(--no-daemon --max-workers=2 --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug)
+          first="$RUNNER_TEMP/gradle-first-attempt.log"
+          status=0
+          ./gradlew "${args[@]}" 2>&1 | tee "$first" || status=$?
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          # A dropped connection (a plugin marker or a dependency that did not resolve) is retried
+          # exactly once; a test, lint or compile failure is not, and a second failure fails the
+          # job, so a genuinely disappeared artifact is still obvious (#1675).
+          if ! grep -Eq 'Plugin .* was not found|Could not resolve|Could not GET' "$first"; then
+            exit "$status"
+          fi
+          echo "resolution failed, retrying once"
+          ./gradlew "${args[@]}"
 
       # The certificate is public evidence that two PR runs share a key; the APK is what a tester installs.
       - name: Debug APK certificate
-        if: steps.changed.outputs.pocket == 'true' && steps.debug_key.outputs.present == 'true'
+        if: steps.debug_key.outputs.present == 'true'
         run: |
           set -euo pipefail
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
             apps/pocket/android/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload the debug APK
-        if: steps.changed.outputs.pocket == 'true' && steps.debug_key.outputs.present == 'true'
+        if: steps.debug_key.outputs.present == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pocket-debug-apk-${{ github.event.pull_request.number || github.run_number }}
@@ -698,13 +886,13 @@ jobs:
           retention-days: 14
 
       - name: Remove the shared debug keystore
-        if: always() && steps.debug_key.outputs.present == 'true'
-        run: rm -f "${POCKET_DEBUG_STORE:-}"
+        if: always()
+        run: rm -f "$RUNNER_TEMP/pocket-debug.keystore"
 
       # Evidence only, never a failure: Gradle hides the tests' "Downloading" lines, so this lists
       # the jars this run fetched into ~/.m2. A warm cache fetches none.
       - name: Robolectric jars fetched in this run
-        if: always() && steps.changed.outputs.pocket == 'true'
+        if: always()
         run: |
           echo "cache-hit=${{ steps.m2.outputs.cache-hit }}"
           if [ -f "$RUNNER_TEMP/m2-marker" ] && [ -d ~/.m2/repository ]; then
@@ -717,7 +905,7 @@ jobs:
           find ~/.m2/repository -name '*.jar' -exec ls -l {} + 2>/dev/null || true
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always() && steps.changed.outputs.pocket == 'true'
+        if: always()
         with:
           name: pocket-reports
           path: |
@@ -727,13 +915,11 @@ jobs:
 
       # The terminal page the app shows (its xterm assets), driven in Chromium.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        if: steps.changed.outputs.pocket == 'true'
         with:
           python-version: '3.12'
 
       - name: Terminal page (Playwright)
         id: terminal
-        if: steps.changed.outputs.pocket == 'true'
         run: |
           set -euo pipefail
           python -m pip install playwright
@@ -780,58 +966,13 @@ jobs:
           fi
           echo "ran: ${OUTCOMES}"
 
-  pocket-link-changes:
-    # Decide on Linux before the matrix can request a scarce macOS runner. The shared
-    # transcript fixture is the tests' only repository input outside Pocket Link itself.
-    name: Pocket Link changed paths
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      link: ${{ steps.changed.outputs.link }}
-    env:
-      POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|\.github/workflows/ci\.yml$)'
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Whether Pocket Link changed
-        id: changed
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          EVENT: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "link=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the first
-          # match, and pipefail reads that as "did not change" (#895).
-          diff_file="${RUNNER_TEMP}/link-changed.txt"
-          # PRs compare from the merge base; pushes compare the complete before/after trees.
-          range="${BASE}..${HEAD_SHA}"
-          if [[ "${EVENT}" == pull_request ]]; then range="${BASE}...${HEAD_SHA}"; fi
-          if ! git diff --no-renames --name-only "${range}" > "${diff_file}"; then
-            echo "::error::git diff ${range} failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${POCKET_LINK_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "link=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "link=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
   pocket-link:
     # The real socket-boundary test skips on Linux, so relevant changes need both OSes.
-    # Job-level if is evaluated before matrix expansion and runner allocation.
+    # Job-level if is evaluated before matrix expansion and runner allocation, so the `changes`
+    # job's link output is what keeps a scarce macOS runner from being requested for nothing.
     name: Pocket Link bridge (${{ matrix.os }})
-    needs: pocket-link-changes
-    if: needs.pocket-link-changes.outputs.link == 'true'
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.link != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -877,15 +1018,15 @@ jobs:
   pocket-link-required:
     # Branch protection must require this stable aggregate, not either conditional OS job.
     name: Pocket Link bridge
-    needs: [pocket-link-changes, pocket-link]
+    needs: [changes, pocket-link]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require successful coverage when Pocket Link changed
         env:
-          DETECTION: ${{ needs.pocket-link-changes.result }}
-          CHANGED: ${{ needs.pocket-link-changes.outputs.link }}
+          DETECTION: ${{ needs.changes.result }}
+          CHANGED: ${{ needs.changes.outputs.link }}
           TESTS: ${{ needs.pocket-link.result }}
         run: |
           set -euo pipefail
@@ -903,51 +1044,25 @@ jobs:
     # Meter's local tools (meter/statusline: the Claude Code status line and the limits logger that
     # runs it as `claude-limits-statusline.mjs -- <status line>`): syntax and their dependency-free
     # tests, the formatter against fixture stdin objects included. No release ships them
-    # (scripts/lane.ts NEVER_SHIPPED).
+    # (scripts/lane.ts NEVER_SHIPPED). Only when meter/statusline/ changed, or this workflow:
+    # the `changes` job's meter output decides it before this job takes a runner.
     name: Meter status line
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.meter != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env:
-      METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Whether meter/statusline/ changed
-        id: changed
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "meter=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the first
-          # match, and pipefail reads that as "did not change" (#895).
-          diff_file="${RUNNER_TEMP}/meter-changed.txt"
-          if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
-            echo "::error::git diff ${BASE}...HEAD failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${METER_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "meter=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "meter/statusline/ did not change: nothing to test" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        if: steps.changed.outputs.meter == 'true'
         with:
           node-version: '22'
 
       - name: Syntax and tests
         id: tests
-        if: steps.changed.outputs.meter == 'true'
         run: |
           set -euo pipefail
           for f in meter/statusline/*.mjs; do node --check "$f"; done
@@ -999,9 +1114,12 @@ jobs:
     # standalone installer's test against the binary just built. It ships on the meter lane (RFC
     # 0017 delivery 4: scripts/lane.ts, and release.yml's meter jobs build its release binaries).
     # The toolchain is pinned so a new clippy lint never fails an unchanged crate; moving it is a
-    # change of its own. Only when the crate, the herdr-meter doc's keeper (meter/schema/), the workflows that test
-    # and release it, or the lane and version tooling changed.
+    # change of its own. Only when the crate, the herdr-meter doc's keeper (meter/schema/), the
+    # workflows that test and release it, or the lane and version tooling changed: the `changes`
+    # job's usagemeter output decides it before either runner is allocated.
     name: usagemeter (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.usagemeter != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -1010,7 +1128,6 @@ jobs:
         os: [ubuntu-24.04, macos-latest]
     env:
       RUST_TOOLCHAIN: 1.93.0
-      USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
     defaults:
       run:
         working-directory: meter/usagemeter
@@ -1020,32 +1137,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Whether meter/usagemeter/ changed
-        id: changed
-        working-directory: .
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "usagemeter=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          diff_file="${RUNNER_TEMP}/usagemeter-changed.txt"
-          if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
-            echo "::error::git diff ${BASE}...HEAD failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${USAGEMETER_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "usagemeter=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "meter/usagemeter/ did not change: nothing to test" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
       - name: Toolchain
-        if: steps.changed.outputs.usagemeter == 'true'
         run: |
           set -euo pipefail
           rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt,clippy
@@ -1053,7 +1145,6 @@ jobs:
           cargo --version
 
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: steps.changed.outputs.usagemeter == 'true'
         with:
           path: |
             ~/.cargo/registry/index
@@ -1065,23 +1156,19 @@ jobs:
 
       - name: Format
         id: format
-        if: steps.changed.outputs.usagemeter == 'true'
         run: cargo fmt --check
 
       - name: Clippy
         id: clippy
-        if: steps.changed.outputs.usagemeter == 'true'
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
         id: test
-        if: steps.changed.outputs.usagemeter == 'true'
         run: cargo test --locked
 
       # The installer stays until RFC 0017 delivery 9. Its test installs from a release laid out on
       # disk, so the binary the tests built stands in for this machine's release asset.
       - name: Installer
-        if: steps.changed.outputs.usagemeter == 'true'
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Linux ]; then shellcheck -s sh install.sh tests/install.sh; fi
@@ -1145,51 +1232,25 @@ jobs:
     # the install/check helper): syntax and hermetic tests (fake bwrap, temp Unix sockets and
     # temp profiles; no live socket, docker.sock or profile). The pack carries the wrapper in
     # its release; no release here ships this folder (scripts/lane.ts NEVER_SHIPPED).
-    # Only when apps/dsh-sandbox/ changed, or this workflow.
+    # Only when apps/dsh-sandbox/ changed, or this workflow: the `changes` job's sandbox output
+    # decides it before this job takes a runner.
     name: dsh-sandbox runner
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.sandbox != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env:
-      SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Whether apps/dsh-sandbox/ changed
-        id: changed
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            echo "sandbox=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the first
-          # match, and pipefail reads that as "did not change" (#895).
-          diff_file="${RUNNER_TEMP}/sandbox-changed.txt"
-          if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
-            echo "::error::git diff ${BASE}...HEAD failed"
-            exit 1
-          fi
-          grep_status=0
-          grep -E "${SANDBOX_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
-          case "${grep_status}" in
-            0) echo "sandbox=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "apps/dsh-sandbox/ did not change: nothing to test" ;;
-            *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
-          esac
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        if: steps.changed.outputs.sandbox == 'true'
         with:
           node-version: '22'
 
       - name: Syntax and tests
         id: tests
-        if: steps.changed.outputs.sandbox == 'true'
         run: |
           set -euo pipefail
           for f in apps/dsh-sandbox/bin/*.mjs; do node --check "$f"; done
@@ -1257,7 +1318,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -1300,6 +1361,25 @@ jobs:
         # fails, rather than skips, when it finds no browser (#323).
         if: matrix.app == 'bots-dsh'
         run: echo "CHROME_BIN=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+
+      - name: A case-insensitive folder for the member wall's spelling check
+        # The member wall decides by folder identity, which only a disk that folds case and
+        # accents (the Mac's default) proves. The runner's kernel has no casefold tmpfs, so a
+        # small casefold ext4 image in the job's own temp. Under CI the test fails, rather than
+        # skips, when it finds no such folder.
+        if: matrix.app == 'bots-dsh'
+        run: |
+          set -euo pipefail
+          img="${RUNNER_TEMP}/casefold.img"
+          dir="${RUNNER_TEMP}/casefold"
+          truncate -s 64M "${img}"
+          mkfs.ext4 -q -O casefold "${img}"
+          mkdir -p "${dir}"
+          sudo mount -o loop "${img}" "${dir}"
+          sudo mkdir "${dir}/w"
+          sudo chattr +F "${dir}/w"
+          sudo chown "$(id -u):$(id -g)" "${dir}/w"
+          echo "MEMBER_WALL_CASEFOLD_DIR=${dir}/w" >> "$GITHUB_ENV"
 
       - name: Electron for the Bot team's script wall check
         # browser_exec's process wall is checked on both runtimes the Bot team ships on. The
@@ -1345,7 +1425,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -1497,7 +1577,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - name: Install
         run: npm ci --no-fund --no-audit
@@ -1529,7 +1609,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - name: Test
         run: node --test test/batch-spawn.test.js test/process-identity.test.js

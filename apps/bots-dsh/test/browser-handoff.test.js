@@ -46,14 +46,17 @@ function start() {
   rt.ensureCapabilities = async sessionId => { ensured.push(sessionId) }
   rt.resolveAgent = async sessionId => ({
     session: { id: sessionId },
-    followup(message) { sent.push({ sessionId, message }) },
+    // The hold as the Bot wakes: it must be clear before the Bot can browser_resume.
+    followup(message) { sent.push({ sessionId, message, hold: rt.browserChannel.holdOf(sessionId) }) },
   })
+  const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', {
+    method: 'POST', body: JSON.stringify({ endpoint, payload }),
+  }))).json()
   return {
-    rt, sent, ensured,
+    rt, sent, ensured, call,
     failFlush(error) { flushError = error },
-    call: async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', {
-      method: 'POST', body: JSON.stringify({ endpoint, payload }),
-    }))).json(),
+    // The desktop window's long poll (native: it holds Electron's view of the browser).
+    poll: async (clientId = 'w1') => (await call('browser-wait', { clientId, open: {}, native: true })).value,
     stop: async () => {
       // Every hold change saves the team in the background (browser.js), and a failed
       // endpoint logs in the background too (channel.js -> diagnostics.js). The
@@ -243,7 +246,7 @@ test('browser-takeover keeps the handoff it takes over, and starts a plain takeo
 })
 
 test('browser-give-back tells the Bot how the handoff went and clears the hold', async (t) => {
-  const { rt, call, sent, ensured, stop } = start()
+  const { rt, call, poll, sent, ensured, stop } = start()
   t.after(stop)
   await rt.load()
 
@@ -272,6 +275,36 @@ test('browser-give-back tells the Bot how the handoff went and clears the hold',
   const skipped = JSON.parse(sent[1].message.content[0].text)
   assert.equal(skipped.outcome, 'skipped')
   assert.match(skipped.message, /Do not retry it/)
+  assert.deepEqual(sent.map(item => item.hold), [null, null])
+
+  // In the desktop app Electron holds the browser too. The card stays and the Bot hears
+  // nothing until that window confirms the release; only then is the hold cleared and
+  // the one answer sent.
+  rt.browserChannel.setHold('b2', BOT_HOLD)
+  await poll()
+  const card = { botId: 'b2', callId: 'call-1', outcome: 'done', viewClientId: 'w1' }
+  const native = call('browser-give-back', card)
+  const { requests: [release], holds } = await poll()
+  assert.deepEqual({ botId: release.botId, held: release.held }, { botId: 'b2', held: false })
+  assert.deepEqual(holds.b2, BOT_HOLD)
+  assert.equal(sent.length, 2)
+  assert.equal((await call('browser-give-back', card)).error.code, 'bot/refused')
+  // Neither another native window, a plain read result, nor this window echoing the other
+  // hold change confirms this window's release.
+  await poll('w2')
+  assert.equal((await call('browser-result', { id: release.id, ok: true, clientId: 'w2', held: false })).value, false)
+  assert.equal((await call('browser-result', { id: release.id, ok: true, page: {} })).value, false)
+  assert.equal((await call('browser-result', { id: release.id, ok: true, clientId: 'w1', held: true })).value, false)
+  assert.equal((await call('browser-result', { id: release.id, ok: true, clientId: 'w1' })).value, false)
+  assert.deepEqual(rt.browserChannel.holdOf('b2'), BOT_HOLD)
+  assert.equal(sent.length, 2)
+  assert.equal((await call('browser-result', { id: release.id, ok: true, clientId: 'w1', held: false })).value, true)
+  assert.equal((await native).value, true)
+  assert.equal(sent.length, 3)
+  assert.equal(sent[2].hold, null)
+  assert.equal(JSON.parse(sent[2].message.content[0].text).outcome, 'done')
+  assert.equal(rt.browserChannel.holdOf('b2'), null)
+  assert.equal((await call('browser-result', { id: release.id, ok: true, clientId: 'w1', held: false })).value, false)
 })
 
 test('browser-give-back answers an open handoff once, and a plain hold without a word', async (t) => {
@@ -313,12 +346,15 @@ test('browser-give-back refuses a stale call, an unknown outcome, and an unknown
   assert.equal(invalid.ok, false)
   assert.equal(invalid.error.code, 'bot/invalid')
   assert.equal((await call('browser-give-back', { botId: 'nobody' })).error.code, 'bot/not-found')
+  // A desktop card for a stale call is refused before any release reaches the window.
+  const nativeStale = await call('browser-give-back', { botId: 'b2', callId: 'call-1', outcome: 'done', viewClientId: 'w1' })
+  assert.equal(nativeStale.error.code, 'bot/stale')
   assert.deepEqual(rt.browserChannel.holdOf('b2'), { ...BOT_HOLD, callId: 'call-2' })
   assert.equal(sent.length, 0)
 })
 
 test('browser-give-back restores the hold when the Bot cannot be told', async (t) => {
-  const { rt, call, sent, failFlush, stop } = start()
+  const { rt, call, poll, sent, failFlush, stop } = start()
   t.after(stop)
   await rt.load()
 
@@ -334,6 +370,32 @@ test('browser-give-back restores the hold when the Bot cannot be told', async (t
   assert.equal((await call('browser-give-back', { botId: 'b2', callId: 'call-1', outcome: 'done' })).value, true)
   assert.equal(rt.browserChannel.holdOf('b2'), null)
   assert.equal(sent.length, 1)
+
+  // A desktop window that refuses the release keeps the same card up and the Bot unwoken.
+  rt.browserChannel.setHold('b2', BOT_HOLD)
+  await poll()
+  sent.length = 0
+  const card = { botId: 'b2', callId: 'call-1', outcome: 'done', viewClientId: 'w1' }
+  const refused = call('browser-give-back', card)
+  const [first] = (await poll()).requests
+  assert.equal(first.held, false)
+  assert.equal((await call('browser-result', { id: first.id, ok: false, error: 'busy', clientId: 'w1', held: false })).value, true)
+  const kept = await refused
+  assert.equal(kept.error.code, 'bot/refused')
+  assert.deepEqual(rt.browserChannel.holdOf('b2'), BOT_HOLD)
+  assert.equal(sent.length, 0)
+  // The retry is the only request the window sees: the refusal emitted nothing. Once the
+  // release is confirmed, the answer is queued and wakes the Bot, so a flush that then fails
+  // leaves the browser with the Bot.
+  failFlush(new Error('flush failed'))
+  const retried = call('browser-give-back', card)
+  const { requests } = await poll()
+  assert.deepEqual(requests.map(item => [item.held, item.id === first.id]), [[false, false]])
+  assert.equal((await call('browser-result', { id: requests[0].id, ok: true, clientId: 'w1', held: false })).value, true)
+  assert.equal((await retried).value, true)
+  assert.equal(rt.browserChannel.holdOf('b2'), null)
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].hold, null)
 })
 
 test('a handoff answer carries its reason, so it reads on its own', () => {

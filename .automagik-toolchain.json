@@ -1,0 +1,16 @@
+{
+  "$schema": "./server/project-toolchain.schema.json",
+  "schemaVersion": 1,
+  "tools": {
+    "bun": {
+      "version": "1.4.4",
+      "sha256": {
+        "linux-x64": "bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c",
+        "linux-arm64": "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e"
+      }
+    }
+  },
+  "gate": {
+    "command": "bun run check"
+  }
+}
