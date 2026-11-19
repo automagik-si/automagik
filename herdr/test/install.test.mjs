@@ -2861,6 +2861,39 @@ test("--uninstall on macOS fallback reads launchd's exact not-found words, not a
   assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "asked first, and never removes on a guess");
 });
 
+test("--uninstall on macOS removes a pack from before the login service whose command refuses the launchd question (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  const plist = REVIVE_PLIST(s);
+  // A pack installed before this PR: it never wrote the plist, so there is no label to orphan.
+  assert.equal(s.run("--no-revive", "--no-usagemeter").code, 0);
+  assert.equal(existsSync(plist), false, "a pre-PR pack writes no plist");
+  // Its command has `revive service`, and on macOS it refuses it with the pre-PR words, exit 1.
+  const said = join(s.root, "old-cli.log");
+  const refusal = "The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. Until then, run am revive by hand after a restart of this computer.";
+  exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${said}"
+case "$1 $2" in
+  "dsh-tui uninstall") exit 0 ;;
+esac
+printf '%s\\n' "${refusal}" >&2
+exit 1
+`);
+  writeFileSync(join(s.pack, "bin", "automagik-herdr.mjs"), `// the command from before the macOS agent: revive service exists, macOS (launchd) is refused\n// ${refusal}\n`);
+  lc.set("gone");
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+  assert.equal(u.code, 0, `an old pack must still uninstall: ${u.out}${u.err}`);
+  assert.equal(existsSync(s.pack), false, "the pack leaves");
+  assert.equal(existsSync(s.link), false, "the link leaves");
+  assert.match(u.out, /can't answer the macOS login service question, so this installer asked launchd itself/, "says why it asked launchd itself");
+  assert.match(u.out, /revive login service isn't installed/, "says what it found");
+  assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "asked launchd, and booted out nothing it could not justify");
+  const calls = existsSync(said) ? readFileSync(said, "utf8").split("\n").filter(Boolean) : [];
+  assert.deepEqual(calls, ["revive service status"], "the old command was only asked, never told to uninstall");
+});
+
 test("--dsh-tui writes minimumReleaseAgeExclude: [] for a release older than the profile's gate", (t) => {
   const s = scratch(t);
   s.publish("9.9.0");

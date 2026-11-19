@@ -1364,15 +1364,27 @@ revive_launchd_not_loaded() {
   if [ "$1" = 113 ]; then return 0; fi
   printf '%s\n' "$2" | grep -Eq '^Could not find service($|[^[:alnum:]_])'
 }
+# Whether the installed command can answer the login-service question on this computer. macOS
+# support came after `revive service` itself, so a pack from before it carries the command and
+# refuses it there ("macOS (launchd) is the next delivery", exit 1). Calling that command's
+# uninstall would stop the whole uninstall over a capability the pack never had. Ask the command
+# itself, read-only, with its own status query: exit 0 is the only answer that says it knows this
+# system's service. No version to guess and no refusal wording to match, so a reworded message or
+# a renamed internal changes neither side; Linux has always answered, so nothing is asked there.
+revive_cli_can_answer() {
+  [ "$REVIVE_OS" = Darwin ] || return 0
+  "$LINK" revive service status </dev/null >/dev/null 2>&1
+}
 # --uninstall: the service goes through the command that wrote it, while the pack and its link
 # are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
-# PLIST_MARK in the macOS plist). That command is called even when the plist is gone: it owns the
-# second-run recovery (a label launchd still holds), and its answer is the one to show. The
-# fallback runs only when that command is gone, never after it refused; on macOS it asks launchd
-# even with the plist gone, boots a loaded label out, and reads only launchd's own not-found
-# answer (113, or the exact "Could not find service") as not loaded. A refusal leaves the file
-# (when there is one), stops the uninstall before the pack and link leave, and names the command
-# that finishes by hand.
+# PLIST_MARK in the macOS plist) and the command can answer on this computer. That command is
+# called even when the plist is gone: it owns the second-run recovery (a label launchd still
+# holds), and its answer is the one to show. The fallback runs when that command is gone or from
+# before it could answer on this system, never after it refused; on macOS it asks launchd even
+# with the plist gone, boots a loaded label out, and reads only launchd's own not-found answer
+# (113, or the exact "Could not find service") as not loaded. A refusal leaves the file (when
+# there is one), stops the uninstall before the pack and link leave, and names the command that
+# finishes by hand.
 revive_uninstall() {
   REVIVE_OS=$(uname -s 2>/dev/null)
   REVIVE_UNIT=$(revive_service_file)
@@ -1385,7 +1397,19 @@ revive_uninstall() {
       return 0
     fi
   fi
+  # The command is called only when it can answer on this computer: a pack from before the macOS
+  # agent has `revive service` and refuses it there, and its refusal is not a reason to leave the
+  # pack behind. Such a pack cannot name a label either (it never wrote a plist), so the
+  # installer's own launchctl probe below is the one that can still see one launchd holds.
+  revive_cli=0
   if link_ours && [ -f "$PACK/bin/automagik-herdr.mjs" ] && grep -q 'revive service' "$PACK/bin/automagik-herdr.mjs" 2>/dev/null; then
+    if revive_cli_can_answer; then
+      revive_cli=1
+    else
+      say "The pack's command can't answer the macOS login service question, so this installer asked launchd itself."
+    fi
+  fi
+  if [ "$revive_cli" = 1 ]; then
     revive_rc=0
     revive_out=$("$LINK" revive service uninstall <"/dev/null" 2>&1) || revive_rc=$?
     if [ "$revive_rc" = 0 ]; then printf '%s\n' "$revive_out" | sed 's/^/  /'; return 0; fi
