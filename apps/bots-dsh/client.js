@@ -9251,7 +9251,7 @@ function PendingHandoff({ sessionId, bot, hold, hooks, actions, inline }) {
   };
   const answer = (outcome) => run2(() => actions.browserGiveBack(bot.id, { callId: hold.callId, outcome }), true);
   const takeOver = () => run2(async () => {
-    await actions.browserTakeover(bot.id);
+    await actions.browserTakeover(bot.id, hold.callId);
     actions.openBrowser?.(bot.id);
   }, false);
   return (0, import_react21.createElement)(
@@ -34061,11 +34061,11 @@ function BrowserView({ bot, tabId, leaving, landed, actions, useBrowserPages, ho
       "div",
       { className: "bt-browser-takeover", "data-held": hold?.by === "user" || void 0 },
       (0, import_react92.createElement)("span", null, hold?.by === "user" ? t("You control this browser") : hold?.by === "bot" ? t("The Bot handed this browser to you: {reason}", { reason: hold.reason }) : t("The Bot controls this browser")),
-      hold?.by ? (0, import_react92.createElement)("button", { type: "button", onClick: () => void actions.browserGiveBack(bot.id) }, t("Give back")) : (0, import_react92.createElement)(
+      hold?.by ? (0, import_react92.createElement)("button", { type: "button", onClick: () => void actions.browserGiveBack(bot.id, { callId: hold.callId ?? null }).catch((error) => actions.reportError?.(error, "handoff")) }, t("Give back")) : (0, import_react92.createElement)(
         "span",
         { className: "bt-browser-takeover-actions" },
-        (0, import_react92.createElement)("button", { type: "button", onClick: () => void actions.browserTakeover(bot.id) }, t("Take over")),
-        (0, import_react92.createElement)("button", { type: "button", onClick: () => void actions.browserStop(bot.id) }, t("Stop"))
+        (0, import_react92.createElement)("button", { type: "button", onClick: () => void actions.browserTakeover(bot.id).catch((error) => actions.reportError?.(error, "handoff")) }, t("Take over")),
+        (0, import_react92.createElement)("button", { type: "button", onClick: () => void actions.browserStop(bot.id).catch((error) => actions.reportError?.(error, "handoff")) }, t("Stop"))
       )
     ) : null,
     (0, import_react92.createElement)(
@@ -36117,21 +36117,26 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
   };
 }
 var sleep = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
-function serveBrowserReads({ browsers, post, clientId = globalThis.crypto.randomUUID(), retryMs = 1e3 }) {
+function serveBrowserReads({ browsers, post, clientId = globalThis.crypto.randomUUID(), retryMs = 1e3, holdView }) {
   let stopped = false;
   let poll;
   let reported = "";
   const answered = /* @__PURE__ */ new Map();
-  const answer = async ({ id, botId }) => {
+  const answer = async ({ id, botId, held }) => {
     let job = answered.get(id);
     if (job === void 0) {
       job = (async () => {
+        const result = typeof held === "boolean" ? { id, clientId, held } : { id };
         try {
-          const result = { id, ok: true, page: await browsers.read(botId) };
+          if (typeof held === "boolean") {
+            if (await holdView?.(botId, held) !== true) throw new Error("The Desktop app did not change browser control.");
+            return { ...result, ok: true };
+          }
+          const page = await browsers.read(botId);
           browsers.noteRead(botId);
-          return result;
+          return { ...result, ok: true, page };
         } catch (error) {
-          return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
+          return { ...result, ok: false, error: error instanceof Error ? error.message : String(error) };
         }
       })();
       answered.set(id, job);
@@ -36146,7 +36151,7 @@ function serveBrowserReads({ browsers, post, clientId = globalThis.crypto.random
       const open = browsers.openPages();
       reported = JSON.stringify(open);
       try {
-        const response = await post("browser-wait", { clientId, open }, poll.signal);
+        const response = await post("browser-wait", { clientId, open, ...holdView ? { native: true } : {} }, poll.signal);
         browsers.setHolds?.(response?.holds);
         failures = 0;
         const requests = Array.isArray(response) ? response : response?.requests;
@@ -38679,6 +38684,8 @@ function apply(ctx) {
   }
   const bridge = (window.dshDesktop?.protocolVersion === 1 ? window.dshDesktop.browser : globalThis.dsBotApp?.browser) ?? null;
   const browsers = bridge ? createBotBrowsers({ bridge, createSource, savedTabs: () => roster.getSnapshot().browserTabs }) : null;
+  const holdView = bridge?.views ? (botId, held) => bridge.views.hold(botId, held) : void 0;
+  const viewClientId = holdView ? globalThis.crypto.randomUUID() : void 0;
   if (browsers) {
     ctx.effect(() => {
       let stopReads = null;
@@ -38686,7 +38693,7 @@ function apply(ctx) {
         const snapshot2 = roster.getSnapshot();
         if (!snapshot2.ready) return;
         const on = snapshot2.browser === true;
-        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call });
+        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call, clientId: viewClientId, holdView });
         if (!on && stopReads) {
           stopReads();
           stopReads = null;
@@ -39040,22 +39047,10 @@ function apply(ctx) {
       browserNavigate: (tabId, input) => browsers.navigate(tabId, input),
       browserCommand: (tabId, name) => browsers.command(tabId, name),
       browserFocus: (tabId) => browsers.focus(tabId),
-      browserTakeover: bridge.views ? async (botId) => {
-        const result = await call("browser-takeover", { botId });
-        await bridge.views.hold(botId, true);
-        return result;
-      } : void 0,
-      browserStop: bridge.views ? async (botId) => {
-        const result = await call("browser-stop", { botId });
-        await bridge.views.hold(botId, true);
-        return result;
-      } : void 0,
+      browserTakeover: holdView ? (botId, callId) => call("browser-takeover", { botId, callId, viewClientId }) : void 0,
+      browserStop: holdView ? (botId) => call("browser-stop", { botId, viewClientId }) : void 0,
       // `answer` is a handoff card's { callId, outcome }; the panel's Give back sends none.
-      browserGiveBack: bridge.views ? async (botId, answer = {}) => {
-        const result = await call("browser-give-back", { botId, ...answer });
-        await bridge.views.hold(botId, false);
-        return result;
-      } : void 0,
+      browserGiveBack: holdView ? (botId, answer = {}) => call("browser-give-back", { ...answer, botId, viewClientId }) : void 0,
       // Cookie imports, only where the bridge offers them (the desktop app): a file or an
       // installed browser's profile is previewed, then applied into the Bot's storage key.
       browserImport: typeof bridge.importSources === "function" ? {
@@ -39068,7 +39063,7 @@ function apply(ctx) {
     });
   } else {
     Object.assign(actions, {
-      browserTakeover: (botId) => call("browser-takeover", { botId }),
+      browserTakeover: (botId, callId) => call("browser-takeover", { botId, callId }),
       browserStop: (botId) => call("browser-stop", { botId }),
       browserGiveBack: (botId, answer = {}) => call("browser-give-back", { botId, ...answer })
     });

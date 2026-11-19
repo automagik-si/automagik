@@ -2022,18 +2022,93 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
   git(s.project, "worktree", "add", "-q", "-b", "feat/wait", wt);
   const lockDir = join(s.app, "automagik-herdr");
   mkdirSync(lockDir, { recursive: true });
-  // Held by this test's process (fresh: under the 10 s stale limit), let go after 4.5 s.
+  // Startup is not contention: keep our holder fresh until the complete wait notice arrives.
   const lock = worktreeLock(lockDir, wt);
-  writeFileSync(lock, `${process.pid} held-by-the-test`);
-  const call = s.cliAsync(["worker", "go", "--worktree", wt]);
-  const free = setTimeout(() => rmSync(lock, { force: true }), 4500);
-  t.after(() => clearTimeout(free));
-  const r = await call;
-  assert.equal(r.code, 0, r.err);
-  assert.match(r.err, new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
-    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m"));
-  assert.equal(r.err.split("waiting for").length, 2, "said once");
-  assert.equal(s.runs().length, 1);
+  const holder = `${process.pid} held-by-the-test`;
+  writeFileSync(lock, holder);
+  const ownsLock = () => {
+    try { return readFileSync(lock, "utf8") === holder; }
+    catch (e) { if (e.code === "ENOENT") return false; throw e; }
+  };
+  const notice = new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
+    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m");
+  let child, fresh, watchdog;
+  let closed = false;
+  let released = false;
+  let terminal = false;
+  let out = "", err = "";
+  let close;
+  try {
+    child = s.spawnCli(["worker", "go", "--worktree", wt]);
+    let finish;
+    const result = new Promise((resolve) => { finish = resolve; });
+    close = new Promise((resolve) => child.once("close", (code, signal) => {
+      terminal = true;
+      closed = true;
+      resolve();
+      finish({ code, signal });
+    }));
+    const fail = (why) => { terminal = true; finish({ failure: why }); };
+    child.on("error", (e) => fail(`scratch CLI error: ${e.message}`));
+    child.stdout.on("error", (e) => fail(`stdout error: ${e.message}`));
+    child.stderr.on("error", (e) => fail(`stderr error: ${e.message}`));
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => {
+      err += d;
+      if (terminal || released || !notice.test(err)) return;
+      released = true; // Accumulated stderr keeps matching; never remove a successor's lock.
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      try {
+        assert.ok(ownsLock(), "fixture holder lost before its wait notice");
+        rmSync(lock);
+      } catch (e) { fail(e.message); return; }
+      watchdog = setTimeout(() => fail("scratch CLI did not close within 30 s after its notice"), 30_000);
+    });
+    fresh = setInterval(() => {
+      try {
+        assert.ok(ownsLock(), "fixture holder lost while waiting for its notice");
+        const now = new Date();
+        utimesSync(lock, now, now);
+      } catch (e) { clearInterval(fresh); fail(e.message); }
+    }, 200);
+    watchdog = setTimeout(() => fail("no complete wait notice within 30 s"), 30_000);
+    const r = await result;
+    const diagnostic = `${r.failure || "scratch CLI closed"}\nstdout: ${out}\nstderr: ${err}`;
+    assert.equal(r.failure, undefined, diagnostic);
+    assert.equal(r.signal, null, diagnostic);
+    assert.equal(r.code, 0, diagnostic);
+    assert.match(err, notice);
+    assert.equal(err.split("waiting for").length, 2, "said once");
+    assert.equal(s.runs().length, 1);
+  } finally {
+    terminal = true; // Keep draining late output without releasing or rearming during teardown.
+    clearInterval(fresh);
+    clearTimeout(watchdog);
+    try {
+      if (child && !closed) {
+        // Only this scratch child; wait for pipe closure before scene's after-hook removes it.
+        const waitClose = async (ms) => {
+          let timer;
+          try { await Promise.race([close, new Promise((resolve) => { timer = setTimeout(resolve, ms); })]); }
+          finally { clearTimeout(timer); }
+        };
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+        await waitClose(2000);
+        if (!closed) {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          await waitClose(3000);
+        }
+        assert.ok(closed, `scratch CLI did not close after termination\nstdout: ${out}\nstderr: ${err}`);
+      }
+    } finally {
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      if (ownsLock()) rmSync(lock);
+    }
+  }
 });
 
 test("worker #536: two calls on one new branch at once, a writer and a reviewer: one makes the worktree, the other finds it", async (t) => {

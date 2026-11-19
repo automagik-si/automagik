@@ -67,8 +67,10 @@ export const IMAGE_FEATURE_ON = 'image_generation'
 // The tools a locked-down Codex may still offer the model: its image tool, and the ones no
 // switch of a current Codex takes away. None of them reads a file or runs a command by itself:
 // `exec` is a JavaScript isolate with no file system, network or environment, the patch tool
-// asks first (and is cancelled), and sub-agents get the same tools. Anything else stops the draw.
-export const IMAGE_TOOLS_ALLOWED = Object.freeze(['functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'clock.sleep', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent'])
+// asks first (and is cancelled), and sub-agents get the same tools. `send_message_to_user_async`
+// (Codex 0.170) sends the person a message and touches nothing else, and its own switch reports
+// off without taking it away (#1021). Anything else stops the draw.
+export const IMAGE_TOOLS_ALLOWED = Object.freeze(['functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'functions.send_message_to_user_async', 'clock.sleep', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent'])
 // The tools `exec` may reach from inside its isolate.
 export const IMAGE_NESTED_ALLOWED = Object.freeze(['apply_patch', 'clock__curr_time', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'])
 // The tool each required-off feature is seen to add when it is on: the effect the run proves

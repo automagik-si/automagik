@@ -437,6 +437,15 @@ this sidebar's attachment. Saved configuration changes use these same choices wh
 them. Pack updates reload mods and do not restart bot panes. The Bots list and the Attach picker open
 on the bots the sidebar already knows and refresh behind.
 
+**A question is not a permission.** An agent that ends its turn waiting on you sets the pane
+label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
+`hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a
+**Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
+**Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
+clears the moment the pane works again or the label is removed: the sidebar reads the label from
+the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
+a day is reported by `am tidy` (`stale-needs-owner`).
+
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
 Detach). The Bots list names the project with its machine, and New bot on a focused space of
