@@ -5206,15 +5206,19 @@ async function queuedRestarts(opts, ref) {
     });
     // #1556: a handoff that failed or was dropped is kept in the app home, so the reader that
     // already answers "what is queued" also answers "what didn't happen" after the watcher's pane went away.
-    const failures = readHandoffFailures().filter((f) => !project || f.project === project);
-    const failureLine = (f) => `${f.botName} (${f.botId}): handoff restart ${f.kind} at ${f.at}: ${f.why}`
+    const record = readHandoffFailureRecord();
+    const failures = record.rows.filter((f) => !project || f.project === project);
+    const failureLine = (f) => `${f.botName} (${f.botId ?? "no id"}): handoff restart ${f.kind} at ${f.at}: ${f.why}`
       + `${f.handoff ? ` (handoff: ${f.handoff})` : ""}`
       + `${f.notified?.sent ? `; the lead was told in ${f.notified.sent}` : f.notified?.unsent ? `; the lead was not told: ${f.notified.unsent}` : ""}.`;
+    const skippedLine = (s) => `Skipped handoff failure row ${s.row}: ${s.reason}.`;
     const lines = [
       ...entries.map((e) => `${e.botName} (${e.botId}): queued on ${e.terminal} (${e.reason}${e.dialog ? `: "${e.dialog.question}" — ${e.dialog.who} must answer` : ""}) since ${e.at}`),
       ...failures.map(failureLine),
+      ...record.skipped.map(skippedLine),
     ];
-    return opts.json ? { queued: entries, ...(failures.length ? { handoff_failures: failures } : {}) }
+    return opts.json ? { queued: entries, ...(failures.length ? { handoff_failures: failures } : {}),
+      ...(record.skipped.length ? { handoff_failures_skipped: record.skipped } : {}) }
       : lines.length ? lines.join("\n") : "No restarts queued.";
   }
   if (!ref) throw new CliError("restart --cancel needs a bot.", 2);
@@ -5365,11 +5369,53 @@ const HANDOFF_FAILURES_PATH = () => join(appHome(), "automagik-herdr", "handoff-
 /** How many failed bots the small record keeps; one per bot, newest first. */
 const HANDOFF_FAILURES_MAX = 20;
 
+const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * One stored row, normalized for printing and rewriting, or why it cannot be. A non-object row
+ * (JSON's null, string, number, array) is skipped, never read through; a row without a usable
+ * botName is skipped too; a row with one keeps its name and fills the fields it did not record
+ * with placeholders, so the reader never prints `undefined`.
+ */
+function handoffFailureRow(raw, index) {
+  const row = index + 1;
+  if (raw === null) return { skipped: { row, reason: "not an object (null)" } };
+  if (Array.isArray(raw)) return { skipped: { row, reason: "not an object (array)" } };
+  if (typeof raw !== "object") return { skipped: { row, reason: `not an object (${typeof raw})` } };
+  if (typeof raw.botName !== "string" || !raw.botName.trim()) return { skipped: { row, reason: "no usable botName" } };
+  const text = (value) => typeof value === "string" && value.trim() ? value : null;
+  return { row: {
+    at: text(raw.at) ?? "(time not recorded)",
+    kind: text(raw.kind) ?? "unknown",
+    botId: text(raw.botId) ?? (typeof raw.botId === "number" ? String(raw.botId) : null),
+    botName: raw.botName,
+    project: text(raw.project),
+    terminal: text(raw.terminal),
+    handoff: text(raw.handoff),
+    why: text(raw.why) ?? "(no reason recorded)",
+    report: text(raw.report),
+    notified: isRecord(raw.notified) ? { sent: text(raw.notified.sent), unsent: text(raw.notified.unsent) } : null,
+  } };
+}
+
+/** The record's usable rows and the malformed ones it skipped, each with its reason. */
+function readHandoffFailureRecord() {
+  const text = readText(HANDOFF_FAILURES_PATH());
+  if (text === null) return { rows: [], skipped: [] };
+  let stored;
+  try { stored = JSON.parse(text)?.failures; } catch { return { rows: [], skipped: [] }; }
+  if (!Array.isArray(stored)) return { rows: [], skipped: [] };
+  const rows = [], skipped = [];
+  for (const [index, raw] of stored.entries()) {
+    const read = handoffFailureRow(raw, index);
+    if (read.row) rows.push(read.row); else skipped.push(read.skipped);
+  }
+  return { rows, skipped };
+}
+
 /** The recorded failures: [{ at, kind, botId, botName, project, terminal, handoff, why, report, notified }]. */
 function readHandoffFailures() {
-  const text = readText(HANDOFF_FAILURES_PATH());
-  if (text === null) return [];
-  try { const rows = JSON.parse(text)?.failures; return Array.isArray(rows) ? rows : []; } catch { return []; }
+  return readHandoffFailureRecord().rows;
 }
 
 /** Keeps `failure` as its bot's only row, newest first, 0600, replaced atomically. */

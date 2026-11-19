@@ -6082,6 +6082,87 @@ test("#1556 a failed first-message send is a recorded warning, not a failed rest
   assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live", "the new conversation runs");
 });
 
+// #1556 repair: a handoff row that is not an object, or has no usable botName, is skipped with
+// its reason in both outputs; the next failure is still written after it. Before this, reading
+// `failures: [null]` threw on the reader and the writer swallowed the same throw, so the newest
+// failure was lost.
+const handoffFailuresPath = (s) => join(s.app, "automagik-herdr/handoff-failures.json");
+const seedHandoffFailures = (s, failures) => {
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(handoffFailuresPath(s), `${JSON.stringify({ version: 1, failures })}\n`, { mode: 0o600 });
+};
+
+const malformedRows = [
+  ["a null row", null, "not an object (null)"],
+  ["a string row", "not a row", "not an object (string)"],
+  ["a number row", 42, "not an object (number)"],
+  ["an array row", [{ botName: "Captain" }], "not an object (array)"],
+  ["a row with no botName", { kind: "send", why: "no name" }, "no usable botName"],
+  ["a nested botName", { botName: { name: "Captain" }, kind: "send", why: "nested" }, "no usable botName"],
+];
+
+for (const [label, row, reason] of malformedRows) {
+  test(`#1556 restart --queued skips ${label} in the handoff record`, (t) => {
+    const s = scene(t);
+    seedHandoffFailures(s, [row]);
+    const text = s.cli(["restart", "--queued"]);
+    assert.equal(text.code, 0, text.err);
+    assert.equal(text.out, `Skipped handoff failure row 1: ${reason}.\n`);
+    assert.doesNotMatch(text.err, /Cannot read properties/);
+    const json = s.cli(["restart", "--queued", "--json"]);
+    assert.equal(json.code, 0, json.err);
+    assert.deepEqual(json.json(), { queued: [], handoff_failures_skipped: [{ row: 1, reason }] });
+  });
+}
+
+test("#1556 a handoff row with a botName but no why or kind prints placeholders", (t) => {
+  const s = scene(t);
+  seedHandoffFailures(s, [
+    { at: "2026-11-19T00:00:00.000Z", botName: "Captain", botId: ID.cap, kind: "send" },
+    { at: "2026-11-19T00:01:00.000Z", botName: "Genie", botId: ID.main, why: "its pane went" },
+    { at: "2026-11-19T00:02:00.000Z", botName: "Dev", botId: ID.dev, kind: "dropped", why: { detail: "nested" } },
+  ]);
+  const text = s.cli(["restart", "--queued"]);
+  assert.equal(text.code, 0, text.err);
+  assert.equal(text.out,
+    `Captain (${ID.cap}): handoff restart send at 2026-11-19T00:00:00.000Z: (no reason recorded).\n`
+    + `Genie (${ID.main}): handoff restart unknown at 2026-11-19T00:01:00.000Z: its pane went.\n`
+    + `Dev (${ID.dev}): handoff restart dropped at 2026-11-19T00:02:00.000Z: (no reason recorded).\n`);
+  const json = s.cli(["restart", "--queued", "--json"]);
+  assert.equal(json.code, 0, json.err);
+  assert.deepEqual(json.json().handoff_failures, [
+    { at: "2026-11-19T00:00:00.000Z", kind: "send", botId: ID.cap, botName: "Captain", project: null,
+      terminal: null, handoff: null, why: "(no reason recorded)", report: null, notified: null },
+    { at: "2026-11-19T00:01:00.000Z", kind: "unknown", botId: ID.main, botName: "Genie", project: null,
+      terminal: null, handoff: null, why: "its pane went", report: null, notified: null },
+    { at: "2026-11-19T00:02:00.000Z", kind: "dropped", botId: ID.dev, botName: "Dev", project: null,
+      terminal: null, handoff: null, why: "(no reason recorded)", report: null, notified: null },
+  ]);
+  assert.equal(json.json().handoff_failures_skipped, undefined);
+});
+
+test("#1556 the next failure is written after a handoff record of malformed rows", (t) => {
+  for (const [label, row] of malformedRows) {
+    const s = captainDueScene(t, { status: "idle" });
+    seedHandoffFailures(s, [row]);
+    const state = s.hcState();
+    // The seat ends at the pass's next look: its dropped row is the write under test.
+    state.terminals.find((x) => x.address === "t6").exitAfterGets = 1;
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    const r = s.cli(["restart", "--due", "--json"]);
+    assert.equal(r.code, 0, `${label}: ${r.err}`);
+    assert.equal(statSync(handoffFailuresPath(s)).mode & 0o777, 0o600, `${label}: the record stays 0600`);
+    const failures = JSON.parse(readFileSync(handoffFailuresPath(s), "utf8")).failures;
+    assert.equal(failures.length, 1, `${label}: ${JSON.stringify(failures)}`);
+    assert.equal(failures[0].botId, ID.cap, `${label}: the new row is the newest`);
+    assert.equal(failures[0].kind, "dropped", label);
+    const listed = s.cli(["restart", "--queued", "--json"]);
+    assert.equal(listed.code, 0, listed.err);
+    assert.deepEqual(listed.json().handoff_failures.map((f) => f.botId), [ID.cap], label);
+    assert.equal(listed.json().handoff_failures_skipped, undefined, label);
+  }
+});
+
 test("#1556 restart --due --dry-run does not say a seat would be asked when its handoff home is a file", (t) => {
   const s = restartScene(t);
   attachSeat(s, "Genie", "t5");
