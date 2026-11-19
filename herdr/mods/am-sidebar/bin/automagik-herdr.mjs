@@ -4479,7 +4479,8 @@ async function launchSeat(project, bot, over = {}) {
   const tags = seatTags(file, bot.id);
   const logSeat = async (createdMs = started.created_ms) => {
     const unlogged = appendLedger(startRow({ kind: "seat", terminal, pid: started.pid ?? await pidOf(terminal), botId: bot.id, worktree: cwd,
-      project: key, agent: agentKey, model, ...tags, core: await rowCore(), createdMs, session: agentKey === "claude" ? session : null }));
+      project: key, agent: agentKey, model, template: carry[WORKER_TEMPLATE_LABEL] ?? null,
+      ...tags, core: await rowCore(), createdMs, session: agentKey === "claude" ? session : null }));
     if (unlogged) { hook.warnings.push(unlogged); report([unlogged]); }
   };
   if (!over.replacing) await logSeat();
@@ -4667,12 +4668,15 @@ function workerLedgerRows() {
 }
 
 /** The workers ledger's last seat row for `botId` in project `key`, as the pane it stood for: { address, created_ms, cwd, labels }, or null. */
-function lastSeat(rows, botId, key) {
+function lastSeat(rows, botId, key, agent) {
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const r = rows[i];
     if (r?.event !== "start" || r.kind !== "seat" || r.botId !== botId || !(r.project == null || r.project === key)) continue;
     if (typeof r.terminal !== "string" || !r.terminal) return null;
-    return { address: r.terminal, created_ms: Number.isSafeInteger(r.created_ms) ? r.created_ms : null, cwd: typeof r.worktree === "string" ? r.worktree : null, labels: {} };
+    // #1418: a gone pane's template follows the seat only while it runs the same agent.
+    const labels = r.agent === agent && typeof r.template === "string" && r.template ? { [WORKER_TEMPLATE_LABEL]: r.template } : {};
+    return { address: r.terminal, created_ms: Number.isSafeInteger(r.created_ms) ? r.created_ms : null,
+      cwd: typeof r.worktree === "string" ? r.worktree : null, labels };
   }
   return null;
 }
@@ -5216,7 +5220,7 @@ async function rerunHelpers(plans, parent, say) {
       let tags = seatTags(null, b.bot);
       try { tags = seatTags(loadProject(b.project).file, b.bot); } catch { /* its file can't be read now: no tags */ }
       const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: await pidOf(address), botId: b.bot, worktree: p.cwd, project: b.project,
-        agent: p.agent, model: null, ...tags, core, createdMs, session: p.agent === "claude" ? p.session : null }));
+        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, session: p.agent === "claude" ? p.session : null }));
       if (unlogged) say(unlogged);
     }
     // A session id carried onto the new terminal, any harness (RFC 0021 (f) 5): a session row.
@@ -5286,6 +5290,10 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const planned = helperPlan({ get: h, worker, session: knownSession(h, agentKey)?.session ?? null,
       agents, fresh, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
       launchAgent: revive && isBareShell(h), grants: grantPlan?.dirs ?? [], where: localWhere() });
+    // #1418: an attached helper's native template becomes a label when the seat is rebuilt.
+    if (binding && planned.template && !Object.hasOwn(planned.labels, WORKER_TEMPLATE_LABEL)) {
+      planned.labels[WORKER_TEMPLATE_LABEL] = planned.template;
+    }
     // #1142: a Codex helper run in the launch mode says what its launch withheld; a template
     // worker runs its own command as written and gets nothing of the pack's.
     const templateWorker = Boolean(worker?.template || h.labels?.[WORKER_TEMPLATE_LABEL]);
@@ -6824,7 +6832,9 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   // The old pane's launch and hc template, only to rebuild from the source and to say when they
   // differ from it (#597): a template hc still lists owns the command, with its CURRENT words.
   const oldLaunch = old ? paneCommand(old) : null;
-  const oldTemplate = old ? await paneTemplate(old) : null;
+  // #1418: a gone pane can name its template too. Hermes keeps its own restart path.
+  const templatePane = old ?? (bot.agent === "hermes" ? null : ghost);
+  const oldTemplate = templatePane ? await paneTemplate(templatePane) : null;
   // The folder the replacement starts in: --cwd DIR, else the old pane's folder (#213: a worktree
   // too, where its conversation is), unless it is gone, else the project. Resolved first: the
   // permission file (#884) trusts this folder, not the project, and a symlinked one by realpath.
@@ -7223,7 +7233,7 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
     const argv = get.foreground?.argv;
     const seatAgent = agentKeyOfArgv(argv, agentTable()) ?? (claude ? "claude" : bot.agent ?? null);
     const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: get.foreground?.pid ?? get.pid ?? null, botId: bot.id,
-      worktree: sessionFolder, project: key, agent: seatAgent, model: detectModel(argv, seatAgent), ...seatTags(file, bot.id),
+      worktree: sessionFolder, project: key, agent: seatAgent, model: detectModel(argv, seatAgent), template: paneTemplateName(get), ...seatTags(file, bot.id),
       core: await rowCore(), createdMs: get.created_ms }));
     if (unlogged) hook.warnings.push(unlogged);
   }
@@ -7986,6 +7996,13 @@ async function templateRuns(template, agents) {
   return { runs: templateAgent(hit.command, agents) ?? undefined, command: typeof hit.command === "string" ? hit.command : null };
 }
 
+/** The template name hc gave the pane, or the label a restart leaves on it (#1418). */
+function paneTemplateName(get) {
+  const own = typeof get?.template === "string" && get.template.trim() ? get.template.trim() : null;
+  const labeled = get?.labels?.[WORKER_TEMPLATE_LABEL];
+  return own ?? (typeof labeled === "string" && labeled.trim() ? labeled.trim() : null);
+}
+
 /**
  * The hc template an old pane was started from: `get.template`, else the worker.template label a
  * Restart through a template leaves on its new pane (so the next restart finds it again), with
@@ -7994,9 +8011,7 @@ async function templateRuns(template, agents) {
  * names the template (#597 review F1). Null when the pane names none.
  */
 async function paneTemplate(get) {
-  const own = typeof get?.template === "string" && get.template.trim() ? get.template.trim() : null;
-  const labeled = get?.labels?.[WORKER_TEMPLATE_LABEL];
-  const name = own ?? (typeof labeled === "string" && labeled.trim() ? labeled.trim() : null);
+  const name = paneTemplateName(get);
   if (!name) return null;
   const { list } = await hcTemplates();
   const hit = list?.find((x) => x?.name === name);

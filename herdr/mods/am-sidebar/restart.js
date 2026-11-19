@@ -536,9 +536,10 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
  * each of `grants` (the folders this launch may write, from helperCwd's folder); a shell command
  * that names no approval or sandbox flag of its own (nor an --add-dir `where`, models.js
  * codexWhere, doesn't allow) and provably forwards words to Codex as options (codexCommandCheck
- * `forwards`) gets the mode words it lacks and the grants through "$@"; any other is refused by name. Returns { name, replaced, cwd,
- * labels, agent, session, mode: "resume" | "fresh", resume, argv, agySettings (the file to write
- * first, or null), note, warning }, or { name, replaced, error } when there is nothing to run.
+ * `forwards`) gets the mode words it lacks and the grants through "$@"; any other is refused by name.
+ * Returns { name, replaced, cwd, labels, agent, template (#1418), session, mode: "resume" | "fresh",
+ * resume, argv, agySettings (the file to write first, or null), note, warning }, or
+ * { name, replaced, error } when there is nothing to run.
  */
 export function helperPlan({ get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false, grants = [],
   where = null }) {
@@ -630,7 +631,7 @@ export function helperPlan({ get, worker = null, session = null, agents, fresh =
   // #955: with no permission file (no bot to write one for, or a command that takes no words),
   // an Antigravity helper never runs on skip-permissions.
   argv = agyGuarded(agent, argv);
-  return { name, replaced, cwd, labels, agent, session: resume && resumesById(agent) ? id : null, mode: resume ? "resume" : "fresh",
+  return { name, replaced, cwd, labels, agent, template, session: resume && resumesById(agent) ? id : null, mode: resume ? "resume" : "fresh",
     resume: resume ?? [], argv, agySettings: settings, note, warning };
 }
 
