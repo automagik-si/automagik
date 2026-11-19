@@ -516,7 +516,18 @@ export function install(rt) {
         const avatar = image === undefined ? undefined : { ...rt.botOf(bot.id)?.avatar, image }
         // `denyTools` needs no other field, so a list-only change is a patch of its own.
         const denyTools = args.deny_tools ?? args.denyTools
-        const next = await rt.updateBot(bot.id, { name: newName, role, instructions, color, ...(avatar !== undefined ? { avatar } : {}), ...(model ? { model } : {}), ...(effort === undefined ? {} : { effort }), ...(section === undefined ? {} : { section }), ...(moving ? { workDir: workDir ?? '' } : {}), ...(denyTools === undefined ? {} : { denyTools }) }, self, exec.agent?.id)
+        const next = await rt.updateBot(bot.id, {
+          ...(newName === undefined ? {} : { name: newName }),
+          ...(role === undefined ? {} : { role }),
+          ...(instructions === undefined ? {} : { instructions }),
+          ...(color === undefined ? {} : { color }),
+          ...(avatar === undefined ? {} : { avatar }),
+          ...(model ? { model } : {}),
+          ...(effort === undefined ? {} : { effort }),
+          ...(section === undefined ? {} : { section }),
+          ...(moving ? { workDir: workDir ?? '' } : {}),
+          ...(denyTools === undefined ? {} : { denyTools }),
+        }, self, exec.agent?.id)
         if (!moving) return `Updated ${next.name}.`
         const folder = workDir ?? 'the team workspace'
         return bot.id === caller.id ? `Updated ${next.name}. From your next step on, you work in ${folder}.` : `Updated ${next.name}. It now works in ${folder}.`

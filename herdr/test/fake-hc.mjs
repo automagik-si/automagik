@@ -153,6 +153,7 @@ if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
 
 switch (words[0]) {
   case "ls": {
+    if (Object.hasOwn(state, "lsReply")) { out(state.lsReply); break; }
     const want = [];
     for (let i = 1; i < words.length; i += 1) if (words[i] === "--label") want.push(words[++i]);
     // --all: finished terminals too (a removed one, hc rm, is in neither list).
@@ -169,12 +170,13 @@ switch (words[0]) {
       if (state.addAfterLs.seen === state.addAfterLs.nth) {
         state.terminals.push(state.addAfterLs.terminal);
         delete state.addAfterLs;
-        save();
       }
+      save();
     }
     break;
   }
   case "get": {
+    if (Object.hasOwn(state.getReply ?? {}, words[1])) { out(state.getReply[words[1]]); break; }
     // state.failGet: terminals hc can't answer for (a server error, not "no such terminal"); with
     // state.failGetExit, that exit code and hc's JSON error of another kind instead of exit 1.
     if ((state.failGet ?? []).includes(words[1])) {
@@ -241,7 +243,8 @@ switch (words[0]) {
   case "label": {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
-    if (state.failLabel === words[1]) fail(`label refused on ${words[1]}`);
+    // state.failLabelExit: the refused label's exit code (127: hc isn't there); else 1.
+    if (state.failLabel === words[1]) fail(`label refused on ${words[1]}`, state.failLabelExit ?? 1);
     t.labels ??= {};
     for (const kv of words.slice(2)) {
       const eq = kv.indexOf("=");
@@ -415,6 +418,14 @@ switch (words[0]) {
     const current = readFileSync(path, "utf8");
     const at = current.indexOf(old);
     if (at < 0 || current.indexOf(old, at + 1) >= 0) err(1, "edit_failed", "the old text is not in the file");
+    // state.dropEditAnswer: the link drops before this edit lands. A string is someone else's text
+    // left there instead (the read-back sees neither the old nor the new text).
+    if (state.dropEditAnswer !== undefined) {
+      const theirs = state.dropEditAnswer;
+      delete state.dropEditAnswer; save();
+      if (typeof theirs === "string") writeFileSync(path, theirs);
+      fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
+    }
     writeFileSync(path, current.slice(0, at) + now + current.slice(at + old.length));
     // state.loseEditAnswer: the edit lands, then the link drops: hc's real answer, unavailable.
     if (state.loseEditAnswer) { delete state.loseEditAnswer; save(); fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } })); }

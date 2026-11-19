@@ -318,6 +318,19 @@ test('a host-owned Bot\'s settings and details name what answers now, never the 
   assert.equal(needsModelPick(bare, { ...hosted, byId: { unfold: bare } }), false)
 })
 
+test('a held shell-off coding CLI Bot names the choice before it can start', () => {
+  const { modelHint } = module.exports
+  const roster = { ready: true, byId: {}, models: [{ ref: 'acp-codex/default', provider: 'acp-codex', providerName: 'Codex', name: 'Codex' }] }
+  const bot = {
+    id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default',
+    shell: false, shellHeld: { cli: 'acp-codex', model: 'acp-codex/default' },
+  }
+  assert.equal(modelHint(bot, roster),
+    'This Bot has no shell, so it cannot run on acp-codex, whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+  // Once the shell is on, the hold is gone and the ordinary hint is back.
+  assert.equal(modelHint({ ...bot, shell: true, shellHeld: undefined }, roster), 'Every message of this Bot runs on it.')
+})
+
 test('the menu leaves out a superseded model, unless the Bot is on it', () => {
   const models = [
     { ref: 'anthropic/claude-opus-5-5', provider: 'anthropic' },

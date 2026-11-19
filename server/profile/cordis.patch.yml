@@ -4,10 +4,12 @@
 - insert:
     - id: web-search-auto
       name: '@automagik/bots-dsh/web-search'
+- insert:
     - id: automagik-read-scope-files
       name: '@automagik/bots-dsh/read-scope-files'
       config:
         applyPatch: false
+- insert:
     - id: automagik-read-scope-search
       name: '@automagik/bots-dsh/read-scope-search'
       config:

@@ -41,13 +41,19 @@ const MAIN_RULES = [
 
 export function install(rt) {
   const { ctx } = rt
+  // A Genie's tools are DSH tools (`grant_wish`), so its ACP Sessions need the bridge even on an
+  // agent that keeps its own built-ins (Codex, #1639). A task (a wish) says no: it must not
+  // grant another wish.
+  const roleToolsInDsh = (bot, sessionId) =>
+    bot.kind === 'genie' && rt.taskOwners?.has(sessionId) !== true
   const attachIdentity = (sub) => {
     const off = sub.acpAgents?.botIdentity?.(sessionId => {
       const owner = rt.selfOf(sessionId)
       const bot = owner === undefined ? undefined : rt.botOf(owner)
       if (bot === undefined) return undefined
       const { name, role, instructions } = bot
-      return { name, role, instructions }
+      const needsDshTools = roleToolsInDsh(bot, sessionId)
+      return { name, role, instructions, ...(needsDshTools ? { needsDshTools: true } : {}) }
     })
     if (typeof off === 'function') sub.effect(() => off, 'ds-bot: ACP identity')
   }

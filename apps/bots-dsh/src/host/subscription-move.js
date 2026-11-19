@@ -331,7 +331,8 @@ export function install(rt) {
     started = true
     const done = state.subscriptionCliMoved !== null && typeof state.subscriptionCliMoved === 'object' ? state.subscriptionCliMoved : {}
     // A Bot its plugin answers for never runs on a DSH model: not moved, restored or counted.
-    const bots = Object.values(state.bots ?? {}).filter(bot => bot !== undefined && bot !== null && rt.hostOwned?.(bot) !== true)
+    const bots = Object.values(state.bots ?? {}).filter(bot => bot !== undefined && bot !== null && rt.hostOwned?.(bot) !== true && bot.shellHeld === undefined)
+    if (bots.length === 0 && Object.values(state.bots ?? {}).some(bot => bot?.shellHeld !== undefined)) return
     const onRoute = (spec, bot) => providerOf(bot.model) === spec.from
     const moved = []
     const restored = []
@@ -406,7 +407,7 @@ export function install(rt) {
           let went = false
           for (const bot of back) {
             // The awaits above let a pick or a removal in: read the Bot and its record again.
-            const record = rt.botOf(bot.id) === bot ? recordOf(bot, spec) : undefined
+            const record = rt.botOf(bot.id) === bot && bot.shellHeld === undefined ? recordOf(bot, spec) : undefined
             if (record === undefined) continue
             if (record.previousOnly === true ? bot.previousModel !== record.previousTarget : bot.model !== record.target) {
               delete bot.subscriptionMoved

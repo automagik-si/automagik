@@ -6,7 +6,7 @@ import { ProductLockup } from './product-lockup.js'
 import { Stage, reducedMotion, useFinish, useGate, useGlitch } from './stage.js'
 import { InstallLog } from './terminal.js'
 import { t } from './i18n.js'
-import { WORKING, powerOf, powerSignal, runPower, showPower, stopPower, takeTeamIntent, usePowerState } from './power-store.js'
+import { WORKING, powerOf, powerSignal, runPower, showPower, stopPower, usePowerState } from './power-store.js'
 import { whereOf } from './where.js'
 
 // Step omni-team (order -270): who joins the companion's team. Each Bot type is a card with
@@ -434,7 +434,7 @@ const GeniePet = ({ expression }) => h('div', { className: 'oai-genie-pet oai-cl
 // Unfold's face follows its box as Genie's does.
 const UnfoldPet = ({ expression }) => h('div', { className: 'oai-unfold-pet oai-clay oai-clay-unfold', 'data-face': expression, style: { '--oai-face-at': faceAt(expression) } })
 
-// The power symbol, on each card's box and (at the header's size) on the sidebar's shortcut.
+// The power symbol, on each card's box.
 export const PowerIcon = ({ size = 18, stroke = 2.4 } = {}) => h('svg', { viewBox: '0 0 24 24', width: size, height: size, 'aria-hidden': true },
   h('path', { d: 'M12 3v8', fill: 'none', stroke: 'currentColor', strokeWidth: stroke, strokeLinecap: 'round' }),
   h('path', { d: 'M6.4 6.6a8 8 0 1 0 11.2 0', fill: 'none', stroke: 'currentColor', strokeWidth: stroke, strokeLinecap: 'round' }))
@@ -645,7 +645,7 @@ function Inside({ phase, detail, power, live }) {
 export const powerLocked = (kind, phase) => phase === 'installing' || phase === 'starting' || (kind !== 'omni' && phase === 'ready')
 
 /**
- * Powering a box off, from its button or the sidebar's shortcut: its run stops, a sign-in waiting
+ * Powering a box off, from its button or a Bot's settings: its run stops, a sign-in waiting
  * on the phone is cancelled and Omni's installer gets Ctrl-C, and the box sleeps, not on the team.
  * Nothing more: a linked Omni stays linked and no Bot is removed (only the team step's Continue,
  * team-save, leaves Omni out of the team).
@@ -769,7 +769,7 @@ const useGeniePower = () => useBotPower('genie', geniePowerOn)
 const useUnfoldPower = () => useBotPower('unfold', unfoldPowerOn)
 function useBotPower(kind, powerOnOf) {
   // The phase lives in the power store (power-store.js): an install keeps running, and shows,
-  // after this card closes, and the sidebar's shortcut reads the same one.
+  // after this card closes, and a Bot's settings card reads the same one.
   const { phase, detail } = usePowerState(kind)
   // The Bot may already be on the team (installed before a restart or an update, or made by
   // its plugin in Unfold's own instance): its card says so from the start, rather than asleep.
@@ -935,14 +935,13 @@ export const TeamLede = ({ name }) => h('p', { className: 'oai-lede' },
   t('{name} leads. Who comes along?', { name }), h('br'),
   h('span', { className: 'oai-lede-rule' }, t('Code work goes to a Bot with Computer.')))
 
-// Opened on purpose (DSH's `explicit`, or the sidebar shortcut's intent, power-store.js), the
-// step is a place to power Bots on: Continue only closes it. It saves no team, so it never puts
-// the companion's name back on the Main Bot (companion.js applyCompanion) nor skips Connect Omni.
-export const explicitOf = (props, intent) => props?.explicit === true || intent !== null
+// Opened on purpose (DSH's `explicit`), the step is a place to power Bots on: Continue only
+// closes it. It saves no team, so it never puts the companion's name back on the Main Bot
+// (companion.js applyCompanion) nor skips Connect Omni.
+export const explicitOf = props => props?.explicit === true
 
 export function TeamStep(props) {
-  const [intent] = useState(() => takeTeamIntent())
-  const explicit = explicitOf(props, intent)
+  const explicit = explicitOf(props)
   const state = useGate(explicit ? { ...props, explicit: true } : props)
   const finish = useFinish(props)
   const [glitching, glitch] = useGlitch()
@@ -972,9 +971,7 @@ export function TeamStep(props) {
   }, [phase, glitch])
   useEffect(() => { if (state) glitch() }, [state, glitch])
   useEffect(() => {
-    // The shortcut's "Choose where Omni lives" wakes Omni's card as a preload would.
-    const asked = intent?.power === 'omni' && !autoPowered.current && power.phase === 'asleep'
-    if (!state || !(asked || powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current))) return
+    if (!state || !powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return
     autoPowered.current = true
     power.toggle()
   }, [state])

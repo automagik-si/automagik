@@ -7,8 +7,10 @@ import { headOf, textOf } from './text.js'
 export function install(rt) {
   const { ctx, state } = rt
 
-  const resolveAgent = async (sessionId) => {
+  const resolveAgent = async (sessionId, botId) => {
+    rt.assertShellChoice?.(sessionId, botId)
     const resolved = await ctx.sessionController.resolveAgent(sessionId)
+    rt.assertShellChoice?.(sessionId, botId)
     if ('error' in resolved) {
       const error = Object.assign(new Error(resolved.error?.message ?? 'Session unavailable'), { code: resolved.error?.code })
       throw rt.autoClosed?.(sessionId, error) ?? error
@@ -131,10 +133,12 @@ export function install(rt) {
       // The Bot may have switched part while the replies waited: they go to its part now.
       const target = targetOf(queue)
       queue.sessionId = target
+      rt.assertShellChoice?.(target, queue.toId)
       let agent = sendable.find(item => item.sessionId === target)?.agent
       if (agent === undefined) {
         await rt.ensureCapabilities(target)
-        agent = await resolveAgent(target)
+        agent = await resolveAgent(target, queue.toId)
+        rt.assertShellChoice?.(target, queue.toId)
       }
       if (rt.live?.get?.(target)?.turn !== undefined || agent.status === 'running') {
         // A turn opened while the exchanges were written, or the agent has not settled
@@ -255,6 +259,7 @@ export function install(rt) {
       ...(abandoned ? { abandoned: true } : {}),
     }
     const targetSessionId = sessionId ?? rt.chatOf(toId)
+    rt.assertShellChoice?.(targetSessionId, toId)
     // Where the message went: a reply that waited for a busy Bot may reach a later part.
     let deliveredTo = targetSessionId
     // On disk before it goes out: a message the book could not keep is not sent, so none is
@@ -280,8 +285,10 @@ export function install(rt) {
         rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
         await rt.ledger.written(book)
       }
+      rt.assertShellChoice?.(targetSessionId, toId)
       await rt.ensureCapabilities(targetSessionId)
-      const agent = await resolveAgent(targetSessionId)
+      const agent = await resolveAgent(targetSessionId, toId)
+      rt.assertShellChoice?.(targetSessionId, toId)
       if (queued !== undefined) {
         queued.agent = agent
         queued.made()

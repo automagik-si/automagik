@@ -1,13 +1,42 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { cp } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import { isSeq, parse, parseDocument } from 'yaml'
 import { pinStore, profileDirOf, PROFILE, seedProfile } from './lib.mjs'
 import { FOLLOW_STATUS, installedPlugins, markSeed, ownership, packageHash, profileState, compareRelease, validBuild, writeJson, readJson } from './profile-state.mjs'
 import { materializePlugins, PLUGINS, pruneImageArchives } from './plugin-payload.mjs'
 import { mergeImageProfile, readLock } from './profile-lock.mjs'
 import { withVolumeLock } from './volume-lock.mjs'
+
+const READ_SCOPE_PATCH_IDS = new Set([
+  'automagik-read-scope-files', 'automagik-read-scope-search', 'tool-fs', 'tool-fs-search',
+])
+const patchIds = row => [
+  row?.id, ...(Array.isArray(row?.insert) ? row.insert.map(plugin => plugin?.id) : []),
+].filter(id => typeof id === 'string')
+
+// Bring the adapter registrations and their stock-tool switches into an existing
+// image profile. The staged copy keeps the owner's rows and settings.
+function mergeReadScopePatch(source, profile) {
+  const name = 'cordis.patch.yml'
+  const shipped = parse(readFileSync(join(source, name), 'utf8'))
+  const replacements = shipped.filter(row => patchIds(row).some(id => READ_SCOPE_PATCH_IDS.has(id)))
+  if (replacements.length === 0) return
+
+  const file = join(profile, name)
+  const stat = lstatSync(file, { throwIfNoEntry: false })
+  if (stat !== undefined && !stat.isFile()) throw new Error('Unsupported image profile patch file')
+  const patch = parseDocument(stat === undefined ? '' : readFileSync(file, 'utf8'))
+  if (patch.errors.length || (patch.contents !== null && !isSeq(patch.contents))) throw new Error('Unsupported image profile patch')
+  const have = new Set((patch.toJS() ?? []).flatMap(patchIds))
+  const missing = replacements.filter(row => patchIds(row).every(id => !have.has(id)))
+  if (missing.length === 0) return
+  patch.contents ??= patch.createNode([])
+  for (const row of missing) patch.add(row)
+  writeFileSync(file, patch.toString())
+}
 
 /** Copy cache files by rename: an existing store file may be hard-linked by the old profile. */
 async function overlayStore(source, target) {
@@ -138,6 +167,7 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     await cp(target, profile, { recursive: true, verbatimSymlinks: true })
     rmSync(join(profile, 'node_modules'), { recursive: true, force: true })
     const lock = mergeImageProfile({ source, target: profile })
+    mergeReadScopePatch(source, profile)
     materializePlugins({ source, target: profile, lock })
     await overlayStore(store, join(dshHome, 'pnpm-store'))
     reuseInstalledIndexes(join(dshHome, 'pnpm-store'))

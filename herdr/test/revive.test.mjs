@@ -24,6 +24,8 @@ import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCand
 // #1417: every CLI run below reads Codex's and Kimi's homes under its scratch home only.
 delete process.env.CODEX_HOME;
 delete process.env.KIMI_CODE_HOME;
+// A host's real DSH home must not stand in for the scratch one the session cases build.
+delete process.env.DSH_HOME;
 
 const SID = "0f3c2a4e-1b2d-4c5e-9f60-718293a4b5c6";
 const SID2 = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";

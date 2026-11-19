@@ -89,6 +89,7 @@ From the owner (2026-11-09, above):
    is where many workspaces, creating one, and the rail live.
 3. **Cloud uses the same identity system Tactu uses, Pocket ID, on a new instance of its own**;
    Arca keeps its own passkey approvals (corrected 2026-11-10). See Decided 13 and 16.
+   *Superseded for identity by [RFC 0032](0032-automagik-id.md): Automagik ID, not Pocket ID.*
 
 From the council review (2026-11-09; five lenses, proceed with conditions; relayed by the
 Automagik Orchestrator). Nine conditions, numbered 4 to 12:
@@ -121,6 +122,8 @@ From the owner's answers (2026-11-09, asked by the Automagik Orchestrator):
     own work, later, and not a delivery of this RFC.
     *Corrected 2026-11-10 (Arca's orchestrator, via Automagik Chat):* Arca keeps its own sign-in
     (its own passkey approvals) and does not move to the new identity service.
+    *Superseded for identity by [RFC 0032](0032-automagik-id.md): the identity service is
+    Automagik ID, not a self-hosted Pocket ID.*
 14. **Billing is Stripe, directly** (was open question 9), "including support to agentic payments"
     (the owner, verbatim). Cloud uses Stripe Billing itself, a subscription per workspace, and
     Stripe's signed webhooks update Cloud's entitlements; no other billing app. Agentic payments
@@ -433,6 +436,11 @@ app never shows a sign-in page in its own window and never embeds a browser for 
 `automagik://` stays open-only and never carries an authorization code.
 
 ### (e) Cloud identity: organisations, people and sign-in
+
+*Note: the identity provider in this section is replaced by [RFC 0032](0032-automagik-id.md),
+Automagik ID. Read "Pocket ID" and "the identity service" as Automagik ID. It has no admin
+key and no groups, so the signup-link job and Cloud's groups below do not apply. Cloud's
+authorization, roles and invitations stand as written.*
 
 **Pocket ID authenticates; Cloud authorizes.** The identity service proves who the person is
 (passkeys) and returns an ID token. The Cloud service is its one confidential client (its secret in

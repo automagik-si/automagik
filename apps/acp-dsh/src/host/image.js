@@ -7,11 +7,13 @@
 //   passthrough and with the run's own overrides, which features it knows (`features list`) and
 //   which tools it would offer the model (`debug prompt-input`: nothing is sent to a model;
 //   the checks read the Bot's isolated Codex home, signed in or not, as the session will). A
-//   feature the run relies on that Codex does not list, or does not turn off, stops the draw;
-//   so does any offered tool that is not on a fixed list (a command, a file read, image
-//   viewing, an MCP tool, a name this version does not know), and a tool list in a form this
-//   code does not know. Nothing rests on a feature name alone: Codex takes an unknown
-//   `features.<name>` without a word;
+//   feature the run relies on that Codex does not list, does not turn off, or lists without
+//   acting on stops the draw; so does any offered tool that is not on a fixed list (a command,
+//   a file read, image viewing, an MCP tool, a name this version does not know), and a tool
+//   list in a form this code does not know. Nothing rests on a feature name alone: Codex takes
+//   an unknown `features.<name>` without a word, so each required switch is read again under
+//   the session's whole config and, when the image tool is offered, proven by its effect (on,
+//   it must add the tool it controls; off, that tool is gone);
 // - the same overrides, from the same object, go to the session through codex-acp's
 //   CODEX_CONFIG. CODEX_HOME is the Bot's isolated Codex home, supplied by cli-homes.js;
 // - the Bot home's image profile is also passed in the run's overrides. The check reads
@@ -53,8 +55,8 @@ export const IMAGE_TIMEOUT_MS = 120_000
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024
 // Codex's features the run cannot go without: each one's switch is seen to take its tools off
 // the list Codex offers (the shell tool: commands and their input; image viewing: opening a
-// picture file). A Codex that does not list one, lists it as removed, or leaves it on stops
-// the draw before it starts.
+// picture file). A Codex that does not list one, lists it as removed, leaves it on, or reports
+// it off without acting on it stops the draw before it starts.
 export const IMAGE_FEATURES_OFF = Object.freeze(['shell_tool', 'view_image'])
 // Other tool sources, turned off when the installed Codex lists them and never sent when it
 // does not, or when it lists them as removed (a removed switch does nothing, on or off). None
@@ -65,10 +67,18 @@ export const IMAGE_FEATURE_ON = 'image_generation'
 // The tools a locked-down Codex may still offer the model: its image tool, and the ones no
 // switch of a current Codex takes away. None of them reads a file or runs a command by itself:
 // `exec` is a JavaScript isolate with no file system, network or environment, the patch tool
-// asks first (and is cancelled), and sub-agents get the same tools. Anything else stops the draw.
-export const IMAGE_TOOLS_ALLOWED = Object.freeze(['functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'clock.sleep', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent'])
+// asks first (and is cancelled), and sub-agents get the same tools. `send_message_to_user_async`
+// (Codex 0.170) sends the person a message and touches nothing else, and its own switch reports
+// off without taking it away (#1021). Anything else stops the draw.
+export const IMAGE_TOOLS_ALLOWED = Object.freeze(['functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'functions.send_message_to_user_async', 'clock.sleep', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent'])
 // The tools `exec` may reach from inside its isolate.
 export const IMAGE_NESTED_ALLOWED = Object.freeze(['apply_patch', 'clock__curr_time', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'])
+// The tool each required-off feature is seen to add when it is on: the effect the run proves
+// before it draws. A feature Codex lists but silently ignores adds no tool, so the draw stops.
+const FEATURE_TOOLS = Object.freeze({
+  shell_tool: /(^|[._])(exec_command|write_stdin|shell|local_shell|unified_exec)$/,
+  view_image: /(^|[._])view_image$/,
+})
 // Codex's image tool: its own namespace, or the provider's hosted tool (which has no name).
 const IMAGE_NAMESPACE = 'image_gen'
 const IMAGE_HOSTED_TYPE = 'image_generation'
@@ -376,6 +386,23 @@ export function checkFeatures(rows, { required = IMAGE_FEATURES_OFF, also = IMAG
   return also.filter(name => live(name) && !required.includes(name))
 }
 
+// Whether Codex offers its image tool. Codex hides it when signed out, and a signed-out run
+// cannot draw; only with the tool there is the run's own config proven to act.
+const offersImage = ({ tools }) => tools.some(name => name === `type:${IMAGE_HOSTED_TYPE}` || name.startsWith(`${IMAGE_NAMESPACE}.`))
+
+/**
+ * Whether turning `name` on is seen to offer a tool the run's own config did not. The on tools
+ * are read under the same overrides as the off ones, with only that feature switched on, so
+ * any tool it adds is the switch's own effect.
+ */
+export function takesEffect(off, on, name) {
+  const pattern = FEATURE_TOOLS[name]
+  if (pattern === undefined) return true
+  return [...on.tools, ...on.nested]
+    .filter(tool => !off.tools.includes(tool) && !off.nested.includes(tool))
+    .some(tool => pattern.test(tool))
+}
+
 const shown = name => String(name).slice(0, 80).replace(/[^A-Za-z0-9_.$:-]/g, '?')
 
 // The fields a current Codex gives each kind of offered tool. A field this code does not know
@@ -567,22 +594,39 @@ export async function imageSetup(launch, { run = execFile, timeoutMs = MCP_LIST_
   // The tools offered under the run's whole config. A first pass names the person's own
   // skills; they are turned off by name and the tools are read again under that config.
   let skills = []
+  let overrides
+  let offered
+  let stdout
   for (let pass = 0; ; pass += 1) {
-    const overrides = imageOverrides({ servers, extras, skills, project, profile })
-    const stdout = await cli(['debug', 'prompt-input', ...configArgs(overrides)], 'the offered tools')
-    const offered = readOffered(stdout)
+    overrides = imageOverrides({ servers, extras, skills, project, profile })
+    stdout = await cli(['debug', 'prompt-input', ...configArgs(overrides)], 'the offered tools')
+    offered = readOffered(stdout)
     checkOffered(offered)
     const more = offered.skills.filter(name => !skills.includes(name))
-    if (more.length === 0 || pass === 1) {
-      if (profile) {
-        let codexHome
-        try { codexHome = realpathSync(launch.env.CODEX_HOME) } catch {}
-        if (!checkProfile(readProfile(stdout), { scratch: project, codexHome })) throw checkError('profile', 'Codex resolved a wider image profile')
-      }
-      return { servers, extras, skills, overrides }
-    }
+    if (more.length === 0 || pass === 1) break
     skills = [...skills, ...more]
   }
+  if (profile) {
+    let codexHome
+    try { codexHome = realpathSync(launch.env.CODEX_HOME) } catch {}
+    if (!checkProfile(readProfile(stdout), { scratch: project, codexHome })) throw checkError('profile', 'Codex resolved a wider image profile')
+  }
+  // The switches are read again under the whole config the session gets, so a layer that turns
+  // a required one back on stops the draw even when no offered tool shows it.
+  const underRun = readFeatures(await cli(['features', 'list', ...configArgs(overrides)], 'the feature list'))
+  checkFeatures(underRun, { required })
+  // A Codex that offers its image tool can draw, so each required switch is then proven by its
+  // effect: turned on, it must offer a tool the run's config did not. One Codex lists and
+  // reports as taken but silently ignores offers no such tool, and the draw stops.
+  if (offersImage(offered)) {
+    for (const name of required) {
+      if (FEATURE_TOOLS[name] === undefined) continue
+      const on = { ...overrides, features: { ...overrides.features, [name]: true } }
+      const shown = readOffered(await cli(['debug', 'prompt-input', ...configArgs(on)], `the ${name} switch`))
+      if (!takesEffect(offered, shown, name)) throw checkError('unsupported', `Codex lists the feature ${name} but does not act on it`)
+    }
+  }
+  return { servers, extras, skills, overrides }
 }
 
 /**

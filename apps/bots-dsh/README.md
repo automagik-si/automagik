@@ -475,7 +475,7 @@ enter team state, messages, tools, model calls or logs. The earlier confirm step
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
-**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`.
+**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`. A Genie is the exception: its role tool (`grant_wish`) is a DSH tool, so bots-dsh tells acp-dsh (`needsDshTools` in the Bot identity) and that Codex Session gets DSH's extras without the setting, never a second copy of the tools Codex already has. A wish's task Session does not.
 
 - Give every model a `contextWindow`. DS Bot takes its lines from it: the usable window is the window minus the reply reserve (`maxTokens`), the hard line is 95% of that, and the check line is `checkRatio` of it. A model without `contextWindow` gets the adapter's default (262,144 tokens for `llm-pi-ai`), which may be wrong for that model; a model that reports no window at all counts as 500,000.
 - To send images, the provider needs `defaultInput: [ text, image ]`.
@@ -555,6 +555,22 @@ targets too. The lists are shared with the Bot browser, so changing them cannot 
 `web_fetch` off; only the profile's `web-fetch-http` row with `disabled: true` does.
 With both lists empty, prompt-injected channel text can still reach localhost services
 (#521); add a deny entry or disable that row.
+
+## Member wall (off)
+
+The package carries the first piece of the wall between people who share one DSH (RFC 0024
+(f)): `@automagik/bots-dsh/member-wall/fs`, a read fence on DSH's file access. Members stay
+off: no profile applies it yet, and with `members: false` (the default) it is DSH's own
+sandboxed filesystem, unchanged. Its rows are in `src/host/member-wall/profile.yml`.
+
+With members on, a session recorded as a member's may read, list, search and load skills only
+in its own area and in the shared roots, never in a denied root; a link out of the area is
+refused too, and a listing leaves out each child that reaches or walks through one, name and
+metadata included, even when the child's final target is allowed.
+Only a session recorded as the owner's acts as the owner; any other session, and
+every session while the record cannot be trusted, is held to a member's rules. The owner's own
+sessions and the owner's interface read as before. A member's commands are not fenced by this
+piece.
 
 ## Bot browser
 
@@ -723,6 +739,7 @@ dev/check.sh                             # all checks (see below)
 | `src/script-child/` | Source of the process a `browser_exec` script runs in: a QuickJS interpreter (WebAssembly) and the two functions it is given; `pins.json` holds the interpreter's version and the sha256 of each of its files |
 | `src/host/browser/script-child.js` | Built from `src/script-child/` and the pinned interpreter by `scripts/build-script-child.mjs` (esbuild) as one file; committed |
 | `web-search.js` | The `auto` search provider; independent of the team code |
+| `src/host/member-wall/` | The member wall (off): the read fence (`fs`), the principal record (`principals`), its profile rows |
 | `test/` | Unit tests and fixtures |
 | `dev/characters.mjs` | Builds the characters (small 3D models traced to outlines) into the `CHARACTERS` table in `src/client/characters.js` |
 | `dev/` | Mock model, test benches, smoke test, Desktop scripts, real-model tools (steward evaluation, logging pass-through) |

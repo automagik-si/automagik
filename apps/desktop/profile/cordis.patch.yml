@@ -3,10 +3,13 @@
 - insert:
     - id: web-search-auto
       name: '@automagik/bots-dsh/web-search'
+# Each adapter has its own entry so a profile that already has one can get the other.
+- insert:
     - id: automagik-read-scope-files
       name: '@automagik/bots-dsh/read-scope-files'
       config:
         applyPatch: false
+- insert:
     - id: automagik-read-scope-search
       name: '@automagik/bots-dsh/read-scope-search'
       config:

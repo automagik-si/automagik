@@ -15,7 +15,7 @@ import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync
 import { homedir, uptime } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
+import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
 import { coreStatus, inTestRoots } from "../coreSocket.mjs";
@@ -31,13 +31,13 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
   GUARD_DIR, KILL_GUARD_DIR, KILL_GUARD_NAME, SESSION_LABEL, baseCandidates, branchNamesTask, branchSlug, guardPathWith,
   LEDGER_MODE, endRow, finishedEnds, launchKey, ledgerLine, ledgerPath, optionLike, paneArgs, readLedger, reapCandidates, reapPath, reapRow,
-  prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks,
+  prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks, forgeHost, forgeOf, workerTaskText,
   sessionRow, stableGuardDir, stableKillDir, stableRootOf,
   parseWorktrees, runsTemplate, startRow, swapArm, swapByte,
   taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
@@ -55,7 +55,7 @@ import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, ent
 import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
-import { chooseLogin } from "../logins.js";
+import { CONFIG_VAR, chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
@@ -99,16 +99,18 @@ async function slot(fn) {
   try { return await fn(); } finally { running -= 1; waiting.shift()?.(); }
 }
 
-/** Runs a program: { code, stdout, stderr }; code 127 when it isn't there; killed: true when its timeout ended it. */
+/** Runs a program: stderr falls back to the exec error, while rawStderr is the child's output.
+ * Code 127 when it isn't there; killed: true when its timeout ended it. */
 export function runProgram(command, args, { cwd, timeout = 15000 } = {}) {
   return slot(() => new Promise((done) => {
     try {
       execFile(command, args, { cwd, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (!err) return done({ code: 0, stdout, stderr });
+        if (!err) return done({ code: 0, stdout, stderr, rawStderr: stderr });
         done({ code: err.code === "ENOENT" ? 127 : (typeof err.code === "number" ? err.code : 1), stdout: stdout ?? "", stderr: stderr || String(err.message),
+          rawStderr: stderr ?? "",
           ...(err.killed ? { killed: true } : {}) });
       });
-    } catch (e) { done({ code: 127, stdout: "", stderr: String(e?.message ?? e) }); }
+    } catch (e) { done({ code: 127, stdout: "", stderr: String(e?.message ?? e), rawStderr: "" }); }
   }));
 }
 const git = async (args, cwd) => { const r = await runProgram("git", args, { cwd }); return r.code === 0 ? r.stdout : null; };
@@ -161,20 +163,27 @@ async function hcJson(args) {
 }
 /** hc's exit code for "no such terminal" (hc --skill: 3 not_found). */
 export const HC_NOT_FOUND = 3;
+const HC_FAILURE_MAX = 300;
 /**
  * What a failed hc call said, safe to print: its error's kind and message when it printed one as
  * JSON (hc --skill: `{error: {kind, message, hint}}` on stderr), else its first line; the home
  * folder written as ~, cut to 300 characters.
  */
 export function hcFailure(r, homeDir = home()) {
-  const text = String(r?.stderr || r?.stdout || "").trim();
+  return formatHcFailure(r, hcFailureMessage(r?.stderr || r?.stdout, homeDir));
+}
+function hcFailureMessage(output, homeDir = home()) {
+  const text = String(output || "").trim();
   let said = text.split("\n")[0];
   try {
     const e = JSON.parse(text)?.error;
     if (e && typeof e === "object") said = [e.kind, e.message].filter((x) => typeof x === "string" && x).join(": ") || said;
   } catch { /* not JSON: its first line */ }
   if (homeDir && homeDir !== "/") said = said.split(homeDir).join("~");
-  return `${said || "no message"}${r?.killed ? " (timed out)" : ""} (exit ${r?.code ?? "?"})`.slice(0, 300);
+  return said;
+}
+function formatHcFailure(r, message) {
+  return `${message || "no message"}${r?.killed ? " (timed out)" : ""} (exit ${r?.code ?? "?"})`.slice(0, HC_FAILURE_MAX);
 }
 /**
  * `hc get <t> --json`, or null when hc says there is no such terminal: only its not_found exit
@@ -424,18 +433,16 @@ export async function loadRemoteProject(key, machine) {
 }
 
 /**
- * writeBotsFile's rule on a linked machine: the whole raw file must pass checkBots, and the
- * file there must still hold the text read (null: none), else nothing is written
- * (remoteFile.js: hc file edit for an edit, an exclusive create for a new file, a checked
- * remove for `raw === null`).
+ * Validates the whole roster on a linked save. remoteFile.js sends the old and new text in
+ * one hc file edit, creates a new file exclusively, or checks before removing it for `raw === null`.
  */
-async function writeRemoteBots(project, raw) {
+async function writeRemoteBots(project, raw, { preview, confirmUnchanged }) {
   const { key, machine, text: expected } = project;
   const path = under(key, BOTS_PATH);
-  if (raw !== null) checkBotsForSave(raw, expected);
+  if (raw !== null) checkBotsForSave(raw, expected, preview);
   try {
     if (raw === null) await removeRemoteText(remoteIo, machine, path, expected);
-    else await writeRemoteText(remoteIo, machine, path, botsText(raw, expected), expected);
+    else await writeRemoteText(remoteIo, machine, path, botsText(raw, expected), expected, { confirmUnchanged });
   } catch (e) {
     if (e instanceof StaleSnapshot) throw new CliError(`Not saved: ${fileName(project)} changed since it was read (another edit landed first). Run the command again.`);
     // A write whose answer was lost and that the file doesn't show: said as it is.
@@ -451,9 +458,9 @@ async function writeRemoteBots(project, raw) {
  * only: a linked machine's shows in the sidebar from its open space, or once the sidebar
  * itself has written it.
  */
-async function saveProject(project, raw, { list = true } = {}) {
-  if (project.machine) return writeRemoteBots(project, raw);
-  writeBotsFile(project.dir, raw, project.expected, fsIo, project.text);
+async function saveProject(project, raw, { list = true, preview, confirmUnchanged } = {}) {
+  if (project.machine) return writeRemoteBots(project, raw, { preview, confirmUnchanged });
+  writeBotsFile(project.dir, raw, project.expected, fsIo, project.text, preview);
   if (list) listProject(project.key);
   if (project.dir !== project.key) report([worktreeNote(project, await changesIn(project.key, project.dir))]);
 }
@@ -537,10 +544,11 @@ const fsIo = {
 };
 
 /** Shared save validation: hard errors refuse; read warnings remain visible on stderr. */
-function checkBotsForSave(raw, before) {
+function checkBotsForSave(raw, before, preview) {
   const errors = checkBots(raw, before);
   if (errors.length) throw new CliError(`Not saved: ${errors.join("; ")}`);
   report(parseBots(JSON.stringify(raw)).warnings.map((w) => `Warning: ${w}`));
+  preview?.();
 }
 
 /**
@@ -551,10 +559,10 @@ function checkBotsForSave(raw, before) {
  * `raw === null` deletes the file (the project's last bot removed). `before`, for checkBots, is
  * the text the edit started from when that isn't the file written (a worktree's first edit).
  */
-export function writeBotsFile(key, raw, expected, io = fsIo, before = expected) {
+export function writeBotsFile(key, raw, expected, io = fsIo, before = expected, preview) {
   if (expected === undefined) throw new Error("writeBotsFile: pass the text the edit started from (null for a new file)");
   const path = under(key, BOTS_PATH);
-  if (raw !== null) checkBotsForSave(raw, before);
+  if (raw !== null) checkBotsForSave(raw, before, preview);
   let now;
   try { now = io.read(path); } catch (e) { throw new CliError(`Not saved: can't read ${path} again: ${e?.message ?? e}`); }
   if (now !== expected) throw new CliError(`Not saved: ${path} changed since it was read (another edit landed first). Run the command again.`);
@@ -783,13 +791,17 @@ export class LedgerRefusal extends CliError {}
  * `hc get <t> --json`; null only when hc answers not_found (exit 3), any other failure throws
  * (no answer within `timeout` ms, hc's 15 s when not given, included).
  */
-async function hcLookup(terminal, { timeout } = {}) {
+async function hcLookup(terminal, { timeout, strictNotFound = false } = {}) {
   const r = await hc(["get", terminal, "--json"], { timeout });
-  if (r.code === 0) return parsed(r, ["get", terminal]);
+  if (r.code === 0) {
+    const get = parsed(r, ["get", terminal]);
+    if (strictNotFound && (!get || typeof get !== "object" || Array.isArray(get))) throw new CliError(`hc get ${terminal} gave incomplete pane identity; nothing was started.`);
+    return get;
+  }
   if (r.killed) throw new CliError(`hc get ${terminal} gave no answer in ${(timeout ?? 15_000) / 1000} s`);
   let kind = null;
   try { kind = JSON.parse(r.stderr || r.stdout)?.error?.kind ?? null; } catch { kind = null; }
-  if (r.code === 3 || kind === "not_found") return null;
+  if (strictNotFound ? r.code === 3 && kind === "not_found" : r.code === 3 || kind === "not_found") return null;
   throw new CliError(`hc get ${terminal} failed: ${(r.stderr || r.stdout).trim()}`);
 }
 
@@ -855,7 +867,7 @@ const asCliError = (e) => (e instanceof CliError ? e : new CliError(e?.message ?
  * Which project defines `botId`: the one `folder` keys to, else one this run named, the
  * current folder's, or a remembered one; null when none does.
  */
-async function projectDefining(botId, folder) {
+async function projectDefining(botId, folder, known = null) {
   const keys = [];
   for (const f of [folder, process.cwd()]) {
     if (typeof f === "string") { try { keys.push(await keyOf(f)); } catch { /* a folder gone */ } }
@@ -864,6 +876,9 @@ async function projectDefining(botId, folder) {
   for (const k of keys) {
     try { if (loadProject(k).file.bots.some((b) => b.id === botId)) return k; } catch { /* unreadable: not this one */ }
   }
+  // A running seat of a project the sidebar knows (its list, a sibling, a cross-project
+  // reference) is imported too, not only the folders this run named or remembers (#223).
+  for (const [k, file] of known ?? []) if (file?.bots?.some((b) => b.id === botId)) return k;
   return null;
 }
 
@@ -873,8 +888,8 @@ async function projectDefining(botId, folder) {
  * one per bot by the old live rule (an agent in front, then the newest), its project the one
  * that defines the bot. The file is created, even empty, so it happens once.
  */
-async function importLabels(path) {
-  const found = await labelRows();
+async function importLabels(path, proposed) {
+  const found = proposed ?? await labelRows();
   try {
     await withLockAsync(ledgerLock(path), async () => {
       if (existsSync(path)) return; // another CLI imported first
@@ -886,6 +901,9 @@ async function importLabels(path) {
 /** The one-time import's rows (importLabels), worked out and not written. */
 async function labelRows() {
   const core = await coreId();
+  let own = null;
+  try { own = await keyOf(process.cwd()); } catch { /* the import can still use the remembered list */ }
+  const known = localProjectsFor(own ? { key: own } : null, appHome(), [...namedKeys]);
   const rows = rowsOf(await hcJson(["ls"])).filter((r) => local(r?.address) && r.state !== "finished");
   // One terminal hc fails to answer for is left out, never the whole import.
   const gets = (await Promise.all(rows.map((r) => hcLookup(r.address).catch(() => null))))
@@ -897,7 +915,7 @@ async function labelRows() {
     const agents = all.filter(agentInForeground);
     const pick = newest(agents.length ? agents : all);
     // A label naming no bot defined here (a stale or hand-set one) is left out.
-    const project = await projectDefining(bot, pick.foreground?.cwd ?? pick.cwd);
+    const project = await projectDefining(bot, pick.foreground?.cwd ?? pick.cwd, known);
     if (project) found.push(attachRow({ event: "attach", bot, project, terminal: pick.address, core, created_ms: pick.created_ms, by: "import" }));
   }
   return found;
@@ -1064,9 +1082,12 @@ function shownCodexSetting({ argv, pinned, levels = [], fallback = null, fallbac
 }
 
 /** One bot as ls and show print it. With hc failing, the bot is still shown, its pane unknown. */
-function describe(project, bot, view, hcError, projects = null) {
+function describe(project, bot, view, hcError, projects = null, observation = null) {
   const { file } = project;
-  const held = !bot.planned && view ? liveFor(view, bot.id, project) : null;
+  const candidate = observation?.candidate;
+  const held = project.machine ? (candidate ? { get: candidate.get,
+    binding: candidate.binding ?? { terminal: candidate.get.address.split("/")[1], at: null } } : null)
+    : !bot.planned && view ? liveFor(view, bot.id, project) : null;
   const live = held?.get ?? null;
   const projectsMap = projects ?? localProjectsFor(project);
   const lead = bot.kind === "member" || bot.leadProject
@@ -1074,10 +1095,13 @@ function describe(project, bot, view, hcError, projects = null) {
     : { lead: "", leadProject: null, leadBot: null, warning: null };
   const leadName = lead.leadBot?.name ?? (!lead.leadProject && lead.lead ? file.bots.find((b) => b.id === lead.lead)?.name ?? null : null);
   const agentKey = bot.agent ? resolveAgent(bot.agent, agentTable()) : null;
-  const io = modelIo();
-  const texts = agentKey ? configTexts(io.home, io.read) : {};
-  const fallback = bot.agent ? defaultModelFrom(bot.agent, texts) : null;
-  const shown = shownModel({ argv: live?.foreground?.argv, agentKey: bot.agent, pinned: bot.model, fallback });
+  const io = project.machine ? null : modelIo();
+  const texts = agentKey && io ? configTexts(io.home, io.read) : {};
+  const fallback = bot.agent && !project.machine ? defaultModelFrom(bot.agent, texts) : null;
+  // A live/unknown target cannot borrow a stopped roster pin or caller defaults.
+  const observedArgv = project.machine && (held || hcError)
+    ? (Array.isArray(live?.foreground?.argv) ? live.foreground.argv : []) : live?.foreground?.argv;
+  const shown = shownModel({ argv: observedArgv, agentKey: bot.agent, pinned: bot.model, fallback });
   // #1411: the Codex reasoning effort and service tier this bot runs now (its pane's command
   // line), else its own record when it isn't running, else the profile its launch names, else
   // the host's global config, else Codex's own: no effort, the default (standard) tier. A
@@ -1085,13 +1109,13 @@ function describe(project, bot, view, hcError, projects = null) {
   const codex = agentKey === "codex";
   const global = codex ? codexSettingsFrom(texts.codexConfig) : null;
   const profileName = codex ? codexProfileName(live?.foreground?.argv) : null;
-  const profile = profileName ? codexProfileFrom(profileName, io) : null;
+  const profile = profileName && io ? codexProfileFrom(profileName, io) : null;
   const shownEffort = codex
-    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.effort, key: "model_reasoning_effort",
+    ? shownCodexSetting({ argv: observedArgv, pinned: bot.effort, key: "model_reasoning_effort",
       levels: [["profile", profile?.effort], ["global", global?.effort]] })
     : { value: null, source: null };
   const shownTier = codex
-    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: "standard",
+    ? shownCodexSetting({ argv: observedArgv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: project.machine ? null : "standard",
       levels: [["profile", profile?.tier], ["global", global?.tier]] })
     : { value: null, source: null };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
@@ -1099,7 +1123,7 @@ function describe(project, bot, view, hcError, projects = null) {
   if (worker && resolveAgent(worker.agent ?? bot.agent) === "antigravity") worker.agyMode = agyModeOf(worker.agyMode);
   let status = "not running";
   if (bot.planned) status = "planned";
-  else if (hcError) status = "hc unavailable";
+  else if (hcError) status = project.machine ? "unknown" : "hc unavailable";
   else if (!held && view && unknownFor(view, bot.id, project)) status = "unknown"; // its machine isn't answering
   else if (held) status = agentInForeground(live) ? live.status?.state ?? "running" : "no agent in front";
   // #823: the effective permission lists the launch carries: a seat's on the project folder,
@@ -1147,6 +1171,99 @@ async function viewOrError() {
     if (e instanceof LedgerRefusal || !(e instanceof CliError)) throw e;
     return { view: null, hcError: e.message };
   }
+}
+
+/** Read the target, never import or sweep the caller's ledger to discover linked panes.
+ * A label is observation only; only an existing, confirmed binding permits replacement.
+ * Each call refreshes machine identity and launch-folder ownership on the target.
+ */
+async function linkedObservation(project, bot) {
+  const { machine, key } = project;
+  const replyMachines = await hcJson(["machine", "ls"]);
+  const targets = replyMachines?.machines?.filter?.((m) => m?.name === machine);
+  if (!Array.isArray(targets) || targets.length !== 1 || !targets[0].id
+      || replyMachines.machines.filter((m) => m?.id === targets[0].id).length !== 1) {
+    throw new CliError(`${machine}'s core identity is missing or ambiguous; nothing was started.`);
+  }
+  const machines = machinesById(replyMachines);
+  const core = coreOfName(machines, machine);
+  if (!core || !machines.get(core)?.connected) throw new CliError(`${machine}'s core cannot be confirmed; nothing was started.`);
+  const bindings = [...foldAttach(readAttachFile(attachPath(appHome())) ?? []).byKey.values()];
+  const binding = bindings.find((b) => b.bot === bot.id && b.project === key && b.core === core && b.machine);
+  if (bindings.some((b) => b.bot === bot.id && b.project === key && b.machine === machine && b.core !== core)) {
+    throw new CliError(`${machine}'s core changed since the attachment; inspect and attach the intended pane before restarting.`);
+  }
+  const reply = await hcJson(["ls", "--label", `${BOT_LABEL}=${bot.id}`]);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) throw new CliError(`hc ls gave no pane list for ${bot.name}; nothing was started.`);
+  const addresses = new Set();
+  for (const row of rowsOf(reply)) {
+    if (typeof row?.address !== "string" || !row.address) throw new CliError(`hc ls gave an incomplete pane address for ${bot.name}; nothing was started.`);
+    if (row.address.startsWith(`${machine}/`)) {
+      if (!/^[A-Za-z0-9._-]+$/.test(row.address.slice(machine.length + 1))) throw new CliError(`hc ls gave an invalid target address; nothing was started.`);
+      addresses.add(row.address);
+    }
+  }
+  const bound = binding ? `${machine}/${binding.terminal}` : null;
+  if (bound) addresses.add(bound);
+  const candidates = [];
+  for (const address of addresses) {
+    const get = await checkedPane(address, { strictNotFound: true });
+    if (!get) continue; // actual not_found/finished, never a failed lookup
+    if (!get.labels || typeof get.labels !== "object" || Array.isArray(get.labels)) throw new CliError(`hc get ${address} gave no label map; nothing was started.`);
+    if (address === bound && get.created_ms !== binding.created_ms) throw new CliError(`${address} is another terminal now (its created_ms changed); inspect and attach the intended pane.`);
+    if (address !== bound && get.labels[BOT_LABEL] !== bot.id) throw new CliError(`${address} changed its bot label during observation; nothing was started.`);
+    if (typeof get.cwd !== "string" || !get.cwd.startsWith("/") || (await remoteIo.exec("test", ["-d", get.cwd], machine)).code !== 0) {
+      throw new CliError(`${address}'s launch folder cannot be confirmed; nothing was started.`);
+    }
+    const owner = await remoteProjectOf(machine, get.cwd);
+    const roster = await loadRemoteProject(owner.key, machine);
+    if (!roster.file.bots.some((b) => b.id === bot.id)) throw new CliError(`${address}'s project ownership cannot be confirmed; nothing was started.`);
+    if (owner.key !== key) {
+      if (address === bound) throw new CliError(`${address}'s launch project differs from its attachment; nothing was started.`);
+      continue;
+    }
+    candidates.push({ get, binding: address === bound ? binding : null });
+  }
+  if (candidates.length > 1) throw new CliError(`${bot.name} has duplicate live labels in ${candidates.map((c) => c.get.address).join(", ")}; inspect those panes before starting or restarting.`,
+    1, { refused: "duplicate", duplicate: true });
+  return { core, machine, candidate: candidates[0] ?? null };
+}
+
+async function describeLinked(project, bot) {
+  let observation, error = null;
+  try { observation = await linkedObservation(project, bot); } catch (e) {
+    if (e instanceof LedgerRefusal) throw e;
+    error = e;
+  }
+  return { ...describe(project, bot, null, error?.message ?? null, null, observation),
+    duplicate: error?.detail?.duplicate === true };
+}
+
+function linkedRestartHeld(project, bot, observation) {
+  const candidate = observation.candidate;
+  if (candidate && !candidate.binding) throw new CliError(`${bot.name} already runs in ${candidate.get.address}, without a confirmed caller attachment. Inspect it, then use am attach ${bot.id} ${candidate.get.address} --machine ${project.machine} --project ${project.key} before restarting.`);
+  return candidate;
+}
+
+async function recheckLinkedRestart(project, bot, initial, opts, tree = false) {
+  const current = await linkedObservation(project, bot);
+  const held = linkedRestartHeld(project, bot, current);
+  if (current.core !== initial.core || (held ? attachKey(held.binding) : null) !== (initial.candidate ? attachKey(initial.candidate.binding) : null)) {
+    throw new CliError(`${bot.name}'s target identity changed before restart; nothing was started.`);
+  }
+  if (held && !tree) await checkLinkedRestartPane(bot, held.get, opts);
+  return held;
+}
+
+async function checkLinkedRestartPane(bot, old, opts) {
+  const helpers = await helpersOf(old.address);
+  const helperRefusal = restartRefusal({ name: bot.name, old: { ...old, status: { state: "idle" } }, helpers, force: opts.force, onMachine: true });
+  if (helperRefusal) throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: old.address });
+  const refusal = restartRefusal({ name: bot.name, old, force: opts.force, onMachine: true });
+  if (refusal) throw busyRefusal(refusal, old);
+  if (!old.status && !opts.force) throw new CliError(`${old.address} doesn't tell hc whether ${bot.name}'s agent is busy or waiting for an approval, so a restart `
+    + `could end it mid-turn. Nothing was restarted. Look at the pane first, then pass --force to restart anyway `
+    + `(it sends the pane no keys: it starts a new pane, then ends this one).`);
 }
 
 // ---- the briefing hook (briefingText.mjs installHook, as launch.js afterBind uses it) ----
@@ -1259,10 +1376,12 @@ const OPTIONS = {
   role: { type: "string" }, instructions: { type: "string" }, "instructions-file": { type: "string" },
   code: { type: "string" },
   lead: { type: "string" }, "lead-project": { type: "string" }, "no-lead-project": { type: "boolean" },
+  "old-lead": { type: "string" },
   "cross-member": { type: "string", multiple: true }, "no-cross-members": { type: "boolean" },
   category: { type: "string" }, "no-category": { type: "boolean" },
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
   model: { type: "string" }, "no-model": { type: "boolean" }, rank: { type: "string" }, "hc-proxy": { type: "string" },
+  "person-features": { type: "string" },
   "agy-mode": { type: "string" }, "worker-agy-mode": { type: "string" },
   "hermes-home": { type: "string" }, "hermes-profile": { type: "string" }, "no-hermes": { type: "boolean" },
   "agy-allow": { type: "string", multiple: true }, "agy-deny": { type: "string", multiple: true },
@@ -1270,7 +1389,7 @@ const OPTIONS = {
   "planned-wave": { type: "string" }, "planned-note": { type: "string" }, unplanned: { type: "boolean" },
   space: { type: "string" }, tab: { type: "string" },
   title: { type: "string" }, sub: { type: "string" }, id: { type: "string" },
-  check: { type: "boolean" }, rollback: { type: "boolean" }, auto: { type: "string" },
+  check: { type: "boolean" }, rollback: { type: "boolean" }, "retry-skipped": { type: "boolean" }, auto: { type: "string" },
   "worker-agent": { type: "string" }, "worker-model": { type: "string" }, "worker-effort": { type: "string" },
   "worker-template": { type: "string" }, template: { type: "string" },
   branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" }, tier: { type: "string" },
@@ -1287,7 +1406,7 @@ export const USAGE = `am: Automagik Herdr's bots and updates from the command li
 
 Usage: am <command> [options]                   (every command takes --json and --project <folder>)
        am <command> --machine M --project <folder there> ...
-                                                 ls, show, create, edit, rm, category, start,
+                                                 ls, show, create, edit, main, rm, category, start,
                                                  restart, attach, detach and whois on a linked
                                                  machine (hc machine ls), through hc
        am --version                              the installed pack's version
@@ -1296,8 +1415,17 @@ Usage: am <command> [options]                   (every command takes --json and 
                                plus planned waves, code opt-outs and Antigravity modes
   show <bot>                    one bot in full (--json: the effective effort and tier,
                                 and where each comes from)
+                                Linked ls/show observe target panes without adopting them.
+                                Model/effort/tier come from observed argv; unobserved target
+                                defaults are unknown. A stopped bot can show its configured pin.
+                                Argv does not prove an interactive in-process model change.
+                                Linked start checks existing panes and checks again before run;
+                                independent caller hosts are not serialized. Linked restart
+                                requires an existing pane to have a confirmed attachment.
   create --name N --agent A [--kind main|member] [--role R]
          [--code true|false]            false omits the worker instruction; default true
+         [--person-features on|off]     Claude Code only: keep the prompt suggestions, away
+                                       summaries and subagent progress summaries; default off
          [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
          [--cross-member BOT@DIR]...   reciprocal cross-project member(s) reporting to this lead
          [--character C --colour K | --omni] [--model M] [--rank R]
@@ -1321,6 +1449,7 @@ Usage: am <command> [options]                   (every command takes --json and 
              [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
              [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
+             [--person-features on|off]   (Claude Code only; default off)
              [--agy-allow=] [--agy-deny=] [--no-agy-permissions] [--cross-member=]   (empty: cleared)
   Effort and tier (Codex): --effort E and --tier fast|standard store the bot's own reasoning
   effort and service tier; every start, restart and revive passes them as per-launch Codex
@@ -1329,6 +1458,9 @@ Usage: am <command> [options]                   (every command takes --json and 
   that names no --tier runs the new model on standard, said explicitly on the launch line, so
   a Fast a profile, a template or the host config still names never applies to it. am show
   --json reports the effective values and their source.
+  main <bot> [--old-lead <bot>] [--dry-run]
+                                hand over the main role and list the members that follow it
+                                --old-lead sets the previous main's lead. --dry-run previews the hand-over.
   rm <bot>
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
@@ -1419,7 +1551,8 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 elsewhere, under another lead or of another agent, a squad
                                 without one captain) refuses the whole import. Never starts,
                                 moves or restarts a pane
-  whois <terminal> | whois --bot <bot>   who plays where, by the attach ledger
+  whois <terminal> | whois --bot <bot> | whois --all
+                                who plays where, by the attach ledger (--all: every place it holds)
   history <bot>                 what the bot did, by the attach and workers ledgers: its panes,
                                 starts, sessions (and the newest transcript) and workers
   brief <bot>                   print the bot's briefing with its team's live state, as it is now
@@ -1456,12 +1589,19 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 repositories. Remove only with verified ownership and current
                                 HEAD pushed or proven merged, including squash merges. Keep
                                 unknown ownership, missing checkouts, dirty work or uncertain
-                                proof, with a reason. No broad prune. A worktree only given to
-                                a worker (--worktree, a branch's existing one) is never removed
-  update [--check | --rollback] install the latest release (checksum verified), only report
+                                proof, with a reason. End a finished worker's terminal once its
+                                branch's pull request merged or closed; delete a local branch a
+                                worker made, merged into the default, with no worktree; name
+                                every other worktree of a known project and leave it alone.
+                                No broad prune. A worktree only given to a worker (--worktree,
+                                a branch's existing one) is never removed
+  update [--check | --rollback | --retry-skipped]
+                                install the latest release (checksum verified), only report
                                 current and latest (--check), or put the replaced pack back;
-                                an update then runs meter install where you agreed to it
-                                (install.sh, or an earlier meter install); nobody asked: nowhere
+                                --retry-skipped: install the release this pack rolled back from,
+                                clearing that record first (an automatic update still waits for a
+                                newer release); an update then runs meter install where you agreed
+                                to it (install.sh, or an earlier meter install); nobody asked: nowhere
   update --auto on|off|status   Install updates automatically (on by default): Herdr installs
                                 each newer verified release on its own; a version you rolled
                                 back is skipped until a newer one is out. Only for a pack
@@ -1569,6 +1709,16 @@ reports no status to hc can't say it is waiting for an approval: restart refuses
 --machine, on that machine (there it needs --force, since it runs at once); a bot whose helpers
 end with its pane there is refused until each helper's pane is ended (hc kill M/tN).
 
+When HC_TERMINAL_ID identifies a requesting terminal, new linked starts and all linked
+restarts refuse: am cannot verify their return route, including --force/--fresh/swaps/--save
+and --tree. A verified already-running start can still return without launching. With no
+caller identity, ordinary non-orchestrated linked launches remain available.
+For orchestration, launch from the origin HC terminal with hc run --bg --on M, retaining
+its real default or explicit HC parent and supplying first-task/report instructions. Use
+the returned M/tN address at the origin. Do not guess reverse aliases or target-local
+addresses for the origin. Remote exec of local am loses origin provenance; this patch
+cannot detect or repair that case and does not promise report delivery for it.
+
 For a code agent: the am skill teaches these commands,
 https://github.com/automagik-si/automagik/blob/dev/skills/am/SKILL.md
 Install it: npx skills add automagik-si/automagik --skill am
@@ -1634,13 +1784,56 @@ function modelList(agent, pin = null) {
 // Whether this CLI run has already looked at `agy models`: one refresh a run at most.
 let agModelsLooked = false;
 
-function checkModel(agent, model) {
+function checkModel(agent, model, listOf = null) {
   if (!agent) throw new CliError("A model pin needs a coding agent (--agent).", 2);
   if (modelRefusal(agent)) throw new CliError(modelRefusal(agent), 2);
-  const list = modelList(agent, model);
+  const list = listOf ? listOf(agent, model) : modelList(agent, model);
+  // A linked machine's own list could not be read: its launch is left to judge the pin (#1173).
+  if (list === null) return;
   if (!list.includes(model)) {
     throw new CliError(list.length ? `${model} isn't a known ${agent} model. Pick one of: ${list.join(", ")}.`
       : `There is no list of ${agent} models to pin from${agent === "antigravity" ? " (agy models has listed none: agy may not be installed, signed in, or cached yet)" : ""}; leave the model unpinned (the running one is detected).`);
+  }
+}
+
+/** That machine's home folder (`$HOME`), or null when it gives none (#1173). */
+async function homeOn(machine) {
+  const r = await remoteIo.exec("sh", ["-c", 'printf %s "$HOME"'], machine, { timeout: AGENT_WAIT_S });
+  const home = r.code === 0 ? r.stdout : "";
+  // eslint-disable-next-line no-control-regex
+  return home.startsWith("/") && !/[\x00-\x1f\x7f]/.test(home) ? home.replace(/\/+$/, "") : null;
+}
+
+/**
+ * The models `agent` may be pinned to on `machine`, from that machine's own knowledge (#1173):
+ * Codex's `~/.codex/models_cache.json` there, Antigravity's pack cache under its app home there,
+ * Claude's `~/.claude/settings.json` default there (its static list is the same everywhere, but
+ * its settings default is each computer's own). Resolves an array, or null when that machine has
+ * no list to read (an older cache, no app home, no settings, a machine that can't answer): the
+ * launch there then judges the pin, never this computer's stale cache.
+ */
+async function modelsOnMachine(machine, key, agent) {
+  if (agent !== "claude" && agent !== "codex" && agent !== "antigravity") return null;
+  try {
+    let text = null;
+    if (agent === "antigravity") {
+      const paneEnv = await paneEnvOn(machine, key);
+      const app = paneEnv.appHome ?? await appHomeOn(machine);
+      if (app) text = await readRemoteText(remoteIo, machine, agModelsPath(app));
+    } else {
+      const home = await homeOn(machine);
+      if (!home) return null;
+      text = await readRemoteText(remoteIo, machine, agent === "claude"
+        ? `${home}/.claude/settings.json` : `${home}/.codex/models_cache.json`);
+    }
+    // No file there is no list to judge a pin by: never fall back to this computer's knowledge.
+    if (text === null) return null;
+    const texts = agent === "antigravity" ? { antigravityModels: text }
+      : agent === "claude" ? { claudeSettings: text } : { codexModels: text };
+    const list = knownModelsFrom(agent, texts);
+    return list.length ? list : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1681,7 +1874,7 @@ function launchAgyMode(bot, agentKey) {
  * The entry create or edit writes: `base` (the stored raw entry, or a new one) with the
  * options given applied and checked against the project. Throws a CliError on a refusal.
  */
-export function entryFrom(opts, base, project, { creating }) {
+export function entryFrom(opts, base, project, { creating, listOf = null }) {
   const { file } = project;
   const entry = JSON.parse(JSON.stringify(base));
   if (opts.name !== undefined) {
@@ -1725,6 +1918,17 @@ export function entryFrom(opts, base, project, { creating }) {
     if (!key) throw new CliError(`"${opts.agent}" isn't a coding agent Herdr knows. Known: ${Object.keys(agents).join(", ")}.`);
     entry.agent = key;
   }
+  // Claude Code's person-at-the-keyboard features (#1558): off by default for a bot seat, and
+  // this keeps them for a seat a person talks to all day. Other agents ignore the field.
+  if (opts["person-features"] !== undefined) {
+    if (!["on", "off"].includes(opts["person-features"])) {
+      throw new CliError("--person-features is on or off; nothing was saved.", 2);
+    }
+    entry.personFeatures = opts["person-features"] === "on";
+    if (entry.personFeatures && entry.agent !== "claude") {
+      report([`--person-features only applies to Claude Code; ${entry.name} runs ${entry.agent ?? "another agent"} and ignores it.`]);
+    }
+  }
   const pairFields = ["home", "profile"];
   const pairing = pairFields.some((field) => opts[`hermes-${field}`] !== undefined);
   if (pairing && opts["no-hermes"]) throw new CliError("Give the Hermes pairing or --no-hermes, not both.", 2);
@@ -1748,9 +1952,13 @@ export function entryFrom(opts, base, project, { creating }) {
   // Model pin (A12): from the agent's list, never free text.
   if (opts.model !== undefined && opts["no-model"]) throw new CliError("Give --model or --no-model, not both.", 2);
   if (opts["no-model"]) delete entry.model;
-  if (opts.model !== undefined) { checkModel(entry.agent, opts.model); entry.model = opts.model; }
-  else if (entry.model && opts.agent !== undefined && !modelList(entry.agent, entry.model).includes(entry.model)) {
-    throw new CliError(`${entry.name} is pinned to ${entry.model}, which ${entry.agent} doesn't list; pass --model or --no-model.`);
+  if (opts.model !== undefined) { checkModel(entry.agent, opts.model, listOf); entry.model = opts.model; }
+  else if (entry.model && opts.agent !== undefined) {
+    const list = listOf ? listOf(entry.agent, entry.model) : modelList(entry.agent, entry.model);
+    // null: that machine's own list could not be read; the launch there judges the pin (#1173).
+    if (list !== null && !list.includes(entry.model)) {
+      throw new CliError(`${entry.name} is pinned to ${entry.model}, which ${entry.agent} doesn't list; pass --model or --no-model.`);
+    }
   }
   // #1411: a bot's own reasoning effort and service tier (Codex's), passed on every launch as
   // its own overrides. Empty clears. A service tier belongs to the model choice: a --model
@@ -2050,7 +2258,7 @@ async function editProjectFor(opts) {
   return loadProject(key, await writeDirOf(opts, key));
 }
 // The commands that take --machine: the definitions ones (and meter's own --machine).
-const ON_MACHINE = new Set(["ls", "show", "create", "edit", "rm", "category", "start", "restart", "attach", "detach", "whois", "meter", "doc", "machines"]);
+const ON_MACHINE = new Set(["ls", "show", "create", "edit", "main", "rm", "category", "start", "restart", "attach", "detach", "whois", "meter", "doc", "machines"]);
 // A project's place in --json answers: `machine` only for a linked machine's.
 const placeOf = (project) => ({ project: project.key, ...(project.machine ? { machine: project.machine } : {}) });
 
@@ -2106,8 +2314,8 @@ async function cmdLs(opts) {
   if (opts.machine !== undefined) {
     if (opts.all) throw new CliError("ls --all lists this computer's projects; give --machine without --all.", 2);
     const project = await projectFor(opts);
-    const { view, hcError } = await viewOrError();
-    const bots = project.file.bots.map((b) => describe(project, b, view, hcError));
+    const bots = [];
+    for (const bot of project.file.bots) bots.push(await describeLinked(project, bot));
     const one = { ...placeOf(project), categories: project.file.categories, warnings: project.warnings, bots };
     return opts.json ? { projects: [one] } : lsLines([one]);
   }
@@ -2119,7 +2327,9 @@ async function cmdLs(opts) {
     let project;
     try { project = loadProject(key); } catch (e) { projects.push({ project: key, error: e.message, categories: [], bots: [], warnings: [] }); continue; }
     if (project.text === null && opts.all && key !== keys[0]) continue; // a remembered project whose file is gone
-    const bots = project.file.bots.map((b) => describe(project, b, view, hcError));
+    const bots = await Promise.all(project.file.bots.map(async (b) => ({
+      ...describe(project, b, view, hcError), duplicate: await duplicateLabel(project, b, view),
+    })));
     projects.push({ project: key, categories: project.file.categories, warnings: project.warnings, bots });
   }
   if (opts.json) return { projects };
@@ -2142,7 +2352,8 @@ function lsLines(projects) {
         ? `  agy-allow ${(b.agyPermissions ?? b.workerAgyPermissions).allow.length} deny ${(b.agyPermissions ?? b.workerAgyPermissions).deny.length}` : "";
       const status = b.planned ? `planned, wave ${b.planned.wave}` : b.terminal ? `${b.status} in ${p.machine ? `${p.machine}/` : ""}${b.terminal}` : b.status;
       const code = b.code === false ? "  code false" : "";
-      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${b.warning ? `  ! ${b.warning}` : ""}`);
+      const duplicate = b.duplicate ? "  ! duplicate live labels" : "";
+      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${duplicate}${b.warning ? `  ! ${b.warning}` : ""}`);
     }
     for (const w of p.warnings ?? []) lines.push(`  ! ${w}`);
     const hcError = p.bots.find((b) => b.hcError)?.hcError;
@@ -2233,8 +2444,9 @@ async function checkLinkedProxy(project, bot, agent, warn = reportProxyWarning) 
 async function cmdShow(opts, [ref]) {
   const project = await projectFor(opts);
   const bot = await botIn(project, ref, opts);
-  const { view, hcError } = await viewOrError();
-  const info = { ...describe(project, bot, view, hcError), instructions: bot.instructions };
+  const { view, hcError } = project.machine ? {} : await viewOrError();
+  const info = { ...(project.machine ? await describeLinked(project, bot)
+    : { ...describe(project, bot, view, hcError), duplicate: await duplicateLabel(project, bot, view) }), instructions: bot.instructions };
   info.hcProxyState = project.machine ? await proxyStateOn(project, bot)
     : approvedProxyState({ project: project.key, bot });
   if (opts.json) return info;
@@ -2265,6 +2477,7 @@ async function cmdShow(opts, [ref]) {
       `  worker agy allow  ${info.workerAgyPermissions.allow.join(", ")}`,
       `  worker agy deny   ${info.workerAgyPermissions.deny.join(", ")}`] : []),
     `  status       ${info.status}${info.terminal ? ` in ${info.terminal} (since ${info.since})` : ""}`,
+    ...(info.duplicate ? ["  warning      duplicate live labels"] : []),
     `  look         ${info.look.character} in ${info.look.colour}`, `  role         ${info.role || "-"}`,
     `  rank         ${info.rank ?? "-"}`, `  code         ${info.code}`,
     `  hc proxy     ${proxyStateText(info.hcProxyState)}`,
@@ -2359,6 +2572,82 @@ async function cmdEdit(opts, [ref]) {
   warnCrossLinkAfterSave(project, raw, bot.id);
   const relabelled = project.machine ? [] : await relabelAfter(project.file, raw);
   return opts.json ? { id: bot.id, ...placeOf(project), bot: entry, relabelled } : `${entry.name} (${bot.id}) saved.`;
+}
+
+const MAIN_USAGE = "usage: am main <bot> [--old-lead <bot>] [--dry-run] [--project DIR] [--machine M] [--json]";
+const MAIN_OPTIONS = new Set(["old-lead", "dry-run", "project", "machine", "json"]);
+
+function checkMainArgs(rest, tokens) {
+  if (rest.length !== 1 || !rest[0].trim()) throw new CliError(MAIN_USAGE, 2);
+  const seen = new Set();
+  for (const token of tokens) {
+    if (token.kind !== "option") continue;
+    if (!MAIN_OPTIONS.has(token.name)) throw new CliError(`--${token.name} isn't an option for main. ${MAIN_USAGE}`, 2);
+    if (seen.has(token.name)) throw new CliError(`Give --${token.name} once. ${MAIN_USAGE}`, 2);
+    if (token.value !== undefined && !token.value.trim()) throw new CliError(`--${token.name} needs a value. ${MAIN_USAGE}`, 2);
+    seen.add(token.name);
+  }
+}
+
+async function cmdMain(opts, [ref]) {
+  const project = await editProjectFor(opts);
+  const mains = project.raw.bots.filter((row) => row?.kind === "main");
+  if (mains.length !== 1) throw new CliError(`Not saved: ${mains.length} main bots; a project has exactly one.`);
+  const [incumbent] = mains;
+  const successor = await botIn(project, ref, opts);
+  if (successor.id === incumbent.id) throw new CliError(`${successor.name} is already the main bot.`);
+  if (successor.planned) throw new CliError(`${successor.name} is planned, so it can't be the main bot yet.`);
+  const lead = opts["old-lead"] === undefined ? successor : await botIn(project, opts["old-lead"], opts);
+  if (lead.id === incumbent.id) throw new CliError(`${incumbent.name} can't lead itself.`);
+  if (lead.planned) throw new CliError(`${lead.name} is planned, so it can't lead a bot yet.`);
+
+  const describe = ({ id, name }) => `${name} (${id})`;
+  const explicitLead = lead.id !== successor.id;
+  const ownProject = cleanProjectPath(project.key);
+  const implicitMembers = [], displacedLinks = [], changes = [];
+  // Use the stored rows so legacy cross-members and unrelated settings pass through verbatim.
+  const bots = project.raw.bots.map((row) => {
+    const promoted = row?.id === successor.id;
+    if (!promoted && row !== incumbent) {
+      if (row?.kind === "member" && !Object.hasOwn(row, "lead")) implicitMembers.push({ id: row.id, name: row.name });
+      return row;
+    }
+    const leadProject = cleanProjectPath(row.leadProject);
+    if (leadProject.startsWith("/") && leadProject !== ownProject && typeof row.lead === "string" && row.lead.trim()) {
+      displacedLinks.push({ id: row.id, name: row.name, lead: row.lead, leadProject });
+    }
+    const next = { ...row, kind: promoted ? "main" : "member" };
+    delete next.lead;
+    delete next.leadProject;
+    if (!promoted && explicitLead) next.lead = lead.id;
+    if (promoted || explicitLead) delete next.category;
+    changes.push(promoted ? `${describe(row)} becomes the main bot.`
+      : `${describe(row)} becomes a member reporting to ${describe(lead)}.`);
+    return next;
+  });
+  const raw = { ...project.raw, bots };
+  const preview = () => {
+    const lines = [
+      ...changes,
+      `Members with no stored lead that will follow ${describe(successor)}:`,
+      ...(implicitMembers.length ? implicitMembers.map((bot) => `  ${describe(bot)}`) : ["  None."]),
+      ...displacedLinks.map((link) => `Displaced external lead: ${describe(link)} → ${link.lead} in ${link.leadProject}. `
+        + "Remove the reciprocal entry there manually."),
+    ];
+    if (opts.json) report(lines);
+    else process.stdout.write(unprinted(`${lines.join("\n")}\n`));
+  };
+
+  const dryRun = Boolean(opts["dry-run"]);
+  let relabelled = [];
+  if (dryRun) checkBotsForSave(raw, project.text, preview);
+  else {
+    await saveProject(project, raw, { preview, confirmUnchanged: true });
+    if (!project.machine) relabelled = await relabelAfter(project.file, raw);
+  }
+  if (opts.json) return { id: successor.id, ...placeOf(project), previousMain: incumbent.id, oldLead: lead.id,
+    implicitMembers, displacedLinks, saved: !dryRun, relabelled };
+  return dryRun ? null : `Main bot hand-over saved in ${fileName(project)}.`;
 }
 
 async function cmdRm(opts, [ref]) {
@@ -2465,6 +2754,11 @@ const heldIds = new Set();
 const holdId = (id) => { if (typeof id === "string" && id.trim().length >= 6) heldIds.add(id.trim()); return id; };
 /** `text` with every held session id shown as SESSION_MASK. */
 const unprinted = (text) => { let out = String(text); for (const id of heldIds) out = out.split(id).join(SESSION_MASK); return out; };
+// Clean the whole message before masking, so truncation can't expose part of a held id.
+function printableHcMessage(text) {
+  const clean = stripVTControlCharacters(String(text)).replace(/[\p{Cc}\p{Cf}]/gu, (c) => (/\s/.test(c) ? " " : ""));
+  return unprinted(clean.replace(/\s+/g, " ").trim());
+}
 const report = (warnings) => { for (const w of warnings) process.stderr.write(`am: ${unprinted(w)}\n`); };
 
 /**
@@ -3088,7 +3382,13 @@ async function windowPlaceOn(machine, key) {
  * { running } when the ledger names a pane for the bot by the time its lock is taken.
  */
 async function seatOnMachine(project, bot, over = {}) {
+  refuseLinkedCaller(project);
   const { file, key, machine } = project;
+  if (over.recheck) await over.recheck();
+  else {
+    const observed = await linkedObservation(project, bot);
+    if (observed.candidate) return { running: observed.candidate.get.address };
+  }
   await checkLinkedProxy(project, bot, over.agent ?? bot.agent);
   const m = await connectedMachine(machine, "nothing was started");
   const agentKey = over.agent ?? bot.agent;
@@ -3096,9 +3396,13 @@ async function seatOnMachine(project, bot, over = {}) {
   if (!agent?.run?.length) throw new CliError(`${bot.name}'s coding agent "${agentKey}" isn't one Herdr can start.`);
   // Antigravity's mode: validated even when over.argv (a restart's plan) already carries it.
   const agyMode = launchAgyMode(bot, agentKey);
-  if (!over.argv && bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
-    throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
-      + `Pick one with am edit ${bot.id} --model <model> --machine ${machine} --project ${key}, or clear it with --no-model.`);
+  if (!over.argv && bot.model) {
+    // #1173: the target's own model list, when it has one, not the controller's stale cache.
+    const list = await modelsOnMachine(machine, key, bot.agent);
+    if (list !== null && !list.includes(bot.model)) {
+      throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't on ${machine}'s ${bot.agent} model list. `
+        + `Pick one with am edit ${bot.id} --model <model> --machine ${machine} --project ${key}, or clear it with --no-model.`);
+    }
   }
   const paneEnv = await paneEnvOn(machine, key);
   // #823: agy reads its permission list from a file on its own machine, under that machine's
@@ -3204,10 +3508,11 @@ async function seatOnMachine(project, bot, over = {}) {
     return { address, terminal: address.slice(address.indexOf("/") + 1), created_ms: get.created_ms, machine, core: m.id, argv, labels, place,
       hookWritten: hook.written, warnings };
   };
-  if (over.replacing) return run();
-  const seat = await underLedger(async ({ machines, heldBy, holds, write }) => {
-    const mine = await holds(heldBy(bot.id, m.id));
-    if (mine && mine.binding.project === key) return { running: addressOf(mine.binding, machines) };
+  if (over.replacing) return underLedger(async () => { await over.recheck(); return run(); });
+  const seat = await underLedger(async ({ write }) => {
+    const observed = await linkedObservation(project, bot);
+    if (observed.core !== m.id) throw new CliError(`${machine}'s core changed before launch; nothing was started.`);
+    if (observed.candidate) return { running: observed.candidate.get.address };
     const seat = await run();
     try {
       write([attachRow({ event: "attach", bot: bot.id, project: key, terminal: seat.terminal, core: m.id, created_ms: seat.created_ms, machine, by: "start" })]);
@@ -3231,19 +3536,27 @@ const seatOnJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, machin
   argv: maskedArgv(seat.argv, seat.labels?.[SESSION_LABEL] ?? null), labels: maskedLabels(seat.labels),
   space: seat.place?.space ?? null, tab: seat.place?.tab ?? null, hookWritten: seat.hookWritten ?? false, warnings: seat.warnings });
 
+/** The remote seat briefing has no supported cross-origin parent/return registration.
+ * Refuse orchestration rather than fabricate a reverse alias or forward a bare caller id.
+ * A target-local am invoked through remote exec has already lost that origin provenance;
+ * absence of HC_TERMINAL_ID here cannot detect or repair that case.
+ */
+function refuseLinkedCaller(project) {
+  if (!project.machine || !process.env.HC_TERMINAL_ID) return;
+  throw new CliError(`Linked am launch cannot verify a return route to the requesting HC terminal; nothing was started or restarted. `
+    + `From the origin HC terminal use hc run --bg --on ${project.machine} with its real default or explicit HC parent and explicit first-task/report instructions. `
+    + `Use the returned ${project.machine}/tN address at the origin. Remote exec of local am loses origin provenance and is not a supported return-route workaround.`,
+  1, { refused: "linked-return-route" });
+}
+
 /** start --machine: the bot's pane there (seatOnMachine); one that runs already is reported. */
 async function startOnMachine(opts, project, bot) {
-  await connectedMachine(project.machine, "nothing was started");
-  const view = await attachView();
-  const held = liveFor(view, bot.id, project);
-  if (held) {
-    const at = addressOf(held.binding, view.machines);
-    return opts.json ? { id: bot.id, running: held.binding.terminal, machine: held.binding.machine } : `${bot.name} is already running in ${at}.`;
+  const observed = await linkedObservation(project, bot);
+  if (observed.candidate) {
+    const at = observed.candidate.get.address;
+    return opts.json ? { id: bot.id, running: at.split("/")[1], machine: project.machine } : `${bot.name} is already running in ${at}.`;
   }
-  if (unknownFor(view, bot.id, project)) {
-    const b = unknownFor(view, bot.id, project);
-    throw new CliError(`${bot.name}'s pane on ${b.machine} (${b.terminal}) can't be checked: ${b.machine} isn't answering. Nothing was started.`);
-  }
+  refuseLinkedCaller(project);
   if (opts.space) throw new CliError("--space and --tab are this computer's window places; a start on a linked machine finds its own.", 2);
   const seat = await seatOnMachine(project, bot);
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
@@ -3260,9 +3573,8 @@ async function restartTreeOnMachine(opts, project, bot) {
   if (opts.space) throw new CliError("A restart on a linked machine keeps the old pane's window place.", 2);
   const { machine, key } = project;
   const m = await connectedMachine(machine, "nothing was restarted");
-  const view = await attachView();
-  const held = liveFor(view, bot.id, project);
-  if (unknownFor(view, bot.id, project)) throw new CliError(`${machine} isn't answering; reconnect it and retry the restart.`);
+  const observed = await linkedObservation(project, bot);
+  const held = linkedRestartHeld(project, bot, observed);
   const paneEnv = await paneEnvOn(machine, key);
   if (paneEnv.refused) throw new CliError(`The project's pane environment on ${machine} could not be read; fix it and retry the restart.`);
   const args = ["restart", bot.id, "--project", key, "--tree", "--json"];
@@ -3286,6 +3598,7 @@ if [ -n "$restart_terminal" ]; then
   "$restart_cli" attach "$restart_bot" "$restart_terminal" --project "$restart_project" --json >/dev/null || exit $?
 fi
 exec "$restart_cli" "$@"`;
+  await recheckLinkedRestart(project, bot, observed, opts, true);
   const result = await remoteIo.exec("sh", ["-c", script, "sh", paneEnv.appHome ?? "", paneEnv.prepend ?? "",
     held?.binding.terminal ?? "", bot.id, key, ...args], machine, { cwd: key, timeout: 540 });
   let out;
@@ -3335,29 +3648,15 @@ exec "$restart_cli" "$@"`;
  * conversation: refused while another bot's same agent runs in that folder there); the old
  * pane is ended (hc kill) only once the new one has kept its agent in front. No keys are sent.
  */
-async function restartOnMachine(opts, project, bot, entry) {
+async function restartOnMachine(opts, project, bot, entry, observed) {
   if (opts.space) throw new CliError("--space and --tab are this computer's window places; a restart on a linked machine keeps the old pane's.", 2);
   const { file, key, machine } = project;
   await checkLinkedProxy(project, bot, opts.agent ?? bot.agent, () => {});
   const m = await connectedMachine(machine, "nothing was restarted");
-  const view = await attachView();
-  const held = liveFor(view, bot.id, project);
-  if (!held && unknownFor(view, bot.id, project)) {
-    throw new CliError(`${bot.name}'s pane on ${machine} can't be checked: ${machine} isn't answering. Nothing was restarted.`);
-  }
-  const old = held ? { ...held.get, address: addressOf(held.binding, view.machines) } : null;
-  if (old) {
-    const helpers = await helpersOf(old.address);
-    const helperRefusal = restartRefusal({ name: bot.name, old: { ...old, status: { state: "idle" } }, helpers, force: opts.force, onMachine: true });
-    if (helperRefusal) throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: old.address });
-    const refusal = restartRefusal({ name: bot.name, old, force: opts.force, onMachine: true });
-    if (refusal) throw busyRefusal(refusal, old);
-    if (!old.status && !opts.force) {
-      throw new CliError(`${old.address} doesn't tell hc whether ${bot.name}'s agent is busy or waiting for an approval, so a restart `
-        + `could end it mid-turn. Nothing was restarted. Look at the pane first, then pass --force to restart anyway `
-        + `(it sends the pane no keys: it starts a new pane, then ends this one).`);
-    }
-  }
+  const held = linkedRestartHeld(project, bot, observed);
+  const old = held?.get ?? null;
+  if (old) await checkLinkedRestartPane(bot, old, opts);
+  const recheck = () => recheckLinkedRestart(project, bot, observed, opts);
   const agentKey = entry?.agent ?? bot.agent;
   const run = agentTable()[agentKey]?.run;
   if (!run?.length) throw new CliError(`${bot.name}'s coding agent "${agentKey}" isn't one Herdr can start.`);
@@ -3407,7 +3706,7 @@ async function restartOnMachine(opts, project, bot, entry) {
     if (refusal) throw new CliError(refusal);
   }
   let seat = await seatOnMachine(project, bot, { agent: plan.agent, argv: plan.argv, cwd, place: old ? placementFrom([old]) : undefined,
-    carry: { ...carriedLabels(old), ...(session ?? plan.sessionId ? { [SESSION_LABEL]: session ?? plan.sessionId } : {}) }, replacing: Boolean(old) });
+    carry: { ...carriedLabels(old), ...(session ?? plan.sessionId ? { [SESSION_LABEL]: session ?? plan.sessionId } : {}) }, replacing: Boolean(old), recheck });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   const warnings = [...(turnNote ? [turnNote] : []), ...seat.warnings];
   // #597: the replacement is built from bots.json, never the pane's command; when they differ,
@@ -3430,7 +3729,7 @@ async function restartOnMachine(opts, project, bot, entry) {
       session = null;
       warnings.push(`${bot.name} starts on a new conversation: ${note}.`);
       report([warnings.at(-1)]);
-      const again = await seatOnMachine(project, bot, { agent: plan.agent, argv: plan.argv, cwd, place: placementFrom([old]), carry: { ...carriedLabels(old), ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, replacing: true });
+      const again = await seatOnMachine(project, bot, { agent: plan.agent, argv: plan.argv, cwd, place: placementFrom([old]), carry: { ...carriedLabels(old), ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, replacing: true, recheck });
       if (again.running) throw new CliError(`${bot.name} is running in ${again.running} now, so no new pane was started; ${old.address} still runs it, untouched.`);
       warnings.push(...again.warnings);
       report(again.warnings);
@@ -3772,7 +4071,8 @@ async function launchSeat(project, bot, over = {}) {
     place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
   }
   // The Claude login this launch uses (#453): read from claude-logins.json now, Claude only.
-  const login = claudeLogin(argv, briefed.warnings);
+  const login = over.login?.words ?? claudeLogin(argv, briefed.warnings);
+  if (over.login) briefed.warnings.push(...over.login.warnings);
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
     (warning) => briefed.warnings.push(warning));
@@ -3827,17 +4127,27 @@ async function launchSeat(project, bot, over = {}) {
   listProject(key);
   // An edit that landed while this Start ran: the file read again, its role and category
   // put on the new pane (relabelWords against the labels it started with).
+  let words = [];
   try {
     const fresh = loadProject(key).file;
     if (fresh.bots.some((b) => b.id === bot.id && !b.planned)) {
-      const words = relabelWords(labels, paneLabels(fresh, bot.id), labels);
-      if (words.length && (await hc(["label", terminal, ...words])).code !== 0) {
-        const warning = `${terminal}'s labels ${words.join(" ")} weren't set.`;
-        hook.warnings.push(warning);
-        report([warning]); // the hook's warnings were printed before hc run
-      }
+      words = relabelWords(labels, paneLabels(fresh, bot.id), labels);
     }
   } catch { /* the file can't be read now: the labels it started with stand */ }
+  if (words.length) {
+    let reason = null;
+    try {
+      const r = await hc(["label", terminal, ...words]);
+      if (r.code !== 0) reason = formatHcFailure(r, printableHcMessage(hcFailureMessage(r.rawStderr)));
+    } catch (e) {
+      reason = printableHcMessage(e?.message ?? e).slice(0, HC_FAILURE_MAX) || "no message";
+    }
+    if (reason) {
+      const warning = `${terminal}'s labels ${words.join(" ")} weren't set. ${reason}`;
+      hook.warnings.push(warning);
+      report([warning]); // the hook's warnings were printed before hc run
+    }
+  }
   if (!place) {
     hook.warnings.push(`No open Herdr space shows ${key}, so Herdr gives ${terminal} no pane: it runs, unseen. `
       + `Watch it with hc attach ${terminal}. To give the next start a pane, open a space on ${key} first, or pass --space <id> (herdr-app ls lists the ids).`);
@@ -4808,7 +5118,7 @@ async function runQueuedRestart(opts) {
   }
 }
 
-async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
+async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered }) {
   const dialog = pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
   const queueId = randomUUID();
   const entry = await editRestartQueue(async (rows) => {
@@ -4817,7 +5127,8 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
     const e = { id: queueId, botId: bot.id, botName: bot.name, project: key, terminal: old.address, created_ms: old.created_ms ?? null,
       reason: dialog ? "blocked" : "working", dialog, options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
         model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
-        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null }, watcher: null, at: new Date().toISOString() };
+        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null,
+        ...(recovered ? { recoveredHome: true } : {}) }, watcher: null, at: new Date().toISOString() };
     // Persist before starting: the detached process may read immediately, then takes this lock.
     const file = queuePath(), tmp = `${file}.${process.pid}`;
     writeFileSync(tmp, JSON.stringify([...rows, e]), { mode: 0o600 });
@@ -4863,6 +5174,163 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
   return `${bot.name}: restart queued for ${old.address} (${why}); it will restart and resume at its next idle (am restart --queued lists it; am restart --cancel ${bot.id} cancels it; pass --force to restart now).`;
 }
 
+// Read only env's launch prefix. A template command or foreground process cannot vouch for
+// the app home or login that launched this pane.
+function paneLaunchEnv(get) {
+  const argv = get?.argv;
+  if (!Array.isArray(argv) || argv[0] !== "/usr/bin/env") return null;
+  const vars = new Map();
+  let index = 1;
+  while (argv[index] === "-u" && typeof argv[index + 1] === "string") {
+    vars.set(argv[index + 1], null);
+    index += 2;
+  }
+  for (const word of argv.slice(index)) {
+    if (typeof word !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) break;
+    const end = word.indexOf("=");
+    vars.set(word.slice(0, end), word.slice(end + 1));
+  }
+  return vars;
+}
+
+const sameHome = (left, right) => (realDir(left) ?? resolvePath(left)) === (realDir(right) ?? resolvePath(right));
+
+async function checkedPane(address, options) {
+  const get = await hcLookup(address, options);
+  if (!get) return null;
+  if (get.address !== address || !["live", "finished"].includes(get.state)
+      || (get.state === "live" && !Number.isSafeInteger(get.created_ms))) {
+    throw new CliError(`hc get ${address} gave incomplete pane identity; nothing was started.`);
+  }
+  return get.state === "live" ? get : null;
+}
+
+async function labelledPanes(project, bot, bound, carriedBinding = () => null) {
+  const reply = await hcJson(["ls", "--label", `${BOT_LABEL}=${bot.id}`]);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) {
+    throw new CliError(`hc ls gave no pane list for ${bot.name}; nothing was started.`);
+  }
+  const addresses = new Set();
+  for (const row of rowsOf(reply)) {
+    if (typeof row?.address !== "string" || !row.address) {
+      throw new CliError(`hc ls gave an incomplete pane address for ${bot.name}; nothing was started.`);
+    }
+    if (project.machine ? row.address.startsWith(`${project.machine}/`) : local(row.address)) addresses.add(row.address);
+  }
+  const gets = await Promise.all([...addresses].map(checkedPane));
+  const scoped = await Promise.all(gets.map(async (get) => {
+    if (!get) return null;
+    if (!get.labels || typeof get.labels !== "object" || Array.isArray(get.labels)) {
+      throw new CliError(`hc get ${get.address} gave no label map; nothing was started.`);
+    }
+    if (get.labels[BOT_LABEL] !== bot.id) return null;
+    if (get.address === bound || !get.cwd) return get;
+    const recordedProject = carriedBinding(get)?.project;
+    if (recordedProject != null) return recordedProject === project.key ? get : null;
+    // The launch folder scopes a label. The foreground process can cd without moving its pane.
+    if (project.machine) return get.cwd === project.key ? get : null;
+    const key = await keyOf(get.cwd);
+    if (key === project.key) return get;
+    // Only a known different checkout can explain the same label elsewhere. A pane launched
+    // with --cwd outside its project can have no roster in that folder.
+    return loadProject(key).file.bots.some((entry) => entry.id === bot.id) ? null : get;
+  }));
+  return scoped.filter(Boolean);
+}
+
+async function duplicateLabel(project, bot, view) {
+  if (!view || bot.planned) return false;
+  const held = liveFor(view, bot.id, project);
+  const bound = held ? addressOf(held.binding, view.machines) : null;
+  try { return (await labelledPanes(project, bot, bound)).length > 1; } catch { return false; }
+}
+
+async function restartTarget(project, bot, requestedHome, explicitHome, allowImport = false) {
+  const core = await coreId();
+  const bindingIn = (dir) => heldIn(foldAttach(readAttachFile(attachPath(dir)) ?? []), bot.id);
+  const carriedBinding = (pane) => {
+    const dir = paneLaunchEnv(pane)?.get("HERDR_APP_HOME");
+    if (typeof dir !== "string" || !isAbsolute(dir) || /[\x00-\x1f\x7f]/.test(dir)
+        || (process.env.AUTOMAGIK_HERDR_TEST_ROOTS && !inTestRoots(dir))) return null;
+    const row = bindingIn(dir);
+    return row?.core === core && row.terminal === pane.address && row.created_ms === pane.created_ms ? row : null;
+  };
+  const selectedPath = attachPath(requestedHome);
+  const selectedRows = readAttachFile(selectedPath);
+  const selected = heldIn(foldAttach(selectedRows ?? []), bot.id);
+  const binding = selected?.core === core && (selected.project == null || selected.project === project.key) ? selected : null;
+  let get = binding ? await checkedPane(binding.terminal) : null;
+  if (get?.created_ms !== binding?.created_ms) get = null;
+  // A legacy row without a project still needs a launch folder in this checkout.
+  if (get && binding.project == null && (!get.cwd || await keyOf(get.cwd) !== project.key)) get = null;
+  const candidates = await labelledPanes(project, bot, get?.address, carriedBinding);
+  if (candidates.length > 1) {
+    const panes = candidates.map((p) => p.address).join(", ");
+    throw new CliError(`${bot.name} has duplicate live labels in ${panes}; inspect those panes before restarting.`,
+      1, { refused: "duplicate", duplicate: true });
+  }
+  let candidate = candidates[0];
+  if (!get && !candidate && /^[A-Za-z0-9._-]+$/.test(process.env.HC_TERMINAL_ID ?? "")) {
+    // An attached pane can lose its display label too. The caller's own terminal is useful
+    // only when its carried app home still proves this exact bot and launch.
+    const caller = await checkedPane(process.env.HC_TERMINAL_ID);
+    if (caller && carriedBinding(caller)?.project === project.key) candidate = caller;
+  }
+  const carried = paneLaunchEnv(candidate)?.get("HERDR_APP_HOME");
+  const row = candidate ? carriedBinding(candidate) : null;
+  if (get && (!candidate || candidate.address === get.address && candidate.created_ms === get.created_ms)) {
+    if (row?.project === project.key && !sameHome(requestedHome, carried)) {
+      throw new CliError(`${get.address} has matching attachments in two app homes; inspect both ledgers before restarting.`,
+        1, { refused: "app-home", terminal: get.address });
+    }
+    return { held: { binding, get }, dir: requestedHome };
+  }
+  if (!candidate) {
+    if (selected?.core === core && selected.project !== project.key && selected.created_ms === (await checkedPane(selected.terminal))?.created_ms) {
+      throw new CliError(`${selected.terminal} has an attachment in the selected app home that doesn't identify this project; nothing was started.`,
+        1, { refused: "attachment", terminal: selected.terminal });
+    }
+    return { held: null, dir: requestedHome };
+  }
+  if (!get && row?.project === project.key) {
+    if (explicitHome && !sameHome(requestedHome, carried)) {
+      throw new CliError(`${candidate.address} belongs to a different HERDR_APP_HOME than the one selected; nothing was started.`,
+        1, { refused: "app-home", terminal: candidate.address });
+    }
+    return { held: { binding: row, get: candidate }, dir: carried };
+  }
+  // A deliberately selected app home still gets its documented one-time import. Never
+  // use import to decide which home owns an unbound pane when the caller lost its home.
+  if (allowImport && explicitHome && selectedRows === null && (!carried || sameHome(requestedHome, carried))) {
+    const proposed = await labelRows();
+    const imported = proposed.find((entry) => entry.bot === bot.id);
+    if (imported?.project === project.key && imported.core === core
+        && imported.terminal === candidate.address && imported.created_ms === candidate.created_ms) {
+      await importLabels(selectedPath, proposed);
+      return restartTarget(project, bot, requestedHome, explicitHome);
+    }
+  }
+  throw new CliError(`${candidate.address} has ${bot.name}'s label but no matching attachment in the selected or carried app home. `
+    + `Inspect the pane and run am attach ${bot.id} ${candidate.address} --project ${project.key} in its app home before restarting.`,
+    1, { refused: "attachment", terminal: candidate.address });
+}
+
+function recoveredLogin(old, argv) {
+  const source = paneCommand(old);
+  if (launchAgent(argv) !== "claude" || (source && launchAgent(source.argv ?? ["sh", "-c", source.shell]) !== "claude")) return undefined;
+  const previous = paneLaunchEnv(old)?.get(CONFIG_VAR);
+  const warnings = [];
+  const words = claudeLogin(argv, warnings);
+  const next = words[0] === "-u" ? null : words[0]?.slice(CONFIG_VAR.length + 1);
+  const matches = previous === next || (typeof previous === "string" && isAbsolute(previous) && next && sameHome(previous, next));
+  if (previous === undefined || !matches) {
+    const why = previous === undefined ? "its launch gives no Claude login" : "the selected Claude login differs from its launch";
+    throw new CliError(`${old.address}: ${why} in the recovered app home. Nothing was started. `
+      + "Select that app home explicitly to apply an account change.", 1, { refused: "login", terminal: old.address });
+  }
+  return { words, warnings };
+}
+
 async function cmdRestart(opts, [ref]) {
   if (opts["run-queued"]) return runQueuedRestart(opts);
   if (opts.queued || opts.cancel) return queuedRestarts(opts, ref);
@@ -4886,7 +5354,36 @@ async function cmdRestart(opts, [ref]) {
   const bot = await botIn(project, ref, opts);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
+  // Before swap validation, preparation or a delegated tree transaction.
+  refuseLinkedCaller(project);
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
+  if (project.machine) {
+    // Observe before swap/model validation can refresh a caller-side model cache.
+    const observed = await linkedObservation(project, bot);
+    linkedRestartHeld(project, bot, observed);
+    return restartResolved(opts, project, bot, wanted, swap, observed);
+  }
+  const explicit = process.env.HERDR_APP_HOME;
+  const requested = appHome();
+  const target = await restartTarget(project, bot, requested, Boolean(explicit), !opts._queuedTarget);
+  const recovered = opts._queuedTarget?.options?.recoveredHome === true || !sameHome(requested, target.dir);
+  if (recovered) {
+    process.env.HERDR_APP_HOME = target.dir;
+    viewOnce = null;
+  }
+  try {
+    return await restartResolved(opts, project, bot, wanted, swap, target, recovered);
+  } finally {
+    if (recovered) {
+      if (explicit === undefined) delete process.env.HERDR_APP_HOME;
+      else process.env.HERDR_APP_HOME = explicit;
+      viewOnce = null;
+    }
+  }
+}
+
+async function restartResolved(opts, project, bot, wanted, swap, target, recovered) {
+  const { file, key } = project;
   // A swap's agent and model are checked as an edit checks them (entryFrom); a new agent
   // without --model drops the old agent's pin. bots.json changes only with --save.
   let entry = null;
@@ -4895,16 +5392,35 @@ async function cmdRestart(opts, [ref]) {
     const target = opts.agent !== undefined ? resolveAgent(opts.agent, agentTable()) : bot.agent;
     const edit = { agent: opts.agent, model: opts.model };
     if (opts.model === undefined && target !== bot.agent) edit["no-model"] = true;
-    entry = entryFrom(edit, stored, project, { creating: false });
-  } else if (bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
-    throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
-      + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
+    // #1173: a swap on a linked machine weighs its pin against that machine's list, when it has
+    // one; a list that can't be read leaves the pin to the launch there.
+    let listOf = null;
+    if (project.machine && target) {
+      const list = await modelsOnMachine(project.machine, key, target);
+      listOf = (agent, pin) => (agent === target ? list : modelList(agent, pin));
+    }
+    entry = entryFrom(edit, stored, project, { creating: false, listOf });
+  } else if (bot.model) {
+    const list = project.machine ? await modelsOnMachine(project.machine, key, bot.agent) : modelList(bot.agent, bot.model);
+    if (list !== null && !list.includes(bot.model)) {
+      throw new CliError(project.machine
+        ? `${bot.name} is pinned to "${bot.model}", which isn't on ${project.machine}'s ${bot.agent} model list. `
+          + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`
+        : `${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
+          + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
+    }
   }
-  if (project.machine) return restartOnMachine(opts, project, bot, entry);
-  // The old pane: the one the attach ledger names for the bot, as hc confirms it.
-  const view = await attachView();
-  const held = view.live.get(bot.id) ?? null;
-  let old = held && local(held.get?.address ?? held.binding.terminal) ? { ...held.get, address: held.get?.address ?? held.binding.terminal } : null;
+  if (project.machine) return restartOnMachine(opts, project, bot, entry, target);
+  const view = await attachView({ readOnly: true });
+  const held = target.held;
+  let old = held?.get ?? null;
+  const recheck = async (argv) => {
+    const current = await restartTarget(project, bot, appHome(), true);
+    if ((current.held ? attachKey(current.held.binding) : null) !== (held ? attachKey(held.binding) : null)) {
+      throw new CliError(`${bot.name}'s attachment changed while planning the restart; nothing was started.`);
+    }
+    return recovered && current.held ? recoveredLogin(current.held.get, argv) : undefined;
+  };
   if (opts._queuedTarget && (!old || old.address !== opts._queuedTarget.terminal
     || (opts._queuedTarget.created_ms != null && old.created_ms !== opts._queuedTarget.created_ms))) return PRINTED;
   // attachView caches its first hc get for the whole watcher run: a queued fire must judge the
@@ -4986,7 +5502,8 @@ async function cmdRestart(opts, [ref]) {
   let plan = restartPlan(planned);
   if (old && !opts.force && !isPaneIdle(old, screen)
     && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen))) {
-    return queueRestart({ bot, key, old, screen, opts, wanted, plan });
+    await recheck(plan.argv);
+    return queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered });
   }
   // --cwd: Claude resumes only within one folder slug (~/.claude/projects/<slug>), by id or --continue.
   const movedFrom = wanted && old && oldCwd ? (realDir(oldCwd) ?? oldCwd) : null;
@@ -4996,7 +5513,9 @@ async function cmdRestart(opts, [ref]) {
       + `${claudeSlug(wanted)}, so a resume there would find nothing. Nothing was started. Restart with --fresh for a new conversation in ${wanted}, `
       + `or pick a folder whose slug is the same.`);
   }
-  const place = opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : (old ? placementFrom([old]) ?? undefined : undefined);
+  // A restart with no --space keeps the old pane's place when its labels name one; no labels is
+  // no place, never an invitation to open a space (#217): the replacement runs unseen, and says so.
+  const place = opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : (old ? placementFrom([old]) : undefined);
   let resumeId = plan.mode === "resume" && !plan.canonicalBot && resumesById(plan.agent) ? sessionFor(plan.agent, known?.session) : null;
   // With no id, a resume takes the folder's latest conversation (--continue, codex resume
   // --last), for every agent: beside another bot on that agent there, a new conversation, and
@@ -5035,6 +5554,7 @@ async function cmdRestart(opts, [ref]) {
     ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}) };
   // The session the new pane runs, for its label and seat row: the id chosen for a new one, or the resumed one.
   const sessionOfPlan = (p, resumed) => p.sessionId ?? (p.mode === "resume" ? resumed : null);
+  const login = await recheck(plan.argv);
   // A queued restart claims its entry only once every check passed and the seat is about to
   // start: a cancel between the watcher's read and here wins, and nothing is launched.
   if (opts._queuedTarget) {
@@ -5046,7 +5566,7 @@ async function cmdRestart(opts, [ref]) {
   }
   let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
-    replacing: old ? held.binding : null, granted: plan.granted });
+    replacing: old ? held.binding : null, granted: plan.granted, login });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   // A direct restart supersedes a queued one only once it really started: its watcher must not
   // start a second replacement while this one hands the bot over.
@@ -5105,6 +5625,7 @@ async function cmdRestart(opts, [ref]) {
     if (providerGone(plan, gone)) {
       const note = providerGoneNote(resumeId, seat.terminal, gone);
       plan = { ...restartPlan({ ...planned, fresh: true }), note };
+      await recheck(plan.argv);
       resumeId = null;
       say(`${bot.name} starts on a new conversation: ${note}.`);
       const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
@@ -5643,6 +6164,20 @@ async function cmdImport(opts) {
 }
 
 async function cmdWhois(opts, [terminal]) {
+  if (opts.all) {
+    if (terminal !== undefined || opts.bot !== undefined) throw new CliError("whois --all takes no terminal and no --bot.", 2);
+    if (opts.machine !== undefined) throw new CliError("whois --all lists every place the ledger holds; --machine goes with one terminal or --bot.", 2);
+    const view = await attachView();
+    const row = (binding, state) => ({ ...whoisOf({ binding }), address: addressOf(binding, view.machines),
+      machine: view.machines.get(binding.core)?.name ?? binding.machine ?? null, state });
+    const bindings = [
+      ...[...view.liveAt.values()].map(({ binding }) => row(binding, "live")),
+      ...[...view.unknownAt.values()].map((binding) => row(binding, "unknown")),
+    ].sort((a, b) => `${a.address}\n${a.bot}`.localeCompare(`${b.address}\n${b.bot}`));
+    if (opts.json) return { core: view.core, bindings };
+    return bindings.map((b) => `${b.address} ${b.state === "live" ? "plays" : "last played"} ${b.bot} `
+      + `(${b.project ?? "no project"}) since ${b.since}${b.state === "unknown" ? " (machine away)" : ""}`).join("\n") || "No bot is attached.";
+  }
   if ((opts.bot === undefined) === (terminal === undefined)) {
     throw new CliError("whois needs a terminal or --bot <id>: am whois <terminal> | whois --bot <id>.", 2);
   }
@@ -6203,21 +6738,66 @@ async function settled(names, terms, gets = new Map()) {
 }
 const firstLine = (r) => (r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n")[0];
 
+/** The forge tool a project's remote names, or the one installed (gh first) when the host is unknown. */
+const forgeByProject = new Map();
+async function forgeOn(cwd) {
+  const project = resolvePath(cwd);
+  if (forgeByProject.has(project)) return forgeByProject.get(project);
+  const remote = (await git(["remote", "get-url", "origin"], project))?.trim()
+    || (await git(["remote", "get-url", "upstream"], project))?.trim() || null;
+  const named = forgeOf(remote);
+  // A named forge is never swapped for the other tool: a GitLab host asked of gh is no answer.
+  // An unknown remote host prefers glab (the non-GitHub forge); a local path or no remote prefers
+  // gh, so a plain repository keeps the tool it always used.
+  const tool = named ?? (forgeHost(remote)
+    ? (programPath("glab") ? "glab" : programPath("gh") ? "gh" : null)
+    : (programPath("gh") ? "gh" : programPath("glab") ? "glab" : null));
+  forgeByProject.set(project, tool);
+  return tool;
+}
+
+/** The states both forges' list calls use, as the cleanup and its rows read them (gh's words). */
+const FORGE_STATES = { open: "OPEN", opened: "OPEN", merged: "MERGED", closed: "CLOSED", locked: "OPEN" };
+
+/** One of gh's or glab's pull request objects as the cleanup and a `pr` row read it, or null. */
+function normalizedPr(item) {
+  const state = FORGE_STATES[String(item?.state ?? "").toLowerCase()] ?? null;
+  const number = Number.isSafeInteger(item?.number) ? item.number
+    : Number.isSafeInteger(item?.iid) ? item.iid : null;
+  if (!state || !number) return null;
+  return { number, state, createdAt: item.createdAt ?? item.created_at ?? null,
+    mergedAt: item.mergedAt ?? item.merged_at ?? null, closedAt: item.closedAt ?? item.closed_at ?? null,
+    baseRefName: item.baseRefName ?? item.target_branch ?? null,
+    headRefOid: item.headRefOid ?? item.sha ?? item.diff_refs?.head_sha ?? null };
+}
+
 /**
- * The branch's pull requests as gh lists them ([{ number, state, createdAt, mergedAt, closedAt,
- * baseRefName }]), or null when gh is missing or fails. Only what the cleanup's check and a
- * `pr` row need is asked for: never a title, an author, a text or an address.
+ * The branch's pull requests as the project's forge lists them ([{ number, state, createdAt,
+ * mergedAt, closedAt, baseRefName, headRefOid }]), or null when that forge is missing or fails.
+ * The remote's host picks the tool (#1278 cause 3): gh for GitHub, glab for GitLab, never one
+ * asked for the other. Only what the cleanup's check and a `pr` row need is asked for: never a
+ * title, an author, a text or an address.
  */
-async function pullRequestsOf(branch, cwd, { cleanup = false } = {}) {
-  const gh = programPath("gh");
-  if (!gh || !branch) return null;
+async function pullRequestsOf(branch, cwd, { cleanup = false, forge = null } = {}) {
+  const tool = forge ?? await forgeOn(cwd);
+  if (!tool || !branch || !programPath(tool)) return null;
+  if (tool === "glab") {
+    const r = await runProgram(programPath("glab"),
+      ["mr", "list", "--source-branch", branch, "--all", "--output", "json"],
+      { cwd, timeout: GH_TIMEOUT });
+    if (r.code !== 0) return null;
+    try {
+      const list = JSON.parse(r.stdout);
+      return Array.isArray(list) ? list.map(normalizedPr).filter(Boolean) : null;
+    } catch { return null; }
+  }
   const fields = "number,state,createdAt,mergedAt,closedAt,baseRefName"
     + (cleanup ? ",headRefOid" : "");
-  const r = await runProgram(gh,
+  const r = await runProgram(programPath("gh"),
     ["pr", "list", "--head", branch, "--state", "all", "--json", fields, "--limit", "20"],
     { cwd, timeout: GH_TIMEOUT });
   if (r.code !== 0) return null;
-  try { const list = JSON.parse(r.stdout); return Array.isArray(list) ? list : null; } catch { return null; }
+  try { const list = JSON.parse(r.stdout); return Array.isArray(list) ? list.map(normalizedPr).filter(Boolean) : null; } catch { return null; }
 }
 
 // ---- pull requests (#899): the sweep's `pr` rows ----
@@ -6277,7 +6857,6 @@ async function firstCommitAt(project, branch, base, target) {
  * Says nothing unless a row couldn't be written.
  */
 async function recordPullRequests({ asked, start, budget, every, lines }) {
-  if (!programPath("gh")) return;
   const rows = workerLedgerRows();
   const now = Date.now();
   const branches = prBranches(rows, now);
@@ -6364,6 +6943,35 @@ async function reapOwnership(c, project = null) {
   return null;
 }
 
+/** A path's spelling without trailing slashes: a missing checkout is compared as recorded. */
+const withoutTrailingSlash = (p) => String(p ?? "").replace(/\/+$/, "");
+
+/**
+ * A candidate whose checkout is missing, as a cleanup outcome: "gone" once its recorded
+ * repository's `git worktree list` no longer names it (#1143), so the cleanup file stops
+ * carrying it as kept forever. Null in every other case: no unambiguous owner, an unreadable
+ * repository, or a registration still there (a folder removed by hand keeps its record; only
+ * `git worktree prune` or `remove` may drop it, never this cleanup). Reads git's list only:
+ * no remove, no prune.
+ */
+async function goneCheckout(c) {
+  if (!c.project) return null;
+  const listed = await git(["worktree", "list", "--porcelain"], c.project);
+  if (listed === null) return null;
+  return parseWorktrees(listed).some((w) => withoutTrailingSlash(w.path) === withoutTrailingSlash(c.worktree))
+    ? null : { result: "gone", why: null };
+}
+
+/**
+ * The paths git lists as ignored under `dir` (`!! ` lines), for the cleanup to name before it
+ * removes a clean checkout that holds them (#1143), or null when git can't say.
+ */
+async function ignoredPaths(dir) {
+  const r = await runProgram("git", ["status", "--porcelain", "--ignored", "--untracked-files=normal"], { cwd: dir });
+  if (r.code !== 0) return null;
+  return r.stdout.split("\n").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3));
+}
+
 /**
  * One candidate, under its worktree's lock: checked for ownership, live terminals and work,
  * then rechecked after preservation proof. git worktree remove (no --force) also removes
@@ -6372,6 +6980,7 @@ async function reapOwnership(c, project = null) {
  */
 async function reapOne(c, asked = new Map(), project = null) {
   const path = c.worktree;
+  const forge = await forgeOn(c.project);
   const ownership = await reapOwnership(c, project);
   if (ownership) return { result: "kept", why: ownership };
   const ownerAtStart = await reapRepository(c.project);
@@ -6397,11 +7006,11 @@ async function reapOne(c, asked = new Map(), project = null) {
     }
     branch = (await git(["symbolic-ref", "--short", "-q", "HEAD"], path))?.trim() || null;
     if (unpushed > 0 && branch && branch === c.branch) {
-      prs = await pullRequestsOf(branch, main, { cleanup: true });
+      prs = await pullRequestsOf(branch, main, { cleanup: true, forge });
       if (c.project) asked.set(prBranchKey({ project: c.project, branch }), prs);
     }
   }
-  const why = workLeft({ changes, unpushed, prs, head, branch, expected: c.branch });
+  const why = workLeft({ changes, unpushed, prs, head, branch, expected: c.branch, forge: forge ?? "gh" });
   if (why) return { result: "kept", why };
   // Re-read the ledger and repository after proof: a newer owner, commit or branch
   // must not inherit the earlier snapshot's permission to remove this checkout.
@@ -6429,7 +7038,7 @@ async function reapOne(c, asked = new Map(), project = null) {
   const finalCount = (await git(["rev-list", "--count", "HEAD", "--not", "--remotes"], path))
     ?.trim();
   const finalProof = /^\d+$/.test(finalCount ?? "")
-    ? workLeft({ changes: 0, unpushed: Number(finalCount), prs, head, branch, expected: c.branch })
+    ? workLeft({ changes: 0, unpushed: Number(finalCount), prs, head, branch, expected: c.branch, forge: forge ?? "gh" })
     : "can't prove HEAD is pushed or merged";
   if (finalProof) return { result: "kept", why: finalProof };
   // Looked at once more just before the remove: a pane started in it without the worktree lock
@@ -6437,9 +7046,178 @@ async function reapOne(c, asked = new Map(), project = null) {
   // has gained changes since the status above.
   const last = await hcTerminals(false);
   if (!last || liveIn(last, path).length) return { result: "waiting" };
+  // #1143: `git worktree remove` deletes git-ignored files too (build output, local env files).
+  // Name them before the remove, so a cleanup that loses them is never silent; an unreadable
+  // list keeps the checkout, because the sweep cannot say what it would remove.
+  const ignored = await ignoredPaths(path);
+  if (ignored === null) return { result: "kept", why: "can't list the files git ignores" };
   const rm = await runProgram("git", ["worktree", "remove", path], { cwd: main, timeout: REMOVE_TIMEOUT });
   if (rm.code !== 0) return { result: "failed", why: `git worktree remove failed: ${firstLine(rm)}` };
-  return { result: "removed", why: null };
+  const ignoredNote = ignored.length ? `git-ignored files removed too: ${ignored.slice(0, 5).join(", ")}`
+    + `${ignored.length > 5 ? ` and ${ignored.length - 5} more` : ""}` : null;
+  return { result: "removed", why: ignoredNote };
+}
+
+/** The newest pull request in a forge's list, by creation time and number, or null. */
+function newestPr(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  return [...list].sort((a, b) => (Date.parse(a.createdAt ?? "") || 0) - (Date.parse(b.createdAt ?? "") || 0)
+    || (a.number ?? 0) - (b.number ?? 0)).at(-1);
+}
+
+/**
+ * #1278 cause 1: end the terminals of finished workers whose branch's newest pull request is
+ * merged or closed, and write their end row. A worker's turn is over (hc says not `working`)
+ * and hc still lists it live; it is its bot's worker (`worker.of`, no `bot` label), its launch
+ * key matches the start row, and the request closed at least REAP_SETTLE_MS ago, so a bot
+ * still handling the merge is never cut off. A worker mid-turn is left alone. `every` (reap)
+ * asks every worker; a worker call asks at most PR_ASK_MAX. Never throws into the sweep.
+ */
+async function endMergedWorkers({ terms, rows, every, start, budget, lines, out }) {
+  const ended = new Set();
+  let asked = 0;
+  const starts = rows.filter((r) => r?.event === "start" && r.kind === "worker" && r.branch
+    && typeof r.project === "string" && r.project && r.terminal && Number.isSafeInteger(r.created_ms))
+    .sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? "")));
+  for (const row of starts) {
+    if (Date.now() - start > budget) break;
+    if (!every && asked >= PR_ASK_MAX) break;
+    const key = launchKey(row);
+    if (!key || ended.has(key)) continue;
+    const listed = terms.find((t) => t?.address === row.terminal);
+    const listedState = typeof listed?.status === "string" ? listed.status : listed?.status?.state;
+    if (!listed || listed.state === "finished" || listedState === "working" || listedState === "blocked") continue;
+    let get = null;
+    try {
+      const r = await hc(["get", row.terminal, "--json"]);
+      if (r.code === 0) get = JSON.parse(r.stdout);
+    } catch { get = null; }
+    if (!get || get.created_ms !== row.created_ms || get.state !== "live") continue;
+    if (get.status?.state !== "idle" && get.status?.state !== "done") continue;
+    if (get.labels?.bot || !get.labels?.[WORKER_OF_LABEL]) continue;
+    const prs = await pullRequestsOf(row.branch, row.project, { cleanup: true });
+    if (!every) asked += 1;
+    const pr = newestPr(prs);
+    if (!pr || (pr.state !== "MERGED" && pr.state !== "CLOSED")) continue;
+    const closedAt = Date.parse(pr.state === "MERGED" ? pr.mergedAt : pr.closedAt);
+    if (!Number.isSafeInteger(closedAt) || Date.now() - closedAt < REAP_SETTLE_MS) continue;
+    let kill = null;
+    try { kill = await hcKill(row.terminal); } catch (e) {
+      lines.push(`couldn't end ${row.terminal}: ${e?.message ?? e}`);
+      continue;
+    }
+    if (kill.code !== 0) {
+      lines.push(`couldn't end ${row.terminal}: hc kill failed: ${firstLine(kill)}`);
+      continue;
+    }
+    ended.add(key);
+    const unlogged = appendEnd(endRow({ kind: "worker", terminal: row.terminal, core: row.core ?? await rowCore(),
+      createdMs: row.created_ms, reason: "finished", hcReason: get.reason, exitCode: get.exit_code, signal: get.signal }));
+    if (unlogged) lines.push(unlogged);
+    out.ended.push(row.terminal);
+    lines.push(`ended ${row.terminal}: its branch's pull request ${pr.state.toLowerCase()}`);
+  }
+}
+
+/** A project's default branch name: origin's HEAD, else dev, main or master, else the checkout's. */
+async function defaultBranchOf(project) {
+  const head = (await git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], project))?.trim();
+  if (head) return head.replace(/^origin\//, "");
+  for (const name of ["dev", "main", "master"]) {
+    if (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`], project) !== null) return name;
+  }
+  return (await git(["symbolic-ref", "--quiet", "--short", "HEAD"], project))?.trim() ?? null;
+}
+
+/** The ref a merged check uses for `name` in `project`: its local branch, else origin's, else HEAD. */
+async function defaultRef(project, name) {
+  for (const ref of [`refs/heads/${name}`, `refs/remotes/origin/${name}`]) {
+    if (await git(["rev-parse", "--verify", "--quiet", ref], project) !== null) return ref;
+  }
+  return "HEAD";
+}
+
+/** The projects a sweep looks at: the launching one, else every project the ledger or list names. */
+function knownProjects(ledger, project) {
+  if (project !== null) return [project];
+  const out = new Set();
+  for (const r of ledger) {
+    if (r?.event === "start" && typeof r.project === "string" && isDir(r.project)) out.add(r.project);
+  }
+  let remembered = [];
+  try { remembered = listedProjects(readText(`${appHome()}/${PROJECTS_FILE}`) ?? ""); } catch { /* the ledger's projects stand */ }
+  for (const key of remembered) if (isDir(key)) out.add(key);
+  return [...out];
+}
+
+/**
+ * #1278 cause 4: delete a local branch a worker made, merged into the project's default branch,
+ * with no worktree and no live worker. Only a branch a start row says this pack created; the
+ * merged check is `git merge-base --is-ancestor`, so an unmerged or diverged branch is kept. The
+ * ref is deleted with `update-ref -d <ref> <sha>`, which refuses a branch that moved since the
+ * check (never -D). A worker call takes at most BRANCH_MAX per project; reap takes every one.
+ */
+const BRANCH_MAX = 50;
+async function sweepBranches({ ledger, terms, project, every, lines, out }) {
+  const cap = every ? Infinity : BRANCH_MAX;
+  const liveBranches = new Set(ledger.filter((r) => r?.event === "start" && r.branch
+    && terms.some((t) => t?.address === r.terminal && t.state !== "finished")).map((r) => `${r.project}\n${r.branch}`));
+  for (const key of knownProjects(ledger, project)) {
+    const mine = ledger.filter((r) => r?.event === "start" && r.kind === "worker" && r.created === true
+      && r.project === key && r.branch);
+    if (!mine.length) continue;
+    const branches = [...new Set(mine.map((r) => r.branch))];
+    const defaultName = await defaultBranchOf(key);
+    if (!defaultName) continue;
+    const defRef = await defaultRef(key, defaultName);
+    const current = (await git(["symbolic-ref", "--quiet", "--short", "HEAD"], key))?.trim() ?? null;
+    const listed = await git(["worktree", "list", "--porcelain"], key);
+    const checkedOut = new Set(listed === null ? [] : parseWorktrees(listed).map((w) => w.branch).filter(Boolean));
+    let removed = 0;
+    for (const branch of branches.sort()) {
+      if (removed >= cap) break;
+      if (!branch || branch === defaultName || branch === current) continue;
+      if (checkedOut.has(branch) || liveBranches.has(`${key}\n${branch}`)) continue;
+      const ref = `refs/heads/${branch}`;
+      const sha = (await git(["rev-parse", "--verify", "--quiet", ref], key))?.trim();
+      if (!sha) continue;
+      if (await git(["merge-base", "--is-ancestor", ref, defRef], key) === null) continue;
+      // A worktree made while this sweep ran, or a checkout moved onto it, is never broken:
+      // both are read again just before the ref goes.
+      const nowListed = await git(["worktree", "list", "--porcelain"], key);
+      if (nowListed === null || parseWorktrees(nowListed).some((w) => w.branch === branch)) continue;
+      const nowCurrent = (await git(["symbolic-ref", "--quiet", "--short", "HEAD"], key))?.trim();
+      if (!nowCurrent || nowCurrent === branch) continue;
+      const del = await runProgram("git", ["update-ref", "-d", ref, sha], { cwd: key });
+      if (del.code !== 0) { lines.push(`couldn't remove branch ${branch}: ${firstLine(del)}`); continue; }
+      removed += 1;
+      out.branches.push(branch);
+      lines.push(`removed branch ${branch}: merged into ${defaultName}`);
+    }
+  }
+}
+
+/**
+ * #1278 cause 2: name every worktree of a known project that no worker start row created, so a
+ * sweep either removes a worktree or says why it kept it. These are never removed: a review
+ * worktree, a subagent's or a person's own is not proof the pack made it.
+ */
+async function listUnownedWorktrees({ ledger, project, candidates, lines, out }) {
+  const accounted = new Set(candidates.map((c) => nativeDir(c.worktree) ?? c.worktree));
+  for (const c of [...out.removed, ...out.gone]) accounted.add(nativeDir(c) ?? c);
+  for (const key of knownProjects(ledger, project)) {
+    const listed = await git(["worktree", "list", "--porcelain"], key);
+    if (listed === null) continue;
+    const main = nativeDir(key) ?? key;
+    for (const w of parseWorktrees(listed)) {
+      const real = nativeDir(w.path) ?? w.path;
+      if (real === main || accounted.has(real) || !isDir(real)) continue;
+      accounted.add(real);
+      const why = "not created by a worker (no start row); left alone";
+      out.unowned.push({ worktree: w.path, why });
+      lines.push(`kept ${w.path}: ${why}`);
+    }
+  }
 }
 
 /**
@@ -6452,15 +7230,23 @@ async function reapOne(c, asked = new Map(), project = null) {
  * hc failing skips the sweep. Each new outcome is a row in the cleanup file and a line.
  * `every` (reap): a line for every kept or failed one, even unchanged; without it (a worker
  * call), a kept one whose reason hasn't changed in REAP_QUIET_MS is skipped.
- * The same sweep, under the same lock and budget, records the worker branches' pull requests
- * in the workers ledger (#899, recordPullRequests), whether or not a worktree is left to remove.
- * Never throws: { removed, kept, failed, waiting, more, lines }.
+ * #1278 adds three passes to that sweep: a finished worker's terminal is ended once its
+ * branch's newest pull request merged or closed (endMergedWorkers), a local branch a worker
+ * made and merged is deleted with no worktree left (sweepBranches), and with `every` (reap)
+ * every worktree of a known project no worker row created is named and kept
+ * (listUnownedWorktrees). The same sweep, under the same lock and budget, records the worker
+ * branches' pull requests in the workers ledger (#899, recordPullRequests), whether or not a
+ * worktree is left to remove. A missing checkout its repository no longer lists is recorded
+ * gone (#1143), with no git write, and never looked at again. A removed one names the
+ * git-ignored files it took with it.
+ * Never throws: { removed, gone, kept, failed, ended, unowned, branches, waiting, more, lines }.
  */
 async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
   every = false, project = null } = {}) {
-  const out = { removed: [], kept: [], failed: [], waiting: 0, more: 0, lines: [] };
+  const out = { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [], waiting: 0, more: 0, lines: [] };
   try {
     const ledger = workerLedgerRows();
+    const workers = ledger.filter((r) => r?.event === "start" && r.kind === "worker" && r.branch);
     const owned = await ownedReapCandidates(ledger);
     const launching = project !== null ? await reapRepository(project) : null;
     // Completion observation remains global. Only deletion eligibility is scoped
@@ -6468,7 +7254,7 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
     const candidates = owned.candidates;
     const eligible = new Set(project === null ? candidates : candidates.filter((c) =>
       launching && c.project && owned.owners.get(c.project) === launching));
-    if (!candidates.length && !prBranches(ledger).some((w) => w.followed)) return out;
+    if (!candidates.length && !workers.length && !prBranches(ledger).some((w) => w.followed)) return out;
     const lockDir = dirname(ledgerPath(appHome()));
     mkdirSync(lockDir, { recursive: true });
     let token;
@@ -6476,9 +7262,11 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
     try { token = await takeLockAsync(lock, 0); } catch { return out; }
     const stop = keepFresh(lock, token);
     try {
-      const terms = candidates.length ? await hcTerminals(true) : [];
+      const terms = (candidates.length || workers.length) ? await hcTerminals(true) : [];
       if (!terms) { out.lines.push("worktree cleanup skipped: hc ls --all failed"); return out; }
       const start = Date.now();
+      // A finished worker's terminal, ended once its branch's pull request merged or closed (#1278).
+      await endMergedWorkers({ terms, rows: ledger, every, start, budget, lines: out.lines, out });
       // The finished workers' terminals hc answered for: their end rows, after the loop.
       const gets = new Map();
       // What gh answered for a candidate's branch: its pull requests' rows, after the loop.
@@ -6500,9 +7288,10 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
         if (!ready) {
           done = { result: "waiting" };
         } else if (!isDir(path)) {
-          // A missing checkout cannot prove its actual repository. Keep its
-          // registration; a repository-wide prune could remove unrelated records.
-          done = { result: "kept", why: "can't verify missing worktree repository ownership" };
+          // A missing checkout cannot prove its actual repository. Keep its registration; a
+          // repository-wide prune could remove unrelated records. A repository that no longer
+          // lists it at all has forgotten it: said gone, never kept forever (#1143).
+          done = await goneCheckout(c) ?? { result: "kept", why: "can't verify missing worktree repository ownership" };
         } else if (liveIn(terms, path).length) {
           done = { result: "waiting" };
         } else {
@@ -6514,7 +7303,11 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
         if (done.result === "waiting") { out.waiting += 1; continue; }
         const changed = c.last?.result !== done.result || c.last?.why !== (done.why ?? null);
         if (changed) { const unrecorded = appendReap(reapRow({ worktree: path, ...done })); if (unrecorded) out.lines.push(unrecorded); }
-        if (done.result === "removed") { out.removed.push(path); out.lines.push(`removed ${path}: its workers ended`); }
+        if (done.result === "removed") {
+          out.removed.push(path);
+          out.lines.push(`removed ${path}: its workers ended${done.why ? ` (${done.why})` : ""}`);
+        }
+        if (done.result === "gone") { out.gone.push(path); out.lines.push(`gone ${path}: its repository no longer lists it`); }
         if (done.result === "kept") out.kept.push({ worktree: path, why: done.why });
         if (done.result === "failed") out.failed.push({ worktree: path, why: done.why });
         if ((done.result === "kept" || done.result === "failed") && (changed || every)) {
@@ -6529,6 +7322,10 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
           if (unlogged) out.lines.push(unlogged);
         }
       }
+      // #1278 causes 2 and 4: every worktree of a known project is seen (an uncreated one is
+      // named, never removed), and a worker's merged branch with no worktree is deleted.
+      if (every) await listUnownedWorktrees({ ledger, project, candidates, lines: out.lines, out });
+      await sweepBranches({ ledger, terms, project, every, lines: out.lines, out });
       try { await recordPullRequests({ asked, start, budget, every, lines: out.lines }); } catch (e) {
         out.lines.push(`pull requests not recorded: ${e?.message ?? e}`);
       }
@@ -6544,7 +7341,8 @@ async function cmdReap(opts, rest) {
   if (rest.length) throw new CliError("reap takes no arguments.", 2);
   const r = await reapWorktrees({ max: Infinity, budget: Infinity, every: true });
   const { lines, ...out } = r;
-  if (opts.json) { report(lines.filter((l) => !l.startsWith("removed ") && !l.startsWith("kept ") && !l.startsWith("couldn't remove "))); return out; }
+  if (opts.json) { report(lines.filter((l) => !l.startsWith("removed ") && !l.startsWith("gone ")
+    && !l.startsWith("kept ") && !l.startsWith("ended ") && !l.startsWith("couldn't remove "))); return out; }
   return lines.length ? lines.join("\n") : "No finished worker's worktree to remove.";
 }
 
@@ -6606,6 +7404,9 @@ async function cmdWorker(opts, rest) {
   if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
   const task = rest.join(" ").trim();
   if (!task) throw new CliError('worker needs the task text: am worker "<task>" --branch <name>.', 2);
+  // #1278 cause 5: the worker is sent back with a clean worktree, so the sweep never has to
+  // keep its worktree for uncommitted changes.
+  const prompt = workerTaskText(task);
   if (optionLike(task)) throw new CliError("The task text can't start with a dash; the agent would read it as an option.", 2);
   if ((opts.branch === undefined) === (opts.worktree === undefined)) throw new CliError("Give --branch or --worktree (one of them).", 2);
   if (opts.base !== undefined && opts.branch === undefined) throw new CliError("--base goes with --branch.", 2);
@@ -6845,7 +7646,7 @@ async function cmdWorker(opts, rest) {
       else warnings.push(codexTrustWarning(`${bot.name}'s Codex worker`, trust.withheld));
     }
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
-      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task, template: plan.template,
+      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task: prompt, template: plan.template,
       templateArgv,
       login: claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
       path: runPath?.path ?? process.env.PATH, taskId, project: project.key, lead,
@@ -6876,7 +7677,7 @@ async function cmdWorker(opts, rest) {
   // An agent that takes no first prompt on its command line (kimi, #1032) started bare: its task
   // goes in as its first message, through the hc that started it, outside the worktree's lock.
   if (!plan.template && promptByMessage(plan.agent)) {
-    const why = await sendFirstTask(terminal, task, started.proxied ? hcReal : hc);
+    const why = await sendFirstTask(terminal, prompt, started.proxied ? hcReal : hc);
     if (why) warnings.push(why);
   }
   // Herdr shows a labelled worker at once, so the sidebar's tab setup (workerTab.js) never
@@ -6916,16 +7717,24 @@ const heldLines = (installed) => (installed.held ?? []).map((h) => `\n${heldModL
 
 /**
  * `update`: install the latest release, `--check` only reports, `--rollback` swaps the kept
- * pack back. `io` is injected by the tests (fetch, env, modsDir, binDir); the pack is the installed
- * one under $HERDR_APP_HOME/mods, never this checkout (update.mjs). The CLI link (~/.local/bin) and
- * the open spaces are looked at only for this computer's own pack: with `io.modsDir`, only `io.binDir`.
+ * pack back, `--retry-skipped` clears the rollback skip for the release it installs. `io` is
+ * injected by the tests (fetch, env, modsDir, binDir); the pack is the installed one under
+ * $HERDR_APP_HOME/mods, never this checkout (update.mjs). The CLI link (~/.local/bin) and the
+ * open spaces are looked at only for this computer's own pack: with `io.modsDir`, only `io.binDir`.
  */
 export async function cmdUpdate(opts, _rest = [], io = {}) {
-  if (opts.auto !== undefined) return autoSetting(opts, io);
+  if (opts.auto !== undefined) {
+    if (opts["retry-skipped"]) throw new CliError("Give --retry-skipped with am update, not --auto.", 2);
+    return autoSetting(opts, io);
+  }
   if (opts.check && opts.rollback) throw new CliError("Give --check or --rollback, not both.", 2);
+  if (opts["retry-skipped"] && (opts.check || opts.rollback)) {
+    throw new CliError("Give --retry-skipped only when installing an update, not with --check or --rollback.", 2);
+  }
   const host = io.modsDir ? { binDir: io.binDir ?? null, window: false }
     : { binDir: io.binDir ?? binDirOf(io.env ?? process.env), window: liveHome(`${appHome(io.env ?? process.env)}/mods`) };
-  const where = { ...(io.env ? { env: io.env } : {}), ...(io.fetch ? { fetch: io.fetch } : {}), ...(io.keys ? { keys: io.keys } : {}), ...(io.modsDir ? { modsDir: io.modsDir } : {}), ...host };
+  const where = { ...(io.env ? { env: io.env } : {}), ...(io.fetch ? { fetch: io.fetch } : {}), ...(io.keys ? { keys: io.keys } : {}), ...(io.modsDir ? { modsDir: io.modsDir } : {}), ...host,
+    ...(opts["retry-skipped"] ? { retrySkipped: true } : {}) };
   const failed = (what, e) => new CliError(`${what}: ${String(e?.message ?? e).split("\n")[0]}`);
   // The pack just swapped (or one an older CLI installed) may name its CLI otherwise
   // (bin/automagik-herdr, or only the .mjs before it): the ~/.local/bin link follows, so a
@@ -7777,7 +8586,7 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
   return PRINTED;
 }
 
-const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, rm: cmdRm, category: cmdCategory,
+const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
   proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive };
@@ -7787,13 +8596,17 @@ const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "
 export async function main(argv = process.argv.slice(2), io = {}) {
   let parsed;
   try {
-    parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
+    parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true, tokens: true });
   } catch (e) {
     process.stderr.write(`am: ${e.message}\n\n${USAGE}\n`);
     return 2;
   }
-  const { values: opts, positionals } = parsed;
+  const { values: opts, positionals, tokens } = parsed;
   const [command, ...rest] = positionals;
+  if (command !== "main") {
+    if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
+    io.repairCliLinks?.();
+  }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
   if (opts.version && !command) {
     let version = "0.0.0";
@@ -7802,13 +8615,16 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     return 0;
   }
   if (opts.help && command === "proxy") { process.stdout.write(`${PROXY_USAGE}\n`); return 0; }
-  if (opts.help || !command || command === "help") { process.stdout.write(`${USAGE}\n`); return command || opts.help ? 0 : 2; }
+  if ((opts.help && command !== "main") || !command || command === "help") {
+    process.stdout.write(`${USAGE}\n`); return command || opts.help ? 0 : 2;
+  }
   const run = COMMANDS[command];
   if (!run) { process.stderr.write(`am: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
   try {
+    if (command === "main") checkMainArgs(rest, tokens);
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"]))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
     if (opts.machine !== undefined && !ON_MACHINE.has(command)) {
-      throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
+      throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
     }
     exitAfter.code = 0;
     const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest);
@@ -7830,7 +8646,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     const message = e instanceof CliError ? e.message : botAction
       ? actionError(e, command === "start" ? "Start" : "Restart") : `${e?.stack ?? e}`;
     process.stderr.write(unprinted(`am: ${message}\n`));
-    if (opts.json && e instanceof CliError && e.detail) process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail }, null, 2)}\n`));
+    if (opts.json && e instanceof CliError && (e.detail || command === "main")) {
+      process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail }, null, 2)}\n`));
+    }
     return e instanceof CliError ? e.code : 1;
   }
 }
@@ -7839,7 +8657,8 @@ export async function main(argv = process.argv.slice(2), io = {}) {
 const invoked = (() => { try { return pathToFileURL(realpathSync(process.argv[1])).href; } catch { return null; } })();
 if (import.meta.url === invoked) {
   // An update made by an older CLI (0.3.4 and before) left the link on the .mjs, which needs node
-  // on PATH: the first start that has a runtime moves it to the wrapper. Silent, never fatal.
-  try { relinkCli(); } catch { /* the link stays; `automagik-herdr update` reports why */ }
-  process.exitCode = await main();
+  // on PATH. Repair those links on startup outside main, whose preview and refusals are read-only.
+  process.exitCode = await main(undefined, { repairCliLinks: () => {
+    try { relinkCli(); } catch { /* the link stays; `automagik-herdr update` reports why */ }
+  } });
 }

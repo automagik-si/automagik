@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { applyBotEdit, checkBots, parseBots, swapProblem } from "../mods/am-sidebar/model.js";
-import { AGENTS, AGY_FIXED_DENY, AGY_SHELL_READ, agySettingsDir, agySettingsFile, effortArgs, promptArgs } from "../mods/am-sidebar/models.js";
+import { AGENTS, AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, effortArgs, promptArgs } from "../mods/am-sidebar/models.js";
 import { ENV, GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableRunner, baseCandidates, hcProxyEnabled, branchNamesTask, branchSlug, parseWorktrees, readLedger, reapCandidates, runsTemplate, workLeft, sessionChange, startRow, swapArm, swapByte, templateAgent,
   KILL_GUARD_DIR, workerArgs, workerBranch, workerPlan, workerRole, workerTaskId, writesWorktree,
   PR_ASK_MAX_MS, PR_ASK_MIN_MS, PR_QUIET_EVERY_MS, PR_QUIET_FIRST_MS, PR_QUIET_WATCH_MS, PR_STATES, PR_WATCH_MS, endRow, finishedEnds, prAskDue, prBranchKey,
@@ -67,6 +67,10 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   exe(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(root, "gh.log")}"\n`
     + `if [ -f "${join(root, "gh-hook.sh")}" ]; then sh "${join(root, "gh-hook.sh")}"; fi\n`
     + `if [ -f "${join(root, "gh.json")}" ]; then cat "${join(root, "gh.json")}"; exit 0; fi\necho "fake gh: no answer" >&2\nexit 1\n`);
+  // The same for glab (#1278): a GitLab-hosted project's merge requests are asked there, never
+  // of gh. glab.json is its answer; glab.log what it was asked.
+  exe(join(bin, "glab"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(root, "glab.log")}"\n`
+    + `if [ -f "${join(root, "glab.json")}" ]; then cat "${join(root, "glab.json")}"; exit 0; fi\necho "fake glab: no answer" >&2\nexit 1\n`);
   const home = join(root, "home");
   mkdirSync(join(home, ".claude"), { recursive: true });
   mkdirSync(join(home, ".config/herdr-app"), { recursive: true });
@@ -166,11 +170,11 @@ const TEMPLATES = [
   { name: "mystery", command: "./run-something.sh" },
 ];
 /** What `hc run` runs after `--`, as raw words. */
-const runArgv = (args) => args.slice(args.indexOf("--") + 1);
+const runArgv = (args) => withoutDone(args.slice(args.indexOf("--") + 1));
 /** A template run: no `--`; the template and the task follow the last option (`--parent P`). */
 const templateArgv = (args) => {
   assert.equal(args.includes("--"), false, `hc's template form has no --: ${JSON.stringify(args)}`);
-  return args.slice(args.indexOf("--parent") + 2);
+  return withoutDone(args.slice(args.indexOf("--parent") + 2));
 };
 /**
  * The agent's argv: after `--`, past the `env PATH=…` every agent worker starts with, and a Claude
@@ -187,6 +191,16 @@ const freshClaude = (words) => {
   assert.equal(words.lastIndexOf("--session-id"), i, "one --session-id");
   return [...words.slice(0, i), ...words.slice(i + 2)];
 };
+// #1558: a Claude launch's person-feature settings are pinned by person-features.test.mjs; the
+// worker tests compare the rest of the launch.
+const withoutPerson = (words) => {
+  const i = words.indexOf("--settings");
+  return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
+};
+const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
+  + "clean (`git status --porcelain` prints nothing).";
+const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${DONE_LINE}`)
+  ? w.slice(0, -(DONE_LINE.length + 2)) : w);
 const after = (args) => {
   const argv = runArgv(args);
   assert.equal(argv[0], "/usr/bin/env", `an agent worker runs under /usr/bin/env PATH=…: ${JSON.stringify(argv)}`);
@@ -195,7 +209,7 @@ const after = (args) => {
   assert.match(argv[at], /^PATH=/);
   const rest = argv.slice(at + 1);
   assert.equal(at === 3, rest[0] === "claude", `only a Claude worker gets the login words: ${JSON.stringify(argv)}`);
-  return rest;
+  return withoutPerson(rest);
 };
 const labelsOf = (args) => args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
 
@@ -685,11 +699,11 @@ test("worker #1032: a Kimi worker starts bare and gets its task as its first mes
   assert.deepEqual(out.argv.slice(-1), ["kimi"]);
   // The task goes in once, as a message to the new pane; hc wait comes first (a send to a
   // booting agent can be dropped), both after hc run.
-  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: TASK }]);
+  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: `${TASK}\n\n${DONE_LINE}` }]);
   const order = s.calls().filter((c) => ["run", "wait", "send"].includes(c[0])).map((c) => c[0]);
   assert.deepEqual(order, ["run", "wait", "send"]);
   assert.deepEqual(s.calls().find((c) => c[0] === "wait").slice(0, 2), ["wait", out.terminal]);
-  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, TASK]);
+  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, `${TASK}\n\n${DONE_LINE}`]);
   assert.deepEqual(out.warnings, [], r.err);
 
   // A send hc refuses (the pane waits for a sign-in or a trust answer, or has ended): the worker
@@ -1193,7 +1207,7 @@ test("effortArgs: claude/antigravity --effort, codex -c model_reasoning_effort, 
   assert.equal(unknown.error.includes("\n"), false, "one clear line");
   // Another agent's worker defaults never add mode words: its argv stays as it was.
   const claude = workerPlan({ id: ID.dev, name: "A", agent: "claude", worker: { agyMode: "plan" } });
-  assert.deepEqual([claude.agyMode, claude.argv], [null, ["claude", "--permission-mode", "auto"]]);
+  assert.deepEqual([claude.agyMode, claude.argv], [null, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto"]]);
   const legacy = workerPlan({ name: "L", agent: "claude" }, { agent: "gemini", effort: "low" });
   assert.equal(legacy.agent, "antigravity", "a typed gemini runs antigravity");
   assert.deepEqual(legacy.argv, ["agy", "--dangerously-skip-permissions", "--mode", "auto", "--effort", "low"]);
@@ -2008,18 +2022,93 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
   git(s.project, "worktree", "add", "-q", "-b", "feat/wait", wt);
   const lockDir = join(s.app, "automagik-herdr");
   mkdirSync(lockDir, { recursive: true });
-  // Held by this test's process (fresh: under the 10 s stale limit), let go after 4.5 s.
+  // Startup is not contention: keep our holder fresh until the complete wait notice arrives.
   const lock = worktreeLock(lockDir, wt);
-  writeFileSync(lock, `${process.pid} held-by-the-test`);
-  const call = s.cliAsync(["worker", "go", "--worktree", wt]);
-  const free = setTimeout(() => rmSync(lock, { force: true }), 4500);
-  t.after(() => clearTimeout(free));
-  const r = await call;
-  assert.equal(r.code, 0, r.err);
-  assert.match(r.err, new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
-    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m"));
-  assert.equal(r.err.split("waiting for").length, 2, "said once");
-  assert.equal(s.runs().length, 1);
+  const holder = `${process.pid} held-by-the-test`;
+  writeFileSync(lock, holder);
+  const ownsLock = () => {
+    try { return readFileSync(lock, "utf8") === holder; }
+    catch (e) { if (e.code === "ENOENT") return false; throw e; }
+  };
+  const notice = new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
+    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m");
+  let child, fresh, watchdog;
+  let closed = false;
+  let released = false;
+  let terminal = false;
+  let out = "", err = "";
+  let close;
+  try {
+    child = s.spawnCli(["worker", "go", "--worktree", wt]);
+    let finish;
+    const result = new Promise((resolve) => { finish = resolve; });
+    close = new Promise((resolve) => child.once("close", (code, signal) => {
+      terminal = true;
+      closed = true;
+      resolve();
+      finish({ code, signal });
+    }));
+    const fail = (why) => { terminal = true; finish({ failure: why }); };
+    child.on("error", (e) => fail(`scratch CLI error: ${e.message}`));
+    child.stdout.on("error", (e) => fail(`stdout error: ${e.message}`));
+    child.stderr.on("error", (e) => fail(`stderr error: ${e.message}`));
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => {
+      err += d;
+      if (terminal || released || !notice.test(err)) return;
+      released = true; // Accumulated stderr keeps matching; never remove a successor's lock.
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      try {
+        assert.ok(ownsLock(), "fixture holder lost before its wait notice");
+        rmSync(lock);
+      } catch (e) { fail(e.message); return; }
+      watchdog = setTimeout(() => fail("scratch CLI did not close within 30 s after its notice"), 30_000);
+    });
+    fresh = setInterval(() => {
+      try {
+        assert.ok(ownsLock(), "fixture holder lost while waiting for its notice");
+        const now = new Date();
+        utimesSync(lock, now, now);
+      } catch (e) { clearInterval(fresh); fail(e.message); }
+    }, 200);
+    watchdog = setTimeout(() => fail("no complete wait notice within 30 s"), 30_000);
+    const r = await result;
+    const diagnostic = `${r.failure || "scratch CLI closed"}\nstdout: ${out}\nstderr: ${err}`;
+    assert.equal(r.failure, undefined, diagnostic);
+    assert.equal(r.signal, null, diagnostic);
+    assert.equal(r.code, 0, diagnostic);
+    assert.match(err, notice);
+    assert.equal(err.split("waiting for").length, 2, "said once");
+    assert.equal(s.runs().length, 1);
+  } finally {
+    terminal = true; // Keep draining late output without releasing or rearming during teardown.
+    clearInterval(fresh);
+    clearTimeout(watchdog);
+    try {
+      if (child && !closed) {
+        // Only this scratch child; wait for pipe closure before scene's after-hook removes it.
+        const waitClose = async (ms) => {
+          let timer;
+          try { await Promise.race([close, new Promise((resolve) => { timer = setTimeout(resolve, ms); })]); }
+          finally { clearTimeout(timer); }
+        };
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+        await waitClose(2000);
+        if (!closed) {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          await waitClose(3000);
+        }
+        assert.ok(closed, `scratch CLI did not close after termination\nstdout: ${out}\nstderr: ${err}`);
+      }
+    } finally {
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      if (ownsLock()) rmSync(lock);
+    }
+  }
 });
 
 test("worker #536: two calls on one new branch at once, a writer and a reviewer: one makes the worktree, the other finds it", async (t) => {
@@ -2184,7 +2273,8 @@ function watchReapGit(s, { count = null } = {}) {
   writeFileSync(log, "");
   exe(join(s.root, "bin/git"), "#!/bin/sh\n"
     + 'if [ "$1" = worktree ] && { [ "$2" = remove ] || [ "$2" = prune ]; }; then\n'
-    + `  printf '%s\\t%s\\n' "$PWD" "$2" >> ${quote(log)}\nfi\n`
+    // The full argv too (#1143): a test can say the remove it saw carried no --force.
+    + `  printf '%s\\t%s\\t%s\\n' "$PWD" "$2" "$*" >> ${quote(log)}\nfi\n`
     + (count === null ? "" : 'if [ "$1" = rev-list ] && [ "$2" = --count ]; then\n'
       + `  printf '%s' ${quote(count)}\n  exit 0\nfi\n`)
     + `exec ${quote(realGit)} "$@"\n`);
@@ -2209,6 +2299,107 @@ function seedReapTree(s, { project = s.project, owner = project, name = "candida
   appendFileSync(file, `${JSON.stringify(row)}\n`, { mode: LEDGER_MODE });
   return { worktree, branch, row, file };
 }
+
+// ---- #1278: a finished worker's terminal, worktree and branch go without the owner ----
+
+test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sweep, with an end row", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "merge it", "--branch", "fix/merged", "--json"]).json();
+  // Its turn is over (hc shows idle), but the terminal is still live, as a finished worker's is.
+  const state = s.hcState();
+  Object.assign(state.terminals.find((x) => x.address === w.terminal).status, { state: "idle" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const head = git(w.worktree, "rev-parse", "HEAD").trim();
+  writeFileSync(join(s.root, "gh.json"), JSON.stringify([{
+    number: 9, state: "MERGED", headRefOid: head,
+    createdAt: new Date(Date.now() - 17 * 60_000).toISOString(),
+    mergedAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+  }]));
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().ended, [w.terminal], "the finished worker's terminal is ended");
+  assert.equal(s.hcState().terminals.find((x) => x.address === w.terminal).state, "finished");
+  assert.ok(s.calls().some((c) => c[0] === "kill" && c[1] === w.terminal), "hc kill was called");
+  const end = s.ledger().find((x) => x.event === "end" && x.terminal === w.terminal);
+  assert.ok(end, "the end event is written");
+  assert.equal(end.reason, "finished");
+});
+
+test("worker #1278 cause 2: reap lists a worktree no worker row created, and never removes it", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  // A project the ledger knows (a worker started there), plus a worktree someone else made.
+  assert.equal(s.cli(["worker", "one", "--branch", "fix/one"]).code, 0);
+  const hand = join(s.project, ".claude/worktrees/hand-made");
+  git(s.project, "worktree", "add", "-q", "-b", "hand/made", hand, "origin/main");
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().unowned.map((x) => x.worktree), [hand], "every worktree is seen");
+  assert.match(r.json().unowned[0].why, /not created by a worker/);
+  assert.equal(existsSync(hand), true, "never touched: no worker made it");
+});
+
+test("worker #1278 cause 3: a GitLab remote asks glab, and its merged MR proves the worktree safe", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "gitlab work", "--branch", "gl-231-fix", "--task", "gl-231", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  const head = git(w.worktree, "rev-parse", "HEAD").trim();
+  git(s.project, "remote", "set-url", "origin", "https://gitlab.com/group/proj.git");
+  s.finish(w.terminal);
+  writeFileSync(join(s.root, "glab.json"), JSON.stringify([{
+    iid: 7, state: "merged", sha: head, target_branch: "dev",
+    created_at: new Date(Date.now() - 17 * 60_000).toISOString(),
+    merged_at: new Date(Date.now() - 16 * 60_000).toISOString(),
+  }]));
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree], "the merged MR proves its HEAD preserved");
+  assert.equal(existsSync(w.worktree), false);
+  assert.match(readFileSync(join(s.root, "glab.log"), "utf8"), /--source-branch gl-231-fix/);
+  const ghLog = existsSync(join(s.root, "gh.log")) ? readFileSync(join(s.root, "gh.log"), "utf8") : "";
+  assert.doesNotMatch(ghLog, /gl-231-fix/, "a GitLab remote is never asked of gh");
+});
+
+test("worker #1278 cause 4: a worker's merged branch with no worktree is deleted after a sweep", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "done", "--branch", "fix/done", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  git(w.worktree, "push", "-q", "origin", "fix/done");
+  git(s.project, "merge", "-q", "--no-ff", "fix/done", "-m", "merge fix/done");
+  git(s.project, "push", "-q", "origin", "main");
+  s.finish(w.terminal);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(existsSync(w.worktree), false, "the worktree goes first");
+  assert.deepEqual(r.json().branches, ["fix/done"], "its local branch goes with it");
+  assert.equal(git(s.project, "branch", "--list", "fix/done").trim(), "");
+});
+
+test("worker #1278 cause 4: a hand-made merged branch and an unmerged worker branch are kept", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  git(s.project, "branch", "hand/made");
+  const w = s.cli(["worker", "unmerged", "--branch", "fix/unmerged", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  s.finish(w.terminal);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().branches, [], "neither is a merged branch a worker made");
+  assert.match(git(s.project, "branch", "--list", "hand/made"), /hand\/made/);
+  assert.match(git(s.project, "branch", "--list", "fix/unmerged"), /fix\/unmerged/);
+});
+
+test("worker #1278 cause 5: a worker's task prompt sends it back with a clean worktree", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "do it", "--branch", "fix/clean", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = s.runs().at(-1);
+  assert.match(words.at(-1), /Before you report done: commit or discard/);
+  assert.match(words.at(-1), /git status --porcelain/);
+});
 
 test("worker #1135: launch never removes or prunes another repository's ended worktree", (t) => {
   const s = scene(t);
@@ -2299,6 +2490,59 @@ for (const ownership of ["missing", "mismatched", "conflicting", "gone"]) {
   });
 }
 
+test("worker #1143: a missing checkout its repository no longer lists is gone, never kept forever", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = seedReapTree(s);
+  rmSync(w.worktree, { recursive: true });
+  // Somebody else pruned the registration (a person's git worktree prune): the cleanup only reads.
+  git(s.project, "worktree", "prune");
+  assert.equal(worktreesOf(s).includes(w.worktree), false);
+  const calls = watchReapGit(s);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().gone, [w.worktree]);
+  assert.deepEqual(r.json().kept, []);
+  assert.deepEqual(calls(), [], "no remove and no prune: the repository already forgot it");
+  assert.deepEqual(reapFile(s).map((x) => [x.worktree, x.result, x.why]), [[w.worktree, "gone", null]]);
+  assert.equal(s.cli(["reap"], { from: null }).out.trim(), "No finished worker's worktree to remove.",
+    "a gone checkout is not looked at again");
+});
+
+test("worker #1143: a clean checkout's git-ignored files are named, then removed with it", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  writeFileSync(join(s.project, ".gitignore"), "*.local\nbuild/\n");
+  git(s.project, "add", ".gitignore");
+  git(s.project, "commit", "-q", "-m", "ignore local files");
+  git(s.project, "push", "-q", "origin", "main");
+  const w = seedReapTree(s);
+  writeFileSync(join(w.worktree, "secrets.local"), "not committed\n");
+  mkdirSync(join(w.worktree, "build"));
+  writeFileSync(join(w.worktree, "build/out.log"), "ignored too\n");
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree]);
+  const row = reapFile(s).find((x) => x.worktree === w.worktree);
+  assert.equal(row.result, "removed");
+  assert.match(row.why, /git-ignored files removed too/);
+  assert.match(row.why, /secrets\.local/);
+  assert.match(row.why, /build\//);
+  assert.equal(existsSync(join(w.worktree, "secrets.local")), false);
+});
+
+test("worker #567: git worktree remove is called without --force", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = seedReapTree(s);
+  const calls = watchReapGit(s);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree]);
+  const remove = calls().find((line) => line.split("\t")[1] === "remove");
+  assert.equal(remove, `${s.project}\tremove\tworktree remove ${w.worktree}`, "no --force: git itself refuses a tree that changed");
+});
+
 test("worker #1135: canonical owner aliases allow pushed same-project work", (t) => {
   const s = scene(t);
   withOrigin(s);
@@ -2311,7 +2555,7 @@ test("worker #1135: canonical owner aliases allow pushed same-project work", (t)
   const r = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
   assert.equal(r.code, 0, r.err);
   assert.equal(existsSync(w.worktree), false, r.out);
-  assert.ok(calls().some((line) => line.endsWith("\tremove")));
+  assert.ok(calls().some((line) => line.split("\t")[1] === "remove"));
 });
 
 for (const ownership of ["foreign", "unknown"]) {
@@ -2466,7 +2710,8 @@ test("worker #567: a killed worker's created worktree is removed by reap 15 min 
   const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], kept: [], failed: [], waiting: 1, more: 0 }, "a live worker's worktree waits");
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [],
+    waiting: 1, more: 0 }, "a live worker's worktree waits");
   assert.equal(existsSync(w.worktree), true);
   fakeHc(s, "kill", w.terminal);
   // Within 15 min of its end (restart --tree runs its workers again there, without the lock): waits.
@@ -2477,7 +2722,7 @@ test("worker #567: a killed worker's created worktree is removed by reap 15 min 
   s.finish(w.terminal, 15 * 60_000 + 1000);
   const r = s.cli(["reap"], { from: null });
   assert.equal(r.code, 0, r.err);
-  assert.equal(r.out.trim(), `removed ${w.worktree}: its workers ended`);
+  assert.equal(r.out.trim(), `removed ${w.worktree}: its workers ended\nremoved branch fix/one: merged into main`);
   assert.equal(existsSync(w.worktree), false);
 });
 
@@ -2545,7 +2790,7 @@ test("worker #567: a worktree only given to a worker (--worktree, a branch's exi
   assert.equal(b.json().created, false, "--branch found the existing worktree");
   s.finish(b.json().terminal);
   const r = s.cli(["reap"], { from: null });
-  assert.equal(r.out.trim(), "No finished worker's worktree to remove.", r.err);
+  assert.equal(r.out.trim(), `kept ${pre}: not created by a worker (no start row); left alone`, r.err);
   assert.equal(existsSync(pre), true, "clean, pushed and ended, but not made by a worker call");
   assert.deepEqual(reapFile(s), []);
 });
@@ -2668,7 +2913,8 @@ writeFileSync(p, JSON.stringify(st));
   writeFileSync(join(s.root, "gh-hook.sh"), `"${process.execPath}" "${join(s.root, "gh-hook.mjs")}"\n`);
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], kept: [], failed: [], waiting: 1, more: 0 });
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [],
+    waiting: 1, more: 0 });
   assert.equal(existsSync(w.worktree), true);
 });
 
@@ -2679,7 +2925,8 @@ test("worker #567 F6/F7: a worktree on another branch, or a detached HEAD with c
   const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
   s.finish(w.terminal);
   git(w.worktree, "checkout", "-q", "-b", "other");
-  assert.equal(s.cli(["reap"], { from: null }).out.trim(), `kept ${w.worktree}: on other, not the worker's branch fix/one`);
+  assert.equal(s.cli(["reap"], { from: null }).out.trim(),
+    `kept ${w.worktree}: on other, not the worker's branch fix/one\nremoved branch fix/one: merged into main`);
   git(w.worktree, "checkout", "-q", "--detach");
   git(w.worktree, "commit", "-q", "--allow-empty", "-m", "on no branch");
   assert.equal(s.cli(["reap"], { from: null }).out.trim(), `kept ${w.worktree}: HEAD is detached with 1 commit on no remote`, "whatever gh says");
@@ -3234,7 +3481,7 @@ test("proxied worker CLI #1032: an approved Kimi worker starts bare through the 
     const argv = fake.calls("terminal.run")[0].params.argv;
     assert.equal(argv.at(-1), "kimi", `the proxy approved an argv with no task word: ${JSON.stringify(argv)}`);
     assert.equal(argv.includes(TASK), false);
-    assert.deepEqual(s.hcState().sent, [{ to: "t200", text: TASK }], r.err);
+    assert.deepEqual(s.hcState().sent, [{ to: "t200", text: `${TASK}\n\n${DONE_LINE}` }], r.err);
     assert.deepEqual(s.calls().filter((c) => ["wait", "send"].includes(c[0])).map((c) => c.slice(0, 2)), [["wait", "t200"], ["send", "t200"]]);
     assert.deepEqual(out.warnings, [], r.err);
   } finally {
@@ -3262,14 +3509,17 @@ test("#858: proxied worker CLI rows pass and exit cleanly when TMPDIR is over 80
   }
 });
 
-test("unproxied worker CLI keeps the guard refusal with switch off and forged env markers", async (t) => {
+test("unproxied worker CLI stays on the guard path with switch off and forged env markers", async (t) => {
   const s = scene(t);
   const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/plain", "--json"],
     { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: "",
       AM_HC_PROXY: "1", AM_HC_PROXY_SOCKET: join(s.root, "missing.sock"), DSH_SANDBOX_MASK: "1" } });
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /hc guard: refused run:/);
-  assert.equal(s.runs().length, 0, "no unguarded spawn with the switch off");
+  assert.equal(r.code, 0, r.err);
+  // #1011: the full guard accepts the pack's own worker shape for every agent it launches, so
+  // the run reaches hc once through the pane's guarded PATH; no forged switch chose the proxy.
+  const runs = s.runs();
+  assert.equal(runs.length, 1, "one run, through the pane's guard");
+  assert.ok(runs[0].some((w) => w.startsWith("PATH=") && w.includes(GUARD_DIR)), runs[0].join(" "));
   assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
     "an unproxied pane retains server.status for core id");
 });
@@ -3318,9 +3568,9 @@ test("worker transport rejects a mismatched terminal for core id and routing", a
     assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
       "a failed terminal check must ignore the reply's core id");
     assert.equal(srv.probes(), 1);
-    assert.notEqual(r.code, 0);
-    assert.match(r.err, /hc guard: refused run:/);
-    assert.equal(s.runs().length, 0);
+    // The rejected reply means an ordinary unproxied run, which #1011's guard now allows.
+    assert.equal(r.code, 0, r.err);
+    assert.equal(s.runs().length, 1);
   } finally {
     await srv.closeServer();
   }
@@ -3361,7 +3611,7 @@ test("worker: a new Claude worker's --session-id is its label and its start row'
   assert.ok(labelsOf(run).includes(`agent.session=${sid}`));
   const row = s.ledger().find((x) => x.event === "start" && x.terminal === r.json().terminal);
   assert.equal(row.session, sid);
-  assert.deepEqual(r.json().argv, ["claude", "--permission-mode", "auto", "--session-id", "***"]);
+  assert.deepEqual(r.json().argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto", "--session-id", "***"]);
   assert.equal(`${r.out}${r.err}`.includes(sid), false, "never printed");
   // A codex worker: no session id, none in its row.
   const text = s.cli(["worker", "review it", "--branch", "feat/other", "--agent", "codex"]);

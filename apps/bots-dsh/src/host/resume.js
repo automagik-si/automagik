@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT } from './constants.js'
+import { AGENT_INTERRUPTED, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT } from './constants.js'
 import { answerSender, cutOffText, failureLine, turnFailure } from './turns.js'
 import { textOf } from './text.js'
 
@@ -33,8 +33,11 @@ const CUT_SUMMARY = 'A restart cut this task off and it was not picked up again.
 
 // How DSH ends a turn a restart cut off: `interrupted` when it repairs the log of a process
 // that died, `aborted`/`disposed` when it stops the turn as it shuts down. Neither means the
-// work is done.
-export const cutByRestart = reason => reason?.kind === 'interrupted' || (reason?.kind === 'aborted' && reason.reason?.kind === 'disposed')
+// work is done. An ACP agent whose process took the host's SIGTERM before DSH stopped the turn
+// reports `AGENT_INTERRUPTED` instead (acp-dsh): it was cut the same way.
+export const cutByRestart = reason => reason?.kind === 'interrupted'
+  || (reason?.kind === 'aborted' && reason.reason?.kind === 'disposed')
+  || (reason?.kind === 'error' && reason.error?.code === AGENT_INTERRUPTED)
 
 export const resumeText = record => [
   'DeepSeek Harness restarted while you were working on this, so your last turn stopped before it finished.',
