@@ -73,7 +73,7 @@ import {
 } from "./migrateHome.mjs";
 import { change, removePath } from "./layoutSafe.mjs";
 import { foldAttach, readAttach } from "./attach.js";
-import { AM_LINK, CLI_LINK, botPaneFolders, hooksNotice, openSpaces, relink, syncHooks, tightenLedgers } from "./migrateHooks.mjs";
+import { AM_LINK, CLI_LINK, botPaneFolders, hooksNotice, hooksNoticeSuppressed, openSpaces, relink, syncHooks, tightenLedgers } from "./migrateHooks.mjs";
 
 export { CHECK_EVERY_MS, FIRST_CHECK_MS, LANE_RELEASE, NO_UPDATE_ENV, PACK_MODS, PACK_NAME, POINTER_SIG_URL, POINTER_URL, RETRY_MS, compareVersions,
   noticeText, packOfPointer, parseSums, pickUpdate, sumsName, tarballName, updatesOff } from "./release.js";
@@ -1866,7 +1866,13 @@ async function main(argv) {
   if (command === "pack-out") return packOut({ modsDir, to: opts.to, layout: opts.layout ?? null, move: opts.move ?? [] });
   const log = (line) => process.stderr.write(`${line}\n`);
   // The hooks notice, last and tagged: install.sh prints the `notice: ` lines at the end of its run.
-  const notice = (hooks) => { for (const line of hooksNotice(hooks)) log(`notice: ${line}`); };
+  // A suppressed notice is the normal case and says nothing; AUTOMAGIK_HERDR_DIAG=1 (the tests') asks
+  // for its one diagnostic line (#1250): direction, crossed and the rewritten-file count.
+  const notice = (hooks) => {
+    for (const line of hooksNotice(hooks)) log(`notice: ${line}`);
+    const why = process.env.AUTOMAGIK_HERDR_DIAG === "1" ? hooksNoticeSuppressed(hooks) : null;
+    if (why) log(why);
+  };
   // The CLI link and the open spaces belong to this computer's own app home; install.sh links the CLI itself.
   const host = { binDir: binDirOf(), window: liveHome(modsDir) };
   if (command === "check" || (command === "update" && opts.check)) return checkForUpdate({ modsDir });
