@@ -14,11 +14,16 @@ export const admitScopedRead = (exec, folder, definition) => admissions.set(exec
 
 const refuse = reason => new HarnessError(reason, READ_SCOPE_CODE)
 
-export function checkReadDispatch(exec, definition) {
+export function checkReadDispatch(exec, resolveDefinition) {
   const admission = admissions.get(exec.token)
-  if (admission !== undefined && (admission.definition !== definition || scopedProviderOf(definition) === undefined)) {
-    throw refuse(PROVIDER_REFUSAL)
+  if (admission === undefined) return
+  try {
+    const definition = resolveDefinition()
+    if (admission.definition === definition && scopedProviderOf(definition) !== undefined) return
+  } catch {
+    // A failed lookup or provider check leaves the admission unverifiable.
   }
+  throw refuse(PROVIDER_REFUSAL)
 }
 
 // DSH reads after awaiting the working directory, and search awaits its binary.

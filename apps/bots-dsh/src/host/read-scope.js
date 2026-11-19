@@ -222,7 +222,9 @@ export function install(rt) {
     }
   })
   ctx.on('tools/execute', (exec, next) => {
-    if (Object.hasOwn(READ_PATH, exec.name)) checkReadDispatch(exec, ctx.tools.executable(exec.name, exec.agent, exec.toolSet))
+    if (Object.hasOwn(READ_PATH, exec.name)) {
+      checkReadDispatch(exec, () => ctx.tools.executable(exec.name, exec.agent, exec.toolSet))
+    }
     return next()
   })
   ctx.on('tools/result', (exec, result) => {
@@ -237,7 +239,7 @@ export function install(rt) {
     if (!validId(sessionId)) throw refused(BINDING_REFUSAL)
     const binding = await resolveBinding(sessionId)
     return { editable: binding.editable, folder: binding.editable ? boundFolder(binding) : null }
-  }, { read: true }))
+  }, { read: true }), 'ds-bot: session-read-scope endpoint')
   ctx.effect(() => rt.hooks.endpoint('set-session-read-scope', async ({ sessionId, folder }) => {
     if (!validId(sessionId) || !(folder === null || (typeof folder === 'string' && folder.length <= 4096))) {
       throw refused('Choose an absolute folder for these four file tools.')
@@ -251,7 +253,7 @@ export function install(rt) {
     }
     await publish(binding.rootId, { folder: real })
     return { editable: true, folder: real }
-  }))
+  }), 'ds-bot: set-session-read-scope endpoint')
 
   Object.assign(rt, { resolveReadScope, reserveReadScope, assertNoConfiguredReadScope, bindScheduledReadScope, markScheduledReadCandidates })
 }
