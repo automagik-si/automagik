@@ -8,6 +8,14 @@ What changed for someone using the plugin. Dates are release dates.
   Only the same dialog seen in two screen inspections can fail a silent run
   early; the pane stays open for an answer. A run that starts late and finishes
   carries a note in history and the panel (#1416).
+- `target:` hands a prompt to a bot (`bot:<id>`) or to a worker of one
+  (`worker:<id>`) instead of opening a fresh session: the bot's own terminal is
+  used, a stopped bot is started with `am start`, and a worker is started under
+  it with `am worker` and ended through `am worker kill` when the run ends.
+  `target_when_busy: queue`
+  (default) or `skip` answers a busy bot. The bot is named by its id from the
+  project's `.herdr/bots.json`, never by an address. `ls --json` names the
+  target kinds a build runs, so an older panel offers none (ADR 0014).
 - `command:` runs a plain program on a schedule: the scheduler starts it
   itself, with no pane, no agent and no model, as the user it runs as. Exit 0
   is `done`; any other exit, a signal or the timeout is `failed`, with the exit
