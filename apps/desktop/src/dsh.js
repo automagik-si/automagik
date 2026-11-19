@@ -14,11 +14,13 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { cp, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { delimiter, join, resolve, win32 } from 'node:path'
 import { DEFAULTS as PRIVACY_DEFAULTS, privacyEnv } from './privacy.js'
 import { CLOSE_INHERITED } from './child-paths.js'
+import { mergePatch, replaceProfilePatch } from './profile-patch.mjs'
 
 export const PROFILE = 'omni'
 const READY_TIMEOUT_MS = 120_000
@@ -102,47 +104,9 @@ const sameTool = (file, text, windows) => {
   }
 }
 
-// The top-level entries of a cordis patch file (a YAML list): each starts with "- " at the
-// first column, runs over its indented lines, and takes the comment lines right above it.
-function patchEntries(text) {
-  const entries = []
-  let comments = []
-  let current = null
-  for (const line of String(text).split('\n')) {
-    if (line.startsWith('- ')) {
-      current = { lines: [...comments, line], ids: [] }
-      comments = []
-      entries.push(current)
-    } else if (line.startsWith('#')) {
-      comments.push(line)
-      continue
-    } else if (current && /^\s+\S/.test(line)) {
-      current.lines.push(line)
-    } else {
-      comments = []
-      continue
-    }
-    const id = line.match(/^[\s-]*id:\s*['"]?([^'"\s#]+)/)
-    if (id) current.ids.push(id[1])
-  }
-  return entries
-}
-
-const idsIn = text => new Set([...String(text).matchAll(/^[\s-]*id:\s*['"]?([^'"\s#]+)/gm)].map(match => match[1]))
-
-/**
- * The user's profile patch with the shipped entries it lacks appended, or null when it
- * lacks none. An entry is missing when none of the ids it names appears in the user's file;
- * one the user has (changed or not) is theirs and stays. DSH's empty template (`[]`) is
- * replaced rather than appended to.
- */
+/** The user's profile patch with missing shipped operations merged, or null if unchanged. */
 export function mergeProfilePatch(user, shipped) {
-  const have = idsIn(user)
-  const missing = patchEntries(shipped).filter(entry => entry.ids.length > 0 && entry.ids.every(id => !have.has(id)))
-  if (missing.length === 0) return null
-  const added = missing.map(entry => entry.lines.join('\n')).join('\n')
-  const base = String(user).replace(/^\[\]\s*$/m, '').replace(/\s*$/, '')
-  return `${base === '' ? '' : `${base}\n`}${added}\n`
+  return mergePatch(createRequire(import.meta.url)('yaml'), user, shipped)
 }
 
 /**
@@ -390,7 +354,7 @@ export function backupSettingsOrLog({ dshHome, version, log = () => {} }) {
  * each with .build-id) is left as it is. Another build's gets the new packages
  * (node_modules, package.json) and nothing else: dsh keeps the user's settings in that
  * folder too (models and preferences in cordis.patch.yml, .plugin-manager/), and an
- * update must not take them away. The shipped cordis.patch.yml only seeds a new profile.
+ * update merges missing shipped patch operations into the existing settings.
  * The copies are asynchronous, so the window stays live while a new build's packages go in;
  * dsh must not start before the returned promise resolves. A quit can cut a copy short (the app
  * lets it through while dsh is not spawned yet): a new profile is copied beside its place and
@@ -412,10 +376,11 @@ export async function installProfile({ dshHome, source }) {
     renameSync(fresh, target)
     return { target, installed: true }
   } else {
+    const shipped = readJson(join(source, 'package.json'))
     // A profile from a build that shipped the Bot team or the welcome under its old name.
-    migrateRenamed({ target, dshHome, shipped: readJson(join(source, 'package.json')) })
+    migrateRenamed({ target, dshHome, shipped })
     // A profile with a package this build no longer ships (RETIRED).
-    migrateRetired({ target, dshHome, shipped: readJson(join(source, 'package.json')) })
+    migrateRetired({ target, dshHome, shipped })
     // Only the packages the app ships are replaced: a plugin the user installed (the market,
     // Settings → Plugins) stays, with its dependencies, and in package.json.
     for (const name of packagesIn(join(source, 'node_modules'))) {
@@ -425,7 +390,6 @@ export async function installProfile({ dshHome, source }) {
     // The tarballs in vendor/ are the app's (file:vendor/… in the shipped package.json), except
     // those a plugin the person installed names.
     const user = readJson(join(target, 'package.json'))
-    const shipped = readJson(join(source, 'package.json'))
     const own = ownDependencies(user, shipped)
     const kept = new Set(own.map(([, spec]) => /^file:(?:\.\/)?vendor\/([^/]+)$/.exec(String(spec))?.[1]))
     for (const file of existsSync(join(target, 'vendor')) ? readdirSync(join(target, 'vendor')) : []) {
@@ -435,13 +399,15 @@ export async function installProfile({ dshHome, source }) {
     writeFileSync(join(target, 'package.json'), mergeProfilePackage(user, shipped))
     replaceLocks({ target, source, ownPlugins: own.length > 0 })
     if (existsSync(join(source, '.build-id'))) cpSync(join(source, '.build-id'), join(target, '.build-id'))
-    for (const file of ['cordis.patch.yml', 'pnpm-workspace.yaml']) {
-      if (!existsSync(join(target, file)) && existsSync(join(source, file))) cpSync(join(source, file), join(target, file))
+    if (!existsSync(join(target, 'pnpm-workspace.yaml')) && existsSync(join(source, 'pnpm-workspace.yaml'))) {
+      cpSync(join(source, 'pnpm-workspace.yaml'), join(target, 'pnpm-workspace.yaml'))
     }
-    // A setting a newer build ships (a new plugin's row, a seed) reaches an existing profile.
     const patch = join(target, 'cordis.patch.yml')
-    const merged = mergeProfilePatch(readFileSync(patch, 'utf8'), readFileSync(join(source, 'cordis.patch.yml'), 'utf8'))
-    if (merged !== null) writeFileSync(patch, merged)
+    const shippedPatch = readFileSync(join(source, 'cordis.patch.yml'), 'utf8')
+    const merged = existsSync(patch) ? mergeProfilePatch(readFileSync(patch, 'utf8'), shippedPatch) : shippedPatch
+    if (merged !== null) {
+      replaceProfilePatch(patch, merged, existsSync(patch) ? statSync(patch).mode & 0o777 : undefined)
+    }
   }
   writeFileSync(marker, stamp)
   return { target, installed: true }

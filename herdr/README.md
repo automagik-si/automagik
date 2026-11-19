@@ -492,12 +492,14 @@ scheduler's own sends.
 
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
-`hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a
-**Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
+`hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
+A bot started by the pack as Claude Code, Codex, omp, pi or grok is told to set and clear it in its launch briefing.
+The sidebar draws a **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
-the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
-a day is reported by `am tidy` (`stale-needs-owner`).
+the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when
+the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
+the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
@@ -514,9 +516,10 @@ once am is installed there, its per-turn hook in that project's
 bot gets the briefing as text. A start never creates an app home on another machine, which may be
 shared: when that app home isn't a folder there, a Claude bot starts with one warning and no
 briefing file or hook. Codex and Hermes bots start there without it, since their own
-config, which may hold a prompt the briefing would replace, is only read on this computer. What
-happened isn't shown for those bots yet. A machine that isn't answering shows its bots as last
-seen, dimmed, and its menu says so.
+config, which may hold a prompt the briefing would replace, is only read on this computer.
+**What happened** shows the attach, detach and end events this computer recorded for the bot on
+that machine and project. A machine that isn't answering shows its bots as last seen, dimmed,
+and its menu says so.
 
 A project there can carry a pane-env file, `<project>/.herdr/pane-env` on that machine, for its
 bots' panes only: other panes there never read it. It takes two keys, one per line:
@@ -602,7 +605,7 @@ am forget <project>
 am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
        [--task ID [--lead BOT]]
-am worker kill <pane>   # from a bot's pane: end one worker that bot started; any other pane is refused
+am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
 am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
 am machines [update [--machine M | --linked | --local] | --auto on|off|status [--machine M]]
@@ -694,8 +697,10 @@ am dsh-tui install | update | uninstall | doctor
   conversation started there by hand. A pane that reports
   no status to hc (Hermes) can't say whether it is waiting for an approval, so `restart` refuses
   it unless `--force`. No command ever sends a pane keys: `--force` starts the new pane and ends
-  the old one only once the new one is up. `worker`, `brief`, `history` and `tidy` stay this
-  computer's.
+  the old one only once the new one is up. `worker`, `brief` and `tidy` stay this computer's.
+- `history <bot> --machine M --project <folder>` shows the attach, detach and end events
+  this computer recorded for that machine's core and project. `--json` adds `machine` beside
+  the bot's identity. Plain `history <bot>` shows this computer's bots' history.
 - A bot is named by its id or by its name. A refusal exits 1, a usage mistake (such as a
   missing `--project` folder) exits 2, and nothing is written.
 - `start` runs the bot's agent in a new pane with `hc run`, labelled `bot=<id>`, and records it
@@ -711,12 +716,12 @@ am dsh-tui install | update | uninstall | doctor
   with the shell itself in front, idle, and no job of its own running (`sleep 99 &` left at
   the prompt keeps it: its child processes are asked with `pgrep -P`, and an answer that
   can't be read keeps it too), so the space is never left empty and nothing else is closed.
-  The sidebar's Start knows the panes. When another start opens a space on the project in the
-  same moment, every start uses the first one, and the sidebar closes the extra space it
-  opened while that space holds only its own shell; a space that shows only after the wait is
-  closed the same way, as soon as it appears. `start` from the command line, `--machine` too, reads
-  them from `herdr-app ls`, which counts no mod pane: it closes the tab only when it saw that
-  shell, right after its own `space.new`, as the new space's one tab and that tab's one
+  When two starts open spaces on the project, they use the first one. The sidebar can close the
+  extra space identified by its own `space.new` reply, even if it appears after the wait, while
+  it still has just its original tab with a single idle shell. A lost reply can leave the extra
+  space open. `start` from the command line, `--machine` too, reads the panes from `herdr-app ls`,
+  which counts no mod pane: it closes the tab only when it saw that shell, right after its own
+  `space.new`, as the new space's one tab and that tab's one
   terminal. `AUTOMAGIK_HERDR_TAB_WAIT_MS` sets how long `start` and `worker` wait for Herdr to show
   the new pane (5000 by default); `0` turns this tab setup off.
 - `restart <bot>` (also `am restart <bot>`) queues a working or blocked bot for its next
@@ -851,6 +856,7 @@ Which pane plays which bot is recorded in one file, `<app home>/automagik-herdr/
 `attach` and `detach`, and any run that reads it and finds a pane ended. The sidebar's Start
 and Attach run the command line too. The `bot` label is a display hint: `hc label` changes
 no row, so relabelling a pane moves no bot.
+`am tidy` identifies local bot panes through the attach ledger and uses `bot=` labels for bots the local ledger has never recorded.
 
 **Which app home a restart uses.** `HERDR_APP_HOME` names it. With it unset, restart resolves
 the home before it writes anything: a pane's launch home wins, live or ended (hc keeps an ended
@@ -1134,16 +1140,19 @@ A pack-started dsh-tui bot pane, and every worker it starts, gets
 `dsh-tui` agent only). Its `hc` is a deny-by-default wrapper around the real `hc` (#624; the
 full send/keys/attach scope is #628): it scans PATH past every guard folder and passes an
 allowed call through unchanged — same stdio, same exit code, same stdout and stderr. It allows
-`send`, `read`, `ls`, `get`, `wait`, `put`, `label` (the caller's own workers only), `kill`,
-`rm`, `events`, `schema`, `templates`, the doc-only `--help`/`-h`/`--version`/`--skill` forms,
+`send`, `read`, `ls`, `get`, `wait`, `label` (the caller's own workers only), `kill`,
+`rm` (the caller's own workers only), `events`, `schema`, `templates`, the doc-only
+`--help`/`-h`/`--version`/`--skill` forms,
 and one `run` shape: the dsh-tui worker start that `am worker` emits (`--bg`, the
 caller as `--parent`, `worker.of=<the caller's bot>`, a `--cwd` under the project's
 `.claude/worktrees/`, and `/usr/bin/env PATH=… dsh-tui` after `--`). Everything else is
 refused with one stderr line naming #624, #628 and #631, and the real `hc` is never called:
 `exec`, any other `run` (including a template or another agent), file writes, edits and reads,
-`machine`, `server`, `update`, `connect`, `keys`, `attach`, a `machine/t7` target on every
-verb but `send` (`hc events --terminal`/`--children-of` included), and any `--on` outside an
-allowed `send`.
+`machine`, `server`, `update`, `connect`, `put`, `keys`, `attach`, a `machine/t7` target on
+every verb but `send` — typed as an address or reached by a name that `hc ls` resolves to one
+(`read`, `get`, `wait`, `label`, `kill`, `rm` and both `hc events` target options resolve the
+target and refuse a machine address before the real `hc` runs) — and any `--on` outside
+an allowed `send`.
 
 `send` is scoped to the caller's team: its lead chain (`effectiveLead` up), its declared lead
 chain (`bot.lead`, then that bot's lead, while each id is listed in the project's bots.json,
@@ -1165,16 +1174,34 @@ bots.json entry, never its pane's `role=` label or an environment variable, and 
 such a bot does not inherit the widening. The caller comes from the attach ledger, the
 authority; a worker pane has no ledger row, so its `worker.of` label names its bot and its
 cwd's project. The target is resolved with the real `hc` (`ls` for a name, `get` for the
-labels). Any target outside that team is refused. The launch briefing carries the guard
+labels). Any target outside that team is refused. `read`, `get` and `wait` are scoped to the
+same graph — the caller's own pane, its own workers and its team — and the shared send roles do
+not widen them: the verified address is the one forwarded, so a rename between the check and the
+call cannot redirect it. `rm` ends the caller's own workers only (`parent` is the caller's pane,
+or `worker.of` is the caller's bot); a team member's seat, another bot's worker and every
+stranger are refused, and a worker pane ends nothing. The launch briefing carries the guard
 paragraph only for a dsh-tui bot; a claude, omp or hermes briefing is unchanged. On a linked
 machine the seat uses the guard folder that machine has, beside its own `automagik-herdr`; with
 none it gets no guard, no briefing paragraph claiming one, and one warning naming #624.
 
+A send to a pane held by a dialog is refused before anything is typed (#1414). The wrapper
+reads the target's herdr-core status and, when it is neither working nor blocked, its screen
+(the restart planner's `pendingDialog`); a blocked pane or a visible question, permission or
+sign-in dialog gets one JSON error line on stderr, kind `blocked`, naming the pane, and exit 9
+(hc's own `blocked` code), so a relay can tell it from a transport error and route the message
+elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
+it. A free pane's send is unchanged; a screen that cannot be read is left to hc's own send, so
+nothing is queued or dropped. This is the pack's wrapper: a sender that bypasses it with an
+absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
+hold belongs.
+
 **This is a guardrail, not a boundary.** A bot can bypass it with an absolute path to the real
 `hc`, a raw socket client, or `hc connect`. The team data is still writable: a bot that edits
 its project's `.herdr/bots.json` can widen its own `send` scope (for example by giving itself
-the pm, integrator or fixer rank), and a bot can label its own workers. `kill`, `rm` and `put`
-stay unscoped, and `read`/`ls`/`get` are cross-pane by design; #628 owns that scope. The real
+the pm, integrator or fixer rank), and a bot can label its own workers. `ls` and `events` stay
+cross-pane (a wrapper cannot filter a table's text or a stream without changing what the real
+`hc` printed), and `kill` is the project's main bot's; the per-pane proxy is where a sandboxed
+pane's list is filtered and its events are refused. The real
 fix is the sandboxed socket mask plus the per-pane filtering proxy wish (#624), and #631 is the
 hard boundary. This wrapper only stops the ordinary `hc exec` attempt while that lands. The
 pack's own CLI still reaches the real `hc` for its trusted calls (system status, machine lists,
@@ -1246,8 +1273,14 @@ herdr-core 0.1.14 and refuses any other version; its socket lives in
 `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
 the worktree and the app home. **Fail closed:** if the proxy cannot start, the pane's command is
 never started, so no sandbox exists and `hc` cannot auto-start a core inside one; a proxy that
-dies takes its pane with it. The network stays open: the proxy filters the hc socket, not the
-box's TCP listeners, and localhost admin ports cannot be hidden without a network namespace.
+dies takes its pane with it. The wrapper also gives the pane its own network namespace
+(`--unshare-net`), so the host's loopback, the host's LAN and the host's own addresses are not
+reachable from inside; the only loopback port the pane gets is the wrapper's egress relay on
+127.0.0.1:3128, whose host-side CONNECT proxy allows public destinations only. Raw TCP and SSH
+have no egress, and a host where the namespace cannot be made refuses the pane instead of
+falling back to the host network. The proxy itself still filters the hc socket, not the box's
+listeners; the namespace is the network boundary (#700, #743; `apps/dsh-sandbox/README.md`,
+"The network: own namespace, one loopback relay").
 
 ## The Create form
 
@@ -1959,6 +1992,16 @@ terminal's `worker.of` label names the calling bot (the bot the attach ledger bi
 caller's pane to), it is not a bot's seat, it is not the caller's own pane, it is on this
 computer, and hc does not report it as `working`. A worker stuck mid-turn is the main bot's to
 end.
+
+`am worker` registers the worker to the bot's ID in `worker.of`. The same bot can still end
+its worker from its new seat after a restart. Only the project's main bot can end a terminal
+started with plain `hc run`, including after a handoff or restart. In a Git project, seats
+configured for coding (`code` defaults to `true`) can start with `am worker` when they need
+to end the worker themselves.
+
+Before ending a registered worker, the CLI rereads the caller's and target's attach bindings
+and asks hc again for the target's identity, ownership and turn status. hc provides no
+conditional kill, so the bindings or terminal can still change between the recheck and the kill.
 
 Where the rule is enforced:
 

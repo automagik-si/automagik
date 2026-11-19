@@ -443,7 +443,8 @@ export function install(rt) {
         const model = args.model || fallback
         const denyTools = args.deny_tools ?? args.denyTools
         const inheritAuto = rt.autoOpener?.()
-        // Only the parameters declared above reach createBot. Its other options (an
+        const readScopeSource = exec.agent?.session?.id ?? rt.callerSessionId?.() ?? exec.agent?.id
+        // Only the parameters declared above can come from the model. Other options (an
         // existing Session to adopt, a Main Bot, a copy, a held model, a kind) are the
         // host's and the user's to give, never a model's: an undeclared argument is dropped.
         const bot = await rt.createBot({
@@ -460,7 +461,7 @@ export function install(rt) {
           ...(inheritAuto === undefined ? {} : { inheritAuto }),
           // Only when asked: an older call keeps the exact payload it had.
           ...(denyTools === undefined ? {} : { denyTools }),
-        })
+        }, { readScopeSource })
         // A level taken from the creator is said, so the creator knows what the Bot may do.
         const inherited = creator && rt.permissionCatalog() && bot.permission
           ? ` Permission inherited from ${creator.name} (${bot.permissionAuto ? 'Auto' : bot.permission})${bot.permission === (creator.permission ?? rt.permissionCatalog()?.defaultPreset) ? '.' : ', no wider than this conversation.'}` : ''

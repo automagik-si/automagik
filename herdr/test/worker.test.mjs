@@ -6,7 +6,7 @@ import net from "node:net";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -79,7 +79,8 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   if (briefing) writeFileSync(join(app, "mods/am-sidebar/briefing.mjs"), "// stand-in\n");
   const statePath = join(root, "hc.json");
   const logPath = join(root, "hc.log");
-  const terminals = [term("t1", { bot: ID.dev, cwd: project }), term("t2", { cwd: project }), term("t3", { bot: ID.stray, cwd: project }),
+  const caller = { ...term("t1", { bot: ID.dev, cwd: project }), argv: ["/usr/bin/env", `HERDR_APP_HOME=${app}`, "claude"] };
+  const terminals = [caller, term("t2", { cwd: project }), term("t3", { bot: ID.stray, cwd: project }),
     term("t4", { bot: ID.cap, cwd: project })];
   writeFileSync(statePath, JSON.stringify({ terminals, next: 100, templates }));
   writeFileSync(logPath, "");
@@ -437,6 +438,49 @@ test("worker kill (#955): a bot ends a worker it started and nothing else: a sea
   const task = s.cli(["worker", "kill", "the", "flaky", "test", "--branch", "feat/kill-flaky", "--json"]);
   assert.equal(task.code, 0, task.err);
   assert.equal(kills().length, 1);
+});
+
+test("worker kill #1129: a plain hc run child is refused whatever its parent says, and a worker that changes before the kill is not ended", (t) => {
+  const s = scene(t);
+  const kills = () => s.calls().filter((c) => c[0] === "kill");
+  const gets = (address) => s.calls().filter((c) => c[0] === "get" && c[1] === address).length;
+  const edit = (address, change) => {
+    const st = s.hcState();
+    change(st.terminals.find((x) => x.address === address));
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  };
+  // A plain child of the caller's own pane, its turn over: hc's parent is no proof of who started it.
+  const st = s.hcState();
+  st.terminals.push({ ...term("t7", { cwd: st.terminals[0].cwd }), parent: "t1" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const plain = s.cli(["worker", "kill", "t7"]);
+  assert.equal(plain.code, 1, plain.err);
+  assert.match(plain.err, /t7 isn't a worker \(it has no worker\.of label\)\. Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started\. Nothing was ended\./);
+  assert.deepEqual(kills(), []);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "live", "the child is still there");
+
+  // A worker that exits between the first look and the recheck: said, never killed.
+  const one = s.cli(["worker", "fix the login form", "--branch", "feat/login", "--json"]);
+  assert.equal(one.code, 0, one.err);
+  const gone = one.json().terminal;
+  edit(gone, (x) => { x.status = { state: "idle" }; x.exitAfterGets = 1; });
+  const before = gets(gone);
+  const exited = s.cli(["worker", "kill", gone]);
+  assert.equal(exited.code, 0, exited.err);
+  assert.match(exited.out, /has already ended \(finished\)/);
+  assert.equal(gets(gone) - before, 2, "a first look and one recheck");
+  assert.deepEqual(kills(), []);
+
+  // A worker whose id is another terminal by the recheck: refused, never killed.
+  const two = s.cli(["worker", "tidy the docs", "--branch", "feat/docs", "--json"]);
+  assert.equal(two.code, 0, two.err);
+  const reused = two.json().terminal;
+  edit(reused, (x) => { x.status = { state: "idle" }; x.reuseAfterGets = 1; x.reuseCreated = 77; });
+  const swapped = s.cli(["worker", "kill", reused]);
+  assert.equal(swapped.code, 1, swapped.err);
+  assert.match(swapped.err, new RegExp(`${reused} could not be confirmed as the same terminal\\. Nothing was ended\\.`));
+  assert.deepEqual(kills(), []);
+  assert.equal(s.hcState().terminals.find((x) => x.address === reused).state, "live");
 });
 
 test("worker: a bot with no worker field runs its own agent, with that agent's default model and effort", (t) => {
@@ -1431,6 +1475,30 @@ test("the bot briefing says a bot doesn't code: one worker per task, checked, en
   assert.match(WORKER_LINE, /end it with `am worker kill <terminal>` once the task merges/);
   assert.doesNotMatch(WORKER_LINE, /hc kill/, "hc kill is the main bot's only (#955)");
   assert.ok(text.length <= BRIEFING_LIMIT);
+});
+
+test("the briefing #1129: a member is told a plain hc run child is the main bot's to end, in both renders; the main bot isn't", async () => {
+  const { briefingText, launchBriefingText, PLAIN_RUN_LINE, WORKER_LINE, BRIEFING_LIMIT } = await import("../mods/am-sidebar/briefingText.mjs");
+  const file = parseBots(JSON.stringify(team())).file;
+  const [main, , member] = file.bots;
+  assert.match(PLAIN_RUN_LINE, /plain `hc run`/);
+  assert.match(PLAIN_RUN_LINE, /`am worker kill` refuses it/);
+  assert.match(PLAIN_RUN_LINE, /Only the project's main bot can end it, including after a handoff or restart/);
+  assert.match(PLAIN_RUN_LINE, /Start with `am worker`/);
+  const cleanup = "A plain `hc run` starts an ordinary terminal. "
+    + "Only the project's main bot can end it, including after a handoff or restart.";
+  for (const render of [briefingText, launchBriefingText]) {
+    const mine = render({ self: member, file });
+    assert.ok(mine.includes(PLAIN_RUN_LINE), `${render.name}: a member`);
+    assert.ok(mine.includes(WORKER_LINE), `${render.name}: the worker line stays`);
+    assert.ok(mine.length <= BRIEFING_LIMIT);
+    for (const [mode, self, isGit] of [["outside git", member, false], ["opted out", { ...member, code: false }, true]]) {
+      const text = render({ self, file, isGit });
+      assert.ok(text.includes(cleanup), `${render.name}: ${mode}`);
+      assert.doesNotMatch(text, /worker/i, `${render.name}: ${mode}`);
+    }
+    assert.doesNotMatch(render({ self: main, file }), /A plain `hc run`/, `${render.name}: the main bot`);
+  }
 });
 
 // ---- review fixes ----
@@ -3887,4 +3955,105 @@ test("proxied worker CLI #1420: a Codex worker through the hc proxy gets no trus
   } finally {
     await closeAll();
   }
+});
+
+/** A loadable #1728 shim with the entry of this release and different hcGuard.mjs bytes. */
+function skewedKillShim(parent) {
+  cpSync(dirname(KILL_GUARD_DIR), parent, { recursive: true });
+  appendFileSync(join(parent, "hcGuard.mjs"), "\n// A different release for #1728.\n");
+  return join(parent, "hc-kill");
+}
+
+/** The scene's fake hc must follow every #1728 fixture shim on PATH. */
+function skewedWorkerEnv(s, dirs) {
+  const env = { ...s.env, AM_HOME: join(s.env.HOME, ".automagik"), HC_TERMINAL_ID: "t1",
+    PATH: [...dirs, s.path].join(":") };
+  assertScratchProject(s.project, { ceiling: s.root, env });
+  const fake = join(s.root, "bin", "hc");
+  const expected = [...dirs.map((dir) => join(dir, "hc")), fake];
+  const entries = env.PATH.split(":").slice(0, expected.length).map((dir) => join(dir, "hc"));
+  assert.deepEqual(entries, expected);
+  for (const file of entries) {
+    const stat = statSync(file);
+    assert.ok(stat.isFile() && (stat.mode & 0o111) !== 0, file);
+  }
+  assert.ok(readFileSync(fake, "utf8").includes(FAKE_HC));
+  const current = readFileSync(join(KILL_GUARD_DIR, "..", "hcGuard.mjs"));
+  for (const dir of dirs) {
+    const real = realpathSync(dir);
+    assert.ok(real.startsWith(`${s.root}/`) && real.endsWith("/hc-kill"), real);
+    assert.notDeepEqual(readFileSync(join(dirname(real), "hcGuard.mjs")), current);
+  }
+  return env;
+}
+
+/** A member's direct kill through each copied shim still hits the shim's own policy. */
+function assertSkewedShimRefuses(s, dirs, terminal, env) {
+  for (const dir of dirs) {
+    const r = spawnSync(join(dir, "hc"), ["kill", terminal], { cwd: s.project, env, encoding: "utf8" });
+    assert.equal(r.status, 2, r.error?.message ?? r.stderr);
+    assert.match(r.stderr, /hc kill shim: refused .*main bot only/);
+  }
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), []);
+}
+
+/** Start a worker and let its turn finish before the #1728 kill checks. */
+function idleSkewWorker(s) {
+  const started = s.cli(["worker", "fix it", "--branch", "feat/skew", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  const { terminal } = started.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status.state = "idle";
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  return terminal;
+}
+
+for (const location of ["am part", "pack mod", "am part before pack mod"]) {
+  test(`#1728 worker kill skips a skewed ${location} shim on PATH`, (t) => {
+    const s = scene(t);
+    const terminal = idleSkewWorker(s);
+    const dirs = [];
+    if (location !== "pack mod") dirs.push(skewedKillShim(join(s.env.HOME, ".automagik", "parts", "automagik.am", "3.158.1")));
+    if (location !== "am part") dirs.push(skewedKillShim(join(s.app, "mods", "am-sidebar")));
+    const env = skewedWorkerEnv(s, dirs);
+    assertSkewedShimRefuses(s, dirs, terminal, env);
+
+    const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal, "--json"], { cwd: s.project, env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.error?.message ?? r.stderr);
+    assert.equal(JSON.parse(r.stdout).ended, true);
+    assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal]]);
+  });
+}
+
+for (const alias of [false, true]) {
+  test(`#1728 worker kill explains a refusal from a planted shim${alias ? " reached through an alias" : ""}`, (t) => {
+    const s = scene(t);
+    const terminal = idleSkewWorker(s);
+    const shim = skewedKillShim(join(s.root, "planted"));
+    const dir = alias ? join(s.root, "pane-tools") : shim;
+    if (alias) symlinkSync(shim, dir);
+    const env = skewedWorkerEnv(s, [dir]);
+    assertSkewedShimRefuses(s, [dir], terminal, env);
+
+    const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal], { cwd: s.project, env, encoding: "utf8" });
+    assert.equal(r.status, 1, r.error?.message ?? r.stderr);
+    const folder = alias ? `${dir} (${realpathSync(shim)})` : dir;
+    assert.ok(r.stderr.includes(`hc kill ${terminal} failed: the first hc on this pane's PATH is in ${folder},`), r.stderr);
+    assert.match(r.stderr, /one version/);
+    assert.match(r.stderr, /restart this pane/);
+    assert.doesNotMatch(r.stderr, /hc kill shim: refused/);
+    assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), []);
+  });
+}
+
+test("#1728 a main bot's worker kill still succeeds through an unvouched shim", (t) => {
+  const s = scene(t, { file: team({ bots: [bot(ID.dev, "main", { name: "Dev" })] }) });
+  const terminal = idleSkewWorker(s);
+  const dir = skewedKillShim(join(s.root, "planted"));
+  const env = skewedWorkerEnv(s, [dir]);
+
+  const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal, "--json"], { cwd: s.project, env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.error?.message ?? r.stderr);
+  assert.equal(JSON.parse(r.stdout).ended, true);
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal]]);
 });

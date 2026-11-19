@@ -266,6 +266,24 @@ test('Auto offer and fallback follow bridge availability and change the permissi
   assert.notEqual(w.rt.autoKey(), key)
 })
 
+test('Auto offer reads the bridge for the Bot\'s current chat', async t => {
+  const w = team(t, { bots: { m1: { ...codex, sessionId: 's1' } } }); await w.rt.load()
+  const bot = w.rt.botOf('m1')
+  const chatId = w.rt.chatOf(bot.id)
+  assert.ok(chatId)
+  assert.notEqual(chatId, bot.id)
+  assert.equal(bot.permissionAuto, undefined)
+  const calls = []
+  w.acpAgents.ownModeOf = (provider, sessionId) => {
+    calls.push([provider, sessionId])
+    return { mode: 'agent', bridged: sessionId === chatId, answerer: true }
+  }
+  const view = w.rt.autoViewOf(bot)
+  assert.equal(view.autoOffered, true)
+  assert.equal(view.autoJudge.bridged, true)
+  assert.deepEqual(calls, [['acp-codex', undefined], ['acp-codex', chatId]])
+})
+
 test('Auto key counts a Bot as false when the session list throws', async t => {
   const w = await enabled(t)
   const key = w.rt.autoKey()

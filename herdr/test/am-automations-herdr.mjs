@@ -11,7 +11,8 @@ const T = ["background", "border", "foreground", "muted", "dim", "raised", "soli
   "input", "hover", "blocked", "working", "idle", "ansi1"];
 // Each key its own value, so a test can tell which one an element was drawn in.
 export const theme = () => Object.fromEntries(T.map((k) => [k, `#${k}`]));
-export const terminals = () => [];
+export const terminals = () => state.terminals ?? [];
+export const panes = () => state.panes ?? [];
 export const spaces = () => [];
 export function run(name, args) { state.runs.push([name, args]); }
 export function notify() {}

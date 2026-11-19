@@ -416,3 +416,156 @@ test('a route job that moved but failed to finish is never diagnosed as complete
   ])
   assert.equal(JSON.stringify(b.calls.diagnostics).includes('private'), false)
 })
+
+const ROUTE_A = 'deepseek/v4'
+const ROUTE_B = 'acp-claude/default'
+
+function catalogBench(t) {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const live = new Set([ROUTE_A, ROUTE_B])
+  let cached = [...live].map(ref => ({ ref }))
+  b.calls.catalog = []
+  b.calls.followups = []
+  b.rt.catalog = async ({ fresh = false, remember = true } = {}) => {
+    b.calls.catalog.push({ fresh, remember })
+    if (fresh) cached = [...live].map(ref => ({ ref }))
+    return cached
+  }
+  b.rt.desiredModel = async bot => {
+    if (cached.some(entry => entry.ref === bot.model)) return bot.model
+    if (cached.some(entry => entry.ref === bot.appliedModel)) return bot.appliedModel
+    return cached[0]?.ref
+  }
+  const resolveAgent = b.rt.resolveAgent
+  b.rt.resolveAgent = async id => {
+    const agent = await resolveAgent(id)
+    if (id !== 's1') agent.followup = () => { b.calls.followups.push(id) }
+    return agent
+  }
+  return { ...b, live }
+}
+
+async function switchToTarget(b, effort) {
+  assert.equal((await b.rt.switchRoute('b1', ROUTE_B, effort)).status, 'switching')
+}
+
+function assertRolledBack(b, before, reason = 'target not served') {
+  assert.deepEqual(b.bot, before)
+  assert.equal([...b.rt.switchJobs()].length, 0)
+  assert.deepEqual(b.calls.diagnostics.map(({ level, text }) => [level, text]), [
+    ['info', `Route change ${ROUTE_A} → ${ROUTE_B} accepted`],
+    ['warn', `Route change ${ROUTE_A} → ${ROUTE_B} rolled back (${reason})`],
+  ])
+}
+
+test('a route change checks the live catalog before creating the fresh part', async t => {
+  const b = catalogBench(t)
+  const before = { ...b.bot }
+  const idle = Promise.withResolvers()
+  b.agent.whenIdle = () => idle.promise
+  await switchToTarget(b)
+  b.live.delete(ROUTE_B)
+  assert.equal(await b.rt.desiredModel(b.bot), ROUTE_B)
+  idle.resolve()
+  await waitFor(() => !b.rt.switchingChat('b1'))
+  assert.deepEqual(b.calls.catalog, [{ fresh: true, remember: false }])
+  assert.deepEqual(b.calls.created, [])
+  assert.deepEqual(b.calls.selected, [])
+  assert.deepEqual(b.calls.archived, [])
+  assertRolledBack(b, before)
+
+  b.live.add(ROUTE_B)
+  await switchToTarget(b)
+  await waitFor(() => !b.rt.switchingChat('b1'))
+})
+
+test('a target dropped during Session creation never selects the old route', async t => {
+  const b = catalogBench(t)
+  const before = { ...b.bot }
+  const createSession = b.rt.createSession
+  b.rt.createSession = async (...args) => {
+    const id = await createSession(...args)
+    b.live.delete(ROUTE_B)
+    await b.rt.catalog({ fresh: true, remember: false })
+    return id
+  }
+  const selectSessionModel = b.rt.selectSessionModel
+  b.rt.selectSessionModel = async (id, selection) => {
+    await selectSessionModel(id, selection)
+    if (!b.live.has(`${selection.provider}/${selection.model}`)) throw new Error('model is unavailable')
+  }
+  await switchToTarget(b)
+  await waitFor(() => !b.rt.switchingChat('b1'))
+  assert.deepEqual(b.calls.created, ['s2'])
+  assert.deepEqual(b.calls.selected, [['s2', { provider: 'acp-claude', model: 'default' }]])
+  assert.deepEqual(b.calls.archived, ['s2'])
+  assertRolledBack(b, before)
+})
+
+test('a target dropped after selection rolls back before sending the handoff', async t => {
+  const b = catalogBench(t)
+  const before = { ...b.bot }
+  const saved = []
+  b.rt.save = async () => {
+    if (!b.live.has(ROUTE_B)) saved.push({ ...b.bot })
+  }
+  b.rt.applyPermission = async () => { b.live.delete(ROUTE_B) }
+  await switchToTarget(b, 'high')
+  await waitFor(() => !b.rt.switchingChat('b1'))
+  assert.deepEqual(b.calls.selected, [['s2', { provider: 'acp-claude', model: 'default', reasoningEffort: 'high' }]])
+  assert.deepEqual(b.calls.followups, [])
+  assert.deepEqual(b.calls.archived, ['s2'])
+  assert.deepEqual(saved[0], { ...before, model: ROUTE_B, effort: 'high' })
+  assertRolledBack(b, before)
+})
+
+test('an empty live catalog rolls back before creating a fresh part', async t => {
+  const b = catalogBench(t)
+  const before = { ...b.bot }
+  b.live.clear()
+  await switchToTarget(b)
+  await waitFor(() => !b.rt.switchingChat('b1'))
+  assert.deepEqual(b.calls.created, [])
+  assert.deepEqual(b.calls.selected, [])
+  assert.deepEqual(b.calls.archived, [])
+  assertRolledBack(b, before)
+})
+
+test('a route change rolls back when catalog availability is unknown', async t => {
+  const b = catalogBench(t)
+  const before = { ...b.bot }
+  b.rt.catalog = async () => { throw new Error('catalog unavailable') }
+  await switchToTarget(b)
+  await waitFor(() => !b.rt.switchingChat('b1'))
+  assert.deepEqual(b.calls.created, [])
+  assert.deepEqual(b.calls.selected, [])
+  assert.deepEqual(b.calls.archived, [])
+  assertRolledBack(b, before, 'target availability unknown')
+})
+
+test('a route change completes when the target stays served', async t => {
+  const b = catalogBench(t)
+  await switchToTarget(b)
+  await waitFor(() => !b.rt.switchingChat('b1'))
+  assert.deepEqual(b.calls.archived, ['s1'])
+  assert.equal(b.bot.sessionId, 's2')
+  assert.equal(b.bot.appliedModel, ROUTE_B)
+  assert.deepEqual(b.calls.diagnostics.map(({ level, text }) => [level, text]), [
+    ['info', `Route change ${ROUTE_A} → ${ROUTE_B} accepted`],
+    ['info', `Route change ${ROUTE_A} → ${ROUTE_B} completed`],
+  ])
+})
+
+test('a no-note route change rolls back without waiting for a first answer', async t => {
+  const b = catalogBench(t)
+  const before = { ...b.bot }
+  b.rt.answersAside = ref => ref !== ROUTE_A
+  b.rt.applyPermission = async () => { b.live.delete(ROUTE_B) }
+  await switchToTarget(b)
+  await waitFor(() => !b.rt.switchingChat('b1'))
+  assert.equal(b.calls.notes, 0)
+  assert.deepEqual(b.calls.archived, ['s2'])
+  assert.equal(b.rt.awaitingFirstAnswer('s2'), false)
+  assertRolledBack(b, before)
+})

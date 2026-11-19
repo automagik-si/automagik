@@ -199,6 +199,7 @@ export const ALLOWLIST = [
   ["am/runner/main.mjs", "unlinkSync(resolved.socket)", 2, "the member runner's own socket, removed when listen fails and when it stops: never mods/ or layouts/"],
   ["am/runner/spawn.mjs", "renameSync(tmp, config.state)", 1, "the member runner's own member-to-uid state: a temp file beside the state path its template config names is renamed onto it, never mods/ or layouts/"],
   ["am/runner/spawn.mjs", "unlinkSync(tmp)", 1, "the member runner's own state temp file, removed after a failed write or sync: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/hc-socket-mask.mjs", "rmSync(egress.dir, { recursive: true, force: true })", 1, "the sandbox wrapper's own 0700 egress temp folder (makeEgressDir under XDG_RUNTIME_DIR or HOME), holding one pane's egress socket and relay; never mods/ or layouts/"],
 ];
 
 test("every rm, rename, unlink and cp outside layoutSafe.mjs is one the allowlist names", () => {

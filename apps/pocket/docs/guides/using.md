@@ -179,6 +179,8 @@ stops opening it, for example after reinstalling, set the assistant again.
 
 ## Updates
 
+Google Play handles updates for the Play build. The following controls are for the GitHub APK.
+
 - The app looks for a new version when it opens (at most every 15 minutes) and every 6 hours while
   it or **Watch in background** runs. **Settings → About → Check for updates** looks now.
 - **Install updates automatically** (Settings → About, on by default): on Android 12 and newer the

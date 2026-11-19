@@ -3,7 +3,16 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { INSTALL_SH, KEY_ID, KEYS_FILE, SLOTS, installKeys, keyIdOf, keyProblem, pointer, postedProblem, signPointer, slotFor, verifyPointer, withInstallKeys } from './herdr-lane';
+import { spawnSync } from 'node:child_process';
+import { POINTER_REPOSITORIES } from '../herdr/mods/am-sidebar/release.js';
+import { INSTALL_SH, KEY_ID, KEYS_FILE, SLOTS, installKeys, keyIdOf, keyProblem, pointer, postedProblem, signPointer, signerSlot, slotFor, verifyPointer, withInstallKeys } from './herdr-lane';
+
+const LANE = join(import.meta.dir, 'herdr-lane.ts');
+/** check-key run with exactly `env`'s signer and key (no inherited secret): its exit code and output. */
+const checkKey = (env: Record<string, string>) => {
+  const run = spawnSync(process.execPath, [LANE, 'check-key'], { env: { PATH: process.env.PATH ?? '', ...env }, encoding: 'utf8' });
+  return { status: run.status, out: `${run.stdout}${run.stderr}` };
+};
 
 // A throwaway key, made for this run only: no private key is ever committed.
 const pair = () => {
@@ -59,6 +68,34 @@ describe('the herdr lane', () => {
     expect(keyIdOf(pair().priv, keys)).toBeNull();
     const bytes = Buffer.from(JSON.stringify(pointer(tgz, { version: '3.57.1', commit, issuedAt: 'x', keyId: 'herdr-pack-2027-05' })));
     expect(verifyPointer(bytes, signPointer(bytes, next.priv), keys).keyId).toBe('herdr-pack-2027-05');
+  });
+
+  test('signerSlot: unset or empty is HERDR_PACK_KEY, each slot names itself, anything else is a problem', () => {
+    expect(signerSlot(undefined)).toBe('HERDR_PACK_KEY');
+    expect(signerSlot('')).toBe('HERDR_PACK_KEY');
+    expect(signerSlot('HERDR_PACK_KEY')).toBe('HERDR_PACK_KEY');
+    expect(signerSlot('HERDR_PACK_KEY_NEXT')).toBe('HERDR_PACK_KEY_NEXT');
+    for (const bogus of ['bogus', 'herdr_pack_key_next', 'HERDR_PACK_KEY ', 'AM_LANE_KEY']) {
+      expect(signerSlot(bogus)).toEqual({ problem: `HERDR_PACK_SIGNER names an unknown slot ${JSON.stringify(bogus)}` });
+    }
+  });
+
+  test('check-key stops on an unknown selector, and on NEXT selected with its slot empty', () => {
+    const bogus = checkKey({ HERDR_PACK_SIGNER: 'bogus', HERDR_PACK_KEY: pair().priv });
+    expect(bogus.status).toBe(1);
+    expect(bogus.out).toContain('HERDR_PACK_SIGNER names an unknown slot "bogus"');
+    // The workflow hands an empty HERDR_PACK_KEY when NEXT is selected and unset; never the primary.
+    const empty = checkKey({ HERDR_PACK_SIGNER: 'HERDR_PACK_KEY_NEXT', HERDR_PACK_KEY: '' });
+    expect(empty.status).toBe(1);
+    expect(empty.out).toContain('HERDR_PACK_KEY is not set (HERDR_PACK_KEY_NEXT selected)');
+    const unlisted = checkKey({ HERDR_PACK_KEY: pair().priv });
+    expect(unlisted.status).toBe(1);
+    expect(unlisted.out).toContain('(HERDR_PACK_KEY selected)');
+    for (const run of [bogus, empty, unlisted]) expect(run.out).not.toContain('PRIVATE KEY');
+  });
+
+  test('the signer\'s repository is one the pack\'s updater accepts', () => {
+    expect(POINTER_REPOSITORIES).toContain(pointer(tgz, { version: '3.57.1', commit, issuedAt: 'x' }).repository);
   });
 
   test('keygen never writes the slot releases sign with: the first key to HERDR_PACK_KEY, a rotation to the other', () => {

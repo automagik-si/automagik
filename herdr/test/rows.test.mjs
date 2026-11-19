@@ -8,7 +8,7 @@ import {
 } from "../mods/am-sidebar/rows.js";
 import { waitsOnPermission } from "../mods/am-sidebar/launchArgs.js";
 import { parseBots } from "../mods/am-sidebar/model.js";
-import { NEEDS_OWNER_LABEL as TIDY_NEEDS_OWNER_LABEL } from "../mods/am-sidebar/tidy.js";
+import { NEEDS_OWNER_LABEL as TIDY_NEEDS_OWNER_LABEL, STALE_NEEDS_OWNER_MS } from "../mods/am-sidebar/tidy.js";
 
 const look = { character: "star", colour: "blue" };
 const bot = (id, more = {}) => ({ id, name: id.slice(2), kind: "member", look, role: `${id} role`, instructions: "", agent: "claude", ...more });
@@ -51,7 +51,7 @@ test("a stopped pane's needs-owner label is the owner question, and a working or
   assert.equal(NEEDS_OWNER_LABEL, "automagik-herdr.needs-owner");
   assert.equal(NEEDS_OWNER_LABEL, TIDY_NEEDS_OWNER_LABEL);
   assert.equal(OWNER_QUESTION, "Question");
-  const row = (label, status = "done") => ({ address: "t1", status, labels: label === null ? {} : { [NEEDS_OWNER_LABEL]: label } });
+  const row = (label, status = "done") => ({ address: "t1", state: "live", status, labels: label === null ? {} : { [NEEDS_OWNER_LABEL]: label } });
   assert.equal(ownerQuestionOf(row("ship it?")), "ship it?");
   assert.equal(ownerQuestionOf(row("  which database?  ", "idle"), "idle"), "which database?");
   // No status reported is not an agent working: the label still speaks.
@@ -69,6 +69,25 @@ test("a stopped pane's needs-owner label is the owner question, and a working or
   const long = ownerQuestionOf(row("x".repeat(500)));
   assert.equal(long.length, 160);
   assert.match(long, /\.\.\.$/);
+});
+
+test("a label older than tidy's stale window, or on a terminal that is gone, is no question", () => {
+  const NOW = 1_800_000_000_000;
+  const at = (age, more = {}) => ({ address: "t1", state: "live", status: "done", status_ms: NOW - age,
+    labels: { [NEEDS_OWNER_LABEL]: "ship it?" }, ...more });
+  // The same boundary tidy.js reports (a strict >): a day is still fresh, a day and a millisecond is not.
+  assert.equal(ownerQuestionOf(at(0), "done", NOW), "ship it?");
+  assert.equal(ownerQuestionOf(at(STALE_NEEDS_OWNER_MS), "done", NOW), "ship it?");
+  assert.equal(ownerQuestionOf(at(STALE_NEEDS_OWNER_MS + 1), "done", NOW), null);
+  // Without a status clock, the terminal's creation age: tidy.js's own fallback.
+  assert.equal(ownerQuestionOf(at(STALE_NEEDS_OWNER_MS + 1, { status_ms: null, created_ms: NOW - 1000 }), "done", NOW), "ship it?");
+  assert.equal(ownerQuestionOf(at(0, { status_ms: null, created_ms: NOW - STALE_NEEDS_OWNER_MS - 1 }), "done", NOW), null);
+  // No clock at all is not stale: tidy reports only a finite age.
+  assert.equal(ownerQuestionOf(at(0, { status_ms: null, created_ms: null }), "done", NOW), "ship it?");
+  // A terminal that exited while its label row survives, or one no longer in the snapshot, asks nothing.
+  assert.equal(ownerQuestionOf(at(0, { state: "exited" }), "done", NOW), null);
+  assert.equal(ownerQuestionOf(at(0, { state: undefined }), "done", NOW), null);
+  assert.equal(ownerQuestionOf(undefined, "done", NOW), null);
 });
 
 test("liveFrom: label + live + agent in front; newest holder wins and is flagged; remote counts", () => {

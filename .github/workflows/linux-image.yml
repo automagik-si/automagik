@@ -31,9 +31,12 @@ on:
 permissions:
   contents: read
 
+# Cancel only pull_request runs: a push to dev finishes, and a manual
+# run is never cancelled by a push. A pull request push cancels the
+# older run. GitHub keeps one pending run per group.
 concurrency:
   group: linux-image-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   image:

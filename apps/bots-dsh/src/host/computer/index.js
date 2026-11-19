@@ -12,6 +12,7 @@ import { createLeases } from './leases.js'
 import { prepareComputerHelper } from './mac-helper.js'
 import { REPLY_KIND } from '../constants.js'
 import { output } from '../tools.js'
+import { refusal } from '../refusal.js'
 
 const REGISTRY_PACKAGE = '@deepseek-ai/dsh-computer-use'
 const PROVIDER_PACKAGES = {
@@ -1027,8 +1028,8 @@ export function install(rt) {
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) throw new Error(readOnly)
     const bot = rt.botOf(botId)
-    if (bot === undefined) throw new Error('Unknown Bot')
-    if (!LEVELS.includes(level)) throw new Error(`Level must be one of ${LEVELS.join(', ')}`)
+    if (bot === undefined) throw refusal('Unknown Bot')
+    if (!LEVELS.includes(level)) throw refusal(`Level must be one of ${LEVELS.join(', ')}`)
     bot.computer ??= {}
     // A Bot with no level of its own is off (levelOf), so every other level is written.
     if (level === 'off') delete bot.computer.level
@@ -1047,7 +1048,7 @@ export function install(rt) {
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) throw new Error(readOnly)
     const bot = rt.botOf(botId)
-    if (bot === undefined) throw new Error('Unknown Bot')
+    if (bot === undefined) throw refusal('Unknown Bot')
     const grant = grantsOf(bot)[appKey]
     if (grant !== undefined) {
       delete bot.computer.apps[appKey]
@@ -1161,13 +1162,13 @@ export function install(rt) {
       }
       case 'permission': {
         const access = service('cuaAccess')
-        if (access === undefined || typeof access.requestPermission !== 'function') throw new Error('System permissions are not available here')
+        if (access === undefined || typeof access.requestPermission !== 'function') throw refusal('System permissions are not available here')
         const permission = ['accessibility', 'screenRecording'].includes(body.permission) ? body.permission : 'accessibility'
         return access.requestPermission(permission, rt.uiLanguage?.() ?? 'en').catch((error) => { throw new Error(String(error?.message ?? error)) })
       }
       case 'open-settings': {
         const access = ctx.get?.('cuaAccess')
-        if (access === undefined || typeof access.openSettings !== 'function') throw new Error('System permissions are not available here')
+        if (access === undefined || typeof access.openSettings !== 'function') throw refusal('System permissions are not available here')
         const permission = ['accessibility', 'screenRecording'].includes(body.permission) ? body.permission : 'accessibility'
         await access.openSettings(permission, rt.uiLanguage?.() ?? 'en')
         return true
@@ -1185,11 +1186,11 @@ export function install(rt) {
       }
       case 'takeover':
         await rt.load()
-        if (!rt.botOf(String(body.botId ?? ''))) throw new Error('Unknown Bot')
+        if (!rt.botOf(String(body.botId ?? ''))) throw refusal('Unknown Bot')
         return takeOver(String(body.botId))
       case 'handback':
         await rt.load()
-        if (!rt.botOf(String(body.botId ?? ''))) throw new Error('Unknown Bot')
+        if (!rt.botOf(String(body.botId ?? ''))) throw refusal('Unknown Bot')
         return handBack(String(body.botId))
       case 'allow-foreground': {
         const ctl = controlOf(String(body.botId ?? ''))
@@ -1220,7 +1221,7 @@ export function install(rt) {
         const outcome = ['done', 'skip', 'takeover'].includes(body.outcome) ? body.outcome : 'done'
         const botId = String(body.botId ?? '')
         if (outcome === 'takeover') {
-          if (!rt.botOf(botId)) throw new Error('Unknown Bot')
+          if (!rt.botOf(botId)) throw refusal('Unknown Bot')
           return takeOver(botId)
         }
         return answerHold(botId, outcome)

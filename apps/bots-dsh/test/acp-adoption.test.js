@@ -1057,3 +1057,65 @@ test('a pinned Bot can still pick its own route model and clear its effort', asy
   assert.equal(rt.botOf('m1').sessionId, 'm1')
   assert.equal(rt.botOf('m1').sessionPinned, true)
 })
+
+async function catalogRefusal(host, model) {
+  const { llm } = host.ctx
+  const refs = await Promise.all(llm.listProviders().map(async ({ id }) =>
+    (await llm.listModels(id)).map(model => `${id}/${model.id}`)))
+  const message = `Model ${model.trim()} is not available. Available models: ${refs.flat().join(', ')}`
+  return { ok: false, error: { code: 'bot/refused', message, details: {} } }
+}
+
+async function routeRecords(rt, bot) {
+  return (await rt.diagnostics.entries())
+    .filter(entry => entry.bot === bot && entry.text.startsWith('Route change'))
+    .map(entry => [entry.where, entry.text])
+}
+
+const missingRouteLine = 'Route change acp-claude/opus → (unavailable ref) refused (not available)'
+
+test('update-bot and update_bot log a missing cross-route model once per call', async (t) => {
+  const host = await start(seed())
+  t.after(host.stop)
+  await host.moved()
+  const rt = host.ctx.provided.get('omniTeam')
+  const before = host.saved().bots.m1
+  const model = 'deepseek/not-in-catalog'
+  const expected = await catalogRefusal(host, model)
+  assert.deepEqual(await host.call('update-bot', { id: 'm1', model }), expected)
+  const records = [['update-bot', missingRouteLine]]
+  assert.deepEqual(await routeRecords(rt, 'm1'), records)
+
+  const tool = rt.teamTools.find(d => d.name === 'update_bot')
+  assert.equal(await tool.execute({ model }, { agent: { id: 'm1' } }), `Could not update the Bot: ${expected.error.message}`)
+  records.push(['update_bot', missingRouteLine])
+  assert.deepEqual(await routeRecords(rt, 'm1'), records)
+
+  for (const model of ['acp-claude/missing', '  acp-claude/missing  ', 'deepseek/', 'nonexistent']) {
+    assert.deepEqual(await host.call('update-bot', { id: 'm1', model }), await catalogRefusal(host, model))
+  }
+  assert.deepEqual(await routeRecords(rt, 'm1'), records)
+  assert.deepEqual(host.saved().bots.m1, before)
+
+  const log = await rt.diagnostics.logText()
+  for (const [where, text] of records) {
+    assert.equal(log.split('\n').filter(line => line.endsWith(`(m1 · ${where}) ${text}`)).length, 1)
+  }
+})
+
+test('update-bot logs a missing cross-route model for a shell-held Bot', async (t) => {
+  const team = seed()
+  Object.assign(team.bots.m1, {
+    model: 'acp-claude/opus', appliedModel: 'acp-claude/opus', shell: false,
+  })
+  const host = await start(team)
+  t.after(host.stop)
+  const rt = host.ctx.provided.get('omniTeam')
+  await rt.load()
+  assert.deepEqual(rt.botOf('m1').shellHeld, { cli: 'acp-claude', model: 'acp-claude/opus' })
+  const before = host.saved().bots.m1
+  const model = 'deepseek/not-in-catalog'
+  assert.deepEqual(await host.call('update-bot', { id: 'm1', model }), await catalogRefusal(host, model))
+  assert.deepEqual(await routeRecords(rt, 'm1'), [['update-bot', missingRouteLine]])
+  assert.deepEqual(host.saved().bots.m1, before)
+})

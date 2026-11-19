@@ -174,8 +174,8 @@ jobs:
   cut:
     name: Cut v<version> on dev
     runs-on: ubuntu-24.04
-    # Three bounded attempts, each re-running the gates on a moved dev (#668): room for the first
-    # attempt's gates and up to two re-cuts, not a place for a hung gate to hide.
+    # The job keeps its 45-minute timeout. A re-cut starts only if the longest measured attempt
+    # fits before the cut deadline, leaving five minutes for the steps after a successful push.
     timeout-minutes: 45
     concurrency:
       group: release-cut
@@ -188,16 +188,25 @@ jobs:
       sha: ${{ steps.cut.outputs.sha }}
       lane: ${{ steps.lane.outputs.kind }}
       herdr: ${{ steps.lane.outputs.herdr }}
-      pocket: ${{ steps.lane.outputs.pocket }}
+      pocket: ${{ steps.cut.outputs.pocket }}
       pocket_since: ${{ steps.lane.outputs.pocket_since }}
       am_sign: ${{ steps.amkey.outputs.sign }}
-      meter: ${{ steps.lane.outputs.meter }}
+      meter: ${{ steps.cut.outputs.meter }}
       meter_sign: ${{ steps.meterkey.outputs.sign }}
     env:
       DO_NOT_TRACK: '1'
       GH_TOKEN: ${{ github.token }}
       PRERELEASE: ${{ inputs.prerelease }}
     steps:
+      - name: Start the release cut clock
+        id: clock
+        run: |
+          set -euo pipefail
+          started=$(date +%s)
+          deadline=$(( started + 40 * 60 ))
+          echo "started=${started}" >> "$GITHUB_OUTPUT"
+          echo "deadline=${deadline}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: dev
@@ -303,14 +312,14 @@ jobs:
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
         run: bash scripts/release-gates.sh herdr-app
 
-      # Before the cut, so a release that packs the pack never goes out without a pointer the
-      # installed packs trust: HERDR_PACK_KEY must be a key pack-keys.json lists (its keyId is the
-      # entry with its public key). The HERDR_PACK_SIGNER variable picks the secret slot, so a
-      # rotation's new key waits in HERDR_PACK_KEY_NEXT until it is switched on (RFC 0011).
+      # Before the cut, check the slot named by HERDR_PACK_SIGNER and its key against pack-keys.json.
+      # An unset or empty selector defaults to HERDR_PACK_KEY. An unknown selector or an empty
+      # selected slot stops the release. The re-cut and signing steps use the same selection.
       - name: The herdr pack's signing key
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
         env:
-          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
+          HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
+          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
         run: bash scripts/release-gates.sh herdr-key
 
       # Every release carries am (RFC 0012): its tests, a syntax check, shellcheck on its launcher,
@@ -323,11 +332,12 @@ jobs:
       # keys, AM_LANE_KEY (the slot AM_LANE_SIGNER names) must be one of them, or the run stops
       # before it tags. While none is listed, or the secret is not set, the release warns, attaches
       # am and posts no am-lane (sign=no): the key is the owner's to add (am-lane.ts keygen).
+      # An empty selected slot supplies an empty key.
       - name: The am lane's signing key
         id: amkey
         if: steps.new.outputs.release == 'true'
         env:
-          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || secrets.AM_LANE_KEY }}
+          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || vars.AM_LANE_SIGNER != 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY || '' }}
         run: bash scripts/release-gates.sh am-key
 
       # Before the cut, so a release that builds the meter never goes out with a crate that fails its
@@ -342,12 +352,12 @@ jobs:
       # Before the cut, on a release that builds the meter (so meter-keys.json lists a key: the lane is
       # held until it does): METER_LANE_KEY (the slot METER_LANE_SIGNER names) must be set and be one
       # of the listed keys, or the run stops before it tags. No warn-only path: a meter build is never
-      # attached unsigned (sign=yes or a failed run).
+      # attached unsigned (sign=yes or a failed run). An empty selected slot supplies an empty key.
       - name: The meter lane's signing key
         id: meterkey
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'
         env:
-          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}
+          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || vars.METER_LANE_SIGNER != 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY || '' }}
         run: bash scripts/release-gates.sh meter-key
 
       # Before the cut, so a release that rebuilds Pocket never goes out with an app that fails its
@@ -368,7 +378,7 @@ jobs:
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0'
+          packages: 'platforms;android-36 build-tools;35.0.0'
 
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
@@ -386,15 +396,20 @@ jobs:
         id: cut
         if: steps.new.outputs.release == 'true'
         env:
+          RELEASE_CUT_STARTED: ${{ steps.clock.outputs.started }}
+          RELEASE_CUT_DEADLINE: ${{ steps.clock.outputs.deadline }}
           KIND: ${{ steps.lane.outputs.kind }}
           HERDR: ${{ steps.lane.outputs.herdr }}
           POCKET: ${{ steps.lane.outputs.pocket }}
+          POCKET_SINCE: ${{ steps.lane.outputs.pocket_since }}
           METER: ${{ steps.lane.outputs.meter }}
+          METER_SINCE: ${{ steps.lane.outputs.meter_since }}
           # A re-cut re-runs the signing-key gates on the new tip: they read the key lists, which a
           # merge in the window can change, so the same secrets the key-check steps got are here.
-          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
-          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || secrets.AM_LANE_KEY }}
-          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}
+          HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
+          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
+          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || vars.AM_LANE_SIGNER != 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY || '' }}
+          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || vars.METER_LANE_SIGNER != 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY || '' }}
           HAS_KEYSTORE: ${{ secrets.POCKET_SIGNING_KEYSTORE != '' }}
           HAS_PASSWORD: ${{ secrets.POCKET_SIGNING_PASSWORD != '' }}
         run: bash scripts/release-cut.sh
@@ -458,8 +473,8 @@ jobs:
           SHA: ${{ steps.cut.outputs.sha }}
           KIND: ${{ steps.lane.outputs.kind }}
           HERDR: ${{ steps.lane.outputs.herdr }}
-          POCKET: ${{ steps.lane.outputs.pocket }}
-          METER: ${{ steps.lane.outputs.meter }}
+          POCKET: ${{ steps.cut.outputs.pocket }}
+          METER: ${{ steps.cut.outputs.meter }}
         run: |
           set -euo pipefail
           notes="\`@automagik/acp-dsh\`, \`@automagik/bots-dsh\`, \`@automagik/locale-pt-br-dsh\`, \`@automagik/welcome-dsh\` for DeepSeek Harness, and the Automagik desktop app. Install the plugins from the [Automagik market](https://github.com/automagik-si/dsh-marketplace) or from an Omni's own market; \`plugins.json\` lists each tarball's integrity. The desktop builds follow when they are done."
@@ -499,7 +514,8 @@ jobs:
         env:
           VERSION: ${{ steps.cut.outputs.version }}
           SHA: ${{ steps.cut.outputs.sha }}
-          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
+          HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
+          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
           HERDR_LANE_REPLACE_UNVERIFIED: ${{ inputs.replace_unverified_herdr_pointer }}
         run: |
           set -euo pipefail
@@ -617,7 +633,7 @@ jobs:
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0'
+          packages: 'platforms;android-36 build-tools;35.0.0'
 
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
@@ -639,12 +655,12 @@ jobs:
           export POCKET_SIGNING_STORE="$RUNNER_TEMP/pocket.jks"
           trap 'rm -f "$POCKET_SIGNING_STORE"' EXIT
           echo "$KEYSTORE" | base64 -d > "$POCKET_SIGNING_STORE"
-          ./gradlew --stacktrace :app:assembleRelease
+          ./gradlew --stacktrace :app:assembleGithubRelease
 
       - name: The APK and its latest.json
         run: |
           set -euo pipefail
-          meta=apps/pocket/android/app/build/outputs/apk/release/output-metadata.json
+          meta=apps/pocket/android/app/build/outputs/apk/github/release/output-metadata.json
           code=$(jq -r '.elements[0].versionCode' "$meta")
           name=$(jq -r '.elements[0].versionName' "$meta")
           want=$(bun scripts/version.ts code "${VERSION}")
@@ -652,7 +668,7 @@ jobs:
           [ "$code" = "$want" ] || { echo "::error::the APK's versionCode is ${code}, ${VERSION} gives ${want}"; exit 1; }
           mkdir -p pocket
           apk="automagik-pocket-${VERSION}.apk"
-          cp apps/pocket/android/app/build/outputs/apk/release/app-release.apk "pocket/${apk}"
+          cp apps/pocket/android/app/build/outputs/apk/github/release/app-github-release.apk "pocket/${apk}"
           sha=$(sha256sum "pocket/${apk}" | cut -d' ' -f1)
           # What changed in the app: the subjects that touched apps/pocket/ since the build phones have.
           summary=$(git log --no-merges --format='%s' "${SINCE:+${SINCE}..}v${VERSION}" -- apps/pocket | grep -vE '^chore\(release\)' | head -5 | paste -sd ';' - | head -c 400 || true)
@@ -742,7 +758,7 @@ jobs:
         env:
           VERSION: ${{ needs.cut.outputs.version }}
           SHA: ${{ needs.cut.outputs.sha }}
-          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || secrets.AM_LANE_KEY }}
+          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || vars.AM_LANE_SIGNER != 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY || '' }}
           AM_LANE_REPLACE_UNVERIFIED: ${{ inputs.replace_unverified_am_pointer }}
         run: |
           set -euo pipefail
@@ -907,7 +923,7 @@ jobs:
 
       - name: Attach the binaries, usagemeter.SHA256SUMS and the signed pointer
         env:
-          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}
+          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || vars.METER_LANE_SIGNER != 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY || '' }}
         run: |
           set -euo pipefail
           # The tag's own key list: the lane is held while it lists none, so this never attaches unsigned.

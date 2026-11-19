@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { entryFolders, layoutEntryProblems, layoutsInEntries, problemsOf } from "../scripts/entries.mjs";
+import { entryFolders, layoutEntryProblems, layoutsInEntries, layoutsInMods, problemsOf } from "../scripts/entries.mjs";
 
 test("an entry folder is any folder holding mods/<name>/main.js; its layouts/ is refused", () => {
   const files = [
@@ -46,6 +46,28 @@ test("herdr/ must stay a mod entry with no layouts/; herdr-layout/ a layout entr
   ]);
   assert.deepEqual(layoutEntryProblems(files.filter((f) => !f.endsWith(".png"))), ["herdr-layout/preview.png: missing; a layout entry needs it"]);
   assert.deepEqual(layoutEntryProblems([...files, "herdr-layout/layouts/nested/x.json"]), [], "a layout of its own beside it is fine");
+});
+
+test("a mod's own layouts/ is refused once for each mod holding main.js", () => {
+  const files = [
+    "herdr/mods/x/main.js", "herdr/mods/x/layouts/a.json", "herdr/mods/x/layouts/b.json",
+    "herdr/mods/nomain/layouts/a.json", "docs/layouts/x.md",
+    "mods/r/main.js", "mods/r/layouts/a.json",
+    "apps/x/mods/y/main.js", "apps/x/mods/y/layouts/a.json",
+    "herdr-layout/examples/mods/m/main.js", "herdr-layout/examples/mods/m/layouts/a.json",
+    "herdr-layout/layouts/automagik.json", "herdr-layout/RECIPE.md", "herdr-layout/preview.png",
+  ];
+  const dirs = ["apps/x/mods/y/layouts/", "herdr-layout/examples/mods/m/layouts/", "herdr/mods/x/layouts/", "mods/r/layouts/"];
+  assert.deepEqual(layoutsInMods(files), dirs);
+  assert.deepEqual(problemsOf(files), dirs.map((dir) => `${dir}: a mod keeps no layouts/ of its own; the pack's layout lives in herdr-layout/layouts/ (herdr.dev skips the whole repository when a herdr-mod entry folder holds layouts/), so move it there`));
+
+  const pack = ["herdr/mods/x/main.js", "herdr-layout/layouts/automagik.json", "herdr-layout/RECIPE.md", "herdr-layout/preview.png"];
+  assert.deepEqual(problemsOf([...pack, "mods/a/main.js", "mods/a/mods/b/main.js", "mods/a/layouts/a.json"]), [
+    "mods/a/layouts/: a herdr-mod entry folder holds layouts/, and herdr.dev skips the whole repository for it; move the layout to its own top-level folder (herdr-layout/layouts/)",
+  ]);
+  assert.deepEqual(problemsOf([...pack, "herdr-layout/mods/m/main.js", "herdr-layout/mods/m/layouts/a.json"]), [
+    "herdr-layout/mods/: the layout entry keeps no mods of its own; the pack's mods are herdr/'s, which its RECIPE adds first, so remove this copy",
+  ]);
 });
 
 test("this repository: no herdr-mod entry folder holds layouts/", () => {

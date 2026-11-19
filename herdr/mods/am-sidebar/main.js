@@ -372,9 +372,9 @@ export default class Spaces extends View {
   reportOf(address) { return this.byAddress?.get(address)?.report ?? null; }
 
   // A pane's pending owner question (rows.js ownerQuestionOf): its needs-owner label while it is
-  // stopped and not blocked, which is what the sidebar draws as a Question chip. `status` is the
-  // row's drawn status, for a bot row whose error is drawn as blocked.
-  ownerOf(address, status) { return ownerQuestionOf(this.byAddress?.get(address), status); }
+  // live, stopped and not blocked, which is what the sidebar draws as a Question chip. `status`
+  // is the row's drawn status, for a bot row whose error is drawn as blocked.
+  ownerOf(address, status) { return ownerQuestionOf(this.byAddress?.get(address), status, this.now); }
 
   // The spaces holding such a pane, by space id: the first question's text. Read from this
   // render's terminals() and panes(), so the space's dot and the row's chip come from one hc
@@ -386,7 +386,7 @@ export default class Spaces extends View {
       const s = tabs.get(p.tab);
       if (!s || out.has(s.id)) continue;
       const t = this.byAddress?.get(p.terminal);
-      const text = ownerQuestionOf(t, t?.status);
+      const text = ownerQuestionOf(t, t?.status, this.now);
       if (text) out.set(s.id, text);
     }
     return out;
@@ -519,7 +519,7 @@ export default class Spaces extends View {
         .when(l === "└" || l === "├", (el) => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(kpic), (el) => el.child(div().mr(7).child(kpic)))
       .child(div().flex_1().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
-      .child(this.status(t, { status: st }, k.report ?? null, ownerQuestionOf(k, st)));
+      .child(this.status(t, { status: st }, k.report ?? null, ownerQuestionOf(k, st, this.now)));
   }
 
   // The agents list's grouped-view name: a tab someone named or the agent's own
@@ -565,7 +565,7 @@ export default class Spaces extends View {
   // for liveness too: the program table can say shell while the agent runs). The attach
   // ledger's bindings, when readLedger has them, name each bot's pane; its labels otherwise.
   prepareBots() {
-    const now = Date.now();
+    const now = this.now ?? Date.now();
     const known = knownBots(this.bots);
     this.keyOf = listedKeyOf(this.bots, this.paneKeyReader());
     const live = liveFrom(this.all, known, argvReader(this.argvOf), this.keyOf, this.ledger);
@@ -792,7 +792,7 @@ export default class Spaces extends View {
         .when(Boolean(h.template || h.model || h.effort), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(10)
           .text_color(t.dim).child([h.template, h.model, h.effort].filter(Boolean).join(" · "))))
         .when(h.terminal.includes("/"), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(h.terminal.split("/")[0])))
-        .child(this.status(t, { status: st }, this.reportOf(h.terminal), ownerQuestionOf(this.byAddress?.get(h.terminal), st))));
+        .child(this.status(t, { status: st }, this.reportOf(h.terminal), ownerQuestionOf(this.byAddress?.get(h.terminal), st, this.now))));
   }
 
   // A helper, worker or live bot row's click (workerTab.js rowWorker): its pane; else a tab
@@ -857,7 +857,7 @@ export default class Spaces extends View {
         .text_size(10).font_semibold().text_color(t.muted).child(`Wave ${b.planned.wave}`));
     } else {
       row = row.child(this.agentIcon(n, main ? 16 : 15, t))
-        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal), ownerQuestionOf(this.byAddress?.get(live.terminal), s), n.rateLimited) : div().w(13).flex_none());
+        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal), ownerQuestionOf(this.byAddress?.get(live.terminal), s, this.now), n.rateLimited) : div().w(13).flex_none());
     }
     const box = this.rowEvents(row, r, t, onClick, onMenu).rounded(main ? 10 : 8);
     const styled = main
@@ -1568,6 +1568,8 @@ export default class Spaces extends View {
     // from by every row: the main thread is the only one, so it can't change during a render.
     // A click reads it again (the snapshot of that moment), never this one.
     this.snap = { spaces: spaces(), panes: panes(), terminals: terminals(), agents: agents(), machines: machines(), focused: focused() };
+    // One clock per render: a label's age and an idle bot's sleep use the same now.
+    this.now = Date.now();
     const sp = this.snap.spaces;
     const ids = new Set(sp.map(p => p.id));
     const kept = Object.fromEntries(Object.entries(shared("am.space.colors") ?? {}).filter(([id]) => ids.has(id)));

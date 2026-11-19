@@ -5,9 +5,9 @@
 //   middle, another result came last). The adapter then says the agent "was interrupted" and
 //   ends the step, but the agent's prompt went on, unseen, until the person's next message.
 //   It is now asked to stop then and there, and ended if it will not.
-// - A bridge that closed. When the bridge process ends it says so and its credential is
-//   revoked; the agent on that session has lost DSH's tools for good. The next turn used to go
-//   on with it, without them. It now ends that session and starts a new one.
+// - A bridge that closed or whose process detached. A respawn can re-attach with the same
+//   credential. If the bridge is still gone on the next turn, the adapter starts a new
+//   session with the chat replayed. The agent process exiting revokes the credential.
 //
 // The real adapter and Backchannel, and the fake agent over stdio, as adapter.test.js.
 import assert from 'node:assert/strict'
@@ -169,7 +169,7 @@ test('#969: a turn that finds its bridge closed starts a new session, with DSH\'
   assert.equal(first.at(-1).reason.kind, 'stop')
   assert.deepEqual(h.executed, ['bash'])
   const before = h.live()
-  // The bridge process ended and said so: its credential is revoked (the `bye` of bridge.js).
+  // The host revoked the bridge credential while the agent was idle.
   h.backchannel.revoke(before.bridge)
   assert.equal(before.bridge.closed, true)
   const second = await h.step([user(opening), said('done'), user('bridge bash')])
@@ -191,6 +191,107 @@ test('#969: a turn that finds its bridge closed starts a new session, with DSH\'
   assert.equal(prompts.length, 2)
   assert.match(prompts[1].text, /walnut/, 'the earlier turn was replayed to the new session')
   assert.equal(h.warned.filter(line => /lost its dsh bridge/i.test(line)).length, 1)
+})
+
+test('#969 8b: a bridge respawn runs a tool in the same ACP session', async (t) => {
+  const h = host(t, { bridge: true })
+  const initial = (await h.step([user('plain words')])).at(-1).reason
+  assert.equal(initial.kind, 'stop', initial.failure?.message)
+  const live = h.live()
+  const { bridge, run } = live
+  const { sessionId } = run
+  const first = bridge.attachment
+  assert.match(first, /^[0-9a-f]{32}$/)
+
+  const chunks = await h.step([user('bridge-respawn bash')])
+  assert.equal(chunks.at(-1).reason.kind, 'stop', chunks.at(-1).reason.failure?.message)
+  assert.match(textIn(chunks), /The bridge said: ran bash/)
+  assert.deepEqual(h.executed, ['bash'])
+  assert.equal(h.live(), live)
+  assert.equal(run.sessionId, sessionId)
+  assert.equal(live.bridge, bridge)
+  assert.match(bridge.attachment, /^[0-9a-f]{32}$/)
+  assert.notEqual(bridge.attachment, first)
+  assert.ok(bridge.retired.has(first))
+  assert.deepEqual(h.events().filter(e => e.event === 'mcp-list').map(e => e.sessionId), [sessionId, sessionId])
+  assert.equal(h.events().filter(e => e.event === 'new-session').length, 1)
+})
+
+test('#969 8b: a bridge child exit rejects its pending MCP call', async t => {
+  const h = host(t, { bridge: true })
+  const get = h.backchannel.ctx.get
+  const started = Promise.withResolvers()
+  const body = Promise.withResolvers()
+  t.mock.method(h.backchannel.ctx, 'get', name => {
+    const service = get(name)
+    if (name !== 'tools') return service
+    return { ...service, execute: () => { started.resolve(); return body.promise } }
+  })
+  const reading = h.step([user('bridge bash')])
+  try {
+    await Promise.race([started.promise, reading.then(() => assert.fail('the bridge call never started'))])
+    const { run } = h.live()
+    await run.conn.prompt({ sessionId: run.sessionId, prompt: [{ type: 'text', text: 'bridge-drop' }] })
+    const chunks = await reading
+    assert.match(textIn(chunks), /bridge failed: dsh exited/)
+  } finally {
+    body.resolve({ results: [] })
+  }
+})
+
+test('#969 8b: a bridge left detached is replaced on the next turn with replay', async (t) => {
+  const h = host(t, { bridge: true })
+  const opening = 'Remember walnut. bridge-drop'
+  const first = await h.step([user(opening)])
+  assert.equal(first.at(-1).reason.kind, 'stop', first.at(-1).reason.failure?.message)
+  const before = h.live()
+  assert.equal(before.bridge.disconnected, true)
+  assert.equal(before.bridge.closed, false)
+  assert.equal(h.warned.filter(line => /lost its dsh bridge/i.test(line)).length, 0)
+
+  const second = await h.step([user(opening), said('done'), user('bridge bash')])
+  assert.equal(second.at(-1).reason.kind, 'stop', second.at(-1).reason.failure?.message)
+  assert.match(textIn(second), /The bridge said: ran bash/)
+  assert.deepEqual(h.executed, ['bash'])
+  assert.notEqual(h.live(), before)
+  assert.equal(before.bridge.closed, true)
+  assert.equal(h.events().filter(e => e.event === 'new-session').length, 2)
+  const prompts = h.events().filter(e => e.event === 'prompt')
+  assert.match(prompts[1].text, /walnut/)
+  assert.equal(h.warned.filter(line => /lost its dsh bridge/i.test(line)).length, 1)
+})
+
+test('#969 8b: an idle agent process exit revokes its bridge without another turn', async (t) => {
+  const h = host(t, { bridge: true })
+  const initial = (await h.step([user('plain words')])).at(-1).reason
+  assert.equal(initial.kind, 'stop', initial.failure?.message)
+  const { run, bridge } = h.live()
+  const list = async () => await fetch(h.backchannel.urlFor(bridge), {
+    method: 'POST',
+    headers: { authorization: `Bearer ${bridge.credential}` },
+    body: JSON.stringify({ op: 'list' }),
+  })
+  assert.equal((await list()).status, 200)
+  assert.equal(run.busy, false)
+  assert.equal(run.child.kill('SIGKILL'), true)
+  await until(() => !run.alive, 'the idle agent exited')
+  assert.equal(bridge.closed, true)
+  assert.equal(h.backchannel.records.has(bridge.credential), false)
+  assert.equal((await list()).status, 401)
+})
+
+test('#969 8b: agent exit revokes its current bridge even after its live entry changes', async t => {
+  const h = host(t, { bridge: true })
+  const initial = (await h.step([user('plain words')])).at(-1).reason
+  assert.equal(initial.kind, 'stop', initial.failure?.message)
+  const state = h.live()
+  const { run } = state
+  const replacement = h.backchannel.mint({ sessionId: 's1', agent: state.bridge.agent, name: 'Fake agent' })
+  state.bridge = replacement
+  h.adapter.live.delete('s1')
+  assert.equal(run.child.kill('SIGKILL'), true)
+  await until(() => replacement.closed, 'the exited run revoked its current bridge')
+  assert.equal(h.backchannel.records.has(replacement.credential), false)
 })
 
 test('#969: a bridge that is open leaves the session as it is', async (t) => {

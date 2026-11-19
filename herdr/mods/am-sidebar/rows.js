@@ -8,6 +8,7 @@ import { BOT_LABEL, RANKS, cleanProjectPath, crossMemberWarnings, mainBotOf, eff
 import { agentInForeground, rowIsAgent, waitsOnPermission } from "./launchArgs.js";
 import { AGENTS, detectModel, defaultModelFrom, resolveAgent } from "./models.js";
 import { workerBranch, workerTaskId } from "./workers.js";
+import { NEEDS_OWNER_LABEL, needsOwnerStale } from "./tidy.js";
 
 /** Idle this long is asleep (Automagik's own threshold). */
 export const ASLEEP_MS = 10 * 60 * 1000;
@@ -231,9 +232,10 @@ export const NEEDS_YOU_PERMISSION = "Permission";
 export const needsYouText = (report) => (waitsOnPermission(report) ? NEEDS_YOU_PERMISSION : NEEDS_YOU);
 
 // The documented marker a stopped agent sets on its own pane with `hc label`: the short text of
-// what it waits on (tidy.js's NEEDS_OWNER_LABEL, one label with two readers; a test holds them
-// equal). The sidebar draws it apart from the blocked chip; it never scans a pane's screen.
-export const NEEDS_OWNER_LABEL = "automagik-herdr.needs-owner";
+// what it waits on. tidy.js owns the marker and the stale window its report uses; rows.js imports
+// both, so the chip and that report cannot disagree. The sidebar draws it apart from the blocked
+// chip; it never scans a pane's screen.
+export { NEEDS_OWNER_LABEL };
 // The owner-question chip's word, drawn by main.js status().
 export const OWNER_QUESTION = "Question";
 /** How much of the label one line can carry; the rest is cut, keeping the chip and its tooltip small. */
@@ -243,11 +245,18 @@ export const OWNER_TEXT_MAX = 160;
  * The question a pane's needs-owner label carries while it waits on the person, or null. A
  * working, blocked or failed pane has no owner question: the chip clears in the drawing the
  * moment the agent works again, even before it removes the label. `status` is the row's drawn
- * status (a bot row draws `error` as blocked). Blank and whitespace labels say nothing; a long
- * one is cut to OWNER_TEXT_MAX characters on one line.
+ * status (a bot row draws `error` as blocked); `now` is the render's clock. The chip never
+ * outlives the agent that asked: tidy.js's needsOwnerStale (a day, its stale-needs-owner rule)
+ * and a live terminal are both required, so a label left on a dead or vanished pane draws
+ * nothing. Blank and whitespace labels say nothing; a long one is cut to OWNER_TEXT_MAX
+ * characters on one line.
  */
-export function ownerQuestionOf(row, status = row?.status) {
+export function ownerQuestionOf(row, status = row?.status, now = Date.now()) {
   if (status === "working" || status === "blocked" || status === "error") return null;
+  // A terminal gone from the snapshot has no row; one that exited may keep its label row around
+  // in the app home. Neither has an agent behind it to wait on the person.
+  if (row?.state !== "live") return null;
+  if (needsOwnerStale(row, now)) return null;
   const text = row?.labels?.[NEEDS_OWNER_LABEL];
   if (typeof text !== "string") return null;
   const line = text.trim().replace(/\s+/g, " ");
