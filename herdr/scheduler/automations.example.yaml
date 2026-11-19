@@ -35,6 +35,32 @@ automations:
     # Optional: send the one-line result to this bot (hc send).
     # notify: b-xxxxxxxx
 
+  # A target hands the prompt to a bot, or to a worker of one, instead of
+  # starting a fresh agent. It needs `backend: hc` at the top of the file (bots
+  # live in herdr-core). `repo` is the project whose .herdr/bots.json names the
+  # bot; the bot is named by its id, never by a terminal address.
+  # `bot:` pastes the prompt into the bot's own terminal (starting it first when
+  # it is not running); `worker:` starts a worker of it for the run and ends it
+  # once its turn finishes. A worker still mid-turn at the timeout is refused by
+  # the checked end and stays, logged (ADR 0014).
+  #
+  # - name: housekeeping
+  #   cron: "0 9 * * *"
+  #   repo: ~/Projects/house
+  #   target: bot:b-6jrz4bmxml
+  #   # queue (the default) hands the prompt over for the bot's next turn;
+  #   # skip drops this occurrence and records it skipped, like an overlap.
+  #   target_when_busy: queue
+  #   prompt: |
+  #     Tidy the house: the checks every morning, and the reports that pile up.
+  #
+  # - name: review-queue
+  #   cron: "0 10 * * *"
+  #   repo: ~/Projects/house
+  #   target: worker:b-6jrz4bmxml
+  #   prompt: |
+  #     Review the queue and leave your notes in the worker's reply.
+
   - name: nightly-deps
     cron: "@daily"
     repo: ~/Projects/myapp

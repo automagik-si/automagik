@@ -266,6 +266,78 @@ test('reconnect resumes stored ID, refreshes runtime ID and replaces a replay ga
   assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
 })
 
+test('attached reconcile flags an epoch gap with a pending submit and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached reconcile flags an epoch gap with an uncertain turn and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    uncertain: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached prepare has no epoch gap at zero cursor with nothing waiting', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: false, uncertain: false,
+  })
+  await f.wire.connect()
+  await f.run.prepare()
+  assert.equal(f.run.joinGap, false)
+  assert.deepEqual(f.run.takeRecovered(), [])
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+})
+
+test('attached prepare has no gap for a waiting turn in the same epoch and runtime', async t => {
+  for (const waiting of ['pendingSubmit', 'uncertain']) {
+    const f = fixture(t, { attached: true, replay: { epoch: 'epoch-a', latest_seq: 0 } })
+    Object.assign(f.identity, {
+      canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+      runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+      [waiting]: true,
+    })
+    await f.wire.connect()
+    await f.run.prepare()
+    assert.equal(f.run.joinGap, false, waiting)
+    assert.deepEqual(f.run.takeRecovered(), [], waiting)
+    assert.equal(f.identity[waiting], true)
+    assert.equal(f.identity.epoch, 'epoch-a')
+    assert.equal(f.identity.runtimeSessionId, f.snapshot.session_id)
+  }
+})
+
 test('a normal turn resets the watermark when an owned SSH backend starts a new replay epoch', async t => {
   const f = fixture(t, { ready: { replay_epoch: 'epoch-b' } })
   Object.assign(f.identity, { storedSessionId: f.snapshot.stored_session_id, runtimeSessionId: f.snapshot.session_id, lastSeq: 100, epoch: 'epoch-a', pendingSubmit: false })
@@ -486,6 +558,34 @@ test('DSH adapter produces a real mirror tool card then continues the same remot
   assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 1)
 })
 
+test('a file copy path that changes between asks does not refuse the turn', async t => {
+  // #1340: the guard rebuilds the Session's projection, and the attachment service may name a
+  // different copy on each call. The path is a handle to the same durable bytes, so the turn
+  // must still be accepted; everything else about the handle and the text stays exact.
+  const ref = Object.freeze({ attachmentId: `sha256:${'a'.repeat(64)}`, name: 'sample.txt', bytes: 3 })
+  const fileMessage = Object.freeze({ role: 'user', id: 'm-2', content: Object.freeze([Object.freeze({ type: 'file', attachment: ref })]) })
+  const messages = Object.freeze([
+    Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([Object.freeze({ type: 'text', text: 'read this' })]) }),
+    fileMessage,
+  ])
+  let calls = 0
+  const ctx = new Context()
+  ctx.provide('attachments'); ctx.set('attachments', { fileHostPath: ref => `/tmp/hermes-copy-${++calls}/${ref.attachmentId.slice(7, 15)}` })
+  ctx.provide('fs'); ctx.set('fs', { processPathFromHostPath: path => path })
+  const adapter = new RemoteChatAdapter({ ctx }, { enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }], identity: () => ({ createKey: randomUUID() }), save: async () => {}, open: async () => { throw Error('not opened') } })
+  t.after(() => adapter.dispose())
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  const dispatched = deepFreeze(projectFilesToText([...messages], () => '/tmp/hermes-copy-dispatched/sha256'))
+  const envelope = Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: dispatched })
+  assert.equal(RemoteChatAdapter.ownTurn(envelope, agent, ref => adapter.filePath(ref)), true)
+  // A different durable file under the same shape is still not this turn.
+  const other = deepFreeze(projectFilesToText([...messages], () => '/tmp/hermes-copy-dispatched/sha256').map(projected => projected.role === 'user' && projected.id === 'm-2'
+    ? { ...projected, content: projected.content.map(block => block.type === 'text' ? { ...block, text: block.text.replace(ref.attachmentId.slice(7, 15), 'b'.repeat(16)) } : block) }
+    : projected))
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ ...envelope, messages: other }), agent, ref => adapter.filePath(ref)), false)
+})
+
 test('a projected agent-loop request still answers, and a hand-built call is still refused', async t => {
   const f = fixture(t)
   const ctx = new Context(), runtime = new LlmRuntime(ctx)
@@ -691,6 +791,38 @@ test('each hardening check is pinned by a forgery equal to the Session message',
   // Frozen message, unfrozen content: the value could change after the guard.
   const unfrozen = Object.freeze({ role: 'user', id: 'm-1', content: [Object.freeze({ type: 'text', text: 'say OK' })] })
   assert.equal(RemoteChatAdapter.ownTurn(envelope([unfrozen]), agent), false)
+})
+
+test('a plain-data toJSON key in history is ordinary data; a function toJSON is still refused', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  // A tool call in history whose arguments carry an ordinary JSON key named toJSON.
+  const call = Object.freeze({ role: 'assistant', id: 'a-1', content: Object.freeze([Object.freeze({ type: 'tool-call', id: 'call-1', name: 'sample', arguments: Object.freeze({ toJSON: 'x', nested: Object.freeze({ toJSON: 1 }) }) })]), source: Object.freeze({ kind: 'model', provider: 'hermes-remote', model: 'sample:model' }) })
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })]) })
+  const messages = Object.freeze([call, user, Object.freeze({ role: 'developer', id: 'dev-tools', content: Object.freeze([Object.freeze({ type: 'tool-addition', toolName: 'sample' })]) })])
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const request = markAgentLoopRequest(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages, tools: Object.freeze([]), signal: new AbortController().signal }))
+  const stream = runtime.stream(request)
+  const first = stream.next()
+  await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the prompt to be submitted', first)
+  f.socket().event('message.complete', { text: 'OK' })
+  const chunks = [(await first).value]
+  for await (const chunk of stream) chunks.push(chunk)
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'OK')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  // A function toJSON is not data: JSON.stringify would call it, so it stays refused.
+  const evil = Object.freeze(Object.defineProperty([Object.freeze({ type: 'text', text: 'say OK' })], 'toJSON', { value: () => [], enumerable: false }))
+  const evilUser = Object.freeze({ role: 'user', id: 'm-1', content: evil })
+  const evilAgent = { id: 'sample-chat', session: { deriveMessages: () => [evilUser], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) } }
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([evilUser]) }), evilAgent), false)
 })
 
 test('each request field must be own data: an equal-value accessor envelope is refused', async t => {
@@ -1494,3 +1626,30 @@ test('an attached chat with no visible row still opens so the first open can nor
   assert.equal(chunks.at(-1).type, 'finish')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
 })
+
+for (const [type, field] of [['error', 'message'], ['message.complete', 'error']]) {
+  test(type + ' reason drops a split supplementary character at the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(498) + '\u{1F600}' + 'tail ' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(498) + '…')
+    assert.ok(detail.isWellFormed())
+  })
+
+  test(type + ' reason keeps a complete supplementary character before the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(497) + '\u{1F600}' + 'tail' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(497) + '\u{1F600}' + '…')
+    assert.equal(detail.length, 500)
+    assert.ok(detail.isWellFormed())
+  })
+}

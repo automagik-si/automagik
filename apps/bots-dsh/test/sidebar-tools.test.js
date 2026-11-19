@@ -6,8 +6,8 @@ import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 
 // Other plugins' buttons in the sidebar's top row and rail (extend.js sidebarTools), drawn by
-// TeamSidebar with a stand-in React: components run as plain functions. The browser half is
-// power-shortcut-browser.test.js.
+// TeamSidebar with a stand-in React: components run as plain functions. The marketplace's Apps
+// button is one of these entries.
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const { outputFiles } = await build({
   stdin: {

@@ -38,6 +38,16 @@ test('the sizes are round 1.1 values', () => {
   assert.match(LEFT_BAR_SKINS.stage['--lb-needs-ink'], /--st-warn.* 70%,var\(--bt-ink\)/)
 })
 
+test('a chat mark is one tile: the other side\'s tone, and the owner\'s as a ring', () => {
+  assert.match(LEFT_BAR_CSS, /\.lb-chat-face\{[^}]*background:var\(--oc-in,var\(--oc-them,var\(--bt-card\)\)\)/)
+  assert.match(LEFT_BAR_CSS, /\.lb-chat-face\[data-self\]\{box-shadow:inset 0 0 0 1\.5px var\(--oc-out/)
+})
+
+test('a chat mark reads Omni\'s tones under either of its names', () => {
+  assert.match(LEFT_BAR_CSS, /\.lb-chat-face\{[^}]*background:var\(--oc-in,var\(--oc-them,var\(--bt-card\)\)\)/)
+  assert.match(LEFT_BAR_CSS, /\.lb-chat-face\[data-self\]\{[^}]*var\(--oc-out,var\(--oc-me,/)
+})
+
 test('the wordmark fits the brand box at any width, so the phone drawer never cuts it', () => {
   assert.match(LEFT_BAR_CSS, /\.lb-brand \.omni-wordmark\{[^}]*max-width:100%[^}]*height:auto\}/)
 })

@@ -32,6 +32,7 @@ import { hasCanvas, splitCanvases } from './canvas-text.js'
 import { CanvasSlot } from './canvas-slot.js'
 import { TaskCard, endLabel } from './task-card.js'
 import { toolCards } from './extend.js'
+import { READ_SCOPE_CODE } from '../shared/read-scope.js'
 
 export { clockLabel }
 
@@ -1191,7 +1192,15 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
     }
     case 'message_bot': {
       const target = findBot(arg('to')) ?? { name: arg('to') ?? '…', color: 'gray' }
-      if (done && call.isError) return h('div', { className: 'bt-event' }, t("Couldn't message {name}", { name: target.name }))
+      if (done) {
+        // The host marks a call that sent nothing with `sent: false` and its reason:
+        // show that reason, never "Messaged", so the user is not told a message left
+        // when it did not. A delivery keeps its string result and says "Messaged".
+        const refused = call.meta?.sent === false ? call.meta.reason ?? contentText(call.content) : ''
+        if (refused !== '') return h('div', { className: 'bt-event bt-event-error', role: 'status' }, refused)
+        // The refusal stands without a reason or content: never fall through to "Messaged".
+        if (call.isError || call.meta?.sent === false) return h('div', { className: 'bt-event' }, t("Couldn't message {name}", { name: target.name }))
+      }
       return h(EventLine, { prefix: t('Messaged'), bots: [target], onOpen: bot => bot.id && actions.openExchange(self?.id ?? sessionId, bot.id), whole: true })
     }
     case 'stop_bot': {
@@ -1316,7 +1325,8 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
     return entry ? [[call.callId, stopLine(entry), entry.why]] : []
   }))) : '[]'
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]))
-  const drawn = calls.filter(call => DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
+  const readRefused = call => call.isError === true && call.error?.code === READ_SCOPE_CODE
+  const drawn = calls.filter(call => readRefused(call) || DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
   // The newest call still running names the work, so a program reads as the tool it is in.
   const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result')
   const note = running ? toolActivity(toolName(running), toolArgs(running).text, findBot, roster.byId[sessionId]) : null
@@ -1327,6 +1337,10 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } }
   return h(Fragment, null, drawn.map((call, index) => {
     const stop = stops.get(call.callId)
+    if (readRefused(call)) {
+      return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status' },
+        call.error.reason ?? contentText(call.content))
+    }
     // A call that draws nothing leaves the empty mark: one of this plugin's own, or a
     // card another plugin registered (extend.js) that returned nothing.
     return h(Fragment, { key: call.callId ?? index }, renderCall(call, env) ?? h(CellEmpty),

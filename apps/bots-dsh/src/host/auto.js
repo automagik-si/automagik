@@ -44,7 +44,9 @@ export function install(rt) {
     if (out.autoOffered || bot.permissionAuto) {
       const mark = bot.permissionAuto ?? markOf(bot.model)
       const by = judgeOf(mark)
-      const bridged = acp()?.ownModeOf?.(mark)?.bridged === true
+      let chatId
+      try { chatId = rt.chatOf?.(bot.id) } catch {}
+      const bridged = acp()?.ownModeOf?.(mark, chatId)?.bridged === true
       const ref = by === 'own' ? bot.model : by === 'team' || bridged ? rt.cachedBackground?.() : undefined
       const catalog = rt.cachedCatalog?.()
       const model = Array.isArray(catalog) ? catalog.find(entry => entry.ref === ref)?.name ?? ref : ref

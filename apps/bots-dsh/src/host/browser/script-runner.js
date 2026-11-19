@@ -22,9 +22,13 @@
 //   withheld  the host's environment: the child gets an empty one
 //             the host itself: the one channel is JSON lines on the child's stdin and
 //             stdout, and a line the host does not accept ends the run
-//             time: at the deadline the host kills the child, it does not ask. The child
-//             keeps the same deadline itself, one second later: the interpreter stops a
-//             script whose own code never yields, and the process leaves
+//             time: the host gives the child twice the budget to start and the whole
+//             budget from when it says ready. The host arms its budget before go, the
+//             child its own at go, one second later: the interpreter stops a script
+//             whose own code never yields, and the process leaves. A child that never
+//             says ready is killed at the start bound; one that calls a helper first
+//             is held to the budget from that call. At either deadline the host kills
+//             the child, it does not ask
 //
 // What no flag of Node 24 refuses, and so what a script that got out of the interpreter
 // could still do:
@@ -90,12 +94,13 @@ function childEnv() {
   return env
 }
 
-// What the child sends and nothing else: a call of one of the helpers, or the one
-// answer. Anything else comes from a child that is no longer ours.
+// What the child sends and nothing else: ready once, a call of one of the helpers, or
+// the one answer. Anything else comes from a child that is no longer ours.
 function readMessage(line, helpers) {
   let message
   try { message = JSON.parse(line) } catch { return undefined }
   if (message === null || typeof message !== 'object' || Array.isArray(message)) return undefined
+  if (message.type === 'ready') return message
   const text = value => value === null || (typeof value === 'string' && value.length <= MAX_TEXT)
   if (message.type === 'done') return text(message.answer) && text(message.error) ? message : undefined
   if (message.type !== 'call') return undefined
@@ -110,9 +115,13 @@ function readMessage(line, helpers) {
 // `entry` is the child's file; only the tests give another.
 export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, entry = CHILD } = {}) {
   return new Promise((resolve, reject) => {
+    const startDeadline = performance.now() + 2 * timeout
+    let phase = 'start'
+    let runDeadline
     let settled = false
     let child
     let folder
+    let timer
     // The folder goes when the child is gone: only then is nothing writing into it.
     const clear = () => {
       try { if (folder !== undefined) rmSync(folder, { recursive: true, force: true }) } catch {}
@@ -127,7 +136,28 @@ export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, ent
       settle(value)
     }
     // The kill stops a script that never yields, which a Promise.race cannot.
-    const timer = setTimeout(() => end(reject, new Error(`Script ran longer than ${timeout / 1000} seconds.`)), timeout)
+    const expire = () => end(reject, new Error(`Script ran longer than ${timeout / 1000} seconds.`))
+    // Node timers have millisecond resolution and can fire just short of a performance.now() deadline.
+    const expireAt = (deadline) => {
+      const delay = Math.min(2_147_483_647, Math.max(1, Math.ceil(deadline - performance.now())))
+      timer = setTimeout(() => {
+        if (performance.now() < deadline) expireAt(deadline)
+        else expire()
+      }, delay)
+    }
+    expireAt(startDeadline)
+    const enterRun = () => {
+      const now = performance.now()
+      if (now >= startDeadline) {
+        expire()
+        return false
+      }
+      phase = 'run'
+      clearTimeout(timer)
+      runDeadline = now + timeout
+      expireAt(runDeadline)
+      return true
+    }
     try {
       // An empty working folder of the run's own: what Node itself writes for a process
       // (a trace log, a snapshot at the heap limit) lands there and not in the host's.
@@ -155,9 +185,16 @@ export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, ent
         else end(reject, new Error(message.error))
         return
       }
+      if (message.type === 'ready') {
+        if (phase !== 'start') return refuse()
+        if (enterRun()) send({ type: 'go' })
+        return
+      }
+      if (phase === 'start' && !enterRun()) return
       let reply
       try {
         const args = JSON.parse(message.args)
+        if (performance.now() >= runDeadline) return expire()
         const value = await helpers[message.name](...(Array.isArray(args) ? args : []))
         const json = JSON.stringify(value)
         // A reply the script's memory may have no room for is not sent: the call fails.
@@ -168,6 +205,7 @@ export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, ent
         reply = { id: message.id, ok: false, error: text.length > MAX_TEXT ? 'The helper failed.' : text }
       }
       if (settled) return
+      if (performance.now() >= runDeadline) return expire()
       send(reply)
       if (child.stdin.writableLength > MAX_WAITING) end(reject, new Error('Script stopped: more than 64 MB of helper replies were waiting for it. It made calls and did not read their replies, or it waited for too many large replies at once.'))
     }
@@ -205,6 +243,6 @@ export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, ent
       clear()
       end(reject, new Error(`Script stopped before it finished (${signal ?? `exit ${code}`}).`))
     })
-    send({ type: 'start', body, names: Object.keys(helpers), wait: timeout })
+    send({ type: 'start', body, names: Object.keys(helpers), wait: timeout, ready: true })
   })
 }

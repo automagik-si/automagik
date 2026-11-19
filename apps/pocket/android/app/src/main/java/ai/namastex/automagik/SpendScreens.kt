@@ -14,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -42,7 +43,17 @@ object TodayTiles {
     fun heightDp(fontScale: Float) = (48f * fontScale + 24f).dp
     const val MAX_SP = 22
     const val MIN_SP = 12
-    fun textWidthDp(screenDp: Int): Double = (screenDp - 2.0 * GUTTER_DP - (COUNT - 1) * GAP_DP) / COUNT - 2 * PAD_DP
+    /** How many tiles share a row: all four, or two from a large font setting so every label stays whole. */
+    fun columns(fontScale: Float) = if (fontScale >= 1.2f) 2 else COUNT
+    fun textWidthDp(screenDp: Int, columns: Int = COUNT): Double = textWidthDp(screenDp.toDouble(), columns)
+    fun textWidthDp(screenDp: Double, columns: Int = COUNT): Double =
+        (screenDp - 2.0 * GUTTER_DP - (columns - 1) * GAP_DP) / columns - 2 * PAD_DP
+    /**
+     * The money figure's size: the counts' [MAX_SP] whenever its 0.62 em width fits the tile at [fontScale],
+     * stepping down only as far as the tile needs (#1068). Never below [MIN_SP].
+     */
+    fun amountSp(text: String, widthDp: Double, fontScale: Float): Int =
+        (MAX_SP downTo MIN_SP).firstOrNull { text.length * 0.62 * it * fontScale <= widthDp } ?: MIN_SP
 }
 
 /** A tile's second line: one line that shrinks rather than ellipsize at a large font setting. */
@@ -53,12 +64,17 @@ object TodayTiles {
 
 /** Today's "spent today" count, beside needs you / working / connected; the caller shows it only when a meter reports. */
 @Composable fun SpendCount(view: Spend.View, modifier: Modifier = Modifier) {
-    val numberBox = with(LocalDensity.current) { 24.sp.toDp() }
+    val density = LocalDensity.current
+    val numberBox = with(density) { 24.sp.toDp() }
+    val screenDp = with(density) { LocalWindowInfo.current.containerSize.width.toDp().value }
+    val room = TodayTiles.textWidthDp(screenDp.toDouble(), TodayTiles.columns(density.fontScale))
+    val amount = Spend.compact(view.today())
+    val size = TodayTiles.amountSp(amount, room, density.fontScale)
     Column(modifier.clip(RoundedCornerShape(12.dp)).background(Surface).border(1.dp, Border, RoundedCornerShape(12.dp)).padding(TodayTiles.PAD_DP.dp, 10.dp)) {
-        // The same fixed line box as CountCard, so the label below starts at the same height.
+        // The same fixed line box and size as CountCard, so the figure matches the counts at every font setting.
         Box(Modifier.height(numberBox), contentAlignment = Alignment.CenterStart) {
-            BasicText(Spend.compact(view.today()), style = LocalTextStyle.current.copy(color = Ink, fontSize = TodayTiles.MAX_SP.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
-                maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(TodayTiles.MIN_SP.sp, TodayTiles.MAX_SP.sp, 1.sp))
+            BasicText(amount, style = LocalTextStyle.current.copy(color = Ink, fontSize = size.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
+                maxLines = 1, softWrap = false)
         }
         TileLabel("spent today")
     }

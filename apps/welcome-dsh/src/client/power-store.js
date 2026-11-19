@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
 // What each power button (Omni, Genie, Unfold) is doing, kept outside the views that draw it:
-// the team step's cards and the sidebar's power shortcut (power-shortcut.js) read the same
+// the team step's cards and each built-in Bot's settings card (power-shortcut.js) read the same
 // phase, and a power-on started in one keeps running when that view closes. Only an explicit
 // stop (a card's Remove or power-off) aborts a run; unmounting never does.
 
@@ -60,34 +60,10 @@ export function stopPower(kind) {
   runs.get(kind)?.abort()
 }
 
-// The shortcut's way into the team step: it opens the step on purpose, so the step saves
-// nothing on Continue (TeamStep's explicit mode), and `power` ('omni') powers that card on by
-// itself. One-shot, short-lived, and mirrored to sessionStorage where there is one.
-const INTENT_KEY = 'automagik.welcome.team-intent'
-export const INTENT_MS = 60_000
-let intent = null
-
-export function setTeamIntent(power = null, now = Date.now()) {
-  intent = { power, at: now }
-  try { globalThis.sessionStorage?.setItem(INTENT_KEY, JSON.stringify(intent)) } catch { /* the module copy stands */ }
-}
-
-export function takeTeamIntent(now = Date.now()) {
-  let value = intent
-  intent = null
-  try {
-    const stored = globalThis.sessionStorage?.getItem(INTENT_KEY)
-    globalThis.sessionStorage?.removeItem(INTENT_KEY)
-    if (value === null && stored) value = JSON.parse(stored)
-  } catch { /* no storage, or an unreadable entry */ }
-  return value !== null && typeof value?.at === 'number' && now - value.at >= 0 && now - value.at < INTENT_MS ? value : null
-}
-
-// For tests: forget every phase, run and intent.
+// For tests: forget every phase and run.
 export function resetPower() {
   for (const controller of runs.values()) controller.abort()
   runs.clear()
   states.clear()
-  intent = null
   for (const listener of Array.from(listeners)) listener()
 }

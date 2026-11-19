@@ -14,7 +14,7 @@ class PocketApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashLog.install(this)
-        Updater.init(this)
+        AppUpdates.init(this)
     }
 }
 

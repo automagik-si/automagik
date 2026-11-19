@@ -158,6 +158,7 @@ export function install(rt) {
       return cliOnly
     }
     for (const bot of Object.values(state.bots ?? {})) {
+      if (bot.shellHeld !== undefined) continue
       const moved = bot?.acpMoved ?? (state.claudeAcpMoved === true ? priorMove(bot) : undefined)
       if (moved === undefined) continue
       const pickedModel = bot.model !== moved.target
@@ -181,7 +182,7 @@ export function install(rt) {
       delete bot.appliedEffort
       restored.push(bot)
     }
-    if (state.claudeAcpMoved === true) {
+    if (state.claudeAcpMoved === true && Object.values(state.bots ?? {}).every(bot => bot.shellHeld === undefined)) {
       delete state.claudeAcpMoved
       changed = true
     }
@@ -200,12 +201,14 @@ export function install(rt) {
     await rt.load()
     // Nothing is written by a host that only reads the team; the writer moves or restores them.
     if (rt.readOnly?.() !== undefined) return
+    const bots = () => Object.values(state.bots ?? {}).filter(bot => bot.shellHeld === undefined)
+    if (bots().length === 0 && Object.keys(state.bots ?? {}).length > 0) return
     // A team moved before this record existed: the pi-ai model is still recoverable from the
     // old ref, so the rollback has something exact to restore. The record is saved, so a
     // later pass cannot rebuild it from a level the person changed meanwhile.
     let recovered = false
     if (state.claudeAcpMoved === true) {
-      for (const bot of Object.values(state.bots ?? {})) {
+      for (const bot of bots()) {
         if (bot?.acpMoved !== undefined) continue
         const record = priorMove(bot)
         if (record !== undefined) {
@@ -226,8 +229,15 @@ export function install(rt) {
     const moved = []
     const reapply = []
     let waiting = false
+    let heldOnRoute = false
     let changed = recovered
-    for (const bot of Object.values(state.bots ?? {})) {
+    for (const bot of bots()) {
+      // A Bot without a shell cannot move onto a coding CLI that brings its own shell.
+      // Its hold ends when the shell comes back, and the move runs again then.
+      if (bot?.acpShellHeld !== undefined && bot.shell !== false) {
+        delete bot.acpShellHeld
+        changed = true
+      }
       const prior = bot?.acpMoved
       if (prior !== undefined) {
         if (bot.model !== prior.target) {
@@ -250,6 +260,16 @@ export function install(rt) {
         if (bot?.claudeCodeModel !== undefined && bot.model === piAiClaudeOf(bot.claudeCodeModel)) waiting = true
         continue
       }
+      if (bot.shell === false) {
+        heldOnRoute = true
+        if (bot.acpShellHeld !== true) {
+          bot.acpShellHeld = true
+          changed = true
+          rt.warn?.('ds-bot: %s stays on %s: Claude Code over ACP brings its own shell, '
+            + 'so turn the shell on or pick a native model.', bot.name, bot.model)
+        }
+        continue
+      }
       bot.acpMoved = {
         from: { model: bot.model, ...(bot.effort === undefined ? {} : { effort: bot.effort }) },
         target,
@@ -261,7 +281,7 @@ export function install(rt) {
       moved.push(bot)
       changed = true
     }
-    if (state.claudeAcpMoved !== true && !waiting) {
+    if (state.claudeAcpMoved !== true && !waiting && !heldOnRoute) {
       state.claudeAcpMoved = true
       changed = true
     }

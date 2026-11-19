@@ -78,3 +78,7 @@ The desktop app counts as "the app" for updates and the Bot browser through `OMN
 This merge incorporates upstream commit `a66cc737cfb6c3d8a2597e748cded6cab1206dd3`.
 Automagik names, routes, storage prefixes, service defaults and the `omni-ui:` namespace remain
 as documented above; generated client and Office bundles are rebuilt by the lead after assembly.
+
+Renamed after v0.3.6, the `ds-bot-office` and `ds-bot-goal` providers are now
+`automagik-bots-office` and `automagik-bots-goal`. Office checks `AUTOMAGIK_BOTS_OFFICE_NODE`
+first and falls back to `DS_BOT_OFFICE_NODE` if the new variable is unset, empty or points to a missing path.

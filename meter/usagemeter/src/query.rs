@@ -1828,7 +1828,8 @@ fn read(
             rows.extend(excess);
         }
         // Hourly history cannot be sliced exactly. Report it only as before-evidence
-        // actor totals, never as exact branch or bot usage in the custom interval.
+        // actor totals, never as exact branch or bot usage in the custom interval: a frozen
+        // row's branch is kept, as the named-window reader keeps it (#1259).
         if evidence_from.is_none_or(|ev| since < ev) {
             let counted = meta_i64(&meta, "counted_from_ms").unwrap_or(since);
             scan_usage(
@@ -1839,8 +1840,6 @@ fn read(
                 evidence_from,
                 &mut |mut r| {
                     r.class = Class::Before;
-                    r.branch = None;
-                    r.branch_basis = BranchBasis::None;
                     r.bot = None;
                     rows.push(r);
                 },

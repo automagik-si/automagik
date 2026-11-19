@@ -14,6 +14,7 @@ export const TOOL_NAME = 'acp_tool'
 const DSH_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'fetch', 'other'])
 const kindOf = kind => (DSH_KINDS.has(kind) ? kind : 'other')
 const OUTPUT_LIMIT = 20_000
+const LASTING_ONLY = 'lasting-only'
 
 const diffsOf = content => (Array.isArray(content) ? content : [])
   .filter(item => item?.type === 'diff' && typeof item.path === 'string')
@@ -45,6 +46,7 @@ const judgedText = tool => `Auto's judge refused ${tool.title}: ${tool.judgeReas
 
 function resultText(tool) {
   if (tool.sessionFileResult !== undefined) return tool.sessionFileResult
+  if (tool.lastingReason !== undefined) return tool.lastingReason
   if (typeof tool.judgeReason === 'string') return judgedText(tool)
   const text = contentText(tool.content) || tool.output || (tool.rawOutput === undefined ? '' : typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput))
   return text.length > OUTPUT_LIMIT ? `${text.slice(0, OUTPUT_LIMIT)}…` : text
@@ -91,7 +93,10 @@ async function resultOf(tool, attachments) {
 // DSH's one-shot answer, as the option the agent offered for it.
 export function optionFor(outcome, options) {
   const pick = kinds => kinds.map(kind => options.find(option => option.kind === kind)).find(Boolean)
-  const chosen = outcome === 'allowed-once' ? pick(['allow_once', 'allow_always']) : outcome === 'rejected' ? pick(['reject_once', 'reject_always']) : undefined
+  let chosen
+  if (outcome === 'allowed-once') chosen = pick(['allow_once'])
+  if (outcome === 'rejected') chosen = pick(['reject_once', 'reject_always'])
+  if (outcome === LASTING_ONLY) chosen = pick(['reject_once'])
   return chosen ? { outcome: { outcome: 'selected', optionId: chosen.optionId } } : { outcome: { outcome: 'cancelled' } }
 }
 
@@ -110,9 +115,9 @@ async function imageResult(host, live, tool, exec) {
   if (exec.signal?.aborted) return failed('The image was stopped before it was finished.')
   const base64 = agentImageOf(tool)
   if (base64 === undefined) {
-    return failed(typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
+    return failed(tool.lastingReason ?? (typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
       ? `${live.name} could not make this image. Try again, or describe it differently.`
-      : `${live.name} ended without an image. Try again.`)
+      : `${live.name} ended without an image. Try again.`))
   }
   if (!isPng(base64)) return failed(`${live.name} answered with something that is not a PNG image. Try again.`)
   if (keeper === undefined || typeof keeper.keep !== 'function') return failed('The image was made, but this chat has no place to keep it.')
@@ -125,15 +130,32 @@ async function imageResult(host, live, tool, exec) {
   }
 }
 
-const changed = (tool, signal) => new Promise((resolve) => {
+// `run`: also wake on a question stored for any other call of that run (native-tools mode).
+const changed = (tool, signal, run) => new Promise((resolve) => {
   const done = () => {
     tool.listeners.delete(done)
+    run?.askListeners?.delete(done)
     signal?.removeEventListener('abort', done)
     resolve()
   }
   tool.listeners.add(done)
+  run?.askListeners?.add(done)
   signal?.addEventListener('abort', done, { once: true })
 })
+
+// Native-tools mode (#1564): while this card waits for its call to end, the agent can ask about
+// another call whose card cannot come before this one ends. That is a subagent's nested call
+// (Claude Code's Agent tool waits for its child, the child waits for the answer): its question
+// is asked here, through DSH's approval, naming that call, so it is never left unanswered and
+// a refusal reaches the agent before the call runs. Its own card follows, already answered.
+const nestedQuestion = (live, tool) => {
+  if (live?.native !== true) return undefined
+  for (const other of live.run.tools.values()) {
+    if (other === tool || other.retired === true || other.mirrored === true || other.unanswerable === true) continue
+    if (other.permission !== undefined && other.permission.asked !== true) return other
+  }
+  return undefined
+}
 
 // The executions whose mirror body started. DSH hands one `exec` object to its gates, to the body
 // and to `tools/result`, so the adapter can tell a call that was refused before the body (and
@@ -216,7 +238,21 @@ export function mirrorTool(host) {
               continue
             }
             if (isTerminal(tool) || !live.run.busy) break
-            await changed(tool, exec.signal)
+            const nested = nestedQuestion(live, tool)
+            if (nested !== undefined) {
+              const question = nested.permission
+              // Auto review reads a call from its own DSH execution. A nested call asked from
+              // the waiting Agent card has none yet, so at Auto run its own card here, inside
+              // the open step: the reviewer answers it like any call, and only an escalation
+              // reaches the person. Manual and Full keep the direct dialog below.
+              const level = levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.())
+              if (level.auto === true && typeof host.runNested === 'function'
+                && await host.runNested(live, nested, exec)) continue
+              question.asked = true
+              question.answer(optionFor(await ask(host, live, nested, exec, question, { review: false }), question.options))
+              continue
+            }
+            await changed(tool, exec.signal, live.native === true ? live.run : undefined)
           }
         } finally {
           // The card's body is done asking, however it left: a question that comes for the call
@@ -348,8 +384,21 @@ function reviewHolds(host, live, tool, exec, permission, record) {
   return isDeepStrictEqual(JSON.parse(JSON.stringify(callArguments(tool))), args)
 }
 
-async function ask(host, live, tool, exec, permission) {
-  const record = reviewed.get(exec); reviewed.delete(exec)
+// `review: false` (a nested call's question, asked from another call's card): the Auto review
+// record of this execution belongs to that card's own call and is left for it.
+async function ask(host, live, tool, exec, permission, { review = true } = {}) {
+  const record = review ? reviewed.get(exec) : undefined
+  if (review) reviewed.delete(exec)
+  tool.lastingReason = undefined
+  const options = permission?.options ?? []
+  const lasting = options.find(option => option.kind === 'allow_always')
+  if (lasting !== undefined && !options.some(option => option.kind === 'allow_once')) {
+    // A one-time yes is never sent as the agent's lasting allow (#1718): refuse with no dialog
+    // and say why in the call's result.
+    const name = typeof lasting.name === 'string' ? lasting.name.trim() : ''
+    tool.lastingReason = `${live.name} offered to allow ${tool.title} only from now on${name ? ` ("${name}")` : ''}, not just once, so Automagik did not approve it.`.replace(/\s+/g, ' ').slice(0, 300)
+    return LASTING_ONLY
+  }
   const approval = host.approval()
   if (!approval || !exec.agent) return 'unavailable'
   if (fullAccess(approval, exec.agent.session, host.sandboxPolicy?.(), host.permissionPresets?.())) return 'allowed-once'

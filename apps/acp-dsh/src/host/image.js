@@ -7,16 +7,19 @@
 //   passthrough and with the run's own overrides, which features it knows (`features list`) and
 //   which tools it would offer the model (`debug prompt-input`: nothing is sent to a model;
 //   the checks read the Bot's isolated Codex home, signed in or not, as the session will). A
-//   feature the run relies on that Codex does not list, or does not turn off, stops the draw;
-//   so does any offered tool that is not on a fixed list (a command, a file read, image
-//   viewing, an MCP tool, a name this version does not know), and a tool list in a form this
-//   code does not know. Nothing rests on a feature name alone: Codex takes an unknown
-//   `features.<name>` without a word;
+//   feature the run relies on that Codex does not list, does not turn off, or lists without
+//   acting on stops the draw; so does any offered tool that is not on a fixed list (a command,
+//   a file read, image viewing, an MCP tool, a name this version does not know), and a tool
+//   list in a form this code does not know. Nothing rests on a feature name alone: Codex takes
+//   an unknown `features.<name>` without a word, so each required switch is read again under
+//   the session's whole config and, when the image tool is offered, proven by its effect (on,
+//   it must add the tool it controls; off, that tool is gone);
 // - the same overrides, from the same object, go to the session through codex-acp's
 //   CODEX_CONFIG. CODEX_HOME is the Bot's isolated Codex home, supplied by cli-homes.js;
 // - the Bot home's image profile is also passed in the run's overrides. The check reads
 //   Codex's resolved profile: root deny, scratch read and at most its own helper folder.
-//   An adapter without that mode falls back to read-only with a warning;
+//   If the profile cannot be checked and selected, the draw or edit is refused before any
+//   prompt. Legacy read-only is never selected as a fallback under the default policy;
 // - the agent starts in an empty scratch folder with no MCP servers. The checks
 //   run in that same folder with the same trust override, which Codex ignores from session
 //   flags. The image profile comes from the Bot's isolated Codex home. Every
@@ -35,14 +38,14 @@
 //   `rawOutput.result`, never from the file Codex saves under its home (`rawOutput.savedPath`),
 //   and is refused when it is not a PNG or is too large;
 // - neither the prompt nor what the agent says is logged or kept.
-// What this does not close is in the README ("Images through Codex", residual risk): first of
-// all that the read-only fallback leaves the image tool's local-file input unrestricted.
+// The remaining risks, including reads through Codex runtime grants, are in the README
+// ("Images through Codex").
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { AgentRun } from './acp.js'
 import { batchSafe } from './batch-spawn.js'
 import { isAuthRequired } from './names.js'
@@ -53,8 +56,8 @@ export const IMAGE_TIMEOUT_MS = 120_000
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024
 // Codex's features the run cannot go without: each one's switch is seen to take its tools off
 // the list Codex offers (the shell tool: commands and their input; image viewing: opening a
-// picture file). A Codex that does not list one, lists it as removed, or leaves it on stops
-// the draw before it starts.
+// picture file). A Codex that does not list one, lists it as removed, leaves it on, or reports
+// it off without acting on it stops the draw before it starts.
 export const IMAGE_FEATURES_OFF = Object.freeze(['shell_tool', 'view_image'])
 // Other tool sources, turned off when the installed Codex lists them and never sent when it
 // does not, or when it lists them as removed (a removed switch does nothing, on or off). None
@@ -65,10 +68,18 @@ export const IMAGE_FEATURE_ON = 'image_generation'
 // The tools a locked-down Codex may still offer the model: its image tool, and the ones no
 // switch of a current Codex takes away. None of them reads a file or runs a command by itself:
 // `exec` is a JavaScript isolate with no file system, network or environment, the patch tool
-// asks first (and is cancelled), and sub-agents get the same tools. Anything else stops the draw.
-export const IMAGE_TOOLS_ALLOWED = Object.freeze(['functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'clock.sleep', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent'])
+// asks first (and is cancelled), and sub-agents get the same tools. `send_message_to_user_async`
+// (Codex 0.170) sends the person a message and touches nothing else, and its own switch reports
+// off without taking it away (#1021). Anything else stops the draw.
+export const IMAGE_TOOLS_ALLOWED = Object.freeze(['functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'functions.send_message_to_user_async', 'clock.sleep', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent'])
 // The tools `exec` may reach from inside its isolate.
 export const IMAGE_NESTED_ALLOWED = Object.freeze(['apply_patch', 'clock__curr_time', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'])
+// The tool each required-off feature is seen to add when it is on: the effect the run proves
+// before it draws. A feature Codex lists but silently ignores adds no tool, so the draw stops.
+const FEATURE_TOOLS = Object.freeze({
+  shell_tool: /(^|[._])(exec_command|write_stdin|shell|local_shell|unified_exec)$/,
+  view_image: /(^|[._])view_image$/,
+})
 // Codex's image tool: its own namespace, or the provider's hosted tool (which has no name).
 const IMAGE_NAMESPACE = 'image_gen'
 const IMAGE_HOSTED_TYPE = 'image_generation'
@@ -134,9 +145,14 @@ export const MCP_LIST_TIMEOUT_MS = 15_000
 export const IMAGE_CHECKS_TIMEOUT_MS = 40_000
 const MCP_NAME = /^[A-Za-z0-9_.-]{1,128}$/
 export const IMAGE_MODE = 'read-only'
-// Owner policy: keep drawing on adapters that cannot select the narrow profile.
-const ALLOW_IMAGE_READ_ONLY_FALLBACK = true
+// #870: fail closed (recommended option; owner decision pending in the draft PR). true restores the
+// 2026-11-11 policy: drawing falls back to read-only when the narrow profile cannot be used.
+const ALLOW_IMAGE_READ_ONLY_FALLBACK = false
 const EDIT_NEEDS_ISOLATION = true
+// An edit whose locked one-off run could not be set up: bots-dsh answers with the Bot's own
+// verified copy so the change is made on the file itself. It keys off `reason`; a draw keeps
+// its existing check refusal, because a draw has no file to fall back to.
+const editFallback = (refusal, input) => input === undefined ? refusal : Object.assign(refusal, { reason: 'edit-not-isolated' })
 
 export const IMAGE_PROFILE_DESCRIPTION = 'Draw one image in the scratch folder'
 // Exactly these two rules. No network table, no `extends`, no :minimal, no runtime or skills root.
@@ -150,7 +166,7 @@ export function imageProfileFor(profileModes) {
   return { id, mode: `permission-profile:${id}` }
 }
 
-async function imageMode(run, profile, log, signal, { reason, stable }) {
+async function imageMode(run, profile, log, signal, { reason, stable, edit }) {
   if (signal?.aborted || run.disposed) throw stoppedCheck()
   if (profile) reason = 'profile mode not offered'
   if (profile && run.modes?.availableModes?.some(mode => mode.id === profile.mode)) {
@@ -164,7 +180,7 @@ async function imageMode(run, profile, log, signal, { reason, stable }) {
       reason = 'profile mode selection rejected'
     }
   }
-  if (!ALLOW_IMAGE_READ_ONLY_FALLBACK) throw notIsolated()
+  if (!ALLOW_IMAGE_READ_ONLY_FALLBACK) throw isolationRefusal(edit, log, reason)
   try { log?.(`the Codex image run is not isolated (${reason}); falling back to read-only`) } catch {}
   await run.setMode(IMAGE_MODE, { force: true, signal })
   return false
@@ -212,6 +228,45 @@ export function checkProfile(resolved, { scratch, codexHome }) {
   return root === 1 && work === 1 && arg0 <= 1
 }
 
+/** Local config layers and project markers that can affect the scratch session. */
+export function codexConfigSources({ codexHome, scratch, platform = process.platform }) {
+  const sources = [{ path: join(codexHome, 'config.toml'), kind: 'required' }]
+  if (platform === 'win32') return sources
+  for (const name of ['config.toml', 'managed_config.toml', 'requirements.toml']) {
+    sources.push({ path: join('/etc/codex', name), kind: 'file' })
+  }
+  for (let ancestor = dirname(resolve(scratch));;) {
+    sources.push({ path: join(ancestor, '.codex', 'config.toml'), kind: 'file' })
+    sources.push({ path: join(ancestor, '.git'), kind: 'marker' })
+    const parent = dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
+  }
+  return sources
+}
+
+/** Hash each source's path and state. An unreadable layer makes the profile unavailable. */
+export function configFingerprint(sources, { read = readFileSync, stat = lstatSync } = {}) {
+  const hash = createHash('sha256')
+  for (const { path, kind } of sources) {
+    let state, bytes
+    try {
+      if (kind === 'marker') {
+        state = stat(path, { throwIfNoEntry: false }) === undefined ? 'absent' : 'present'
+      } else {
+        bytes = read(path)
+        state = 'bytes'
+      }
+    } catch (error) {
+      if (kind === 'required' || !['ENOENT', 'ENOTDIR'].includes(error.code)) return undefined
+      state = 'absent'
+    }
+    hash.update(JSON.stringify([path, kind, state, bytes?.length]))
+    if (bytes !== undefined) hash.update(bytes)
+  }
+  return hash.digest('hex')
+}
+
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47])
 const SIZE_WORDS = {
   '1024x1024': 'square (1024x1024)',
@@ -235,9 +290,10 @@ const stoppedCheck = () => checkError('unreadable', 'the check was stopped', { p
  * standard output; nothing of it is logged. Past `timeoutMs`, or when `signal` aborts, the
  * command and the Codex it started are killed together and the answer does not wait for them.
  */
-function codexCli(launch, args, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_MS, what, refusal = 'unreadable', cwd = tmpdir(), signal } = {}) {
+function codexCli(launch, args, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_MS, what, refusal = 'unreadable', cwd = tmpdir(), signal, profiled = false } = {}) {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(stoppedCheck())
+    const rejectCheck = error => reject(Object.assign(error, { profiled }))
+    if (signal?.aborted) return rejectCheck(stoppedCheck())
     let child
     let timer
     let done = false
@@ -258,24 +314,24 @@ function codexCli(launch, args, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_M
       signal?.removeEventListener('abort', onAbort)
       settle(value)
     }
-    const onAbort = () => { kill(); end(reject, stoppedCheck()) }
+    const onAbort = () => { kill(); end(rejectCheck, stoppedCheck()) }
     try {
       const env = {
         ...(launch.env?.AUTOMAGIK_BOT_CLI_HOME ? launch.env : { ...process.env, ...launch.env }),
         NO_COLOR: '1', DISABLE_UPDATES: '1',
       }
       signal?.addEventListener('abort', onAbort, { once: true })
-      timer = setTimeout(() => { kill(); end(reject, checkError('unreadable', `${what} could not be read in time`, { passing: true })) }, timeoutMs)
+      timer = setTimeout(() => { kill(); end(rejectCheck, checkError('unreadable', `${what} could not be read in time`, { passing: true })) }, timeoutMs)
       child = run(...batchSafe(launch.command, [...(launch.args ?? []), 'cli', ...args], { env, cwd, maxBuffer: 8 << 20, windowsHide: true, detached: process.platform !== 'win32' }), (error, stdout, stderr) => {
-        if (/Invalid configuration/i.test(String(stderr ?? ''))) return end(reject, checkError('config', `${what} could not be read: Codex could not load its configuration`))
+        if (/Invalid configuration/i.test(String(stderr ?? ''))) return end(rejectCheck, checkError('config', `${what} could not be read: Codex could not load its configuration`))
         if (!error) return end(resolve, String(stdout ?? ''))
-        if (CONFIG_BROKEN.test(String(stderr ?? '')) && refusal === 'unreadable') return end(reject, checkError('config', `${what} could not be read: Codex could not load its configuration`))
+        if (CONFIG_BROKEN.test(String(stderr ?? '')) && refusal === 'unreadable') return end(rejectCheck, checkError('config', `${what} could not be read: Codex could not load its configuration`))
         // Codex answered and said no (an exit code, not a kill or a spawn failure).
         const answered = typeof error.code === 'number' && error.killed !== true
-        end(reject, checkError(answered ? refusal : 'unreadable', `${what} could not be read`, error.killed === true ? { passing: true } : undefined))
+        end(rejectCheck, checkError(answered ? refusal : 'unreadable', `${what} could not be read`, error.killed === true ? { passing: true } : undefined))
       })
     } catch {
-      end(reject, checkError('unreadable', `${what} could not be read`))
+      end(rejectCheck, checkError('unreadable', `${what} could not be read`))
     }
   })
 }
@@ -335,6 +391,23 @@ export function checkFeatures(rows, { required = IMAGE_FEATURES_OFF, also = IMAG
   }
   if (!live(IMAGE_FEATURE_ON) || !rows.get(IMAGE_FEATURE_ON).on) throw checkError('unsupported', `Codex did not turn the feature ${IMAGE_FEATURE_ON} on`)
   return also.filter(name => live(name) && !required.includes(name))
+}
+
+// Whether Codex offers its image tool. Codex hides it when signed out, and a signed-out run
+// cannot draw; only with the tool there is the run's own config proven to act.
+const offersImage = ({ tools }) => tools.some(name => name === `type:${IMAGE_HOSTED_TYPE}` || name.startsWith(`${IMAGE_NAMESPACE}.`))
+
+/**
+ * Whether turning `name` on is seen to offer a tool the run's own config did not. The on tools
+ * are read under the same overrides as the off ones, with only that feature switched on, so
+ * any tool it adds is the switch's own effect.
+ */
+export function takesEffect(off, on, name) {
+  const pattern = FEATURE_TOOLS[name]
+  if (pattern === undefined) return true
+  return [...on.tools, ...on.nested]
+    .filter(tool => !off.tools.includes(tool) && !off.nested.includes(tool))
+    .some(tool => pattern.test(tool))
 }
 
 const shown = name => String(name).slice(0, 80).replace(/[^A-Za-z0-9_.$:-]/g, '?')
@@ -503,7 +576,8 @@ export function checkOffered({ tools, nested }) {
  * session will, from `cwd` (the run's scratch folder, which the overrides then trust as
  * codex-acp does). Resolves the names the run turns off and its overrides ({ servers, extras,
  * skills, overrides }); rejects with a `kind` (see checkError) when a check does not hold, is
- * stopped by `signal`, or all of them together take longer than `deadlineMs`.
+ * stopped by `signal`, or all of them together take longer than `deadlineMs`. CLI errors
+ * record whether the failing command carried the image profile.
  * @param {{ command: string, args?: string[], env?: Record<string, string> }} launch
  */
 export async function imageSetup(launch, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_MS, deadlineMs = IMAGE_CHECKS_TIMEOUT_MS, now = Date.now, cwd, signal, listServers = mcpServerNames, required = IMAGE_FEATURES_OFF, also = IMAGE_FEATURES_ALSO_OFF, profile } = {}) {
@@ -521,29 +595,50 @@ export async function imageSetup(launch, { run = execFile, timeoutMs = MCP_LIST_
   }
   // The person's own MCP servers, each turned off for this run.
   const servers = await listServers(launch, { run, timeoutMs: left(), cwd: project, signal })
-  const cli = (args, what) => codexCli(launch, args, { run, timeoutMs: left(), cwd: project, signal, what, refusal: 'unsupported' })
+  const cli = (args, what, config) => codexCli(launch, [...args, ...configArgs(config)], {
+    run, timeoutMs: left(), cwd: project, signal, what, refusal: 'unsupported',
+    profiled: Object.hasOwn(config, 'default_permissions'),
+  })
   // The features, read with the required switches set: the list answers the effective values.
-  const rows = readFeatures(await cli(['features', 'list', ...configArgs({ features: { [IMAGE_FEATURE_ON]: true, ...off(required) } })], 'the feature list'))
+  const features = { [IMAGE_FEATURE_ON]: true, ...off(required) }
+  const rows = readFeatures(await cli(['features', 'list'], 'the feature list', { features }))
   const extras = checkFeatures(rows, { required, also })
   // The tools offered under the run's whole config. A first pass names the person's own
   // skills; they are turned off by name and the tools are read again under that config.
   let skills = []
+  let overrides
+  let offered
+  let stdout
   for (let pass = 0; ; pass += 1) {
-    const overrides = imageOverrides({ servers, extras, skills, project, profile })
-    const stdout = await cli(['debug', 'prompt-input', ...configArgs(overrides)], 'the offered tools')
-    const offered = readOffered(stdout)
+    overrides = imageOverrides({ servers, extras, skills, project, profile })
+    stdout = await cli(['debug', 'prompt-input'], 'the offered tools', overrides)
+    offered = readOffered(stdout)
     checkOffered(offered)
     const more = offered.skills.filter(name => !skills.includes(name))
-    if (more.length === 0 || pass === 1) {
-      if (profile) {
-        let codexHome
-        try { codexHome = realpathSync(launch.env.CODEX_HOME) } catch {}
-        if (!checkProfile(readProfile(stdout), { scratch: project, codexHome })) throw checkError('profile', 'Codex resolved a wider image profile')
-      }
-      return { servers, extras, skills, overrides }
-    }
+    if (more.length === 0 || pass === 1) break
     skills = [...skills, ...more]
   }
+  if (profile) {
+    let codexHome
+    try { codexHome = realpathSync(launch.env.CODEX_HOME) } catch {}
+    if (!checkProfile(readProfile(stdout), { scratch: project, codexHome })) throw checkError('profile', 'Codex resolved a wider image profile', { profiled: true })
+  }
+  // The switches are read again under the whole config the session gets, so a layer that turns
+  // a required one back on stops the draw even when no offered tool shows it.
+  const underRun = readFeatures(await cli(['features', 'list'], 'the feature list', overrides))
+  checkFeatures(underRun, { required })
+  // A Codex that offers its image tool can draw, so each required switch is then proven by its
+  // effect: turned on, it must offer a tool the run's config did not. One Codex lists and
+  // reports as taken but silently ignores offers no such tool, and the draw stops.
+  if (offersImage(offered)) {
+    for (const name of required) {
+      if (FEATURE_TOOLS[name] === undefined) continue
+      const on = { ...overrides, features: { ...overrides.features, [name]: true } }
+      const shown = readOffered(await cli(['debug', 'prompt-input'], `the ${name} switch`, on))
+      if (!takesEffect(offered, shown, name)) throw checkError('unsupported', `Codex lists the feature ${name} but does not act on it`)
+    }
+  }
+  return { servers, extras, skills, overrides }
 }
 
 /**
@@ -681,7 +776,13 @@ class ImageRun extends AgentRun {
 
 /** The refusal of a Codex that does not take the lockdown, for a caller that knew beforehand. */
 export const unsupported = () => imageRefusal(UNAVAILABLE, CHECK_TEXT.unsupported)
-const notIsolated = () => imageRefusal(UNAVAILABLE, 'The Codex image run could not be isolated, so the image was not started. Update Automagik and try again.')
+function isolationRefusal(edit, log, reason) {
+  try { log?.(`the Codex image run is not isolated (${reason}); the image was refused`) } catch {}
+  if (edit) {
+    return Object.assign(imageRefusal(UNAVAILABLE, 'Codex can edit a picture only inside its locked image run, which could not be set up on this computer, so the picture was not edited.'), { reason: 'edit-not-isolated' })
+  }
+  return imageRefusal(UNAVAILABLE, 'The Codex image run could not be isolated, so the image was not started. Update Automagik and try again.')
+}
 const CHECK_TEXT = {
   unsupported: 'Codex here offers tools the image run could not turn off, so the image was not started. Update Automagik and try again.',
   config: 'Codex could not load its own configuration, so the image was not started. Fix Codex\'s config file and try again.',
@@ -693,41 +794,72 @@ const CHECK_TEXT = {
  * may throw when its connector is not installed yet. Resolves { base64, mimeType }; rejects with
  * an `imageRefusal` (signed out, usage limit, timeout, stopped, failed, refused, unavailable).
  * `log` is told, in one line with no private content, why a check stopped the draw.
- * @param {{ spawn: () => { command: string, args?: string[], env?: Record<string, string> }, prompt: string, size?: string, quality?: string, background?: string, input?: { data: Uint8Array, mimeType: string }, signal?: AbortSignal, timeoutMs?: number, checkTimeoutMs?: number, name?: string, scratch?: () => Promise<string>, Run?: typeof AgentRun, listServers?: typeof mcpServerNames, log?: (line: string) => void }} request
+ * @param {{
+ *   spawn: () => { command: string, args?: string[], env?: Record<string, string> },
+ *   prompt: string, size?: string, quality?: string, background?: string,
+ *   input?: { data: Uint8Array, mimeType: string }, signal?: AbortSignal,
+ *   timeoutMs?: number, checkTimeoutMs?: number, name?: string,
+ *   scratch?: () => Promise<string>, Run?: typeof AgentRun,
+ *   listServers?: typeof mcpServerNames, configSources?: typeof codexConfigSources,
+ *   log?: (line: string) => void
+ * }} request
  */
-export async function drawImage({ spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS, checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex', scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))), Run = ImageRun, listServers = mcpServerNames, log, input }) {
+export async function drawImage({
+  spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS,
+  checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex',
+  scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))),
+  Run = ImageRun, listServers = mcpServerNames, configSources = codexConfigSources, log, input,
+}) {
   if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
   // The draw holds the event loop from start to cleanup: the run lets go of it once a turn ends,
   // and its close and cancel guards must not be cut short by a process with nothing else alive.
   const keepAlive = setInterval(() => {}, 1 << 30)
   try {
-    return await draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input })
+    return await draw({
+      spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs,
+      name, scratch, Run, listServers, configSources, log, input,
+    })
   } finally {
     clearInterval(keepAlive)
   }
 }
 
-async function draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input }) {
+async function draw({
+  spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs,
+  name, scratch, Run, listServers, configSources, log, input,
+}) {
   let launch
   try {
     launch = spawn()
   } catch (error) {
-    throw imageRefusal(UNAVAILABLE, `Codex cannot draw yet: ${String(error?.message ?? error).slice(0, 200)}`)
+    throw editFallback(imageRefusal(UNAVAILABLE, `Codex cannot draw yet: ${String(error?.message ?? error).slice(0, 200)}`), input)
   }
   // The lockdown is checked against this Codex before anything of it starts, in the folder
   // the session would get: no session and no model request exist when a check does not hold.
-  const dir = await scratch()
+  // A scratch folder that cannot be made is the same pre-session stop for an edit: the Bot is
+  // given its own copy; a draw keeps the original error unchanged.
+  let dir
+  try {
+    dir = await scratch()
+  } catch (error) {
+    if (input === undefined) throw error
+    if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
+    try { log?.('the Codex image run was not started: the scratch folder could not be prepared') } catch {}
+    throw editFallback(imageRefusal(UNAVAILABLE, 'The scratch folder could not be prepared, so the image was not started. Try again.'), input)
+  }
   const file = input ? `input.${{ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[input.mimeType]}` : undefined
   let profile = imageProfileFor(launch.profileModes)
   if (typeof launch.env?.CODEX_HOME !== 'string') profile = undefined
   let reason = 'profile unavailable'
   let fingerprint
-  const homeHash = () => {
-    try { return createHash('sha256').update(readFileSync(join(launch.env.CODEX_HOME, 'config.toml'))).digest('hex') } catch { return undefined }
+  const configHash = () => {
+    try {
+      return configFingerprint(configSources({ codexHome: launch.env.CODEX_HOME, scratch: dir }))
+    } catch { return undefined }
   }
   const stable = () => {
     try {
-      return fingerprint !== undefined && homeHash() === fingerprint
+      return fingerprint !== undefined && configHash() === fingerprint
         && lstatSync(join(dir, '.codex'), { throwIfNoEntry: false }) === undefined
     } catch { return false }
   }
@@ -739,34 +871,44 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
     await rm(dir, { recursive: true, force: true }).catch(() => {})
     if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
     try { log?.('the Codex image run was not started: the scratch folder could not be prepared') } catch {}
-    throw imageRefusal(UNAVAILABLE, 'The scratch folder could not be prepared, so the image was not started. Try again.')
+    throw editFallback(imageRefusal(UNAVAILABLE, 'The scratch folder could not be prepared, so the image was not started. Try again.'), input)
   }
   try {
     const check = () => imageSetup(launch, { profile, timeoutMs: checkTimeoutMs, cwd: dir, signal, listServers: async (...args) => { const names = await listServers(...args); listed = true; return names } })
     if (profile) {
-      fingerprint = homeHash()
+      fingerprint = configHash()
       if (fingerprint === undefined) { profile = undefined; reason = 'profile unavailable' }
     }
-    try {
-      setup = await check()
-    } catch (error) {
-      if (signal?.aborted || error?.stopped || !profile || !['config', 'profile'].includes(error?.kind)) throw error
-      if (!ALLOW_IMAGE_READ_ONLY_FALLBACK) throw notIsolated()
-      reason = error.kind === 'config' ? 'profile config refused' : 'profile wider than requested'
-      profile = undefined
-      listed = false
-      setup = await check()
+    for (let first = true; ; first = false) {
+      try {
+        setup = await check()
+        break
+      } catch (error) {
+        if (signal?.aborted || error?.stopped || !['config', 'profile'].includes(error?.kind)) throw error
+        if (!ALLOW_IMAGE_READ_ONLY_FALLBACK && (error.kind === 'profile' || error.profiled)) {
+          const reason = error.kind === 'config' ? 'profile config refused' : 'profile wider than requested'
+          throw isolationRefusal(input !== undefined, log, reason)
+        }
+        if (!first) throw error
+        // Keep the profile when retrying a base-config failure under the shipped policy.
+        if (ALLOW_IMAGE_READ_ONLY_FALLBACK) {
+          if (!profile) throw error
+          reason = error.kind === 'config' ? 'profile config refused' : 'profile wider than requested'
+          profile = undefined
+        }
+        listed = false
+      }
     }
   } catch (error) {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
     if (signal?.aborted || error?.stopped === true) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
-    if (error?.code === UNAVAILABLE) throw error
-    if (!listed && error?.kind !== 'config') throw imageRefusal(UNAVAILABLE, 'Codex\'s MCP servers could not be listed, so the image was not started (none of them may run while it draws). Try again.')
+    if (error?.code === UNAVAILABLE) throw editFallback(error, input)
+    if (!listed && error?.kind !== 'config') throw editFallback(imageRefusal(UNAVAILABLE, 'Codex\'s MCP servers could not be listed, so the image was not started (none of them may run while it draws). Try again.'), input)
     const kind = CHECK_TEXT[error?.kind] === undefined ? 'unreadable' : error.kind
     try {
       log?.(`the Codex image run was not started (${kind}): ${String(error?.message ?? '').slice(0, 200)}`)
     } catch {}
-    throw imageRefusal(UNAVAILABLE, CHECK_TEXT[kind])
+    throw editFallback(imageRefusal(UNAVAILABLE, CHECK_TEXT[kind]), input)
   }
   if (signal?.aborted) {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
@@ -817,19 +959,21 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
     timer = setTimeout(() => wake(), timeoutMs)
     timer.unref?.()
     let isolated = false
-    const started = run.start().then(async () => { isolated = await imageMode(run, profile, log, modeSignal, { reason, stable }) })
+    const started = run.start().then(async () => {
+      isolated = await imageMode(run, profile, log, modeSignal, { reason, stable, edit: input !== undefined })
+    })
     started.catch(() => {})
     try {
       await Promise.race([started, settled.then(() => { throw undefined })])
     } catch (error) {
       if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was finished.')
-      if (error === undefined) throw imageRefusal(TIMED_OUT, 'Codex did not start in time. Try again.')
-      if (isAuthRequired(error)) throw signedOut()
-      if (error?.code === UNAVAILABLE) throw error
-      throw imageRefusal(UNAVAILABLE, `Codex did not start: ${String(error?.message ?? error).slice(0, 200)}`)
+      if (error === undefined) throw editFallback(imageRefusal(TIMED_OUT, 'Codex did not start in time. Try again.'), input)
+      if (isAuthRequired(error)) throw editFallback(signedOut(), input)
+      if (error?.code === UNAVAILABLE) throw editFallback(error, input)
+      throw editFallback(imageRefusal(UNAVAILABLE, `Codex did not start: ${String(error?.message ?? error).slice(0, 200)}`), input)
     }
     if (input && EDIT_NEEDS_ISOLATION && isolated !== true) {
-      throw Object.assign(imageRefusal(UNAVAILABLE, 'Codex can edit a picture only inside its locked image run, which could not be set up on this computer, so the picture was not edited.'), { reason: 'edit-not-isolated' })
+      throw isolationRefusal(true)
     }
     let said = ''
     let ended
@@ -867,7 +1011,7 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
     if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was finished.')
     if (foundError !== undefined) throw foundError
     if (ended === undefined) throw imageRefusal(TIMED_OUT, `Codex did not finish the image within ${Math.round(timeoutMs / 1000)} seconds. Try again.`)
-    if (ended.type === 'error' && isAuthRequired(ended)) throw signedOut()
+    if (ended.type === 'error' && isAuthRequired(ended)) throw editFallback(signedOut(), input)
     if (USAGE_TEXT.test(said) || (ended.type === 'error' && USAGE_TEXT.test(String(ended.message ?? '')))) throw usageLimit()
     throw imageRefusal(FAILED, 'Codex ended without drawing an image. Try again.')
   } finally {

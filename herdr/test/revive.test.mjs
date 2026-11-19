@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // Revive (#939): the bots come back after a restart of this computer. revive.js over plain data,
 // then `automagik-herdr revive` run as a program against a scratch project, a scratch home and
 // app home, a fake `hc` (test/fake-hc.mjs), a fake `herdr-app` and a fake `systemctl`. No live
@@ -6,16 +7,25 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { helperPlan } from "../mods/am-sidebar/restart.js";
 import { AGENTS } from "../mods/am-sidebar/models.js";
-import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
+import { FIRST_SESSION_MS, KEEP_DOWN, PLIST_DECL, PLIST_LABEL, PLIST_MARK, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, launchdNotLoaded, ledgerRivals,
+  pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
 import { readJsonLines } from "./log-lines.mjs";
+import { servicePath, unitKeepsPath } from "../mods/am-sidebar/revive.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
+import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCandidates, kimiHomeOf, kimiIndexPath, uuidV7Ms } from "../mods/am-sidebar/revive.js";
+
+// #1417: every CLI run below reads Codex's and Kimi's homes under its scratch home only.
+delete process.env.CODEX_HOME;
+delete process.env.KIMI_CODE_HOME;
+// A host's real DSH home must not stand in for the scratch one the session cases build.
+delete process.env.DSH_HOME;
 
 const SID = "0f3c2a4e-1b2d-4c5e-9f60-718293a4b5c6";
 const SID2 = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
@@ -187,6 +197,39 @@ test("unitText: a oneshot user unit that runs revive --boot and waits for herdr-
   assert.equal(sameBoot(null, 5), false);
 });
 
+test("plistText: a launchd agent that runs revive --boot at login, marked on its second line, with the kept PATH (#939, #1418)", () => {
+  const text = plistText({ runner: "/Users/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/Users/u/my app/100%", PATH: `/opt/my tools/bin:/opt/$x:/opt/&<>"` }, wait: 600 });
+  assert.ok(text.startsWith(`${PLIST_DECL}\n${PLIST_MARK}\n`), text);
+  assert.ok(text.includes(`<key>Label</key><string>${PLIST_LABEL}</string>`), "the label launchd knows the job by");
+  assert.match(text, /<key>ProgramArguments<\/key><array>\n\s*<string>\/Users\/u\/\.local\/bin\/automagik-herdr<\/string>\n\s*<string>revive<\/string>\n\s*<string>--boot<\/string>\n\s*<string>--wait<\/string>\n\s*<string>600<\/string>\n\s*<\/array>/, text);
+  assert.match(text, /<key>RunAtLoad<\/key><true\/>/, "it runs at login");
+  assert.match(text, /<key>KeepAlive<\/key><false\/>/, "once: it never restarts itself");
+  assert.doesNotMatch(text, /StartInterval|StartCalendarInterval/, "no schedule of its own");
+  assert.match(text, /<key>HERDR_APP_HOME<\/key><string>\/Users\/u\/my app\/100%<\/string>/, "a % is literal in a plist");
+  assert.ok(text.includes(`<key>PATH</key><string>/opt/my tools/bin:/opt/$x:/opt/&amp;&lt;&gt;&quot;</string>`), text);
+  assert.equal(plistIsOurs(text), true);
+  assert.equal(plistKeepsPath(text), true);
+  assert.equal(plistKeepsPath(plistText({ runner: "/r", env: { HERDR_APP_HOME: "/a" } })), false);
+  assert.equal(plistIsOurs(`${PLIST_DECL}\n<plist version="1.0"><dict/></plist>\n`), false, "the declaration alone is anyone's");
+  assert.equal(plistIsOurs(`<?xml version="1.0"?>\n${PLIST_MARK}\n`), false, "a comment may not come before the declaration");
+  assert.equal(plistIsOurs(null), false);
+  assert.equal(plistPath("/Users/u/"), "/Users/u/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist");
+  assert.ok(plistPath("/Users/u").startsWith("/Users/u/Library/LaunchAgents/"), "the person's own launch agents, never a system folder");
+});
+
+test("launchdNotLoaded: only launchctl's own exit 113 or its exact 'Could not find service' says the job is not loaded (#939)", () => {
+  const r = (code, stderr = "", stdout = "") => ({ code, stderr, stdout });
+  assert.equal(launchdNotLoaded(r(113)), true, "113 is launchd's not-found");
+  assert.equal(launchdNotLoaded(r(0, "", "Could not find service")), true, "the exact words, whatever the exit");
+  assert.equal(launchdNotLoaded(r(1, "Could not find service \"x\" in domain for user gui: 501")), true);
+  assert.equal(launchdNotLoaded(r(1, "print failed")), false, "a failed probe is not a not-found");
+  assert.equal(launchdNotLoaded(r(64, "usage: launchctl print <domain-target>")), false);
+  assert.equal(launchdNotLoaded(r(1, "Operation not permitted")), false);
+  assert.equal(launchdNotLoaded(r(5, "Input/output error")), false);
+  assert.equal(launchdNotLoaded(r(0, "Could not find servicex")), false, "the exact message, not a word that starts it");
+  assert.equal(launchdNotLoaded(r(0)), false, "exit 0 with no words is loaded");
+});
+
 test("helperPlan: a helper that is a bare shell names its agent by its launch command only when revive asks", () => {
   const get = { address: "t8", name: "side", cwd: "/p", state: "live", labels: { "agent.session": SID }, argv: ["/usr/bin/env", "PATH=/bin", "claude", "--session-id", SID, "do the thing"],
     foreground: { argv: ["zsh"], cwd: "/p" } };
@@ -219,7 +262,7 @@ const pane = (address, { bot: b, front = ["zsh"], argv = ["claude"], cwd, create
   address, name: address, cwd, state: "live", parent, die_with_parent: die, created_ms: created, argv, labels: { ...(b ? { bot: b } : {}), ...labels },
   foreground: { argv: front, cwd }, status: { app: "claude-code", state: status } });
 
-function world(t, { file = team(), terminals = () => [], attach = null, hcExtra = {} } = {}) {
+function world(t, { file = team(), terminals = () => [], attach = null, hcExtra = {}, os = null } = {}) {
   const root = scratchRoot(t, "hb-revive-");
   const project = scratchProject(root, "proj", { isGit: true, commit: true });
   const bin = join(root, "bin");
@@ -229,6 +272,23 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   exe(join(bin, "pgrep"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_PGREP}" "$@"\n`);
   exe(join(bin, "agy"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
   for (const name of ["claude", "codex", "dsh-tui"]) exe(join(bin, name), "#!/bin/sh\nexit 0\n");
+  // A system that says it is another one (`os`): both the installer and the CLI read uname -s.
+  if (os) exe(join(bin, "uname"), `#!/bin/sh\necho ${os}\n`);
+  // launchd's stand-in: it logs every call. A job is loaded only when the test says so, and a
+  // bootout fails only when it asks for that. A test can also make `print` itself fail, with the
+  // exit and the words it wants, to test that only launchd's own not-found answer means "not
+  // loaded". The real launchctl is never reached.
+  const lcLog = join(root, "launchctl.log");
+  exe(join(bin, "launchctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${lcLog}"\ncase $1 in
+  print)
+    if [ -n "\${LAUNCHCTL_PRINT_EXIT:-}" ]; then printf '%s\\n' "\${LAUNCHCTL_PRINT_TEXT:-}" >&2; exit "$LAUNCHCTL_PRINT_EXIT"; fi
+    if [ -n "\${LAUNCHCTL_PRINT_OUT:-}" ]; then printf '%s\\n' "$LAUNCHCTL_PRINT_OUT"; exit 0; fi
+    [ "\${LAUNCHCTL_LOADED:-}" = 1 ] && exit 0
+    echo "Could not find service" >&2; exit 113 ;;
+  bootout) [ "\${LAUNCHCTL_BOOTOUT_FAIL:-}" = 1 ] && { echo "Boot-out failed: Input/output error" >&2; exit 1; }; exit 0 ;;
+esac
+exit 0
+`);
   const sysLog = join(root, "systemctl.log");
   exe(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${sysLog}"\n[ -n "$SYSTEMCTL_FAIL" ] && { echo "Failed to connect to bus" >&2; exit 1; }\nexit 0\n`);
   const home = join(root, "home");
@@ -256,7 +316,11 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
     AUTOMAGIK_HERDR_TAB_WAIT_MS: "100", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "200", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "3000",
     AUTOMAGIK_HERDR_TREE_TURN_WAIT_MS: "1000", AUTOMAGIK_HERDR_REVIVE_SETTLE_MS: "0" };
   for (const k of ["HC_TERMINAL_ID", "HC_SOCKET", "HERMES_HOME", "AUTOMAGIK_HERDR_BOOT_MS", "CLAUDE_CONFIG_DIR"]) delete env[k];
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   const cli = (args, { env: extra = {}, cwd = project } = {}) => {
+    core.control({ ...env, ...extra });
     const r = spawnSync(RUNTIME, [CLI, ...args], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
@@ -266,7 +330,8 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   const attachRows = () => readAttach(readFileSync(attachPath(app), "utf8")).rows;
   const lastReport = () => JSON.parse(readFileSync(join(app, "automagik-herdr/revive-last.json"), "utf8"));
   const sysCalls = () => (existsSync(sysLog) ? readFileSync(sysLog, "utf8").split("\n").filter(Boolean) : []);
-  return { root, project, home, app, env, cli, calls, hcState, ledger, attachRows, lastReport, sysCalls };
+  const lcCalls = () => (existsSync(lcLog) ? readFileSync(lcLog, "utf8").split("\n").filter(Boolean) : []);
+  return { root, project, home, app, env, cli, calls, hcState, ledger, attachRows, lastReport, sysCalls, lcCalls };
 }
 const runsOf = (s) => s.calls().filter((c) => c[0] === "run");
 const wordsOf = (run) => run.slice(run.indexOf("--") + 1);
@@ -315,6 +380,19 @@ test("revive: after a reboot each bot at a bare shell is restarted in its place,
   assert.equal(again.code, 0, again.err);
   assert.match(again.out, /nothing to bring back/);
   assert.equal(runsOf(s).length, 2);
+});
+
+test("#1413: revive after a reboot starts a Claude bot with its own permission mode", (t) => {
+  const s = world(t, {
+    file: team({ main: { permissionMode: "bypassPermissions" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })],
+  });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = wordsOf(runsOf(s)[0]);
+  const at = words.indexOf("--permission-mode");
+  assert.notEqual(at, -1, words.join(" "));
+  assert.equal(words[at + 1], "bypassPermissions");
 });
 
 test("revive --dry-run prints the plan and touches nothing", (t) => {
@@ -422,6 +500,83 @@ test("revive: a pane that is gone whole comes back in its seat row's folder, res
   assert.deepEqual([res.name, res.outcome, res.terminal], ["Genie", "fresh", "t101"]);
   assert.match(res.why, /^its conversation couldn't be resumed \(/);
   assert.match(s2.hcState().sent[0].text, /Back on a new conversation: Genie \(t101\), its conversation couldn't be resumed/);
+});
+
+/** #1418: the pane is gone whole, so only its seat row can name its template. */
+function goneSeat(t, { seat = {}, bot = {}, templates = [], hcExtra = {} } = {}) {
+  const agent = bot.agent ?? "omp";
+  const s = world(t, { file: team({ main: { agent, ...bot } }),
+    attach: () => [{ bot: ID.main, terminal: "t5", created_ms: 50 }], hcExtra: { templates, ...hcExtra } });
+  exe(join(s.root, "bin", agent), "#!/bin/sh\nexit 0\n");
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "seat", terminal: "t5", botId: ID.main, project: s.project,
+    worktree: s.project, agent, core: CORE, created_ms: 50, at: "2026-11-01T10:00:00.000Z", ...seat })}\n`, { mode: 0o600 });
+  return s;
+}
+
+function assertRevivedSeat(s, address, argv, template, agent = "omp") {
+  const get = s.hcState().terminals.find((p) => p.address === address);
+  const at = get.argv.findIndex((word, i) => i > 0 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  assert.deepEqual(get.argv.slice(at).filter((w) => !w.startsWith("--append-system-prompt=<herdr-bot>")), argv);
+  assert.equal(get.labels["worker.template"], template ?? undefined);
+  const rows = s.ledger().filter((r) => r.event === "start" && r.kind === "seat" && r.terminal === address);
+  assert.deepEqual(rows.map((r) => [r.botId, r.agent, r.template, r.created_ms]), [[ID.main, agent, template, get.created_ms]]);
+}
+
+const seatTemplate = { name: "dev-kimi", command: "/opt/agents/omp --auto-approve --model kimi/k3" };
+
+for (const args of [["revive"], ["revive", "--boot"]]) {
+  test(`#1418: ${args.join(" ")} runs the current template command when the pane is gone`, (t) => {
+    const s = goneSeat(t, { seat: { template: seatTemplate.name }, templates: [seatTemplate] });
+    const r = s.cli([...args, "--json"], { env: { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) } });
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(r.json().projects[0].results.map((x) => [x.outcome, x.terminal]), [["resumed", "t100"]]);
+    assert.equal(runsOf(s).length, 1);
+    assertRevivedSeat(s, "t100", ["sh", "-c", `${seatTemplate.command} "$@"`, "sh", "--continue"], seatTemplate.name);
+    assert.doesNotMatch(r.err, /differs from its source/);
+  });
+}
+
+for (const { why, seat, templates, lookups } of [
+  { why: "the template is no longer listed", seat: { template: seatTemplate.name }, templates: [], lookups: 1 },
+  { why: "an old seat row has no template field", seat: {}, templates: [seatTemplate], lookups: 0 },
+  { why: "the seat row names another agent", seat: { agent: "claude", template: seatTemplate.name }, templates: [seatTemplate], lookups: 0 },
+]) {
+  test(`#1418: revive uses the agent row when ${why}`, (t) => {
+    const s = goneSeat(t, { seat, templates });
+    const r = s.cli(["revive", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(r.json().projects[0].results.map((x) => [x.outcome, x.terminal]), [["resumed", "t100"]]);
+    assert.equal(runsOf(s).length, 1);
+    assert.equal(s.calls().filter((c) => c[0] === "templates").length, lookups);
+    assertRevivedSeat(s, "t100", ["omp", "--continue"], null);
+  });
+}
+
+test("#1418: a gone paired Hermes seat resumes Bot Chat even when its row names a template", (t) => {
+  const bot = { agent: "hermes", hermes: { home: "/srv/research", profile: "default" } };
+  const s = goneSeat(t, { bot, seat: { template: "research" }, templates: [{ name: "research", command: "hermes --tui" }],
+    hcExtra: { noStatus: ["hermes"] } });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.outcome, x.terminal]), [["resumed", "t100"]]);
+  assert.equal(runsOf(s).length, 1);
+  assert.equal(s.calls().filter((c) => c[0] === "templates").length, 0);
+  assert.ok(wordsOf(runsOf(s)[0]).includes("HERMES_HOME=/srv/research"));
+  assertRevivedSeat(s, "t100", ["hermes", "--profile", "default", "--tui", "--continue", "Bot Chat"], null, "hermes");
+});
+
+test("#1418: when a gone seat's template resume exits, revive keeps the template on its --fresh retry", (t) => {
+  const s = goneSeat(t, { seat: { template: seatTemplate.name, session: SID }, templates: [seatTemplate],
+    hcExtra: { runQueue: [{ runAs: "exit", screen: "No conversation found with session ID\n" }] } });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const res = r.json().projects[0].results[0];
+  assert.deepEqual([res.outcome, res.terminal], ["fresh", "t101"]);
+  assert.match(res.why, /^its conversation couldn't be resumed \(/);
+  assert.equal(runsOf(s).length, 2);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t100").state, "finished");
+  assertRevivedSeat(s, "t100", ["sh", "-c", `${seatTemplate.command} "$@"`, "sh", `--resume=${SID}`], seatTemplate.name);
+  assertRevivedSeat(s, "t101", ["sh", "-c", seatTemplate.command], seatTemplate.name);
 });
 
 test("revive brings a bot's helpers back under its new pane (--tree): a helper at a bare shell is run again from its launch command, resumed by its own session", (t) => {
@@ -550,6 +705,162 @@ test("revive service: installs and enables a systemd user unit that runs revive 
   assert.equal(s.cli(["revive", "service", "start"]).code, 2);
 });
 
+test("revive service on macOS: writes the LaunchAgent in the person's own LaunchAgents, starts nothing, and uninstalls only after launchd lets go of the label", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const label = PLIST_LABEL;
+  // The command as install.sh links it: what the agent runs.
+  mkdirSync(join(s.home, ".local/bin"), { recursive: true });
+  exe(join(s.home, ".local/bin/automagik-herdr"), "#!/bin/sh\nexit 0\n");
+  assert.match(s.cli(["revive", "service", "status"]).out, /isn't installed/);
+  assert.deepEqual(s.lcCalls(), [], "status asks launchd nothing");
+
+  const r = s.cli(["revive", "service", "install", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const text = readFileSync(plist, "utf8");
+  assert.equal(plistIsOurs(text), true);
+  assert.ok(text.includes(`<string>${join(s.home, ".local/bin/automagik-herdr")}</string>`), text);
+  assert.ok(text.includes("<string>revive</string>") && text.includes("<string>--boot</string>"), text);
+  assert.ok(text.includes(`<key>HERDR_APP_HOME</key><string>${s.app}</string>`), text);
+  const installed = r.json();
+  assert.equal(installed.enabled, true);
+  assert.equal(installed.label, label);
+  assert.equal(installed.path, plist);
+  assert.ok(installed.kept_path.split(":").includes(join(s.home, ".local/bin")), installed.kept_path);
+  assert.deepEqual(s.lcCalls(), [], "written only: never bootstrapped, so the pass never runs while the person is using the computer");
+  assert.deepEqual(changes(s), [], "no pane was touched");
+  const status = s.cli(["revive", "service", "status", "--json"]).json();
+  assert.deepEqual([status.path, status.installed, status.ours, status.enabled, status.path_kept], [plist, true, true, true, true]);
+  assert.match(s.cli(["revive", "service", "status"]).out, /Automagik Herdr's, runs at your next login/);
+
+  // Not loaded yet (no login since the install): the file goes, and launchd is only asked first.
+  const gone = s.cli(["revive", "service", "uninstall", "--json"]);
+  assert.equal(gone.code, 0, gone.err);
+  assert.equal(existsSync(plist), false);
+  assert.equal(gone.json().loaded, false);
+  assert.deepEqual(s.lcCalls(), [`print gui/${uid}/${label}`]);
+  assert.match(s.cli(["revive", "service", "status"]).out, /isn't installed/);
+
+  // Loaded (a login ran it): bootout comes first, then the plist goes: no label is left behind.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const u2 = s.cli(["revive", "service", "uninstall", "--json"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(u2.code, 0, u2.err);
+  assert.equal(u2.json().loaded, true);
+  assert.equal(existsSync(plist), false);
+  assert.deepEqual(s.lcCalls().slice(-2), [`print gui/${uid}/${label}`, `bootout gui/${uid}/${label}`]);
+
+  // A bootout that fails while launchd holds the job: refused, and the plist is left whole.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const before = readFileSync(plist, "utf8");
+  const no = s.cli(["revive", "service", "uninstall"], { env: { LAUNCHCTL_LOADED: "1", LAUNCHCTL_BOOTOUT_FAIL: "1" } });
+  assert.equal(no.code, 1);
+  assert.match(no.err, /launchd still holds dev\.herdr\.automagik-herdr-revive and its bootout failed \(Boot-out failed: Input\/output error\), so .* was left in place/);
+  assert.ok(no.err.includes(`launchctl bootout gui/${uid}/${label}`), no.err);
+  assert.equal(readFileSync(plist, "utf8"), before, "no orphaned plist: it is left exactly as it was");
+
+  // Someone else's plist at that path is left as it is, by install and by uninstall.
+  writeFileSync(plist, '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n');
+  for (const verb of ["install", "uninstall"]) {
+    const theirs = s.cli(["revive", "service", verb]);
+    assert.equal(theirs.code, 1);
+    assert.match(theirs.err, /isn't one Automagik Herdr wrote, so it was left as it is/);
+  }
+  assert.match(readFileSync(plist, "utf8"), /<dict\/>/);
+});
+
+test("revive service uninstall on macOS refuses when launchctl print fails, whatever the failure; the plist stays and the command is named (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const command = ["launchctl", "bootout", `gui/${uid}/${PLIST_LABEL}`].join(" ");
+  const cases = [
+    ["exit 1", { LAUNCHCTL_PRINT_EXIT: "1", LAUNCHCTL_PRINT_TEXT: "print failed" }],
+    ["exit 64", { LAUNCHCTL_PRINT_EXIT: "64", LAUNCHCTL_PRINT_TEXT: "usage: launchctl print <domain-target>" }],
+    ["an I/O error", { LAUNCHCTL_PRINT_EXIT: "5", LAUNCHCTL_PRINT_TEXT: "Input/output error" }],
+  ];
+  for (const [why, env] of cases) {
+    assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+    const before = readFileSync(plist, "utf8");
+    const r = s.cli(["revive", "service", "uninstall"], { env });
+    assert.notEqual(r.code, 0, `${why}: a failed probe is a refusal, not a removal`);
+    assert.equal(readFileSync(plist, "utf8"), before, `${why}: the plist is left exactly as it was`);
+    assert.ok(r.err.includes(command), `${why}: names the command that finishes by hand (${r.err})`);
+  }
+  // A launchctl that cannot be executed at all (EPERM/EACCES) is a refusal too, never a not-found.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const lc = join(s.root, "bin", "launchctl");
+  chmodSync(lc, 0o644);
+  const denied = s.cli(["revive", "service", "uninstall"]);
+  assert.notEqual(denied.code, 0, denied.err);
+  assert.equal(existsSync(plist), true, "a permission failure is not a not-found");
+  assert.ok(denied.err.includes(command), denied.err);
+  chmodSync(lc, 0o755);
+});
+
+test("revive service uninstall on macOS reads only 113 or the exact 'Could not find service' as not loaded (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const cases = [
+    ["exit 113", { LAUNCHCTL_PRINT_EXIT: "113", LAUNCHCTL_PRINT_TEXT: `Could not find service "${PLIST_LABEL}" in domain for user gui: ${uid}` }],
+    ["exit 0 with the words", { LAUNCHCTL_PRINT_OUT: `Could not find service "${PLIST_LABEL}" in domain for user gui: ${uid}` }],
+  ];
+  for (const [why, env] of cases) {
+    assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+    const asked = s.lcCalls().length;
+    const r = s.cli(["revive", "service", "uninstall", "--json"], { env });
+    assert.equal(r.code, 0, `${why}: ${r.err}`);
+    assert.equal(r.json().loaded, false, why);
+    assert.equal(existsSync(plist), false, why);
+    assert.deepEqual(s.lcCalls().slice(asked), [`print gui/${uid}/${PLIST_LABEL}`], `${why}: not loaded, so no bootout`);
+  }
+});
+
+test("revive service uninstall on macOS, with no plist, still asks launchd and boots out a label an earlier run left behind (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  // What a run that removed the plist while launchd held the label left: no file, a loaded label.
+  const r = s.cli(["revive", "service", "uninstall", "--json"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual([r.json().removed, r.json().loaded, r.json().booted_out], [false, true, true]);
+  assert.equal(existsSync(plist), false);
+  assert.deepEqual(s.lcCalls(), [`print gui/${uid}/${PLIST_LABEL}`, `bootout gui/${uid}/${PLIST_LABEL}`], "asked, then booted out");
+  const said = s.cli(["revive", "service", "uninstall"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(said.code, 0, said.err);
+  assert.match(said.out, /plist is gone .*launchd still held .*booted it out/i);
+  // And once launchd no longer holds it either, there is nothing left to say.
+  const none = s.cli(["revive", "service", "uninstall"]);
+  assert.equal(none.code, 0, none.err);
+  assert.match(none.out, /isn't installed/);
+});
+
+test("revive service on macOS refuses when it cannot ask launchd, and on a system with no login service it says why and writes nothing", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const plist = plistPath(s.home);
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  assert.equal(existsSync(plist), true);
+  // A PATH with only the fake uname: launchctl is nowhere, so no real one can be reached either.
+  const bare = join(s.root, "bare-bin");
+  mkdirSync(bare);
+  exe(join(bare, "uname"), "#!/bin/sh\necho Darwin\n");
+  const no = s.cli(["revive", "service", "uninstall"], { env: { PATH: bare } });
+  assert.equal(no.code, 1);
+  assert.match(no.err, /launchctl isn't here, so whether launchd holds dev\.herdr\.automagik-herdr-revive can't be read, and .* was left in place/);
+  assert.equal(existsSync(plist), true, "removing it blind could orphan a loaded job");
+
+  // Any other system: every verb refuses, naming the services that exist, and nothing is written.
+  const other = world(t, { os: "FreeBSD" });
+  for (const verb of ["install", "uninstall", "status"]) {
+    const r = other.cli(["revive", "service", verb]);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /The revive login service is built for Linux \(a systemd user unit\) and macOS \(a launchd agent\), not for FreeBSD: nothing was written or removed\./);
+  }
+  assert.equal(existsSync(join(other.home, "Library")), false);
+  assert.equal(existsSync(join(other.home, ".config/systemd")), false);
+});
+
 // ---- #992 review ----
 
 /** DSH session folders for the project, each born at its time. */
@@ -635,4 +946,484 @@ test("revive --boot prints counts only: no folder and no bot name reaches the us
   assert.match(r.out, /^revive: 1 resumed, 0 on a new conversation, 0 not back, 0 left alone, in 1 project;/);
   for (const text of [r.out, r.err]) for (const word of [s.project, s.home, s.root, "Genie", SID]) assert.ok(!text.includes(word), text);
   assert.equal(s.lastReport().projects[0].project, s.project, "the kept report still names the project");
+});
+
+// #1411: a reboot's recovery rebuilds a Codex seat from its record, the seat's own reasoning
+// effort and service tier included.
+test("#1411: revive passes a Codex seat's own effort and tier to its replacement pane", (t) => {
+  const file = team({ main: { agent: "codex", effort: "high", tier: "fast" } });
+  const s = world(t, { file, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s)[0];
+  const words = wordsOf(run);
+  assert.ok(hasSeq(words, ["-c", "model_reasoning_effort=high"]), run.join(" "));
+  assert.ok(hasSeq(words, ["-c", "service_tier=priority"]), run.join(" "));
+  assert.ok(hasSeq(words, ["resume", SID]), "resumed by its own id");
+  assert.equal(r.out.includes(SID), false, "no session id printed");
+});
+
+// ---- #1417: Codex and Kimi, whose ids are found on disk after the launch ----
+
+/** A version-7 UUID whose time is `ms`, as Codex makes its thread ids. */
+const v7 = (ms, tail = "8abc-0123456789ab") => { const h = Math.trunc(ms).toString(16).padStart(12, "0"); return `${h.slice(0, 8)}-${h.slice(8, 12)}-7def-${tail}`; };
+const KID = "session_3f2e1d0c-9b8a-4c7d-8e6f-5a4b3c2d1e0f";
+const KID2 = "session_7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d";
+const localDay = (ms) => { const d = new Date(ms); return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`; };
+
+/** Writes a Codex rollout under `codexHome` (default ~/.codex): its first line a session_meta for `cwd`, filed under day `dayMs`. */
+function codexRollout(s, { id, cwd, dayMs = Date.now(), codexHome = join(s.home, ".codex"), firstLine = null, rest = "" }) {
+  const dir = join(codexSessionsDir(codexHome), localDay(dayMs));
+  mkdirSync(dir, { recursive: true });
+  const meta = firstLine ?? JSON.stringify({ timestamp: new Date(dayMs).toISOString(), type: "session_meta",
+    payload: { id, session_id: id, timestamp: new Date(uuidV7Ms(id) ?? dayMs).toISOString(), cwd, base_instructions: { text: "the bot's briefing" } } });
+  writeFileSync(join(dir, `rollout-2026-11-16T12-00-00-${id}.jsonl`), `${meta}\n${rest}`);
+}
+
+/** Writes Kimi's session index under `kimiHome` (default ~/.kimi-code), each row's session folder born at `at`. */
+function kimiIndex(s, rows, kimiHome = join(s.home, ".kimi-code")) {
+  mkdirSync(kimiHome, { recursive: true });
+  const lines = [];
+  for (const { id, at, workDir = s.project, deleted = false } of rows) {
+    if (deleted) { lines.push(JSON.stringify({ sessionId: id, deleted: true })); continue; }
+    const sessionDir = join(kimiHome, "sessions", "ws1", id);
+    mkdirSync(sessionDir, { recursive: true });
+    utimesSync(sessionDir, at / 1000, at / 1000);
+    lines.push(JSON.stringify({ sessionId: id, sessionDir, workDir }));
+  }
+  writeFileSync(kimiIndexPath(kimiHome), `${lines.join("\n")}\n`);
+}
+const kimiBin = (s) => exe(join(s.root, "bin", "kimi"), "#!/bin/sh\nexit 0\n");
+
+test("codexHomeOf, kimiHomeOf, uuidV7Ms, codexRolloutId: where Codex and Kimi keep their sessions, and the time a Codex id carries", () => {
+  assert.equal(codexHomeOf("/home/u/", {}), "/home/u/.codex");
+  assert.equal(codexHomeOf("/home/u", { CODEX_HOME: "/data/codex" }), "/data/codex", "an absolute $CODEX_HOME wins");
+  assert.equal(codexHomeOf("/home/u", { CODEX_HOME: "relative" }), "/home/u/.codex");
+  assert.equal(codexSessionsDir("/home/u/.codex/"), "/home/u/.codex/sessions");
+  assert.equal(kimiHomeOf("/home/u", {}), "/home/u/.kimi-code");
+  assert.equal(kimiHomeOf("/home/u", { KIMI_CODE_HOME: "/data/kimi" }), "/data/kimi");
+  assert.equal(kimiHomeOf("/home/u", { KIMI_CODE_HOME: "kimi" }), "/home/u/.kimi-code");
+  assert.equal(kimiIndexPath("/home/u/.kimi-code"), "/home/u/.kimi-code/session_index.jsonl");
+  // Seen from codex-cli 0.169.0: the id's time is its session_meta timestamp.
+  assert.equal(uuidV7Ms("01a1e509-07dc-7621-b3f2-733a5a470bdd"), Date.parse("2026-11-16T15:45:36.732Z"));
+  assert.equal(uuidV7Ms(SID), null, "a version-4 UUID carries no time");
+  assert.equal(uuidV7Ms("not-an-id"), null);
+  const id = v7(1794843936732);
+  assert.equal(codexRolloutId(`rollout-2026-11-16T12-45-36-${id}.jsonl`), id);
+  assert.equal(codexRolloutId(`rollout-2026-11-16T12-45-36-${id}.json`), null);
+  assert.equal(codexRolloutId("notes.jsonl"), null);
+});
+
+test("codexCandidate: a session_meta for one of the folders gives its id and its birth; another folder's is null; anything unreadable is undefined", () => {
+  const id = v7(5_000_000);
+  const meta = (payload, extra = {}) => JSON.stringify({ timestamp: "2026-11-16T15:45:36.813Z", type: "session_meta", payload, ...extra });
+  assert.deepEqual(codexCandidate(meta({ id, timestamp: "2026-11-16T15:45:36.733Z", cwd: "/p", base_instructions: "secret" }), ["/p", "/q"]), { id, born: 5_000_000 });
+  assert.equal(codexCandidate(meta({ id, timestamp: "2026-11-16T15:45:36.733Z", cwd: "/elsewhere" }), ["/p"]), null);
+  // A version-4 id: the payload's timestamp, else the line's own.
+  assert.deepEqual(codexCandidate(meta({ id: SID, timestamp: "2026-11-16T15:45:36.733Z", cwd: "/p" }), ["/p"]), { id: SID, born: Date.parse("2026-11-16T15:45:36.733Z") });
+  assert.deepEqual(codexCandidate(meta({ id: SID, cwd: "/p" }), ["/p"]), { id: SID, born: Date.parse("2026-11-16T15:45:36.813Z") });
+  for (const bad of ["{torn", "", meta({ id: "--last", cwd: "/p" }), meta({ cwd: "/p" }), JSON.stringify({ type: "response_item", payload: { id, cwd: "/p" } })]) {
+    assert.equal(codexCandidate(bad, ["/p"]), undefined, bad);
+  }
+  assert.ok(!JSON.stringify(codexCandidate(meta({ id, cwd: "/p", base_instructions: "secret" }), ["/p"])).includes("secret"), "only id and time are kept");
+});
+
+test("kimiCandidates: the index replayed in order, a deleted id dropped, other folders' and bad ids left out, a session folder only under Kimi's own sessions", () => {
+  const home = "/home/u/.kimi-code";
+  const row = (o) => JSON.stringify(o);
+  const text = [
+    row({ sessionId: KID, sessionDir: `${home}/sessions/w/${KID}`, workDir: "/p" }),
+    row({ sessionId: KID2, sessionDir: `${home}/sessions/w/${KID2}`, workDir: "/p" }),
+    row({ sessionId: KID2, deleted: true }),
+    row({ sessionId: KID, sessionDir: `${home}/sessions/w2/${KID}`, workDir: "/p" }), // a later row for the same id wins
+    row({ sessionId: "session_nope", sessionDir: `${home}/sessions/w/x`, workDir: "/p" }),
+    row({ sessionId: `session_${SID}`, sessionDir: `${home}/sessions/w/s`, workDir: "/q" }),
+    row({ sessionId: `session_${SID2}`, sessionDir: `${home}/sessions/../../.ssh`, workDir: "/p" }),
+    row({ sessionId: `session_${SID3}`, sessionDir: "/tmp/elsewhere", workDir: "/p" }),
+    row({ sessionId: `session_${SID4}`, sessionDir: `${home}/sessions`, workDir: "/p" }),
+    "{torn", "",
+  ].join("\n");
+  assert.deepEqual(kimiCandidates(text, ["/p"], home), [{ id: KID, sessionDir: `${home}/sessions/w2/${KID}` }]);
+  assert.deepEqual(kimiCandidates(text, ["/q"], home), [{ id: `session_${SID}`, sessionDir: `${home}/sessions/w/s` }]);
+  assert.deepEqual(kimiCandidates("", ["/p"], home), []);
+});
+
+test("pickSession takes Kimi's session_<uuid> ids as it takes UUIDs, and no other shape", () => {
+  assert.equal(pickSession({ createdMs: 1_000_000, candidates: [{ id: KID, born: 1_001_000 }] }), KID);
+  for (const id of ["session_nope", "session-" + SID, `x${KID}`, "--last"]) assert.equal(pickSession({ createdMs: 1_000_000, candidates: [{ id, born: 1_001_000 }] }), null, id);
+});
+
+test("#1417 revive: a Codex bot at a bare shell is resumed by the id its rollout holds, though its first turn wrote it a day after the launch; the id is never printed", (t) => {
+  const born = Date.now() - 2 * 86_400_000;
+  const id = v7(born + 3000);
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], labels: { "herdr.space": "sp1" } })] });
+  codexRollout(s, { id, cwd: s.project, dayMs: born + 86_400_000 });
+  // Another folder's thread from the same moment, and an older one of this folder: never this pane's.
+  codexRollout(s, { id: v7(born + 4000, "9abc-0123456789ab"), cwd: "/elsewhere", dayMs: born + 86_400_000 });
+  codexRollout(s, { id: v7(born - 86_400_000), cwd: s.project, dayMs: born - 86_400_000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", id]]);
+  assert.deepEqual(s.ledger().filter((x) => x.event === "session").map((x) => [x.terminal, x.session, x.agent]), [["t5", id, "codex"], ["t100", id, "codex"]]);
+  const run = runsOf(s)[0];
+  assert.ok(hasSeq(wordsOf(run), ["resume", id]), run.join(" "));
+  assert.ok(!wordsOf(run).includes("--last"), run.join(" "));
+  assert.ok(run.includes(`agent.session=${id}`), "the next restart finds it on the new pane");
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome]), [["Lead", "resumed"]]);
+  for (const text of [r.out, r.err, s.hcState().sent[0].text, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(id), text);
+});
+
+test("#1417 revive: a Codex bot whose pane is gone whole comes back by its seat row and its rollout, under $CODEX_HOME when it is set", (t) => {
+  const born = Date.now() - 3_600_000;
+  const id = v7(born + 5000);
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }), attach: () => [{ bot: ID.main, terminal: "t5", created_ms: born }] });
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "seat", terminal: "t5", botId: ID.main, project: s.project, worktree: s.project,
+    agent: "codex", core: CORE, created_ms: born, at: new Date(born).toISOString() })}\n`, { mode: 0o600 });
+  const codexHome = join(s.root, "codex-home");
+  codexRollout(s, { id, cwd: s.project, codexHome });
+  codexRollout(s, { id: v7(born + 6000, "9abc-0123456789ab"), cwd: s.project }); // ~/.codex is not Codex's home here
+  const r = s.cli(["revive", "--json"], { env: { CODEX_HOME: codexHome } });
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s)[0];
+  assert.ok(hasSeq(wordsOf(run), ["resume", id]), run.join(" "));
+  assert.equal(cwdOf(run), s.project);
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome, x.terminal]), [["Lead", "resumed", "t100"]]);
+});
+
+test("#1417 revive: a Kimi bot at a bare shell is resumed by the session its index ties to the folder (--session=), never another's", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "kimi", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"] })] });
+  kimiBin(s);
+  kimiIndex(s, [{ id: KID2, at: born - 86_400_000 }, { id: KID, at: born + 4000 }, { id: `session_${SID}`, at: born + 4500, workDir: "/elsewhere" }]);
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", KID]]);
+  const run = runsOf(s)[0];
+  assert.ok(wordsOf(run).includes(`--session=${KID}`), run.join(" "));
+  assert.ok(!wordsOf(run).includes("--continue"), run.join(" "));
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome]), [["Lead", "resumed"]]);
+  for (const text of [r.out, r.err, s.hcState().sent[0].text, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(KID), text);
+});
+
+test("#1417 revive: two Codex bots started together in one folder can't be told apart: no id is recorded and each comes back on a new conversation, said", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" }, cap: { agent: "codex" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] }), pane("t6", { bot: ID.cap, cwd: p, created: born + 500, argv: ["codex"] })] });
+  writeFileSync(ledgerPath(s.app), [["t5", ID.main, born], ["t6", ID.cap, born + 500]].map(([terminal, botId, created_ms]) =>
+    `${JSON.stringify({ event: "start", kind: "seat", terminal, botId, project: s.project, worktree: s.project, agent: "codex", core: CORE, created_ms, at: new Date(created_ms).toISOString() })}\n`).join(""), { mode: 0o600 });
+  codexRollout(s, { id: v7(born + 1500), cwd: s.project });
+  codexRollout(s, { id: v7(born + 2500, "9abc-0123456789ab"), cwd: s.project });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s), [], "no id guessed");
+  for (const run of runsOf(s)) assert.ok(!wordsOf(run).includes("resume") && !wordsOf(run).includes("--last"), run.join(" "));
+  const results = r.json().projects[0].results;
+  assert.deepEqual(results.map((x) => [x.name, x.outcome]), [["Lead", "fresh"], ["Captain", "fresh"]]);
+  assert.match(results[0].why, /no Codex conversation of its own could be identified for t5/);
+});
+
+test("#1417 revive never guesses a Codex or Kimi bot's latest conversation: alone in its folder with no session of its own, it starts new and says so", (t) => {
+  const born = Date.now() - 3_600_000;
+  for (const agent of ["codex", "kimi"]) {
+    const s = world(t, { file: team({ main: { agent, name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: [agent] })] });
+    if (agent === "kimi") kimiBin(s);
+    const r = s.cli(["revive", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const run = runsOf(s)[0];
+    // codex's -c is --config; kimi's -c is --continue.
+    for (const w of agent === "codex" ? ["resume", "--last"] : ["--continue", "-c"]) assert.ok(!wordsOf(run).includes(w), `${agent}: ${run.join(" ")}`);
+    assert.ok(!wordsOf(run).some((w) => w.startsWith("--session")), `${agent}: ${run.join(" ")}`);
+    const res = r.json().projects[0].results[0];
+    assert.deepEqual([res.name, res.outcome], ["Lead", "fresh"]);
+    assert.match(res.why, new RegExp(`no ${agent === "codex" ? "Codex" : "Kimi"} conversation of its own could be identified for t5, so its folder's latest one was not guessed`));
+    assert.match(s.hcState().sent[0].text, /Back on a new conversation: Lead \(t100\), no .* conversation of its own could be identified/);
+  }
+});
+
+test("#1417: a restart by hand keeps its fallback for a Codex bot alone in its folder with no id (resume --last)", (t) => {
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: Date.now() - 3_600_000, front: ["codex"], argv: ["codex"], status: "idle" })] });
+  const r = s.cli(["restart", "Lead", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.ok(hasSeq(wordsOf(runsOf(s)[0]), ["resume", "--last"]), runsOf(s)[0].join(" "));
+});
+
+test("#1417 fails closed: an unreadable or oversized rollout of the launch's moment, or an oversized Kimi index, records nothing", (t) => {
+  const born = Date.now() - 3_600_000;
+  for (const firstLine of ["{torn", `{"type":"session_meta","payload":{"id":"x","pad":"${"y".repeat(1024 * 1024 + 10)}"}}`]) {
+    const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] })] });
+    codexRollout(s, { id: v7(born + 1000), cwd: s.project });
+    codexRollout(s, { id: v7(born + 2000, "9abc-0123456789ab"), cwd: s.project, firstLine }); // may be a rival's: nothing is taken
+    const r = s.cli(["revive", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(sessionLabels(s), []);
+    assert.deepEqual(r.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
+  }
+  // A rollout far from the launch is never opened: its torn line changes nothing.
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] })] });
+  const id = v7(born + 1000);
+  codexRollout(s, { id, cwd: s.project });
+  codexRollout(s, { id: v7(born + 900_000, "9abc-0123456789ab"), cwd: s.project, firstLine: "{torn" });
+  const ok = s.cli(["revive", "--json"]);
+  assert.equal(ok.code, 0, ok.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", id]]);
+  // Kimi's index over its 16 MiB cap.
+  const k = world(t, { file: team({ main: { agent: "kimi", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"] })] });
+  kimiBin(k);
+  kimiIndex(k, [{ id: KID, at: born + 4000 }]);
+  writeFileSync(kimiIndexPath(join(k.home, ".kimi-code")), `\n${" ".repeat(16 * 1024 * 1024)}`, { flag: "a" });
+  const rk = k.cli(["revive", "--json"]);
+  assert.equal(rk.code, 0, rk.err);
+  assert.deepEqual(sessionLabels(k), []);
+  assert.deepEqual(rk.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
+});
+
+test("#1417: a Kimi session folder that is a symlink, or is gone, is never taken", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "kimi", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"] })] });
+  kimiBin(s);
+  const kimiHome = join(s.home, ".kimi-code");
+  kimiIndex(s, [{ id: KID, at: born + 4000 }]);
+  const real = join(s.root, "elsewhere-session");
+  mkdirSync(real);
+  utimesSync(real, (born + 3000) / 1000, (born + 3000) / 1000);
+  const linked = join(kimiHome, "sessions", "ws1", KID2);
+  symlinkSync(real, linked);
+  writeFileSync(kimiIndexPath(kimiHome), `${JSON.stringify({ sessionId: KID2, sessionDir: linked, workDir: s.project })}\n`
+    + `${JSON.stringify({ sessionId: `session_${SID}`, sessionDir: join(kimiHome, "sessions", "ws1", "gone"), workDir: s.project })}\n`, { flag: "a" });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", KID]], "only the real folder counts");
+});
+
+// ---- #1418: the login service keeps the PATH it was installed with ----
+
+/** The PATH an installed unit keeps, read back as systemd would hand it to the boot pass. */
+const keptPathOf = (text) => {
+  const line = text.split("\n").find((l) => l.startsWith('Environment="PATH='));
+  return line ? line.slice('Environment="PATH='.length, -1).replace(/%%/g, "%").replace(/\\(["\\])/g, "$1") : null;
+};
+/** The pane PATH an `hc run` gave its program (the env wrapper's PATH word). */
+const panePathOf = (run) => wordsOf(run).find((w) => w.startsWith("PATH="))?.slice(5) ?? null;
+/** The first folder of `path` that holds an executable `name`: what the pane's own lookup runs. */
+const firstOnPath = (path, name) => {
+  for (const dir of path.split(":")) {
+    try { if (statSync(join(dir, name)).mode & 0o111) return join(dir, name); } catch { /* next */ }
+  }
+  return null;
+};
+
+test("servicePath: the caller's PATH, absolute words only, once each, without guard folders, node_modules/.bin or the venv's bin; ~/.local/bin and /usr/bin:/bin always there (#1418)", () => {
+  const drop = (d) => /(^|\/)(guard|hc-kill)\/?$/.test(d);
+  assert.equal(servicePath("/opt/agents/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin", { binDir: "/home/u/.local/bin" }),
+    "/opt/agents/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin", "already whole: unchanged, binDir never moved");
+  assert.equal(servicePath("/home/u/.automagik/parts/automagik.am/3.149.9/hc-kill:/pack/guard/:/opt/a:relative/bin::/opt/a:/p/node_modules/.bin:/p/node_modules/.bin/:/venv/bin:/opt/b",
+    { binDir: "/home/u/.local/bin", venv: "/venv/", drop }),
+  "/opt/a:/opt/b:/home/u/.local/bin:/usr/bin:/bin");
+  assert.equal(servicePath("", { binDir: "/home/u/.local/bin" }), "/home/u/.local/bin:/usr/bin:/bin", "no PATH at all still finds the CLI's link and the system's tools");
+  assert.equal(servicePath("/ok:/bad\nword:/tab\there", { binDir: "/b" }), "/ok:/b:/usr/bin:/bin", "a word with a control character never reaches the unit");
+});
+
+test("unitText: a kept PATH is its own Environment= line; % doubled, \" and \\ escaped, $ and spaces left as they are (#1418)", () => {
+  const text = unitText({ runner: "/home/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/a", PATH: '/opt/my tools/bin:/opt/$x:/opt/100%:/opt/q"t' }, wait: 600 });
+  assert.ok(text.split("\n").includes('Environment="PATH=/opt/my tools/bin:/opt/$x:/opt/100%%:/opt/q\\"t"'), text);
+  assert.equal(keptPathOf(text), '/opt/my tools/bin:/opt/$x:/opt/100%:/opt/q"t', "read back word for word");
+  assert.match(text, /^ExecStart="\/home\/u\/\.local\/bin\/automagik-herdr" revive --boot --wait 600$/m, "ExecStart as before");
+  assert.equal(unitKeepsPath(text), true);
+  assert.equal(unitKeepsPath(unitText({ runner: "/r", env: { HERDR_APP_HOME: "/a" } })), false, "a unit from before #1418 keeps none");
+  assert.equal(unitKeepsPath(null), false);
+});
+
+test("revive service install keeps the installer's PATH, without the pack's guard folders; status says when a unit keeps none (#1418)", { skip: process.platform !== "linux" }, (t) => {
+  const s = world(t);
+  // A pane's PATH: the kill shim's folder (beside an hcGuard.mjs) first, a project's node_modules/.bin, then the person's own.
+  const shim = join(s.root, "parts/automagik.am/3.0.0/hc-kill");
+  mkdirSync(shim, { recursive: true });
+  writeFileSync(join(s.root, "parts/automagik.am/3.0.0/hcGuard.mjs"), "// an older copy\n");
+  exe(join(shim, "hc"), "#!/bin/sh\nexit 0\n");
+  const tools = join(s.root, "tools");
+  mkdirSync(tools);
+  const r = s.cli(["revive", "service", "install", "--json"], { env: { PATH: `${shim}:${join(s.project, "node_modules/.bin")}:${tools}:${s.env.PATH}` } });
+  assert.equal(r.code, 0, r.err);
+  const out = r.json();
+  assert.equal(out.path, unitPath(s.home), "--json's path is still the unit's");
+  const text = readFileSync(unitPath(s.home), "utf8");
+  const kept = keptPathOf(text);
+  assert.equal(out.kept_path, kept);
+  const words = kept.split(":");
+  assert.equal(words[0], tools, kept);
+  assert.ok(!words.includes(shim), "a pane's versioned shim folder is never the boot pass's");
+  assert.ok(!words.some((w) => w.includes("node_modules")), kept);
+  assert.ok(words.includes(join(s.home, ".local/bin")) && words.includes("/usr/bin") && words.includes("/bin"), kept);
+  assert.ok(text.includes(`Environment="HERDR_APP_HOME=${s.app}"`), text);
+  const status = s.cli(["revive", "service", "status", "--json"]);
+  assert.equal(status.json().path_kept, true);
+  assert.doesNotMatch(s.cli(["revive", "service", "status"]).out, /keeps no PATH/);
+  // A unit written before #1418: status says so, and how to refresh it.
+  writeFileSync(unitPath(s.home), unitText({ runner: "/r", env: { HERDR_APP_HOME: s.app } }));
+  assert.equal(s.cli(["revive", "service", "status", "--json"]).json().path_kept, false);
+  assert.match(s.cli(["revive", "service", "status"]).out, /It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install\./);
+});
+
+test("revive with the unit's kept PATH starts the agent the person's terminal starts, not an older one a minimal PATH finds first (#1418)", { skip: process.platform !== "linux" }, (t) => {
+  const make = () => world(t, { file: team({ main: { agent: "codex" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, argv: ["codex"], labels: { "herdr.space": "sp9", "herdr.tab": "tb3" } })] });
+  const setup = (s) => {
+    // An old global codex (no status reports) where systemd's minimal PATH looks first, and the
+    // person's current codex earlier on their own PATH.
+    const system = join(s.root, "usr-local-bin"), mine = join(s.root, "home-local-bin");
+    for (const dir of [system, mine]) { mkdirSync(dir); exe(join(dir, "codex"), "#!/bin/sh\nexit 0\n"); }
+    return { system, mine };
+  };
+  // Installed from the person's terminal: their PATH is kept.
+  const s = make();
+  const { system, mine } = setup(s);
+  const install = s.cli(["revive", "service", "install"], { env: { PATH: `${mine}:${s.env.PATH}:${system}` } });
+  assert.equal(install.code, 0, install.err);
+  const kept = keptPathOf(readFileSync(unitPath(s.home), "utf8"));
+  assert.ok(kept.startsWith(`${mine}:`), kept);
+  // The boot pass runs with exactly that PATH.
+  const r = s.cli(["revive", "--json"], { env: { PATH: kept } });
+  assert.equal(r.code, 0, r.err);
+  const runs = runsOf(s);
+  assert.equal(runs.length, 1, JSON.stringify(runs));
+  assert.equal(firstOnPath(panePathOf(runs[0]), "codex"), join(mine, "codex"), runs[0].join(" "));
+  // Contrast, the unit before #1418: the boot pass under a minimal PATH starts the old one.
+  const before = make();
+  const old = setup(before);
+  const b = before.cli(["revive", "--json"], { env: { PATH: `${old.system}:${before.env.PATH}` } });
+  assert.equal(b.code, 0, b.err);
+  assert.equal(firstOnPath(panePathOf(runsOf(before)[0]), "codex"), join(old.system, "codex"), "what #1418 saw: another agent than the person's");
+});
+
+// ---- #1419: every pass is recorded, one that stops early too, and `revive --last` shows it ----
+
+import { lastText } from "../mods/am-sidebar/revive.js";
+
+const hcDown = (s) => exe(join(s.root, "bin", "hc"), "#!/bin/sh\necho 'core is not running' >&2\nexit 1\n");
+const hcUp = (s) => exe(join(s.root, "bin", "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+const recordPath = (s) => join(s.app, "automagik-herdr/revive-last.json");
+const stampPath = (s) => join(s.app, "automagik-herdr/revive-boot.json");
+const CHIEF = team({ main: { name: "Chief" } });
+
+test("lastText: the last pass, by the login service or by hand, each report and whether it was sent; one that stopped early; none on record", () => {
+  assert.match(lastText(null, "/x/revive-last.json"), /^No revive pass is on record on this computer \(\/x\/revive-last\.json\)\. .*am revive service status\.$/);
+  const sent = lastText({ at: "2026-11-16T10:00:00.000Z", boot: true, projects: [{ project: "/p", report: "Revive after a restart of this computer, project /p.", sent: "t9", unsent: null }] }, "/x");
+  assert.equal(sent, "Last revive pass: 2026-11-16T10:00:00.000Z, the login service's pass (--boot).\nRevive after a restart of this computer, project /p.\n  Sent to the main bot (t9).");
+  const unsent = lastText({ at: "2026-11-16T10:00:00.000Z", boot: false, projects: [{ project: "/p", report: "R.", sent: null, unsent: "Main has no pane" }] }, "/x");
+  assert.match(unsent, /, run by hand\.\nR\.\n {2}Not sent: Main has no pane\.$/);
+  // An older record has no `boot`: neither is said. Nothing came back: said so.
+  assert.equal(lastText({ at: "2026-11-16T10:00:00.000Z", projects: [] }, "/x"), "Last revive pass: 2026-11-16T10:00:00.000Z.\nNothing to bring back: every bot the ledger named ran its agent.");
+  // Stopped early: the reason, never "nothing to bring back"; a project with no report yet is named.
+  const stopped = lastText({ boot_ms: 1, projects: [{ project: "/p", report: null, sent: null, unsent: "the pass stopped early" }],
+    stopped: { at: "2026-11-16T11:00:00.000Z", boot: true, reason: "herdr-core isn't answering 600s on (down). Nothing was started." } }, "/x");
+  assert.match(stopped, /^Last revive pass: 2026-11-16T11:00:00\.000Z, the login service's pass \(--boot\)\.\nProject \/p: no report\.\n {2}Not sent: the pass stopped early\.\nA pass stopped early \(2026-11-16T11:00:00\.000Z, --boot\): herdr-core isn't answering/);
+  assert.doesNotMatch(stopped, /Nothing to bring back/);
+});
+
+test("revive --boot with herdr-core not answering keeps a record that says it stopped early, stamps nothing, and the next boot pass runs", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  hcDown(s);
+  const r = s.cli(["revive", "--boot", "--wait", "1"], { env });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /herdr-core isn't answering 1s on \(core is not running\)\. Nothing was started\./);
+  const rec = s.lastReport();
+  assert.equal(statSync(recordPath(s)).mode & 0o777, 0o600);
+  assert.deepEqual(rec.projects, []);
+  assert.equal(rec.stopped.boot, true);
+  assert.match(rec.stopped.reason, /^herdr-core isn't answering 1s on/);
+  assert.ok(!JSON.stringify(rec).includes("at "), "no stack in the record");
+  assert.equal(existsSync(stampPath(s)), false, "an aborted pass never stamps the boot");
+  const last = s.cli(["revive", "--last"]);
+  assert.equal(last.code, 0, last.err);
+  assert.match(last.out, /A pass stopped early \(.*, --boot\): herdr-core isn't answering 1s on/);
+  // herdr-core answers again: the same boot's pass runs, records, stamps.
+  hcUp(s);
+  const again = s.cli(["revive", "--boot", "--json"], { env });
+  assert.equal(again.code, 0, again.err);
+  assert.equal(again.json().ran, true);
+  assert.equal(s.lastReport().boot, true);
+  assert.equal(s.lastReport().stopped, undefined);
+  assert.ok(existsSync(stampPath(s)));
+});
+
+test("a pass that stops early keeps the report this boot's pass couldn't send, under its own stop", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t6", { bot: ID.cap, cwd: p, labels: { "agent.session": SID2 } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  const r = s.cli(["revive"], { env });
+  assert.equal(r.code, 0, r.err);
+  const before = s.lastReport();
+  assert.equal(before.boot, false);
+  assert.equal(before.projects[0].unsent, "Chief has no pane");
+  hcDown(s);
+  assert.equal(s.cli(["revive", "--wait", "1"], { env }).code, 1);
+  const after = s.lastReport();
+  assert.deepEqual(after.projects, before.projects);
+  assert.equal(after.at, before.at);
+  assert.equal(after.stopped.boot, false);
+  const last = s.cli(["revive", "--last"]).out;
+  assert.match(last, /, run by hand\.\nRevive after a restart of this computer, project .*Captain \(t100\).*\n {2}Not sent: Chief has no pane\.\nA pass stopped early/);
+});
+
+test("a second boot pass while herdr-core is down says it already ran and leaves the record as it is", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  assert.equal(s.cli(["revive", "--boot"], { env }).code, 0);
+  const record = readFileSync(recordPath(s), "utf8");
+  const stamp = readFileSync(stampPath(s), "utf8");
+  hcDown(s);
+  const r = s.cli(["revive", "--boot", "--json", "--wait", "1"], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { ran: false, reason: "already ran for this boot" });
+  assert.equal(readFileSync(recordPath(s), "utf8"), record);
+  assert.equal(readFileSync(stampPath(s), "utf8"), stamp);
+});
+
+test("the main bot's report goes only to a pane this core bound: a binding of another core is no pane of its own", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, front: ["claude"], status: "idle" }), pane("t6", { bot: ID.cap, cwd: p, labels: { "agent.session": SID2 } })],
+    attach: () => [{ bot: ID.main, terminal: "t5", created_ms: 1, core: "othercore000" }, { bot: ID.cap, terminal: "t6", created_ms: 1 }] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(s.hcState().sent, undefined, "nothing typed into another core's pane");
+  assert.equal(r.json().projects[0].unsent, "Chief has no pane");
+  assert.equal(s.lastReport().projects[0].unsent, "Chief has no pane");
+});
+
+test("revive --last shows the last pass and whether its report was sent, asks hc nothing and writes nothing; --json gives the record", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const none = s.cli(["revive", "--last"]);
+  assert.equal(none.code, 0, none.err);
+  assert.match(none.out, /^No revive pass is on record on this computer \(.*revive-last\.json\)\. To see whether the login service that runs it after a restart is installed: am revive service status\./);
+  assert.deepEqual(s.cli(["revive", "--last", "--json"]).json(), { path: recordPath(s), record: null });
+  assert.equal(s.cli(["revive"]).code, 0);
+  const files = [recordPath(s), attachPath(s.app)].map((f) => readFileSync(f, "utf8"));
+  const calls = s.calls().length;
+  hcDown(s);
+  const r = s.cli(["revive", "--last"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^Last revive pass: .*, run by hand\.\nRevive after a restart of this computer, project .*Resumed where they were: Chief \(t100\)\..*\n {2}Sent to the main bot \(t100\)\.\n?$/);
+  assert.ok(!r.out.includes(SID) && !r.err.includes(SID), r.out);
+  const j = s.cli(["revive", "--last", "--json"]).json();
+  assert.equal(j.path, recordPath(s));
+  assert.equal(j.record.projects[0].sent, "t100");
+  assert.equal(s.calls().length, calls, "no hc call");
+  assert.deepEqual([recordPath(s), attachPath(s.app)].map((f) => readFileSync(f, "utf8")), files);
+  assert.equal(existsSync(stampPath(s)), false);
+});
+
+test("revive --last: a record that isn't JSON exits 1 and says so; --last with a pass's options or a verb is a usage mistake", (t) => {
+  const s = world(t, { file: CHIEF });
+  writeFileSync(recordPath(s), "{ not json");
+  const r = s.cli(["revive", "--last"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /The revive record isn't valid JSON \(.*revive-last\.json\)\./);
+  for (const args of [["revive", "--last", "--boot"], ["revive", "--last", "--wait", "0"], ["revive", "--last", "--dry-run"], ["revive", "service", "install", "--last"]]) {
+    const u = s.cli(args);
+    assert.equal(u.code, 2, args.join(" "));
+    assert.match(u.err, /revive --last \[--json\]/, args.join(" "));
+  }
+  assert.deepEqual(s.sysCalls(), [], "service install never ran");
 });

@@ -87,6 +87,47 @@ test('Hermes moves; OpenClaw, Grok bot and Muse are labels with a Coming soon pi
   assert.deepEqual(plain(soon.map(textOf).map(body => migrate.TOOLS.find(tool => body.includes(tool.name)).name)), ['OpenClaw', 'Grok bot', 'Muse'])
 })
 
+test('not-ready cards show only their names and Coming soon, with rows kept at the top', () => {
+  const tree = render(migrate.MigrateView({ phase: 'choosing' }))
+  const soon = findAll(tree, byClass('oai-mig-is-soon'))
+  const expected = [
+    ['openclaw', 'OpenClaw', 'OpenClaw'],
+    ['grok', 'Grok bot', 'Grok botxAI'],
+    ['muse', 'Muse', 'MuseMeta'],
+  ]
+  assert.equal(soon.length, expected.length)
+  const tools = plain(migrate.TOOLS.filter(tool => tool.ready !== true))
+  assert.deepEqual(tools.map(tool => tool.id), expected.map(([id]) => id))
+  for (const [index, [id, name, label]] of expected.entries()) {
+    const card = soon[index]
+    const who = findAll(card, byClass('oai-mig-who'))
+    assert.equal(who.length, 1)
+    assert.equal(textOf(who[0]), label)
+    assert.equal(findAll(who[0], node => node.type === 'span').length, 0)
+    assert.equal(findAll(card, byClass('oai-mig-blurb')).length, 0)
+    const pills = findAll(card, byClass('oai-soon'))
+    assert.equal(pills.length, 1)
+    assert.equal(textOf(pills[0]), 'Coming soon')
+    assert.doesNotMatch(textOf(card), /Telegram/)
+    const marks = findAll(card, byClass('oai-mig-mark'))
+    assert.equal(marks.length, 1)
+    assert.equal(marks[0].props['aria-hidden'], 'true')
+    assert.equal(card.props['aria-label'], `${name}: coming soon`)
+    const tool = tools.find(tool => tool.id === id)
+    assert.equal(Object.hasOwn(tool, 'what'), false)
+    assert.equal(Object.hasOwn(tool, 'blurb'), false)
+  }
+  const ready = findAll(tree, byClass('oai-mig-is-ready'))
+  assert.equal(ready.length, 1)
+  const who = findAll(ready[0], byClass('oai-mig-who'))[0]
+  assert.equal(textOf(findAll(who, node => node.type === 'span')[0]), 'Telegram bot')
+  assert.equal(
+    textOf(findAll(ready[0], byClass('oai-mig-blurb'))[0]),
+    'Move its Telegram bot to Omni, with the bot you already know.',
+  )
+  assert.match(migrate.MIGRATE_CSS, /\.oai-mig-is-soon\{[^}]*align-content:start[;}]/)
+})
+
 test('the confirm card says Hermes restarts, its settings are copied, and the order is Hermes then Omni', () => {
   const tree = view({ phase: 'confirm', probe: probe(), agreed: false })
   const body = textOf(tree)
@@ -279,6 +320,35 @@ test('an unknown Omni channel state says Hermes is off and what to check, not th
   assert.match(body, /Omni did not confirm which channel is the move's/)
   assert.match(body, /Hermes still has the key/)
   assert.doesNotMatch(body, /Nothing is listening right now/)
+})
+
+test('an unknown Omni result offers the way back to Hermes, only when there is a copy to put back', () => {
+  const back = []
+  const tree = view({
+    phase: 'problem',
+    error: { code: 'omni', message: '', changed: { hermesOff: true, omniCreated: false, omniUnknown: true }, canRestoreHermes: true },
+    onRestoreHermes: () => back.push(true),
+  })
+  const button = buttons(tree).find(node => textOf(node) === 'Turn Hermes\'s Telegram back on')
+  assert.ok(button, 'the unknown result offered no way back to Hermes')
+  button.props.onClick()
+  assert.deepEqual(back, [true])
+
+  const noCopy = view({ phase: 'problem', error: { code: 'omni', message: '', changed: { hermesOff: true, omniCreated: false, omniUnknown: true } } })
+  assert.equal(buttonLabels(noCopy).includes('Turn Hermes\'s Telegram back on'), false, 'offered a way back with no copy to put back')
+
+  const known = view({ phase: 'problem', error: { code: 'omni', message: '', changed: { hermesOff: true, omniCreated: false }, canRestoreHermes: true } })
+  assert.equal(buttonLabels(known).includes('Turn Hermes\'s Telegram back on'), false, 'offered a way back after a known empty Omni')
+})
+
+test('a restored Hermes ends the step with its Telegram back, and a recovered channel says who answers', () => {
+  const tree = view({ phase: 'restored' })
+  assert.match(textOf(tree), /Hermes's Telegram is back on/)
+  assert.match(textOf(tree), /Hermes has its Telegram again/)
+  assert.deepEqual(buttonLabels(tree), ['Done'])
+
+  const done = view({ phase: 'done', result: { channelId: OTHER, channelName: 'Telegram', connected: true, botName: '@HefestoBot', chatUrl: null, attached: true, answering: false, answeringOff: false, answerBot: null, recovered: true, hermesOff: true } })
+  assert.match(textOf(done), /No Bot answers in these chats yet\. Pick one in Omni's Channels\./)
 })
 
 test('the step carries its own clay, in both themes', () => {

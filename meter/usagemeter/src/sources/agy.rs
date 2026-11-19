@@ -15,14 +15,14 @@
 //! checkpoint on close is off. A database in WAL mode may still have its `-wal` and `-shm`
 //! sidecars created or updated by a read-only SQLite open; the database bytes are not rewritten.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Precision, Tokens, UsageEvent};
+use crate::event::{Precision, Tokens, UsageEvent, key_hash};
 use crate::sources::clip;
 use crate::time::DAY_MS;
 
@@ -82,6 +82,8 @@ pub enum Failure {
 #[derive(Debug, Default)]
 pub struct Read {
     pub events: Vec<UsageEvent>,
+    /// For each call, the hashes it could have been counted under before its earliest time arrived.
+    pub(crate) later_step_keys: HashMap<String, Vec<i64>>,
     /// The highest `gen_metadata.idx` processed. A refused or incomplete row leaves it below
     /// that row, so the next sync reads it again instead of losing its usage.
     pub max_gen: i64,
@@ -655,9 +657,8 @@ pub fn read(
                 tokens,
                 steps,
             } => {
-                // A recent row waits until every step it names has a time, so its key and cursor
-                // time do not change when an earlier step's time lands after the first sync. Once
-                // the database is quiet nothing can change: count it with the times present.
+                // A recent row waits until every step it names has a time. A quiet row can count
+                // with the times present, even if another step's time arrives later.
                 let complete = steps.iter().all(|i| times.contains_key(i));
                 let ts = steps.iter().filter_map(|i| times.get(i)).min().copied();
                 next_by_idx.insert(idx, ts.unwrap_or(0));
@@ -711,11 +712,27 @@ pub fn read(
                     held_at.get_or_insert(idx);
                     continue;
                 };
-                // What identifies a call: its conversation, generation index and first step's
-                // time. A re-read row whose bytes change keeps its key, while a reused index with
-                // a new call gets a new step time. Keys written by earlier, unmerged builds are
-                // not migrated: no released store carries one.
-                let dedupe = format!("agy|{session}|{idx}|{ts}");
+                // A quiet row may already have been counted using one of its later times.
+                // Reconstruct those keys from its named steps, including for stores that saved
+                // only the original key's hash. The cursor still tracks the earliest current time.
+                let prefix = format!("agy|{session}|{idx}|");
+                let dedupe = format!("{prefix}{ts}");
+                let mut later_times: Vec<_> = steps
+                    .iter()
+                    .filter_map(|i| times.get(i).copied())
+                    .filter(|&time| time > ts)
+                    .collect();
+                if !later_times.is_empty() {
+                    later_times.sort_unstable();
+                    later_times.dedup();
+                    out.later_step_keys.insert(
+                        dedupe.clone(),
+                        later_times
+                            .into_iter()
+                            .map(|time| key_hash(&format!("{prefix}{time}")))
+                            .collect(),
+                    );
+                }
                 out.events.push(UsageEvent {
                     dedupe_key: dedupe,
                     ts_ms: ts,

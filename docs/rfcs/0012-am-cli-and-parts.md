@@ -128,7 +128,8 @@ change.
 - **As built in delivery 1** (t30j, agreed with t22n and t259, 2026-11-03):
   - The secret is `AM_LANE_KEY` (rotation slot `AM_LANE_KEY_NEXT`, picked by the variable
     `AM_LANE_SIGNER`), the public keys `am/am-keys.json`, made by `bun scripts/am-lane.ts
-    keygen`. Amending the bullet above: while `am-keys.json` lists no key, or the secret is not
+    keygen`. The workflow uses only the selected slot, even when its secret is empty.
+    Amending the bullet above: while `am-keys.json` lists no key, or the secret is not
     set, a release attaches am, posts no `am-lane` and says so in a `::warning::` (the key is
     the owner's to add; a release never fails over its absence, nor in the window between
     keygen and its `am-keys.json` reaching dev). Once keys are listed, a secret that is none of

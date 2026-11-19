@@ -10,6 +10,7 @@ import { WHATSAPP_SIGNUPS_OPEN } from './waitlist/lib/shared.js'
 import { themeCss, titleFace, brandFonts, statusNames } from './scripts/sync-theme.mjs'
 import { pages, routes, rootFiles, weUnfold, arca, arcaLogo, arcaArk, oiTag, platforms, offered, used, usedCredit, trademarks, brand as siteLogo, icons, manifest as webManifest, family, familyArt, familyButton, familyHost, familyLinks } from './scripts/build-pages.mjs'
 import { BOX, GEOMETRY, LOGO, TONES, logoInner, tagInner } from './scripts/build-lockup.mjs'
+import { checkArt } from './scripts/build-art.mjs'
 
 // The width of each name's lockup in the kit's own units; all are 264 high.
 const LOCKUP_BOX = { Automagik: '1632.34' }
@@ -458,6 +459,12 @@ test('derived art: each file is one recorded rectangle of a hashed source, at 1x
   }
 })
 
+test('derived art: each committed file is the picture its recorded source builds', () => {
+  // A digest proves the manifest matches the file, not that the file came from its source: a
+  // stale crop with its sha256 updated passes every hash. Rebuild the picture and compare.
+  assert.deepEqual(checkArt(), [], 'A committed WebP crop does not re-derive from its source: rebuild the art')
+})
+
 test('only Cloud carries the add/removal forms, fields, explicit consent and privacy', () => {
   for (const route of routes) {
     const forms = htmlAt(route).match(/<form\b/g) ?? []
@@ -499,8 +506,8 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
   // The site serves byte copies of the brand's font and licence, and the font is the recorded build.
   assert.deepEqual(brandFonts.map(file => file.to.pathname.split('/').pop()), ['fredoka-latin.woff2', 'OFL-Fredoka.txt'])
   for (const { from, to } of brandFonts) assert.ok(readFileSync(to).equals(readFileSync(from)), to.pathname.split('/').pop())
-  assert.equal(createHash('sha256').update(readFileSync(brandFonts[0].to)).digest('hex'), 'd1ceb16007127919aa1900fb85e4b5d612a4f242404a4068d43f3bc628b2aeca')
-  assert.ok(read('../../docs/brand/fonts/README.md').includes('`d1ceb16007127919aa1900fb85e4b5d612a4f242404a4068d43f3bc628b2aeca`'))
+  assert.equal(createHash('sha256').update(readFileSync(brandFonts[0].to)).digest('hex'), '810dcfb6a381d6af829919740868e38b2e1bfdeca74cec7f34526d9dc7662f1b')
+  assert.ok(read('../../docs/brand/fonts/README.md').includes('`810dcfb6a381d6af829919740868e38b2e1bfdeca74cec7f34526d9dc7662f1b`'))
   // The theme takes the family, the file, the size adjustment and the weights from the brand's tokens.
   assert.deepEqual({ family: titleFace.family, weight: titleFace.weight, sizeAdjust: titleFace.sizeAdjust }, { family: 'Fredoka', weight: '300 700', sizeAdjust: '105%' })
   assert.deepEqual(brand.weights.map(weight => [weight.name, weight.value]), [['weight-title', 536], ['weight-strong', 469], ['weight-label', 402]])
@@ -511,9 +518,22 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
   // Nothing set in the title face carries a weight of its own: a heavier Fredoka is heavier than the logo.
   assert.equal(css.match(/font:[^;}]*var\(--head\)/g).length, 37)
   assert.deepEqual(css.match(/font:[^;}]*var\(--head\)/g).filter(rule => !/^font:var\(--weight-(?:title|strong|label)\) /.test(rule)), [])
-  assert.ok(css.includes('\nh1{font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;letter-spacing:-.02em}\n'))
-  assert.ok(css.includes('\nh2{font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;letter-spacing:-.016em}\n'))
-  assert.ok(css.includes('\nh3{font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;letter-spacing:-.01em}\n'))
+  // Each heading's weight, size and line height are the brand's, and its letter spacing reaches its
+  // own brand token through the theme's variable, with only the leading zero CSS drops put back.
+  const headings = brand.groups.find(group => group.name === 'Headings').styles
+  for (const [tag, style, rule] of [
+    ['h1', 'heading-1', 'font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;'],
+    ['h2', 'heading-2', 'font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;'],
+    ['h3', 'heading-3', 'font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;'],
+  ]) {
+    const start = `${tag}{${rule}letter-spacing:`
+    const line = css.split('\n').find(text => text.startsWith(start) && /^[^;}]+\}$/.test(text.slice(start.length)))
+    assert.ok(line, `${tag}: the weight, size and line height are not the brand's`)
+    const n = style.split('-')[1]
+    assert.equal(line.slice(start.length, -1), `var(--heading-${n}-letter-spacing)`, `${tag}: the letter spacing is not ${style}'s variable`)
+    const value = theme.match(new RegExp(`--heading-${n}-letter-spacing:([^;]+);`))[1].replace(/^(-?)\./, (_, sign) => `${sign}0.`)
+    assert.equal(value, headings.find(entry => entry.name === style).letterSpacing, `${tag}: the letter spacing is not ${style}'s`)
+  }
   // Fredoka's own word space is wide; the extra word spacing the old face needed is gone.
   assert.doesNotMatch(css, /word-spacing/)
   // Widths counted in the face's own zero: Fredoka's zero is narrower, so the counts grew to keep the same lines.
@@ -526,6 +546,28 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
     assert.equal(html.split('<link rel="preload" href="/assets/brand/fredoka-latin.woff2" as="font" type="font/woff2" crossorigin>').length, 2, route)
     assert.doesNotMatch(html, /manrope/i, route)
   }
+})
+
+test('the heading letter spacing comes from the brand tokens, once', () => {
+  const brand = JSON.parse(read('../../docs/brand/tokens/tokens.json')).type
+  const headings = brand.groups.find(group => group.name === 'Headings').styles
+  assert.deepEqual(headings.map(style => style.name), ['heading-1', 'heading-2', 'heading-3'])
+  for (const [index, style] of headings.entries()) {
+    const n = index + 1
+    assert.ok(theme.includes(`--heading-${n}-letter-spacing:${style.letterSpacing};`), `the theme carries heading ${n}'s letter spacing`)
+    assert.ok(css.includes(`letter-spacing:var(--heading-${n}-letter-spacing)`), `h${n} uses the brand's letter spacing`)
+  }
+  // The number lives in tokens.json only: never copied into the stylesheet by hand again.
+  assert.doesNotMatch(css, /(?:^|\n)h[123]\{[^}]*letter-spacing:-?\.0/)
+})
+
+test('the Genie flow step title stays on one line beside its number in the three-column layout', () => {
+  // The counter plaque (30px) and the gap leave the title its column less 36px. At 861px and
+  // up the fluid size keeps "A branch and a test run" on one line; below it the single-column
+  // layout gives the title 560px, and a phone may still wrap it.
+  assert.match(css, /\.flow-steps h3\{[^}]*font-size:clamp\(1\.2rem,1\.1rem \+ \.2vw,1\.3rem\)/)
+  assert.match(css, /\.flow-steps h3\{[^}]*gap:6px/)
+  assert.doesNotMatch(css, /\.flow-steps h3\{[^}]*white-space:nowrap/)
 })
 
 test('the title face never ships without its licence, in the brand folder and on the site', () => {
@@ -1109,6 +1151,17 @@ test('the Cloud form offers email only while WhatsApp sign-ups are paused; remov
 })
 
 
+test('the brand kit WaitlistForm preview shows the form the site serves', () => {
+  const preview = read('../../docs/brand/components/WaitlistForm/preview.html').match(/<form class="waitlist-form"[\s\S]*?<\/form>/)[0]
+  const served = waitlistForm()
+  const names = markup => [...markup.matchAll(/name="([^"]+)"/g)].map(match => match[1])
+  assert.deepEqual(names(preview), names(served), 'The preview carries the served fields, in order')
+  assert.match(preview, /<input type="hidden" name="channel" value="email">/)
+  assert.doesNotMatch(preview, /whatsapp|wa\.me|AMG-/i)
+  assert.equal((preview.match(/<input type="email" name="email" [^>]*required/g) ?? []).length, 1)
+})
+
+
 test('approved WhatsApp support privacy is verbatim in English with its Portuguese counterpart', () => {
   const markup = supportPrivacy()
   const english = markup.match(/<section lang="en"[\s\S]*?<\/section>/)[0]
@@ -1138,4 +1191,26 @@ test('every public page forbids internal delivery and product-team jargon, inclu
   const { onRequest } = await import('./functions/api/waitlist.js')
   const response = await onRequest({ request: new Request('https://automagik.si/api/waitlist'), env: {} })
   assert.doesNotMatch(await response.text(), forbidden, '/api/waitlist')
+})
+
+// The default companion is Pirlim (#1442): the capture scripts hatch it for the next regeneration.
+// Read as text: importing them would start the capture runtime or browsers.
+test('the capture scripts name the companion Pirlim and hold no Pip word', () => {
+  for (const file of ['capture.mjs', 'scripted-model.mjs', 'theme.mjs']) {
+    const source = read(`capture/${file}`)
+    assert.match(source, /\bPirlim\b/, file)
+    assert.doesNotMatch(source, /\bPip\b/, file)
+  }
+  const capture = read('capture/capture.mjs')
+  assert.match(capture, /name: 'Pirlim', exact: true/)
+  assert.match(capture, /name: 'Hatch Pirlim'/)
+  assert.match(capture, /getByText\('Pirlim leads\. Who comes along\?'\)/)
+  assert.match(capture, /keepWorkspace\('Pirlim'\)/)
+  assert.match(capture, /name: 'Pirlim, Orchestrator, Main Bot'/)
+  const model = read('capture/scripted-model.mjs')
+  assert.ok(model.includes("Hi, I\\'m Pirlim!"))
+  assert.match(model, /who === 'Pirlim'/)
+  const theme = read('capture/theme.mjs')
+  assert.match(theme, /api\('update-bot', \{ id: main\.id, name: 'Pirlim'/)
+  assert.match(theme, /scenario: 'Fictional Pirlim, Rowan and Sage/)
 })

@@ -1,65 +1,322 @@
 # RFC 0032: Automagik ID
 
-- Status: In delivery; delivery 1 authorized by the owner.
-- Scope: one identity for all Automagik products.
+| Field | Value |
+|---|---|
+| Status | In delivery (delivery 1 authorized by the owner and merged: #1094, #1118, #1377; deliveries 2-5 open; questions (a)-(d) decided by the owner on 2026-11-18, (e)-(g) open; replaces RFC 0024's identity-provider choice) |
+| Milestone | none (independent Worker deployment) |
+| Lanes | none: `apps/id/` deploys on its own and no release carries it |
+| Created | 2026-11-11 |
 
-## Decision
+## Summary
 
-Automagik ID uses Better Auth, under its MIT license, in one Cloudflare Worker
-with D1. Passkeys are the first sign-in method, including account creation without
-an existing session. There is no email, password, social sign-in or sign-up form.
-WhatsApp proof through Omni is disabled by default. Delivery 2 requires the person
-to send a browser-issued challenge message first; the service never sends first.
+Automagik ID is one sign-in service for every Automagik product. It proves who a
+person is and nothing more. Products key on the `(issuer, sub)` pair it returns and
+keep their own roles, organisations and entitlements.
 
-Automagik desktop and Cloud connect through OpenID Connect first. Arca, Omni and
-Brain can each gain their own client later. Every client requires S256 PKCE;
-native clients use the standard loopback redirect flow. Client registrations
-come from a reviewed seed list. Third-party clients require consent; the seeded
-first-party clients may skip it. D1 persists sessions, challenges and rate limits.
+It is one Cloudflare Worker with one D1 database, built on Better Auth under its MIT
+license. Passkeys are the sign-in method. There is no email, password, social sign-in
+or sign-up form. Products connect through OpenID Connect with a code flow and S256
+PKCE. Clients come from a reviewed seed list in the repository.
 
-This replaces RFC 0024's identity-provider choice, its provider hosting and
-administration assumptions, and its account provisioning and product-client
-arrangements. RFC 0024's workspace isolation, product authorization, principal
-binding, credential protection and desktop sign-in safeguards still apply.
-Product roles and entitlements remain the product's responsibility.
+This RFC records what is built (delivery 1), the contracts products may rely on, the
+threat model, and the deliveries that remain before real people use it.
 
-## Delivery 1
+## Motivation
 
-The independently deployed service lives in `apps/id/`. Repository releases do
-not carry it. Acceptance requires passkey account creation and sign-in, an OIDC
-code flow, verified tokens, strict redirect and PKCE checks, optional phone-code
-verification, and shared database rate limits in a local Workers runtime.
-Sign-in and consent screens belong to the owner and follow the page contract.
-They exist since #1118 (`apps/id/pages/sign-in.html`, `consent.html`).
+RFC 0024 chose a self-hosted Pocket ID as Cloud's identity service. Its delivery 0
+evidence showed the limits: flat groups, unscoped admin API keys, outbound SCIM only,
+and invitations that the provider cannot hold. Cloud had to hold every invitation and
+role itself anyway.
 
-Every Automagik and Arca sign-in shares one passkey site name, `automagik.si`
-(owner, 2026-11-11), read from a setting; the service refuses to start on a host
-outside it. A workers.dev address cannot carry that name, so the first deployment
-and acceptance trial use a test name under `automagik.si` (owner, 2026-11-15),
-and passkeys made there keep working at the public name. No public-name move
-occurs until the owner explicitly directs it. This delivery provisions and
-deploys nothing. Rollback disables the service; keep its database and signing
-material until product sessions have been retired deliberately.
+A small service of our own gives:
 
-## Trust boundary and later decisions
+- one passkey site name, `automagik.si`, shared by every Automagik and Arca sign-in;
+- no admin API key that reaches every account;
+- code we review, with tests that run without Cloudflare;
+- room for the inbound WhatsApp proof the owner asked for.
 
-Only the allowlisted authentication and protocol endpoints are public. There is
-no public client management API. Secrets are provisioned through the deployment
-tool's secret input, and configuration identifiers stay outside tracked files.
-There is no automatic migration from another provider's principals.
+## Decided
 
-Recovery, account linking, additional product clients, phone rollout, and the
-eventual public name each need a later owner decision. Enabling phone codes
-does not link a number to an existing passkey identity.
+1. **Better Auth in one Worker with D1** (owner). No other provider, no secondary store.
+2. **Passkeys first.** Account creation works without a prior session, but only with
+   an admission ticket (Decided 9). No email, password, social sign-in or sign-up form.
+3. **Passkey site name `automagik.si`** (owner, 2026-11-11), read from a setting. The
+   service refuses to start on a host outside it.
+4. **The public name is `id.automagik.si`** (owner, 2026-11-18). It is the issuer
+   every product stores in `(iss, sub)`. It replaces the test-name first deployment
+   (owner, 2026-11-15): the first deployment goes to `id.automagik.si`, so the issuer
+   never moves, and the invite gate keeps it closed until someone is admitted.
+5. **Phone proof is inbound only.** The person sends a browser-issued challenge
+   message through WhatsApp; the service never sends first. It is off by default.
+6. **Identity only.** Product roles and entitlements stay in each product.
+7. **No automatic migration** from another provider's principals.
+8. **The free product stays one human per instance** (owner, 2026-11-18), as RFC 0024's
+   Decided 2 says. Many people working together is Cloud.
+9. **Invite only, as Arca** (owner, 2026-11-18). Invitations stay Cloud records:
+   single use, with an expiry, revocable, minted by staff and named by project. The ID
+   stores no invitation and no code. It creates an account only when the request
+   carries an admission ticket: a short-lived token Cloud signs after it redeems an
+   invitation, checked against public keys in the ID's config, used once (its id is
+   kept in D1). With no admission key configured, no account can be created. A first
+   phone proof for an unknown number needs a ticket too.
+10. **Recovery: staff recovery tickets now, recovery codes later** (owner, 2026-11-18).
+    A person who lost every passkey asks staff, who check it is them the way they hand
+    out invitations, then mint a recovery ticket: the admission ticket naming the
+    account's `sub`, used once and short-lived. It adds a new passkey to that account
+    and ends all its sessions. Self-service recovery codes come in a later delivery.
+    There is no email reset.
 
-## Delivery 2: inbound phone proof
+## Design
 
-The browser receives a short-lived challenge and a prefilled messaging link.
-The person sends that message; Omni forwards the event to an authenticated
-inbound endpoint. Hashed challenges, browser binding, event deduplication,
-message-time checks and shared rate limits live in D1. A verified sender can
-sign in once to its phone account or create a separate one. An existing browser
-session never becomes the account selected by the phone proof. Privacy IDs and
-other non-phone identifiers cannot verify a number. The outbound phone-code
-path is removed. Page controls follow the extended page contract in a separate
-delivery; receiving configuration and secret provisioning remain owner actions.
+### Architecture as built
+
+- **One Worker.** `apps/id/src/index.ts` is the only entry. It serves the pages
+  through an assets binding (`PAGES`) and everything else through Better Auth.
+  `wrangler.toml` turns off the workers.dev address and preview URLs. Account,
+  database and zone identifiers never sit in tracked files; `scripts/configure.ts`
+  writes an ignored local config from the operator's environment.
+- **One D1 database.** Users, passkeys, sessions, WebAuthn challenges, OAuth codes,
+  grants, consents, refresh tokens, signing keys, rate-limit counters and WhatsApp
+  challenges all live in D1. The session cookie cache is off. There is no other store.
+- **Better Auth 1.7.21, pinned exactly**, with its passkey plugin, its OAuth provider
+  plugin and its JWT plugin, all at 1.7.21. Upgrades are reviewed changes.
+- **OIDC code flow.** Scopes `openid`, `profile` and `offline_access`. Grants
+  `authorization_code` and `refresh_token`. S256 PKCE is required for every client,
+  confidential ones included; discovery offers only S256. Dynamic client
+  registration is off.
+- **Native clients use loopback redirects** (RFC 8252). A registered
+  `http://127.0.0.1` or `http://[::1]` redirect may come back on another port, with
+  the same scheme, host, path and query. Any other `http:` redirect must match
+  exactly. There are no wildcards.
+- **Reviewed client seed list.** `apps/id/clients.json` is the only client source.
+  `scripts/seed-clients.ts` writes it to D1. Only `automagik-desktop` and
+  `automagik-cloud` skip consent; the seed forces `skipConsent` off for any other id.
+- **Route allowlist.** Only listed auth and protocol routes answer; everything else
+  under `/api/auth/` is 404. There is no client-management API, no account list and
+  no admin route on the public surface.
+- **Rate limit in D1.** Better Auth's limiter stores counters in D1, keyed on
+  Cloudflare's `cf-connecting-ip`: 60 requests per minute per IP and path by default,
+  tighter on sensitive routes (WhatsApp start: 5 per minute). Isolates share the
+  counters.
+- **Passkeys.** The relying-party ID comes from `PASSKEY_RP_ID` (`automagik.si`). The
+  service host (`BETTER_AUTH_URL`) must be that name or a subdomain of it, or every
+  request gets a plain configuration error. Credentials are discoverable and require
+  user verification. Registration routes ignore any session cookie, so a passkey
+  always creates a new account and never joins the current one.
+- **Optional phone sign-in.** When `WHATSAPP_RECEIVING_NUMBER` and the secret
+  `OMNI_INBOUND_TOKEN` are both set, the browser gets a six-character challenge and a
+  prefilled WhatsApp link. Omni forwards the received message to `/api/omni/inbound`
+  with a bearer secret. A verified number signs in to its own phone account, or
+  creates one. It never selects or changes the browser's passkey account, so a phone
+  identity is a separate identity. Without both settings, the phone routes are 404.
+  The older outbound phone-code path is gone.
+- **The placeholder email.** Better Auth needs a unique email per user, so each
+  account gets a random `<uuid>@id.invalid`. It is never mailed. The Worker strips
+  `email` and `emailVerified` from every JSON response and replaces any `@id.invalid`
+  string with the display name. No email scope exists.
+- **Never in a release.** `apps/id/` is deployed by the owner's workflow
+  (`apps/id/DEPLOY.md`). No release lane builds or attaches it.
+
+### The pages
+
+`apps/id/pages/` holds `sign-in.html` and `consent.html`, one stylesheet, one script
+and local assets. They follow `apps/id/PAGES-CONTRACT.md`. The Worker serves them only
+at `/sign-in` and `/consent`, adding `referrer-policy: no-referrer`,
+`cache-control: no-store` and `x-frame-options: DENY`. A direct `.html` path is 404.
+The pages load nothing from another origin and carry a same-origin meta
+Content-Security-Policy. Without the `PAGES` binding both routes answer 501.
+
+## Contracts introduced
+
+- **Issuer.** The `issuer` value in the discovery document. Today it is the service
+  origin followed by `/api/auth`. Clients read it once from discovery and then pin it.
+  It changes if the host changes (question (d)).
+- **Discovery and keys.** `/.well-known/openid-configuration` (also under
+  `/api/auth/`), `/.well-known/oauth-authorization-server/api/auth`, and the
+  `jwks_uri` they name. ID tokens are signed with keys from the JWKS.
+- **The principal.** `(iss, sub)`. `sub` is the Better Auth user id, stable for the
+  life of the database. Products key every record on this pair, never on a name, a
+  phone number or an email. A passkey account and a phone account of the same person
+  are two principals until linking exists (question (f)).
+- **Claims.** ID token: `iss`, `sub`, `aud`, `exp`, `iat`, `nonce` when sent, and the
+  `profile` claims, whose `name` is the placeholder "Automagik user". No email, no
+  phone number, no groups, no roles. Userinfo returns the same subject and no email.
+- **The client seed list.** `apps/id/clients.json`: client id, name, type, token
+  endpoint auth method, exact redirect URIs, `skipConsent`, `disabled`. Adding or
+  changing a client is a reviewed change to that file. Cloud's callback is still an
+  example and must change before a real Cloud sign-in. Arca, Omni and Brain are
+  present and disabled.
+- **The pages contract.** `apps/id/PAGES-CONTRACT.md`: the endpoints the pages call,
+  the opaque `oauth_query` they carry, and the error shapes.
+- **Token lifetimes.** Delivery 2 pins them in config (#1512) and tests each one, so a
+  library upgrade cannot change them silently:
+
+  | Item | Lifetime | Where it is set |
+  |---|---|---|
+  | Authorization code | 10 minutes, single use | library default |
+  | Access token | 15 minutes | config (#1512) |
+  | ID token | 15 minutes | config (#1512); the library default was 10 hours |
+  | Refresh token | 30 days; each refresh starts a new 30 days | config (#1512) |
+  | Refresh rotation | a new token on every use, reuse window 0 | config (#1512) |
+  | Browser session | 7 days, renewed daily | library default; no absolute maximum |
+  | Signing key | no rotation | gap: delivery 2 ops plan |
+  | WhatsApp challenge | 5 minutes | set in code |
+
+  Until #1512 merges, the library defaults apply (access 1 hour, ID token 10 hours).
+
+## Threat model
+
+### Assets
+
+- **Passkeys.** The private keys stay on people's authenticators. D1 holds public keys
+  and counters, bound to `automagik.si`.
+- **Sessions and refresh tokens.** Bearer secrets in D1 and in cookies or clients.
+- **Signing keys.** The JWKS private keys in D1, encrypted with `BETTER_AUTH_SECRET`.
+- **`BETTER_AUTH_SECRET`, the root of trust.** It encrypts the signing keys and signs
+  cookies and the provider's signed query. Whoever holds it and the database can mint
+  tokens for any `sub`. It lives only in the Worker's secret store.
+- **`OMNI_INBOUND_TOKEN`.** Whoever holds it can claim any phone number while a
+  challenge is open. Shared only with Omni's private environment.
+- **The Cloud client secret.** Held by Cloud's backend; D1 keeps only its hash.
+
+### Attackers and mitigations
+
+- **Phishing.** A look-alike site cannot use a passkey for `automagik.si`; browsers
+  bind the ceremony to the RP ID. A tested check refuses a look-alike host.
+- **Authorization code interception.** Mandatory S256 PKCE for every client; codes
+  live 10 minutes and are single use.
+- **Open redirect.** Redirect URIs match the seed list exactly, apart from RFC 8252's
+  port on IP loopback. Pages never navigate to a query's `redirect_uri`; they follow
+  the URL the server returns.
+- **CSRF on auth routes.** Better Auth checks the `Origin` against the service origin.
+  The WhatsApp status route refuses a foreign `Origin` and `sec-fetch-site: cross-site`.
+  The phone challenge cookie is `__Host-`, HttpOnly, Secure, SameSite=Lax.
+- **Clickjacking on pages.** `x-frame-options: DENY` on both pages. Pages answer only
+  at their routes, so the header is never skipped.
+- **Joining someone else's account.** Registration routes strip session cookies and
+  the `authorization` header, so a passkey cannot be enrolled into the signed-in
+  account. A phone proof never selects the browser's current account.
+- **Forged inbound phone events.** Bearer secret compared in constant time; numeric
+  sender only; message time inside the challenge life; one D1 batch deduplicates the
+  event and enforces 10 events per sender per minute and 3 per challenge.
+- **Account-creation abuse.** Without the invite gate, a bare GET to
+  `/api/auth/passkey/generate-register-options` writes a user row before any passkey
+  exists, and a spread of addresses gets past the 60 per minute limit. The gate
+  (Decided 9) refuses registration without a valid, unused admission ticket before any
+  row is written; the orphan cleanup removes what an abandoned ceremony leaves.
+- **Rate-limit cost.** Every limited request writes a D1 row. A flood costs D1 writes
+  even when it is refused.
+
+### Residual risks
+
+- Account creation open to anyone, until delivery 2's invite gate and cleanup.
+- One passkey per account and no recovery, until delivery 2 adds a second passkey and the
+  staff recovery ticket; a staff ticket is only as strong as staff's check of the person.
+- No session list or revoke for the person; sign-out ends only the current session.
+- No security headers on API responses, no HSTS and no header CSP yet (delivery 2).
+- No signing-key rotation, and no written plan to rotate `BETTER_AUTH_SECRET`.
+- The free Workers plan, no named D1 region, no backup routine and no alerting.
+- Leaking `BETTER_AUTH_SECRET` with a D1 copy lets an attacker sign tokens for anyone.
+- Presenting an already-rotated refresh token makes the library revoke every refresh
+  token that person holds for that client, and the access tokens issued from them, not
+  only one rotation family. A replay therefore also ends the person's other sessions on
+  the same client; other clients are unaffected. This fails safe, is pinned by a test
+  (#1512) and is accepted.
+- `offline_access` is granted to the two first-party clients without a consent prompt,
+  although OpenID Connect expects `prompt=consent` for it, because those clients skip
+  consent by decision. This is accepted for first-party clients only: a third-party
+  client must never skip consent.
+
+## Deliveries
+
+Each is one pull request (or a short set) with an independent review. 2 before any
+real account; 3 and 4 after 2; 5 after 3.
+
+1. **The service (done).** #1094 (Worker, passkeys, OIDC, D1, seed list), #1118
+   (pages and inbound WhatsApp proof), #1377 (passkey site name from a setting).
+   *Check:* `bun run test` in `apps/id`: passkey account creation and sign-in, the
+   native S256 code flow, JWKS and ID token checks, strict redirects, the phone
+   proof, the cross-runtime limiter; the page tests in a real Chromium; each
+   mutation in `scripts/mutations.mjs` fails its test.
+   *Rollback:* remove the custom domain or the Worker; keep D1 and the secret.
+2. **Ready for real accounts.**
+   - the public name `id.automagik.si` as the Worker's custom domain (Decided 4);
+   - the invite gate: account creation and a first phone proof need an admission
+     ticket (Decided 9);
+   - the sign-in and consent pages on it, with the contract's states;
+   - security headers on every response (HSTS, header CSP, `nosniff`,
+     `frame-ancestors 'none'`);
+   - a second passkey on an existing account, behind a fresh sign-in;
+   - the staff recovery ticket (Decided 10);
+   - a session list and revoke, for the person's own sessions;
+   - refresh-token tests: rotation, reuse of an old token, revoke, expiry;
+   - orphan cleanup: users with no passkey and no phone after a short window;
+   - token lifetimes pinned in config (#1512);
+   - ops: the paid Workers plan, a named D1 location, Time Travel restore tested,
+     alerting on errors and 429 spikes, and a written rotation plan for the signing
+     keys, `BETTER_AUTH_SECRET` and `OMNI_INBOUND_TOKEN`.
+   *Check:* tests for each item; a Time Travel restore drill on a copy; header tests
+   on API and page responses; a second passkey signs in to the same `sub`.
+   *Rollback:* revert the Worker; D1 migrations only add, so the old Worker still runs.
+3. **First client: Cloud web (confidential).** Cloud's real callback in
+   `clients.json`; Cloud checks issuer, audience, nonce and PKCE and keys on
+   `(iss, sub)`.
+   *Check:* a sign-in on the trial name end to end; a wrong issuer, audience or nonce
+   is refused by Cloud.
+   *Rollback:* set the client `disabled: true` and reseed.
+4. **Desktop client** (RFC 8252). Secure token storage comes first (RFC 0024 (d);
+   the open pull request for #906). Then the desktop signs in through the system
+   browser and a loopback redirect.
+   *Check:* tokens never written in plain text; a stolen code without the verifier
+   fails; sign-out revokes the refresh token.
+   *Rollback:* the setting stays off by default.
+5. **Hand-off to RFC 0024 (e) multi-user.** Organisations, roles and invitations in
+   Cloud, keyed on `(iss, sub)`. Members join a workspace only once RFC 0024 (f)'s
+   three preconditions hold: an unforgeable principal channel into DSH, role-filtered
+   DSH routes, and the launch token out of the Bots' reach.
+   *Check:* RFC 0024's own checks for (e) and (f).
+   *Rollback:* workspaces stay owner-only.
+
+## Open questions
+
+Each has a recommendation; the owner's decision is pending.
+
+- **(a) Is the free or self-hosted product one human per instance?** Decided: yes
+  (Decided 8).
+- **(b) Open sign-up or invite-only?** Decided: invite-only, as Arca (Decided 9). RFC
+  0024's one-use signup links from an operator job are superseded by the admission
+  ticket: there is no admin key to mint them.
+- **(c) What does recovery look like?** Decided: a staff recovery ticket now, recovery
+  codes later (Decided 10).
+- **(d) What is the public name?** Decided: `id.automagik.si` (Decided 4), before any
+  product stores a principal.
+- **(e) A device-code grant for headless clients?** Recommended: not now. Add it when
+  a headless client exists, with its own review.
+- **(f) Linking a phone identity to a passkey identity?** Recommended: not now. When
+  added, it needs a signed-in passkey session plus a fresh phone proof, and products
+  must handle two subjects becoming one.
+- **(g) Account deletion and export (EU).** Recommended: a self-service delete that
+  removes passkeys, sessions and grants and tells products by a signed event; an
+  export of the little the service holds. Needed before the service is opened widely.
+
+## Superseded text
+
+RFC 0024's identity-provider choice (Pocket ID), its hosting and admin assumptions,
+its account provisioning and its signup links are replaced by this RFC. Pointer notes
+sit in RFC 0024, RFC 0008 and the RFC 0024 delivery 0 evidence record. RFC 0024's
+workspace isolation, product authorization, principal binding, credential protection
+and desktop sign-in safeguards still apply.
+
+## Tracking
+
+- #1094, #1118, #1377: delivery 1.
+- #906 and its open pull request: secure token storage and system-browser sign-in.
+
+## Links
+
+- [RFC 0024: Automagik Cloud](0024-automagik-cloud.md)
+- [RFC 0024 delivery 0 evidence](../cloud/0024-delivery-0-evidence.md)
+- [RFC 0008: Platform and web instances](0008-platform-and-web-instances.md)
+- `apps/id/README.md`, `apps/id/DEPLOY.md`, `apps/id/PAGES-CONTRACT.md`
+- [Better Auth passkeys](https://www.better-auth.com/docs/plugins/passkey),
+  [OAuth provider](https://www.better-auth.com/docs/plugins/oauth-provider)

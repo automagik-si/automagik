@@ -269,7 +269,8 @@ Three ways to make that pointer trustworthy:
   name, URL, sha256 and size. The signature is ed25519 over its exact bytes, detached, base64.
 - The key is `METER_LANE_KEY`, the meter's own, never `PLUGIN_LANE_KEY`, `HERDR_PACK_KEY` or
   `AM_LANE_KEY`. Two slots, `METER_LANE_KEY` and `METER_LANE_KEY_NEXT`; the variable
-  `METER_LANE_SIGNER` names the one releases sign with. `bun scripts/meter-lane.ts keygen`
+  `METER_LANE_SIGNER` names the one releases sign with. The workflow uses only the selected
+  slot, even when its secret is empty. `bun scripts/meter-lane.ts keygen`
   generates the pair in memory and pipes the private key straight to `gh secret set`: never
   printed, never on disk. Only then does it add the public key to
   `meter/usagemeter/meter-keys.json`. A rotation is RFC 0011's two phases: keygen fills the slot

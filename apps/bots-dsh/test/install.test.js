@@ -68,6 +68,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on tools/result',
     'on session/event',
     'effect omni-ui: lost hand-offs',
+    'on session/event',
+    'on agent/status',
     'effect ds-bot: folder access context',
     'prompt context ds-bot:folder-access 650',
     'effect ds-bot: agent tool restrict retry',
@@ -77,6 +79,14 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: tool deny retry',
     'on agent/created',
     'on tools/execute',
+    // The four file tools' folder (read-scope.js): prepared before the call, guarded, checked
+    // again at dispatch, a refusal noted, and its two endpoints.
+    'on tools/pre-execute',
+    'tools guard',
+    'on tools/execute',
+    'on tools/result',
+    'effect ds-bot: session-read-scope endpoint',
+    'effect ds-bot: set-session-read-scope endpoint',
     'on tools/execute',
     'effect omni-ui: identity section',
     'prompt bot-identity 640',
@@ -182,6 +192,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: live feed route',
     'route GET /api/omni-ui/feed',
     'effect ds-bot: live feed',
+    // The Code side's typing routes and watched pane stream (code-side.js), then the shared
+    // gen-UI kit's host half: the live slice, its feed nudge and the media route.
     'effect omni-ui: code typing releases',
     'effect omni-ui: code typing /api/omni-ui/code/take',
     'route POST /api/omni-ui/code/take',
@@ -191,6 +203,10 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'route POST /api/omni-ui/code/release',
     'effect omni-ui: code pane stream',
     'route GET /api/omni-ui/code/stream',
+    'effect omni-ui: genui slice',
+    'effect omni-ui: genui feed nudge',
+    'effect omni-ui: genui media route',
+    'route GET /api/omni-ui/genui-media',
     'effect ds-bot: agent access',
     'effect ds-bot: pet route',
     'route GET /api/omni-ui/pet',

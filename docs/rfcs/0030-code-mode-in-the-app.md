@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (owner not yet read; owner's direction 2026-11-10, issue #1007; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10; Q1-Q14 open for the owner) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; merged: delivery 4's selector (#1025, issue #1016), delivery 1's desktop half (#1391), delivery 2's typing (#1394); delivery 0 waits only on the owner's approval of RFC 0022's revision; owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) only if the preload must change; the server image; herdr (3.N.P) for the pack's fix-only period, the `am mailbox send` verb (the pack's CLI is its source; `am/` gets it as a byte copy) and the retirement notice; am (3.N.P) for those copies |
 | Created | 2026-11-10 |
 | Replaces | [RFC 0013](0013-work-code-switch.md)'s D27 ("Code is the real herdr-app window, glue only") |
-| Builds on | [RFC 0022](0022-desktop-chat-view.md)'s 2026-11-10 revision (open PR #1009: Team and Code, the left bar, humanized bots); RFC 0028 (open PR #1008, `docs/rfcs/0028-code-workers.md` there: Code workers); [RFC 0023](0023-dsh-upstream-agent-context-and-chat-rows.md) (the session terminal field) |
+| Builds on | [RFC 0022](0022-desktop-chat-view.md)'s 2026-11-10 revision (merged in #1009, still Proposed there: Team and Code, the left bar, humanized bots); [RFC 0028](0028-code-workers.md) (merged in #1008: Code workers); [RFC 0023](0023-dsh-upstream-agent-context-and-chat-rows.md) (the session terminal field) |
 
 ## Summary
 
@@ -20,8 +20,9 @@ with `am` as today. The pack's sidebar and mods become parts of a DSH plugin, th
 retired.
 
 The owner decided the direction (Decided, copied from the issue). This RFC answers each design
-point the issue lists with a recommendation, names where it meets the two open RFC PRs it builds
-on (#1008 and #1009), and lists the real conflicts as questions for the owner.
+point the issue lists with a recommendation, names where it meets the two RFCs it builds on (RFC
+0028, #1008, and RFC 0022's revision, #1009, both open pull requests when it was written), and
+lists the real conflicts as questions; all were answered on 2026-11-19 (Answers).
 
 ## Motivation
 
@@ -424,6 +425,9 @@ Herdr install.
 0. **Owner's answers** to Q1-Q3 (the conflicts with #1009) and RFC 0022's revision approved.
    *Acceptance:* this RFC's Status records them; no build on the Code track before. Delivery 4
    is not held by it.
+   *Status, 2026-11-19:* Q1-Q3 are answered (Answers). RFC 0022's revision is merged (#1009) but
+   its own Status still says the owner has not read it, so this delivery stays open until the
+   owner approves it. Deliveries 1 and 2 shipped parts before it (#1391, #1394).
 1. **The flip, end to end, on this computer** (plugin; after RFC 0022's delivery B, the bar). The
    first slice. In Code mode the tree lists this computer's projects, bots and workers from the
    registry and the two ledgers; a click renders that terminal live in the right pane, view-only;
@@ -487,10 +491,66 @@ Herdr install.
 Linked machines come after RFC 0022's delivery H, as a delivery of that RFC widened by its Q16,
 not of this one.
 
+## Answers (2026-11-19)
+
+The owner's delegate accepted this RFC on 2026-11-19 (issue #1007) and answered every open
+question with this RFC's own recommendation. Each answer is that recommendation, restated; the
+questions below stay as they were asked.
+
+1. **Q1:** Decided 3 governs the Genie product. RFC 0022's rejection of a separate Genie bot, and
+   its revision's (j), stay for the team's own seats (Chat, the General Orchestrator) until the
+   owner moves them to a Genie; the mailbox's two-kind rule answers the rejection's reason. Owed:
+   RFC 0022 is amended to say so. This answer does not approve RFC 0022's revision.
+2. **Q2:** RFC 0022 (h)'s "D27 holds" reads as "Herdr's spaces, tabs, splits and layouts are never
+   rebuilt", which this RFC keeps. The herdr-app link on a Code row stays while herdr-app is
+   installed and goes with the pack (delivery 8).
+3. **Q3:** both stand, for different bots: a Genie's human-facing bot is a DSH Bot from its first
+   day; an existing seat shown on Team stays a view (RFC 0022 1L) until the owner moves it.
+4. **Q4:** the orchestrator's terminal is typeable, with the one-line note above it (Terminal
+   renderer).
+5. **Q5:** the image's agent CLIs install into the volume on first enable; none is baked into the
+   image.
+6. **Q6:** the Community entry is never opened, and `herdr/` stops being its folder when the pack
+   is retired.
+7. **Q7:** Sessions that already crossed harnesses keep their record as it is; the next crossing
+   uses the handoff note; from delivery 4 on, replay stops at a harness change only, and
+   `dshTools` and same-harness replay stay as RFC 0003 has them. Owed in delivery 4: on a
+   harness change, send only the redacted handoff note; a crossing today (#1025) still sends
+   earlier and latest messages to the new conversation (`apps/bots-dsh/src/host/parts.js`, the
+   handoff package).
+8. **Q8:** yes. RFC 0028 gains a worker kind `lead`: long-lived, outside the cap, woken only by
+   the mailbox, and a send to it while it works is held until its turn ends, then sent, rather
+   than refused. It is an amendment to RFC 0028 in its own PR. Owed: that amendment.
+9. **Q9:** the owner's sense wins: "Code" and "Code mode" mean the app's Code side, and one pane's
+   xterm face is the terminal face. This RFC merged last (#1017, after #1008 and #1009). Owed:
+   RFC 0028's Words table and RFC 0022's "Code mode" wording updated to match, with no change to
+   their design.
+10. **Q10:** two systems on two pages for now: the pack's automations and the Bot team's schedules.
+    Merging them needs its own RFC.
+11. **Q11:** Pocket decides. This RFC's recommendation to Pocket stands as written: Pocket Link's
+    bridge runs as a service `am` starts, so it no longer needs herdr-app. Nothing here moves
+    Pocket Link.
+12. **Q12:** one plugin: the core bridge stays in bots-dsh's host, beside RFC 0022's live-chat
+    engine.
+13. **Q13:** the table as recommended: Automagik and Omni take Native and ACP; DSH takes Native
+    only; a Genie's human-facing bot takes Native and ACP; a Genie's team seats (the orchestrator
+    and its workers) take Herdr only. Herdr is not offered for a bot the person chats with;
+    revisit once RFC 0022's delivery 1L ships. Owed in delivery 4: the selector's per-bot-type
+    route policy (#1025) applies this table to the three routes it covers, telling a Genie's
+    human-facing bot from its team seats; which bots may take RFC 0003's fourth route (Remote
+    Hermes, 2026-11-11) is outside Q13.
+14. **Q14:** an agent change inside ACP or Herdr counts as a route change: a new conversation with
+    a handoff note. Only a model change inside one agent keeps the conversation.
+
+From this acceptance the pack is fix-only (The pack after the move, 1): security and breakage
+fixes on the herdr lane as today, no new features in its UI, until deliveries 1 and 2 are in a
+stable release.
+
 ## Open questions
 
-Each has a recommendation. Q1-Q3 are real conflicts with open PR #1009 (RFC 0022's revision);
-Q8-Q9 with open PR #1008 (RFC 0028); Q7 with RFC 0003.
+Answered on 2026-11-19 (Answers, above); kept as asked. Each has a recommendation. Q1-Q3 were
+real conflicts with #1009 (RFC 0022's revision), then an open pull request; Q8-Q9 with #1008
+(RFC 0028), then open too; Q7 with RFC 0003.
 
 1. **The Genie's two seats vs RFC 0022's rejection.** RFC 0022 rejected "a separate DSH Genie
    bot as the owner's interface, delegating to Chat through hc", because a second agent would
@@ -556,7 +616,7 @@ Q8-Q9 with open PR #1008 (RFC 0028); Q7 with RFC 0003.
 
 ## Links
 
-- Issue #1007 (the owner's direction); open PRs #1008 (RFC 0028), #1009 (RFC 0022's revision).
+- Issue #1007 (the owner's direction); #1008 (RFC 0028) and #1009 (RFC 0022's revision), both merged.
 - RFCs: [0003](0003-model-routes-and-acp.md) (live switching, sign-in from the chat),
   [0011](0011-monorepo-parts-and-releases.md) (lanes, the pack pointer),
   [0012](0012-am-cli-and-parts.md) (`am`), [0013](0013-work-code-switch.md) (D27, deliveries
@@ -564,7 +624,7 @@ Q8-Q9 with open PR #1008 (RFC 0028); Q7 with RFC 0003.
   Q19, universal Bots), [0022](0022-desktop-chat-view.md) ((f), Decided 2, 6, 8, delivery H),
   [0023](0023-dsh-upstream-agent-context-and-chat-rows.md) (the session terminal field),
   [0024](0024-automagik-cloud.md) (delivery 2, the gate),
-  0028 (Code workers, in open PR #1008; linked here once it merges).
+  [0028](0028-code-workers.md) (Code workers).
 - Issues and PRs: #1016 (the selector's delivery), #206 (remote starts), #220 (scheduler
   install), #628 and #631 (scoped core access), #973 (more native-ACP agents), herdr-core#122
   (conditional keys).

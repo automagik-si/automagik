@@ -39,7 +39,7 @@ export async function signIn(token, { api = 'https://api.github.com', fetch: req
   if (response.status === 401) throw refusal('GitHub did not accept this token')
   if (!response.ok) throw refusal(`GitHub answered ${response.status}`)
   const user = await response.json().catch(() => ({}))
-  if (typeof user?.login !== 'string') throw new Error('GitHub did not say who this token belongs to')
+  if (typeof user?.login !== 'string') throw refusal('GitHub did not say who this token belongs to')
   return { login: user.login }
 }
 
@@ -77,7 +77,7 @@ export function install(rt) {
   }
   const known = (id) => {
     const entry = entryFor(String(id ?? ''))
-    if (entry === undefined || entry.id === 'github' && options === null) throw new Error('No such connector')
+    if (entry === undefined || entry.id === 'github' && options === null) throw refusal('No such connector')
     return entry
   }
   const reason = (error) => rt.redactSecrets([error, error?.cause].filter(Boolean).map(part => String(part?.message ?? part)).join(': ') || 'error').slice(0, 300)
@@ -381,7 +381,7 @@ export function install(rt) {
 
   async function beginSignIn(id) {
     const entry = known(id)
-    if (entry.auth.kind !== 'oauth') throw new Error('This connector does not sign in')
+    if (entry.auth.kind !== 'oauth') throw refusal('This connector does not sign in')
     if (entry.auth.client?.deviceFlow && !entry.auth.client.id) {
       statuses.set(id, { state: 'needs-client', error: 'NOT SET UP: configure an Automagik sign-in app' })
       return
@@ -656,7 +656,7 @@ export function install(rt) {
       }
       if (entry.auth.kind === 'key') {
         const key = typeof body.key === 'string' ? body.key.trim() : ''
-        if (key === '') throw new Error('Paste a key first')
+        if (key === '') throw refusal('Paste a key first')
         const remote = entry.remote?.url
         if (remote !== undefined && insecure(remote)) throw refusal('Connector addresses must start with https://')
         await writeSecret(keySecretOf(entry.id), key, `${entry.name} connector`)
@@ -678,7 +678,7 @@ export function install(rt) {
         await sync()
         return connectorsView()
       }
-      if (entry.id === 'github' && (entry.auth.client?.id ?? '') === '') throw new Error('NOT SET UP: configure an Automagik sign-in app or paste a token')
+      if (entry.id === 'github' && (entry.auth.client?.id ?? '') === '') throw refusal('NOT SET UP: configure an Automagik sign-in app or paste a token')
       await beginSignIn(entry.id)
       return connectorsView()
     },
@@ -727,7 +727,7 @@ export function install(rt) {
     async 'connector-client'(body) {
       const entry = known(body.id)
       const clientId = String(body.clientId ?? '').trim()
-      if (clientId === '') throw new Error('Enter the client ID')
+      if (clientId === '') throw refusal('Enter the client ID')
       const clientSecret = typeof body.clientSecret === 'string' && body.clientSecret.trim() !== '' ? body.clientSecret.trim() : undefined
       if (clientSecret !== undefined) await writeSecret(clientSecretOf(entry.id), clientSecret, `${entry.name} connector`)
       await saveState(entry.id, { client: { via: 'manual', clientId } })
@@ -748,11 +748,11 @@ export function install(rt) {
     },
     async 'connector-add'(body) {
       const name = String(body.name ?? '').trim()
-      if (name === '') throw new Error('Name the connector')
+      if (name === '') throw refusal('Name the connector')
       const url = typeof body.url === 'string' ? body.url.trim() : undefined
       const command = typeof body.command === 'string' ? body.command.trim() : undefined
       if (url !== undefined && insecure(url) && !/^http:\/\/(localhost|127\.)/i.test(url)) throw refusal('Connector addresses must start with https://')
-      if (url === undefined && command === undefined) throw new Error('Enter an address or a command')
+      if (url === undefined && command === undefined) throw refusal('Enter an address or a command')
       const taken = new Set(Object.keys(state.connectors ?? {}))
       const id = customId(name, taken)
       CONNECTOR_IDS.add(id)
@@ -765,7 +765,7 @@ export function install(rt) {
     },
     async 'connector-remove'(body) {
       const entry = known(body.id)
-      if (entry.custom === undefined) throw new Error('Only added connectors can be removed')
+      if (entry.custom === undefined) throw refusal('Only added connectors can be removed')
       await endpoints['connector-disconnect']({ id: entry.id })
       return connectorsView()
     },
@@ -811,8 +811,8 @@ export function install(rt) {
         }
         return undefined
       })()
-      if (found === undefined) throw new Error('This request is gone')
-      if (found.request.status !== 'pending') throw new Error('This request was already answered')
+      if (found === undefined) throw refusal('This request is gone')
+      if (found.request.status !== 'pending') throw refusal('This request was already answered')
       found.request.status = 'canceled'
       found.request.settledAt = Date.now()
       await rt.save()

@@ -22,6 +22,9 @@ One scrolling column, `chrome` background, 13 px text.
   A row is a fold arrow (shown on hover only, no count), the character in a pose for its
   status, the name in its colour's ink over `role · model` (`Main bot · model · project` for the
   main bot, `not running · role` for a stopped bot), the agent's Herdr icon and the status mark.
+  A stopped agent that carries the pane label `automagik-herdr.needs-owner=<short text>` shows a
+  **Question** chip there, apart from a blocked pane's **Needs you**; its space shows a dot by its
+  name (and the narrow rail's glyph takes the waiting colour), the tooltip naming the text.
   A planned bot is dimmed and dashed, asleep, with its note and a `Wave n` pill. A project with
   no open space (its last space closed, or the CLI listed it) keeps its tree where its space
   was, else right after the open spaces, under the project's name and a Start button that
@@ -51,6 +54,14 @@ One scrolling column, `chrome` background, 13 px text.
   edit relabels the changed bots' live panes on this computer (`bots.js`); a pane hc wouldn't
   label, or a bot whose panes couldn't be checked, is named in one notice. Detach (CLI) takes
   off only what it set.
+- **Needs-owner marker** (`rows.js` `ownerQuestionOf`): a stopped agent sets
+  `automagik-herdr.needs-owner=<short text>` on its own pane with `hc label`, and clears it when
+  answered. A bot started by the pack as Claude Code, Codex, omp, pi or grok is told to set and
+  clear it in its launch briefing. The sidebar reads it from the one terminal snapshot it already
+  takes (local and linked machines), never by scanning a screen, and draws a **Question** chip while the pane is
+  live and not working, blocked or failed, so the chip clears when the agent works again even
+  before the label is removed. A pane that exited or left the snapshot, or a label past the
+  pack's stale window (tidy.js's `needsOwnerStale`: a day), draws none.
 - **Create / Edit / Attach picker / bot list** (`create.js`, `formModel.js`) open as a dialog or
   popup (`props.form`: `create` | `edit` | `attach` | `pick` | `menu`), drawn to the approved
   mockup: live character preview, look, name and sidebar preview on the left; role, instructions,

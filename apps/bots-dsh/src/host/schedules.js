@@ -155,7 +155,11 @@ export function install(rt) {
     return { ids }
   }
   const botOfTaskSession = async sessionId => (await lineageOf(sessionId)).bot
-  const restricted = bot => Array.isArray(bot?.denyTools) && bot.denyTools.length > 0
+  // A Bot with a deny list or no shell: a fresh-Session target would open a Session no
+  // tool-deny layer can bind, so those tasks are paused (tool-deny.js denies the two
+  // schedule tools to the same Bots).
+  const restricted = bot => bot?.shell === false
+    || (Array.isArray(bot?.denyTools) && bot.denyTools.length > 0)
   // Every Session a Bot speaks from now, plus the ones a caller already has.
   const sessionsOf = (bot, extra = []) => {
     const ids = new Set(extra)
@@ -409,18 +413,57 @@ export function install(rt) {
     }
     return agent
   }
+  // The activation hook receives a destination id, not a task id. A new_once
+  // destination is published before delivery; a recurring new reservation is private.
+  // A destination must never borrow a different root's folder for one reminder.
+  async function checkScheduledReadScope(sessionId) {
+    if (service === null) return
+    const held = cause => new Error('A scheduled delivery is held because its root Session’s file-tool folder could not be bound.', { cause })
+    try {
+      const entries = await service.catalog()
+      const exact = entries.filter(entry => entry.target?.sessionId === sessionId || entry.lastDelivery?.targetSessionId === sessionId)
+      const candidates = exact.length > 0 ? exact : entries.filter(entry => entry.target?.kind === 'new')
+      const unresolved = new Set()
+      for (const entry of candidates) {
+        const sources = entry.involvedSessionIds.filter(id => id !== sessionId)
+        const scopes = await Promise.all(sources.map(id => rt.resolveReadScope(id)))
+        const roots = new Set(scopes.map(scope => scope.rootId))
+        if (entry.target?.kind === 'new_once' && entry.target.sessionId === sessionId && roots.size === 1) {
+          await rt.bindScheduledReadScope(sessionId, roots.values().next().value)
+        } else if (NEW_TARGETS.has(entry.target?.kind)) {
+          for (const id of roots) unresolved.add(id)
+        } else if (scopes.some(scope => scope.folder !== null)) {
+          if (roots.size !== 1) throw held()
+          const destination = await rt.resolveReadScope(sessionId)
+          if (!roots.has(destination.rootId)) throw held()
+        }
+      }
+      if (unresolved.size > 0) await rt.markScheduledReadCandidates(sessionId, unresolved)
+    } catch (cause) {
+      // A host without enough Session metadata still serves ordinary reminders
+      // when its policy store has no configured folder.
+      try { rt.assertNoConfiguredReadScope() }
+      catch { throw held(cause) }
+    }
+  }
   // The last line for a delivery: if the check has not run yet, or a task could not be
   // paused, a Session no Bot binds must not be activated for a task a restricted Bot is in.
   // DSH drives deliveries through this waterfall, before the prompt runs. It must never
   // await a management write: that would queue behind the delivery's own serialized drive.
   ctx.on('schedule/resolve-agent', async (sessionId, next) => {
-    if (swept && stuck.size === 0) return openedLevel(sessionId, await next())
-    if (await botOfTaskSession(sessionId) !== undefined) return next()
-    const unsafe = teamLoaded ? await unsafeDelivery(sessionId) : true
-    if (!unsafe) return openedLevel(sessionId, await next())
-    void revokeNewSchedules()
-      .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
-    throw new Error('ds-bot: a scheduled delivery is blocked until its task can be paused')
+    if (!swept || stuck.size > 0) {
+      if (await botOfTaskSession(sessionId) !== undefined) {
+        await checkScheduledReadScope(sessionId)
+        return next()
+      }
+      if (!teamLoaded || await unsafeDelivery(sessionId)) {
+        void revokeNewSchedules()
+          .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
+        throw new Error('ds-bot: a scheduled delivery is blocked until its task can be paused')
+      }
+    }
+    await checkScheduledReadScope(sessionId)
+    return openedLevel(sessionId, await next())
   })
 
   async function schedulesView() {

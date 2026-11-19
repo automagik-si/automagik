@@ -54,6 +54,14 @@
       "to": "am/briefingText.mjs"
     },
     {
+      "from": "herdr/mods/am-sidebar/coreSocket.mjs",
+      "to": "am/coreSocket.mjs"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/dialog.js",
+      "to": "am/dialog.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/docGet.mjs",
       "to": "am/docGet.mjs"
     },

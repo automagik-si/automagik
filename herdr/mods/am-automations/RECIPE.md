@@ -51,6 +51,13 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   pills (installed agents plus hc templates), model, `PERMISSIONS`, prompt, timeout, MCP config, and
   `Next: …` previewed live; `Cancel` / `Save`. A prompt naming a terminal address gets a
   `blocked`-coloured line under it.
+- **Form, runs as** (#498): with a scheduler that names targets, `RUNS AS` pills — `New session`
+  (today), `A bot`, `A worker of a bot`. Picking either target asks for the project's folder
+  (still `REPO`, because its `.herdr/bots.json` names the bots), then a `BOT` picker of that
+  project's roster by name with `Reload`; a bot target also asks `WHEN THE BOT IS BUSY` —
+  `Queue it` (the default) or `Skip this run`. The agent, model, permissions, "runs in" and
+  "after a run" fields go: the bot's own launch supplies them. A `blocked` line says when the
+  chosen bot left the roster or is only planned, and Save refuses until another is picked.
 - **Form, command kind** (#938): `RUNS` pills, `Agent prompt` / `Command (no model)`. A command
   shows `COMMAND` (the program and its arguments on one line), a note ("No shell reads this line …
   It runs as you … Exit 0 is done; any other exit, or the timeout, is failed."), `WORKING FOLDER`
@@ -137,6 +144,29 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   from its exit code; the panel only shows what `history --json` reports (`result`, `exit_code`,
   `stderr`, `notified`). A running command has no terminal: its dot is `working` while its last
   record says `running`.
+- **Targets** (#498): `target: <kind>:<bot id>` sends the prompt to a bot instead of a new session.
+  `bot:<id>` resolves the bot's live terminal through the pack's own checks: `hc ls --label
+  bot=<id>` supplies candidates, each `hc get` says live, still labelled with that id, an agent in
+  front (a shell is a bot that quit), and in this project's folder; two live candidates are refused,
+  never guessed between. It starts a stopped bot with `am start <id> --project <repo>`, waits up to
+  2 min for its terminal, then re-reads the pane just before `hc send` (still live, still labelled,
+  an agent in front, the same `created_ms`) and refuses the send, naming the pane, if it changed;
+  the run is `done` when the bot takes it. `worker:<id>` starts `am worker "<prompt>" --worktree
+  <dir> --project <repo>` with `HC_TERMINAL_ID` set to the bot's pane, so the worker inherits the
+  bot's worker launch and permissions, then waits for its turn and ends it through the checked
+  `am worker kill <pane> --json` once the turn has finished (a worker still mid-turn at the
+  timeout is refused by that verb and stays, logged; the finished terminal stays as the run's
+  address, so the history still points at where it ran). A bot that is gone from the roster,
+  planned, on another machine, or unreachable is a
+  `failed` run whose line names it; it never falls back to a fresh agent. `target_when_busy: skip`
+  records a busy bot's run `skipped`, keeping the pane and target it resolved. Our build names
+  `targets` in `ls --json` only when its backend can run one (`hc`, or `auto`); without it the form
+  offers no runs-as. An older build has no `Target` field, so its `ls` cannot show a hand-written
+  target, it ignores the key and runs a fresh session, and a panel save (which sends no target key)
+  leaves the key in place. After a target save the panel reads the entry back and fails the save if
+  the build claimed `targets` but dropped the key. A target run's history row has a second line
+  naming the bot, and clicking it looks up the bot in the automation's current project with `am ls`
+  to focus or peek its terminal, or says why the terminal is unavailable.
 - **Address warning** (#498): a prompt holding an hc address (`t3q1`, `build-box/t9`: a `t`, a
   digit, then letters and digits) is warned about on every preview and on Save, "… is a terminal
   address; it changes on restart. Name the bot instead"; it is saved all the same. A name given with
@@ -154,6 +184,7 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
 `modes.js` (permission flags read as a mode, the automatic flags, the address check, a command's
 env line; pure),
 `scheduler.js` (the scheduler release pin and its repair command; pure, so the pin check reads it),
+`targets.js` (a target parsed, named and its roster warning; pure),
 `retired.js` (the retired agents: a byte-equal copy of am-sidebar's, the pack's one list),
 `automations.svg` (a clock, 24×24 stroke), `mod.json`
 (`place: "none"`, title "Automations"), `LICENSE` (this pack's Apache-2.0) and `LICENSE-upstream`
@@ -161,13 +192,14 @@ env line; pure),
 `notify`, `pickFolder`, `watchFolder`, `knownAgents`; `InputState`, `TextareaState`.
 
 Programs: `herdr-automations` (the scheduler; `install.sh` installs it and, when you say yes, its
-login service), `hc` templates, `sh`, `uname`, and the agents a run starts (`claude`, `codex`,
+login service), `hc` templates, `sh`, `uname`, `am` (`ls --json` for a project's bots, on the
+scheduler's side `start` and `worker` for a target), and the agents a run starts (`claude`, `codex`,
 `pi`); **Install** runs the repair command's `curl`, `shasum` or `sha256sum`, `chmod` and `mv`.
 
 ## Watch out
 
-- **It runs programs**: `herdr-automations` on every action, `hc templates` for the form, and it
-  starts agents. It reaches no network and writes no file itself, except when you click
+- **It runs programs**: `herdr-automations` on every action, `hc templates` for the form,
+  `am ls --json --project` for a project's bots when a target is chosen, and it starts agents. It reaches no network and writes no file itself, except when you click
   **Install**: that one command downloads the pinned scheduler from this repository's release and
   writes `~/.local/bin/herdr-automations` once its sha256 matches. `exec`'s 30 s limit applies to
   it: on a slow link it fails and says so, and the copied command in a terminal has no limit.

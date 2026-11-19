@@ -89,12 +89,20 @@ async function setup({ served = ['read', 'ask_user', QUESTION], goals, throwOn }
   const rt = createRuntime(ctx, { home, github: false, diagnosticsFile: false })
   await rt.load()
   const guard = (name, sessionId) => ctx.guards.map(check => check({ name, agent: sessionId === undefined ? undefined : { id: sessionId } })).find(reason => reason !== undefined)
+  // The file tools' guards read what DSH's tools/pre-execute prepared for this call's token,
+  // from the calling Session's header; run that preparation first, as DSH does.
+  const preparedGuard = async (name, sessionId) => {
+    const exec = { name, token: {}, agent: { id: sessionId, session: { id: sessionId, header: { id: sessionId } } } }
+    const prepare = ctx.listeners.get('tools/pre-execute').find(listener => listener.name === 'prepareReadScope')
+    await prepare(exec, async () => {})
+    return ctx.guards.map(check => check(exec)).find(reason => reason !== undefined)
+  }
   const hiddenIn = id => hidden.filter(([sessionId, deny]) => sessionId === id && deny.includes(QUESTION))
   const stop = async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { ctx, rt, agentFor, hidden, hiddenIn, guard, sent, scopedListeners, stop }
+  return { ctx, rt, agentFor, hidden, hiddenIn, guard, preparedGuard, sent, scopedListeners, stop }
 }
 
 // DSH's goal service, holding one goal per Session; block() records what was asked.
@@ -175,12 +183,13 @@ test('an adopted DSH Bot retains native question and goal tools alongside team t
 })
 
 test('the guard refuses the blocking question tool in Bot Sessions only', async (t) => {
-  const { guard, stop } = await setup()
+  const { guard, preparedGuard, stop } = await setup()
   t.after(stop)
   for (const sessionId of ['chief', 'writer', 'room-writer']) assert.match(guard(QUESTION, sessionId), /Ask with ask_user in your own chat, or ask in your reply\./)
   for (const sessionId of ['plain', 'elsewhere', undefined]) assert.equal(guard(QUESTION, sessionId), undefined)
   assert.equal(guard('ask_user', 'writer'), undefined)
-  assert.equal(guard('read', 'writer'), undefined)
+  // A prepared read in a root Session with no file-tool folder set.
+  assert.equal(await preparedGuard('read', 'writer'), undefined)
 })
 
 // FeiZhuLulu/DS-Bot#77: a new Bot told never to use a question tool was opened
@@ -201,18 +210,18 @@ test('a new Bot that rules out question tools opens without one and cannot block
 
 // Fei2411/DS-Bot#133: /goal in a group chat started DSH's goal rounds, which the
 // group never answered, so round after round ran and showed the raw goal prompt.
-test('a Bot\'s chat and its group Sessions lose the goal tools; other Sessions keep them', async (t) => {
+// A Bot's own chat is the exception the goal loop runs in: it keeps the goal tools.
+test('a group Session loses the goal tools, a Bot\'s own chat keeps them', async (t) => {
   const { agentFor, hidden, stop } = await setup({ served: ['read', 'ask_user', QUESTION, 'create_goal', 'update_goal', 'get_goal'] })
   t.after(stop)
   for (const id of ['chief', 'room-writer', 'plain']) await agentFor(id)
   // A DSH Agent Session ('plain') has its own mask, which leaves the goal tools.
   assert.deepEqual(hidden.filter(([, deny]) => deny.includes('create_goal')), [
-    ['chief', [QUESTION, 'create_goal', 'update_goal', 'get_goal']],
     ['room-writer', [QUESTION, 'create_goal', 'update_goal', 'get_goal']],
   ])
 })
 
-test('a goal started in a Bot chat or a group is blocked; one elsewhere runs', async (t) => {
+test('a goal started in a group Session is blocked; a Bot\'s own chat and elsewhere run', async (t) => {
   const goals = goalService()
   const { ctx, agentFor, stop } = await setup({ goals })
   t.after(stop)
@@ -221,11 +230,12 @@ test('a goal started in a Bot chat or a group is blocked; one elsewhere runs', a
   for (const id of ids) startGoal(ctx, goals, id)
   // The block waits until DSH has handed the change to every listener.
   assert.deepEqual(goals.blocked, [])
-  await until(() => goals.blocked.length === 3, { label: 'the three Bot and group goals are blocked', t })
+  await until(() => goals.blocked.length === 2, { label: 'the two group goals are blocked', t })
   await new Promise(resolve => setTimeout(resolve, 20))
-  assert.deepEqual(goals.blocked.map(entry => entry.sessionId), ['writer', 'room', 'room-writer'])
-  for (const entry of goals.blocked) assert.deepEqual([entry.code, entry.message], ['not-supported', 'Bot chats do not run /goal. To give a group a goal, use Set a goal in its + menu.'])
-  assert.equal(goals.current.get('plain').phase, 'active')
+  assert.deepEqual(goals.blocked.map(entry => entry.sessionId), ['room', 'room-writer'])
+  for (const entry of goals.blocked) assert.deepEqual([entry.code, entry.message], ['not-supported', "A group Session does not run /goal: set the group's goal with Set a goal in its + menu, or with the group_goal tool."])
+  // The loop the team asked for: a Bot's own chat keeps its goal, and so does a DSH Agent Session.
+  for (const id of ['writer', 'plain']) assert.equal(goals.current.get(id).phase, 'active')
 })
 
 test('without DSH\'s goal service a goal change is left alone', async (t) => {
@@ -260,18 +270,27 @@ test('Bot Sessions filter the hidden tools and their guidance out of the prompt 
     tools: [{ name: 'read' }, { name: 'subagent' }, { name: 'workflow' }, { name: 'send_message' }, { name: 'message_bot' }, { name: 'ask_user_question' }, { name: 'create_goal' }],
     variables: { a: 1 },
   }))
-  assert.deepEqual(filtered.sections.map(section => section.name), ['bot-identity', 'tool:workflow', 'tool:subagent', 'tool:bash'])
-  assert.deepEqual(filtered.tools.map(tool => tool.name), ['read', 'subagent', 'workflow', 'send_message', 'message_bot'])
+  // A Bot's own chat keeps the goal tools the loop needs; only the question tool goes.
+  assert.deepEqual(filtered.sections.map(section => section.name), ['bot-identity', 'tool:goal', 'tool:workflow', 'tool:subagent', 'tool:bash'])
+  assert.deepEqual(filtered.tools.map(tool => tool.name), ['read', 'subagent', 'workflow', 'send_message', 'message_bot', 'create_goal'])
+  // A group Session keeps neither the goal tools nor their guidance.
+  const grouped = await filters[2].listener({}, {}, async () => ({
+    sections: [{ name: 'bot-identity' }, { name: 'tool:goal' }],
+    tools: [{ name: 'read' }, { name: 'create_goal' }],
+  }))
+  assert.deepEqual(grouped.sections.map(section => section.name), ['bot-identity'])
+  assert.deepEqual(grouped.tools.map(tool => tool.name), ['read'])
   assert.deepEqual(filtered.contexts, [{ name: 'x' }])
   assert.deepEqual(filtered.variables, { a: 1 })
   // DSH 0.2.2 adds the tool list after this waterfall, so the assembly it passes has
-  // none; the guidance is still filtered and no tools appear.
+  // none; the guidance is still filtered and no tools appear. A Bot's own chat keeps the
+  // goal guidance, because it keeps the goal.
   const current = await filters[0].listener({}, {}, async () => ({
-    sections: [{ name: 'bot-identity' }, { name: 'tool:goal' }],
+    sections: [{ name: 'bot-identity' }, { name: 'tool:goal' }, { name: 'tool:ask_user_question' }],
     contexts: [],
     variables: {},
   }))
-  assert.deepEqual(current, { sections: [{ name: 'bot-identity' }], contexts: [], variables: {} })
+  assert.deepEqual(current, { sections: [{ name: 'bot-identity' }, { name: 'tool:goal' }], contexts: [], variables: {} })
   // The computer-use filter keeps everything but the provider's own sections.
   const computer = await filters[1].listener({}, {}, async () => ({
     sections: [{ name: 'bot-identity' }, { name: 'computer-use:dsh-cua' }],

@@ -502,13 +502,13 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         onScreen.value = shown
         // Android lets the watch service start only from the foreground.
         if (shown) { watchText = ""; syncWatch(); kickSlowReconnects() }
-        if (shown) Updater.opened() else Updater.left()
+        AppUpdates.setForeground(shown)
     }
     // Opening the app checks for an update (setForeground); this tells a waiting one when installing would interrupt.
-    // Registered after the fields its lambda reads (onScreen, watchText): Updater can call it while this view model is
+    // Registered after the fields it reads (onScreen, watchText): the GitHub updater can call it while this view model is
     // still being constructed (a download finishing then), and a registration before them would read a null field (#762).
     init {
-        Updater.usage = { val s = state.value; Updater.Usage(foreground, s.selected != null, watchText.isNotEmpty()) }
+        AppUpdates.registerUsage({ foreground }, { state.value.selected != null }, { watchText.isNotEmpty() })
     }
     private suspend fun alert(found: List<Alerts.Alert>, client: CoreClient) {
         val s = state.value

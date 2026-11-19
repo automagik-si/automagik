@@ -13,7 +13,7 @@ import { build } from 'esbuild'
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const { outputFiles } = await build({
   stdin: {
-    contents: "export { TeamSidebar } from './src/client/sidebar.js'\nexport { badges, botChildren } from './src/client/extend.js'",
+    contents: "export { TeamSidebar } from './src/client/sidebar.js'\nexport { badges, botChildren, botChannels } from './src/client/extend.js'",
     resolveDir: PLUGIN,
   },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
@@ -36,7 +36,7 @@ runInNewContext(outputFiles[0].text, {
   document: { body: { dataset: {} } },
   matchMedia: () => ({ matches: false }),
 })
-const { TeamSidebar, badges, botChildren } = module.exports
+const { TeamSidebar, badges, botChildren, botChannels } = module.exports
 
 const pip = { id: 'pip', name: 'Pip', role: 'Orchestrator', sessionId: 'pip', createdAt: 1 }
 const omni = { id: 'omni', name: 'Omni', role: 'Channel keeper', kind: 'omni', sessionId: 'omni', createdAt: 2 }
@@ -82,6 +82,19 @@ test('the first Main Bot is the bar\'s first row, then the others; what hangs un
   assert.deepEqual([...rows.props.team.bots.map(bot => bot.id)], ['pip', 'omni'])
   // Its children (what other plugins hang under a Bot) follow it.
   assert.ok(find(after('pip'), named('BotChildren')).some(node => node.props.bot.id === 'pip'))
+})
+
+test('a Bot served by a channel source keeps the team\'s old rows off, and its chats open through the source', (t) => {
+  const opened = []
+  const source = { id: 'fake-channels', botId: 'pip', useChannels: () => [], open: chatId => opened.push(chatId) }
+  t.after(botChannels.register(source))
+  const { bar, teamRows, after } = sidebar()
+  const pipRow = teamRows().props.team.bots.find(bot => bot.id === 'pip')
+  assert.equal(pipRow.channelSource, source, 'the bar reads the one source that serves it')
+  assert.equal(find(after('pip', pipRow), named('BotChildren')).length, 0, 'the bar draws its channels instead')
+  assert.equal(find(after('pip', pipRow), named('BotThreads')).length, 1, 'its running tasks stay')
+  bar.props.open({ kind: 'chat', id: 'chat-1', botId: 'pip', source })
+  assert.deepEqual(opened, ['chat-1'])
 })
 
 test('rows other plugins hang under a Bot get the rows\' own props, and opening one folds the sidebar', (t) => {

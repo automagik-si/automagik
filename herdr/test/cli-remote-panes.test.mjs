@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // automagik-herdr's pane commands on a linked machine (automagik#206 part b): start, attach,
 // detach, restart and whois with --machine, against fake-hc's linked machine "vm" (a scratch
 // home; its terminals are "vm/tN"). Shaped on the Atlas bot on lab: a Hermes pane under hc's
@@ -6,6 +7,7 @@
 // ever sends a pane keys. The real hc and window are never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,7 +15,7 @@ import { join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { GUARD_DIR, KILL_GUARD_DIR } from "../mods/am-sidebar/workers.js";
-import { AGY_FIXED_DENY } from "../mods/am-sidebar/models.js";
+import { AGY_FIXED_DENY, CLAUDE_PERSON_SETTINGS } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE } from "../mods/am-sidebar/briefingText.mjs";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { DEADLINE_CALL_MS, DEADLINE_MARGIN_MS, DEADLINE_PLACE_MS } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
@@ -32,7 +34,7 @@ const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755);
 /** The warning a start on a machine with no `hc kill` shim prints (#955). */
 const NO_KILL_SHIM = /^\S.* runs on vm without the hc kill shim \(#955\): /;
 
-function scene(t, { terminals = [], tui = true } = {}) {
+function scene(t, { terminals = [], tui = true, caller = false } = {}) {
   const root = scratchRoot(t, "hb-panes-");
   const bin = join(root, "bin"), home = join(root, "home"), app = join(root, "app"), vm = join(root, "vm"), vmBin = join(root, "vm-bin");
   for (const d of [bin, home, app, vm, vmBin]) mkdirSync(d, { recursive: true });
@@ -63,9 +65,20 @@ function scene(t, { terminals = [], tui = true } = {}) {
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog,
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "300", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "4000", AUTOMAGIK_HERDR_TAB_WAIT_MS: "300",
     GIT_CEILING_DIRECTORIES: root };
-  // Run from a pane (t1), as a bot would: hc run's default parent is the calling terminal.
-  env.HC_TERMINAL_ID = "t1";
+  if (caller) {
+    const state = JSON.parse(readFileSync(statePath));
+    state.terminals.push({ address: "t1", state: "live", created_ms: 1, cwd: home, labels: {},
+      foreground: { argv: ["codex", "--no-daemon"] }, status: { state: "working", app: "codex" } });
+    writeFileSync(statePath, JSON.stringify(state));
+  }
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
+  // Ordinary linked launches have no requesting HC parent. Dedicated caller tests
+  // include a real fixture terminal, rather than inheriting the test runner's identity.
+  env.HC_TERMINAL_ID = caller ? "t1" : "";
   const cli = (args, more = {}) => {
+    core.control({ ...env, ...more });
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...more }, encoding: "utf8" });
     // #955: vm in this scene has no automagik-herdr on its pane PATH, so a start of any agent but
     // dsh-tui adds the "no hc kill shim there" warning. json() leaves that one line out, so each
@@ -320,7 +333,13 @@ test("start --machine: an agent not installed there is refused before anything r
 
 /** The words hc run starts there: after `--`, the `/usr/bin/env` words, then the agent's. */
 const startedWith = (s) => { const run = s.calls().find((c) => c[0] === "run"); return run.slice(run.indexOf("--") + 1); };
-const agentPart = (argv) => (argv[0] === "/usr/bin/env" ? argv.slice(argv.findIndex((w, i) => i > 0 && !/^[A-Z_]+=/.test(w))) : argv);
+// #1558: a Claude launch's person-feature settings are pinned by person-features.test.mjs; the
+// words compared here are the rest of the launch (never another --settings, such as agy's file).
+const withoutPerson = (words) => {
+  const i = words.indexOf("--settings");
+  return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
+};
+const agentPart = (argv) => withoutPerson(argv[0] === "/usr/bin/env" ? argv.slice(argv.findIndex((w, i) => i > 0 && !/^[A-Z_]+=/.test(w))) : argv);
 /** The pack's briefing entry and script in an app home on vm, as an install there puts them. */
 const packAt = (dir) => {
   for (const f of ["automagik-herdr/briefing.mjs", "mods/am-sidebar/briefing.mjs"]) {
@@ -380,7 +399,7 @@ test("start --machine of a Claude bot: it runs on a session id Herdr chose (--se
   assert.equal(pane.labels.bot, HEDGE);
   // Output never shows a session id (RFC 0021): the argv's value and the label are masked, stderr too.
   const out = r.json();
-  assert.deepEqual(out.argv, ["claude", "--permission-mode", "auto", "--session-id", "***"]);
+  assert.deepEqual(out.argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto", "--session-id", "***"]);
   assert.equal(out.labels["agent.session"], "***");
   assert.equal(`${r.out}${r.err}`.includes(id), false);
   // The attach row is the starting machine's and names no session.
@@ -422,7 +441,7 @@ test("restart --machine --fresh of a Claude bot: the new conversation runs on a 
   assert.equal(fresh.words.length, 5);
   assert.equal(runLabels(fresh.run)["agent.session"], fresh.words[4], "the new pane's label is the new session, never the old one carried");
   assert.equal(s.hcState().terminals.find((x) => x.address === r.json().terminal || x.address === `vm/${r.json().terminal}`).labels["agent.session"], fresh.words[4]);
-  assert.deepEqual(r.json().argv, ["claude", "--permission-mode", "auto", "--session-id", "***"]);
+  assert.deepEqual(r.json().argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto", "--session-id", "***"]);
   assert.equal(`${r.out}${r.err}`.includes(fresh.words[4]), false);
   // A resume keeps its session: --resume <that id>, no --session-id, the label carried.
   const again = s.cli(["restart", "Hedge", ...s.on, "--force", "--json"]);
@@ -865,7 +884,7 @@ test("a same-id bot on this computer is never touched by --machine: start, resta
 test("restart --machine: an old pane whose id is another terminal by the kill is left alone, and says so", (t) => {
   const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" }, labels: {} })] });
   assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
-  s.setState((st) => { const p = st.terminals.find((x) => x.address === "vm/t8"); p.reuseAfterGets = 1; p.reuseCreated = 77; });
+  s.setState((st) => { const p = st.terminals.find((x) => x.address === "vm/t8"); p.reuseAfterGets = 3; p.reuseCreated = 77; });
   const r = s.cli(["restart", "Atlas", ...s.on, "--fresh"]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.err, /vm\/t8 is another terminal now \(its created_ms changed\), so it wasn't ended/);
@@ -1349,7 +1368,7 @@ test("start and restart --machine (#1033): on Darwin when security show-keychain
   exe(join(vmBin, "security"), `#!/bin/sh\nif [ "$1" = show-keychain-info ]; then\n  echo "${denied}" >&2\n  exit 36\nfi\nexit 2\n`);
   s.setState((st) => {
     st.machines[0].uname = "Darwin arm64";
-    st.terminals.push(atlasPane({ foreground: { argv: ["agy"], name: "agy" }, status: { state: "idle", app: "agy" } }));
+    st.terminals.push(atlasPane({ cwd: s.project, foreground: { argv: ["agy"], name: "agy" }, status: { state: "idle", app: "agy" } }));
   });
   assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
   const beforeCalls = s.calls().length;
@@ -1427,4 +1446,525 @@ test("linked tree reply naming a live pane that is not the bot's replacement: no
   assert.match(r.err, /its replacement pane could not be confirmed/);
   assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
   assert.equal(s.rows().at(-1).terminal, "t8", "the controller attachment stays on the old pane");
+});
+
+// ---- #1173: a linked machine's model pins are checked against that machine, not this one ----
+
+/** A Codex model cache in `home` (models.js reads `~/.codex/models_cache.json`). */
+const seedCodexModels = (home, slugs) => {
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  writeFileSync(join(home, ".codex/models_cache.json"), JSON.stringify({ models: slugs.map((slug) => ({ slug })) }));
+};
+/** Hedge stored as a Codex bot with `model` (null: no pin), on vm. */
+const hedgeAsCodex = (s, model = null) => {
+  const file = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json"), "utf8"));
+  const hedge = file.bots.find((b) => b.id === HEDGE);
+  hedge.agent = "codex";
+  if (model) hedge.model = model; else delete hedge.model;
+  writeFileSync(join(s.project, ".herdr/bots.json"), JSON.stringify(file));
+};
+const codexRunWords = (s) => {
+  const run = s.calls().filter((c) => c[0] === "run").at(-1);
+  return agentPart(run.slice(run.indexOf("--") + 1));
+};
+
+test("#1173 start --machine starts a Codex pin that only the target's cache lists", (t) => {
+  const s = scene(t);
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s, "codex-target-only");
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+test("#1173 restart --machine keeps a stored Codex pin that only the target's cache lists", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live", created_ms: 1700000000009, parent: null,
+    labels: { bot: HEDGE }, foreground: { argv: ["codex"], name: "codex" }, status: { state: "idle", app: "codex" } }] });
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s, "codex-target-only");
+  assert.equal(s.cli(["attach", "Hedge", "vm/t9", ...s.on]).code, 0);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+test("#1173 restart --machine --model accepts a pin from the target's cache", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live", created_ms: 1700000000009, parent: null,
+    labels: { bot: HEDGE }, foreground: { argv: ["codex"], name: "codex" }, status: { state: "idle", app: "codex" } }] });
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s);
+  assert.equal(s.cli(["attach", "Hedge", "vm/t9", ...s.on]).code, 0);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--model", "codex-target-only", "--force", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+test("#1173 restart --machine --agent codex --model: the swap's pin is the target's list's", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live", created_ms: 1700000000009, parent: null,
+    labels: { bot: HEDGE }, foreground: { argv: ["codex"], name: "codex" }, status: { state: "idle", app: "codex" } }] });
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s);
+  const a = s.cli(["attach", "Hedge", "vm/t9", ...s.on]);
+  assert.equal(a.code, 0, `${a.err}\n${a.out}`);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--agent", "codex", "--model", "codex-target-only", "--force", "--json"]);
+  assert.equal(r.code, 0, `${r.err}\n${r.out}`);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+/** A Claude settings default in `home` (models.js reads `~/.claude/settings.json`). */
+const seedClaudeModel = (home, model) => {
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(join(home, ".claude/settings.json"), JSON.stringify({ model }));
+};
+/** Hedge stored as a Claude bot with `model` (null: no pin), on vm. */
+const hedgeAsClaude = (s, model = null) => {
+  const file = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json"), "utf8"));
+  const hedge = file.bots.find((b) => b.id === HEDGE);
+  hedge.agent = "claude";
+  if (model) hedge.model = model; else delete hedge.model;
+  writeFileSync(join(s.project, ".herdr/bots.json"), JSON.stringify(file));
+};
+const claudeRunWords = (s) => {
+  const run = s.calls().filter((c) => c[0] === "run").at(-1);
+  return agentPart(run.slice(run.indexOf("--") + 1));
+};
+
+test("#1173 start --machine starts a Claude pin that only the target's settings name", (t) => {
+  const s = scene(t);
+  seedClaudeModel(s.home, "claude-local-only");
+  seedClaudeModel(join(s.root, "vm"), "claude-target-only");
+  hedgeAsClaude(s, "claude-target-only");
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, `exit ${r.code}: ${r.err}`);
+  const words = claudeRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "claude-target-only");
+});
+
+test("#1173 restart --machine keeps a stored Claude pin only the target's settings name", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live",
+    created_ms: 1700000000009, parent: null, labels: { bot: HEDGE },
+    foreground: { argv: ["claude"], name: "claude" },
+    status: { state: "idle", app: "claude" } }] });
+  s.setState((st) => { st.terminals[0].foreground.cwd = s.project; });
+  seedClaudeModel(s.home, "claude-local-only");
+  seedClaudeModel(join(s.root, "vm"), "claude-target-only");
+  hedgeAsClaude(s, "claude-target-only");
+  const a = s.cli(["attach", "Hedge", "vm/t9", ...s.on]);
+  assert.equal(a.code, 0, `${a.err}\n${a.out}`);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 0, `exit ${r.code}: ${r.err}`);
+  const words = claudeRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "claude-target-only");
+});
+
+test("#1173 start --machine leaves a Claude pin alone when the target lists none", (t) => {
+  const s = scene(t);
+  seedClaudeModel(s.home, "claude-local-only");
+  hedgeAsClaude(s, "claude-target-only");
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, `exit ${r.code}: ${r.err}`);
+  const words = claudeRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "claude-target-only");
+});
+
+// #1634: the caller ledger is not the target's inventory. All observations below
+// use the existing fake linked filesystem/HC transport, with no real machine calls.
+function seedCallerLedger(s, rows = []) {
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(attachPath(s.app), rows.map((row) => JSON.stringify(row) + "\n").join(""), { mode: 0o600 });
+}
+function linkedRow(s, extra = {}) {
+  return { v: 1, event: "attach", bot: ATLAS, project: s.project, terminal: "t8", core: CORE,
+    created_ms: 1700000000008, machine: "vm", at: "2026-11-18T00:00:00.000Z", by: "attach", ...extra };
+}
+function linkedBytes(s) {
+  return [attachPath(s.app), join(s.project, ".herdr/bots.json")].map((p) => existsSync(p) ? readFileSync(p, "utf8") : null);
+}
+function noLaunchOrKill(s, from = 0) {
+  assert.deepEqual(s.calls().slice(from).filter((c) => ["run", "kill", "send", "keys", "label"].includes(c[0])), []);
+}
+
+for (const ledger of ["absent", "empty", "unrelated"]) test(`#1634 target-only working pane across ${ledger} caller ledger is read-only and prevents start/restart`, (t) => {
+  const s = scene(t, { terminals: [atlasPane({ labels: { bot: ATLAS }, status: { state: "working", app: "hermes" } })] });
+  if (ledger !== "absent") seedCallerLedger(s, ledger === "empty" ? [] : [linkedRow(s, { bot: HEDGE, terminal: "t77" })]);
+  const before = linkedBytes(s);
+  for (const args of [["ls"], ["show", "Atlas"]]) {
+    const r = s.cli([...args, ...s.on, "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const b = args[0] === "ls" ? r.json().projects[0].bots[0] : r.json();
+    assert.equal(b.status, "working");
+    assert.equal(b.terminal, "t8");
+  }
+  const start = s.cli(["start", "Atlas", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.json().running, "t8");
+  for (const flags of [[], ["--force", "--fresh"], ["--tree", "--force"]]) {
+    const r = s.cli(["restart", "Atlas", ...s.on, ...flags, "--json"]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /without a confirmed caller attachment.*am attach/);
+  }
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+  assert.equal(s.calls().some((c) => c[0] === "exec" && c.includes("--tree")), false);
+});
+
+test("#1634 linked model/effort/tier describe argv, stopped pins or unknown, never caller config", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ labels: { bot: ATLAS }, status: { state: "working", app: "codex" },
+    foreground: { argv: ["codex", "--model", "target-B", "-c", 'model_reasoning_effort="high"', "-c", 'service_tier="priority"'] } })] });
+  seedCallerLedger(s);
+  const file = join(s.project, ".herdr/bots.json"), roster = JSON.parse(readFileSync(file));
+  Object.assign(roster.bots[0], { agent: "codex", model: "stale-C", effort: "low", tier: "standard" });
+  writeFileSync(file, JSON.stringify(roster));
+  mkdirSync(join(s.home, ".codex"));
+  writeFileSync(join(s.home, ".codex/config.toml"), 'model="caller-A"\nmodel_reasoning_effort="ultra"\nservice_tier="priority"\n[profiles.caller]\nmodel="caller-profile"\nmodel_reasoning_effort="max"\n');
+  const before = linkedBytes(s);
+  for (const phase of ["explicit", "no-model", "unknown", "stopped-pinned", "stopped-unpinned"]) {
+    s.setState((state) => {
+      state.failGet = phase === "unknown" ? ["vm/t8"] : [];
+      state.terminals[0].state = phase.startsWith("stopped") ? "finished" : "live";
+      if (phase !== "explicit") state.terminals[0].foreground.argv = ["codex", "--profile", "caller"];
+    });
+    if (phase === "stopped-unpinned") {
+      for (const field of ["model", "effort", "tier"]) delete roster.bots[0][field];
+      writeFileSync(file, JSON.stringify(roster));
+    }
+    for (const args of [["ls"], ["show", "Atlas"]]) {
+      const r = s.cli([...args, ...s.on, "--json"]);
+      assert.equal(r.code, 0, r.err);
+      const b = args[0] === "ls" ? r.json().projects[0].bots[0] : r.json();
+      assert.equal(b.status, phase === "unknown" ? "unknown" : phase.startsWith("stopped") ? "not running" : "working");
+      assert.deepEqual([b.model, b.modelSource], phase === "explicit" ? ["target-B", "detected"] : phase === "stopped-pinned" ? ["stale-C", "pinned"] : [null, null]);
+      assert.deepEqual([b.effort, b.effortSource, b.tier, b.tierSource], phase === "explicit" ? ["high", "detected", "fast", "detected"]
+        : phase === "stopped-pinned" ? ["low", "roster", "standard", "roster"] : [null, null, null, null]);
+      const human = s.cli([...args, ...s.on]);
+      assert.equal(human.code, 0, human.err);
+      assert.doesNotMatch(human.out, /caller-A|caller-profile|ultra|\(global\)|\(profile\)/);
+      if (phase === "explicit") assert.match(human.out, /target-B \(detected\)/);
+      if (phase === "unknown") assert.match(human.out, /unknown/);
+    }
+  }
+  assert.equal(linkedBytes(s)[0], before[0]);
+  noLaunchOrKill(s);
+});
+
+test("#1634 scope uses target launch project, ignoring foreground cwd, clones and other cores", (t) => {
+  const s = scene(t);
+  seedCallerLedger(s);
+  const bots = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json")));
+  execFileSync("git", ["init", "-q", s.project]);
+  execFileSync("git", ["-C", s.project, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "fixture"]);
+  const worktree = join(s.root, "target-worktree");
+  execFileSync("git", ["-C", s.project, "worktree", "add", "--detach", worktree], { stdio: "pipe" });
+  const clone = scratchProject(s.root, "other-project", { bots });
+  s.setState((state) => {
+    state.machines.push({ name: "other", id: "other-core", state: "connected" });
+    state.terminals = [atlasPane({ cwd: worktree, labels: { bot: ATLAS }, foreground: { argv: KEEP, cwd: clone } }),
+      atlasPane({ address: "vm/t9", created_ms: 9, cwd: clone, labels: { bot: ATLAS } }),
+      atlasPane({ address: "other/t8", cwd: s.project, labels: { bot: ATLAS } }),
+      atlasPane({ address: "t8", cwd: s.project, labels: { bot: ATLAS } })];
+  });
+  const start = s.cli(["start", "Atlas", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.json().running, "t8");
+  assert.equal(s.cli(["show", "Atlas", ...s.on, "--json"]).json().duplicate, false);
+  noLaunchOrKill(s);
+});
+
+for (const failure of ["no-cwd", "gone-cwd", "no-roster", "malformed-ls", "malformed-get", "null-get", "get-unavailable", "false-not-found", "duplicate", "no-core", "ambiguous-core", "reused-core", "reused-id"]) {
+  test(`#1634 ${failure}: unknown target and refusal leave ledger, roster and pane untouched`, (t) => {
+    const s = scene(t, { terminals: [atlasPane({ labels: { bot: ATLAS } })] });
+    seedCallerLedger(s, failure.startsWith("reused") ? [linkedRow(s)] : []);
+    s.setState((state) => {
+      const pane = state.terminals[0];
+      if (failure === "no-cwd") delete pane.cwd;
+      if (failure === "gone-cwd") pane.cwd = join(s.root, "missing");
+      if (failure === "no-roster") pane.cwd = s.home;
+      if (failure === "malformed-ls") state.lsReply = {};
+      if (failure === "malformed-get") state.badGet = ["vm/t8"];
+      if (failure === "null-get") state.getReply = { "vm/t8": null };
+      if (failure === "get-unavailable" || failure === "false-not-found") state.failGet = ["vm/t8"];
+      if (failure === "false-not-found") state.failGetExit = 3;
+      if (failure === "duplicate") state.terminals.push(atlasPane({ address: "vm/t9", cwd: s.project, created_ms: 9, labels: { bot: ATLAS } }));
+      if (failure === "no-core") state.machines[0].id = "";
+      if (failure === "ambiguous-core") state.machines.push({ ...state.machines[0], id: "another-core" });
+      if (failure === "reused-core") state.machines[0].id = "new-core";
+      if (failure === "reused-id") pane.created_ms = 77;
+    });
+    const before = linkedBytes(s);
+    const show = s.cli(["show", "Atlas", ...s.on, "--json"]);
+    assert.equal(show.code, 0, show.err);
+    assert.equal(show.json().status, "unknown");
+    if (failure === "duplicate") assert.equal(show.json().duplicate, true);
+    for (const args of [["start"], ["restart", "--force", "--fresh"], ["restart", "--tree", "--force"]]) {
+      const r = s.cli([args[0], "Atlas", ...args.slice(1), ...s.on, "--json"]);
+      assert.equal(r.code, 1, `${failure}: ${r.out} ${r.err}`);
+    }
+    assert.deepEqual(linkedBytes(s), before);
+    assert.equal(s.hcState().terminals[0].state, "live");
+    noLaunchOrKill(s);
+  });
+}
+
+test("#1634 confirmed unlabeled attachment is observed; actual not_found is stopped without sweeping", (t) => {
+  const s = scene(t, { terminals: [atlasPane()] });
+  seedCallerLedger(s, [linkedRow(s)]);
+  const before = linkedBytes(s);
+  assert.equal(s.cli(["show", "Atlas", ...s.on, "--json"]).json().terminal, "t8");
+  s.setState((state) => { state.terminals = []; });
+  const r = s.cli(["show", "Atlas", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().status, "not running");
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+});
+
+for (const nth of [1, 3]) test(`#1634 target pane appearing after list ${nth} prevents a duplicate launch`, (t) => {
+  const s = scene(t);
+  seedCallerLedger(s);
+  const before = linkedBytes(s);
+  s.setState((state) => { state.addAfterLs = { nth, terminal: atlasPane({ cwd: s.project, labels: { bot: ATLAS } }) }; });
+  const r = s.cli(["start", "Atlas", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.json().running, /t8$/);
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+  // The late check may follow legitimate briefing/window preparation; it is not
+  // a claim that preparation is rolled back or independent hosts are atomic.
+});
+
+for (const tree of [false, true]) test(`#1634 ${tree ? "tree" : "direct"} restart rechecks reused identity before replacement`, (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } })] });
+  seedCallerLedger(s, [linkedRow(s)]);
+  s.setState((state) => { Object.assign(state.terminals[0], { reuseAfterGets: 1, reuseCreated: 77 }); });
+  const before = linkedBytes(s);
+  const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force", ...(tree ? ["--tree"] : []), "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /created_ms changed/);
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+  assert.equal(s.calls().some((c) => c[0] === "exec" && c.includes("--tree")), false);
+});
+
+test("#1634 a nested target roster owns its subfolder; its same-id pane is not the parent's", (t) => {
+  const s = scene(t);
+  seedCallerLedger(s);
+  const bots = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json")));
+  const nested = scratchProject(s.project, "nested", { bots });
+  const subdir = join(nested, "src");
+  mkdirSync(subdir);
+  s.setState((state) => { state.terminals = [atlasPane({ cwd: subdir, labels: { bot: ATLAS } })]; });
+  const nestedShow = s.cli(["show", "Atlas", "--machine", "vm", "--project", nested, "--json"]);
+  assert.equal(nestedShow.code, 0, nestedShow.err);
+  assert.equal(nestedShow.json().terminal, "t8");
+  const parentShow = s.cli(["show", "Atlas", ...s.on, "--json"]);
+  assert.equal(parentShow.code, 0, parentShow.err);
+  assert.equal(parentShow.json().status, "not running");
+  assert.equal(parentShow.json().terminal, null);
+  noLaunchOrKill(s);
+});
+
+test("#1634 a second target label appearing during restart preparation refuses before run or kill", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" }, labels: { bot: ATLAS } })] });
+  seedCallerLedger(s, [linkedRow(s)]);
+  const before = linkedBytes(s);
+  s.setState((state) => { state.addAfterLs = { nth: 3, terminal: atlasPane({ address: "vm/t9", created_ms: 9, cwd: s.project, labels: { bot: ATLAS } }) }; });
+  const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /duplicate live labels/);
+  assert.deepEqual(linkedBytes(s), before);
+  assert.equal(s.hcState().terminals[0].state, "live");
+  noLaunchOrKill(s);
+});
+
+// #1635 snapshots all caller/target configuration trees and the fake window,
+// distinguishing read-only transport probes from settings/hooks/delegated execution.
+function linkedFiles(s) {
+  const out = {};
+  const visit = (path) => {
+    // The existing CLI records refused commands in its diagnostic log. That is
+    // not a settings/roster/attachment mutation or a launch preparation step.
+    if (path === join(s.app, "automagik-herdr/actions.log")) return;
+    if (!existsSync(path)) return;
+    if (statSync(path).isDirectory()) {
+      out[path] = "directory";
+      for (const name of readdirSync(path).sort()) visit(join(path, name));
+    } else out[path] = createHash("sha256").update(readFileSync(path)).digest("hex");
+  };
+  for (const path of [s.app, s.home, join(s.root, "vm"), join(s.root, "herdr-app.json")]) visit(path);
+  return out;
+}
+function noLinkedPreparation(s, from = 0) {
+  const calls = s.calls().slice(from);
+  noLaunchOrKill(s, from);
+  assert.deepEqual(calls.filter((c) => c[0] === "file" && c[1] !== "read"), []);
+  // Project identity needs only test/git. No shell script, environment preparation,
+  // delegated CLI, settings/hook writer, window creation or interaction is permitted.
+  assert.deepEqual(calls.filter((c) => c[0] === "exec" && !["test", "git"].includes(c[c.indexOf("--") + 1])), []);
+  assert.deepEqual(s.appCalls(), []);
+}
+
+for (const attached of [false, true]) test(`#1635 caller-context linked launches refuse before mutation (${attached ? "confirmed pane" : "stopped"})`, (t) => {
+  const s = scene(t, { caller: true, terminals: attached ? [atlasPane({ labels: { bot: ATLAS }, status: { state: "idle", app: "hermes" } })] : [] });
+  seedCallerLedger(s, attached ? [linkedRow(s)] : []);
+  s.fakeWindow({ spaces: [] });
+  const before = linkedFiles(s);
+  const cases = [
+    ["restart", "Atlas"],
+    ["restart", "Atlas", "--force", "--fresh"],
+    ["restart", "Atlas", "--agent", "claude", "--save"],
+    ["restart", "Atlas", "--agent", "antigravity", "--model", "uncached-model", "--save", "--force"],
+    ["restart", "Atlas", "--tree", "--force"],
+    ["restart", "Atlas", "--tree", "--force", "--fresh", "--fresh-shared", "--agent", "codex", "--model", "unvalidated-model", "--save"],
+    ...(!attached ? [["start", "Atlas"], ["start", "Atlas", "--force", "--fresh"]] : []),
+  ];
+  for (const args of cases) {
+    const r = s.cli([...args, ...s.on, "--json"]);
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.out} ${r.err}`);
+    assert.match(r.err, /cannot verify a return route/);
+    assert.match(r.err, /origin HC terminal.*hc run --bg --on vm/);
+    assert.match(r.err, /real.*parent.*first-task.*report instructions/);
+    assert.match(r.err, /returned vm\/tN/);
+    assert.doesNotMatch(r.err, /--no-parent|hc send t1(?:\s|$)/);
+    assert.equal(r.json().refused, "linked-return-route");
+  }
+  assert.deepEqual(linkedFiles(s), before);
+  noLinkedPreparation(s);
+  if (attached) assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
+});
+
+test("#1635 caller-context start may report the verified existing target without launching or adopting", (t) => {
+  const s = scene(t, { caller: true, terminals: [atlasPane({ labels: { bot: ATLAS }, status: { state: "working", app: "hermes" } })] });
+  seedCallerLedger(s);
+  s.fakeWindow({ spaces: [] });
+  const before = linkedFiles(s);
+  const r = s.cli(["start", "Atlas", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { id: ATLAS, running: "t8", machine: "vm" });
+  assert.deepEqual(linkedFiles(s), before);
+  noLinkedPreparation(s);
+});
+
+for (const state of ["unknown", "duplicate"]) test(`#1635 caller-context start does not turn ${state} target state into an already-running success`, (t) => {
+  const s = scene(t, { caller: true, terminals: [atlasPane({ labels: { bot: ATLAS } })] });
+  seedCallerLedger(s);
+  s.fakeWindow({ spaces: [] });
+  s.setState((data) => {
+    if (state === "unknown") data.failGet = ["vm/t8"];
+    else data.terminals.push(atlasPane({ address: "vm/t9", created_ms: 9, cwd: s.project, labels: { bot: ATLAS } }));
+  });
+  const before = linkedFiles(s);
+  const r = s.cli(["start", "Atlas", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  // Transport CliErrors have stderr only; structured refusals also emit JSON.
+  if (r.out.trim()) assert.equal(r.json().running, undefined);
+  assert.match(r.err, state === "unknown" ? /hc get vm\/t8 failed/ : /duplicate live labels/);
+  assert.deepEqual(linkedFiles(s), before);
+  noLinkedPreparation(s);
+});
+
+test("#1635 no-caller member start and restart remain ordinary non-orchestrated launches", (t) => {
+  const s = scene(t, { caller: false });
+  seedCallerLedger(s);
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  const restart = s.cli(["restart", "Hedge", ...s.on, "--fresh", "--force", "--json"]);
+  assert.equal(restart.code, 0, restart.err);
+  assert.equal(restart.json().replaced, start.json().terminal);
+  const runs = s.calls().filter((c) => c[0] === "run");
+  assert.equal(runs.length, 2);
+  assert.ok(runs.every((c) => c.includes("--on") && c.includes("--no-parent")));
+  assert.deepEqual(keysSent(s.calls()), []);
+  // Compatibility only: this does not prove a cross-origin return/report route.
+});
+
+// #206 (c): history --machine reads only the rows this computer wrote for that machine's core
+// and the linked project. A machine's name may change, so the core id decides, never the name.
+test("#206 history --machine shows this computer's rows for the linked core and project only", (t) => {
+  const s = scene(t);
+  const GONE = "b-goneaaaaaa";
+  const at = (m) => `2026-11-18T00:${String(m).padStart(2, "0")}:00.000Z`;
+  const local = { v: 1, event: "attach", bot: ATLAS, project: s.project, terminal: "t8", core: "core-of-this", created_ms: 1, at: at(1), by: "attach" };
+  seedCallerLedger(s, [
+    local,
+    linkedRow(s, { terminal: "t21", at: at(2) }),
+    linkedRow(s, { event: "detach", terminal: "t21", at: at(3), by: "detach" }),
+    linkedRow(s, { terminal: "t22", project: join(s.root, "vm", "other"), at: at(4) }),
+    linkedRow(s, { terminal: "t23", core: "core-of-another", at: at(5) }),
+    linkedRow(s, { terminal: "t24", machine: "old-vm-name", at: at(6) }),
+    linkedRow(s, { bot: GONE, terminal: "t25", at: at(7) }),
+  ]);
+  const before = linkedBytes(s);
+  const from = s.calls().length;
+
+  const json = s.cli(["history", "Atlas", ...s.on, "--json"]);
+  assert.equal(json.code, 0, json.err);
+  const out = json.json();
+  assert.deepEqual([out.id, out.name, out.machine], [ATLAS, "Atlas", "vm"]);
+  assert.deepEqual(out.attach.map((r) => [r.event, r.terminal]), [["attach", "t21"], ["detach", "t21"], ["attach", "t24"]]);
+  // The rows pass as written (bots.attach-ledger@1): nothing added, nothing taken.
+  assert.deepEqual(out.attach[0], linkedRow(s, { terminal: "t21", at: at(2) }));
+  assert.deepEqual(out.attach[2], linkedRow(s, { terminal: "t24", machine: "old-vm-name", at: at(6) }));
+  // The worker ledger is this computer's: nothing of it is shown for a linked machine.
+  assert.deepEqual([out.starts, out.workers, out.sessions, out.transcript], [[], [], [], null]);
+
+  const text = s.cli(["history", "Atlas", ...s.on]);
+  assert.equal(text.code, 0, text.err);
+  assert.match(text.out, new RegExp(`^Atlas \\(${ATLAS}\\) on vm$`, "m"));
+  for (const seen of [/attached to t21/, /detached from t21/, /attached to t24/]) assert.match(text.out, seen);
+  for (const other of ["t8", "t22", "t23", "t25"]) assert.doesNotMatch(text.out, new RegExp(`\\b${other}\\b`));
+
+  // A removed bot, by its bare id, still answers from the rows.
+  const gone = s.cli(["history", GONE, ...s.on, "--json"]);
+  assert.equal(gone.code, 0, gone.err);
+  assert.deepEqual([gone.json().id, gone.json().name, gone.json().machine], [GONE, null, "vm"]);
+  assert.deepEqual(gone.json().attach.map((r) => r.terminal), ["t25"]);
+
+  // Nothing recorded for that core and project: the empty state names the machine.
+  const empty = s.cli(["history", "Hedge", ...s.on]);
+  assert.equal(empty.code, 0, empty.err);
+  assert.match(empty.out, /^Hedge \(b-hedgeaaaaa\) on vm$/m);
+  assert.match(empty.out, /nothing recorded by this computer for vm/);
+
+  // A read only: no ledger or bots file changed, no pane started, keyed or killed.
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s, from);
+});
+
+test("#206 history --machine refuses a machine that isn't linked, and a name the project doesn't define", (t) => {
+  const s = scene(t);
+  seedCallerLedger(s, [linkedRow(s)]);
+  const unknown = s.cli(["history", "Atlas", "--machine", "nosuch", "--project", s.project, "--json"]);
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.err, /nosuch can't be reached|isn't a linked machine/);
+  assert.equal(unknown.out.trim(), "");
+  // Only a bare id may name a removed bot; an unknown name is still an error.
+  const name = s.cli(["history", "Nobody", ...s.on]);
+  assert.notEqual(name.code, 0);
+  assert.equal(name.out.trim(), "");
 });

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-5: #267, #273, #280, #282, #286, #574; later work: #523, #655, #670, #675, #680; 6-8 unconfirmed; every question answered; amended 2026-11-07: writes on DSH chats, global Bots included) |
+| Status | In delivery (deliveries 1-5: #267, #273, #280, #282, #286, #574; later work: #523, #655, #670, #675, #680; 6-8 unconfirmed; every question answered; amended 2026-11-07: writes on DSH chats, global Bots included; amended 2026-11-19 by [RFC 0036](0036-bot-management-from-pocket.md): Bot management from Pocket, approved by the owner's delegate) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr (3.N.P, Pocket Link included), plugin (3.N.P), pocket (3.N.P, [RFC 0011](0011-monorepo-parts-and-releases.md)) |
 | Created | 2026-11-03 |
@@ -745,9 +745,14 @@ finds out what the other accepts, and fails closed to read-only.
   team's project Bots shown under a yes and the global Bots, the Main Bot included; stop their
   turns; and approve or deny their tool calls one call at a time, at the level DSH's sandbox
   gives that Session, at up to 20 writes a minute; and it sees each request's input. It cannot
-  grant allow for session, pick a project without the yes, start a Bot, change a Bot's settings
-  or its level, or reach the socket. Undo as before: remove the phone in Pocket Link (its
-  writes end within 2 s), or turn the bridge off.
+  grant allow for session, pick a project without the yes, start a Bot, write a Bot's level,
+  change its other settings beyond what RFC 0036 allows, or reach the socket. Amended
+  2026-11-19 by [RFC 0036](0036-bot-management-from-pocket.md) (Decided): through that RFC's
+  separately negotiated management capability, a phone may also list a shown project Bot's
+  scheduled tasks without their prompts and pause, resume or rename them, change its name and
+  model (a model write can clear Auto), and read, edit and add its own memory when it is not
+  private; global Bots are not managed, and every other limit here stands. Undo as before:
+  remove the phone in Pocket Link (its writes end within 2 s), or turn the bridge off.
 - **The per-project yes still gates the chat** (0014 Threat model, item 3; `shown[]`). A DSH
   chat of a Bot whose project has no entry in the home file's `shown[]` is listed with
   `shown: false`; `subscribe` and every write on it are refused `not-shown`, by the socket and

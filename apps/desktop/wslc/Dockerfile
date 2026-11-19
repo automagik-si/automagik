@@ -60,13 +60,16 @@ RUN set -eux; \
     useradd --uid 1000 --gid 1000 --create-home --home-dir /home/automagik --shell /bin/bash automagik; \
     install -d -o automagik -g automagik -m 0755 /mnt/automagik-exchange /mnt/automagik-exchange/downloads /mnt/automagik-exchange/lane
 
-# The DeepSeek Harness and the profile the desktop ships, read-only code.
+# The DeepSeek Harness and the profile the desktop ships, read-only code, and the launcher that
+# binds dsh's plugin operations to the runtime's pnpm by absolute path.
 COPY build/runtime /opt/automagik/runtime
 COPY build/profile /opt/automagik/profile
 COPY build/versions.json /opt/automagik/versions.json
+COPY build/dsh-launch /opt/automagik/dsh-launch
 # The launcher, and the desktop's own modules it starts DSH and runs the lane with.
 COPY package.json /opt/automagik/desktop/package.json
-COPY src/dsh.js src/child-paths.js src/close-inherited.cjs src/close-inherited-preload.cjs \
+COPY build/runtime/node_modules/yaml /opt/automagik/desktop/node_modules/yaml
+COPY src/dsh.js src/profile-patch.mjs src/child-paths.js src/close-inherited.cjs src/close-inherited-preload.cjs \
      src/lane.js src/lane-keys.js src/privacy.js src/tar.js src/update.js /opt/automagik/desktop/src/
 COPY wslc/bin /opt/automagik/desktop/wslc/bin
 COPY wslc/lib /opt/automagik/desktop/wslc/lib
@@ -76,7 +79,7 @@ RUN set -eux; \
     chmod 0755 /opt/automagik/desktop/wslc/bin/*.mjs; \
     ln -s ../desktop/wslc/bin/dsh-launch.mjs /opt/automagik/bin/dsh-launch; \
     ln -s ../desktop/wslc/bin/xdg-open.mjs /opt/automagik/bin/xdg-open; \
-    printf '#!/bin/sh\n# The pnpm DSH installs plugins with (the desktop runtime'"'"'s pinned pnpm 10).\nexec node /opt/automagik/runtime/node_modules/pnpm/bin/pnpm.cjs "$@"\n' > /usr/local/bin/pnpm; \
+    printf '#!/bin/sh\n# The pnpm other tools find on PATH (the desktop runtime'"'"'s pinned pnpm 10); plugin operations run it by absolute path through dsh-launch.\nexec node /opt/automagik/runtime/node_modules/pnpm/bin/pnpm.cjs "$@"\n' > /usr/local/bin/pnpm; \
     chmod 0755 /usr/local/bin/pnpm; \
     pnpm --version; \
     node --version

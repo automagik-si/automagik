@@ -14,11 +14,13 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { cp, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { delimiter, join, resolve, win32 } from 'node:path'
 import { DEFAULTS as PRIVACY_DEFAULTS, privacyEnv } from './privacy.js'
 import { CLOSE_INHERITED } from './child-paths.js'
+import { mergePatch, replaceProfilePatch } from './profile-patch.mjs'
 
 export const PROFILE = 'omni'
 const READY_TIMEOUT_MS = 120_000
@@ -47,6 +49,9 @@ export function resourcesOf({ packaged, resourcesPath, appPath }) {
   return {
     bin: join(root, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     pnpm: join(root, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    // The launcher that gives dsh's plugin manager this pnpm (src/dsh-launch.cjs): outside the
+    // app's asar when packaged, because it runs as Node.
+    launcher: packaged ? join(root, 'dsh-launch', 'dsh-launch.cjs') : join(appPath, 'src', 'dsh-launch.cjs'),
     profile: join(root, 'profile'),
   }
 }
@@ -60,12 +65,14 @@ const batchQuote = text => `"${String(text).replaceAll('%', '%%')}"`
 export const toolFileOf = (dir, name, platform = process.platform) => join(dir, platform === 'win32' ? `${name}.cmd` : name)
 
 /**
- * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's plugin manager installs plugins
- * (the market, Settings → Plugins) with pnpm, and nothing guarantees a machine has Node or
- * pnpm. Both run on `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at
- * every launch, since the app's path changes with each install; a file that already says the
- * same, and can run, is left as it is. On Windows they are batch files, `node.cmd` and
- * `pnpm.cmd`, which PATH finds by PATHEXT.
+ * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's commands and the agent CLIs a plugin
+ * starts run with them, and nothing guarantees a machine has Node or pnpm. Plugin installs,
+ * updates and removals do not resolve them here: the app starts dsh through src/dsh-launch.cjs,
+ * which gives the plugin manager the bundled pnpm by absolute path (#1466). Both tools run on
+ * `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at every launch, since
+ * the app's path changes with each install; a file that already says the same, and can run, is
+ * left as it is. On Windows they are batch files, `node.cmd` and `pnpm.cmd`, which PATH finds
+ * by PATHEXT.
  */
 export function writeTools({ dir, node, pnpm, platform = process.platform }) {
   mkdirSync(dir, { recursive: true })
@@ -97,47 +104,9 @@ const sameTool = (file, text, windows) => {
   }
 }
 
-// The top-level entries of a cordis patch file (a YAML list): each starts with "- " at the
-// first column, runs over its indented lines, and takes the comment lines right above it.
-function patchEntries(text) {
-  const entries = []
-  let comments = []
-  let current = null
-  for (const line of String(text).split('\n')) {
-    if (line.startsWith('- ')) {
-      current = { lines: [...comments, line], ids: [] }
-      comments = []
-      entries.push(current)
-    } else if (line.startsWith('#')) {
-      comments.push(line)
-      continue
-    } else if (current && /^\s+\S/.test(line)) {
-      current.lines.push(line)
-    } else {
-      comments = []
-      continue
-    }
-    const id = line.match(/^[\s-]*id:\s*['"]?([^'"\s#]+)/)
-    if (id) current.ids.push(id[1])
-  }
-  return entries
-}
-
-const idsIn = text => new Set([...String(text).matchAll(/^[\s-]*id:\s*['"]?([^'"\s#]+)/gm)].map(match => match[1]))
-
-/**
- * The user's profile patch with the shipped entries it lacks appended, or null when it
- * lacks none. An entry is missing when none of the ids it names appears in the user's file;
- * one the user has (changed or not) is theirs and stays. DSH's empty template (`[]`) is
- * replaced rather than appended to.
- */
+/** The user's profile patch with missing shipped operations merged, or null if unchanged. */
 export function mergeProfilePatch(user, shipped) {
-  const have = idsIn(user)
-  const missing = patchEntries(shipped).filter(entry => entry.ids.length > 0 && entry.ids.every(id => !have.has(id)))
-  if (missing.length === 0) return null
-  const added = missing.map(entry => entry.lines.join('\n')).join('\n')
-  const base = String(user).replace(/^\[\]\s*$/m, '').replace(/\s*$/, '')
-  return `${base === '' ? '' : `${base}\n`}${added}\n`
+  return mergePatch(createRequire(import.meta.url)('yaml'), user, shipped)
 }
 
 /**
@@ -385,7 +354,7 @@ export function backupSettingsOrLog({ dshHome, version, log = () => {} }) {
  * each with .build-id) is left as it is. Another build's gets the new packages
  * (node_modules, package.json) and nothing else: dsh keeps the user's settings in that
  * folder too (models and preferences in cordis.patch.yml, .plugin-manager/), and an
- * update must not take them away. The shipped cordis.patch.yml only seeds a new profile.
+ * update merges missing shipped patch operations into the existing settings.
  * The copies are asynchronous, so the window stays live while a new build's packages go in;
  * dsh must not start before the returned promise resolves. A quit can cut a copy short (the app
  * lets it through while dsh is not spawned yet): a new profile is copied beside its place and
@@ -407,10 +376,11 @@ export async function installProfile({ dshHome, source }) {
     renameSync(fresh, target)
     return { target, installed: true }
   } else {
+    const shipped = readJson(join(source, 'package.json'))
     // A profile from a build that shipped the Bot team or the welcome under its old name.
-    migrateRenamed({ target, dshHome, shipped: readJson(join(source, 'package.json')) })
+    migrateRenamed({ target, dshHome, shipped })
     // A profile with a package this build no longer ships (RETIRED).
-    migrateRetired({ target, dshHome, shipped: readJson(join(source, 'package.json')) })
+    migrateRetired({ target, dshHome, shipped })
     // Only the packages the app ships are replaced: a plugin the user installed (the market,
     // Settings → Plugins) stays, with its dependencies, and in package.json.
     for (const name of packagesIn(join(source, 'node_modules'))) {
@@ -420,7 +390,6 @@ export async function installProfile({ dshHome, source }) {
     // The tarballs in vendor/ are the app's (file:vendor/… in the shipped package.json), except
     // those a plugin the person installed names.
     const user = readJson(join(target, 'package.json'))
-    const shipped = readJson(join(source, 'package.json'))
     const own = ownDependencies(user, shipped)
     const kept = new Set(own.map(([, spec]) => /^file:(?:\.\/)?vendor\/([^/]+)$/.exec(String(spec))?.[1]))
     for (const file of existsSync(join(target, 'vendor')) ? readdirSync(join(target, 'vendor')) : []) {
@@ -430,13 +399,15 @@ export async function installProfile({ dshHome, source }) {
     writeFileSync(join(target, 'package.json'), mergeProfilePackage(user, shipped))
     replaceLocks({ target, source, ownPlugins: own.length > 0 })
     if (existsSync(join(source, '.build-id'))) cpSync(join(source, '.build-id'), join(target, '.build-id'))
-    for (const file of ['cordis.patch.yml', 'pnpm-workspace.yaml']) {
-      if (!existsSync(join(target, file)) && existsSync(join(source, file))) cpSync(join(source, file), join(target, file))
+    if (!existsSync(join(target, 'pnpm-workspace.yaml')) && existsSync(join(source, 'pnpm-workspace.yaml'))) {
+      cpSync(join(source, 'pnpm-workspace.yaml'), join(target, 'pnpm-workspace.yaml'))
     }
-    // A setting a newer build ships (a new plugin's row, a seed) reaches an existing profile.
     const patch = join(target, 'cordis.patch.yml')
-    const merged = mergeProfilePatch(readFileSync(patch, 'utf8'), readFileSync(join(source, 'cordis.patch.yml'), 'utf8'))
-    if (merged !== null) writeFileSync(patch, merged)
+    const shippedPatch = readFileSync(join(source, 'cordis.patch.yml'), 'utf8')
+    const merged = existsSync(patch) ? mergeProfilePatch(readFileSync(patch, 'utf8'), shippedPatch) : shippedPatch
+    if (merged !== null) {
+      replaceProfilePatch(patch, merged, existsSync(patch) ? statSync(patch).mode & 0o777 : undefined)
+    }
   }
   writeFileSync(marker, stamp)
   return { target, installed: true }
@@ -810,7 +781,8 @@ export const toolDirs = (userHome = homedir()) => [join(userHome, '.local', 'bin
 
 export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform }) {
   // After the machine's own: a project's commands keep the user's node and pnpm, and then the
-  // usual tool folders, then the app's own node and pnpm.
+  // usual tool folders, then the app's own node and pnpm. dsh's plugin manager does not resolve
+  // pnpm here: startDsh binds it to the bundled pnpm by absolute path (src/dsh-launch.cjs).
   const PATH = [...String(base.PATH ?? '').split(delimiter), ...toolDirs(userHome), ...(binDir ? [binDir] : [])]
     .filter((dir, index, all) => dir !== '' && all.indexOf(dir) === index)
     .join(delimiter)
@@ -853,10 +825,14 @@ export const busyFileOf = home => join(home, 'busy.json')
  * the process at once, so a quit while dsh starts can stop it, and the app can answer its
  * messages (the Bot browser bridge, main.js) from the start. `urlFile` is the file dsh's web
  * app records the URL in: the previous start's is removed, and it is read when output is lost.
+ *
+ * `bundledPnpm` (with `launcher`, src/dsh-launch.cjs) binds dsh's plugin installs, updates and
+ * removals to the app's own pnpm by absolute path, instead of the `pnpm` PATH resolves; a
+ * missing pnpm or launcher fails here, before dsh starts, and never falls back to PATH.
  */
 export function startDsh({
   node, bin, env, port, cwd, log, privacy, timeoutMs = READY_TIMEOUT_MS, onSpawn, urlFile,
-  spawn = nodeSpawn,
+  bundledPnpm, launcher, spawn = nodeSpawn,
 }) {
   // A file left by an earlier start must not sign this one in: dsh writes its own once it is
   // ready, and this start falls back to it when dsh's output is unavailable. A removal that
@@ -872,13 +848,34 @@ export function startDsh({
       log?.write(`automagik: could not remove the previous launch URL ${urlFile}: ${reason}\n`)
     }
   }
+  // The app's package manager comes through the launcher, which imports the pinned dsh and
+  // passes runCli its ProfilePnpmInvocation (src/dsh-launch.cjs). Both are checked here so a
+  // build without them says what is missing instead of dsh starting and failing on PATH.
+  if (bundledPnpm !== undefined && launcher === undefined) {
+    return Promise.reject(new Error('startDsh: bundledPnpm needs the dsh launcher'))
+  }
+  if (launcher !== undefined && bundledPnpm === undefined) {
+    return Promise.reject(new Error("startDsh: the dsh launcher needs the app's bundled pnpm"))
+  }
+  if (bundledPnpm !== undefined && !existsSync(bundledPnpm)) {
+    return Promise.reject(new Error(`the app's bundled pnpm is missing at ${bundledPnpm}`))
+  }
+  if (bundledPnpm !== undefined && !existsSync(launcher)) {
+    return Promise.reject(new Error(`the dsh launcher is missing at ${launcher}`))
+  }
   const args = [
-    '--require', CLOSE_INHERITED, bin, '--profile', PROFILE,
+    '--require', CLOSE_INHERITED, bundledPnpm === undefined ? bin : launcher, '--profile', PROFILE,
     ...(privacy ? ['--patch', privacy] : []),
     '--no-open', '--host', '127.0.0.1', '--port', String(port),
   ]
   const child = spawn(node, args, {
-    cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    cwd,
+    env: bundledPnpm === undefined ? env : {
+      ...env,
+      AUTOMAGIK_DSH_ENTRY: bin,
+      AUTOMAGIK_DSH_PNPM: bundledPnpm,
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
   onSpawn?.(child)
   const ready = new Promise((done, fail) => {

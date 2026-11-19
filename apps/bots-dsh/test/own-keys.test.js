@@ -145,7 +145,8 @@ test('tools answer an inherited Bot name like any unknown name', async (t) => {
   await call('state', {})
   const before = state()
   for (const id of BAD) {
-    assert.equal(await tool('message_bot', { to: id, message: 'hi' }, 'm1'), `No Bot named ${id}. Team: Omni, Writer`)
+    const unknown = await tool('message_bot', { to: id, message: 'hi' }, 'm1')
+    assert.deepEqual(unknown, { text: `No Bot named ${id}. Team: Omni, Writer`, sent: false, reason: `No Bot named ${id}. Team: Omni, Writer` })
     assert.equal(await tool('update_bot', { bot: id, role: 'x' }, 'm1'), `No Bot named ${id}.`)
     assert.match(await tool('create_group', { members: [id, 'Writer'] }, 'm1'), new RegExp(`^No Bot named ${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
     // Asking as a Bot named like this finds no caller either.

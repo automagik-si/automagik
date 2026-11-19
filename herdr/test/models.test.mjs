@@ -8,10 +8,12 @@ import { readFileSync } from "node:fs";
 import { agModelsCacheText, agModelsPath, parseAgModelsOutput } from "../mods/am-sidebar/models.js";
 
 import {
-  AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AGY_READ_ALLOW, AGY_SHELL_READ, AGY_WRITE_ALLOW, LEGACY_AGENTS,
-  agentArgv, agentKeyOfArgv, agyModeArgs, agyModeOf, agyModeProblem, agySettingsDir, agySettingsPlan,
-  configPaths, defaultModel, defaultModelFrom, detectModel, effortArgs, knownModels, knownModelsFrom,
-  modelArgs, promptArgs, promptByMessage, resolveAgent, resumeArgs, shownModel, withOverrides,
+  AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AGY_READ_ALLOW, AGY_SHELL_READ, AGY_WRITE_ALLOW, LEGACY_AGENTS, TIERS,
+  agentArgv, agentKeyOfArgv, agyModeArgs, agyModeOf, agyModeProblem, agySettingsDir, agySettingsPlan, codexConfigValue,
+  codexDefaultsFrom, codexEffortProblem, codexProfileFrom, codexProfileName, codexProfilePath, codexSettingsFrom, configPaths, configTexts,
+  defaultModel, defaultModelFrom, detectModel, effortArgs, knownModels, knownModelsFrom,
+  modelArgs, promptArgs, promptByMessage, resolveAgent, resumeArgs, seatSettingsArgs, serviceTierId, shownModel, tierArgs, tierName,
+  tierProblem, withOverrides,
 } from "../mods/am-sidebar/models.js";
 import { BRIEFINGS_DIR, briefingFileOf, briefingLaunch, briefingWay, ownPromptIn, resumedSessionOf, resumesConversation, tomlString,
   withBriefing, withoutBriefing } from "../mods/am-sidebar/models.js";
@@ -376,4 +378,132 @@ test("Antigravity #840: default read-only shell tools in writer and read-only --
     }
     assert.equal(perms.allow.some((r) => r.startsWith("write_file(")), false);
   }
+});
+
+// ---- a bot's own reasoning effort and service tier (#1411) ----
+
+test("#1411: a Codex bot's own effort and tier are its own -c words, in the roster's words, after its other words", () => {
+  assert.deepEqual([...TIERS], ["fast", "standard"]);
+  // Fast is Codex's `priority` service tier, Standard its `default`; the roster stores their names.
+  assert.deepEqual(tierArgs("codex", "fast"), ["-c", "service_tier=priority"]);
+  assert.deepEqual(tierArgs("codex", "standard"), ["-c", "service_tier=default"]);
+  assert.deepEqual(tierArgs("codex"), []);
+  assert.deepEqual(tierArgs("codex", ""), []);
+  assert.deepEqual(tierArgs("codex", "flex"), [], "a tier this pack can't name is never passed");
+  for (const key of Object.keys(AGENTS).filter((k) => k !== "codex")) assert.deepEqual(tierArgs(key, "fast"), [], key);
+  assert.equal(serviceTierId("fast"), "priority");
+  assert.equal(serviceTierId("standard"), "default");
+  assert.equal(serviceTierId("flex"), null);
+  assert.equal(tierName("priority"), "fast");
+  assert.equal(tierName("default"), "standard");
+  assert.equal(tierName("flex"), "flex", "an id the roster has no word for is shown as Codex spells it");
+  assert.equal(tierName(null), null);
+  for (const tier of TIERS) assert.equal(tierProblem(tier), null, tier);
+  // Codex's own effort levels (its catalog's supported_reasoning_levels); an unknown word is refused
+  // rather than handed to Codex as a -c override it would drop.
+  for (const effort of ["low", "medium", "high", "xhigh", "max", "ultra"]) assert.equal(codexEffortProblem(effort), null, effort);
+  assert.equal(codexEffortProblem(undefined), null);
+  assert.equal(codexEffortProblem("banana"), 'reasoning effort "banana" isn\'t one of low, medium, high, xhigh, max, ultra');
+  assert.equal(codexEffortProblem("High"), 'reasoning effort "High" isn\'t one of low, medium, high, xhigh, max, ultra');
+  assert.equal(tierProblem(undefined), null);
+  assert.equal(tierProblem(""), 'service tier "" isn\'t fast or standard');
+  assert.equal(tierProblem("Fast"), 'service tier "Fast" isn\'t fast or standard');
+  // effortArgs is Codex's own -c word already; seatSettingsArgs puts both on a Codex launch only.
+  assert.deepEqual(effortArgs("codex", "high"), ["-c", "model_reasoning_effort=high"]);
+  assert.deepEqual(seatSettingsArgs("codex", { effort: "high", tier: "fast" }),
+    ["-c", "model_reasoning_effort=high", "-c", "service_tier=priority"]);
+  assert.deepEqual(seatSettingsArgs("codex", { effort: "xhigh" }), ["-c", "model_reasoning_effort=xhigh"]);
+  assert.deepEqual(seatSettingsArgs("codex", { tier: "standard" }), ["-c", "service_tier=default"]);
+  assert.deepEqual(seatSettingsArgs("codex", {}), []);
+  assert.deepEqual(seatSettingsArgs("codex", null), []);
+  for (const key of Object.keys(AGENTS).filter((k) => k !== "codex")) assert.deepEqual(seatSettingsArgs(key, { effort: "high", tier: "fast" }), [], key);
+});
+
+test("#1411: the value a Codex argv gives a config key, in every word form, the last one winning; only the exact key", () => {
+  const argv = ["codex", "-c", "model_reasoning_effort=low", "--config", 'service_tier="priority"', "-cmodel_reasoning_effort=high",
+    "--config=service_tier=default", "--config=model=other", "--", "-c", "model_reasoning_effort=max"];
+  assert.equal(codexConfigValue(argv, "model_reasoning_effort"), "high", "the last -c wins, nothing after -- is read");
+  assert.equal(codexConfigValue(argv, "service_tier"), "default");
+  assert.equal(codexConfigValue(argv, "model"), "other");
+  for (const key of ["model_reasoning_effort_x", "reasoning_effort", "model.provider", ""]) assert.equal(codexConfigValue(argv, key), null, key);
+  // Forms that name no value, and a joined spelling with a value that looks like a flag.
+  assert.deepEqual([codexConfigValue(["codex", "-c", "model_reasoning_effort"], "model_reasoning_effort"),
+    codexConfigValue(["codex", "--config"], "service_tier"), codexConfigValue(["codex"], "service_tier")], [null, null, null]);
+  assert.equal(codexConfigValue(["codex", "-c=service_tier=flex"], "service_tier"), "flex");
+  assert.equal(codexConfigValue(["codex", "-c", "service_tier"], "service_tier"), null);
+  assert.equal(codexConfigValue(["codex", "-c", "service_tier=priority", "-c", "service_tier="], "service_tier"), "");
+  assert.equal(codexConfigValue("not an argv", "service_tier"), null);
+  assert.equal(codexConfigValue(undefined, "service_tier"), null);
+});
+
+test("#1411: a Codex bot with neither stored inherits the global config's top-level pair, and a profile is its own file", () => {
+  const texts = { codexConfig: 'model = "gpt-6-astra"\nmodel_reasoning_effort = "high" # the host default\nservice_tier = "priority"\n\n'
+    + '[profiles.work]\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n' };
+  assert.deepEqual(codexDefaultsFrom("codex", texts), { effort: "high", tier: "priority" });
+  assert.deepEqual(codexDefaultsFrom("claude", texts), { effort: null, tier: null });
+  assert.deepEqual(codexDefaultsFrom("codex", {}), { effort: null, tier: null });
+  // A [profiles.…] section isn't the file `-p` layers (codexProfileFrom): it never stands in for
+  // the global top level, and a bot that runs one still reads the global pair here.
+  const profileOnly = { codexConfig: '[profiles.work]\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n' };
+  assert.deepEqual(codexDefaultsFrom("codex", profileOnly), { effort: null, tier: null });
+  assert.deepEqual(codexDefaultsFrom("codex", { codexConfig: "model_reasoning_effort = 'xhigh'\nservice_tier = 'flex'\n" }),
+    { effort: "xhigh", tier: "flex" });
+  // The model default beside them still reads, and configTexts reads every file through `read`.
+  assert.equal(defaultModelFrom("codex", texts), "gpt-6-astra");
+  assert.deepEqual(Object.keys(configTexts("/h", () => null)), Object.keys(configPaths("/h")));
+  assert.equal(configTexts("/h", (p) => (p === configPaths("/h").codexConfig ? "service_tier = \"default\"\n" : null)).codexConfig,
+    "service_tier = \"default\"\n");
+});
+
+test("#1411: the Codex profile a launch names is one file beside the global config, read for its own pair", () => {
+  // Every word form Codex takes for -p/--profile, the last one winning, nothing after -- read.
+  for (const [argv, name] of [
+    [["codex", "-p", "sol"], "sol"],
+    [["codex", "-psol"], "sol"],
+    [["codex", "-p=sol"], "sol"],
+    [["codex", "--profile", "sol"], "sol"],
+    [["codex", "--profile=sol"], "sol"],
+    [["codex", "-p", "one", "--profile", "two"], "two"],
+    [["codex", "--profile", "sol.config.toml"], "sol.config.toml"],
+    [["codex", "--", "-p", "sol"], null],
+    [["codex"], null],
+    [["codex", "-p"], null],
+    [["codex", "-p", ""], null],
+    [["codex", "-p", "../x"], null],
+    [["codex", "--profile=/abs/sol"], null],
+    [["codex", "-p", "sol", "-p", "../x"], null],
+  ]) assert.equal(codexProfileName(argv), name, JSON.stringify(argv));
+  assert.equal(codexProfileName(undefined), null);
+  assert.equal(codexProfileName("codex -p sol"), null, "only a word list is an argv");
+  // The file `-p <name>` layers on the global config, and the pair it names at its top level.
+  assert.equal(codexProfilePath("/h", "sol"), "/h/.codex/sol.config.toml");
+  assert.equal(codexProfilePath("/h", "../sol"), null);
+  assert.equal(codexProfilePath(undefined, "sol"), null);
+  const files = { "/h/.codex/sol.config.toml": 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\nservice_tier = "fast"\n' };
+  const read = (p) => files[p] ?? null;
+  assert.deepEqual(codexProfileFrom("sol", { home: "/h", read }), { effort: "high", tier: "fast" });
+  assert.deepEqual(codexProfileFrom("astra", { home: "/h", read }), null, "a file that isn't there names nothing");
+  assert.equal(codexProfileFrom("../sol", { home: "/h", read }), null, "a name that can't be one file is never read");
+  assert.equal(codexProfileFrom("sol", { home: "/h", read: () => { throw new Error("no"); } }), null);
+  assert.equal(codexProfileFrom("sol", {}), null);
+  // codexSettingsFrom is the one top-level reader both callers share.
+  assert.deepEqual(codexSettingsFrom(files["/h/.codex/sol.config.toml"]), { effort: "high", tier: "fast" });
+  assert.deepEqual(codexSettingsFrom(undefined), { effort: null, tier: null });
+  assert.deepEqual(codexSettingsFrom('[profiles.work]\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n'),
+    { effort: null, tier: null }, "a section's keys aren't the file's top-level pair");
+});
+
+test("#1415 Claude lists both Fable 5.2 forms and the older pin without relying on its default", () => {
+  for (const models of [
+    knownModelsFrom("claude"),
+    knownModelsFrom("claude", { claudeSettings: JSON.stringify({ model: "claude-opus-5-5" }) }),
+  ]) {
+    for (const id of ["claude-fable-5-2", "claude-fable-5-2[1m]", "claude-fable-5-1"]) {
+      assert.ok(models.includes(id), `${id} is offered with an absent or differing default`);
+    }
+  }
+});
+
+test("#1415 Claude's 1M-context Fable id is passed unchanged in modelArgs", () => {
+  assert.deepEqual(modelArgs("claude", "claude-fable-5-2[1m]"), ["--model", "claude-fable-5-2[1m]"]);
 });

@@ -7,6 +7,10 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 preview_urls = false
 
+# Hourly removal of accounts whose passkey ceremony was abandoned (src/cleanup.ts).
+[triggers]
+crons = ["17 * * * *"]
+
 # Copy to ignored wrangler.local.toml; the deployment script supplies the binding.
 # No account, database or zone identifiers belong in this file.
 [assets]

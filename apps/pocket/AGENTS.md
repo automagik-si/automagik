@@ -23,8 +23,9 @@ the same rules apply. The monorepo's own contract is [AGENTS.md](../../AGENTS.md
 3. Commit subjects are conventional, `type(scope): description`; CI rejects others. `feat`, `fix`,
    `refactor` and similar cut a release on merge; `docs`, `ci` and `test` don't
    ([releasing](docs/guides/releasing.md)).
-4. Before a pull request: `cd apps/pocket/android && ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`
-   (the toolchain line in the root [AGENTS.md](../../AGENTS.md)).
+4. Before a pull request, run the GitHub APK build and both flavor gates from the repository root
+   as shown in the root [AGENTS.md](../../AGENTS.md). The capped run holds the shared
+   `.automagik/locks/full-gate.lock`.
 5. Never commit or print the signing key or its password. Never change the app ID, the signing key,
    the `latest.json` format or where phones read it (the `pocket-lane` release) without an RFC
    (the monorepo's [RFC 0011](../../docs/rfcs/0011-monorepo-parts-and-releases.md), "Pocket").
