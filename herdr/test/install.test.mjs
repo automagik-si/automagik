@@ -2906,11 +2906,24 @@ test("--uninstall on macOS removes the real pack from before the login service: 
 });
 
 test("--uninstall on macOS reads every status answer but launchd's own as a pack from before the login service (#939)", (t) => {
+  // Each body answers `service status --json`; the fake command refuses every other call, so the
+  // test sees a fallback that never asked it to uninstall.
+  const label = "dev.herdr.automagik-herdr-revive";
+  const launchd = `"/x/Library/LaunchAgents/${label}.plist"`;
   const answers = [
     ["a refusal", 'printf "%s\\n" "refused" >&2; exit 1'],
+    ["a non-zero exit with an otherwise launchd-shaped answer", `printf '%s\\n' '{"path":${launchd},"label":"${label}","installed":false}'; exit 3`],
     ["an unparseable answer", 'printf "%s\\n" "not json"; exit 0'],
+    ["an empty object", `printf '%s\\n' '{}'; exit 0`],
     ["a status without a label", `printf '%s\\n' '{"path":"/x/.config/systemd/user/automagik-herdr-revive.service","installed":false}'; exit 0`],
-    ["a label without the launchd path", `printf '%s\\n' '{"label":"dev.herdr.automagik-herdr-revive","installed":false}'; exit 0`],
+    ["a launchd path without a label", `printf '%s\\n' '{"path":${launchd},"installed":false}'; exit 0`],
+    ["a label without the launchd path", `printf '%s\\n' '{"label":"${label}","installed":false}'; exit 0`],
+    ["a label and a systemd path", `printf '%s\\n' '{"path":"/x/.config/systemd/user/automagik-herdr-revive.service","label":"${label}","installed":false}'; exit 0`],
+    ["a label and a path that merely contains Library/LaunchAgents", `printf '%s\\n' '{"path":"/x/Library/LaunchAgents.bak/${label}.plist","label":"${label}","installed":false}'; exit 0`],
+    ["a label and a path outside a LaunchAgents folder", `printf '%s\\n' '{"path":"/x/Library/Other/${label}.plist","label":"${label}","installed":false}'; exit 0`],
+    ["a wrong label", `printf '%s\\n' '{"path":${launchd},"label":"dev.herdr.someone-else","installed":false}'; exit 0`],
+    ["a label of the wrong type", `printf '%s\\n' '{"path":${launchd},"label":7,"installed":false}'; exit 0`],
+    ["a path of the wrong type", `printf '%s\\n' '{"path":[${launchd}],"label":"${label}","installed":false}'; exit 0`],
   ];
   for (const [what, body] of answers) {
     const s = scratch(t, { os: "Darwin" });
@@ -2928,6 +2941,48 @@ exit 1
     assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, `${what}: says why`);
     assert.equal(existsSync(s.pack), false, `${what}: the pack leaves`);
     assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], `${what}: the fallback asked launchd`);
+  }
+});
+
+test("--uninstall on macOS reads a truncated launchd status as a pack from before the login service (#939)", (t) => {
+  // The review's shapes: the real launchd-aware `service status --json` answer, cut at 75, 90,
+  // 95 and 99 percent. Each cut still carries the whole label and a LaunchAgents path as text, so
+  // only parsing the answer can say it is not one. The real answer is asked of the installed
+  // command with a short home, so the label is past the 75% cut as it was in the review.
+  const shortHome = mkdtempSync("/tmp/amh-");
+  t.after(() => rmSync(shortHome, { recursive: true, force: true }));
+  for (const pct of [75, 90, 95, 99]) {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0, `${pct}%: install`);
+    const real = spawnSync(s.link, ["revive", "service", "status", "--json"], {
+      env: { ...process.env, HOME: shortHome, PATH: `${s.bin}:${dirname(process.execPath)}:/usr/bin:/bin` },
+      encoding: "utf8",
+    });
+    assert.equal(real.status, 0, `${pct}%: the real command answers: ${real.stdout}${real.stderr}`);
+    const answer = real.stdout.trim();
+    const parsed = JSON.parse(answer);
+    assert.equal(parsed.label, "dev.herdr.automagik-herdr-revive", `${pct}%: a real launchd-aware answer`);
+    assert.match(parsed.path, /^\/tmp\/amh-[^/]+\/Library\/LaunchAgents\/dev\.herdr\.automagik-herdr-revive\.plist$/, `${pct}%: manages a LaunchAgents file`);
+    const cut = answer.slice(0, Math.floor(answer.length * pct / 100));
+    assert.ok(cut.includes('"label"') && cut.includes("dev.herdr.automagik-herdr-revive"), `${pct}%: the label key and value survive the cut`);
+    assert.ok(cut.includes("Library/LaunchAgents"), `${pct}%: the LaunchAgents path survives the cut`);
+    const cliLog = join(s.root, "cli.log");
+    writeFileSync(cliLog, "");
+    exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${cliLog}"
+case "$*" in *"status --json"*) printf '%s' '${cut}'; exit 0 ;; esac
+exit 1
+`);
+    lc.set("gone");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+    assert.equal(u.code, 0, `${pct}%: the cut is not an answer, so the installer falls back: ${u.out}${u.err}`);
+    assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, `${pct}%: says why`);
+    assert.equal(existsSync(s.pack), false, `${pct}%: the pack leaves`);
+    assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], `${pct}%: the fallback asked launchd`);
+    assert.equal(readFileSync(cliLog, "utf8").includes("revive service uninstall"), false, `${pct}%: the command's uninstall was never called`);
   }
 });
 

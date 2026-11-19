@@ -1367,17 +1367,30 @@ revive_launchd_not_loaded() {
 # Whether the installed command can answer the login-service question on this computer. macOS
 # support came after `revive service` itself, so a pack from before it carries the command — and
 # on macOS that command's `service status` exits 0 anyway (it reports the systemd unit as not
-# installed); only `service uninstall` refuses. Exit status therefore proves nothing. Ask for the
-# status as JSON and require what only a launchd-aware command describes: the launchd label and
-# the LaunchAgents path it manages. A pre-PR command's answer names the systemd unit and no
-# label; a refusal, an unparseable answer, a non-zero exit or either signal missing is "pre-PR
-# pack", never "launchd-aware". Read-only, with its own status query. Linux has always answered,
-# so nothing is asked there.
+# installed); only `service uninstall` refuses. Exit status therefore proves nothing. Parse the
+# status answer as JSON and require what only a launchd-aware command emits: `label` exactly the
+# launchd label, and `path` a file structurally under a `Library/LaunchAgents` folder. A pre-PR
+# command's answer names the systemd unit and has no label; a refusal, a non-zero exit, an
+# unparseable or truncated answer, a missing field, a wrong type, a wrong label or a path that
+# merely contains the string is "pre-PR pack", never "launchd-aware". Node is the command's own
+# runtime and the installer already requires it; if it is missing here the probe fails closed to
+# the installer's own launchctl fallback. Read-only, with its own status query. Linux has always
+# answered, so nothing is asked there.
 revive_cli_can_answer() {
   [ "$REVIVE_OS" = Darwin ] || return 0
   revive_answer=$("$LINK" revive service status --json </dev/null 2>/dev/null) || return 1
-  printf '%s\n' "$revive_answer" | grep -q '"label"[[:space:]]*:[[:space:]]*"dev\.herdr\.automagik-herdr-revive"' || return 1
-  printf '%s\n' "$revive_answer" | grep -q 'Library/LaunchAgents' || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  printf '%s\n' "$revive_answer" | node -e '
+const answer = require("node:fs").readFileSync(0, "utf8");
+let status;
+try { status = JSON.parse(answer); } catch { process.exit(1); }
+if (status === null || typeof status !== "object" || Array.isArray(status)) process.exit(1);
+if (status.label !== "dev.herdr.automagik-herdr-revive" || typeof status.path !== "string") process.exit(1);
+const parts = status.path.split("/");
+if (parts.some((part) => part === "..")) process.exit(1);
+const at = parts.findIndex((part, i) => part === "Library" && parts[i + 1] === "LaunchAgents");
+if (at < 0 || at + 2 >= parts.length || parts[at + 2] === "") process.exit(1);
+' || return 1
 }
 # --uninstall: the service goes through the command that wrote it, while the pack and its link
 # are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
