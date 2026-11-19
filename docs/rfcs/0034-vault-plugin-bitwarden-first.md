@@ -2,11 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-19, approved by the owner's delegate) |
+| Status | Approved |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-11-19 |
-| Amended | 2026-11-19: the review's blocking findings — the 300-second freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder |
+| Amended | 2026-11-19: the review's blocking findings — the freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder. Q1-Q12 decided the same day: Q6 from #1668, the other eleven as recommended; the #1668 contract pins `bw` 2026.10.1 and tolerates only its network-failure allowlist |
+
+> Approved by Guga's delegation while the owner is away (19/11); the owner may amend on return.
 
 ## Summary
 
@@ -14,13 +16,14 @@ Propose an optional Vault plugin, `@automagik/vault-dsh`, that makes a password 
 **source** for a Bot's secret instead of another place the value is copied to. A Bot still asks
 `request_secret` by name and uses `$DSH_SECRET_<NAME>`; the value is read from the vault when an
 approved command needs it and is not saved by Automagik. Bitwarden's `bw` is first, read-only,
-and the Bot team keeps every authorization decision. The owner's delegate approved it on 2026-11-19
-and answered every numbered question below as recommended. The issue calls it RFC 0033, but 0033 is
+and the Bot team keeps every authorization decision. The owner's delegate approved it on
+2026-11-19 and answered every numbered question below as recommended; no question is open. The
+issue calls it RFC 0033, but 0033 is
 [Attachments from Pocket](0033-attachments-from-pocket.md), so this is 0034.
 
 The contract is stated as rules with numbers, not as intentions: a read's gate is a `bw sync`
-that just succeeded, and a non-auth sync failure is tolerated only within 300 seconds of the last
-successful sync, while an auth failure always refuses and locks. An approval names one exact
+that just succeeded; only a message from the pinned `bw` version's network allowlist is
+tolerated as `stale`, and every other failure refuses and locks. An approval names one exact
 command, shell and folder, and covers one execution for 10 minutes. A name that two stores define
 is unavailable from both, and `bots-dsh` reads the mapping file even with the plugin off.
 
@@ -72,9 +75,9 @@ plugin, Bitwarden `bw` first, read-only, with `bots-dsh` keeping authorization.
 | A local `bw serve` | (a) `bw serve`: a loopback HTTP API avoids parsing CLI text, but it is a listener that stays up holding a session-key server and must be supervised. (b) The installed `bw` CLI: no listener, one short-lived child per invocation, at the cost of parsing its text. | **(b)**; `bw serve` loses on the no-listener rule below and buys nothing for freshness |
 | Where values live at rest | (a) Nowhere outside the vault: no value cache, and the session key exists only in the plugin's memory. (b) An in-memory value cache with a TTL: fewer reads, wider exposure. (c) The OS keychain for the session key: survives a restart, but turns "unlock" into "already open" and adds a platform store. | **(a)**; no value cache; no keychain in the first cut |
 | Locked vault | (a) Refuse, name the lock, and let the person unlock in Settings, then retry. (b) Ask for the master password in the Bot's chat: the Bot and the chat see it. (c) Use a cached value. | **(a)**; never (b) or (c) |
-| Offline vault | (a) Refuse unless a `bw sync` just succeeded, or a non-auth sync failure is within 300 seconds of the last successful sync; the local cache is never the authority. (b) Read `bw`'s local encrypted cache whenever it is unlocked: it works offline, and it also serves a deleted or rotated item forever. | **(a)**; there is no default-off cache option in the first cut |
-| A revoked session | (a) Trust `bw status`'s `unlocked`: the local vault still decrypts, so the stale rule can serve for up to 300 seconds. (b) Make `bw sync` the gate and treat an auth failure as decisive: refuse and `bw lock` regardless of `lastSync`. | **(b)** |
-| A name in both stores | (a) The typed value wins: the vault's revocation silently stops applying. (b) The vault mapping wins: a hand-edit or a stale mapping can shadow a typed secret. (c) Refuse the name in both directions and serve neither value. | **(c)** |
+| Offline vault | (a) Refuse unless a `bw sync` just succeeded, or the failure is one of the recognized network failures of the pinned `bw` version; the local cache is never the authority. (b) Read `bw`'s local encrypted cache whenever it is unlocked: it works offline, and it also serves a deleted or rotated item forever. | **(a)**; there is no default-off cache option in the first cut |
+| A revoked session | (a) Trust `bw status`'s `unlocked`: the local vault still decrypts, so a recognized network failure can still serve the old value. (b) Make `bw sync` the gate and treat an auth failure as decisive: refuse and `bw lock` regardless of `lastSync`. | **(b)** |
+| A name in both stores | (a) The typed value wins: the vault's revocation silently stops applying. (b) The vault mapping wins: a hand-edit or an outdated mapping can shadow a typed secret. (c) Refuse the name in both directions and serve neither value. | **(c)** |
 | Bot on a machine without the vault | (a) Unavailable, with a reason; the person can install the plugin or map a typed secret explicitly. (b) Fall back to a stored value: that recreates the copy. (c) Queue the read: a command must not run with a value that arrives later. | **(a)**; never (b) or (c) |
 
 ### The shape and the seam
@@ -114,12 +117,13 @@ key must not be.
    grant and writes the audit row. The only grant in the first cut is **allow once for that
    command, in that shell and folder, in that Session, one execution**, expiring 10 minutes
    after the approval (Q3, Q11).
-5. Only then does the adapter read that one field, after the grant, in this order: `bw status`
-   (5 s) is a pre-check that refuses a locked or unauthenticated vault; `bw sync` (10 s) is the
-   gate and must succeed; `bw get` reads the field. A sync that fails authentication is decisive
-   and refuses; a sync that fails for another reason is tolerated only under the 300-second stale
-   rule below. No other field leaves the adapter; where the CLI has no field command it reads the
-   item transiently and selects the mapped field.
+5. Only then does the adapter read that one field, after the grant, in this order: `bw --version`
+   (5 s) gates the pinned 2026.10.1 line; `bw status` (5 s) is a pre-check that refuses a locked
+   or unauthenticated vault; `bw sync` (10 s) is the gate and must succeed; `bw get` reads the
+   field. A sync that fails only with a message in the pinned version's network allowlist is
+   tolerated as `stale`; every other failure refuses and runs `bw lock`. No other field leaves the
+   adapter; where the CLI has no field command it reads the item transiently and selects the
+   mapped field.
 6. The grant check and the digest comparison run in the shell tool's `tools/execute` pre-hook,
    which can await: a match lets the adapter read and caches the value for that tool call only,
    keyed by `callId`; a mismatch cancels the grant and reads nothing. The synchronous shell
@@ -209,12 +213,12 @@ mapped.
   change, one grant for the command, shell and folder the card named. A typed name is unchanged:
   its allow card still adds that Bot to the secret's scope, the value still reaches every shell
   call it makes, and no command is bound.
-- If the vault is locked, the card says so and offers the person the unlock in Settings; if the
-  last sync is already beyond the 300-second bound, the card warns that the next use will refuse.
-  The Bot gets a note and no value, and no grant is issued.
+- If the vault is locked, the card says so and offers the person the unlock in Settings. The Bot
+  gets a note and no value, and no grant is issued.
 - `list_secrets` shows the name, purpose, scope, and one availability word: available, locked or
-  unavailable (a stale connection, a name defined twice and a mapped name with the plugin off all
-  read unavailable). It never shows the provider, item, field, reference or value.
+  unavailable (a name defined twice and a mapped name with the plugin off read unavailable).
+  `stale` is a read result, never an availability word. It never shows the provider, item, field,
+  reference or value.
 - The Bot may read exactly the one value, in the one approved execution. It cannot list, search,
   export, read another field, write, unlock, change scope, or supply a vault reference.
 - The first cut reaches the shell only, through `$DSH_SECRET_<NAME>`. MCP capabilities, the
@@ -227,57 +231,99 @@ mapped.
 `bw get` does not ask the server: it reads the unlocked local vault, which is only as new as the
 last `bw sync`. `bw status` reports `status` (`unlocked`, `locked` or `unauthenticated`) and the
 persisted `lastSync` (ISO-8601), but neither proves the session is still valid: a revoked CLI
-session can keep decrypting the local vault. Status is therefore a fast pre-check; the sync is
-the gate. The rule, in numbers:
+session can keep decrypting the local vault. The version is checked first; status is a fast
+pre-check; the sync is the gate. The rules, in order:
 
-- **Status first, as a pre-check only (5 s).** `bw status` runs with a 5-second timeout. `locked`
-  or `unauthenticated` refuses as locked without a sync. A status that fails, times out or cannot
+- **Version gate first (5 s).** The first child of a read is `bw --version` with a 5-second
+  timeout. The first cut accepts the 2026.10 line at `2026.10.1` or later
+  (`>= 2026.10.1`, `< 2026.11.0`). Any other version refuses before any status or sync with
+  `The installed Bitwarden CLI is not the version this vault plugin supports; nothing was read.
+  Install Bitwarden CLI 2026.10.1 and ask again.`, drops the session key and runs `bw lock`. The
+  version is pinned because the classifier below recognizes that build's messages; a newer `bw`
+  is refused until this RFC names it and its messages, so an upgrade cannot widen what is
+  tolerated in silence. 2026.10.1 was the current stable line when this RFC's contract was
+  written; the 2026.11.0 cut shipped on this RFC's date, and a minimum cannot be a build released
+  the same day, so the first cut pins the 2026.10 line. The commands and flags this RFC uses
+  (`--version`, `status`, `sync`, `get`, `lock`, `config server`) are all present in 2026.10.1.
+- **Status is a pre-check only (5 s).** `bw status` runs with a 5-second timeout. `locked` or
+  `unauthenticated` refuses as locked without a sync. A status that fails, times out or cannot
   be read refuses with `The vault did not answer; nothing was read. Ask again when it is
   available.` `unlocked` proves only that the local vault can be decrypted; it does not prove the
   session.
-- **Sync is the gate (10 s).** `bw sync` then runs with a 10-second timeout. Success means the
-  local vault is current as of now, and the read proceeds to `bw get`; no `lastSync` arithmetic is
-  needed. A read is never served from a cache the plugin kept; it keeps none.
-- **An auth failure is decisive.** A `bw sync` that fails authentication (not logged in, an
-  invalid or expired session key, 401/403, or a decryption/MAC error) means the session is
-  revoked or the account disabled. The read refuses as locked (`The vault is locked or the
-  session is no longer valid. Unlock it in Settings › Vault and ask again; nothing was read.`),
-  drops the session key, runs `bw lock`, and audits `result: locked`. It does this regardless of
-  `lastSync`: a recent `lastSync` is not evidence that the session is live.
-- **A non-auth failure is tolerated only inside 300 seconds.** If `bw sync` fails for another
-  reason (offline, server unreachable, a 5xx, a timeout), the read may proceed only when the
-  `lastSync` from the status pre-check is known and `now - lastSync ≤ 300 s`; the audit row
-  records `result: stale`. Outside that bound, with `lastSync: null`, with an unreadable instant,
-  or with a `lastSync` in the future, the read refuses before any `bw get`:
-  > The vault was last synced <n> minutes ago, over the 5-minute limit. Nothing was read.
-  > Connect this computer to the vault and try again; the next use syncs again.
+- **Sync is the gate (10 s).** `bw sync` runs with `BW_RESPONSE=true` and a 10-second timeout.
+  Success means the local vault is current as of now, and the read proceeds to `bw get`; no
+  `lastSync` arithmetic is needed. A read is never served from a cache the plugin kept; it keeps
+  none. A sync the plugin kills at the timeout prints no message, so it is an unrecognized
+  failure and refuses.
+- **Only a recognized network failure is tolerated as `stale`.** The classifier reads the
+  `Syncing failed: <message>` value from the `BW_RESPONSE` JSON and accepts exactly the network
+  messages of 2026.10.1 below; it then audits `result: stale` and proceeds to `bw get`. The age of
+  `lastSync` does not gate the read: the kind of failure is the criterion, not the clock.
+- **Every other failure refuses and locks.** An auth failure (not logged in, an invalid or
+  expired session key, 401/403, a decryption/MAC error), a 5xx, a TLS or certificate error, a
+  proxy-auth error, a changed or unreadable output format, a version outside the range, any other
+  `Syncing failed:` message, and a plugin kill all refuse before any `bw get` with
+  `The vault is locked or the session is no longer valid. Unlock it in Settings › Vault and ask
+  again; nothing was read.`, drop the session key, run `bw lock`, and audit `result: locked` for
+  a recognized auth failure or `result: refused` for any other. A recent `lastSync` is not
+  evidence that the session is live.
+- **What "offline" means.** Offline is not a separate mode and not a clock: it is exactly a
+  `bw sync` failure whose message is in the network allowlist below. Any other failure is not
+  "offline" and is never tolerated. The allowlist and the version range are not settable in the
+  first cut, and option (b) in the table above (always read the local cache) is not shipped.
 
-  `<n>` is `ceil((now - lastSync) / 60)`, so it is at least 6 when the age is over 300 s. For
-  `lastSync: null`, an unreadable value or a future instant the sentence is `The vault has no
-  readable last sync, so it cannot prove it is fresh. Nothing was read. Sync it in Settings ›
-  Vault and try again.` The Bot gets the sentence and no value; the grant is canceled and
-  consumed, and the card is marked "refused: vault stale".
-- **What "offline" means.** Offline is not a separate mode: it is exactly a non-auth `bw sync`
-  failure with `lastSync` beyond 300 seconds. The bound is not settable in the first cut, and
-  option (b) in the table above (always read the local cache) is not shipped. Q6 confirms the
-  bound.
+**The network allowlist, at 2026.10.1.** The CLI prints `Syncing failed: ` and then node-fetch
+2.7.0's `FetchError` text. The shapes below are the part after `Syncing failed: FetchError: `;
+the classifier accepts only these, anchored at both ends, with the URL and the address or host
+allowed to vary:
+
+- `request to <url> failed, reason: getaddrinfo ENOTFOUND <host>`
+- `request to <url> failed, reason: getaddrinfo EAI_AGAIN <host>`
+- `request to <url> failed, reason: getaddrinfo EAI_FAIL <host>`
+- `request to <url> failed, reason: connect ECONNREFUSED <address>`
+- `request to <url> failed, reason: connect ETIMEDOUT <address>`
+- `request to <url> failed, reason: connect EHOSTUNREACH <address>`
+- `request to <url> failed, reason: connect ENETUNREACH <address>`
+- `request to <url> failed, reason: connect ENETDOWN <address>`
+- `request to <url> failed, reason: connect ECONNRESET <address>`
+- `request to <url> failed, reason: read ETIMEDOUT`
+- `request to <url> failed, reason: read ECONNRESET`
+- `request to <url> failed, reason: write EPIPE`
+- `request to <url> failed, reason: socket hang up`
+- `request to <url> failed, reason: Client network socket disconnected before secure TLS connection was established`
+
+A `FetchError` with any other reason — a certificate, proxy-auth or HTTP-status message, or an
+unparseable body — is not in the allowlist and refuses and locks. The classifier never matches a
+bare `ENOTFOUND` or `timeout` substring, and never treats a non-`FetchError` message or a value
+it cannot parse as network.
+
+**Where the classifier lives and how it is tested.** It is a pure function in
+`apps/vault-dsh/src/bw/classify.js`, called by the adapter between the sync child and the read.
+It takes only the observed version, the child's exit code and the decoded `BW_RESPONSE`
+stdout/stderr, returns `ok`, `stale-network`, `auth` or `unknown`, and performs no I/O and no
+logging. `apps/vault-dsh/test/classify.test.js` forges both classes without a real vault:
+table-driven fixtures of the exact strings above (recorded from `bw` 2026.10.1) plus auth, 5xx,
+TLS, truncated JSON and unknown text, all passed as text. The delivery 3 adapter test also puts a
+fake `bw` on `PATH` that prints a fixture and exits 1, so the refusal, the `bw lock` call and the
+audit row are proven with temp homes and a fake clock. No test needs a vault account, a server or
+a real `bw`.
+
 - **A revoked session between two reads.** Every read syncs, so the first read after a revocation
   gets the auth failure, refuses and locks; no value is served. A revocation that lands after a
   successful sync but before that read's `bw get` cannot be seen by that read: the value was
-  current at sync time, and the next read refuses. The residual window is one read, not the
-  300-second stale bound.
+  current at sync time, and the next read refuses. The residual window is one read, not a clock.
 - **A locked vault is checked first.** `bw status` reports `locked` or `unauthenticated`; the read
   then refuses as locked (`The vault is locked. Unlock it in Settings › Vault and ask again;
-  nothing was read.`) and never syncs with a stale session key.
+  nothing was read.`) and never syncs while the status says the vault is locked or unauthenticated.
 
 **Revocation.** The freshness rule is what makes a revocation visible; it is not a retraction.
 What each revocation means:
 
 | Revoked in the vault | Next use | What it cannot do |
 |---|---|---|
-| Item deleted | With a successful sync, the read finds no item: refuse with `The value for <name> is not in the vault; nothing was read.`, audit `result: revoked`. The person's Secrets row says "item not found". A tolerated stale read can serve the pre-deletion value for up to 300 s. | Delete a value a command already read. |
-| Field renamed or removed | With a successful sync, refuse with `The value for <name> is not available from the vault; nothing was read.` The person's Secrets row names the item and field; the Bot's message never does. A tolerated stale read can serve the old field's value for up to 300 s. | Same. |
-| Value rotated | With a successful sync, the new value is served, and only it; there is no plugin cache holding the old one. A tolerated stale read after a non-auth sync failure can serve the pre-rotation value for up to 300 s, with `result: stale`. | Change a Bot's context, a file the Bot wrote, or a process started before the rotation. |
+| Item deleted | With a successful sync, the read finds no item: refuse with `The value for <name> is not in the vault; nothing was read.`, audit `result: revoked`. The person's Secrets row says "item not found". A tolerated stale read can serve the pre-deletion value until the next successful sync. | Delete a value a command already read. |
+| Field renamed or removed | With a successful sync, refuse with `The value for <name> is not available from the vault; nothing was read.` The person's Secrets row names the item and field; the Bot's message never does. A tolerated stale read can serve the old field's value until the next successful sync. | Same. |
+| Value rotated | With a successful sync, the new value is served, and only it; there is no plugin cache holding the old one. A tolerated stale read after a recognized network failure can serve the pre-rotation value until the next successful sync, with `result: stale`. | Change a Bot's context, a file the Bot wrote, or a process started before the rotation. |
 | Session revoked or the account disabled | The next `bw sync` fails authentication; the read refuses as locked or unauthenticated regardless of `lastSync`, the plugin drops its session key and runs `bw lock`, audit `result: locked`. | Revoke a value already delivered. |
 | Mapping deleted, or the Bot removed from its scope | The name no longer resolves for that Bot, and no card can grant it. | Same. |
 | Plugin turned off or uninstalled | Every vault-backed name is unavailable; `bots-dsh` still reads `vault-sources.json`, so a mapped name never resolves from `secrets.json` (One name, one source). | Same. |
@@ -285,8 +331,8 @@ What each revocation means:
 A Bot that already holds a value — in its context, in a file it wrote, in a process it started —
 keeps it: the plugin's boundary is the read, not the Bot's later copies. The person's remedy is to
 rotate the credential in the vault, revoke the vault session, delete the mapping and, if the Bot
-wrote it to disk, delete the file. The lock timer and the 300-second bound narrow the window; they
-do not close it.
+wrote it to disk, delete the file. The lock timer narrows the window; the network-only allowlist
+keeps a non-network failure from being read as offline; they do not close it.
 
 **Masking life.** A value read from the vault joins the redactor before the approved command
 starts and leaves it when the turn ends or 15 minutes after the read, whichever comes first.
@@ -351,14 +397,14 @@ and never travel over a plain-HTTP page off loopback.
 
 **The session key's exposure.** `bw` takes the session key through `BW_SESSION` or `--session`.
 The plugin passes it only as `BW_SESSION` in the environment of each short-lived `bw` child it
-runs — one child per invocation, so `bw status`, `bw sync` and `bw get` are three children, and
-`bw lock` runs without it — never in argv, never in a temp file, never in DSH's own environment,
-never in the profile or `ctx.credentials`, never in a Bot shell's declared variables. Each child's
-environment exposes the key for that child's run (and until it exits); the plugin starts no
-long-lived process. A same-user process can read a child's environment (`/proc/<pid>/environ`,
-`ps eww`) or its memory while it runs, and a Bot's shell is such a process. The boundary is that
-no file, log, session, diagnostics or audit ever holds the key — not that no same-user process can
-read it while a child runs.
+runs — one child per invocation, so `bw --version`, `bw status`, `bw sync` and `bw get` are four
+children, and `bw lock` runs without it — never in argv, never in a temp file, never in DSH's own
+environment, never in the profile or `ctx.credentials`, never in a Bot shell's declared variables.
+Each child's environment exposes the key for that child's run (and until it exits); the plugin
+starts no long-lived process. A same-user process can read a child's environment
+(`/proc/<pid>/environ`, `ps eww`) or its memory while it runs, and a Bot's shell is such a
+process. The boundary is that no file, log, session, diagnostics or audit ever holds the key —
+not that no same-user process can read it while a child runs.
 
 ### Boundaries
 
@@ -366,10 +412,11 @@ read it while a child runs.
   session key or API token, the master password, the item reference and path, the field, the
   connection label, and raw manager output. An error is reduced to a code before it is shown or
   logged. The audit holds a command digest, never the command text.
-- **Bot-facing refusals carry the secret name only.** A deleted item, a renamed field, a revoked
-  session and a stale vault each answer the Bot with the name it asked for and a generic reason;
-  the item, field, connection and manager output stay in the person's Settings view. A refusal
-  returned to the Bot is part of its session, so it is written to the same boundary as a value.
+- **Bot-facing refusals carry the secret name only.** A deleted item, a renamed field and a
+  revoked session each answer the Bot with the name it asked for and a generic reason; the item,
+  field, connection and manager output stay in the person's Settings view. A tolerated `stale`
+  read is not a refusal: it returns the value and audits `stale`. A refusal returned to the Bot is
+  part of its session, so it is written to the same boundary as a value.
 - **The person must approve:** the mapping (name to provider, item and field, with whose Bots may
   ask), the unlock, each use (allow once, for the named command, shell and folder), turning the
   plugin on, and a new connection. A Bot can never approve any of these.
@@ -400,7 +447,7 @@ read it while a child runs.
 - **Cloud:** service accounts only (`bws`), never a person's master password or personal vault.
   The `bws` access token has no store in the first cut (no keychain); it must live in the Cloud
   profile's secure storage with its own rotation and revocation, so Cloud waits for that. This is
-  question 10.
+  Q10.
 - **ACP routes:** the Bot's DSH shell path is unchanged; a value reaches only that execution, not
   an agent's own built-in shell.
 - A route that cannot be supported in a delivery is named in that delivery and approved by the
@@ -409,14 +456,23 @@ read it while a child runs.
 ## Contracts introduced
 
 - `@automagik/vault-dsh` (`apps/vault-dsh`), an optional market plugin. It adds no package
-  dependency and bundles no manager CLI. The person installs `bw`; the plugin names a minimum
-  version and never updates it.
+  dependency and bundles no manager CLI. The person installs `bw`; the plugin pins the 2026.10
+  line and never updates it.
 - Service `secretSources`, version 1: status, unlock, lock, a read of one field (or the item
   transiently, with only the field leaving), and a person-only item list for the picker. `status`
   resolves to `{state: 'unlocked'|'locked'|'unauthenticated', lastSync?: number}`; a read is
-  `status (5 s pre-check) → sync (10 s gate) → a stale allowance only on a non-auth failure → one
-  field`. Unlock input comes from the host's Settings, never from a model message. A Bot-facing
-  list or read-all is not part of the service.
+  `version (5 s gate) → status (5 s pre-check) → sync (10 s gate) → a stale allowance only on a
+  message in the pinned version's network allowlist → one field`. Unlock input comes from the
+  host's Settings, never from a model message. A Bot-facing list or read-all is not part of the
+  service.
+- **The `bw` version and its network allowlist are a contract.** The first cut accepts
+  `>= 2026.10.1` and `< 2026.11.0`; any other version refuses and locks. Only the 2026.10.1
+  messages listed under "Freshness, offline and revocation" may yield `stale`; every other
+  failure, including an auth failure, an unknown message, a 5xx and a TLS or certificate error,
+  refuses and locks. The classifier is `apps/vault-dsh/src/bw/classify.js`, a pure function over
+  the version, the exit code and the decoded `BW_RESPONSE` output. A new `bw` line is refused
+  until an RFC amendment names it and its messages; it never widens the allowlist by itself. This
+  is the #1668 contract.
 - `<team home>/vault-sources.json`, mode 0600, version 1, keyed by name with one row per name:
   name, provider, connection label, item, field, scope, purpose, requester and timestamps. No
   value, ever. `bots-dsh` owns and reads it, not the plugin, and always reads it, with or without
@@ -453,9 +509,8 @@ read it while a child runs.
   shell and MCP environment: `BW_SESSION`, `BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`,
   `VAULT_TOKEN` and every adapter's unlock variable.
 - `<team home>/vault-audit.jsonl`, mode 0600, bounded and rotated: time, secret name, Bot id,
-  consumer kind, command digest, decision, result. `result` is one of `ok`, `stale`,
-  `stale-refused`, `revoked`, `locked`, `refused`. No value, reference, field, connection, raw
-  command or command text.
+  consumer kind, command digest, decision, result. `result` is one of `ok`, `stale`, `revoked`,
+  `locked`, `refused`. No value, reference, field, connection, raw command or command text.
 - **Masking floor.** A vault field shorter than 4 characters is never used, exactly as a typed
   value below `MIN_VALUE` is held (`secrets.js:22`, `:53`), with `The vault value for <name> is
   shorter than 4 characters, so it cannot be masked; nothing was read.` A 4–7 character value is
@@ -503,11 +558,13 @@ listener.
   scoped accounts and the lock limit it. Revoke the vault session, rotate the credential, and
   delete the mapping. A value already read and approved cannot be taken back.
 - **Stale reads and revocation.** `bw get` serves the local vault, so `bw sync` is the gate: an
-  auth failure refuses and locks at once, and a non-auth failure is tolerated only inside the
-  300-second bound, audited `stale`. A revocation this machine has not synced is not visible: a
-  tolerated stale read can serve the pre-revocation value for up to 300 seconds, which is why the
-  bound is small. A successful sync makes a deleted or rotated item visible; a revoked session
-  fails the sync. A value a Bot already holds is not retractable: rotate the credential.
+  auth failure refuses and locks at once, and only a message in the pinned version's network
+  allowlist is tolerated, audited `stale`; every other failure refuses and locks. A revocation
+  this machine has not synced is not visible: a tolerated stale read can serve the pre-revocation
+  value until the next successful sync. The allowlist is what keeps a non-network failure from
+  being mistaken for offline. A successful sync makes a deleted or rotated item visible; a
+  revoked session fails the sync. A value a Bot already holds is not retractable: rotate the
+  credential.
 - **A name in two stores.** A dual name is refused from both stores, and `bots-dsh` reads the
   mapping file even with the plugin off, so a hand-edited typed secret cannot shadow a vault
   mapping and a mapping cannot silently replace a typed secret. There is no precedence rule to
@@ -556,22 +613,25 @@ Each delivery is on one release lane, per [RFC 0011](0011-monorepo-parts-and-rel
    mappings remain and no value is stored.
 3. **`apps/vault-dsh`, Bitwarden `bw`, read-only by reference** (desktop, 3.N — one lane). Unlock
    in Settings, the idle lock, the item picker, the approval card, and the freshness rule
-   (`bw status` pre-check → `bw sync` gate → one read). Vaultwarden's `bw config server` flow gets
-   its own fake-`bw` case. This is the desktop release from the plugin lists, plus its market
-   listing. *Check:* the acceptance list in #1271, with a fake `bw` on `PATH`, a fake clock and
-   temp homes: the value and the session key are absent from every file and log; the reference,
-   item and field are absent from `secrets.json`, the profile, sessions, diagnostics and the audit
-   (they appear only in `vault-sources.json` and the person's card/Settings view, never in a Bot
-   session or the model transcript); `BW_SESSION` reaches only each `bw` child's environment,
-   never its argv; a `bw sync` that fails authentication with a recent `lastSync` refuses, drops
-   the key and runs `bw lock`, audit `locked`; `lastSync: null` or unreadable refuses with its
-   sentence; a non-auth sync failure inside the bound serves and audits `stale`, and outside it
-   refuses; a tolerated stale read can serve the pre-revocation value for at most 300 s; a
-   deleted item and a missing field each refuse with a message that contains only the secret name
-   and a generic reason, and audit `revoked`; a rotated value serves the new one; another Bot, a
-   group, a denied card and a locked vault each refuse with an audit row; `bw lock` runs after the
-   idle lock; turning the plugin off makes the name unavailable and still refuses a typed
-   fallback. *Rollback:* turn off or remove the plugin; mappings remain and no value is converted.
+   (`bw --version` gate → `bw status` pre-check → `bw sync` gate → one read). Vaultwarden's
+   `bw config server` flow gets its own fake-`bw` case. This is the desktop release from the
+   plugin lists, plus its market listing. *Check:* the acceptance list in #1271, with a fake `bw`
+   on `PATH`, a fake clock and temp homes: the value and the session key are absent from every
+   file and log; the reference, item and field are absent from `secrets.json`, the profile,
+   sessions, diagnostics and the audit (they appear only in `vault-sources.json` and the person's
+   card/Settings view, never in a Bot session or the model transcript); `BW_SESSION` reaches only
+   each `bw` child's environment, never its argv; a `bw sync` that fails authentication with a
+   recent `lastSync` refuses, drops the key and runs `bw lock`, audit `locked`; a `bw --version`
+   outside `2026.10.1`–`< 2026.11.0`, a 5xx, a TLS error, an unknown `Syncing failed:` message, a
+   truncated `BW_RESPONSE` and a plugin timeout each refuse and run `bw lock`; the classifier's
+   forged fixtures prove the allowlisted network messages serve and audit `stale` while every
+   non-listed message refuses; a tolerated stale read can serve the pre-revocation value until
+   the next successful sync; a deleted item and a missing field each refuse with a message that
+   contains only the secret name and a generic reason, and audit `revoked`; a rotated value serves
+   the new one; another Bot, a group, a denied card and a locked vault each refuse with an audit
+   row; `bw lock` runs after the idle lock; turning the plugin off makes the name unavailable and
+   still refuses a typed fallback. *Rollback:* turn off or remove the plugin; mappings remain and
+   no value is converted.
 4. **1Password, then Secrets Manager** (plugin, 3.N.P). Service accounts first, then the desktop
    app integration; `bws` machine accounts second. A `bws` access token is kept in the OS keychain
    where the platform has one, and the adapter is unshipped where it does not. *Check:* fake `op`
@@ -589,92 +649,59 @@ Each delivery is on one release lane, per [RFC 0011](0011-monorepo-parts-and-rel
 
 Vault writes are not a delivery. They need an owner rule and a later RFC.
 
-## Open questions
+## Decided questions
 
-None left. The owner's delegate approved this RFC on 2026-11-19 and answered every question as the
-RFC recommends; Q4 recommends a range, so its default is the range's conservative end. The questions
-stay below as written, as the record, each followed by its answer.
+The twelve questions this RFC asked are decided (2026-11-19): Q6 is the owner's decision on
+#1668, and the other eleven carry the recommended answer the owner's delegate approved. Q4 takes
+the conservative end of its recommended range, 5 minutes. No question is open.
 
-1. **Transport for the first cut.** Wrap the installed `bw` CLI, or speak the Vault Management
-   API? **Recommend the CLI**, because it reaches Bitwarden cloud, self-hosted and Vaultwarden
-   through the person's existing login, and the API is not a stable personal-vault contract. Add
-   `bws` as the least-privilege route in delivery 4. `bw serve` is rejected for the listener.
-   *Answered (2026-11-19):* the installed `bw` CLI; `bws` comes in delivery 4; `bw serve` stays
-   rejected.
-2. **First use: shell or MCP?** **Recommend the shell command first**, because most Bot work runs
+1. **Transport for the first cut.** **Decided: the installed `bw` CLI**; the Management API does
+   not enter now, because the CLI reaches Bitwarden cloud, self-hosted and Vaultwarden through the
+   person's existing login, while the API is not a stable personal-vault contract. `bws` follows
+   as the least-privilege route in delivery 4, and `bw serve` is rejected for the listener.
+2. **First use: shell or MCP?** **Decided: the shell command first**, because most Bot work runs
    there and the grant can name the exact command and shell. The MCP destination route is safer
-   but needs the mount rework in delivery 5. If the owner answers against Q11, this answer
-   changes with it: without a command and shell on the approval, the shell first cut has nothing
-   to bind.
-   *Answered (2026-11-19):* the shell command first; MCP destinations come with delivery 5. Q11 is
-   yes, so the shell grant has its command and shell to bind.
-3. **Default approval: once, session or standing?** The first cut ships **allow once only**, for
-   the named command, shell and folder, 10 minutes, one execution. Should a timed or standing
-   grant be added later? **Recommend not before it has a contract**: a standing grant needs a
-   record (bot, name, command digest, shell and folder, issuedAt, ttl ≤ 24 h), a revoke in
-   Settings, an audit row on issue, use and revoke, and a delivery of its own. Until then, allow
-   once is the only grant.
-   *Answered (2026-11-19):* allow once only: the named command, shell and folder, 10 minutes, one
-   execution. No timed or standing grant before it has the contract described here.
-4. **Idle lock time.** **Recommend 5–15 minutes by default**, person-set, with an 8-hour maximum.
-   A longer lock weakens revocation; a much shorter one makes a Bot fail often.
-   *Answered (2026-11-19):* 5 minutes by default, the conservative end of the recommended range:
-   person-set, at most 8 hours.
-5. **Where the mapping lives.** **Recommend the separate 0600 `vault-sources.json`**, not a
-   `source` field in `secrets.json`. It satisfies #1271's rule that the reference never appears in
-   `secrets.json`, and an older `bots-dsh` cannot drop it into a value store.
-   *Answered (2026-11-19):* the separate 0600 `vault-sources.json`.
-6. **A machine without the vault, and an offline vault.** **Recommend unavailable with a reason**,
-   never a typed fallback and never a queued read. A successful `bw sync` is the gate; a non-auth
-   sync failure is tolerated only within 300 seconds of the last successful sync, and an auth
-   failure always refuses and locks. Confirm the 300-second bound.
-   *Answered (2026-11-19):* unavailable with a reason, never a typed fallback or a queued read. A
-   successful `bw sync` is the gate; a non-auth sync failure is tolerated only within 300 seconds of
-   the last successful sync (the bound is confirmed), and an auth failure always refuses and locks.
-7. **Typed secrets and every shell.** Should typed secrets also reach only the command that names
-   them? **Recommend yes, later and behind a per-team switch first**, because it changes existing
-   teams' behavior and needs its own rollback.
-   *Answered (2026-11-19):* yes, later, behind a per-team switch first. Typed secrets keep today's
-   behavior until then.
-8. **Vault writes.** **Recommend never in this RFC.** Writes need an owner rule, their own audit
-   and a separate RFC.
-   *Answered (2026-11-19):* never in this RFC.
-9. **#384, the machine's `gh` login.** **Recommend keeping it separate.** It is ambient
-   credentials with no item and no vault approval; the same seam can serve it later.
-   *Answered (2026-11-19):* kept separate. #384 was closed with that decision on 2026-11-19.
-10. **Cloud and remote routes.** **Recommend `bws` service accounts only in Cloud**, and approve
-    but never unlock from Pocket or remote. A person's personal vault never opens in Cloud. The
-    `bws` access token has no store in the first cut; it needs the Cloud profile's secure storage
-    with its own rotation and revocation, so **recommend Cloud waits** for that and stays out of
-    the first cut.
-    *Answered (2026-11-19):* Cloud waits and stays out of the first cut. When it comes, only `bws`
-    service accounts, after the Cloud profile's secure storage exists; Pocket and remote routes
-    approve and never unlock.
+   but needs the mount rework in delivery 5. Q11 is yes, so the shell grant has its command and
+   shell to bind.
+3. **Default approval: once, session or standing?** **Decided: allow once only**, for the named
+   command, shell and folder, 10 minutes, one execution. A session or standing grant waits for
+   its own contract: a record, a revoke in Settings, an audit on issue, use and revoke, and a
+   delivery of its own.
+4. **Idle lock time.** **Decided: 5 minutes by default**, the conservative end of the recommended
+   5–15-minute range, person-set, with an 8-hour maximum, because a longer lock weakens revocation
+   and a much shorter one makes a Bot fail often.
+5. **Where the mapping lives.** **Decided: the separate 0600 `vault-sources.json`**, not a
+   `source` field in `secrets.json`, because #1271 requires the reference to stay out of
+   `secrets.json` and an older `bots-dsh` cannot turn it into a stored value.
+6. **A machine without the vault, and an offline vault.** **Decided: unavailable with a reason**,
+   never a typed fallback and never a queued read; a successful `bw sync` is the gate, only a
+   recognized network failure from the pinned `bw` 2026.10 line is tolerated as `stale`, and every
+   other failure refuses and locks (#1668). The network allowlist, the version range and the
+   classifier's tests are in "Freshness, offline and revocation"; the kind of failure decides,
+   not the clock.
+7. **Typed secrets and every shell.** **Decided: yes, later and behind a per-team switch first**,
+   because it changes existing teams' behavior and needs its own rollback.
+8. **Vault writes.** **Decided: never in this RFC**, because writes need an owner rule, their own
+   audit and a separate RFC.
+9. **#384, the machine's `gh` login.** **Decided: keep it separate**, because it is ambient
+   credentials with no item and no vault approval; the same seam can serve it later. #384 was
+   closed with that decision on 2026-11-19.
+10. **Cloud and remote routes.** **Decided: `bws` service accounts only in Cloud**, and approve
+    but never unlock from Pocket or remote; a person's personal vault never opens in Cloud. Cloud
+    waits for the secure storage with its own rotation and revocation and stays out of the first
+    cut.
 11. **May `request_secret` gain `command` and `shell`, and may `secret-allow` issue a vault
-    grant?** **Recommend yes.** `command` and `shell` are the only way the card can name the
-    command and shell the Bot will actually use: two optional strings, both required for a
-    vault-backed name and both ignored for a typed one, no new tool, no rename, no other
-    argument. The vault branch of the existing `secret-allow` is the only path that can issue the
-    one-execution grant, because that handler refuses a name missing from `secrets.json` today
-    (`secrets.js:906-907`); it adds no value and no scope. Without both, the RFC would have to
-    drop "the card names the exact command" and say the person approves only a name, which binds
-    no consumer. The owner is asked because `request_secret` is a Bot-facing tool surface; both
-    changes are additive, so an older host and every typed caller keep working. If the owner
-    declines, delivery 2 and 3 cannot ship a vault grant, and the design returns with no approval
-    path.
-    *Answered (2026-11-19):* yes: the two optional strings on `request_secret` and the vault branch
-    of `secret-allow`.
-12. **More than one vault connection?** **Recommend one in the first cut.** A second account or
-    server needs its own `bw` data directory and session, and the plugin's one-connection refusal
-    is honest until that exists; a later delivery adds per-connection directories and a picker.
-    Answering yes now moves the mapping file and delivery 3's acceptance.
-    *Answered (2026-11-19):* one connection in the first cut.
+    grant?** **Decided: yes.** `command` and `shell` are the only way the card can name the
+    command and shell the Bot will use; both are additive, so an older host and every typed
+    caller keep working, and the `secret-allow` vault branch adds no value and no scope.
+12. **More than one vault connection?** **Decided: one in the first cut**, because a second
+    account or server needs its own `bw` data directory and session; a later delivery adds
+    per-connection directories and a picker.
 
 Three rules are contracts, not questions, because there is no safe alternative to write: a name
 in both stores is unavailable from both (no precedence, no fallback); `bots-dsh` reads
 `vault-sources.json` even with the plugin off (so a mapped name never falls back); and the session
-key is limited by the same-user boundary (there is no "never seen" claim). An owner answer against
-any of them would reopen the boundary, not tune it.
+key is limited by the same-user boundary (there is no "never seen" claim).
 
 Q2 and Q5 restate what the design already fixes. Both were answered as recommended, so delivery 3's
 acceptance and the Contracts above stand as written.
@@ -683,7 +710,7 @@ acceptance and the Contracts above stand as written.
 
 - #1271: the request, current state and acceptance list. The issue calls this RFC 0033; 0033 is
   now [Attachments from Pocket](0033-attachments-from-pocket.md).
-- #384: reuse the machine's `gh` login, kept separate by question 9.
+- #384: reuse the machine's `gh` login, kept separate by Q9.
 - [RFC 0010](0010-desktop-sandbox.md): the sandbox and the deferred secrets broker, which this
   RFC does not replace.
 - [RFC 0011](0011-monorepo-parts-and-releases.md): parts, lanes and the plugin patch.
