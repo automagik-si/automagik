@@ -58,7 +58,8 @@ The pack's layout is its own top-level entry folder, `herdr-layout/` (`layouts/a
 folder holds `layouts/`, and a skip deletes a listing it had (probe-confirmed, t22n and t259). A
 herdr-mod entry folder is any folder holding `mods/<name>/main.js`, as the mod manager reads a
 package. `herdr/scripts/entries.mjs --check` fails when one holds `layouts/`; CI runs it on every
-pull request and the release with the pack's gates. The probe's layout test
+pull request and the release with the pack's gates. It also refuses a mod's own `mods/<name>/layouts/`,
+defensively: the probe did not test that shape, and no mod needs one (#207). The probe's layout test
 settled the shape: herdr.dev lists a layout only from its entry folder's `layouts/<name>.json`
 and ignores a `.json` at the folder's root (e2 went unlisted for want of `layouts/`, not because of
 its root `.json`: 60 listed layout entries hold one), and the entry needs no `mods/` of its own
