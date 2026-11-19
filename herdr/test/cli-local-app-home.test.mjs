@@ -626,6 +626,7 @@ test("#1195 a live labelled pane no ledger proves is adopted and replaced, never
   const adopted = rows.filter((x) => x.event === "attach").at(-1);
   assert.equal(adopted.terminal, liveFor(s, ID.main)[0].address, "the launch home binds the replacement");
   assert.equal(adopted.project, s.project, "under this project");
+  assert.equal(rows.filter((x) => x.event === "attach" && x.terminal === adopted.terminal).length, 1, "bound exactly once");
   assert.ok(rows.some((x) => x.event === "detach" && x.terminal === "t4"), "the stale row is retired, never authority");
   const whois = s.cli(["whois", "--bot", ID.main, "--json"]);
   assert.equal(whois.status, 0, whois.stderr);
@@ -676,6 +677,37 @@ test("#1195 a stale record and two live labels: restart refuses naming both pane
   assert.equal(listed.duplicate, true, "ls reports the duplicate too");
 });
 
+// #1195 MEDIUM: one live pane the selected home binds (its label lost, as `hc label` can drop it)
+// and one live labelled pane no ledger binds. Restart refuses and names both, so the read side
+// must call it duplicate too: `duplicate` covers every two-live-pane split, not only the one
+// where both panes carry the label.
+test("#1195 one live bound pane and one live labelled pane: show and ls say duplicate", (t) => {
+  const s = scene(t);
+  const terminal = startIn(s, s.app);
+  dropLabel(s, terminal);
+  idlePane(s, terminal);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  const bound = state.terminals.find((x) => x.address === terminal);
+  state.terminals.push({ ...bound, address: "t52", name: "labelled", created_ms: bound.created_ms + 1,
+    argv: bound.argv.filter((word) => !word.startsWith("HERDR_APP_HOME=")), labels: { ...bound.labels, bot: ID.main } });
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const before = readFileSync(attachPath(s.app));
+  writeFileSync(s.logPath, "");
+  const r = s.cli(["restart", "Genie", "--json"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.equal(JSON.parse(r.stdout).refused, "app-home");
+  assert.ok(r.stderr.includes(terminal) && r.stderr.includes("t52"), `both panes named: ${r.stderr}`);
+  assert.deepEqual(calls(s).filter((call) => ["run", "kill"].includes(call[0])), [], "nothing launched or ended");
+  assert.deepEqual(readFileSync(attachPath(s.app)), before, "the selected ledger is untouched");
+  const show = s.cli(["show", "Genie", "--json"]);
+  assert.equal(show.status, 0, show.stderr);
+  assert.equal(JSON.parse(show.stdout).duplicate, true, "show covers the unlabelled-bound split");
+  const ls = s.cli(["ls", "--json"]);
+  assert.equal(ls.status, 0, ls.stderr);
+  const listed = JSON.parse(ls.stdout).projects[0].bots.find((b) => b.id === ID.main);
+  assert.equal(listed.duplicate, true, "ls covers the unlabelled-bound split");
+});
+
 // #1195: a genuinely stopped bot is not a twin risk: its record names a dead pane, its label is
 // free, and the restart starts exactly one pane.
 test("#1195 a genuinely stopped bot starts exactly one pane", (t) => {
@@ -693,14 +725,18 @@ test("#1195 a genuinely stopped bot starts exactly one pane", (t) => {
 
 // #1195: when the pane's launch proves a login the adopted home does not select and no carried
 // home can vouch for it on the next restart, the restart refuses rather than move the bot's
-// memory folder silently. Nothing is launched or ended.
-test("#1195 adoption refuses a login it cannot keep across the next restart", (t) => {
-  const { s, terminal } = twoHomes(t);
+// memory folder silently. Nothing is launched or ended, and the refusal leaves no binding in the
+// home it was about to adopt into: a row written before the check would make the next restart
+// read that home's selection instead of the pane's carried login and switch the account in
+// silence (the Reviewer's HIGH).
+test("#1195 adoption refuses a login it cannot keep across the next restart, and leaves no binding", (t) => {
+  const { s, fallback, terminal } = twoHomes(t);
   const state = JSON.parse(readFileSync(s.statePath, "utf8"));
   const pane = state.terminals.find((x) => x.address === terminal);
   pane.argv = pane.argv.filter((word) => !word.startsWith("HERDR_APP_HOME="));
   writeFileSync(s.statePath, JSON.stringify(state));
   rmSync(attachPath(s.app), { force: true });
+  const beforeDefault = fileOrNull(attachPath(fallback));
   writeFileSync(s.logPath, "");
   const r = restartFrom(s, terminal, ["restart", "Genie", "--json"]);
   assert.equal(r.status, 1, r.stdout);
@@ -708,4 +744,19 @@ test("#1195 adoption refuses a login it cannot keep across the next restart", (t
   assert.match(r.stderr, /different Claude login/);
   assert.deepEqual(calls(s).filter((call) => ["run", "kill"].includes(call[0])), [], "nothing launched or ended");
   assert.equal(liveFor(s, ID.main).length, 1, "the live pane is untouched");
+  // A retried restart behaves as if the refusal never happened: the same carried login is read,
+  // the login is refused again, and the other login is never launched. If the refused restart had
+  // left a row, this second one would read the fallback home as an ordinary binding, skip this
+  // check and launch on that home's login instead of the pane's.
+  writeFileSync(s.logPath, "");
+  const again = restartFrom(s, terminal, ["restart", "Genie", "--json"]);
+  assert.deepEqual(runs(s), [], "nothing launched, so nothing switched to another CLAUDE_CONFIG_DIR");
+  assert.equal(again.status, 1, again.stdout);
+  assert.equal(JSON.parse(again.stdout).refused, "login");
+  assert.equal(liveFor(s, ID.main).length, 1, "still exactly one live seat");
+  // The state, not the refusal message: the fallback home binds no row for this pane, so a later
+  // restart cannot mistake a refused adoption for an ordinary held binding.
+  assert.deepEqual(fileOrNull(attachPath(fallback)), beforeDefault, "neither refusal wrote the fallback ledger");
+  assert.equal(attachRowsIn(fallback).filter((row) => row.event === "attach" && row.terminal === terminal).length, 0,
+    "the fallback home binds no row for the refused pane");
 });

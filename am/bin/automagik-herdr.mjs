@@ -6187,7 +6187,14 @@ async function duplicateLabel(project, bot, view) {
   if (!view || bot.planned) return false;
   const held = liveFor(view, bot.id, project);
   const bound = held ? addressOf(held.binding, view.machines) : null;
-  try { return (await labelledPanes(project, bot, bound)).length > 1; } catch { return false; }
+  try {
+    // Every live pane counts, labelled or not (#1195): a live binding whose display label was
+    // dropped (hc label can, and the ledger still proves it) beside a live labelled pane is the
+    // same two-live-pane split restart refuses, so the read side calls it duplicate too.
+    const panes = new Set((await labelledPanes(project, bot, bound)).map((get) => get.address));
+    if (bound) panes.add(bound);
+    return panes.size > 1;
+  } catch { return false; }
 }
 
 /** A project's own app home (RFC 0021 delivery 3): `<project>/.herdr/app-home`. */
@@ -6505,48 +6512,74 @@ async function restartTarget(project, bot, requestedHome, explicitHome, allowImp
       throw new CliError(`${candidate.address} belongs to a different HERDR_APP_HOME than the one selected; nothing was started.`,
         1, { refused: "app-home", terminal: candidate.address });
     }
-    const adopted = await adoptPane(project, bot, candidate, core, launchHome);
-    return { held: { binding: adopted, get: candidate }, dir: launchHome, adopted: true };
+    return adoptedTarget(project, bot, candidate, core, launchHome);
   }
   const own = projectAppHomeOf(project.key);
   const home = !explicitHome && existsSync(attachPath(own)) ? own : requestedHome;
-  const adopted = await adoptPane(project, bot, candidate, core, home);
-  return { held: { binding: adopted, get: candidate }, dir: home, adopted: true };
+  return adoptedTarget(project, bot, candidate, core, home);
 }
 
 /**
- * Writes a live labelled pane no ledger proves into `home`'s ledger, under its lock (#1195), and
- * returns its binding. Another bot's row for that terminal, or another pane that took the bot
- * meanwhile, is refused rather than overwritten: adoption records the truth, it never guesses.
+ * The adoption of a live labelled pane no ledger proves (#1195), decided here and written only
+ * once the replacement has started (commitAdoption). Every refusal — the login check above all,
+ * which runs after this planning step — therefore leaves the ledger untouched: a row written
+ * before that check would make the next restart read it as an ordinary held binding, skip the
+ * check and launch on the adopted home's other login. The row's identity is the pane's own, so a
+ * recheck of the same launch plans the same binding without writing it.
  */
-async function adoptPane(project, bot, pane, core, home) {
+async function adoptedTarget(project, bot, pane, core, home) {
   const path = attachPath(home);
+  const fold = foldAttach(readAttachFile(path) ?? []);
+  const other = [...fold.byKey.values()].find((b) => b.terminal === pane.address && b.created_ms === pane.created_ms && b.bot !== bot.id);
+  if (other) {
+    throw new CliError(`${pane.address} is attached to bot ${other.bot} in ${path}; nothing was started.`,
+      1, { refused: "attachment", terminal: pane.address });
+  }
+  const held = heldIn(fold, bot.id);
+  // A row no live pane confirms is stale, not authority: the live labelled pane is the bot (the
+  // restart's home checks above already refused a second live binding). It is retired at commit,
+  // never used to refuse the adoption.
+  const stale = held && !(held.terminal === pane.address && held.created_ms === pane.created_ms) ? held : null;
+  if (stale && await bindingPane(stale, project.key)) {
+    throw new CliError(`${bot.name} is attached to the live pane ${stale.terminal} in ${path}, not ${pane.address}; nothing was started.`,
+      1, { refused: "app-home", terminal: pane.address });
+  }
+  const binding = attachRow({ event: "attach", bot: bot.id, project: project.key, terminal: pane.address, core,
+    created_ms: pane.created_ms, by: "import" });
+  return { held: { binding, get: pane }, dir: home, adopted: true, adoption: { home, pane, core, binding, stale } };
+}
+
+/**
+ * The rows an adoption writes, under the adopted home's ledger lock, only once the replacement
+ * has stayed up (#1195): the stale row it supersedes is detached, the replacement attached. A
+ * binding another CLI wrote meanwhile is refused (lost), never overwritten, and the terminating
+ * pane keeps the bot as it was.
+ */
+async function commitAdoption(bot, adoption, terminal, created_ms, key) {
+  const path = attachPath(adoption.home);
   try {
     return await withLockAsync(ledgerLock(path), async () => {
       const fold = foldAttach(readAttachFile(path) ?? []);
-      const other = [...fold.byKey.values()].find((b) => b.terminal === pane.address && b.created_ms === pane.created_ms && b.bot !== bot.id);
+      const other = [...fold.byKey.values()].find((b) => b.terminal === adoption.pane.address && b.created_ms === adoption.pane.created_ms && b.bot !== bot.id);
       if (other) {
-        throw new CliError(`${pane.address} is attached to bot ${other.bot} in ${path}; nothing was started.`,
-          1, { refused: "attachment", terminal: pane.address });
+        throw new CliError(`${adoption.pane.address} is attached to bot ${other.bot} in ${path}; nothing was started.`,
+          1, { refused: "attachment", terminal: adoption.pane.address });
       }
-      const held = heldIn(fold, bot.id);
-      if (held && held.terminal === pane.address && held.created_ms === pane.created_ms) return held;
-      if (held) {
-        // A row no live pane confirms is stale, not authority: the live labelled pane is the bot
-        // (the restart's home checks above already refused a second live binding). Retire the
-        // stale row and adopt the pane the label proves.
-        const still = await bindingPane(held, project.key);
-        if (still) {
-          throw new CliError(`${bot.name} is attached to the live pane ${held.terminal} in ${path}, not ${pane.address}; nothing was started.`,
-            1, { refused: "app-home", terminal: pane.address });
-        }
+      const now = heldIn(fold, bot.id);
+      const nowKey = now ? attachKey(now) : null;
+      const staleKey = adoption.stale ? attachKey(adoption.stale) : null;
+      if (now && nowKey !== attachKey(adoption.binding) && nowKey !== staleKey) {
+        if (await bindingPane(now, key)) return { lost: now.terminal };
       }
-      // The attach first: the fold supersedes the stale row with it, so a crash between the two
-      // writes never leaves the bot unbound. The detach row then records why the old one ended.
-      const adoptedRow = attachRow({ event: "attach", bot: bot.id, project: project.key, terminal: pane.address, core,
-        created_ms: pane.created_ms, by: "import" });
-      appendAttach(path, held ? [adoptedRow, closingRow(held, "detach", "import", "moved")] : [adoptedRow]);
-      return adoptedRow;
+      const rows = [];
+      // The replacement first: the fold supersedes the stale row with it, so a crash between the
+      // two writes never leaves the bot unbound. The detach row then records why the old one ended.
+      rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal, core: adoption.core, created_ms, by: "start" }));
+      if (adoption.stale && nowKey === staleKey) {
+        rows.push(closingRow(adoption.stale, "detach", "start", "moved"));
+      }
+      appendAttach(path, rows);
+      return { lost: undefined };
     });
   } catch (e) { throw asCliError(e); }
 }
@@ -6941,7 +6974,9 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     let moved;
     try {
       if (!Number.isSafeInteger(created)) throw new CliError(`hc get gave no created_ms for ${seat.terminal}`);
-      moved = await attachMoved(bot, held.binding, seat.terminal, created, key);
+      moved = target.adopted
+        ? await commitAdoption(bot, target.adoption, seat.terminal, created, key)
+        : await attachMoved(bot, held.binding, seat.terminal, created, key);
     } catch (e) {
       await hcKill(seat.terminal);
       throw new CliError(`${seat.terminal} was ended and ${old.address} still runs ${bot.name}: the attach ledger wasn't written (${e?.message ?? e}).`);
