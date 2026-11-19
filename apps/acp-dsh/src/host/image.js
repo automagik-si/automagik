@@ -147,6 +147,10 @@ export const IMAGE_MODE = 'read-only'
 // Owner policy: keep drawing on adapters that cannot select the narrow profile.
 const ALLOW_IMAGE_READ_ONLY_FALLBACK = true
 const EDIT_NEEDS_ISOLATION = true
+// An edit whose locked one-off run could not be set up: bots-dsh answers with the Bot's own
+// verified copy so the change is made on the file itself. It keys off `reason`; a draw keeps
+// its existing check refusal, because a draw has no file to fall back to.
+const editFallback = (refusal, input) => input === undefined ? refusal : Object.assign(refusal, { reason: 'edit-not-isolated' })
 
 export const IMAGE_PROFILE_DESCRIPTION = 'Draw one image in the scratch folder'
 // Exactly these two rules. No network table, no `extends`, no :minimal, no runtime or skills root.
@@ -843,7 +847,7 @@ async function draw({
     await rm(dir, { recursive: true, force: true }).catch(() => {})
     if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
     try { log?.('the Codex image run was not started: the scratch folder could not be prepared') } catch {}
-    throw imageRefusal(UNAVAILABLE, 'The scratch folder could not be prepared, so the image was not started. Try again.')
+    throw editFallback(imageRefusal(UNAVAILABLE, 'The scratch folder could not be prepared, so the image was not started. Try again.'), input)
   }
   try {
     const check = () => imageSetup(launch, { profile, timeoutMs: checkTimeoutMs, cwd: dir, signal, listServers: async (...args) => { const names = await listServers(...args); listed = true; return names } })
@@ -864,13 +868,13 @@ async function draw({
   } catch (error) {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
     if (signal?.aborted || error?.stopped === true) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
-    if (error?.code === UNAVAILABLE) throw error
-    if (!listed && error?.kind !== 'config') throw imageRefusal(UNAVAILABLE, 'Codex\'s MCP servers could not be listed, so the image was not started (none of them may run while it draws). Try again.')
+    if (error?.code === UNAVAILABLE) throw editFallback(error, input)
+    if (!listed && error?.kind !== 'config') throw editFallback(imageRefusal(UNAVAILABLE, 'Codex\'s MCP servers could not be listed, so the image was not started (none of them may run while it draws). Try again.'), input)
     const kind = CHECK_TEXT[error?.kind] === undefined ? 'unreadable' : error.kind
     try {
       log?.(`the Codex image run was not started (${kind}): ${String(error?.message ?? '').slice(0, 200)}`)
     } catch {}
-    throw imageRefusal(UNAVAILABLE, CHECK_TEXT[kind])
+    throw editFallback(imageRefusal(UNAVAILABLE, CHECK_TEXT[kind]), input)
   }
   if (signal?.aborted) {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
@@ -928,9 +932,9 @@ async function draw({
     } catch (error) {
       if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was finished.')
       if (error === undefined) throw imageRefusal(TIMED_OUT, 'Codex did not start in time. Try again.')
-      if (isAuthRequired(error)) throw signedOut()
-      if (error?.code === UNAVAILABLE) throw error
-      throw imageRefusal(UNAVAILABLE, `Codex did not start: ${String(error?.message ?? error).slice(0, 200)}`)
+      if (isAuthRequired(error)) throw editFallback(signedOut(), input)
+      if (error?.code === UNAVAILABLE) throw editFallback(error, input)
+      throw editFallback(imageRefusal(UNAVAILABLE, `Codex did not start: ${String(error?.message ?? error).slice(0, 200)}`), input)
     }
     if (input && EDIT_NEEDS_ISOLATION && isolated !== true) {
       throw Object.assign(imageRefusal(UNAVAILABLE, 'Codex can edit a picture only inside its locked image run, which could not be set up on this computer, so the picture was not edited.'), { reason: 'edit-not-isolated' })
@@ -971,7 +975,7 @@ async function draw({
     if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was finished.')
     if (foundError !== undefined) throw foundError
     if (ended === undefined) throw imageRefusal(TIMED_OUT, `Codex did not finish the image within ${Math.round(timeoutMs / 1000)} seconds. Try again.`)
-    if (ended.type === 'error' && isAuthRequired(ended)) throw signedOut()
+    if (ended.type === 'error' && isAuthRequired(ended)) throw editFallback(signedOut(), input)
     if (USAGE_TEXT.test(said) || (ended.type === 'error' && USAGE_TEXT.test(String(ended.message ?? '')))) throw usageLimit()
     throw imageRefusal(FAILED, 'Codex ended without drawing an image. Try again.')
   } finally {

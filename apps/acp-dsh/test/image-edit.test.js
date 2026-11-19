@@ -11,7 +11,7 @@ const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-image-agent.mjs')
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
 const input = { data: Buffer.from(PNG, 'base64'), mimeType: 'image/png' }
 const EXTRAS = ['unified_exec', 'code_mode', 'multi_agent', 'multi_agent_v2', 'apps', 'plugins', 'browser_use', 'sleep_tool']
-function setup(t, { mode = 'ok', profile = 'offer' } = {}) {
+function setup(t, { mode = 'ok', profile = 'offer', env = {} } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'acp-edit-test-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
   const profileModes = ensureChatProfiles(home, { platform: 'linux' })
@@ -26,7 +26,7 @@ function setup(t, { mode = 'ok', profile = 'offer' } = {}) {
       return dir
     },
     spawn: () => ({ command: process.execPath, args: [FAKE], profileModes, env: {
-      CODEX_HOME: home, CODEX_PATH: '/fake/codex', FAKE_IMAGE_MODE: mode, FAKE_IMAGE_PROFILE: profile, FAKE_IMAGE_TRACE: traceFile,
+      CODEX_HOME: home, CODEX_PATH: '/fake/codex', FAKE_IMAGE_MODE: mode, FAKE_IMAGE_PROFILE: profile, FAKE_IMAGE_TRACE: traceFile, ...env,
     } }),
     trace: () => existsSync(traceFile) ? readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [],
   }
@@ -117,6 +117,30 @@ test('a missing or refused profile refuses editing before any prompt, and remove
   }
 })
 
+// The issue's rule: a locked run that never starts is the same for an edit as one whose profile
+// was refused; the Bot gets its own copy and edits the file itself (bots-dsh `edit-not-isolated`).
+// A draw keeps its existing check refusal, without that edit reason.
+for (const [name, env] of [
+  ['an unloadable config', { FAKE_MCP_LIST: 'broken' }],
+  ['a feature list this Codex loses', { FAKE_FEATURES: 'fail' }],
+]) test(`an edit whose preflight stops on ${name} carries the own-copy reason, a draw does not`, async t => {
+  const run = setup(t, { env })
+  await assert.rejects(drawImage({ ...run, input, prompt: 'edit' }), error => {
+    assert.equal(error.code, UNAVAILABLE)
+    assert.equal(error.reason, 'edit-not-isolated', error.message)
+    return true
+  })
+  assert.equal(run.trace().some(entry => entry.event === 'prompt'), false)
+  assert.equal(existsSync(run.scratches[0]), false)
+  const draw = setup(t, { env })
+  await assert.rejects(drawImage({ ...draw, prompt: 'draw' }), error => {
+    assert.equal(error.code, UNAVAILABLE)
+    assert.equal(error.reason, undefined)
+    return true
+  })
+  assert.equal(draw.trace().some(entry => entry.event === 'prompt'), false)
+})
+
 test('edits reject a second image or any other tool, including an injected file-read request', async t => {
   for (const mode of ['twice', 'peek', 'late', 'ask']) {
     const run = setup(t, { mode })
@@ -177,6 +201,21 @@ test('the edit service refuses malformed inputs before account probes or any ima
   assert.equal(host.checks(), 1, 'stale account never starts a new check or draw')
   await assert.rejects(service({ signedIn: false }).acp.editImage({ prompt: 'edit',
     image: { base64: PNG, mimeType: 'image/png' } }), error => error.code === SIGNED_OUT)
+})
+
+test('an edit refused at the service sign-in boundary carries the own-copy reason, a draw does not', async () => {
+  const image = { base64: PNG, mimeType: 'image/png' }
+  const host = service({ signedIn: false })
+  await assert.rejects(host.acp.editImage({ prompt: 'edit', image }), error => {
+    assert.equal(error.code, SIGNED_OUT)
+    assert.equal(error.reason, 'edit-not-isolated')
+    return true
+  })
+  await assert.rejects(service({ signedIn: false }).acp.generateImage({ prompt: 'draw' }), error => {
+    assert.equal(error.code, SIGNED_OUT)
+    assert.equal(error.reason, undefined)
+    return true
+  })
 })
 
 test('strict base64 refuses padding, whitespace, URL-safe and noncanonical encodings before any probe', async t => {

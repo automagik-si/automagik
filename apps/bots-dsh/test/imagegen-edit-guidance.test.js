@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { CODEX_RECORD, createImageGen, install as imagegen } from '../src/host/imagegen.js'
 import { install as uploads } from '../src/host/shared-uploads.js'
 
-async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated') {
+async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated', { access = { ready: true }, codex = true, canEdit = true } = {}) {
   const folder = await mkdtemp(join(tmpdir(), 'edit-guidance-'))
   t.after(() => rm(folder, { recursive: true, force: true }))
   const data = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
@@ -21,7 +21,11 @@ async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated'
       credentials: { readRecord: async () => undefined, resolve: async () => undefined },
       attachments: { readImage: async typed => { reads++; assert.equal(typed.name, undefined); return { ref: typed, data } } },
       sandboxPolicy: { resolve: () => ({ mode }) },
-      acpAgents: { imageAccess: async () => ({ ready: true }), editImage: async () => { throw Object.assign(new Error('The image run was refused.'), { reason }) }, generateImage: () => assert.fail('no draw') },
+      acpAgents: codex ? {
+        imageAccess: async () => access,
+        generateImage: () => assert.fail('no draw'),
+        ...(canEdit ? { editImage: async () => { throw Object.assign(new Error('The image run was refused.'), { reason }) } } : {}),
+      } : undefined,
     })[name] } }
   uploads(rt); imagegen(rt)
   const tool = rt.teamTools.find(tool => tool.name === 'generate_image')
@@ -44,6 +48,47 @@ for (const mode of ['workspace-write', 'read-only']) test(`isolated-edit failure
   assert.equal(f.reads(), 1)
   assert.equal(f.rt.images.progress('edit').phase, 'failed')
   assert.doesNotMatch(text + f.tool.description, /OpenAI key/)
+})
+
+// The issue's rule: when the locked run cannot be set up, the Bot is given its own copy to edit
+// the file itself. A Codex whose account check, sign-in or switch enforcement refuses before the
+// run (the #1637 preflight) must not answer with a reason alone.
+for (const [name, access, detail] of [
+  ['unsupported', { ready: false, signedIn: true, reason: 'unsupported', unsupported: true }, /does not take the locked image run/],
+  ['signed out', { ready: false, signedIn: false }, /not signed in/],
+  ['unconfirmed account', { ready: false, signedIn: true, reason: 'account' }, /not confirmed/],
+  ['unloadable config', { ready: false, signedIn: true, reason: 'config' }, /could not load its own configuration/],
+  ['unreadable check', { ready: false, signedIn: true, reason: 'unreadable' }, /could not be checked for safe editing/],
+]) test(`an edit Codex cannot ready (${name}) still gives the Bot its own copy`, async t => {
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { access })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)), text)
+  assert.match(text, /no edited image was made/)
+  assert.match(text, detail)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+  assert.deepEqual(await readFile(path), f.data)
+  assert.equal((await stat(path)).mode & 0o777, 0o444)
+})
+
+test('an edit with no image service at all still gives the Bot its own copy', async t => {
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { codex: false })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)), text)
+  assert.match(text, /no edited image was made/)
+  assert.match(text, /no image service is connected/)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+})
+
+test('an edit an older Codex service cannot take still gives the Bot its own copy', async t => {
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { canEdit: false })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)), text)
+  assert.match(text, /no edited image was made/)
+  assert.match(text, /cannot edit pictures/)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
 })
 
 for (const error of ['os', 'other']) test(`copy ${error} refusal never claims an edit`, async t => {

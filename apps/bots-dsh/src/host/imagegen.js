@@ -46,6 +46,19 @@ const KEEP_MS = 5 * 60_000
 export const IMAGE_ID = /^img-[a-z0-9-]{8,64}$/
 
 const refused = message => Object.assign(new Error(message), { code: 'bot/unavailable' })
+// An edit whose Codex locked run could not be set up. `reason` is the contract bots-dsh's
+// generate_image answers with: it saves the Bot's own read-only copy of the picture and tells
+// the Bot to make the change itself. `detail` names the check that stopped it, never a key.
+const editWithoutLockedRun = (detail, message) => Object.assign(refused(message), { reason: 'edit-not-isolated', detail })
+// Why Codex cannot edit now, in words the Bot can hand the person beside its own copy's path.
+const codexEditDetail = (codex) => {
+  if (codex?.reason === 'account') return 'its account is not confirmed for Automagik'
+  if (codex?.unsupported === true) return 'this Codex version does not take the locked image run'
+  if (codex?.reason === 'config') return 'Codex could not load its own configuration'
+  if (codex?.reason === 'unreadable') return 'Codex could not be checked for safe editing'
+  if (codex?.signedIn === false) return 'Codex is not signed in here'
+  return 'no image service is connected'
+}
 
 /** The ChatGPT account id inside an access token, or undefined. */
 export function accountIdOf(token) {
@@ -234,6 +247,12 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
       // A signed-in Codex that acp-dsh does not let draw (a safety check of its image run did
       // not hold) is not a missing sign-in: say what helps.
       const codex = await codexService()?.imageAccess().catch(() => undefined)
+      // An edit does not need Codex to draw: when its locked run cannot be set up, the Bot is
+      // given its own verified copy and the change is made on the file (the tool's fallback).
+      if (input) {
+        const detail = codexEditDetail(codex)
+        throw editWithoutLockedRun(detail, `Codex could not edit the picture here: ${detail}.`)
+      }
       if (codex?.reason === 'account') throw refused('Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there); then generate_image can draw.')
       if (codex?.unsupported === true) throw refused('Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik; then generate_image can draw.')
       if (codex?.reason === 'config') throw refused('Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file; then generate_image can draw.')
@@ -243,7 +262,7 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     const chatgpt = found.kind === 'chatgpt'
     note(callId, { phase: 'generating', via: found.kind, partials: [], started: now(), error: undefined })
     if (input && chatgpt) {
-      const error = refused('Editing a picture needs Codex signed in. Ask the user to sign in to Codex from a Bot\'s chat.')
+      const error = editWithoutLockedRun('Codex is not signed in here', 'Editing a picture needs Codex signed in. Ask the user to sign in to Codex from a Bot\'s chat.')
       note(callId, { phase: 'failed', error: error.message })
       throw error
     }
@@ -308,7 +327,9 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     text, size, quality, background, callId, signal, input, accountGeneration,
   }) {
     try {
-      if (input && typeof service.editImage !== 'function') throw refused('Editing a picture with Codex needs a newer Automagik. Ask the user to update.')
+      if (input && typeof service.editImage !== 'function') {
+        throw editWithoutLockedRun('this Automagik\'s Codex service cannot edit pictures', 'Editing a picture with Codex needs a newer Automagik. Ask the user to update.')
+      }
       const fields = {
         prompt: text,
         size: SIZES.includes(size) ? size : 'auto',
@@ -410,7 +431,7 @@ export function install(rt) {
           const saved = await rt.sharedUploads?.save(input.ref, { sessionId, name: input.name, data: input.data, signal: exec.signal })
           let readOnly = false
           try { readOnly = ctx.get?.('sandboxPolicy')?.resolve?.({ session: exec.agent?.session })?.mode === 'read-only' } catch {}
-          const first = 'Codex could not edit the picture here: its locked image run could not be set up on this computer, so no edited image was made.'
+          const first = `Codex could not edit the picture here: its locked image run could not be set up on this computer${typeof error?.detail === 'string' ? ` (${error.detail})` : ''}, so no edited image was made.`
           if (saved?.path) {
             const copy = `${first} Your copy of the picture is at ${JSON.stringify(saved.path)} (read-only).`
             return readOnly
