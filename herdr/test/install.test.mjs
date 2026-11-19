@@ -3056,20 +3056,46 @@ test("--uninstall on macOS doesn't block on a command whose status never answers
   const lc = launchctlFake(s);
   assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
   const said = join(s.root, "cli.log");
+  const pidFile = join(s.root, "cli.pid");
   writeFileSync(said, "");
+  // The fake records its own PID and then hangs; `exec sleep` keeps that PID, so after
+  // `--uninstall` returns the test can prove that very process was killed. The 120s only
+  // matters when the kill is broken: the installer's probe kills it at 3s.
   exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
 printf '%s\\n' "$*" >> "${said}"
 case "$*" in
-  "revive service status --json") exec sleep 30 ;;
+  "revive service status --json") printf '%s\\n' "$$" > "${pidFile}"; exec sleep 120 ;;
 esac
 exit 0
 `);
+  const running = (pid) => {
+    try { process.kill(pid, 0); return true; } catch (error) {
+      if (error.code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  let hung = 0;
+  // A broken probe must not leave the hang behind: kill it here, and fail even if the body
+  // somehow passed. The body's own check is what turns a live PID into a failure normally.
+  t.after(() => {
+    if (!Number.isInteger(hung) || hung <= 0 || !running(hung)) return;
+    try { process.kill(hung, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    throw new Error(`the hung command (pid ${hung}) was still alive after --uninstall returned`);
+  });
   lc.set("gone");
   const started = Date.now();
   const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
   const took = Date.now() - started;
+  // Read the PID before any assertion, so the cleanup can always reach a hang that was left.
+  hung = Number(readFileSync(pidFile, "utf8").trim());
   assert.equal(u.code, 0, `the installer must not block on the command: ${u.out}${u.err}`);
-  assert.ok(took < 10_000, `the probe bounded the hung command (took ${took}ms)`);
+  assert.ok(Number.isInteger(hung) && hung > 0, `the hung command wrote its PID (read ${hung})`);
+  // The proof is causal, not temporal: `--uninstall` returned, and the process that was hanging
+  // is gone. The old wall-clock budget measured the whole uninstall (node, shell steps, file
+  // removal) on a loaded runner, which is how #939 went red at 13210ms while the kill worked.
+  assert.throws(() => process.kill(hung, 0), { code: "ESRCH" }, `the probe killed the hung command (pid ${hung})`);
+  // A safety net only, far below the 120s hang: it catches a truly unbounded wait, not load.
+  assert.ok(took < 60_000, `the uninstall didn't wait out the hung command (took ${took}ms)`);
   assert.equal(existsSync(s.pack), false, "the pack leaves after the installer's own probe");
   assert.equal(existsSync(s.link), false, "the link leaves too");
   assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, "it treats no answer as no answer");
