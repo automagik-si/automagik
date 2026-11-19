@@ -251,6 +251,34 @@ test('live runs draw their rows and only a running row offers Stop, once', async
   card.unmount()
 })
 
+test('the range and both date inputs say the same UTC day, including a single-day range', () => {
+  // One proposal at each edge of the range: a western viewer would read the first day as
+  // Feb 28 and an eastern viewer the last as Nov 16, while the inputs say Mar 1 and Nov 15.
+  const firstDay = { ...PROPOSAL, id: 'p3', from: FROM, to: FROM }
+  const lastDay = { ...PROPOSAL, id: 'p4', from: TO, to: TO }
+  const card = mount(BackfillCard, {
+    roster: { omniBackfillProposals: [firstDay, lastDay], omniBackfills: [] },
+    start: async () => {}, cancel: async () => {},
+  })
+  const tree = card.render()
+  const dates = byType(tree, 'input').filter(input => input.props.type === 'date')
+  assert.deepEqual(dates.map(input => input.props.value), ['2026-03-01', '2026-03-01', '2026-11-15', '2026-11-15'])
+  const text = textOf(tree)
+  assert.match(text, /Mar 1, 2026/)
+  assert.match(text, /Nov 15, 2026/)
+  assert.doesNotMatch(text, /Feb 28, 2026|Nov 16, 2026/)
+  card.unmount()
+  // A live run with the same single day says that day once, not the viewer's next one.
+  const run = { id: 'r1', botId: 'm1', from: TO, to: TO, startedAt: 1_795_003_201_000, rows: [] }
+  const runCard = mount(BackfillCard, {
+    roster: { omniBackfillProposals: [], omniBackfills: [run] }, start: async () => {}, cancel: async () => {},
+  })
+  const runText = textOf(runCard.render())
+  assert.match(runText, /Nov 15, 2026/)
+  assert.doesNotMatch(runText, /Nov 16, 2026/)
+  runCard.unmount()
+})
+
 test('a cancel that fails says why, and an empty roster draws nothing', async () => {
   const card = mount(BackfillCard, { roster: {}, start: async () => {}, cancel: async () => {} })
   assert.equal(card.render(), null)

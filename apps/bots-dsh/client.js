@@ -37810,9 +37810,21 @@ function backfillDay(value) {
   const pad2 = (number) => String(number).padStart(2, "0");
   return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`;
 }
+var backfillDayText = (value) => {
+  const day2 = backfillDay(value);
+  if (day2 === "") return "";
+  const date = genuiInstant(`${day2}T00:00:00.000Z`);
+  if (date === void 0) return "";
+  return new Intl.DateTimeFormat(dateLocale(), {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC"
+  }).format(date);
+};
 function backfillRange(from, to) {
-  const start2 = shortDate(from);
-  const end = shortDate(to);
+  const start2 = backfillDayText(from);
+  const end = backfillDayText(to);
   if (start2 !== "" && end !== "") return start2 === end ? start2 : `${start2} – ${end}`;
   if (start2 !== "") return t("From {date}", { date: start2 });
   if (end !== "") return t("Through {date}", { date: end });
@@ -37887,7 +37899,7 @@ function runView(value) {
     id,
     botId: backfillId(value.botId),
     range: backfillRange(value.from, value.to),
-    started: shortDate(value.startedAt),
+    started: backfillDayText(value.startedAt),
     summary: backfillSummaryText(value.summary, rows2),
     total: rows2.length,
     rows: shown,

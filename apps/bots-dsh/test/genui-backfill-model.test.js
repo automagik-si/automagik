@@ -77,6 +77,26 @@ test('one approval: the day a date input carries is the UTC day the host reads',
   assert.equal(backfillRange(null, null), 'All available history')
 })
 
+test('the range names the UTC day the date inputs carry, never the viewer\'s day', () => {
+  // The start is the first millisecond of its UTC day and the end its last: a western
+  // viewer's local label for the start would be the day before, and an eastern viewer's for
+  // the end would be the day after. The proposal's date inputs already use the UTC day
+  // (backfillDay), so the range must use the same one, whatever the viewer's zone.
+  assert.equal(backfillRange(FROM, TO), 'Mar 1, 2026 – Nov 15, 2026')
+  assert.equal(backfillRange(TO, TO), 'Nov 15, 2026')
+  assert.equal(backfillRange('2026-03-01', '2026-03-01'), 'Mar 1, 2026')
+  // The proposal's range text always agrees with its two date-input values.
+  const proposal = proposalView({ id: 'p', from: FROM, to: TO, chats: [] })
+  assert.equal(proposal.from, '2026-03-01')
+  assert.equal(proposal.to, '2026-11-15')
+  assert.equal(proposal.range, 'Mar 1, 2026 – Nov 15, 2026')
+  // A run says the same picked days, and a single-day run says one day once.
+  assert.equal(runView({ id: 'r', from: FROM, to: TO, rows: [] }).range, 'Mar 1, 2026 – Nov 15, 2026')
+  assert.equal(runView({ id: 'r', from: TO, to: TO, rows: [] }).range, 'Nov 15, 2026')
+  // An offset time still names its UTC day, the one backfillDay reads and the input shows.
+  assert.equal(backfillRange('2026-03-01T00:00:00-03:00', '2026-11-15T23:59:59.999+09:00'), 'Mar 1, 2026 – Nov 15, 2026')
+})
+
 test('a run says its range and how its chats move, and only a live job can be stopped', () => {
   const rows = [
     { chatId: 'c1', chat: 'Ana', jobId: 'j1', state: 'fetching', outcome: null, round: 1, counts: { fetched: 50, stored: 40, duplicates: 10, mediaDownloaded: 5, mediaMissing: 1, reactions: 2, edits: 1, deletions: 1, unmatched: 0 } },

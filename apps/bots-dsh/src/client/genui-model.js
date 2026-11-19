@@ -324,10 +324,25 @@ export function backfillDay(value) {
   return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
 }
 
+// The day a backfill card names: the same UTC day `backfillDay` puts in the date input,
+// formatted for the interface. Formatting the instant in the viewer's zone would show the
+// day before at a UTC midnight and the day after at a UTC day's last millisecond, which is
+// exactly the range the person did not pick. The run's started day uses it too, so every
+// day on the card speaks the same UTC calendar; other cards keep `shortDate`'s local day.
+const backfillDayText = (value) => {
+  const day = backfillDay(value)
+  if (day === '') return ''
+  const date = genuiInstant(`${day}T00:00:00.000Z`)
+  if (date === undefined) return ''
+  return new Intl.DateTimeFormat(dateLocale(), {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+  }).format(date)
+}
+
 /** The range a proposal or a run covers: "Mar 1, 2026 – Nov 15, 2026", or the whole history. */
 export function backfillRange(from, to) {
-  const start = shortDate(from)
-  const end = shortDate(to)
+  const start = backfillDayText(from)
+  const end = backfillDayText(to)
   if (start !== '' && end !== '') return start === end ? start : `${start} – ${end}`
   if (start !== '') return t('From {date}', { date: start })
   if (end !== '') return t('Through {date}', { date: end })
@@ -415,7 +430,7 @@ export function runView(value) {
     id,
     botId: backfillId(value.botId),
     range: backfillRange(value.from, value.to),
-    started: shortDate(value.startedAt),
+    started: backfillDayText(value.startedAt),
     summary: backfillSummaryText(value.summary, rows),
     total: rows.length,
     rows: shown,
