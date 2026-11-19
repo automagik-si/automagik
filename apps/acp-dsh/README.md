@@ -46,11 +46,11 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   start, and it detects and cancels because the update arrives after the call began.
   DSH's `read_image` works for Claude Code because acp-dsh declares its models as taking images;
   other ACP agents keep no declaration.
-  `acp-codex` has no such switch, so it is bridged only with an explicit `dshTools: true`, or
-  when the Session's Bot needs DSH's role tools (a Genie's `grant_wish`): then the bridge offers
-  DSH's extras only, never a second copy of the tools Codex already has. Until a structured
-  name is proven in its tool calls, it draws no ACP card for an MCP call. The person's
-  own MCP servers load beside the bridge with their own tools and sign-ins: DSH hands the session
+  `acp-codex` keeps its own tools. A team Bot gets DSH's extras over the bridge by default,
+  with Codex's own tools taking the place of DSH's twins. An explicit `dshTools: true` gives
+  Codex the whole DSH preset. Until a structured name is proven in its tool calls, it draws no
+  ACP card for an MCP call. The person's own MCP servers load beside the bridge with their own
+  tools and sign-ins: DSH hands the session
   only the `dsh` bridge, so any other `mcp__<server>__<tool>` is the CLI's own user-scope config
   (claude-agent-acp merges the person's settings MCP servers into the session), it passes the
   drift allowlist by design, and DSH's Auto review does not gate it: the agent's own rules and
@@ -304,17 +304,14 @@ differs from Claude Code and Codex:
   a model switch reaches them like any agent.
 
 `dshTools` (live, no schema default) is the bridge, its DSH approval, the drift detector and live
-switching above. Absent means the per-agent default: `acp-claude` bridges because its adapter can
-drop its own built-in tools; `acp-codex` does not, because it cannot, unless the Session's Bot
-needs DSH's role tools: the Bot team sends that as `needsDshTools` in the Bot identity, today for
-a Genie, whose `grant_wish` is a DSH tool. Codex is otherwise bridged only with an explicit
-`true`; absent or `false` means no bridge, and Codex keeps its own built-in tools as its only
-tool set. A role-tools bridge offers DSH's extras only, without twins of Codex's own tools, so it
-never runs two tool sets. An explicit `false` is the kill switch for Claude too: the 2026-11-03
-behaviour, where each agent keeps its own tools and its own approvals. The key is public and
-stays writable through
-DSH's settings service or the profile patch, but it is hidden from settings forms (`.hidden()`):
-it is a rollback lever, not a preference. Flipping it either way ends the running agent sessions
+switching above. Absent means the per-agent default. `acp-claude` bridges because its adapter can
+drop its own built-in tools. `acp-codex` keeps its own tools and bridges when the Bot team sends
+`needsDshTools` in the Session's identity. That bridge serves DSH's extras, with Codex's own
+tools taking the place of DSH's twins. An explicit `true` gives Codex the whole DSH preset,
+including on a Genie. An explicit `false` is the kill switch for both agents. It keeps the
+2026-11-03 behaviour, where each agent keeps its own tools and its own approvals. This rollback
+lever stays writable through DSH's settings service or the profile patch. Settings forms hide it
+with `.hidden()`. Flipping it either way ends the running agent sessions
 and revokes their bridges at once; the DSH Session keeps its transcript and the next turn starts
 afresh under the new setting. A flip is also announced on the plugin context as
 `acp-dsh/dsh-tools-changed` with `{ on }`: DSH delivers `loader/volatile-update` only to the
@@ -329,7 +326,7 @@ The transcript replay is independent of the bridge: only an explicit `false` tur
 
 | `dshTools` | Claude Code: tools | Claude Code: replay | Codex: tools | Codex: replay |
 |---|---|---|---|---|
-| absent | DSH bridge, its own off | yes | its own only (a Genie: DSH extras too) | yes |
+| absent | DSH bridge, its own off | yes | its own only, a team Bot: DSH extras too | yes |
 | `true` | DSH bridge | yes | DSH bridge and its own | yes |
 | `false` | its own only | no | its own only | no |
 
@@ -339,16 +336,18 @@ To confirm delivery, check the receiving Bot’s chat. If your team has a native
 (such as `@browse`), you can ask it directly to open a page. In a Bot conversation that offers
 a **Browser** tab, you can also open it from **Details → Browser**.
 
-So with `dshTools` absent Codex sees the chat but not the team's tools; those need an explicit
-`true` (two tool sets). A Genie is the exception: its role tools live in DSH, so its Codex
-Session gets DSH's extras over the bridge with no setting, and without the twins of Codex's own
-tools. A replay reaches an agent in each of these cases, redacted and capped at
+With `dshTools` absent, a team Bot gets DSH's extras, including `message_bot` and the Bot Browser
+tools, in its current own chat and in group Sessions. Task Sessions keep their agent's default.
+A replay reaches an agent in each of these cases, redacted and capped at
 120,000 characters, the oldest messages dropped first with a marker: a move from another
 provider (with its "Switching to X" row); a new agent session in a chat that already has answers
 (after a restart, or a session a crossing or a flip ended), with no row since the chat stayed on
-that agent; and a live session resumed after the chat answered elsewhere (a move off Codex keeps
-its session), which gets only the turns it missed, from its own last answer on, with the row. A
-Bot part's handoff package (a relay marked `handoff`) is carried as the record it is: in the
+that agent; and a live session resumed after the chat answered elsewhere, which gets only the
+turns it missed, from its own last answer on, with the row. A move off Codex keeps its session
+only while that Session has no bridge. Moving to DSH from a bridged Codex Session ends the run
+with a "Switching to DSH" row. The new run on return gets the redacted replay.
+
+A Bot part's handoff package (a relay marked `handoff`) is carried as the record it is: in the
 part's first turn it stays in the prompt beside the person's words, and once the Bot team has
 answered that turn itself, the next new session gets it in the replay. Both pass the redactor.
 With `false`, an agent sees only its own session, and a new one in a chat with answers writes the
@@ -383,7 +382,7 @@ A settings page reads the agents through this host service; the plugin stays hos
 | `generateImage({ prompt, size?, quality?, background?, signal?, timeoutMs? })` | Draws one image with the Codex CLI (`src/host/image.js`) and resolves `{ base64, mimeType: 'image/png' }`. Refusals carry an `acp/image-*` code (`signed-out`, `usage-limit`, `timeout`, `unavailable`, `failed`, `stopped`, `refused`) and a message to show as it is. |
 | `keepImages(keeper)` | Where an image an agent makes in a chat is kept, so the chat can show it (`src/host/agent-image.js`). `keeper` is `{ start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) -> Promise<{ file }>, fail?({ callId, sessionId, error }) }`; one at a time, and the call returns its disposer. The Bot team registers its images folder. |
 | `ownMode(answer)` | Registers one answerer for an unbridged Workspace Session's own mode. Only exact `true` within two seconds counts, twice per prompt. Returns a disposer for that registration; competing registrations disable own mode permanently. |
-| `ownModeOf(provider)` | `{ mode, bridged, answerer }` for a provider offering its own mode, otherwise undefined. |
+| `ownModeOf(provider, sessionId?)` | `{ mode, bridged, answerer }` for a provider offering its own mode, otherwise undefined. Pass the Session id to include its Bot's bridge default. |
 | `ownModeIn(sessionId)` | Whether that Session is busy on a prompt in its own mode. |
 | `holdTurns(gate)` | A veto on agent turns, for a plugin that must keep an agent from acting in a Session (the Bot team: a Session whose permission level could not be set). `gate({ sessionId, agent, provider })` is asked before every model step on an agent's route and again right before a turn's prompt is sent; it answers undefined to let the Session go, or the sentence the step answers with. It can only refuse: a gate that throws, takes longer than ten seconds, or answers anything else holds the Session with a fixed sentence, and a held Session's agent session is ended. Several plugins may register: any refusal wins, and the returned disposer removes only its own gate. With none registered nothing is asked. |
 | `endSession(sessionId, why?)` | Ends one Session's agent session now, a turn under way included: the agent's process is stopped, its bridge credential revoked, and the step answers `why`. The DSH Session and its transcript stay; the next turn starts a fresh agent session, which takes its permission mode again. Answers whether one was live. |

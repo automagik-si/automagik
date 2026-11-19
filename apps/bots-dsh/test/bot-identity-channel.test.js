@@ -26,10 +26,13 @@ function host(t, injected = false) {
   ])
   const owners = new Map([
     ['private', 'ada'], ['group-member', 'ada'], ['task', 'ada'], ['other', 'someone'],
+    ['archived-part', 'ada'],
     ['wish-chat', 'genie'], ['wish-task', 'genie'], ['wish-group', 'genie'],
   ])
   const taskOwners = new Map([['wish-task', { botId: 'genie' }]])
-  install({ ctx, taskOwners, selfOf: id => owners.get(id), botOf: id => bots.get(id) })
+  const botSessions = new Set(['private', 'group-member', 'other', 'wish-chat', 'wish-group'])
+  const isBotSession = id => botSessions.has(id) || taskOwners.has(id)
+  install({ ctx, taskOwners, isBotSession, selfOf: id => owners.get(id), botOf: id => bots.get(id) })
   t.after(() => ctx.dispose())
   return { ctx, bots, read: id => reader?.(id), disposed: () => disposed }
 }
@@ -37,14 +40,21 @@ function host(t, injected = false) {
 test('identity reader returns only the owning Bot identity and a fresh copy', t => {
   const h = host(t, true)
   const identity = { name: 'Ada', role: 'Reviewer', instructions: 'Check files.' }
-  for (const id of ['private', 'group-member', 'task']) assert.deepEqual(h.read(id), identity)
+  const bridged = { ...identity, needsDshTools: true }
+  for (const id of ['private', 'group-member']) assert.deepEqual(h.read(id), bridged)
+  assert.deepEqual(h.read('task'), identity)
   assert.deepEqual(h.read('other'), {
-    name: 'Someone', role: 'Writer', instructions: 'Write notes.',
+    name: 'Someone', role: 'Writer', instructions: 'Write notes.', needsDshTools: true,
   })
   h.read('private').instructions = 'Changed copy.'
-  assert.deepEqual(h.read('private'), identity)
+  assert.deepEqual(h.read('private'), bridged)
   h.bots.get('ada').instructions = 'Read the diff.'
   assert.equal(h.read('private').instructions, 'Read the diff.')
+})
+
+test('an archived part keeps its Bot identity without asking for DSH tools', t => {
+  const h = host(t)
+  assert.deepEqual(h.read('archived-part'), { name: 'Ada', role: 'Reviewer', instructions: 'Check files.' })
 })
 
 test('a Genie says its role tools live in DSH, and a wish task does not (#1639)', t => {
