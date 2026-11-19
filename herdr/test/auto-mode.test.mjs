@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 import {
   AGENTS, AGY_FIXED_DENY, AGY_READ_ALLOW, AGY_SKIP_PERMISSIONS, AUTO_MODE, AUTO_MODE_NONE,
-  AGY_KILL_DENY, agyGuarded, agyModeWarning, agySettingsDir, agySettingsPlan, autoModeArgs, launchRun, mayHcKill,
+  AGY_KILL_DENY, agyGuarded, agyModeWarning, agySettingsDir, agySettingsPlan, autoModeArgs, CLAUDE_PERSON_SETTINGS, launchRun, mayHcKill,
 } from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
 import { workerArgs, workerKillRefusal, workerPlan } from "../mods/am-sidebar/workers.js";
@@ -25,12 +25,15 @@ const ID = "b-aaaaaaaaaa";
 const APP = "/home/u/.config/herdr-app";
 // The flags that answer every approval with yes. Only Antigravity's may be on a launch line, and
 // only beside its deny list (the owner's word, #955).
+// The person-feature settings every Claude launch carries unless its bot keeps them (#1558).
+const PERSON = ["--settings", CLAUDE_PERSON_SETTINGS];
 const SKIP_ALL = ["--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--auto-approve",
   "--approval-mode=yolo", "--force", "--allow-all-tools", "--dangerously-allow-all", "bypassPermissions"];
 // What each kind's launch adds, written out here so a change to the table is a change to this list.
 const EXPECTED = {
   claude: ["--permission-mode", "auto"],
-  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"],
+  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "allow_login_shell=false"],
   antigravity: ["--dangerously-skip-permissions"],
 };
 
@@ -47,7 +50,7 @@ for (const key of Object.keys(AGENTS)) {
     const bot = { id: ID, name: "Genie", agent: key };
     const run = AGENTS[key].run;
     const auto = EXPECTED[key] ?? [];
-    const head = [...run, ...auto];
+    const head = [...run, ...(key === "claude" ? PERSON : []), ...auto];
     // A start (launchSeat and seatOnMachine build their line from launchRun).
     assert.deepEqual(launchRun(key, run, bot), head);
     // A restart, here and on a linked machine: the callers hand restartPlan launchRun's words.
@@ -73,15 +76,15 @@ for (const key of Object.keys(AGENTS)) {
 }
 
 test("a run that already picks its approvals (programs.json) is left as the person wrote it, except Codex's (#1125)", () => {
-  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode", "manual"], {}), ["claude", "--permission-mode", "manual"]);
-  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode=plan"], {}), ["claude", "--permission-mode=plan"]);
+  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode", "manual"], {}), ["claude", "--permission-mode", "manual", ...PERSON]);
+  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode=plan"], {}), ["claude", "--permission-mode=plan", ...PERSON]);
   // Codex's own approval words go and its launch mode comes, codexAuto false or not (codex-mode.test.mjs has the forms).
   assert.deepEqual(launchRun("codex", ["codex", "-a", "never"], {}), ["codex", ...EXPECTED.codex]);
   assert.deepEqual(launchRun("antigravity", ["agy", AGY_SKIP_PERMISSIONS], {}), ["agy", AGY_SKIP_PERMISSIONS]);
   assert.deepEqual(autoModeArgs("codex", { codexAuto: false }, ["codex"]), EXPECTED.codex);
   assert.deepEqual(autoModeArgs("claude", { codexAuto: false }, ["claude"]), ["--permission-mode", "auto"]);
   // A flag after `--` is a prompt word, never the run's own choice.
-  assert.deepEqual(launchRun("claude", ["claude", "--", "--permission-mode"], {}), ["claude", "--", "--permission-mode", "--permission-mode", "auto"]);
+  assert.deepEqual(launchRun("claude", ["claude", "--", "--permission-mode"], {}), ["claude", ...PERSON, "--", "--permission-mode", "--permission-mode", "auto"]);
 });
 
 // ---- Antigravity: skip-permissions only beside the deny list ----

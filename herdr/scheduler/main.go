@@ -181,6 +181,11 @@ func list() error {
 			// No workspace, no agent, no model: the scheduler runs it itself.
 			workspace, agent, model = "-", "command", "-"
 		}
+		if a.Target != "" {
+			// Who the prompt goes to, and which bot supplies the launch: no
+			// workspace opens, and the model is the bot's (or its worker's).
+			workspace, agent, model = "-", a.Target, "its own"
+		}
 		fmt.Printf("%-24s %-16s %-9s %-8s %-13s %s\n",
 			name, a.Cron, workspace, agent, model, last)
 	}
@@ -395,6 +400,13 @@ func putCmd(args []string) error {
 	for k := range sent {
 		given = append(given, k)
 	}
+	// Removing a target removes its busy answer in the same put: target_when_busy
+	// without a target is a load diagnostic, not a key to leave behind (#498).
+	if _, sentTarget := sent["target"]; sentTarget && in.Target == "" {
+		if _, sentBusy := sent["target_when_busy"]; !sentBusy {
+			given = append(given, "target_when_busy")
+		}
+	}
 	a := config.Automation{
 		Name: in.Name, Cron: in.Cron, Repo: in.Repo, Workspace: in.Workspace, WorkspaceID: in.WorkspaceID,
 		Agent: in.Agent, Model: in.Model, Template: in.Template, Prompt: in.Prompt, Workflow: in.Workflow,
@@ -402,6 +414,7 @@ func putCmd(args []string) error {
 		CatchUpMinutes: in.CatchUpMinutes, BlockedGraceMinutes: in.BlockedGraceMinutes,
 		Disabled: in.Disabled, CloseWorkspace: config.CloseWorkspace(in.CloseWorkspace),
 		Command: in.Command, Notify: in.Notify,
+		Target: in.Target, TargetWhenBusy: config.TargetWhenBusy(in.TargetWhenBusy),
 	}
 	// A new automation that names no agent_args starts on the form's automatic
 	// mode (#938): the form always sends the key, so this is a bot or a person
@@ -410,7 +423,7 @@ func putCmd(args []string) error {
 	// form's "Agent default"), and an edit keeps the entry's own args as before.
 	// A template's command and a workflow bring their own, and a command starts
 	// no agent at all: the loader refuses one that names agent_args.
-	if _, sentArgs := sent["agent_args"]; original == "" && !sentArgs && a.Template == "" && a.Workflow == "" && a.Command == nil {
+	if _, sentArgs := sent["agent_args"]; original == "" && !sentArgs && a.Template == "" && a.Workflow == "" && a.Command == nil && a.Target == "" {
 		a.AgentArgs = config.DefaultAgentArgs(a.Agent)
 	}
 	return printJSON(config.Put(original, a, given, dryRun))

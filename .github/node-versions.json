@@ -1,0 +1,15 @@
+{
+  "_why": [
+    "The one place the Node versions the CI and release gates run on are written (#1645).",
+    "`ci` is the matrix the herdr and am jobs run; `release` is the exact version the release cut",
+    "runs and must be one of `ci`. They are one file because a release-only version hid a real",
+    "break: on 24.0-24.13.0 rmSync followed a symlink to a directory and threw, while 24.18",
+    "unlinked it, so the same commit passed every PR check on 22 + latest 24 and failed every",
+    "release on 24.9.0 for hours (#1645, fixed by #1644's tests). A Node minor can change",
+    "filesystem, network or process behaviour, so the release must run a Node a pull request ran.",
+    "scripts/node-versions.test.ts enforces the file, the matrix expression and the release pin",
+    "together; do not add a Node pin to either workflow outside this file."
+  ],
+  "ci": ["22", "24", "24.9.0"],
+  "release": "24.9.0"
+}

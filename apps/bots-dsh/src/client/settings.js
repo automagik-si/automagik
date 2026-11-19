@@ -40,7 +40,7 @@ const capitalize = word => word[0].toUpperCase() + word.slice(1)
 // Models is there only in a window without DSH's own settings, which carry the providers.
 const SETTINGS_PAGES = [
   ['general', 'General'], ['models', 'Models'], ['bots', 'Bots'], ['groups', 'Group chats'],
-  ['connectors', 'Connectors'], ['capabilities', 'Capabilities'], ['browser', 'Browser'],
+  ['connectors', 'Apps'], ['capabilities', 'Capabilities'], ['browser', 'Browser'],
   ['computer', 'Computer use'], ['schedules', 'Scheduled tasks'], ['usage', 'Usage'], ['secrets', 'Secrets'],
   ['agent-access', 'Agent access'], ['privacy', 'Privacy'], ['feedback', 'Feedback'],
   ['about', 'About Automagik'],

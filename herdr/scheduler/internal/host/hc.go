@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DnzzL/herdr-automations/internal/config"
@@ -26,6 +27,7 @@ type hcOps interface {
 	Get(address string) (hc.Terminal, error)
 	Terminals(labels map[string]string) ([]string, error)
 	Read(address string) (string, error)
+	Send(address, text string) error
 	Kill(address string) error
 	Rm(address string) error
 	// MainCheckout is the repo's main working tree, whatever checkout repo is.
@@ -47,6 +49,22 @@ type hcHost struct {
 	// clock measures the blocked grace. nil is time.Now; the tests advance it
 	// instead of sleeping out a real grace.
 	clock func() time.Time
+	// notes belong to runs on different panes, which can finish together.
+	notesMu sync.Mutex
+	notes   map[string]string
+	// roster and amFn are a target run's seams. nil is the project's real
+	// .herdr/bots.json and the pack's real `am`.
+	roster func(path string) ([]byte, error)
+	amFn   func(args, extraEnv []string) (string, error)
+}
+
+// Note returns the run's note and forgets it.
+func (h *hcHost) Note(s Session) string {
+	h.notesMu.Lock()
+	defer h.notesMu.Unlock()
+	note := h.notes[s.PaneID]
+	delete(h.notes, s.PaneID)
+	return note
 }
 
 func (h *hcHost) now() time.Time {
@@ -62,6 +80,9 @@ func (h *hcHost) now() time.Time {
 // in the run's history as soon as it is running. hc takes the prompt with the
 // launch, so there is no separate submit step to keep apart.
 func (h *hcHost) Provision(a config.Automation) (Session, error) {
+	if a.Target != "" {
+		return h.targetProvision(a)
+	}
 	argv, err := hcArgv(a)
 	if err != nil {
 		return Session{}, err
@@ -112,17 +133,54 @@ func (h *hcHost) worktree(a config.Automation) (string, error) {
 	return path, nil
 }
 
-// Do waits for the agent to finish its turn.
+// Do carries out the run: a bot target hands the prompt over (or skips a busy
+// bot), a worker target waits for its turn and ends it, and every other run
+// waits for its agent as before.
 func (h *hcHost) Do(s Session, a config.Automation, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+	if s.Target != "" {
+		return h.targetDo(s, a, timeout)
+	}
+	return h.waitTurn(s, a, timeout)
+}
+
+// waitTurn waits for the agent in s to finish its turn.
+func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration) error {
+	h.Note(s)
 	started := time.Now()
+	deadline := started.Add(timeout)
 	turn, working := 0, false
+	sawWork := func() {
+		if turn > 0 || working {
+			return
+		}
+		working = true
+		elapsed := time.Since(started)
+		if elapsed > h.knobs.paneReady {
+			note := fmt.Sprintf("started late: first seen working %s after the run began", elapsed.Round(time.Second))
+			log.Printf("%s: %s", s.PaneID, note)
+			h.notesMu.Lock()
+			if h.notes == nil {
+				h.notes = make(map[string]string)
+			}
+			h.notes[s.PaneID] = note
+			h.notesMu.Unlock()
+		}
+	}
 	grace := a.BlockedGrace()
 	failFast := !a.WaitsOutBlocked()
 	var blockedSince time.Time
+	var inspected time.Time
+	previousDialog := ""
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			if turn == 0 && !working {
+				if h.agentState(s) == "working" {
+					sawWork()
+				} else {
+					return fmt.Errorf("the agent never started working: no sign of work in %s; open %s to see what it is waiting on", timeout, s.PaneID)
+				}
+			}
 			return fmt.Errorf("the agent was still working after %s", timeout)
 		}
 		w, err := h.ops.Wait(s.PaneID, min(h.knobs.waitSlice, remaining))
@@ -132,13 +190,15 @@ func (h *hcHost) Do(s Session, a config.Automation, timeout time.Duration) error
 			log.Printf("could not wait on %s (%v), recording it as cancelled", s.PaneID, err)
 			return ErrCancelled
 		}
-		turn = max(turn, w.Turn)
 		// Claude counts a turn when it starts, pi when it ends: having been
 		// seen at work is what says the prompt landed. Blocked is not that: a
 		// dialog can come up before the prompt is read (a trust or a permission
 		// mode question), and a run that went from it straight back to idle did
 		// no work at all (#938).
-		working = working || w.Status == "working"
+		if w.Status == "working" || w.Turn > 0 {
+			sawWork()
+		}
+		turn = max(turn, w.Turn)
 		switch {
 		case w.Reason == "exit":
 			return h.exitOutcome(s, turn > 0 || working)
@@ -167,11 +227,29 @@ func (h *hcHost) Do(s Session, a config.Automation, timeout time.Duration) error
 		} else {
 			blockedSince = time.Time{}
 		}
-		// No turn yet after this long: the agent is sitting on something only
-		// a person can answer, like Claude's trust dialog in a folder it has
-		// never seen. It reports no status there at all, not even blocked.
-		if turn == 0 && !working && time.Since(started) > h.knobs.paneReady && !h.reportsWork(s) {
-			return fmt.Errorf("the agent never started working; open %s and look for a dialog (trust prompt?)", s.PaneID)
+		if time.Until(deadline) <= 0 {
+			continue
+		}
+		// Silence alone says nothing about whether the prompt landed. Only a
+		// dialog seen twice can fail the run before its timeout, and a fresh
+		// status after the read can say the agent got past it in between.
+		if turn == 0 && !working && time.Since(started) > h.knobs.paneReady && time.Since(inspected) >= h.knobs.waitSlice {
+			inspected = time.Now()
+			line := ""
+			if screen, err := h.ops.Read(s.PaneID); err == nil {
+				line = dialogLine(screen)
+			} else {
+				log.Printf("could not read the screen of %s: %v", s.PaneID, err)
+			}
+			state := h.agentState(s)
+			if state == "working" {
+				sawWork()
+			} else if time.Until(deadline) <= 0 {
+				continue
+			} else if line != "" && line == previousDialog && state != "blocked" && state != "done" {
+				return fmt.Errorf("the agent never started working: a dialog is waiting on its screen; open %s and answer it: %s", s.PaneID, line)
+			}
+			previousDialog = line
 		}
 		if w.Ended {
 			// blocked, or idle before the prompt landed: wait answers at once
@@ -210,6 +288,11 @@ func (h *hcHost) blockedOutcome(s Session) error {
 // closing the other tabs in between can still leave it last; the scheduler
 // itself asks for no space close in this mode.
 func (h *hcHost) Close(s Session, a config.Automation) error {
+	if s.Target != "" {
+		// A target run opened no workspace to close; a worker target ended its
+		// worker with the run.
+		return nil
+	}
 	if a.Workspace == config.WorkspaceExisting {
 		if s.TabID == "" {
 			log.Printf("%s: done, but its tab stays open: the run has no tab id", a.Name)
@@ -239,14 +322,14 @@ func (h *hcHost) Close(s Session, a config.Automation) error {
 	return nil
 }
 
-// reportsWork asks the terminal itself: a wait that only checked in may not
-// carry the agent's state. done counts: an agent that says so did start.
-func (h *hcHost) reportsWork(s Session) bool {
+// agentState asks the terminal itself: a wait that only checked in may not
+// carry the agent's state. An unreadable state is unknown, not a witness.
+func (h *hcHost) agentState(s Session) string {
 	t, err := h.ops.Get(s.PaneID)
 	if err != nil || t.Status == nil {
-		return false
+		return ""
 	}
-	return t.Status.State == "working" || t.Status.State == "blocked" || t.Status.State == "done"
+	return t.Status.State
 }
 
 // exitOutcome reads how the run's program ended. Closing the run's space in

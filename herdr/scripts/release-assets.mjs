@@ -3,6 +3,8 @@
 // timeout or a network error, the same asset is fetched through the REST API asset route (`gh
 // release download`'s): GET /repos/<repo>/releases/tags/<tag>, then the named asset's `url` as
 // octet-stream. A 4xx means the release or asset really is not there, and is reported at once.
+// Once a public download has failed that way, the rest of the run goes straight to the API route,
+// so a hung public route costs one timeout, not one per asset (#720).
 //
 // The token is ever only an `Authorization: Bearer` header on the API requests: never on the
 // public download, never in a URL and never in a log line. Each `get(name)` logs exactly one line
@@ -43,6 +45,8 @@ const apiHeaders = (token, accept) => ({ Accept: accept, ...(token ? { Authoriza
  * retryable failure. `base` is the public download folder (`.../releases/download/<tag>`), `api`
  * the repository's API root (`https://api.github.com/repos/<owner>/<repo>`) and `tag` the release
  * tag. The API's asset list is read once per fetcher; `log` gets the one route line per asset.
+ * For small files, `get(name, { publicTimeout })` can shorten the public attempt in milliseconds.
+ * Each API request uses `timeout`.
  */
 export function releaseAssets({
   base,
@@ -54,6 +58,9 @@ export function releaseAssets({
   timeout = 120_000,
 } = {}) {
   const release = { value: null };
+  // A public route that failed retryably is not tried again this run (#720): the fallback is
+  // already the route, and each asset would otherwise wait its own full timeout first.
+  let publicDown = false;
 
   async function apiAsset(name) {
     if (!release.value) {
@@ -67,21 +74,27 @@ export function releaseAssets({
   }
 
   return {
-    async get(name) {
-      try {
-        const bytes = await download(fetchImpl, `${base}/${name}`, {}, timeout);
-        log(`${name}: served by the ${PUBLIC_ROUTE}`);
-        return bytes;
-      } catch (publicError) {
-        if (!publicError.retryable) throw publicError;
+    async get(name, { publicTimeout = timeout } = {}) {
+      if (!publicDown) {
         try {
-          const bytes = await apiAsset(name);
-          log(`${name}: served by the ${API_ROUTE}`);
+          const bytes = await download(fetchImpl, `${base}/${name}`, {}, publicTimeout);
+          log(`${name}: served by the ${PUBLIC_ROUTE}`);
           return bytes;
-        } catch (apiError) {
-          throw new Error(`${publicError.message}; the API asset route failed too: ${apiError.message}`);
+        } catch (publicError) {
+          if (!publicError.retryable) throw publicError;
+          publicDown = true;
+          try {
+            const bytes = await apiAsset(name);
+            log(`${name}: served by the ${API_ROUTE}`);
+            return bytes;
+          } catch (apiError) {
+            throw new Error(`${publicError.message}; the API asset route failed too: ${apiError.message}`);
+          }
         }
       }
+      const bytes = await apiAsset(name);
+      log(`${name}: served by the ${API_ROUTE}`);
+      return bytes;
     },
   };
 }

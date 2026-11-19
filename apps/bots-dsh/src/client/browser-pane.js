@@ -367,10 +367,11 @@ function BrowserView({ bot, tabId, leaving, landed, actions, useBrowserPages, ho
     actions.browserTakeover ? h('div', { className: 'bt-browser-takeover', 'data-held': hold?.by === 'user' || undefined },
       h('span', null, hold?.by === 'user' ? t('You control this browser') : hold?.by === 'bot' ? t('The Bot handed this browser to you: {reason}', { reason: hold.reason }) : t('The Bot controls this browser')),
       hold?.by
-        ? h('button', { type: 'button', onClick: () => void actions.browserGiveBack(bot.id) }, t('Give back'))
+        ? h('button', { type: 'button', onClick: () => void actions.browserGiveBack(bot.id, { callId: hold.callId ?? null })
+          .catch(error => actions.reportError?.(error, 'handoff')) }, t('Give back'))
         : h('span', { className: 'bt-browser-takeover-actions' },
-            h('button', { type: 'button', onClick: () => void actions.browserTakeover(bot.id) }, t('Take over')),
-            h('button', { type: 'button', onClick: () => void actions.browserStop(bot.id) }, t('Stop')))) : null,
+            h('button', { type: 'button', onClick: () => void actions.browserTakeover(bot.id).catch(error => actions.reportError?.(error, 'handoff')) }, t('Take over')),
+            h('button', { type: 'button', onClick: () => void actions.browserStop(bot.id).catch(error => actions.reportError?.(error, 'handoff')) }, t('Stop')))) : null,
     h('div', { className: 'bt-browser-bar' },
       h('button', { type: 'button', className: 'bt-icon-btn', 'aria-label': t('Back'), title: t('Back'), disabled: !page.canGoBack, onClick: () => actions.browserCommand(tabId, 'back') }, h(BackIcon)),
       h('button', { type: 'button', className: 'bt-icon-btn', 'aria-label': t('Forward'), title: t('Forward'), disabled: !page.canGoForward, onClick: () => actions.browserCommand(tabId, 'forward') }, h(ForwardIcon)),

@@ -5,7 +5,7 @@
 // Pure: no `herdr`, `gpui-kit`, `gpui-base` or `fs`, so briefing.mjs runs it under plain
 // node and `node --test` runs it too. Apache-2.0.
 
-import { cleanProjectPath, effectiveLead, inferProjectOf, MAX_INSTRUCTIONS, projectEntriesOf } from "./model.js";
+import { cleanProjectPath, effectiveLead, inferProjectOf, MAX_INSTRUCTIONS, projectEntriesOf, restartAtOf } from "./model.js";
 import { BRIEFING_MARK, BRIEFINGS_DIR } from "./models.js";
 import { OLD_PACK_NAME, PACK_NAME } from "./release.js";
 
@@ -13,6 +13,19 @@ import { OLD_PACK_NAME, PACK_NAME } from "./release.js";
 export const WORKER_LINE = "You write no code yourself: for each task start one worker with "
   + "`am worker \"<task>\" --branch <branch>` (it runs in the task's worktree, under your pane), "
   + "check its result, and end it with `am worker kill <terminal>` once the task merges.";
+
+/** How every bot messages (fleet telemetry, 2026-11-18): no acknowledgements, state is read, not asked. */
+export const MESSAGE_LINE = "Messages: send a task, a result or a blocker. Never send or answer an "
+  + "acknowledgement, a \"holding\" or a status-only note. Read another bot's state with `am brief` or "
+  + "`hc get` instead of asking it.";
+
+/** #1556: what a seat with a context threshold does when `am restart --due` asks for its handoff. */
+export const HANDOFF_LINE = "When `am` asks for your handoff, write it to the path its message names "
+  + "(what is in flight, what waits on whom, and your next three actions) and end your turn; you will be "
+  + "restarted from that file.";
+
+/** The handoff line only for a seat that has a context threshold (#1556). */
+const handoffLines = (self) => (restartAtOf(self) === null ? [] : [HANDOFF_LINE]);
 
 // The caller checks git; an omitted flag keeps the existing pure-text default.
 const workerLines = (self, isGit) => (isGit && self.code !== false ? [WORKER_LINE] : []);
@@ -137,7 +150,7 @@ export function briefingText({ self, file, members = [], lead, helpers = [], gua
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) head.push("Instructions:", shown.trim());
-  head.push(...workerLines(self, isGit), ...guardLines(self, guard), liveLine(self.id));
+  head.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE, liveLine(self.id), ...handoffLines(self));
   const tail = [];
 
   if (lead) {
@@ -222,7 +235,7 @@ export function launchBriefingText({ self, file, guard = null, isGit = true, pro
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) lines.push("Instructions:", shown.trim());
-  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), liveLine(self.id), restartLine(self.id));
+  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE, liveLine(self.id), restartLine(self.id), ...handoffLines(self));
   const eff = self.kind === "member" || self.leadProject
     ? effectiveLead(file, self.id, { project, projects })
     : { lead: "", leadProject: null, leadBot: null, warning: null };

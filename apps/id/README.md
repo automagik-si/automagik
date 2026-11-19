@@ -66,6 +66,27 @@ IP loopback URI while preserving its scheme, host, path and query. No origin
 wildcard is configured. Consent is skipped only on the two first-party entries;
 future third-party entries must keep `skipConsent: false`.
 
+## Token lifetimes
+
+These are the contract Desktop and Cloud sessions build on, set as named constants in
+`src/auth.ts`:
+
+| Token | Lifetime | Why |
+| --- | --- | --- |
+| Access token | 15 minutes | Bearer-usable until it expires; a JWT cannot be recalled |
+| ID token | 15 minutes | Proves one sign-in to the client, not a standing credential |
+| Refresh token | 30 days | Keeps Desktop and Cloud signed in through a month of inactivity |
+
+A refresh token is issued only when the authorization asked for `offline_access`.
+It is bound to the client it was issued to, and a confidential client must
+authenticate to use it. Every use rotates it: the response carries a new refresh
+token and the old one fails. There is no reuse grace window. Presenting a rotated
+refresh token again is treated as replay: the provider deletes every refresh token
+that person holds for that client, with the access tokens issued from them, so every
+sign-in of that client must start over. Tokens of other clients survive. Revoking a
+refresh token at `/oauth2/revoke` ends it; another client's revocation request has
+no effect. Each refresh starts a fresh 30-day lifetime for the new token.
+
 The sign-in and consent pages live in `pages/` and follow [PAGES-CONTRACT.md](PAGES-CONTRACT.md):
 `sign-in.html`, `consent.html`, one stylesheet (`id.css`), one script (`id.js`) and
 `assets/` (fonts, wordmark, Genie and Omni face artwork, the app icon and licences).
@@ -75,11 +96,14 @@ main action. When enabled, WhatsApp lets the person send the prefilled message
 from a link or QR code; the page has no phone-number or code-entry fields. Copy
 is English only, in one table in `id.js`.
 
-The Worker serves a page only at `/sign-in` and `/consent`, where it adds
-`referrer-policy`, `cache-control: no-store` and `x-frame-options`. Any direct
-`.html` path answers 404, so a page never arrives without those headers. Other
-files in `pages/` are served as they are. A Worker running without the `PAGES`
-binding answers plain text `501 page not built yet` on both routes.
+The Worker serves a page only at `/sign-in` and `/consent`, with
+`cache-control: no-store`. Any direct `.html` path answers 404, so there is one
+address per page. Every answer the Worker gives, pages, files, API, well-known
+metadata and errors alike, carries the security headers `PAGES-CONTRACT.md`
+lists: a strict Content-Security-Policy, `x-content-type-options: nosniff`,
+`strict-transport-security`, `referrer-policy: no-referrer` and
+`x-frame-options: DENY`. A Worker running without the `PAGES` binding answers
+plain text `501 page not built yet` on both routes.
 
 From this directory:
 
@@ -113,10 +137,18 @@ reuse, select the current session account, restore the session JWT header, disab
 PKCE, relax redirects, enable public registration, move rate limits to memory,
 serve a page file directly as `.html`, take the passkey site name from the host,
 start on (or configure) a host outside it, accept a look-alike host, let CI
-skip the page browser tests, return tokens in the session list, and let the cleanup
-ignore the passkey, age, phone-number or batch-size condition,
-one at a time. Each must fail its targeted test; source files are restored
-afterward. Announcements and results are printed to stdout.
+skip the page browser tests, return tokens in the session list, let the cleanup
+ignore the passkey, age, phone-number or batch-size condition, drop the
+Content-Security-Policy or nosniff, let inline script run, send files and API
+answers without the security headers, let a direct `.html` path through, rebuild
+the headers losing Better Auth's cookies, lengthen a token lifetime and allow
+rotated refresh-token replay, one at a time. Further checks edit the pinned OAuth
+provider's own bundle in `node_modules` (replaced, never rewritten in place, since
+it may be a hard link into the package cache) so a version bump that drops one of
+its refresh checks fails a test: issuing a refresh token without `offline_access`,
+keeping a rotated token alive, accepting an expired one, dropping its client
+binding and ignoring its revocation. Each must fail its targeted test; source
+files are restored afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;
 never replace an already applied migration when upgrading a deployed database.
 

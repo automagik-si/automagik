@@ -1,7 +1,7 @@
 // Revive over plain data (#939): which bots a reboot left without their agent, the order they
 // come back in, the session an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left on
-// disk for a pane, the one report the project's main bot gets, and the login service's unit
-// with the caller's PATH kept (#1418).
+// disk for a pane, the one report the project's main bot gets, and the login service's files
+// with the caller's PATH kept: a systemd user unit, a launchd agent on macOS (#1418).
 // The CLI's `revive` runs it with hc and the files. Pure: no `herdr`, no `node:` import, so
 // `node --test` runs it. Apache-2.0.
 
@@ -367,3 +367,53 @@ export const unitKeepsPath = (text) => typeof text === "string" && /^Environment
 
 /** Two boot times (ms) are one boot: os.uptime() jitters by a second or so. */
 export const sameBoot = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 60_000;
+
+// ---- the login service on macOS (launchd, #939) ----
+
+/** The job's label: launchd's name for it, and the plist's file name under LaunchAgents. */
+export const PLIST_LABEL = "dev.herdr.automagik-herdr-revive";
+/** The plist's path: the person's own launch agents folder, never a system-wide path. */
+export const plistPath = (home) => `${String(home).replace(/\/+$/, "")}/Library/LaunchAgents/${PLIST_LABEL}.plist`;
+/** The XML declaration a plist opens with (a declaration may not follow a comment). */
+export const PLIST_DECL = '<?xml version="1.0" encoding="UTF-8"?>';
+/** The plist's second line, after the declaration: only a file that starts so is replaced or removed. */
+export const PLIST_MARK = "<!-- Automagik Herdr: brings the bots back after a restart of this computer (am revive). -->";
+
+/** Whether `text` (a plist's) is one this pack wrote. */
+export const plistIsOurs = (text) => typeof text === "string" && text.startsWith(`${PLIST_DECL}\n${PLIST_MARK}\n`);
+
+/** Whether the plist keeps the PATH it was installed with (#1418). */
+export const plistKeepsPath = (text) => typeof text === "string" && text.includes("<key>PATH</key>");
+
+/**
+ * Whether a `launchctl print` answer says the job is not loaded: exit 113 (launchd's own
+ * not-found) or the exact "Could not find service" words. Every other failure — usage (64),
+ * EPERM, an I/O error, a timeout — is "can't tell", never "not loaded": a plist removed on such
+ * an answer can leave a label launchd still holds (#939).
+ */
+export const launchdNotLoaded = (r) => r?.code === 113
+  || /^Could not find service\b/m.test(`${r?.stderr ?? ""}\n${r?.stdout ?? ""}`);
+
+/** `w` as XML text: the five characters a plist string may not carry as they are. */
+const xml = (w) => String(w).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+/**
+ * The launchd agent: once per login, `<runner> revive --boot --wait <s>` (the CLI's launcher,
+ * bin/run.sh, which finds Node itself). RunAtLoad and never KeepAlive: it runs once, and the
+ * file is loaded at the next login without starting anything now. `env`: the kept PATH (#1418)
+ * and HERDR_APP_HOME when it isn't the default.
+ */
+export function plistText({ runner, env = {}, wait = SERVICE_WAIT_S }) {
+  const vars = Object.entries(env).filter(([, v]) => typeof v === "string" && v);
+  const args = [runner, "revive", "--boot", "--wait", String(wait)];
+  return [PLIST_DECL, PLIST_MARK, '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0"><dict>',
+    `  <key>Label</key><string>${PLIST_LABEL}</string>`,
+    "  <key>ProgramArguments</key><array>",
+    ...args.map((a) => `    <string>${xml(a)}</string>`),
+    "  </array>",
+    "  <key>RunAtLoad</key><true/>",
+    "  <key>KeepAlive</key><false/>",
+    ...(vars.length ? ["  <key>EnvironmentVariables</key><dict>", ...vars.map(([k, v]) => `    <key>${xml(k)}</key><string>${xml(v)}</string>`), "  </dict>"] : []),
+    "</dict></plist>", ""].join("\n");
+}

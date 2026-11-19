@@ -52,7 +52,7 @@ test('a config refusal only with the profile retries all checks without it and d
   assert.equal(run.logged.length, 1)
   assert.match(run.logged[0], /not isolated \(profile config refused\); falling back to read-only/)
   const trace = run.trace()
-  assert.deepEqual(trace.filter(row => row.event === 'cli').map(row => row.args[0]), ['mcp', 'features', 'debug'])
+  assert.deepEqual(trace.filter(row => row.event === 'cli').map(row => row.args[0]), ['mcp', 'features', 'debug', 'features', 'debug', 'debug'])
   assert.ok(trace.filter(row => ['cli', 'new-session'].includes(row.event)).every(row => row.config === undefined))
   assert.deepEqual(trace.filter(row => row.event === 'mode').map(row => row.modeId), ['read-only'])
   assert.equal(trace.find(row => row.event === 'prompt').modeId, 'read-only')

@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // The briefing: the pure text (briefingText.mjs) for a main bot, a captain and a member, and
 // the launch text a bot's agent starts with; the 10,000-character cap; planned bots skipped; the hook and exclude merges; then
 // briefing.mjs itself under node with a fake `hc` on PATH and a scratch git project, for the
@@ -17,7 +18,7 @@ import { state } from "./use-stubs.mjs";
 import { parseBots } from "../mods/am-sidebar/model.js";
 import {
   briefingText, directMembers, mergeHook, hookCommand, legacyHookCommand, directHookCommand, briefingPath, stableBriefingPath, withExclude, EXCLUDE_LINE, BRIEFING_LIMIT,
-  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE,
+  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE, MESSAGE_LINE,
   amPartEntryPath, amPartHookCommand, amPartRunnerPath, hookTargetOf, installHook, isAmPartEntry, scriptOf, statusWord, PERMISSION_WORD,
 } from "../mods/am-sidebar/briefingText.mjs";
 import { BUDGET_MS, CALL_MS, GUARD_MS, COMPACT_MARK, compactedSince, timeScale, gatherBriefing } from "../mods/am-sidebar/briefing.mjs";
@@ -383,12 +384,15 @@ async function scratch(t) {
   // What the hook printed per terminal is forgotten before each call, so each is a first turn,
   // unless `keep` (the once-only tests below).
   // `feed(child)`, in place of `input`: the test writes stdin itself (in parts, or never closed).
+  const core = startFakeCore(t, { HOME: root, PATH: `${bin}:${NODE_DIR}:/usr/bin:/bin`, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   const brief = async (env, input, { keep = false, feed = null, timeout = 0 } = {}) => {
     const options = {
       env: { PATH: `${bin}:${NODE_DIR}:/usr/bin:/bin`, FAKE_HC: fixture, FAKE_HC_HANG_MS: String(HANG_MS), HOME: root,
         HERDR_BRIEFING_TIME_SCALE: String(SCALE), HERDR_APP_HOME: join(root, "app"), GIT_CEILING_DIRECTORIES: root, ...env },
       timeout,
     };
+    Object.assign(options.env, { ...core.env });
+    core.control(options.env);
     if (!keep) try { rmSync(join(options.env.HERDR_APP_HOME, "automagik-herdr", "briefed"), { recursive: true, force: true }); } catch {}
     if (input === undefined && !feed) return run(RUNTIME, [SCRIPT], options);
     return new Promise((resolve, reject) => {
@@ -1070,6 +1074,7 @@ test("worker instruction: launch and full briefings agree on code and git scope"
       for (const render of [launchBriefingText, briefingText]) {
         const text = render({ self, file, isGit });
         assert.equal(text.includes(WORKER_LINE), expected);
+        assert.ok(text.includes(MESSAGE_LINE));
         if (!expected) assert.doesNotMatch(text, /worker/i);
         assert.match(text, /Keep the board green/);
       }
@@ -1485,4 +1490,17 @@ test("#805 briefing gives the Herdr restart path and explains Claude's /restart 
   assert.match(text, /am restart b-main/);
   assert.match(text, /Update installed · \/restart to apply/);
   assert.match(text, /never works.*--append-system-prompt-file.*--settings/);
+});
+
+test("#1556 a seat with a context threshold is told how to hand off; one with none is not", () => {
+  const { file } = parseBots(JSON.stringify(team()));
+  const main = byId(file, ID.main);
+  const member = byId(file, ID.dev);
+  const everyone = { file };
+  assert.match(launchBriefingText({ self: main, ...everyone }), /When `am` asks for your handoff, write it to the path its message names/);
+  assert.match(briefingText({ self: main, ...everyone }), /When `am` asks for your handoff/);
+  assert.doesNotMatch(launchBriefingText({ self: member, ...everyone }), /asks for your handoff/);
+  // A member with its own threshold is told too.
+  const told = { ...member, restartAt: 1000 };
+  assert.match(launchBriefingText({ self: told, ...everyone }), /asks for your handoff/);
 });

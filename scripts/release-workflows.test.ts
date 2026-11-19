@@ -12,10 +12,73 @@ import { dirname, join } from 'node:path';
 import { pluginNames } from './release-plugins';
 
 const workflow = (name: string) => readFileSync(join(import.meta.dir, '..', '.github', 'workflows', name), 'utf8').split('\n');
+// The cut's lane decision and gates moved into scripts/ (#668), so the cut can re-run them on a
+// moved dev; the shell is still tested as written.
+const script = (name: string) => readFileSync(join(import.meta.dir, name), 'utf8').split('\n');
 
-function bash(script: string, args: string[] = [], env: Record<string, string> = {}) {
-  const run = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`, 'bash', ...args], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...env } });
+function bash(script: string, args: string[] = [], env: Record<string, string> = {}, cwd = process.cwd()) {
+  const run = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`, 'bash', ...args], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...env } });
   return { status: run.status, out: run.stdout, err: run.stderr };
+}
+
+// The `run: |` block of the step named `name`, dedented.
+function runOf(lines: string[], name: string): string {
+  const at = lines.findIndex(line => line.trim() === `- name: ${name}`);
+  if (at < 0) return '';
+  const run = lines.findIndex((line, i) => i > at && line.trim() === 'run: |');
+  if (run < 0) return '';
+  const base = lines[run].length - lines[run].trimStart().length;
+  const body: string[] = [];
+  for (const line of lines.slice(run + 1)) {
+    if (line.trim() !== '' && line.length - line.trimStart().length <= base) break;
+    body.push(line);
+  }
+  const by = Math.min(...body.filter(line => line.trim() !== '').map(line => line.length - line.trimStart().length));
+  return body.map(line => line.slice(by)).join('\n');
+}
+
+// A fake gh: `release view` answers the release's assets (or says it is missing), the publish
+// calls are logged, and every call is recorded.
+function fakeGh(options: { feeds?: string[]; assets?: string[]; missing?: boolean; failView?: string; failDispatch?: boolean } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  mkdirSync(join(dir, 'assets'));
+  writeFileSync(join(dir, 'assets', 'Automagik-9.9.9-mac-arm64.dmg'), 'dmg');
+  writeFileSync(join(dir, 'assets', 'latest-mac.yml'), 'feed');
+  const log = join(dir, 'gh.log');
+  const published = join(dir, 'published');
+  writeFileSync(log, '');
+  writeFileSync(published, (options.assets ?? options.feeds ?? []).map(name => `${name}\n`).join(''));
+  const script = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    `echo "$*" >> "${log}"`,
+    'case "$*" in',
+    '  *"release view v9.9.9"*)',
+    options.missing || options.failView ? `    echo ${JSON.stringify(options.failView ?? 'release not found')} >&2; exit 1` : '    :',
+    '    case "$*" in',
+    `      *"--json assets"*) cat "${published}" ;;`,
+    '    esac',
+    '    ;;',
+    '  *"workflow run desktop-build.yml"*)',
+    options.failDispatch ? '    exit 1' : '    :',
+    '    ;;',
+    '  *"release download v9.9.9"*) : ;;',
+    '  *"release delete-asset v9.9.9"*) : ;;',
+    '  *"release upload v9.9.9"*) : ;;',
+    '  *"release edit v9.9.9"*) : ;;',
+    '  *"release create v9.9.9"*) : ;;',
+    '  *) echo "unexpected gh: $*" >&2; exit 64 ;;',
+    'esac',
+  ].join('\n');
+  writeFileSync(join(bin, 'gh'), script);
+  chmodSync(join(bin, 'gh'), 0o755);
+  return {
+    run: (script: string, env: Record<string, string> = {}) => bash(script, [], { PATH: `${bin}:${process.env.PATH ?? ''}`, GITHUB_REPOSITORY: 'owner/repo', VERSION: '9.9.9', TAG: 'v9.9.9', SHA: '0123456789012345678901234567890123456789', PRERELEASE: 'false', WINDOWS: 'false', ...env }, dir),
+    calls: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 describe('the desktop build adding its files to an existing release', () => {
@@ -32,6 +95,147 @@ describe('the desktop build adding its files to an existing release', () => {
     expect(run.status).toBe(0);
     // The meter's binaries, their sums and signed pointer are the meter jobs' own (release.yml): spared.
     expect(run.out.trim().split('\n')).toEqual(['Automagik-9.9.9-arm64.dmg', 'lane.json.old', 'SHA256SUMS']);
+  });
+});
+
+describe('the desktop publish refusing a second feed', () => {
+  const lines = workflow('desktop-build.yml');
+  const parsed = Bun.YAML.parse(lines.join('\n')) as any;
+  const publish = runOf(lines, 'Add the builds to the release');
+
+  test('reads the release and checks its feed immediately before the upload', () => {
+    expect(publish).toContain('already carries');
+    expect(publish).toContain('replace=true');
+    expect(publish.indexOf('latest(-mac|-linux)')).toBeGreaterThan(-1);
+    expect(publish.indexOf('latest(-mac|-linux)')).toBeLessThan(publish.indexOf('gh release upload'));
+    const step = lines.findIndex(line => line.trim() === '- name: Add the builds to the release');
+    expect(lines.slice(step, step + 8).map(line => line.trim())).toContain('REPLACE: ${{ inputs.replace }}');
+    expect(parsed.jobs.release.concurrency).toEqual({ group: 'desktop-publish-${{ needs.version.outputs.version }}', 'cancel-in-progress': false });
+    expect(parsed.on.workflow_call.inputs.replace.default).toBe(false);
+    expect(parsed.on.workflow_dispatch.inputs.replace.default).toBe(false);
+  });
+
+  test('a release that already carries a feed is refused before any upload', () => {
+    const gh = fakeGh({ assets: ['latest-mac.yml'] });
+    try {
+      const run = gh.run(publish, { REPLACE: 'false' });
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('v9.9.9 already carries latest-mac.yml');
+      expect(run.out).toContain('replace=true');
+      expect(gh.calls().some(call => call.startsWith('release upload'))).toBe(false);
+      expect(gh.calls().some(call => call.startsWith('release create'))).toBe(false);
+    } finally {
+      gh.cleanup();
+    }
+  });
+
+  test('no feed publishes, and a release that does not exist yet is created', () => {
+    const clean = fakeGh({ assets: [] });
+    try {
+      const run = clean.run(publish, { REPLACE: 'false' });
+      expect(run.status).toBe(0);
+      expect(clean.calls()).toContain('release upload v9.9.9 assets/Automagik-9.9.9-mac-arm64.dmg assets/latest-mac.yml --clobber --repo owner/repo');
+    } finally {
+      clean.cleanup();
+    }
+    const missing = fakeGh({ missing: true });
+    try {
+      const run = missing.run(publish, { REPLACE: 'false' });
+      expect(run.status).toBe(0);
+      expect(missing.calls().some(call => call.startsWith('release create v9.9.9'))).toBe(true);
+      expect(missing.calls().some(call => call.startsWith('release upload'))).toBe(false);
+    } finally {
+      missing.cleanup();
+    }
+  });
+
+  test('any other failed read stops the publish: no feed is assumed from an API error', () => {
+    const gh = fakeGh({ failView: 'HTTP 500: server error' });
+    try {
+      const run = gh.run(publish, { REPLACE: 'false' });
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('::error ::could not read v9.9.9: HTTP 500: server error');
+      expect(gh.calls().some(call => call.startsWith('release upload'))).toBe(false);
+    } finally {
+      gh.cleanup();
+    }
+  });
+
+  test('a deliberate replace=true rebuild uploads over the feed', () => {
+    const gh = fakeGh({ assets: ['latest-mac.yml'] });
+    try {
+      const run = gh.run(publish, { REPLACE: 'true' });
+      expect(run.status).toBe(0);
+      expect(gh.calls()).toContain('release upload v9.9.9 assets/Automagik-9.9.9-mac-arm64.dmg assets/latest-mac.yml --clobber --repo owner/repo');
+    } finally {
+      gh.cleanup();
+    }
+  });
+});
+
+describe('the desktop publish retry', () => {
+  const lines = workflow('release.yml');
+  const parsed = Bun.YAML.parse(lines.join('\n')) as any;
+  const retry = runOf(lines, 'Dispatch one rebuild when the release has no feed');
+  const dispatch = 'workflow run desktop-build.yml --repo owner/repo --ref dev -f ref=v9.9.9 -f publish=true -f replace=false -f prerelease=false';
+
+  test('runs only for a failed desktop job on a cut version, after the cut', () => {
+    expect(parsed.jobs['desktop-retry'].needs).toEqual(['cut', 'desktop']);
+    expect(parsed.jobs['desktop-retry'].if).toContain('!cancelled()');
+    expect(parsed.jobs['desktop-retry'].if).toContain("needs.cut.outputs.version != ''");
+    expect(parsed.jobs['desktop-retry'].if).toContain("needs.desktop.result == 'failure'");
+    expect(parsed.jobs['desktop-retry'].permissions).toEqual({ actions: 'write', contents: 'read' });
+  });
+
+  test('no feed: one dispatch for the same tag, with replace=false', () => {
+    const gh = fakeGh({ feeds: [] });
+    try {
+      const run = gh.run(retry);
+      expect(run.status).toBe(0);
+      expect(gh.calls().at(-1)).toBe(dispatch);
+      expect(run.out).toContain('dispatched desktop-build.yml for v9.9.9');
+    } finally {
+      gh.cleanup();
+    }
+  });
+
+  test('a feed already there: no second build', () => {
+    const gh = fakeGh({ feeds: ['latest-linux.yml'] });
+    try {
+      const run = gh.run(retry);
+      expect(run.status).toBe(0);
+      expect(gh.calls().some(call => call.startsWith('workflow run'))).toBe(false);
+      expect(run.out).toContain('already carries a desktop feed');
+    } finally {
+      gh.cleanup();
+    }
+  });
+
+  test('a missing release or a refused dispatch fails the retry, never a silent skip', () => {
+    const missing = fakeGh({ missing: true });
+    try {
+      const run = missing.run(retry);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('::error ::could not read v9.9.9: release not found');
+      expect(missing.calls().some(call => call.startsWith('workflow run'))).toBe(false);
+    } finally {
+      missing.cleanup();
+    }
+    const refused = fakeGh({ feeds: [], failDispatch: true });
+    try {
+      expect(refused.run(retry).status).toBe(1);
+    } finally {
+      refused.cleanup();
+    }
+    const unreadable = fakeGh({ failView: 'HTTP 500: server error' });
+    try {
+      const run = unreadable.run(retry);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('::error ::could not read v9.9.9: HTTP 500: server error');
+      expect(unreadable.calls().some(call => call.startsWith('workflow run'))).toBe(false);
+    } finally {
+      unreadable.cleanup();
+    }
   });
 });
 
@@ -596,24 +800,29 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     expect(lines[at('The meter lane\'s signing key') + 2].trim()).toBe("if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'");
     const key = lines.slice(at('The meter lane\'s signing key'), at('The meter lane\'s signing key') + 6).join('\n');
     expect(key).toContain("METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}");
-    expect(key).toContain('run: bun scripts/meter-lane.ts check-key');
+    expect(key).toContain('run: bash scripts/release-gates.sh meter-key');
+    // The gate script holds the command, so a re-cut on a moved dev runs it again (#1653).
+    expect(script('release-gates.sh').join('\n')).toContain('bun scripts/meter-lane.ts check-key');
     const cut = job('cut').map(line => line.trim());
     expect(cut).toContain('meter: ${{ steps.lane.outputs.meter }}');
     expect(cut).toContain('meter_sign: ${{ steps.meterkey.outputs.sign }}');
   });
 
-  test('the meter is signed with its own key alone, in two places only; the posting job holds no key', () => {
+  test('the meter is signed with its own key alone, in three places only; the posting job holds no key', () => {
     const attach = job('meter-attach').join('\n');
     expect(attach).toContain('METER_LANE_KEY:');
     for (const other of ['PLUGIN_LANE_KEY', 'HERDR_PACK_KEY', 'AM_LANE_KEY']) expect(attach).not.toContain(other);
     expect(job('meter-lane').join('\n')).not.toMatch(/LANE_KEY|PACK_KEY/);
-    // The meter's key reaches no other step: only the key check and the attach step name it.
+    // The meter's key reaches only the key check, the cut step (which re-runs the check on a moved
+    // dev, #1653) and the attach step.
     const named = lines.map((line, i) => [line, i] as const).filter(([line]) => /secrets\.METER_LANE_KEY/.test(line)).map(([, i]) => i);
-    expect(named.length).toBe(2);
+    expect(named.length).toBe(3);
     expect(named[0]).toBeGreaterThan(at('The meter lane\'s signing key'));
     expect(named[0]).toBeLessThan(at('The meter lane\'s signing key') + 5);
-    expect(named[1]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
-    expect(named[1]).toBeLessThan(jobEnds('meter-attach'));
+    expect(named[1]).toBeGreaterThan(at('Version, commit and tag'));
+    expect(named[1]).toBeLessThan(at('Pack am'));
+    expect(named[2]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
+    expect(named[2]).toBeLessThan(jobEnds('meter-attach'));
     // The attach job is gated on the key too, and signs before anything goes up.
     expect(job('meter-attach').map(line => line.trim())).toContain("if: needs.cut.outputs.version != '' && needs.cut.outputs.meter == 'yes' && needs.cut.outputs.meter_sign == 'yes'");
     expect(attach.indexOf('bun scripts/meter-lane.ts verify')).toBeLessThan(attach.indexOf('gh release upload'));
@@ -621,12 +830,15 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
 
   // The Reviewer's L2: the prerelease list is read (never guessed) and passed to meter-since.
   test('meter-since is told which releases are prereleases, and a failure to list them stops the run', () => {
-    const first = lines.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
-    const call = lines.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
+    // The lane decision is release-gates.sh's now, so the cut can re-run it on a new dev (#668).
+    expect(lines.join('\n')).toContain('run: bash scripts/release-gates.sh lane');
+    const gates = script('release-gates.sh');
+    const first = gates.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
+    const call = gates.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
     expect(first).toBeGreaterThan(-1);
     expect(call).toBe(first + 2);
-    expect(lines[first]).toContain('select(.isPrerelease)');
-    const block = lines.slice(first, call + 1).join('\n');
+    expect(gates[first]).toContain('select(.isPrerelease)');
+    const block = gates.slice(first, call + 1).join('\n');
     expect(block).not.toContain('|| true');
     const run = (gh: string) => {
       const dir = mkdtempSync(join(tmpdir(), 'meter-since-'));
@@ -674,8 +886,10 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     // Wherever a herdr patch is told apart, a meter patch is too.
     const herdrOnly = lines.filter(line => /kind != 'herdr'|lane != 'herdr'|LANE != 'herdr'/.test(line));
     for (const line of herdrOnly) expect(line).toMatch(/!= 'meter'/);
-    // And it is a patch: 3.N.P on the newest 3.N.
-    expect(text).toContain('|| "${KIND}" == "meter" ]]; then version=$(bun scripts/lane.ts next-patch)');
+    // And it is a patch: 3.N.P on the newest 3.N (release-cut.sh, where the cut decides).
+    const cut = script('release-cut.sh').join('\n');
+    expect(cut).toContain('" plugins " | " herdr " | " pocket " | " am " | " meter ") bun scripts/lane.ts next-patch');
+    expect(cut).toContain('*) bun scripts/version.ts next');
   });
 
   // The dry run: the attach step as written, with the four binaries the matrix uploads, part.json and

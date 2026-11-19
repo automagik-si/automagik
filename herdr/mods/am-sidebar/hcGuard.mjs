@@ -40,7 +40,8 @@ import { readApprovedRecord } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
 import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
 import { agentKeyOfArgv, resolveAgent } from "./models.js";
-import { ENV, KILL_GUARD_NAME, WORKER_OF_LABEL, isKillGuardWord } from "./workers.js";
+import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL,
+  WORKER_OF_LABEL, isKillGuardWord } from "./workers.js";
 
 /** The commands a sandboxed bot may call unchanged. */
 export const ALLOWED_VERBS = new Set([
@@ -48,9 +49,10 @@ export const ALLOWED_VERBS = new Set([
 ]);
 /** Doc-only forms that touch no core (and `hc send --help` and friends for an allowed command). */
 const DOC_ONLY = new Set(["--help", "-h", "--version", "--skill"]);
-/** The `operation` of `hc run`: the one worker start the pack emits. */
+/** The `operation` of `hc run`: the one worker start the pack emits, for any agent it launches. */
 const WORKER_LABELS = new Set([
   WORKER_OF_LABEL, "task", "task.project", "task.lead", "branch", "worker.role", "herdr.space",
+  SESSION_LABEL, WORKER_MODEL_LABEL, WORKER_EFFORT_LABEL, WORKER_AGY_MODE_LABEL,
 ]);
 /** The shared verdict ranks: targets with one of these bots.json ranks are reachable. */
 export const SHARED_ROLES = ["tester", "reviewer", "fixer"].filter((role) => RANKS.includes(role));
@@ -798,10 +800,26 @@ function runProblem(args, env, terminal) {
   if (!underWorktrees(cwd, caller.project)) return "--cwd is not under the caller's project .claude/worktrees/";
   const rest = args.slice(i);
   if (rest[0] !== ENV) return `the program is not ${ENV}`;
-  if (!rest[1] || !rest[1].startsWith("PATH=")) return "no PATH word after the program";
-  const first = rest[1].slice("PATH=".length).split(delimiter)[0];
+  // `/usr/bin/env` words: a login option first (Claude's default login unsets its config
+  // variable), the PATH word the pack set, then any other assignment (the chosen login's).
+  let at = 1;
+  while (rest[at] === "-u" || rest[at] === "--unset") {
+    if (typeof rest[at + 1] !== "string") return "a login word without a name";
+    at += 2;
+  }
+  if (!rest[at] || !rest[at].startsWith("PATH=")) return "no PATH word after the program";
+  const first = rest[at].slice("PATH=".length).split(delimiter)[0];
   if (!isGuardFolder(first) || isKillGuardWord(first)) return "the PATH word does not start with a guard";
-  if (rest[2] !== "dsh-tui") return "the program is not dsh-tui";
-  if (rest.length !== 5 || rest[3] !== "--" || typeof rest[4] !== "string") return "the task is not the one -- <task> word";
+  at += 1;
+  while (at < rest.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[at])) at += 1;
+  const launch = rest.slice(at);
+  // dsh-tui runs from `-- <task>` exactly; every other agent the pack launches starts from its
+  // own program, with whatever flags the pack gave it (#1011).
+  if (launch[0] !== "dsh-tui") {
+    const agent = agentKeyOfArgv(launch);
+    if (!agent || agent === "dsh-tui") return "the program is not a coding agent";
+    return null;
+  }
+  if (launch.length !== 3 || launch[1] !== "--" || typeof launch[2] !== "string") return "the task is not the one -- <task> word";
   return null;
 }

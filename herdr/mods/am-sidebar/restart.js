@@ -4,7 +4,7 @@
 // sidebar's Restart runs the CLI. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
 import { agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
-  modelArgs, ownsSession, resumeArgs, resumesById, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
+  modelArgs, ownsSession, resumeArgs, resumesById, seatSettingsArgs, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
 import { SQUAD_LABEL, SQUAD_MARK } from "./launchArgs.js";
 import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
   codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
@@ -156,9 +156,20 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
     ? agySettingsPlan({ bot, scope: "seat", folder: agy.folder ?? "", settingsDir: agySettingsDir(agy.appHomeDir),
       realpath: agy.realpath ?? null, homeDir: agy.homeDir ?? null }) : null;
   const settingsWords = agySettingsArgs(key, settings?.path);
+  // #1411: the bot's own reasoning effort and service tier (Codex's), after its own words so
+  // they win over a profile, and after a template's own words so the roster wins there too. A
+  // stored tier goes with the model it was picked for: a restart's model swap (the one path that
+  // changes the model with no tier option) runs the new model on Codex's default tier, said
+  // explicitly as standard, so neither the record's Fast nor a profile's can stay on it.
+  const storedModel = typeof bot.model === "string" && bot.model ? bot.model : null;
+  const modelSwitch = model !== undefined && (model || null) !== storedModel;
+  // A Codex seat's own record carries the tier; a bot changing agent (or one that was never
+  // Codex's) has none of its own, so it keeps inheriting as before.
+  const seatSwap = modelSwitch && bot.agent === "codex" && key === "codex";
+  const seatWords = seatSettingsArgs(key, seatSwap ? { ...bot, tier: "standard" } : bot);
   // The source a pane's launch is compared with names no settings file: that one is this
   // launch's own, never a change a restart should report.
-  const source = [...run, ...modeWords, ...modelArgs(key, pin)];
+  const source = [...run, ...modeWords, ...modelArgs(key, pin), ...seatWords];
   // A template owns its command only when it runs the bot's own agent, whatever the pane's
   // foreground says (unknown included): a template for another agent, a swap or a pane on
   // another agent starts from the agent row (the template would cross them).
@@ -182,9 +193,9 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
   // fresh and say why, as a helper does.
   const blocked = "its template's command ends in a separator or a comment, so it can't take resume words";
   const plan = (mode, extra = [], note = null) => {
-    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin)],
+    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin), ...seatWords],
       source, template: null, agySettings: settings, note, templateNote, granted: false };
-    const words = [...codexWords, ...settingsWords, ...extra];
+    const words = [...codexWords, ...settingsWords, ...extra, ...seatWords];
     const argv = commandArgv({ shell: tpl.command }, words);
     if (argv) return { mode, agent: key, model: null, resume: extra, argv, source, template: tpl.name, agySettings: settings, note, templateNote, granted };
     // Nothing past the template's own command: neither the permission list nor resume words.
@@ -335,6 +346,37 @@ export function launchChange({ name, launch, agent, argv, template = null, usedT
  * slug share their conversations, so a session resumes in either.
  */
 export const claudeSlug = (folder) => String(folder ?? "").replace(/[^A-Za-z0-9]/g, "-");
+
+/** Where Claude Code keeps `session`'s log for a pane launched in `cwd` (#1556), as a path. */
+export const claudeTranscriptPath = (home, cwd, session) =>
+  `${String(home ?? "").replace(/\/+$/, "")}/.claude/projects/${claudeSlug(cwd)}/${session}.jsonl`;
+
+/**
+ * The context a Claude Code session's next request carries (#1556): input + cache-read +
+ * cache-creation tokens of the NEWEST assistant message in the session log's JSONL text.
+ * Later assistant messages win; a line that isn't JSON, isn't an assistant message or carries
+ * no usable usage is skipped. Null when the text holds no such message: nothing is measured,
+ * never zero.
+ */
+export function contextTokensOf(text) {
+  const lines = String(text ?? "").split("\n");
+  let tokens = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let row;
+    try { row = JSON.parse(trimmed); } catch { continue; }
+    if (row?.type !== "assistant") continue;
+    const usage = row?.message?.usage;
+    if (!usage || typeof usage !== "object" || Array.isArray(usage)) continue;
+    const parts = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+      .map((k) => usage[k])
+      .filter((n) => typeof n === "number" && Number.isFinite(n) && n >= 0);
+    if (!parts.length) continue;
+    tokens = parts.reduce((sum, n) => sum + n, 0);
+  }
+  return tokens;
+}
 
 /** The old pane's Claude session id (its agent.session label, UUID-shaped), or null. */
 export const sessionOf = (get) => sessionId(get?.labels?.[SESSION]);

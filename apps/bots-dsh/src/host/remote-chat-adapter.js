@@ -14,6 +14,23 @@ const ATTACHED_PLACEHOLDER = Object.freeze({ id: 'attach', name: 'Hermes', model
 export const MISSING_TOOLS = 'Remote Hermes has no Automagik team tools: message_bot, list_bots, create_bot, request_secret, or Automagik memory and schedules. Its tools run remotely under the remote profile’s rules.'
 const finish = (kind, message) => ({ type: 'finish', reason: { kind, ...(message ? { failure: { code: 'REMOTE_HERMES', message } } : {}) } })
 const service = (ctx, name) => { try { return ctx.get?.(name) } catch { return undefined } }
+// The only part of a file handle the attachments service may spell differently between two
+// asks: the path of the read-only copy. Its identity (name, size, sha256) stays in the same
+// text, so two spellings name the same durable bytes and the turn is still that turn.
+const SAVED_COPY_PATH = /(\[File .*?: verbatim read-only copy saved at )"(?:[^"\\]|\\.)*"/
+const withoutSavedPath = messages => messages.map(message => {
+  const content = message?.content
+  if (!Array.isArray(content)) return message
+  let changed = false
+  const next = content.map(block => {
+    if (block?.type !== 'text' || typeof block.text !== 'string') return block
+    const text = block.text.replace(SAVED_COPY_PATH, '$1"[path]"')
+    if (text === block.text) return block
+    changed = true
+    return { ...block, text }
+  })
+  return changed ? { ...message, content: next } : message
+})
 
 // What Hermes asks is the person's to answer at every chat level: nothing here says yes or
 // no for them. A level that asks shows the chat's approval card. A level that never asks has
@@ -60,14 +77,18 @@ function* textBlocks(text, index) {
   yield { type: 'block-end', index, block: { type: 'text', text } }
 }
 
-// Deep-frozen plain data only: an object with its own toJSON, a getter, a Proxy or a class
+// Deep-frozen plain data only: an object with its own function toJSON, a getter, a Proxy or a class
 // prototype could answer one read and behave differently on the next, so it is not a message.
 function plainData(value) {
   if (value === null || typeof value !== 'object') return typeof value !== 'function'
   if (types.isProxy(value)) return false
   const prototype = Object.getPrototypeOf(value)
   if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false
-  if (Object.hasOwn(value, 'toJSON') || !Object.isFrozen(value)) return false
+  if (!Object.isFrozen(value)) return false
+  // JSON.stringify calls only a function toJSON. A plain data key with that name is ordinary
+  // data a tool argument or a model reply may legitimately carry.
+  const toJSON = Object.getOwnPropertyDescriptor(value, 'toJSON')
+  if (toJSON !== undefined && 'value' in toJSON && typeof toJSON.value === 'function') return false
   for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
     if (!('value' in descriptor)) return false
     if (!plainData(descriptor.value)) return false
@@ -196,13 +217,17 @@ export class RemoteChatAdapter extends LlmAdapter {
     let expected
     try { expected = projectFilesToText(derived.filter(message => message?.role !== 'developer'), filePath) } catch { return false }
     if (expected.length !== request.messages.length || expected.length === 0) return false
-    // Only deep-frozen plain data: no toJSON, accessors, Proxies or class instances can make one
+    // Only deep-frozen plain data: no function toJSON, accessors, Proxies or class instances can make one
     // read (this comparison) differ from the next (the text the adapter actually submits).
     if (!plainData(request.messages)) return false
     const want = expected.map(message => asDispatched(message, request.provider))
-    if (!want.every((message, index) => isDeepStrictEqual(request.messages[index], message))) return false
+    // The saved-copy path is resolved again here, so the attachments service may name a
+    // different copy than the dispatch did; compare the handle without that one spelling.
+    const wanted = withoutSavedPath(want)
+    const given = withoutSavedPath(request.messages)
+    if (!wanted.every((message, index) => isDeepStrictEqual(given[index], message))) return false
     // The payload itself, read exactly as the stream reads it, must be that turn's text.
-    return RemoteChatAdapter.promptText(request.messages) === RemoteChatAdapter.promptText(expected)
+    return RemoteChatAdapter.promptText(given) === RemoteChatAdapter.promptText(wanted)
   }
 
   // The text one request submits to the remote: the trailing run of person messages.

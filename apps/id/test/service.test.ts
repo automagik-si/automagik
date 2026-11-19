@@ -1024,13 +1024,19 @@ describe('orphan account cleanup', () => {
     expect((await jsonOK(await request('/api/auth/get-session'))).user.id).toBe(owner.userId);
   });
 
-  test('cleanup is bounded per run and finishes the backlog over later runs', async () => {
+  test('cleanup is bounded per run, leaves other accounts alone and finishes the backlog', async () => {
+    // A real old account with a passkey must survive runs that are deleting orphans.
+    const keeper = await signup();
+    await age(keeper.userId, ORPHAN_MIN_AGE_MS * 30);
     for (let index = 0; index < ORPHAN_BATCH_LIMIT + 5; index++) {
       await insertUser(`orphan-${String(index).padStart(4, '0')}`, ORPHAN_MIN_AGE_MS + hour + index);
     }
     await cleanup();
-    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(5);
+    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(6);
+    expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', keeper.userId)).toBe(1);
     await cleanup();
-    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(1);
+    expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', keeper.userId)).toBe(1);
+    expect((await jsonOK(await request('/api/auth/get-session'))).user.id).toBe(keeper.userId);
   });
 });

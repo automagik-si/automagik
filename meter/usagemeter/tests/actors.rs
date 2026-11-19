@@ -942,6 +942,129 @@ fn a_backfill_never_attributes_a_frozen_row() {
     assert_eq!(counts(&v["rows"][0]), [1_678_000, 0, 0, 940_000]);
 }
 
+// Issue 1229: the hour before the original evidence_from can hold a normal sync's evidence (a
+// call read from the log tail) beside a frozen rollup of the same hour. A backfill re-reads that
+// call, and adoption must not write a second, identical evidence row against the frozen rollup.
+#[test]
+fn a_backfill_never_writes_a_second_copy_of_a_call_that_has_evidence() {
+    let branch = Some("feat/gn-70-dup");
+    let frozen = scenes::Frozen {
+        bot: None,
+        harness: "claude-code",
+        model: scenes::OPUS,
+        branch,
+        hour: t("2026-11-08T12:00:00Z"),
+        tokens: [100, 1000, 0, 0, 100, 0],
+    };
+    let mut s = Scene::migrated("2026-11-08T12:30:00Z", &[frozen]);
+    let w = wt("gn-70");
+    s.add(
+        Usage::new(H::Claude, "s-dup", &w, branch, at(&["2026-11-08T12"]))
+            .tokens([10, 100, 0, 0, 10, 0]),
+    );
+    // The call is after the migration but before evidence_from (13:00): the normal sync gives
+    // it evidence, and the hour's frozen row still counts its own older calls.
+    s.sync();
+    let before = totals(&s);
+    assert_eq!(s.store().count("evidence").unwrap(), 1);
+    let r = s.sync_with(|o| o.evidence_backfill = Some(30));
+    let b = r.evidence_backfill.expect("a backfill ran");
+    assert!(b.done, "{b:?}");
+    assert_eq!(totals(&s), before, "a backfill never changes a total");
+    assert_eq!(
+        s.store().count("evidence").unwrap(),
+        1,
+        "the call already had its evidence; the backfill wrote no duplicate"
+    );
+    assert_rollups_agree(&s);
+}
+
+// Issue 1229's dry-run report: `status` counts duplicate evidence rows and removes nothing. Two
+// real calls with the same request id at different times are not a duplicate group.
+#[test]
+fn status_counts_duplicate_evidence_rows_and_removes_nothing() {
+    let mut s = Scene::migrated("2026-11-08T12:30:00Z", &[]);
+    let w = wt("gn-71");
+    s.add(
+        Usage::new(
+            H::Claude,
+            "s-dup-status",
+            &w,
+            Some("feat/gn-71"),
+            at(&["2026-11-08T14"]),
+        )
+        .tokens([10, 100, 0, 0, 10, 0]),
+    );
+    s.sync();
+    let store = s.store();
+    let first = store
+        .conn
+        .query_row("SELECT min(id) FROM evidence", [], |r| r.get::<_, i64>(0))
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO evidence(ts_ms, dim, actor, session, parent, request, cwd, session_cwd,
+               copied, input_uncached, cache_read, cache_write_5m, cache_write_1h, output,
+               reasoning, unsplit, reported_usd)
+             SELECT ts_ms, dim, actor, session, parent, request, cwd, session_cwd, copied,
+               input_uncached, cache_read, cache_write_5m, cache_write_1h, output, reasoning,
+               unsplit, reported_usd FROM evidence WHERE id = ?1",
+            [first],
+        )
+        .unwrap();
+    let d = evidence::duplicates(&store.conn).unwrap();
+    assert_eq!(
+        (d.groups, d.extra_rows, d.exact_groups, d.exact_extra_rows),
+        (1, 1, 1, 1)
+    );
+    assert_eq!(d.hours.len(), 1);
+    assert_eq!(d.hours[0].hour_ms, t("2026-11-08T14:00:00Z"));
+    assert_eq!((d.hours[0].groups, d.hours[0].extra_rows), (1, 1));
+    assert_eq!(d.hours_omitted, 0);
+    // The same request id one hour later is another real call, not a duplicate row.
+    store
+        .conn
+        .execute(
+            "INSERT INTO evidence(ts_ms, dim, actor, session, parent, request, cwd, session_cwd,
+               copied, input_uncached, cache_read, cache_write_5m, cache_write_1h, output,
+               reasoning, unsplit, reported_usd)
+             SELECT ts_ms + 3600000, dim, actor, session, parent, request, cwd, session_cwd,
+               copied, input_uncached, cache_read, cache_write_5m, cache_write_1h, output,
+               reasoning, unsplit, reported_usd FROM evidence WHERE id = ?1",
+            [first],
+        )
+        .unwrap();
+    assert_eq!(evidence::duplicates(&store.conn).unwrap().groups, 1);
+    drop(store);
+    let out = s
+        .env
+        .command()
+        .env("METER_STATE_DIR", s.env.state())
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["evidence"]["duplicates"]["groups"], 1);
+    assert_eq!(v["evidence"]["duplicates"]["extra_rows"], 1);
+    assert_eq!(v["evidence"]["duplicates"]["exact_extra_rows"], 1);
+    assert_eq!(
+        v["evidence"]["duplicates"]["hours"],
+        serde_json::json!([
+            {"hour": "2026-11-08T14:00:00Z", "groups": 1, "extra_rows": 1}
+        ])
+    );
+    assert_eq!(v["evidence"]["duplicates"]["hours_omitted"], 0);
+    // A status run is read-only: the rows it counted are still there.
+    let store = s.store();
+    assert_eq!(store.count("evidence").unwrap(), 3);
+}
+
 // --days never asks past the retention bound (RFC 0021 delivery 8's Acceptance), and the backfill
 // always says how far back it goes.
 #[test]

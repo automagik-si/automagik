@@ -42,8 +42,16 @@ test('client.js registers a factory that exports apply and inject', () => {
   // this one through dsh.client.external).
   assert.deepEqual(Object.keys(exports), ['apply', 'inject', 'omni'])
   assert.equal(typeof exports.apply, 'function')
-  assert.deepEqual(Object.keys(exports.omni).sort(), ['addStrings', 'badges', 'botChildren', 'botSettings', 'call', 'chatSuggestions', 'dateLocale', 'face', 'headerButtons', 'hostText', 'language', 'nav', 'onShell', 'registerComposerPack', 'setCanvasRenderer', 'sidebarTools', 't', 'toolCards', 'ui'])
+  assert.deepEqual(Object.keys(exports.omni).sort(), ['addStrings', 'badges', 'botChannels', 'botChildren', 'botSettings', 'call', 'chatSuggestions', 'dateLocale', 'face', 'genui', 'headerButtons', 'hostText', 'language', 'nav', 'onShell', 'registerComposerPack', 'setCanvasRenderer', 'sidebarTools', 't', 'toolCards', 'ui'])
   assert.deepEqual(Object.keys(exports.omni.ui).sort(), ['BotMark', 'CHARACTERS', 'MAIN_LOOK', 'OmniMark', 'createSource', 'icons', 'relativeShort'])
+  // The shared gen-UI kit (#1326) is a plugin's to draw with: the rows, the person card,
+  // the slice reader and the endpoint it reads.
+  assert.deepEqual(Object.keys(exports.omni.genui).sort(), ['CoverageRow', 'PersonCard', 'ProgressRow', 'ProgressRows', 'READING_NOTE', 'loadReadingNote', 'model', 'revisionOf', 'rows'])
+  assert.equal(exports.omni.genui.READING_NOTE, 'omni-reading-note')
+  for (const name of ['CoverageRow', 'PersonCard', 'ProgressRow', 'ProgressRows', 'loadReadingNote', 'revisionOf', 'rows']) {
+    assert.equal(typeof exports.omni.genui[name], 'function', name)
+  }
+  assert.deepEqual(Object.keys(exports.omni.genui.model).sort(), ['countText', 'coverageLine', 'coverageOf', 'parseReadingNote', 'percentOf', 'personView', 'rowView', 'shortDate', 'spanOf', 'stateId', 'stateWord'])
   assert.ok(Object.isFrozen(exports.omni))
   assert.equal(exports.omni.face(), null)
   // No `configForms`: the client never writes the user's DSH settings, such as the

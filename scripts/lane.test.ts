@@ -339,6 +339,20 @@ describe('the plugin lane', () => {
     expect(ships(['.gitignore'], none)).toBe(false);
   });
 
+  test('the project toolchain manifest (.automagik-toolchain.json) is repo-local and cuts no release', () => {
+    const none = () => false;
+    const manifest = '.automagik-toolchain.json';
+    // Alone: the release's first `ships` question is no, so there is no release at all.
+    expect(ships([manifest], none)).toBe(false);
+    expect(herdrShips([manifest])).toBe(false);
+    expect(pocketShips([manifest])).toBe(false);
+    expect(meterShips([manifest])).toBe(false);
+    // Beside a shipped file follows that file's lane, as every other never-shipped path does.
+    expect(ships([manifest, 'apps/bots-dsh/src/host/turns.js'], none)).toBe(true);
+    expect(kindOf([manifest, 'apps/bots-dsh/src/host/turns.js'], none)).toBe('plugins');
+    expect(kindOf([manifest, 'apps/desktop/src/main.js'], none)).toBe('full');
+  });
+
   test('a .gitignore change beside a shipped file takes that file\'s lane', () => {
     const none = () => false;
     const changed = ['.gitignore', 'herdr/mods/am-sidebar/main.js'];

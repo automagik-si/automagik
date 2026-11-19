@@ -23,7 +23,7 @@ const form = outOfSearch(formFunction), confirm = outOfSearch(confirmFunction), 
 const fields = { action: 'add', goal: 'Organise my project reports', platform: 'both', apps: 'My editor', expected_result: 'A report I can review', language: 'en', channel: 'email', email: 'demo@example.com', consent: 'yes' }
 function post(env, values = {}, options = {}) {
   const request = new Request(origin + '/api/waitlist', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '203.0.113.1', ...options.headers }, body: new URLSearchParams({ ...fields, ...values }) })
-  return form({ request, env })
+  return form({ request, env, ...(options.whatsappSignupsOpen ? { whatsappSignupsOpen: true } : {}) })
 }
 async function callback(env, body, { auth = `Bearer ${env.WAITLIST_CONFIRM_SECRET}`, method = 'POST', type = 'application/json', raw, protocol = 'https:' } = {}) {
   return confirm({ env, request: new Request(origin.replace('https:', protocol) + '/api/waitlist/whatsapp-confirm', { method, headers: { 'Content-Type': type, Authorization: auth, 'X-Omni-Event-Id': 'fixture-event' }, ...(method === 'GET' ? {} : { body: raw ?? JSON.stringify(body) }) }) })
@@ -130,6 +130,46 @@ test('WhatsApp sign-ups are paused: a WhatsApp POST gets the unavailable page an
   }
   assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0, 'No row and no code')
   assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist_quota').get().n, 0, 'No reservation either')
+})
+
+test('with WhatsApp sign-ups on, the form issues a code and that code confirms', async t => {
+  const f = fixture(); t.after(f.close)
+  t.mock.method(globalThis, 'fetch', () => assert.fail('WhatsApp makes no third-party request'))
+  const open = { whatsappSignupsOpen: true }
+  // The form answers with the choice again, while the default page keeps offering email only.
+  const page = await form({ env: {}, request: new Request(origin + '/api/waitlist'), ...open })
+  const html = await page.text()
+  assert.match(html, /<option value="whatsapp">WhatsApp — you send the first message<\/option>/)
+  assert.match(html, /WhatsApp confirmation may take a little while/)
+  assert.match(html, /WhatsApp shows a code for you to send to our support Bot/)
+  const closed = await (await form({ env: {}, request: new Request(origin + '/api/waitlist') })).text()
+  const closedForm = closed.match(/<form class="waitlist-form"[\s\S]*?<\/form>/)[0]
+  assert.match(closedForm, /<input type="hidden" name="channel" value="email">/)
+  assert.doesNotMatch(closedForm, /whatsapp/i)
+  // The post issues the code page: a code, the support number, the prepared message and a QR.
+  const response = await post(f.env, { channel: 'whatsapp', email: '' }, open)
+  assert.equal(response.status, 200)
+  const sent = await response.text()
+  const code = sent.match(/\bAMG-[0-9A-HJKMNP-TV-Z]{6}\b/)[0]
+  assert.match(code, codePattern)
+  assert.match(sent, /https:\/\/wa\.me\/15555550100\?text=/)
+  assert.match(sent, /<svg/)
+  assert.match(sent, /Send it within half an hour/)
+  const pending = f.sqlite.prepare('SELECT * FROM waitlist').get()
+  assert.equal(pending.channel, 'whatsapp')
+  assert.equal(pending.email, null)
+  assert.equal(pending.confirmation_hash, await hash(code))
+  assert.equal(pending.expires_at - pending.created_at, 1800)
+  // The return path: the code the page issued confirms the row and returns the support reply.
+  const confirmed = await callback(f.env, event(code))
+  assert.equal(confirmed.status, 200)
+  assert.match((await confirmed.json()).reply, /interest is confirmed/)
+  const done = f.sqlite.prepare('SELECT * FROM waitlist').get()
+  assert.ok(done.confirmed_at)
+  assert.equal(done.whatsapp_sender, '+15555550100')
+  // The support privacy section's line: a code sent is recorded as confirmed, and the message
+  // text and sender name are never stored.
+  assert.doesNotMatch(JSON.stringify(done), /Confirm my Automagik waitlist|Fictional Sender/)
 })
 
 test('an earlier WhatsApp sign-up is removed by its sender or its original code', async t => {

@@ -18,6 +18,7 @@ import { replaceFile } from './files.js'
 import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
+import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 
 // A table read that sees only the keys the table holds itself. Ids that come from
 // outside (a request body, a tool argument, a name a model gives) go through this, so
@@ -35,6 +36,30 @@ export function install(rt) {
   let teamRead = false
   let writing = Promise.resolve()
   const { warn } = rt
+
+  const diagnosticLabel = value => headOf(String(value).replace(/\s+/g, ' ').trim(), 120)
+  // Keep the on-disk marker and the admission checks on the same Bot record.
+  const refreshShellHolds = (bots, { log = true } = {}) => {
+    let changed = false
+    for (const bot of Object.values(bots)) {
+      const model = shellHoldModelOf(bot)
+      if (model === undefined) {
+        if (bot.shellHeld !== undefined) {
+          delete bot.shellHeld
+          changed = true
+        }
+        continue
+      }
+      const cli = model.split('/')[0]
+      if (bot.shellHeld?.model === model && bot.shellHeld.cli === cli) continue
+      bot.shellHeld = { cli, model }
+      changed = true
+      if (log) warn('ds-bot: %s loads with its shell off on %s, a coding CLI that brings its own shell: '
+        + 'it is held until the shell is turned on or it runs on a model that uses DeepSeek Harness\'s tools.',
+      diagnosticLabel(bot.name ?? 'This Bot'), diagnosticLabel(cli))
+    }
+    return changed
+  }
 
   const EMPTY = JSON.stringify(state)
   // The other dsh host that holds state.lock while this one only reads (see home-lock.js);
@@ -223,6 +248,7 @@ export function install(rt) {
         migrated = true
       }
     }
+    if (refreshShellHolds(state.bots)) migrated = true
     // A team from before several Main Bots were allowed names a single one.
     if (!Array.isArray(state.mainBotIds)) state.mainBotIds = []
     if ('mainBotId' in state) {
@@ -480,6 +506,12 @@ export function install(rt) {
     if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) adopt(readFileState())
   }
 
+  // Admission reads the adopted team without refreshing an unchanged writer.
+  const refreshShellChoice = async () => {
+    await load()
+    if (adopting !== undefined || stamp() !== seen) await refresh()
+  }
+
   const warnReadOnly = () => {
     if (!warnedReadOnly) {
       warnedReadOnly = true
@@ -517,16 +549,42 @@ export function install(rt) {
     }
     return dropped
   }
-  rt.saveCopy = (change) => {
+  rt.saveCopy = (change, { beforeCommit, afterWrite } = {}) => {
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
+    refreshShellHolds(state.bots)
     indexSessions()
     rt.sweepAuto?.()
+    if (afterWrite !== undefined) {
+      let revision
+      return writeSnapshot(() => {
+        const copy = JSON.parse(JSON.stringify(state))
+        change(copy)
+        refreshShellHolds(copy.bots, { log: false })
+        revision = state.revision + 1
+        copy.revision = copy.autoStamp = revision
+        copy.version = STATE_VERSION
+        copy.exchanges = copy.exchanges.slice(-MAX_EXCHANGES)
+        return JSON.stringify(copy)
+      }, {
+        required: true,
+        epoch: lockEpoch,
+        beforeCommit,
+        afterWrite: () => {
+          state.revision = state.autoStamp = revision
+          state.version = STATE_VERSION
+          state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
+          afterWrite()
+          refreshShellHolds(state.bots)
+        },
+      })
+    }
     state.revision += 1
     state.autoStamp = state.revision
     state.version = STATE_VERSION
     state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
     const copy = JSON.parse(JSON.stringify(state))
     change(copy)
+    refreshShellHolds(copy.bots, { log: false })
     // Permission copies belong to the state the caller inspected. Never apply one
     // to a replacement team adopted while this write waited.
     const snapshot = JSON.stringify(copy)
@@ -535,10 +593,12 @@ export function install(rt) {
 
   const save = ({ required = false } = {}) => {
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
+    refreshShellHolds(state.bots)
     indexSessions()
     // A reading host keeps the file's revision, so its window does not skip the next change.
     if (!writable()) return required ? Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`)) : writing
     return writeSnapshot(() => {
+      refreshShellHolds(state.bots)
       rt.sweepAuto?.()
       state.revision += 1
       state.autoStamp = state.revision
@@ -548,7 +608,7 @@ export function install(rt) {
     }, { required })
   }
 
-  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch } = {}) => {
+  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, beforeCommit, afterWrite } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
       if (stuck !== undefined || holder !== undefined) {
@@ -577,9 +637,14 @@ export function install(rt) {
         }
         ensureLock()
         await writeFile(temp, snapshot, 'utf8')
-        ensureLock()
-        await replaceFile(temp, statePath, ensureLock)
+        const ensureCommit = () => {
+          ensureLock()
+          beforeCommit?.()
+        }
+        ensureCommit()
+        await replaceFile(temp, statePath, ensureCommit)
         seen = stamp()
+        afterWrite?.()
         // The file now holds this team, a fresh one after a corrupt file included.
         if (stuck === undefined) teamRead = true
         rt.capabilitiesStateSaved?.()
@@ -649,7 +714,7 @@ export function install(rt) {
     } catch {
       return
     }
-    const held = [...chatOwners.keys(), ...groupOwners.keys(), ...roomOwners.keys()].filter(id => archived.has(id))
+    const held = [...chatOwners.keys(), ...groupOwners.keys(), ...roomOwners.keys()].filter(id => archived.has(id) && botOf(selfOf(id))?.shellHeld === undefined)
     if (held.length === 0) return
     restoring = (async () => {
       for (const sessionId of held) {
@@ -665,9 +730,9 @@ export function install(rt) {
     roomOwners.clear()
     pastOwners.clear()
     taskOwners.clear()
-    for (const run of state.subscriptionRuns ?? []) if (run.sessionId && run.botId && run.task) taskOwners.set(run.sessionId, { botId: run.botId })
+    for (const run of state.subscriptionRuns ?? []) if (run.sessionId && run.botId && run.task) taskOwners.set(run.sessionId, { botId: run.botId, ...(run.shellOffCli === true ? { shellOffCli: true } : {}) })
     for (const bot of Object.values(state.bots)) {
-      for (const segment of bot.segments ?? []) pastOwners.set(segment.sessionId, { botId: bot.id })
+      for (const segment of bot.segments ?? []) pastOwners.set(segment.sessionId, { botId: bot.id, ...(segment.shellOffCli === true ? { shellOffCli: true } : {}) })
       chatOwners.set(chatOf(bot.id), bot.id)
     }
     for (const room of Object.values(state.rooms)) {
@@ -675,7 +740,7 @@ export function install(rt) {
       if (sessionId !== undefined) roomOwners.set(sessionId, room.id)
       for (const segment of room.parts ?? []) pastOwners.set(segment.sessionId, { roomId: room.id })
       for (const [botId, segments] of Object.entries(room.segments ?? {})) {
-        for (const segment of segments) pastOwners.set(segment.sessionId, { botId, roomId: room.id })
+        for (const segment of segments) pastOwners.set(segment.sessionId, { botId, roomId: room.id, ...(segment.shellOffCli === true ? { shellOffCli: true } : {}) })
       }
       for (const [botId, sessionId] of Object.entries(room.sessions ?? {})) groupOwners.set(sessionId, { botId, roomId: room.id })
     }
@@ -691,6 +756,17 @@ export function install(rt) {
   const selfOf = id => chatOwners.get(id) ?? groupOwners.get(id)?.botId ?? taskOwners.get(id)?.botId ?? pastOwners.get(id)?.botId
   // A Session where the Bot speaks now, as opposed to an archived segment.
   const isBotSession = id => chatOwners.has(id) || groupOwners.has(id) || taskOwners.has(id)
+  const assertShellChoice = (sessionId, botId) => {
+    const task = own(state.tasks, sessionId)
+    const owner = botOf(selfOf(sessionId) ?? task?.from)
+    const target = botOf(botId)
+    const held = owner?.shellHeld !== undefined ? owner : target?.shellHeld !== undefined ? target : undefined
+    if (held !== undefined) throw Object.assign(new Error(shellHoldText(held)), { code: 'bot/shell' })
+    if (owner?.shell === false && (pastOwners.get(sessionId)?.shellOffCli === true || task?.shellOffCli === true
+      || taskOwners.get(sessionId)?.shellOffCli === true)) {
+      throw Object.assign(new Error('This earlier Session was set aside when the Bot moved off its coding CLI.'), { code: 'bot/shell' })
+    }
+  }
   const groupSessionsOf = botId => Object.values(state.rooms).map(room => room.sessions?.[botId]).filter(Boolean)
   const dropGroupSession = (room, botId) => {
     if (room.memberDirs !== undefined) delete room.memberDirs[botId]
@@ -755,7 +831,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, teamLoaded, own, onSaved, closeCard,
+    state, load, save, refresh, readOnly, teamLoaded, own, onSaved, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,

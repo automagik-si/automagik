@@ -207,6 +207,22 @@ test('the machine DSH runs on is its OS family, and a hint when DSH was launched
   for (const word of ['secret-box', 'someone', '/home/someone']) assert.ok(!sent.includes(word), word)
 })
 
+test('a request with no payload says the payload is missing, not unknown endpoint', async () => {
+  const fake = host()
+  const [route] = fake.routes
+  const post = async body => (await route.fetch(new Request('http://dsh.local/api/omni-ai', { method: 'POST', body: JSON.stringify(body) }))).json()
+  const missing = await post({ endpoint: 'state' })
+  assert.equal(missing.ok, false)
+  assert.equal(missing.error.code, 'omni-ai/no-payload')
+  assert.match(missing.error.message, /payload is missing/i)
+  // A null payload is a payload: it stays valid, as today.
+  assert.equal((await post({ endpoint: 'state', payload: null })).ok, true)
+  // A truly unknown endpoint keeps its own answer.
+  const unknown = await post({ endpoint: 'nope' })
+  assert.equal(unknown.error.code, 'omni-ai/not-found')
+  assert.match(unknown.error.message, /Unknown endpoint nope/)
+})
+
 test('the route answers JSON for the browser, unknown endpoints included', async () => {
   const fake = host()
   const [route] = fake.routes

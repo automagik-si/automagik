@@ -35,6 +35,21 @@ type Session struct {
 	// HerdrSession is the Herdr session both IDs belong to. Not to be confused
 	// with Session itself, which predates Herdr having sessions.
 	HerdrSession string
+	// Target is the automation's target when the run was handed to a bot
+	// instead of opening a workspace: "bot:<id>" or "worker:<id>" (#498).
+	// PaneID is the bot's terminal, or the worker's.
+	Target string
+	// TargetName is that bot's name from the project's bots.json, for the
+	// lines a person reads.
+	TargetName string
+	// TargetParent is the bot's terminal a worker target runs under. The
+	// worker is ended through the pack's checked `am worker kill`, which asks
+	// that pane whose worker this is; a bot target leaves it empty.
+	TargetParent string
+	// TargetCreatedMS identifies the bot's terminal as resolved: hc reuses
+	// terminal ids, so the prompt is re-read against this before it is sent
+	// and a different created_ms refuses the send (#498).
+	TargetCreatedMS int64
 }
 
 // Host provisions somewhere for a run to happen, and does the work there.
@@ -45,6 +60,11 @@ type Host interface {
 	// the run opened (close_workspace, ADR 0012). One already gone is closed.
 	// It leaves alone a run still waiting on a person.
 	Close(s Session, a config.Automation) error
+}
+
+// Noter returns the run's note and forgets it.
+type Noter interface {
+	Note(s Session) string
 }
 
 // ErrCancelled means the run's workspace was closed while it was working.
@@ -82,6 +102,8 @@ type knobs struct {
 	promptSettle     time.Duration
 	promptSettleLast time.Duration
 	workflowPoll     time.Duration
+	// targetPoll is how often a starting bot is looked for (#498).
+	targetPoll time.Duration
 }
 
 func defaultKnobs() knobs {
@@ -93,6 +115,7 @@ func defaultKnobs() knobs {
 		promptSettle:     20 * time.Second,
 		promptSettleLast: 30 * time.Second,
 		workflowPoll:     5 * time.Second,
+		targetPoll:       2 * time.Second,
 	}
 }
 
@@ -106,6 +129,12 @@ func (h *live) in(a config.Automation) *live {
 
 // Provision opens the workspace the automation asked for.
 func (h *live) Provision(a config.Automation) (Session, error) {
+	if a.Target != "" {
+		// Bots live in herdr-core. backend: auto resolves to this host when
+		// herdr-core does not answer, and a target must then fail, never open
+		// the fresh session it was meant to replace (#498).
+		return Session{}, fmt.Errorf("%s: a target needs herdr-core, which is not answering; start the app it runs in", a.Name)
+	}
 	h = h.in(a)
 	label := "auto: " + a.Name
 	var workspaceID, paneID, tabID string

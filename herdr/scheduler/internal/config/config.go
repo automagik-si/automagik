@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -58,6 +59,61 @@ const (
 	BackendHerdr Backend = "herdr" // the TUI's server; the default
 	BackendHC    Backend = "hc"    // herdr-core, shown by the desktop app
 )
+
+// TargetKind is what an automation's target names: a bot's own terminal, or a
+// worker started under that bot for the run. A target replaces the fresh
+// session a prompt run opens today (#498).
+type TargetKind string
+
+const (
+	TargetBot    TargetKind = "bot"    // hand the prompt to the bot's own terminal
+	TargetWorker TargetKind = "worker" // a worker of the bot, for this run only
+)
+
+// Targets are the target kinds this build runs, for `ls --json`: a panel
+// offers a target only when the scheduler it drives names the kind. Absent
+// from a build that predates targets, so that panel never writes one to a
+// scheduler that would drop it.
+var Targets = []string{string(TargetBot), string(TargetWorker)}
+
+// TargetBotID is a bot id from .herdr/bots.json: "b-" and ten lowercase
+// base32 characters (model.js's ID_SHAPE, kept equal). A terminal address,
+// a bot name and a linked machine's pane are never a target: only the stable
+// id is, so a rename or a restart never changes where an automation goes.
+var TargetBotID = regexp.MustCompile(`^b-[a-z2-7]{10}$`)
+
+// SplitTarget reads an automation's target, "<kind>:<bot id>", or says why it
+// is not one. The kind and the id stay one YAML key so a form, a `put` and a
+// hand-edited file all have one value to read and write.
+func SplitTarget(target string) (TargetKind, string, error) {
+	kind, bot, found := strings.Cut(strings.TrimSpace(target), ":")
+	if !found {
+		return "", "", fmt.Errorf("target %q is not <kind>:<bot id>, e.g. bot:b-xxxxxxxxxx", target)
+	}
+	switch TargetKind(kind) {
+	case TargetBot, TargetWorker:
+	default:
+		return "", "", fmt.Errorf("target %q names %q; it must be bot or worker", target, kind)
+	}
+	if !TargetBotID.MatchString(bot) {
+		return "", "", fmt.Errorf("target %q: %q is not a bot id (b- and ten base32 characters); "+
+			"name the bot, never a terminal address", target, bot)
+	}
+	return TargetKind(kind), bot, nil
+}
+
+// TargetWhenBusy is what a bot target does when the bot is already working:
+// queue (the default) hands the prompt over for the bot's next turn, skip
+// drops the occurrence the way an overlapping run is dropped.
+type TargetWhenBusy string
+
+const (
+	TargetQueue TargetWhenBusy = "queue" // the default
+	TargetSkip  TargetWhenBusy = "skip"
+)
+
+// QueueWhenBusy is the busy behaviour actually used: an absent value is queue.
+func (a Automation) QueueWhenBusy() bool { return a.TargetWhenBusy != TargetSkip }
 
 // Command is work the scheduler runs itself: one program, started directly by
 // the daemon as the user it runs as. No pane, no agent, no model (ADR 0013).
@@ -124,6 +180,16 @@ type Automation struct {
 	Session string `yaml:"session,omitempty"`
 	// CloseWorkspace closes a done run's workspace; failures stay open.
 	CloseWorkspace CloseWorkspace `yaml:"close_workspace,omitempty"`
+	// Target is who a prompt run hands its prompt to instead of opening a
+	// fresh session: "bot:<id>" (the bot's own terminal, started when it is
+	// not running) or "worker:<id>" (a worker of that bot for this run only).
+	// Empty is a new session, exactly as before (#498). A target needs the
+	// project's repo, because .herdr/bots.json names the bot there.
+	Target string `yaml:"target,omitempty"`
+	// TargetWhenBusy is a bot target's answer to a busy bot: "queue" (the
+	// default) or "skip". A worker target runs alongside its bot and never
+	// asks.
+	TargetWhenBusy TargetWhenBusy `yaml:"target_when_busy,omitempty"`
 	// Disabled keeps the entry in the file but out of the scheduler.
 	Disabled bool `yaml:"disabled,omitempty"`
 
@@ -173,6 +239,17 @@ func (a *Automation) applyDefaults() {
 	}
 	if a.CatchUpMinutes == 0 {
 		a.CatchUpMinutes = 120
+	}
+	if a.Target != "" {
+		// A target starts no agent and opens no space: the bot's own launch,
+		// or its worker's, supplies both. Only the wait's grace applies.
+		if a.BlockedGraceMinutes == 0 {
+			a.BlockedGraceMinutes = 2
+		}
+		if a.TargetWhenBusy == "" && strings.HasPrefix(a.Target, string(TargetBot)+":") {
+			a.TargetWhenBusy = TargetQueue
+		}
+		return
 	}
 	if a.Command != nil {
 		// No workspace and no agent to default: a command has neither.
@@ -237,6 +314,12 @@ func (a *Automation) validate(backend Backend) error {
 	}
 	if kinds != 1 {
 		return fmt.Errorf("%s: exactly one of prompt, workflow or command is required", a.Name)
+	}
+	if a.Target != "" {
+		return a.validateTarget(backend)
+	}
+	if a.TargetWhenBusy != "" {
+		return fmt.Errorf("%s: target_when_busy is a bot target's; add target: bot:<id> or drop it", a.Name)
 	}
 	if a.Command != nil {
 		return a.validateCommand()
@@ -326,6 +409,62 @@ func (a *Automation) validateCommand() error {
 	}
 	if strings.ContainsAny(a.Notify, " \t\n") || strings.HasPrefix(a.Notify, "-") {
 		return fmt.Errorf("%s: notify %q is not a bot id or a terminal name", a.Name, a.Notify)
+	}
+	return nil
+}
+
+// validateTarget checks a bot or worker target. A target run opens no space and
+// starts no agent of its own — the bot's launch, or its worker's, is the whole
+// point — so an entry that still names one is a mistake to say out loud, not
+// to ignore. It also has to run in herdr-core, where bots live.
+func (a *Automation) validateTarget(backend Backend) error {
+	kind, bot, err := SplitTarget(a.Target)
+	if err != nil {
+		return fmt.Errorf("%s: %w", a.Name, err)
+	}
+	if a.Command != nil {
+		return fmt.Errorf("%s: a target hands over a prompt; a command cannot also name one", a.Name)
+	}
+	if a.Workflow != "" {
+		return fmt.Errorf("%s: a target hands over a prompt; a workflow cannot be sent to a bot", a.Name)
+	}
+	if a.Repo == "" {
+		return fmt.Errorf("%s: a target needs repo: the project whose .herdr/bots.json names %s", a.Name, bot)
+	}
+	if a.BlockedGraceMinutes < -1 {
+		return fmt.Errorf("%s: blocked_grace_minutes must be -1, 0 (the default) or a positive number, got %d",
+			a.Name, a.BlockedGraceMinutes)
+	}
+	switch a.TargetWhenBusy {
+	case "":
+	case TargetQueue, TargetSkip:
+		if kind == TargetWorker {
+			return fmt.Errorf("%s: target_when_busy is a bot target's; a worker runs alongside its bot", a.Name)
+		}
+	default:
+		return fmt.Errorf("%s: target_when_busy must be queue or skip, got %q", a.Name, a.TargetWhenBusy)
+	}
+	for _, k := range []struct {
+		name string
+		set  bool
+	}{
+		{"workspace", a.Workspace != ""},
+		{"workspace_id", a.WorkspaceID != ""},
+		{"session", a.Session != ""},
+		{"agent", a.Agent != ""},
+		{"template", a.Template != ""},
+		{"model", a.Model != ""},
+		{"mcp_config", a.MCPConfig != ""},
+		{"agent_args", len(a.AgentArgs) > 0},
+		{"notify", a.Notify != ""},
+		{"close_workspace", a.CloseWorkspace != "" && a.CloseWorkspace != CloseNever},
+	} {
+		if k.set {
+			return fmt.Errorf("%s: a target run uses the bot's own launch and opens no space; drop %s", a.Name, k.name)
+		}
+	}
+	if backend == BackendHerdr {
+		return fmt.Errorf("%s: a target runs in herdr-core, where bots live; set backend: hc", a.Name)
 	}
 	return nil
 }
