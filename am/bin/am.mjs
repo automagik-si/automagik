@@ -4,7 +4,7 @@
 //
 //   am update [automagik.am | herdr.pack] [--check] [--json]   am from am-lane first, then the pack
 //                                                              (where one is installed)
-//   am update --rollback | --auto on|off|status                the pack CLI's update, as given
+//   am update --rollback | --retry-skipped | --auto on|off|status   the pack CLI's update, as given
 //   am rollback automagik.am | herdr.pack [--json]             back to the kept previous one
 //   am self install | uninstall [--purge] | doctor [--json]    am's part entries (part.json)
 //   am help                                                    this, then the Bot verbs
@@ -31,7 +31,7 @@ Usage: am <command> [options]
                                 am first, from the signed am-lane (checksum and signature
                                 checked; never an older one), then the herdr pack where
                                 one is installed; an id updates that part alone
-  update --rollback | --auto on|off|status
+  update --rollback | --retry-skipped | --auto on|off|status
                                 the herdr pack's own switches (update, below)
   rollback automagik.am | herdr.pack [--json]
                                 back to the version each keeps (am: its previous copy)
@@ -79,10 +79,10 @@ const lineOf = (r) => ({
   updated: `Updated am ${r.from ?? "(none)"} → ${r.to}. The replaced one is kept: am rollback automagik.am puts it back.`,
 }[r.state]);
 
-/** The pack's own update switches (its kept set, its automatic updates): the pack CLI's, as given. */
-const PACK_SWITCH = /^--(?:rollback|auto)(?:=|$)/;
+/** The pack's own update switches (rollback, retry a skipped release, automatic updates): forwarded as given. */
+const PACK_SWITCH = /^--(?:rollback|auto|retry-skipped)(?:=|$)/;
 /** What may stand beside them: their own switches and the pack update's --check and --json. Any other word is a target. */
-const PACK_FLAG = /^--(?:(?:rollback|auto)(?:=.*)?|check|json)$/;
+const PACK_FLAG = /^--(?:(?:rollback|auto|retry-skipped)(?:=.*)?|check|json)$/;
 
 async function update(args) {
   if (args.some((a) => PACK_SWITCH.test(a))) {
@@ -94,7 +94,14 @@ async function update(args) {
       if (args[i] === "--auto") i++;
       else if (!args[i].startsWith("-") || !PACK_FLAG.test(args[i])) named.push(args[i]);
     }
-    if (named.some((a) => a !== PACK)) throw new Usage(`--rollback and --auto are ${PACK}'s own update, not ${named.filter((a) => a !== PACK).join(" ")}'s (am update ${PACK} --rollback)`);
+    const otherTargets = named.filter((a) => a !== PACK);
+    if (otherTargets.length) {
+      const target = otherTargets.join(" ");
+      if (args.some((a) => /^--retry-skipped(?:=|$)/.test(a))) {
+        throw new Usage(`--retry-skipped is ${PACK}'s own update, not ${target}'s (am update ${PACK} --retry-skipped)`);
+      }
+      throw new Usage(`--rollback and --auto are ${PACK}'s own update, not ${target}'s (am update ${PACK} --rollback)`);
+    }
     return cli(["update", ...args]).code;
   }
   const { words, flags } = parse(args, ["--check", "--json"]);

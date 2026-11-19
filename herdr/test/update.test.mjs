@@ -1697,6 +1697,25 @@ test("an old rolled-back install: am update --retry-skipped clears the skip and 
   } finally { h.done(); }
 });
 
+test("#1486: --retry-skipped on the affected machine, whose check runner still never starts, keeps the release unchecked", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "still-127"), { code: 127 });
+  try {
+    // The old updater's rollback, made by a runner that never started (#1486).
+    writeAuto(h.mods, { skip: "0.2.0" });
+    writeFileSync(join(stateDirOf(h.mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: "0.2.0",
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin, retrySkipped: true });
+    assert.equal(r.installed.version, "0.2.0", "the skipped release is installed and kept");
+    assert.equal(r.installed.restored, undefined, "nothing was rolled back again");
+    assert.deepEqual(r.installed.check, { failed: [], checked: false, unavailable: "the herdr-app check could not run (exit 127)" });
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0");
+    assert.equal(readAuto(h.mods).skip, null, "the skip is cleared, and no new one is written");
+    assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "the old restore receipt is gone");
+    assert.equal(existsSync(join(stateDirOf(h.mods), CHECK_FILE)), true, "the unchecked note is written");
+  } finally { h.done(); }
+});
+
 test("a skip recorded from a real mod failure holds through an ordinary update", async () => {
   const h = autoHome(["0.2.0"]);
   try {
