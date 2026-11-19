@@ -26,8 +26,10 @@ has it), P2 (the package and its record), P3 (the shop and the picker), P4 (Voic
 (the isolated runtime for community roles) and P6 (Genie becomes an ordinary role package).
 
 This RFC is documentation. It ships no code and cuts no release; the implementation is a
-separate wish. The design work in #1572 settled the screens; the mock itself is preserved on its
-own branch and is not part of this RFC's diff.
+separate wish. The design work in #1572 settled the screens; the mock itself is preserved on
+`feat/roles-dev-mock-preserved` and is not part of this RFC's diff. The mock's `?mock=roles` is
+a preview URL parameter (an alias for `?mock=bazaar`) that opens that branch's mock page; it is
+not a product setting, and `dev` has no roles setting: the team-level one is introduced in P1.
 
 ## Motivation
 
@@ -37,7 +39,7 @@ tied to a DSH plugin (`apps/bots-dsh/src/host/installed.js:18`): when that plugi
 switched off, the team reports the Bot as not installed, with that reason
 (`installed.js:2-9`). The kind is then read in the host and drawn in the client: the shell
 recovery whitelist (`parts.js:2438`), Genie's prompt exception (`prompt.js:48`), the clay art
-(`clay-art.js:78`), a plugin-owned model menu (`host-models.js`), and the client's marks and
+(`src/client/clay-art.js:78`), a plugin-owned model menu (`host-models.js`), and the client's marks and
 badges.
 
 That costs more than it returns:
@@ -102,7 +104,7 @@ manifest, `role.json`, declares:
 
 One prompt part means one part inside the Bot's existing `bot-identity` section, added where
 the other plugins' parts already go: after the Bot's own instructions, beside the Main Bot's
-rules and the team's rules (`prompt.js:68-86`). It is marked as the role's and cannot replace
+rules and the team's rules (`prompt.js:68-95`). It is marked as the role's and cannot replace
 the identity line or the Bot's instructions, add a second system prompt or write the Main Bot's
 rules.
 
@@ -146,7 +148,9 @@ A role is **not**:
 
 A team with no roles sees no change. A Bot of kind `genie` is read as the built-in Genie role
 from P1 and keeps its wishes, its Session and its memory; P6 is the delivery that writes the
-role and retires the kind.
+role and retires the kind. The free-text `bot.role` label is kept exactly as it is on `dev`: the
+new roles never read or write it, and the two are never converted into each other. It is not
+migrated or superseded in P1-P6; only the product name "Role" is new.
 
 ### Role assignment
 
@@ -178,8 +182,8 @@ explicit update action). This is Q3.
 
 ### The marketplace
 
-The Apps page gains a **Roles** section between Automagik's official rows and the DeepSeek
-Harness catalog, with a **Roles** chip beside the existing categories. Official roles come
+The Apps page gains a **Roles** section between Automagik's official rows and the upstream
+connector catalog, with a **Roles** chip beside the existing categories. Official roles come
 first; a community role carries a Community tag and an Install button that is off with the P5
 reason. Search and the existing category chips work across the section; P1-P6 add no new page,
 route or navigation entry.
@@ -308,12 +312,18 @@ process, and this RFC does not claim they do. That is why community roles wait f
 10. **Release artifacts.** An official role is `automagik-role-<id>-<version>.tgz` plus its
     `.sha256`, attached to the release; the signed `roles.json` on that release names it. Nothing
     is published to npm.
+11. **The roles setting.** `state.json: prefs.roles` is a team-level boolean introduced in P1,
+    on by default: the one switch the deliveries reuse. It gates the Role picker and tag (P1),
+    the temporary install action (P2) and the Roles section and chip (P3). It is not a Bot
+    setting, not `bot.role`, not `bots[].roles` and not the install records in `roles`.
 
 ## Deliveries
 
 Each delivery is plugin-only (3.N.P), is complete for its users at merge (or hidden behind the
-existing roles setting), and leaves every Bot's own settings untouched. The acceptance check is
-the one test or observation that proves it; the rollback says what a revert does.
+team-level roles setting that P1 introduces), and leaves every Bot's own settings untouched. The
+roles setting is a team-level flag in `state.prefs`, not a Bot setting and not the free-text
+`bot.role` label; `dev` has neither the flag nor a roles group in Bot settings. The acceptance
+check is the one test or observation that proves it; the rollback says what a revert does.
 
 ### P1 - one Bot, one Role picker (unchanged)
 
@@ -321,6 +331,11 @@ The step-1 design as it stands: a Bot carries `bot.roles` (empty on an old Genie
 `kind` still reads as the built-in role); the Role picker sits beside its role line; the
 built-in Genie role is served through that path, with its `grant_wish` tool, its wish rows, its
 rules and the role tag. No package, no install, no shop.
+
+P1 also introduces the roles setting: one team-level boolean, `state.prefs.roles`, in the same
+`state.json` as `prefs.theme` and `prefs.permission`, on by default. It is new in P1, not an
+existing setting on `dev`, and it is not a Bot setting. It gates the picker and the role tag in
+P1, the temporary install action in P2, and the Roles section and chip in P3.
 
 - **Acceptance:** an ordinary Bot shows Role: none and keeps its model, permission, folder and
   Session; a Genie Bot still grants a wish and draws its wish rows; setting the role to none
@@ -332,7 +347,8 @@ rules and the role tag. No package, no install, no shop.
 
 The role package and `state.roles`: install from the signed index, verify the sha256, validate
 the id and capabilities, write the files under the team home, record the install. No shop yet;
-the install action is reachable from the Bot's settings behind the roles setting, for testing.
+while the P1 roles setting (`state.prefs.roles`) is on, a temporary install action appears in a
+Roles card in the Bot's settings, for testing.
 
 - **Acceptance:** a package whose bytes do not match the sha256, a version not in the index, or
   an unknown capability is refused and leaves no files; a good package installs, records id,
@@ -351,8 +367,9 @@ Bot's row and in its settings, Uninstall disabled while attached.
   Bot, see the tag and the card, detach, uninstall; a community row is listed, labelled, and its
   Install button is off with the P5 reason. The flow leaves an unrelated Bot byte-identical in
   `state.json`.
-- **Rollback:** hide the Roles section and the chip with the roles setting; installed packages
-  and attachments stay in the state, and the picker goes on working if it was already in use.
+- **Rollback:** hide the Roles section and the chip with the P1 roles setting
+  (`state.prefs.roles`); installed packages and attachments stay in the state, and the picker
+  goes on working if it was already in use.
 
 ### P4 - Voice / Mouth
 
