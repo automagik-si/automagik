@@ -423,6 +423,16 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
     for (const name of ['HERDR_PACK_KEY', 'AM_LANE_KEY', 'METER_LANE_KEY', 'HAS_KEYSTORE', 'HAS_PASSWORD']) expect(cut).toContain(`${name}:`);
   });
 
+  test('the herdr key check, the cut and the signing step select the same slot, with no fallback to the primary', () => {
+    const selected = "HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}";
+    for (const name of ["The herdr pack's signing key", 'Version, commit and tag', 'Sign and post the herdr lane']) {
+      const lines = step(name).split('\n').map(line => line.trim());
+      expect(lines.filter(line => line.startsWith('HERDR_PACK_KEY:'))).toEqual([selected]);
+      expect(lines).toContain('HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}');
+      expect(step(name)).not.toContain('|| secrets.HERDR_PACK_KEY }}');
+    }
+  });
+
   test('the scripts still carry the gates they replaced', () => {
     for (const command of [
       "node --test 'test/*.test.mjs'",

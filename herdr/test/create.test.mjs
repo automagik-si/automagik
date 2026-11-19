@@ -1380,17 +1380,43 @@ test("menu busy labels: only the running action's item changes", async () => {
 
 // ---- automagik#206: a project on a linked machine ("vm": its files are scratch paths here) ----
 
-test("menu on a linked machine: Configure, Prompt and Run there; no What happened yet; Configure opens the form there", async () => {
+test("menu on a linked machine: Configure, Prompt, Run and What happened there; Configure opens the form there", async () => {
   seed([MAIN, OMP]);
   const { draw, click } = await menu({ machine: "vm" });
   draw();
-  for (const id of ["menu-configure", "menu-prompt", "menu-start", "menu-restart"]) assert.ok(nodes.has(id), id);
-  for (const id of ["menu-attach", "menu-detach", "menu-focus", "menu-inspect"]) assert.ok(!nodes.has(id), id);
-  assert.match(textOf(nodes.get("menu-remote-note")), /On vm\. What happened isn't shown/);
+  for (const id of ["menu-configure", "menu-prompt", "menu-start", "menu-restart", "menu-inspect"]) assert.ok(nodes.has(id), id);
+  for (const id of ["menu-attach", "menu-detach", "menu-focus"]) assert.ok(!nodes.has(id), id);
+  // #206: the scope is said: the events this computer recorded for that machine, nothing more.
+  assert.equal(textOf(nodes.get("menu-remote-note")), "Attach, detach and end events recorded by this computer for vm.");
   assert.doesNotMatch(textOf(nodes.get("bot-form-body")), /work from that computer/);
   state.opened = [];
   await click("menu-configure");
   assert.deepEqual(state.opened[0].props, { form: "edit", bot: OMP.id, project, machine: "vm" });
+});
+
+test("menu What happened on a linked machine asks history --machine and shows its rows, or names the machine when empty (#206)", async () => {
+  seed([MAIN, OMP]);
+  const at = (m) => `2026-11-03T10:0${m}:00.000Z`;
+  const args = fakeCli({ id: OMP.id, name: OMP.name, machine: "vm", bot: OMP.id,
+    attach: [{ v: 1, event: "attach", bot: OMP.id, terminal: "t8", core: "core-of-vm", machine: "vm", by: "attach", at: at(1) },
+      { v: 1, event: "detach", bot: OMP.id, terminal: "t8", core: "core-of-vm", machine: "vm", by: "detach", at: at(2) }],
+    starts: [], workers: [], sessions: [], transcript: null });
+  const { draw, click } = await menu({ machine: "vm" });
+  draw();
+  await click("menu-inspect");
+  const text = textOf(draw());
+  assert.deepEqual(args(), [`history ${OMP.id} --project ${project} --machine vm --json`]);
+  assert.match(text, /2026-11-03 10:02 detached from t8 · by detach/);
+  assert.match(text, /2026-11-03 10:01 attached to t8 · by attach/);
+  assert.match(textOf(nodes.get("menu-remote-note")), /recorded by this computer for vm/);
+  assert.ok(!nodes.has("menu-transcript"));
+
+  seed([MAIN, OMP]);
+  fakeCli({ id: OMP.id, name: OMP.name, machine: "vm", bot: OMP.id, attach: [], starts: [], workers: [], sessions: [], transcript: null });
+  const none = await menu({ machine: "vm" });
+  none.draw();
+  await none.click("menu-inspect");
+  assert.match(textOf(none.draw()), /Nothing recorded by this computer for vm yet\./);
 });
 
 test("menu on a linked machine, running: Focus and Detach its pane there; Attach only to a pane of that machine; actions pass --machine", async () => {

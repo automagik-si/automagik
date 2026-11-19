@@ -1902,3 +1902,69 @@ test("#1635 no-caller member start and restart remain ordinary non-orchestrated 
   assert.deepEqual(keysSent(s.calls()), []);
   // Compatibility only: this does not prove a cross-origin return/report route.
 });
+
+// #206 (c): history --machine reads only the rows this computer wrote for that machine's core
+// and the linked project. A machine's name may change, so the core id decides, never the name.
+test("#206 history --machine shows this computer's rows for the linked core and project only", (t) => {
+  const s = scene(t);
+  const GONE = "b-goneaaaaaa";
+  const at = (m) => `2026-11-18T00:${String(m).padStart(2, "0")}:00.000Z`;
+  const local = { v: 1, event: "attach", bot: ATLAS, project: s.project, terminal: "t8", core: "core-of-this", created_ms: 1, at: at(1), by: "attach" };
+  seedCallerLedger(s, [
+    local,
+    linkedRow(s, { terminal: "t21", at: at(2) }),
+    linkedRow(s, { event: "detach", terminal: "t21", at: at(3), by: "detach" }),
+    linkedRow(s, { terminal: "t22", project: join(s.root, "vm", "other"), at: at(4) }),
+    linkedRow(s, { terminal: "t23", core: "core-of-another", at: at(5) }),
+    linkedRow(s, { terminal: "t24", machine: "old-vm-name", at: at(6) }),
+    linkedRow(s, { bot: GONE, terminal: "t25", at: at(7) }),
+  ]);
+  const before = linkedBytes(s);
+  const from = s.calls().length;
+
+  const json = s.cli(["history", "Atlas", ...s.on, "--json"]);
+  assert.equal(json.code, 0, json.err);
+  const out = json.json();
+  assert.deepEqual([out.id, out.name, out.machine], [ATLAS, "Atlas", "vm"]);
+  assert.deepEqual(out.attach.map((r) => [r.event, r.terminal]), [["attach", "t21"], ["detach", "t21"], ["attach", "t24"]]);
+  // The rows pass as written (bots.attach-ledger@1): nothing added, nothing taken.
+  assert.deepEqual(out.attach[0], linkedRow(s, { terminal: "t21", at: at(2) }));
+  assert.deepEqual(out.attach[2], linkedRow(s, { terminal: "t24", machine: "old-vm-name", at: at(6) }));
+  // The worker ledger is this computer's: nothing of it is shown for a linked machine.
+  assert.deepEqual([out.starts, out.workers, out.sessions, out.transcript], [[], [], [], null]);
+
+  const text = s.cli(["history", "Atlas", ...s.on]);
+  assert.equal(text.code, 0, text.err);
+  assert.match(text.out, new RegExp(`^Atlas \\(${ATLAS}\\) on vm$`, "m"));
+  for (const seen of [/attached to t21/, /detached from t21/, /attached to t24/]) assert.match(text.out, seen);
+  for (const other of ["t8", "t22", "t23", "t25"]) assert.doesNotMatch(text.out, new RegExp(`\\b${other}\\b`));
+
+  // A removed bot, by its bare id, still answers from the rows.
+  const gone = s.cli(["history", GONE, ...s.on, "--json"]);
+  assert.equal(gone.code, 0, gone.err);
+  assert.deepEqual([gone.json().id, gone.json().name, gone.json().machine], [GONE, null, "vm"]);
+  assert.deepEqual(gone.json().attach.map((r) => r.terminal), ["t25"]);
+
+  // Nothing recorded for that core and project: the empty state names the machine.
+  const empty = s.cli(["history", "Hedge", ...s.on]);
+  assert.equal(empty.code, 0, empty.err);
+  assert.match(empty.out, /^Hedge \(b-hedgeaaaaa\) on vm$/m);
+  assert.match(empty.out, /nothing recorded by this computer for vm/);
+
+  // A read only: no ledger or bots file changed, no pane started, keyed or killed.
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s, from);
+});
+
+test("#206 history --machine refuses a machine that isn't linked, and a name the project doesn't define", (t) => {
+  const s = scene(t);
+  seedCallerLedger(s, [linkedRow(s)]);
+  const unknown = s.cli(["history", "Atlas", "--machine", "nosuch", "--project", s.project, "--json"]);
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.err, /nosuch can't be reached|isn't a linked machine/);
+  assert.equal(unknown.out.trim(), "");
+  // Only a bare id may name a removed bot; an unknown name is still an error.
+  const name = s.cli(["history", "Nobody", ...s.on]);
+  assert.notEqual(name.code, 0);
+  assert.equal(name.out.trim(), "");
+});
