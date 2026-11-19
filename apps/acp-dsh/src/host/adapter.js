@@ -18,7 +18,7 @@ import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
-import { BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
+import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import { agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
@@ -564,13 +564,16 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, access, holds, ownMode = () => undefined,
+    botIdentity = () => undefined, access, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
     super()
     this.cancelWaitMs = cancelWaitMs
     this.timers = timers
+    // Whether the host itself is stopping (index.js watches its SIGTERM/SIGINT): a prompt the
+    // agent then cancels was cut by the restart, not stopped by the person or by its own policy.
+    this.hostStopping = hostStopping
     // The turn gates (index.js `holdTurns`): asked before an agent acts for a Session. They
     // only ever refuse; with none registered nothing is asked.
     this.ownMode = ownMode
@@ -769,20 +772,28 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   /**
-   * Whether DSH's tools reach this agent when the setting says nothing. Only an adapter that
-   * can drop its own built-in tools is in the default: today that is Claude Code's. Codex keeps
-   * its own tool set, so bridging it by default would run two tool sets; an explicit true
-   * still does it.
+   * Whether DSH's tools reach this agent when the setting says nothing. An adapter that can
+   * drop its own built-in tools is in the default: today that is Claude Code's. An agent that
+   * keeps them (Codex) is not, unless its Bot's role tools live in DSH: bots-dsh sends that as
+   * `needsDshTools` in the Session's identity, because a Genie's `grant_wish` has no other path
+   * to the model. Such a Session still does not get DSH's twins of the agent's own tools.
    */
-  bridgeDefault(agent) {
-    return agent?.disableBuiltInTools === true
+  bridgeDefault(agent, sessionId) {
+    if (agent?.disableBuiltInTools === true) return true
+    return this.roleToolsInDsh(sessionId)
+  }
+
+  /** Whether this Session's Bot needs DSH's tools whatever its agent keeps (bots-dsh identity). */
+  roleToolsInDsh(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return false
+    try { return this.botIdentity(sessionId)?.needsDshTools === true } catch { return false }
   }
 
   /**
    * Whether DSH's tools reach an agent at all: an explicit true/false decides, and an absent
    * setting takes the adapter's own switch (`bridgeDefault`).
    */
-  bridgeOn(agent) {
+  bridgeOn(agent, sessionId) {
     if (this.backchannel === undefined) return false
     // A row that declares no bridge (`bridge: false`, the native agents) gets none, even with
     // `dshTools: true`: its bridge calls would not be recognised, so each would draw a mirror
@@ -790,7 +801,7 @@ export class AcpAdapter extends LlmAdapter {
     if (agent?.bridge === false) return false
     const setting = this.dshTools()
     if (setting === true || setting === false) return setting
-    return this.bridgeDefault(agent)
+    return this.bridgeDefault(agent, sessionId)
   }
 
   /**
@@ -805,7 +816,7 @@ export class AcpAdapter extends LlmAdapter {
    * @param {string} sessionId the DSH Session
    */
   nativeOn(agent, sessionId) {
-    if (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent)) return false
+    if (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent, sessionId)) return false
     let setting
     try { setting = this.nativeTools() } catch { return false }
     if (setting === true) return true
@@ -1071,7 +1082,13 @@ export class AcpAdapter extends LlmAdapter {
    */
   async refork(agent, live, dshAgent, signal) {
     const previous = live.bridge
-    const next = this.backchannel.mint({ sessionId: dshAgent?.session?.id, agent: dshAgent, name: agent.name, promptRunning: () => live.open === true && live.run?.busy === true, native: live.native === true })
+    const next = this.backchannel.mint({
+      sessionId: dshAgent?.session?.id,
+      agent: dshAgent,
+      name: agent.name,
+      promptRunning: () => live.open === true && live.run?.busy === true,
+      native: live.twinsOff === true,
+    })
     live.bridge = next
     try {
       await live.run.held(() => live.run.fork({
@@ -1104,7 +1121,7 @@ export class AcpAdapter extends LlmAdapter {
    * the same trace and the record says what ran.
    */
   checkDrift(sessionId, agent, tool) {
-    if (!this.bridgeOn(agent) || agent.drift !== true || tool.drift === true) return
+    if (!this.bridgeOn(agent, sessionId) || agent.drift !== true || tool.drift === true) return
     const name = tool.structuredName
     if (name === undefined || name.startsWith('mcp__') || name === 'ToolSearch') return
     // Every drifted call stays cardless, but the record and the cancel belong to the turn: a
@@ -1141,7 +1158,7 @@ export class AcpAdapter extends LlmAdapter {
     if (live === undefined) return
     // Off is the old path, byte for byte: the agent session is kept across a turn on another
     // provider, so switching back resumes the same ACP session. The default is per agent.
-    if (!this.bridgeOn(this.agents.get(live.provider))) return
+    if (!this.bridgeOn(this.agents.get(live.provider), session?.id)) return
     const provider = event.data?.provider
     if (agentRoute(this.agents, provider)) return
     this.end(session.id, live)
@@ -1342,11 +1359,13 @@ export class AcpAdapter extends LlmAdapter {
       // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
       // person's own allow rules must not silently skip the ask for a hard Bash or file case.
       const native = this.nativeOn(agent, sessionId)
-      const asks = typeof agent.hardAsk === 'function' && !(this.bridgeOn(agent) && agent.disableBuiltInTools === true && !native) && !full
-      const bridgeGone = live?.bridge?.closed === true && this.bridgeOn(agent)
+      const asks = typeof agent.hardAsk === 'function' && !(this.bridgeOn(agent, sessionId) && agent.disableBuiltInTools === true && !native) && !full
+      const bridgeGone = live?.bridge?.closed === true && this.bridgeOn(agent, sessionId)
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // A flip of the mode is a new tool set: the next turn starts a new agent session on it.
-      if (live !== undefined && (live.provider !== options.provider || !live.run.alive || bridgeGone || live.asks !== asks || (live.native === true) !== native)) {
+      const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
+        || bridgeGone || live.asks !== asks || (live.native === true) !== native)
+      if (remade) {
         this.end(sessionId, live)
         live = undefined
       }
@@ -1393,7 +1412,7 @@ export class AcpAdapter extends LlmAdapter {
       const replaying = this.replayOn()
       if (live === undefined) {
         crossing = replaying && prior !== undefined && prior !== options.provider
-        const state = { fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox, provider: options.provider, name: agent.name, asks, native, run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, bridge: undefined, replay: undefined, owed: undefined, drifted: false }
+        const state = { fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox, provider: options.provider, name: agent.name, asks, native, twinsOff: false, run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, bridge: undefined, replay: undefined, owed: undefined, drifted: false }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
         // session start is tried once more on that one: the turn is not lost to a bad release.
@@ -1411,10 +1430,18 @@ export class AcpAdapter extends LlmAdapter {
               this.sessionFiles.clear(sessionId, { owner: fileOwner })
               state.fileOwner = fileOwner = undefined
             }
-            if (this.bridgeOn(agent)) {
+            const bridged = this.bridgeOn(agent, sessionId)
+            // A Bot whose role tools live in DSH is bridged without asking, even on an agent
+            // that keeps its own built-ins (Codex): it is offered DSH's extras only, never a
+            // second copy of the tools it already has. An explicit `dshTools: true` keeps the
+            // whole preset.
+            const twinsOff = native
+              || (bridged && agent.disableBuiltInTools !== true && this.roleToolsInDsh(sessionId))
+            state.twinsOff = twinsOff
+            if (bridged) {
               await this.backchannel.listen()
               if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
-              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true, native })
+              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true, native: twinsOff })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
             const takesIdentity = ['acp-claude', 'acp-codex'].includes(options.provider)
@@ -1432,6 +1459,13 @@ export class AcpAdapter extends LlmAdapter {
                   + `You are ${name}, a Bot on the user's team.`
                   + (role ? ` Your role: ${role}.` : '')
                   + (instructions ? `\n\n${instructions}` : '')
+                  + '\n\nFor a Bot Browser request, use the browser tools this conversation offers. '
+                  + 'Never launch Chrome or another browser from a command. '
+                  + 'When sign-in, payment or verification needs the person, use the offered browser handoff '
+                  + '(`browser_handoff` when available) and stop until they answer. '
+                  + 'If you cannot open the page here, ask the Bot named `browse` only when `message_bot` is offered '
+                  + 'and that Bot is on the team. Say when the request was sent, then report the browser outcome '
+                  + 'when its reply arrives. If the route is unavailable or a call fails, say why.'
               },
               // Which way the Bot's identity went (never its text), for the log.
               onIdentity: takesIdentity ? delivery => {
@@ -1442,10 +1476,10 @@ export class AcpAdapter extends LlmAdapter {
               // the hard ask rules unless the level is Full.
               ...(native
                 ? { sessionMeta: { ...(asks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
-                : this.bridgeOn(agent) && agent.disableBuiltInTools === true
+                : bridged && agent.disableBuiltInTools === true
                   ? { sessionMeta: { disableBuiltInTools: true } }
                   : asks ? { sessionMeta: agent.hardAsk() } : {}),
-              dshTools: this.bridgeOn(agent),
+              dshTools: bridged,
               refresh: agent.refresh,
               onReady: state.bridge === undefined ? undefined : () => this.ready(agent, state),
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
@@ -1538,7 +1572,7 @@ export class AcpAdapter extends LlmAdapter {
       }
       // A preset or level change since the last turn: the bridge serves the new set, and an
       // agent that ignores `tools/list_changed` gets the list through a fork instead.
-      if (live.bridge !== undefined && this.bridgeOn(agent)) {
+      if (live.bridge !== undefined) {
         const changed = this.backchannel.refresh(live.bridge)
         if (changed && agent.refresh === 'fork') {
           if (live.sessionFileMode) {
@@ -1770,7 +1804,7 @@ export class AcpAdapter extends LlmAdapter {
         const skip = tool.drift === true || tool.bridge === true
           || tool.structuredName === 'ToolSearch'
           || (agent.refresh === 'fork' && tool.mcp === true)
-        if (this.bridgeOn(agent) && skip) {
+        if (live.bridge !== undefined && skip) {
           live.run.answerSkippedMcp(tool)
           if (tool.drift === true) {
             // Drift can be discovered after the nameless event was queued. No card will ask
@@ -1804,6 +1838,14 @@ export class AcpAdapter extends LlmAdapter {
         }
         yield* shown()
         yield* blocks.close()
+        // A cancel the app did not ask for (the turn's Stop would have aborted the signal) while
+        // the host itself is stopping came from outside: its SIGTERM reached the agent, which
+        // answered with `cancelled`. That is an interruption, not the person's Stop, and not a
+        // model failure: the Bot team resumes the work after the restart.
+        if (event.stopReason === 'cancelled' && options.signal?.aborted !== true
+            && live.run.cancelled !== true && this.hostStopping()) {
+          return yield finish('error', `${agent.name} was interrupted before it finished.`, AGENT_INTERRUPTED)
+        }
         if (event.stopReason === 'cancelled') return yield finish('aborted', 'Stopped', 'ABORTED')
         return yield finish(FINISH[event.stopReason] ?? 'stop')
       } else if (event.type === 'error') {
@@ -1813,6 +1855,12 @@ export class AcpAdapter extends LlmAdapter {
         if (isAuthRequired(event)) {
           this.signedOut(options.provider)
           return yield signInFailure(agent, event)
+        }
+        // The agent process took the host's SIGTERM while its prompt was in flight: the work
+        // was cut while running, so it is reported as an interruption rather than a failure.
+        if (options.signal?.aborted !== true && live.run.cancelled !== true
+            && (this.hostStopping() || live.run.exited?.signal === 'SIGTERM' || live.run.exited?.signal === 'SIGINT')) {
+          return yield finish('error', `${agent.name}: ${event.message}`, AGENT_INTERRUPTED)
         }
         return yield finish('error', `${agent.name}: ${event.message}`)
       } else if (event.type === 'aborted') {

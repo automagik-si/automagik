@@ -41,6 +41,6 @@
     "PATH=<guard>:<root>/bin:/usr/bin:/bin",
     "dsh-tui",
     "--",
-    "do the task"
+    "do the task\n\nBefore you report done: commit or discard every change you made and leave the worktree clean (`git status --porcelain` prints nothing)."
   ]
 }

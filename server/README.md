@@ -137,7 +137,7 @@ Four preparation/runtime stages, every base digest-pinned (plus the distroless b
 | Stage | What it does |
 |---|---|
 | `builder` | `node:24.22.3-trixie-slim`: installs the pinned harness and pnpm, verifies the release tarballs, installs/prunes the profile, prepares its inspected offline dependency store, writes version/revision metadata |
-| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, `flock`, `tar`, `gzip`, `find`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped |
+| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, `flock`, `tar`, `gzip`, `find`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped. It also strips the distroless Node binary's debug sections with a build-only `binutils` |
 | `gate-deps` | Bun 1.4.4 installs the exact WebAuthn dependency and `server/bun.lock`, with lifecycle scripts disabled, then prunes development files. Bun stays in this stage |
 | `runtime` | `scratch` holding the distroless nodejs24 rootfs (node and glibc), cleaned in the `tools` stage (man pages and changelogs stripped there with coreutils), plus the tools above, the code, nothing else — no apt, npm, curl or build toolchain |
 
@@ -146,6 +146,15 @@ pruned payload keeps everything the composed tree names — office-to-pdf and it
 `libreoffice-kit-wasm` included — and drops the inspector, the voice engine, the musl sharp
 variants, the win32/darwin node-pty prebuilds and the experimental bundles the profile never
 composes.
+
+No debug bytes ship: the `tools` stage strips the distroless Node binary's DWARF sections
+(17,817,400 of its 122,466,960 bytes; `--strip-all` keeps the dynamic symbol table). The
+Emscripten `@img/sharp-wasm32` payload stays: `sharp` falls back to it on an x86-64 CPU without
+v2 and after any native-load failure, so its 9,150,351 bytes are a live fallback, not dead
+weight. On a build of the current tree with content 3.157.2, the strip alone took the image from
+642,998,234 to 625,180,834 bytes flattened (17.0 MiB) and from 216,040,627 to 211,828,001 bytes
+compressed (4.0 MiB); `USER 1000:1000`, the digest-pinned bases and the health check are
+unchanged.
 
 ## Build and smoke
 
@@ -851,9 +860,10 @@ smoke checks private claim output and host control in the built runtime.
 
 A Cloud workspace's gate takes no claim and no passkey. A person opens the workspace from the
 Cloud rail, and the gate turns that open into its own session. It follows RFC 0024 (g) and the
-[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4, 5 and 6. Delivery state: the
+[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4, 5 and 6, and the
+[version 2 renewal contract](../docs/cloud/contracts-v2.md). Delivery state: the
 gate side is built and tested against a fake Cloud service; the Cloud service's side (minting
-open codes and tokens, and sending revocation) is not built yet.
+open codes and tokens, rechecking a role on renewal, and sending revocation) is not built yet.
 
 Set all seven values on the gate container, with your own values on the host:
 
@@ -863,7 +873,7 @@ Set all seven values on the gate container, with your own values on the host:
 | `AUTOMAGIK_GATE_CLOUD_IDENTITY_ISSUER` | `{identity-service-issuer}`, the principal's `issuer` |
 | `AUTOMAGIK_GATE_CLOUD_WORKSPACE` | `{workspace-id}`, this workspace's id: the only audience it accepts |
 | `AUTOMAGIK_GATE_CLOUD_KEYS_URL` | the HTTPS URL of the Cloud service's published key set |
-| `AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL` | the HTTPS URL of the Cloud service's open-code exchange |
+| `AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL` | the HTTPS URL of the Cloud service's open-code exchange and version 2 role recheck |
 | `AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN` | the exact HTTPS origin of the Cloud rail page that opens workspaces |
 | `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` | the HTTPS URL of the Cloud service's revocation list |
 
@@ -900,11 +910,29 @@ safeguards of (f) hold. The gate admits a token only when its roles include `own
 `{ issuer: <identity issuer>, subject: sub, roles, workspace }`.
 
 **The session.** The gate sets its usual `__Host-automagik-session` cookie on its own origin.
-The session ends when the token does, and never more than 5 minutes after the open. Renewal
-rotates the cookie but never extends that end. Cloud sessions are kept in memory only; a gate
-restart ends them. To keep working, the person opens the workspace from the rail again; a new
-open replaces the browser's previous session. The session list and "sign out everywhere" cover
-only the signed-in person's own sessions.
+The session ends when the token does, and never more than 5 minutes after the open or the last
+renewal. Cloud sessions are kept in memory only; a gate restart ends them. To keep working, the
+person renews (below) or opens the workspace from the rail again; a new open replaces the
+browser's previous session. The session list and "sign out everywhere" cover only the signed-in
+person's own sessions.
+
+**Renewal (contracts v2).** The page posts `application/json` to `POST /_gate/cloud/renew` on
+the gate's origin, with exactly `{version: 2, renew: true, workspace}` and its current session
+cookie: no single-use code, no token and no `Authorization` header. `workspace` is the configured
+workspace id, the same value as version 1's `aud`, never a host. The gate refuses an expired or
+revoked session, a version 1 body, another version, another workspace, a held token whose `aud`
+differs, or any extra field. For a valid request it sends the exact workspace token it verified
+at open, server to server, as the proof: no browser cookie, open code or query string leaves the
+gate. The Cloud service verifies that token's signature, `aud` and `exp`, then rechecks the
+person's role, and answers with a version 1 workspace token carrying the current roles. The gate
+refuses a missing held token or one past its `exp` before it calls Cloud, with no grace, and
+refuses any answer over 5 minutes. A verified answer replaces the session with one made from the
+rechecked roles, and the gate keeps the new token server-side for the next renewal. The old
+cookie stops working, and the new session ends at the earlier of the token's expiry and 5
+minutes from the renewal. A refusal by Cloud or a role that grants no access is refused whole and
+issues no session. Nothing in the request can lengthen the session or raise a role.
+`POST /_gate/session/renew` remains the plain cookie rotation and still never extends a Cloud
+session's hard end.
 
 **Revocation.** The Cloud service sends `POST /_gate/cloud/revocation` to the gate's origin as
 `application/json`, with the version 1 call body. The call carries a detached JWS in

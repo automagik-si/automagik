@@ -419,20 +419,32 @@ a place in a team, and keeps that team in front of every agent and of you.
 The pack replaces Herdr's `spaces` sidebar with one that draws each project's team under its
 space: the main bot as a card, categories as headers, captains with their members folded
 under them, planned bots dimmed with their wave. Each bot shows its character, its role and
-model, its agent's icon and its status. Right-click a bot for its menu: Configure opens the edit
-form (name, agent, model, role, category, lead, worker defaults); Prompt edits its instructions
-in place and saves them as the form does; Run starts it, or focuses its pane when it has one,
-restarts it (Restart runs `am restart`; Restart on… restarts it on another installed
-agent, a new conversation, the bot's definition keeping its agent), attaches it to the focused
-pane or detaches it; What happened shows `am history` for it (its panes, starts,
-sessions, the newest transcript, which a click copies, its workers) and the helpers its pane runs
-now. A planned bot's menu has no Run items. A queued restart waits for its next idle. A busy-pane
-refusal offers "Restart anyway". With helpers, choose "Restart with its helpers" to restart immediately and resume
+model, its agent's icon and its status. The rows and their clicks follow the attach ledger
+(`am whois --all`), not a pane's `bot=` label: after a relabel, a bot is drawn and focused on
+the pane the ledger binds it to (the labels draw the rows only while the CLI can't answer).
+Right-click a bot for its menu: Configure opens the edit form (name, agent, model, role,
+category, lead, worker defaults); Prompt edits its instructions in place and saves them
+as the form does; Run starts it, or focuses its pane when it has one, restarts it (Restart
+runs `am restart`; Restart on… restarts it on another installed agent, a new conversation, the
+bot's definition keeping its agent), attaches it to the focused pane or detaches it; What
+happened shows `am history` for it (its panes, starts, sessions, the newest transcript, which a
+click copies, its workers) and the helpers its pane runs now. A planned bot's menu has no Run
+items. A queued restart waits for its next idle. A busy-pane refusal offers "Restart anyway".
+With helpers, choose "Restart with its helpers" to restart immediately and resume
 those conversations, or "End helpers and restart" to end them. On a linked machine, the first choice
 runs the installed CLI's local `--tree --force` restart on the machine holding the panes, then updates
 this sidebar's attachment. Saved configuration changes use these same choices when you restart to apply
 them. Pack updates reload mods and do not restart bot panes. The Bots list and the Attach picker open
 on the bots the sidebar already knows and refresh behind.
+
+**A question is not a permission.** An agent that ends its turn waiting on you sets the pane
+label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
+`hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a
+**Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
+**Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
+clears the moment the pane works again or the label is removed: the sidebar reads the label from
+the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
+a day is reported by `am tidy` (`stale-needs-owner`).
 
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
@@ -646,7 +658,10 @@ am dsh-tui install | update | uninstall | doctor
   with the shell itself in front, idle, and no job of its own running (`sleep 99 &` left at
   the prompt keeps it: its child processes are asked with `pgrep -P`, and an answer that
   can't be read keeps it too), so the space is never left empty and nothing else is closed.
-  The sidebar's Start knows the panes. `start` from the command line, `--machine` too, reads
+  The sidebar's Start knows the panes. When another start opens a space on the project in the
+  same moment, every start uses the first one, and the sidebar closes the extra space it
+  opened while that space holds only its own shell; a space that shows only after the wait is
+  closed the same way, as soon as it appears. `start` from the command line, `--machine` too, reads
   them from `herdr-app ls`, which counts no mod pane: it closes the tab only when it saw that
   shell, right after its own `space.new`, as the new space's one tab and that tab's one
   terminal. `AUTOMAGIK_HERDR_TAB_WAIT_MS` sets how long `start` and `worker` wait for Herdr to show
@@ -767,6 +782,21 @@ Which pane plays which bot is recorded in one file, `<app home>/automagik-herdr/
 `attach` and `detach`, and any run that reads it and finds a pane ended. The sidebar's Start
 and Attach run the command line too. The `bot` label is a display hint: `hc label` changes
 no row, so relabelling a pane moves no bot.
+
+**Which app home a restart uses.** `HERDR_APP_HOME` names it. With it unset, restart resolves
+the home before it writes anything: a pane's launch home wins, live or ended (hc keeps an ended
+pane until it is removed, and its launch carries the home); else a live binding wins over a
+stale one; else the project's own app home (`<project>/.herdr/app-home`, RFC 0021 delivery 3)
+is used when it names the bot and the default does not. A binding is **live** while hc still
+gives its terminal with the same `created_ms` (a finished, vanished or reused terminal is
+**stale**), and that one rule is what `restart`, `attach`, `show`, `whois` and `revive` resolve
+with: the live binding is the bot's wherever the command was typed. `ls`, `brief` and `start`
+read the selected home first and fall back to the project's own home when it names nothing
+live. Two live bindings on different panes, and two stale ledgers that both name the bot, have
+no launch record to decide between them: `restart`, `show` and `whois` refuse them, naming both
+ledgers, before anything starts or is written. Set `HERDR_APP_HOME` to the home that owns it.
+`am revive` leaves a bot alone when a live pane carries its label or the project's own home
+still binds it live, so a stale row in another home never brings back a twin.
 
 The file is made with mode 0600; one that is group- or world-writable is refused (every
 command that reads it exits 1, naming the fix: `chmod 600`). Each row is one line, written

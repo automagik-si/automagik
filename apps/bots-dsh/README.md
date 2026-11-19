@@ -469,7 +469,7 @@ enter team state, messages, tools, model calls or logs. The earlier confirm step
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
-**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`.
+**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`. A Genie is the exception: its role tool (`grant_wish`) is a DSH tool, so bots-dsh tells acp-dsh (`needsDshTools` in the Bot identity) and that Codex Session gets DSH's extras without the setting, never a second copy of the tools Codex already has. A wish's task Session does not.
 
 - Give every model a `contextWindow`. DS Bot takes its lines from it: the usable window is the window minus the reply reserve (`maxTokens`), the hard line is 95% of that, and the check line is `checkRatio` of it. A model without `contextWindow` gets the adapter's default (262,144 tokens for `llm-pi-ai`), which may be wrong for that model; a model that reports no window at all counts as 500,000.
 - To send images, the provider needs `defaultInput: [ text, image ]`.
@@ -616,14 +616,14 @@ When a Bot needs an API key, token or password, it calls `request_secret`, and a
 - **Fill in**: the field hides what you type, is not part of a form and is not autofilled. Choose "All Bots" or "Only this Bot" and select Save. A value must have at least 4 characters (a 4-digit PIN works). A value of 8 characters or more is hidden wherever it appears; a shorter one only where no letter or digit touches it, so ordinary words stay intact.
 - **Allow**: if the secret is already saved but this Bot is not allowed to use it, the card only asks whether to allow it. You can also replace the value there.
 - **Use**: the value goes into the Bot's shell environment as `DSH_SECRET_<NAME>` (`$DSH_SECRET_NAME` in bash, `$env:DSH_SECRET_NAME` in PowerShell). `list_secrets` lists the names a Bot can use. An MCP capability can also take `$DSH_SECRET_<NAME>` in its env, its headers and its URL (path or query); in the URL the value is URL-encoded. Use headers when the server accepts them.
-- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value is replaced with `[secret:<NAME>]`.
+- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value that the redactor recognizes is replaced with `[secret:<NAME>]`.
 - **Manage**: Settings → Secrets lists every secret by name, purpose, the Bot that asked and the last use. You can change who may use it, replace the value, delete it or add one. Deleting a Bot removes it from every secret.
 - **Storage**: `<DSH_HOME>/bot/secrets.json`, file mode 600, written atomically. Values are never in `state.json` or logs.
 
 Limits:
 
 - On Windows, the file mode has no effect; the file is protected by your user folder only.
-- Only exact copies of a value are masked. A Bot that encodes, splits or reverses a value can still print it. Do not give important secrets to a Bot you do not trust.
+- Masking covers a value and its JSON-escaped and URL-encoded forms (`src/host/secrets.js`, the redactor). Base64, hex, split and reversed forms are not covered; a Bot that prints one can still leak it. Do not give important secrets to a Bot you do not trust.
 - On a page that is not HTTPS (for example dsh Web opened over http on a LAN), the value crosses the network in clear text. The card warns you.
 - Group chats show no cards; a Bot asks in its own chat.
 

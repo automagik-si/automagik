@@ -156,7 +156,9 @@ export function apply(ctx, config = {}, {
       ? join(dirname(store.home), CONSENT_FILE) : undefined,
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
 } = {}) {
-  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome)
+  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
+    onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
+  })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
   }
@@ -201,10 +203,26 @@ export function apply(ctx, config = {}, {
   const turnGates = new Set()
   let ownAnswerer
   let ownContested = false
+  // DSH installs its SIGTERM/SIGINT handlers before plugins load. While the host stops, an ACP
+  // prompt the agent cancels on its way down was cut by the restart, not stopped by the person
+  // or by its own policy (adapter.js). A bare test process has no such handler, so it keeps
+  // Node's default signal behaviour.
+  const hostStopping = { now: false }
+  const stopWatchingSignals = []
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    if (process.listenerCount(signal) === 0) continue
+    const stop = () => { hostStopping.now = true }
+    process.on(signal, stop)
+    stopWatchingSignals.push(() => process.removeListener(signal, stop))
+  }
+  if (stopWatchingSignals.length > 0) {
+    ctx.effect?.(() => () => { for (const stop of stopWatchingSignals) stop() })
+  }
   const adapter = new AcpAdapter(ctx, agents, {
     ownMode: () => (ownContested ? undefined : ownAnswerer?.answer),
     holds: () => [...turnGates].map(entry => entry.gate),
     images: () => imageKeeper,
+    hostStopping: () => hostStopping.now,
     botIdentity: sessionId => {
       let identity
       for (const { reader } of identityReaders) {

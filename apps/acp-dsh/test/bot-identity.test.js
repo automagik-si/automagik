@@ -11,8 +11,16 @@ import { AGENTS } from '../src/host/agents.js'
 
 const FAKE = join(import.meta.dirname, 'fixtures', 'identity-agent.mjs')
 const identity = { name: 'Ada', role: 'Reviewer', instructions: 'Check files.' }
+// #1544: the browser-to-person rule every owned acp-claude/acp-codex identity ends with.
+const browserRule = '\n\nFor a Bot Browser request, use the browser tools this conversation offers. '
+  + 'Never launch Chrome or another browser from a command. '
+  + 'When sign-in, payment or verification needs the person, use the offered browser handoff '
+  + '(`browser_handoff` when available) and stop until they answer. '
+  + 'If you cannot open the page here, ask the Bot named `browse` only when `message_bot` is offered '
+  + 'and that Bot is on the team. Say when the request was sent, then report the browser outcome '
+  + 'when its reply arrives. If the route is unavailable or a call fails, say why.'
 const text = "# Your identity\nYou are Ada, a Bot on the user's team."
-  + ' Your role: Reviewer.\n\nCheck files.'
+  + ' Your role: Reviewer.\n\nCheck files.' + browserRule
 const append = value => ({ mode: 'append', content: [{ type: 'text', text: value }] })
 const content = value => [{ type: 'text', text: value }]
 
@@ -79,7 +87,7 @@ for (const provider of ['acp-claude', 'acp-codex']) {
     assert.deepEqual(h.rows('prompt')[0].prompt, content('Hello'))
     assert.deepEqual(h.reads, ['ada'])
     assert.ok(h.warnings.some(line => line.endsWith('Bot identity: systemPrompt')))
-    assert.ok(h.warnings.every(line => !line.includes('Check files.')))
+    assert.ok(h.warnings.every(line => !line.includes('Check files.') && !line.includes('Bot Browser')))
     if (AGENTS[provider].hardAsk) {
       assert.deepEqual(h.rows('new')[0]._meta, AGENTS[provider].hardAsk())
     }
@@ -162,7 +170,7 @@ test("another Bot's identity and native tool policy never cross", async t => {
   await h.step('someone')
   assert.deepEqual(h.rows('new').map(row => row.systemPrompt), [
     append(text),
-    append("# Your identity\nYou are Someone, a Bot on the user's team.\n\nWrite notes."),
+    append("# Your identity\nYou are Someone, a Bot on the user's team.\n\nWrite notes." + browserRule),
   ])
 })
 

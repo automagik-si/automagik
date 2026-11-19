@@ -1108,11 +1108,15 @@ function scene(t, { programs = null, templates = [], env: more = {} } = {}) {
   return { root, project, home, app, cli, runs, setState, grants };
 }
 /** What an `hc run` call launches, past `/usr/bin/env NAME=value…` and the seat's briefing. */
+const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
+  + "clean (`git status --porcelain` prints nothing).";
+const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${DONE_LINE}`)
+  ? w.slice(0, -(DONE_LINE.length + 2)) : w);
 const launched = (call) => {
   const words = call.slice(call.indexOf("--") + 1);
   let i = words[0] === "/usr/bin/env" ? 1 : 0;
   while (i && i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
-  return withoutBriefing("codex", words.slice(i));
+  return withoutDone(withoutBriefing("codex", words.slice(i)));
 };
 const addDirs = (argv) => argv.flatMap((w, i) => (w === "--add-dir" ? [argv[i + 1]] : []));
 
@@ -1149,7 +1153,7 @@ test("a Codex worker in a linked worktree may write its own git dir and the main
   // A template without --no-daemon: started in hc's template form (its instructions kept), one warning with the fix.
   const old = s.cli(["worker", "task two", "--branch", "fix/1125-b", "--template", "old-codex", "--json"]);
   assert.equal(old.code, 0, old.err);
-  assert.deepEqual(s.runs().at(-1).slice(-2), ["old-codex", "task two"]);
+  assert.deepEqual(withoutDone(s.runs().at(-1).slice(-2)), ["old-codex", "task two"]);
   assert.match(old.err, /Template old-codex runs Codex without --no-daemon.*Add --no-daemon/);
   // #1142, warning-only: it starts in hc's template form, never with the pack's folders and never classified granted.
   const oldCall = s.runs().at(-1);
@@ -1160,7 +1164,7 @@ test("a Codex worker in a linked worktree may write its own git dir and the main
   // The owner's bypass template: neither refused nor warned, its command untouched.
   const mac = s.cli(["worker", "task three", "--branch", "fix/1125-c", "--template", "mac-dev", "--json"]);
   assert.equal(mac.code, 0, mac.err);
-  assert.deepEqual(s.runs().at(-1).slice(-2), ["mac-dev", "task three"]);
+  assert.deepEqual(withoutDone(s.runs().at(-1).slice(-2)), ["mac-dev", "task three"]);
   assert.equal(/no-daemon/.test(mac.err), false);
 });
 
@@ -1218,7 +1222,7 @@ test("#1142 the CLI refuses a worker template that puts a Codex option after its
   const mac = s.cli(["worker", "task", "--branch", "fix/1142-b", "--template", "mac-dev", "--json"]);
   assert.equal(mac.code, 0, mac.err);
   const call = s.runs().at(-1);
-  assert.deepEqual(call.slice(-2), ["mac-dev", "task"]);
+  assert.deepEqual(withoutDone(call.slice(-2)), ["mac-dev", "task"]);
   assert.equal(call.includes("--add-dir"), false, "no pack-injected --add-dir for a template worker");
   assert.equal("granted" in JSON.parse(mac.out), false);
 });
