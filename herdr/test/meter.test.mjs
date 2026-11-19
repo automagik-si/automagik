@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { METER_EVERY_MS, METER_FIRST_MS, METER_KEY, SYNC, meterBin, syncMeter } from "../mods/am-sidebar/meter.js";
 import { formatMarker, parseMarker } from "../mods/am-sidebar/release.js";
+import { closure } from "../../scripts/am-copies.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BIN = meterBin("/home/someone");
@@ -150,7 +151,7 @@ test("the first sync after the upgrade: a lock held, a blocked move or no space 
   }
 });
 
-test("the sidebar wires it: Herdr's exec and home(), 30 s after load, no LaunchAgent anywhere", () => {
+test("the sidebar wires it: Herdr's exec and home(), 30 s after load, and nothing Herdr loads writes a LaunchAgent", () => {
   const main = readFileSync(join(ROOT, "mods", "am-sidebar", "main.js"), "utf8");
   assert.match(main, /import \{[^}]*\bsyncMeter\b[^}]*\} from "\.\/meter\.js";/);
   assert.match(main, /cx\.timer\.after\(METER_FIRST_MS, \(cx\) => this\.meterTick\(cx\)\)/);
@@ -164,9 +165,10 @@ test("the sidebar wires it: Herdr's exec and home(), 30 s after load, no LaunchA
   assert.deepEqual(readFileSync(join(ROOT, "mods", "am-sidebar", "meter.js"), "utf8").match(/^import .*$/gm).map((l) => l.replace(/^.* from /, "")), ['"./meterFleet.js";']);
   assert.doesNotMatch(readFileSync(join(ROOT, "mods", "am-sidebar", "meterFleet.js"), "utf8"), /^import /m);
   // The pack's mods: Pocket Link (mods/pocket-link, Pocket's, never in the pack) runs its own bridge
-  // LaunchAgent, which the pack never writes.
+  // LaunchAgent, which the pack never writes. Nothing Herdr loads names launchd either; the revive
+  // login service (#939) writes its agent from the CLI, in modules main.js never imports.
   for (const dir of readdirSync(join(ROOT, "mods")).filter((d) => d !== "pocket-link")) {
-    for (const name of readdirSync(join(ROOT, "mods", dir)).filter((n) => /\.(m?js)$/.test(n))) {
+    for (const name of closure(join(ROOT, "mods", dir), ["main.js"])) {
       assert.doesNotMatch(readFileSync(join(ROOT, "mods", dir, name), "utf8"), /Library\/LaunchAgents|launchctl/, `${dir}/${name}`);
     }
   }
