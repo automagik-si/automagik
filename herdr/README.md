@@ -772,10 +772,12 @@ EPERM, an I/O error — is a refusal that leaves the plist, exits non-zero and n
 `launchctl bootout gui/<uid>/dev.herdr.automagik-herdr-revive`, so a job launchd still holds is
 never orphaned. It asks even when the plist is already gone, so a second run boots out a label an
 earlier run left behind and says so. `install.sh --uninstall` follows the same rule: it calls that
-command first when the command can answer on this computer (a pack from before the macOS agent
-still carries it and refuses), also when the plist is gone; when the command is gone or cannot
-answer it asks launchd itself — with the same 113/exact-words rule — before it removes the pack
-and its link. It never overrules a refusal from a command that answered.
+command first when the command can answer on this computer — its `revive service status --json`
+names the launchd label and its `Library/LaunchAgents` path — also when the plist is gone. A pack
+from before the macOS agent answers `status` with exit 0, but names the systemd unit and no
+launchd job, and refuses only `uninstall`, so its `uninstall` is never asked. When the command is
+gone or cannot answer it asks launchd itself — with the same 113/exact-words rule — before it
+removes the pack and its link. It never overrules a refusal from a command that answered.
 Panes on a linked machine are that machine's own to bring back.
 
 ## The attach ledger

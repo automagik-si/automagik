@@ -1365,15 +1365,19 @@ revive_launchd_not_loaded() {
   printf '%s\n' "$2" | grep -Eq '^Could not find service($|[^[:alnum:]_])'
 }
 # Whether the installed command can answer the login-service question on this computer. macOS
-# support came after `revive service` itself, so a pack from before it carries the command and
-# refuses it there ("macOS (launchd) is the next delivery", exit 1). Calling that command's
-# uninstall would stop the whole uninstall over a capability the pack never had. Ask the command
-# itself, read-only, with its own status query: exit 0 is the only answer that says it knows this
-# system's service. No version to guess and no refusal wording to match, so a reworded message or
-# a renamed internal changes neither side; Linux has always answered, so nothing is asked there.
+# support came after `revive service` itself, so a pack from before it carries the command — and
+# on macOS that command's `service status` exits 0 anyway (it reports the systemd unit as not
+# installed); only `service uninstall` refuses. Exit status therefore proves nothing. Ask for the
+# status as JSON and require what only a launchd-aware command describes: the launchd label and
+# the LaunchAgents path it manages. A pre-PR command's answer names the systemd unit and no
+# label; a refusal, an unparseable answer, a non-zero exit or either signal missing is "pre-PR
+# pack", never "launchd-aware". Read-only, with its own status query. Linux has always answered,
+# so nothing is asked there.
 revive_cli_can_answer() {
   [ "$REVIVE_OS" = Darwin ] || return 0
-  "$LINK" revive service status </dev/null >/dev/null 2>&1
+  revive_answer=$("$LINK" revive service status --json </dev/null 2>/dev/null) || return 1
+  printf '%s\n' "$revive_answer" | grep -q '"label"[[:space:]]*:[[:space:]]*"dev\.herdr\.automagik-herdr-revive"' || return 1
+  printf '%s\n' "$revive_answer" | grep -q 'Library/LaunchAgents' || return 1
 }
 # --uninstall: the service goes through the command that wrote it, while the pack and its link
 # are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
@@ -1398,15 +1402,17 @@ revive_uninstall() {
     fi
   fi
   # The command is called only when it can answer on this computer: a pack from before the macOS
-  # agent has `revive service` and refuses it there, and its refusal is not a reason to leave the
-  # pack behind. Such a pack cannot name a label either (it never wrote a plist), so the
-  # installer's own launchctl probe below is the one that can still see one launchd holds.
+  # agent has `revive service`, answers `service status` there, and cannot describe a launchd job
+  # (it refuses only `service uninstall`). Calling its uninstall would stop the whole uninstall
+  # over a capability the pack never had. Such a pack cannot name a label either (it never wrote
+  # a plist), so the installer's own launchctl probe below is the one that can still see one
+  # launchd holds.
   revive_cli=0
   if link_ours && [ -f "$PACK/bin/automagik-herdr.mjs" ] && grep -q 'revive service' "$PACK/bin/automagik-herdr.mjs" 2>/dev/null; then
     if revive_cli_can_answer; then
       revive_cli=1
     else
-      say "The pack's command can't answer the macOS login service question, so this installer asked launchd itself."
+      say "The pack's command doesn't know macOS's login service, so this installer asked launchd itself."
     fi
   fi
   if [ "$revive_cli" = 1 ]; then

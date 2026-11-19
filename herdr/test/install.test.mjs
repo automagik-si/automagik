@@ -15,6 +15,10 @@ import { UNIT_MARK as UNIT_MARK_LINE } from "../mods/am-sidebar/revive.js";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const INSTALL = join(ROOT, "install.sh");
 const PACK_SRC = join(ROOT, "mods", "am-sidebar");
+// The pack's CLI at b227988ac, the PR's base (test/fixtures/pre-pr-939/README.md): the real
+// command from before the macOS login service, never a stand-in shaped to give the answer the
+// probe is supposed to see.
+const PRE_PR_939 = join(ROOT, "test", "fixtures", "pre-pr-939");
 // The layout is its own top-level entry beside herdr/ (RFC 0011); the tarball carries it as layouts/automagik.json.
 const LAYOUT_SRC = join(ROOT, "..", "herdr-layout", "layouts", "automagik.json");
 const { OFF_BY_DEFAULT, OLD_PACK_NAME, PACK_MODS, V020_LAYOUT_SHA256, parseMarker } = await import("../mods/am-sidebar/release.js");
@@ -111,6 +115,11 @@ fi
   const link = join(home, ".local", "bin", "automagik-herdr");
   const run = (...args) => {
     const r = spawnSync("sh", [INSTALL, ...args], { cwd: root, env: { ...env, ...extraEnv }, encoding: "utf8" });
+    return { code: r.status, out: r.stdout, err: r.stderr };
+  };
+  /** The installed command (the link), under the same fake PATH and home as install.sh. */
+  const runCli = (...args) => {
+    const r = spawnSync(link, args, { cwd: root, env: { ...env, ...extraEnv }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };
   };
   // As `curl … | sh -s -- <args>` runs it: the script is stdin.
@@ -232,7 +241,7 @@ esac
   /** Every pack folder's release (its VERSION), by name, on or off. */
   const versions = () => Object.fromEntries(PACK_MODS.map((m) => [m, /\/\/ release (\S+)\n$/.exec(readFileSync(join(where(m), "main.js"), "utf8"))?.[1]]));
   const all = (v) => Object.fromEntries(PACK_MODS.map((m) => [m, v]));
-  return { root, bin, home, apps, appHome, mods, state, where, pack, old, link, run, piped, publish, publishMeter, publishScheduler, schedulerBuilds, meterKey: meterKeyOf, meterCalls, meterBuilds, herdrInstallerCalls, brewCalls, addHerdrApp, show, herdrCalls, checks, mark, versions, all, extraEnv, herdrLog };
+  return { root, bin, home, apps, appHome, mods, state, where, pack, old, link, run, runCli, piped, publish, publishMeter, publishScheduler, schedulerBuilds, meterKey: meterKeyOf, meterCalls, meterBuilds, herdrInstallerCalls, brewCalls, addHerdrApp, show, herdrCalls, checks, mark, versions, all, extraEnv, herdrLog };
 }
 
 /**
@@ -2861,37 +2870,65 @@ test("--uninstall on macOS fallback reads launchd's exact not-found words, not a
   assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "asked first, and never removes on a guess");
 });
 
-test("--uninstall on macOS removes a pack from before the login service whose command refuses the launchd question (#939)", (t) => {
+test("--uninstall on macOS removes the real pack from before the login service: its status answers, but names no launchd job (#939)", (t) => {
   const s = scratch(t, { os: "Darwin" });
   s.addHerdrApp();
   s.publish("9.9.0");
   const lc = launchctlFake(s);
   const plist = REVIVE_PLIST(s);
   // A pack installed before this PR: it never wrote the plist, so there is no label to orphan.
-  assert.equal(s.run("--no-revive", "--no-usagemeter").code, 0);
+  assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
   assert.equal(existsSync(plist), false, "a pre-PR pack writes no plist");
-  // Its command has `revive service`, and on macOS it refuses it with the pre-PR words, exit 1.
-  const said = join(s.root, "old-cli.log");
-  const refusal = "The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. Until then, run am revive by hand after a restart of this computer.";
-  exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
-printf '%s\\n' "$*" >> "${said}"
-case "$1 $2" in
-  "dsh-tui uninstall") exit 0 ;;
-esac
-printf '%s\\n' "${refusal}" >&2
-exit 1
-`);
-  writeFileSync(join(s.pack, "bin", "automagik-herdr.mjs"), `// the command from before the macOS agent: revive service exists, macOS (launchd) is refused\n// ${refusal}\n`);
+  // Put back the CLI from the base commit b227988ac (test/fixtures/pre-pr-939): the pack's own
+  // files, not a stand-in shaped to give the refusal the probe was expected to see.
+  cpSync(join(PRE_PR_939, "automagik-herdr.mjs"), join(s.pack, "bin", "automagik-herdr.mjs"));
+  cpSync(join(PRE_PR_939, "revive.js"), join(s.pack, "revive.js"));
+  // The pre-PR CLI reads process.platform rather than uname (this branch's CLI reads both): on a
+  // Linux host it must see the Mac the fake uname already describes, as the review's reproduction
+  // did.
+  const preload = join(s.root, "darwin-platform.mjs");
+  writeFileSync(preload, 'Object.defineProperty(process, "platform", { value: "darwin", configurable: true });\n');
+  s.extraEnv.NODE_OPTIONS = `--import ${preload}`;
+  // The review's finding: the pre-PR CLI answers `service status` with exit 0. Its answer names
+  // the systemd unit, and neither a launchd label nor a LaunchAgents path, so exit status alone
+  // cannot say whether a CLI knows launchd.
+  const st = s.runCli("revive", "service", "status", "--json");
+  assert.equal(st.code, 0, `the pre-PR command answers status: ${st.out}${st.err}`);
+  assert.doesNotMatch(st.out, /"label"|Library\/LaunchAgents/, `the pre-PR status names no launchd job: ${st.out}`);
   lc.set("gone");
-  const u = s.run("--uninstall", "--yes", "--no-usagemeter");
-  assert.equal(u.code, 0, `an old pack must still uninstall: ${u.out}${u.err}`);
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+  assert.equal(u.code, 0, `a pre-PR pack must still uninstall: ${u.out}${u.err}`);
   assert.equal(existsSync(s.pack), false, "the pack leaves");
   assert.equal(existsSync(s.link), false, "the link leaves");
-  assert.match(u.out, /can't answer the macOS login service question, so this installer asked launchd itself/, "says why it asked launchd itself");
+  assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, "says why it asked launchd itself");
   assert.match(u.out, /revive login service isn't installed/, "says what it found");
   assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "asked launchd, and booted out nothing it could not justify");
-  const calls = existsSync(said) ? readFileSync(said, "utf8").split("\n").filter(Boolean) : [];
-  assert.deepEqual(calls, ["revive service status"], "the old command was only asked, never told to uninstall");
+});
+
+test("--uninstall on macOS reads every status answer but launchd's own as a pack from before the login service (#939)", (t) => {
+  const answers = [
+    ["a refusal", 'printf "%s\\n" "refused" >&2; exit 1'],
+    ["an unparseable answer", 'printf "%s\\n" "not json"; exit 0'],
+    ["a status without a label", `printf '%s\\n' '{"path":"/x/.config/systemd/user/automagik-herdr-revive.service","installed":false}'; exit 0`],
+    ["a label without the launchd path", `printf '%s\\n' '{"label":"dev.herdr.automagik-herdr-revive","installed":false}'; exit 0`],
+  ];
+  for (const [what, body] of answers) {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0, what);
+    exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+case "$*" in *"status --json"*) ${body} ;; esac
+exit 1
+`);
+    lc.set("gone");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+    assert.equal(u.code, 0, `${what}: the installer falls back instead of calling the command's uninstall: ${u.out}${u.err}`);
+    assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, `${what}: says why`);
+    assert.equal(existsSync(s.pack), false, `${what}: the pack leaves`);
+    assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], `${what}: the fallback asked launchd`);
+  }
 });
 
 test("--dsh-tui writes minimumReleaseAgeExclude: [] for a release older than the profile's gate", (t) => {
