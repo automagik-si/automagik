@@ -133,6 +133,38 @@ it classifies as agent sessions. A token the CLI classifies as an ordinary perso
 access token reads like one. Proton may record reads in its Business read report.
 Forward proxies are unsupported. Proton Pass is unavailable in Automagik Cloud.
 
+## Bitwarden Secrets Manager machine accounts
+
+Install `bws` 2.x on the host. In local Settings › Secrets › Vault, choose **Bitwarden
+Secrets Manager**, enter the server (`us`, `eu`, or a self-hosted HTTPS base URL) and
+select **Set token**. Use a machine account scoped to the projects it needs. The picker
+lists projects first and lets you choose a project's keys.
+
+The token is saved in the host user's keychain. After a restart or lock, select **Unlock**
+to activate it again. **Clear token** deletes the saved credential and locks the adapter.
+Settings sends the displayed connection label with Clear. A provider-only request requires
+an active Secrets Manager connection or a mapping to identify the saved item.
+Setting a fresh token for the same connection replaces its saved server and token. The
+adapter confirms the saved record before activating the replacement. With two DSH processes
+on one profile, a Clear in one does not end the other's in-memory session. That session
+ends at its idle lock, an explicit lock, or quit. Remote and Pocket clients cannot change
+or unlock the credential. Cloud support is deferred.
+
+With `bws` 2.1.0, HTTP 401 and HTTP 400 with an `invalid_client` or `invalid_grant`
+error lock the adapter. The CLI reports identity and item API errors in the same
+format, so D4c classifies a 404 from `bws secret get` as unavailable and leaves the
+adapter unlocked. The adapter never classifies a `bws` diagnostic as revoked.
+
+macOS uses the login keychain's default ACL, which trusts `/usr/bin/security`. A
+same-user process can use that executable to read the credential while the login keychain
+is unlocked, including between CLI calls. Removing that trust would require prompting
+on reads. Linux and WSL use the local login session's Secret Service through `secret-tool`.
+Windows uses the current user's Credential Manager.
+
+Before rolling back, remove Bitwarden Secrets Manager mappings and clear the saved token
+while this version is still installed. Older Bot team versions reject the mapping file
+when it contains a Bitwarden Secrets Manager row.
+
 The host-only `secretSources` v1 service provides `status`, `unlock`, `lock`, `read`,
 `listItems` and `prepareQuit`. The `providers` property lists supported providers.
 HashiCorp Vault also exposes `listFields` for the host picker. Secret Service exposes

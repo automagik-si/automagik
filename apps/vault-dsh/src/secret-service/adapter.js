@@ -97,9 +97,13 @@ async function confirmDeleted(api, path) {
   throw new BusFailure(remaining.includes(path) ? 'refused' : 'revoked')
 }
 
+const reserved = attributes => attributes.some(([name]) => name === 'automagik-vault-item')
+
 async function identity(api, path, created = undefined) {
   created ??= (await api.created(path)).toString()
-  const attrs = attributeDigest(await api.attributes(path))
+  const attributes = await api.attributes(path)
+  ensure(!reserved(attributes))
+  const attrs = attributeDigest(attributes)
   ensure(attrs !== undefined)
   return JSON.stringify([path, created, attrs])
 }
@@ -337,6 +341,7 @@ export function createSecretService({ idleLockMinutes = 5 } = {}, {
           if (!itemPath(item) || collectionOf(item) !== path || await api.locked(item)) continue
           const name = await api.label(item)
           if (query !== '' && !name.toLowerCase().includes(query) && !collection.toLowerCase().includes(query)) continue
+          if (reserved(await api.attributes(item))) continue
           const handle = randomBytes(16).toString('hex')
           const created = (await api.created(item)).toString()
           handles.set(handle, { path: item, name, collection, created })

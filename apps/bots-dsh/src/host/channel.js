@@ -503,7 +503,8 @@ export function install(rt) {
       // from memory before the refresh below, which may load the team or take its lock. It
       // takes no input.
       if (endpoint === 'diagnostics-permissions') return ok(rt.permissionDiagnostics())
-      if (endpoint === 'vault-unlock' || endpoint === 'vault-token-set') {
+      if (endpoint === 'vault-unlock' || endpoint === 'vault-token-set'
+        || (endpoint === 'vault-token-clear' && body.provider === 'bitwarden-secrets')) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
       await rt.refresh()
@@ -1419,6 +1420,11 @@ export function install(rt) {
           if (request.headers.has('x-automagik-principal')
             || (!desktopWindow && (page === undefined || !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(page.hostname)))) {
             return fail('Unlock the vault in Settings on this computer.', 'bot/refused')
+          }
+          // Clear must reach the adapter to end the activation even when deletion is unavailable.
+          if (endpoint !== 'vault-token-clear' && body?.payload?.provider === 'bitwarden-secrets'
+            && process.env.AUTOMAGIK_GATE_CLOUD_WORKSPACE?.trim()) {
+            return fail('Bitwarden Secrets Manager is unavailable in Automagik Cloud.', 'bot/refused')
           }
         }
         return handle(endpoint, body?.payload, request.signal, proof)

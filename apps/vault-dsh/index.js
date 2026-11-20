@@ -7,6 +7,10 @@ import { createSecretService } from './src/secret-service/adapter.js'
 import { provider as secretService } from './src/secret-service/parse.js'
 import { cloudProfile as protonCloud, createProtonPass } from './src/proton-pass/adapter.js'
 import { protonPass, validConnection as validProtonConnection, validToken as validProtonToken } from './src/proton-pass/parse.js'
+import { checkSetToken, createBitwardenSecrets } from './src/bws/adapter.js'
+import { keychainIdentity } from './src/keychain/index.js'
+
+const secretsManager = 'bitwarden-secrets'
 
 export const name = 'vault-dsh'
 export const Config = Schema.object({
@@ -14,20 +18,60 @@ export const Config = Schema.object({
     .description('Minutes after unlocking or reading a field before the vault locks.'),
 })
 
-export function apply(ctx, config = {}) {
+export function apply(ctx, config = {}, { keychain } = {}) {
   const adapters = new Map([
     ['bitwarden', createVault(config)],
     ['onepassword', createOnePassword(config)],
     [hashicorp, createHashicorpVault(config)],
     [secretService, createSecretService(config)],
     [protonPass, createProtonPass(config)],
+    [secretsManager, createBitwardenSecrets(config, { identity: keychainIdentity(ctx), keychain })],
   ])
   let selection = Object.freeze({ provider: 'bitwarden', generation: 0 })
   let generation = 0
   let secretServiceRevision = 0
+  let managerLockRevision = 0
   let retiring
   let disposed = false
   const refused = () => ({ ok: false, code: 'refused' })
+  async function enter(provider, options, operation) {
+    const adapter = adapters.get(provider)
+    if (adapter === undefined || disposed) return refused()
+    if (provider === secretService) {
+      const code = adapter.availability()
+      if (code !== undefined) return { ok: false, code }
+    }
+    if (provider === protonPass) {
+      if (protonCloud()) return { ok: false, code: 'cloud' }
+      if (!validProtonToken(options.token) || !validProtonConnection(options.connection)) return refused()
+    }
+    if (options.signal?.aborted) return { ok: false, code: 'locked' }
+    if (provider === hashicorp) {
+      if (cloudProfile()) return { ok: false, code: 'cloud' }
+      if (!validToken(options.token) || !endpointOf(options.address, options.namespace)
+        || (options.mount !== undefined && !validMount(options.mount))) return refused()
+    }
+    if (provider === secretsManager) {
+      const code = adapter.availability()
+      if (code !== undefined) return { ok: false, code }
+    }
+    const revision = secretServiceRevision
+    const managerRevision = managerLockRevision
+    const switching = provider !== selection.provider
+    const current = switching || retiring !== undefined ? ++generation : generation
+    if (switching) {
+      retiring ??= adapters.get(selection.provider).retire().catch(() => false).finally(() => { retiring = undefined })
+    }
+    const retired = await retiring
+    if (disposed || current !== generation || options.signal?.aborted
+      || (provider === secretService && revision !== secretServiceRevision)
+      || (provider === secretsManager && managerRevision !== managerLockRevision)) return { ok: false, code: 'locked' }
+    if (switching) {
+      if (retired !== true) return { ok: false, code: 'unavailable' }
+      selection = Object.freeze({ provider, generation: current })
+    }
+    return adapter[operation](options)
+  }
   const service = {
     version: 1,
     status({ provider = 'bitwarden' } = {}) {
@@ -35,40 +79,12 @@ export function apply(ctx, config = {}) {
       if (adapter === undefined) throw new Error('The vault did not answer.')
       return adapter.status()
     },
-    async unlock({ provider = 'bitwarden', ...options } = {}) {
-      const adapter = adapters.get(provider)
-      if (adapter === undefined || disposed) return refused()
-      if (provider === secretService) {
-        const code = adapter.availability()
-        if (code !== undefined) return { ok: false, code }
-      }
-      if (provider === protonPass) {
-        if (protonCloud()) return { ok: false, code: 'cloud' }
-        if (!validProtonToken(options.token) || !validProtonConnection(options.connection)) return refused()
-      }
-      if (options.signal?.aborted) return { ok: false, code: 'locked' }
-      if (provider === hashicorp) {
-        if (cloudProfile()) return { ok: false, code: 'cloud' }
-        if (!validToken(options.token) || !endpointOf(options.address, options.namespace)
-          || (options.mount !== undefined && !validMount(options.mount))) return refused()
-      }
-      const revision = secretServiceRevision
-      const switching = provider !== selection.provider
-      const current = switching || retiring !== undefined ? ++generation : generation
-      if (switching) {
-        retiring ??= adapters.get(selection.provider).retire().catch(() => false).finally(() => { retiring = undefined })
-      }
-      const retired = await retiring
-      if (disposed || current !== generation || options.signal?.aborted
-        || (provider === secretService && revision !== secretServiceRevision)) return { ok: false, code: 'locked' }
-      if (switching) {
-        if (retired !== true) return { ok: false, code: 'unavailable' }
-        selection = Object.freeze({ provider, generation: current })
-      }
-      return adapter.unlock(options)
+    unlock({ provider = 'bitwarden', ...options } = {}) {
+      return enter(provider, options, 'unlock')
     },
     async lock({ provider } = {}) {
       if (provider === secretService) secretServiceRevision++
+      else if (provider === secretsManager) managerLockRevision++
       else generation++
       if (provider !== undefined && !adapters.has(provider)) return false
       const targets = provider === undefined ? [...adapters.values()] : [adapters.get(provider)]
@@ -89,6 +105,22 @@ export function apply(ctx, config = {}) {
   }
   // Capability metadata is discovered directly. Keep the enumerable v1 method surface.
   Object.defineProperty(service, 'providers', { value: Object.freeze([...adapters.keys()]) })
+  Object.defineProperty(service, 'checkSetToken', { value: checkSetToken })
+  Object.defineProperties(service, {
+    activationId: { value: ({ provider } = {}) =>
+      provider === secretsManager ? adapters.get(provider).activationId : undefined },
+    checkAvailability: { value: ({ provider } = {}) =>
+      provider === secretsManager ? adapters.get(provider).availability() : undefined },
+  })
+  Object.defineProperty(service, 'setToken', { value: ({ provider, ...options } = {}) => {
+    if (provider !== secretsManager || !checkSetToken(options)) return refused()
+    return enter(provider, options, 'setToken')
+  } })
+  Object.defineProperty(service, 'clearToken', { value: ({ provider, connection } = {}) => {
+    if (provider !== secretsManager || disposed) return refused()
+    managerLockRevision++
+    return adapters.get(provider).clearToken({ connection })
+  } })
   // Publish the selection only after the old adapter has been retired.
   Object.defineProperty(service, 'providerSelection', { get: () => selection })
   Object.defineProperty(service, 'activeConnection', { value: () => {
