@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; no delivery merged; delivery 1 waits for delivery 0, the grant, upstream, and delivery 0b) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; delivery 0b merged (#1827); amended 2026-11-20: reports are not batched on DSH rc.2, one message each in order, approved by the owner's delegate on 2026-11-20; delivery 1 waits for delivery 0, the grant, upstream) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr-core (the scoped grant), plugin (3.N.P) for each Automagik delivery |
 | Created | 2026-11-10 |
@@ -123,9 +123,9 @@ worker's turn ends, it blocks, it errors or it exits:
 4. It clears the intent once the Session accepted the message.
 
 A crash between 1 and 4 resends on restart by the intent's id, and the Bot takes the report up
-once. Reports from several workers that end close together arrive together and one turn reads
-them, each closing its own intent (reports for different work are not batched). A Bot that is
-busy reads them at its next step, like a message from another Bot.
+once. Reports from several workers that end close together arrive as separate messages, in the
+order they ended, each closing its own intent; a Bot reads them one turn after another, like
+messages from another Bot (Several reports at once, below).
 
 ### The durable wake log
 
@@ -245,10 +245,30 @@ records a withdrawal and a shutdown's cancelling of an inbox the same way, so a 
 DSH's record and that line cannot be told from a shutdown: such a report comes back once, marked
 as resent. That is a residual this amendment accepts over losing a report.
 
-**Several reports at once.** Reports for one Session and one `work` (or none) that end close
-together go in together and one turn reads them, each as its own message with its own
-`exchangeId`, the way replies are batched today (delivery.js `queueReply`); each closes on its
-own. Reports for different work are not batched.
+**Several reports at once (amended 2026-11-20).** Each report goes into its Session as its own
+message, in the order the reports were produced, exactly as task and group reports go today
+(`followup`, one turn reads one report). Reports are not batched into one turn. Delivery 0b-2
+tried it on DSH 0.2.2-rc.2 and found no safe way: DSH has no operation that admits several
+messages into one turn atomically (a synchronous inbox-insertion listener can put other input
+between them), and claiming several reports in one step changes what Stop, a clearing Stop and
+withdrawing a queued message do to the ones still waiting, and can put a report behind later
+input. Batching waits for a DSH operation that admits a set of messages at one turn boundary,
+as one unit (asked of DSH outside this repository); delivery 1 decides then whether worker
+reports use it. Amendment approved by the owner's delegate on 2026-11-20.
+
+**As built in delivery 0b (#1827).** Where the code is narrower or more exact than the text
+above: a group report's key is the post id alone (a post reports in one round); `moved` is best
+effort (a failed write gives a diagnostics line and the forward goes on, and the replay also
+searches the Bot's current Session and retained parts); `sent` is written once the message is in
+the inbox; every close first finishes and saves the producer's change, and a receipt read from a
+live Session counts only after its flush returns true; an unknown `kind` or event at `v: 1` is
+left alone like a later `v`; an unreadable file turns intents off for that run; the team import
+copies `wake.jsonl` but not rewrite leftovers; a message DSH claimed but did not record stays open
+until the next start; the refusal covers every Bot's file tools and `apply_patch`, and searches
+that name the file, while a folder walk over the team home is refused only with a private Bot
+(the same exposure as `inflight.json`). Known residuals: a report removed by the sign-in guard and
+cut by a crash before its `discarded` record can come back once; a clock rollback can hide a
+receipt in an unrecorded retired part and give one resend.
 
 **Retention.** A report is eligible for sending for 7 days after its `at`; expiry is checked
 before any send, at start, and once an hour while the host holds the lock. The host rewrites the
@@ -377,7 +397,8 @@ either order; delivery 1 needs both.
   and a second restart before either is taken still give one of each; a report a turn took up is
   never resent, and the resume pass never resends a wake note; a group report posted to one group
   from another goes back to the group it came from; a failed intent write still delivers; the
-  file is refused to a Bot's file tools with no private Bot on the team.
+  file is refused to a Bot's file tools with no private Bot on the team. Merged as #1827. The
+  batching it once planned as a second part (0b-2) is not built (Several reports at once).
 - **1. The tools and the wake loop** (plugin, behind the setting). `code_start`, `code_send`,
   `code_read`, `code_list` and `code_stop`, and the report through the durable wake log.
   Needs deliveries 0 and 0b on dev.
