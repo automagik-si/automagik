@@ -457,7 +457,7 @@ async function callerFixture(t, { multiuser = true, selfHosted, carrierStatus = 
     socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
   })
   const port = await listen(upstream)
-  const credentials = { port, authority: `${DSH_HOST}:${port}`, async cookie(refresh) {
+  const credentials = { port, authority: `${DSH_HOST}:${port}`, invalidate() {}, async cookie(refresh) {
     cookieCalls.push(refresh)
     return 'dsh=cached'
   } }
@@ -489,7 +489,7 @@ test('the gate sends exactly one framed DELETE or POST with the original body on
   const owner = f.issue('owner')
   const body = 'alpha\r\nbeta'
   for (const [port, path, target, headers] of [
-    [f.gatePort, '/api/example', '/_automagik/caller/api/example', member.headers],
+    [f.gatePort, '/api/omni-ui', '/_automagik/caller/api/omni-ui', member.headers],
     [f.gatePort, '/api/example', '/api/example', owner.headers],
     [off, '/api/example', '/api/example', owner.headers],
     [off, '/api/omni-mcp', '/api/omni-mcp', { origin: ORIGIN, authorization: 'Bearer fixture' }],
@@ -501,16 +501,24 @@ test('the gate sends exactly one framed DELETE or POST with the original body on
       ['DELETE', `Content-Length: ${Buffer.byteLength(body)}`, body],
     ]) {
       const count = f.seen.length
+      if (headers === member.headers && method === 'DELETE') {
+        const signs = f.signs.length
+        assert.equal(await rawRequest(port, `DELETE ${path} HTTP/1.1`, [...base, framed], upload), 403)
+        assert.equal(f.seen.length, count)
+        assert.equal(f.signs.length, signs)
+        if (framed.startsWith('Transfer-Encoding')) continue
+      }
+      const forwardedMethod = headers === member.headers ? 'POST' : method
       const offset = f.wire.length
-      assert.equal(await rawRequest(port, `${method} ${path} HTTP/1.1`, [...base, framed], upload), 200)
+      assert.equal(await rawRequest(port, `${forwardedMethod} ${path} HTTP/1.1`, [...base, framed], upload), 200)
       assert.equal(f.seen.length, count + 1)
       const hop = f.seen.at(-1)
-      assert.deepEqual([hop.method, hop.url, hop.body], [method, target, body])
+      assert.deepEqual([hop.method, hop.url, hop.body], [forwardedMethod, target, body])
       const isChunked = framed.startsWith('Transfer-Encoding')
       assert.equal(hop.headers['transfer-encoding'], isChunked ? 'chunked' : undefined)
       assert.equal(hop.headers['content-length'], isChunked ? undefined : String(Buffer.byteLength(body)))
       const raw = Buffer.concat(f.wire.slice(offset)).toString()
-      assert.equal(raw.split('\r\n', 1)[0], `${method} ${target} HTTP/1.1`)
+      assert.equal(raw.split('\r\n', 1)[0], `${forwardedMethod} ${target} HTTP/1.1`)
       assert.equal(raw.match(/ HTTP\/1\.1\r\n/g)?.length, 1)
       assert.ok(raw.endsWith(isChunked ? '\r\n0\r\n\r\n' : body))
     }
@@ -523,7 +531,7 @@ test('ambiguous or unsupported upload framing is refused before signing or acqui
   const member = f.issue('member')
   const owner = f.issue('owner')
   for (const [port, path, cookie] of [
-    [f.gatePort, '/api/example', member.headers.cookie],
+    [f.gatePort, '/api/omni-ui', member.headers.cookie],
     [f.gatePort, '/api/example', owner.headers.cookie],
     [off, '/api/omni-mcp', owner.headers.cookie],
   ]) {
@@ -560,10 +568,14 @@ test('public HTTP, upgrade and MCP reject duplicate Host headers with the same o
   assert.deepEqual(f.cookieCalls, [])
 })
 
-test('the member carrier rewrite binds the exact method and query and drops browser credentials and assertions', async t => {
+test('the member carrier rewrite binds the exact method and target and drops browser credentials and assertions', async t => {
   const f = await callerFixture(t)
   const member = f.issue('member')
-  const path = '/api/x?b=2&a=%20&a=1'
+  const query = '/api/x?b=2&a=%20&a=1'
+  assert.equal((await request(f.gatePort, query, { method: 'POST', body: 'body', headers: member.headers })).status, 403)
+  assert.deepEqual(f.signs, [])
+  assert.deepEqual(f.probes, [])
+  const path = '/api/omni-ui'
   const response = await request(f.gatePort, path, { method: 'POST', body: 'body', headers: {
     ...member.headers, cookie: member.headers.cookie + '; dsh=spoofed', authorization: 'Bearer browser',
     'x-automagik-caller': 'spoofed', 'x-automagik-principal': 'spoofed',
@@ -583,6 +595,10 @@ test('the member carrier rewrite binds the exact method and query and drops brow
     method: 'POST', path, nowSec: Math.floor(Date.now() / 1000), startedAtSec: 0,
   }).principal, member.principal)
   assert.deepEqual(f.cookieCalls, [])
+  const owner = f.issue('owner')
+  assert.equal((await request(f.gatePort, query, { method: 'POST', body: 'body', headers: owner.headers })).status, 200)
+  assert.equal(f.seen.at(-1).url, query)
+  assert.equal(f.seen.at(-1).headers['x-automagik-caller'], undefined)
 })
 
 test('the gate fences all carrier namespace spellings before authentication on every transport', async t => {
@@ -693,15 +709,15 @@ test('member frontend allowlist, MCP refusal and rollback never use the owner cr
 test('carrier unavailability, an upstream 401 and an inactive member never use the owner fallback', async t => {
   const f = await callerFixture(t, { carrierStatus: 401 })
   const { headers, family } = f.issue('member')
-  assert.equal((await request(f.gatePort, '/api/x', { headers })).status, 401)
+  assert.equal((await request(f.gatePort, '/api/omni-ui/feed', { headers })).status, 401)
   assert.equal(f.seen.length, 1)
   assert.equal(f.signs.length, 1)
   await f.stopUpstream()
   // Delivery 5b: with DSH gone the readiness probe fails, so nothing more is signed.
-  assert.equal((await request(f.gatePort, '/api/x', { headers })).status, 503)
+  assert.equal((await request(f.gatePort, '/api/omni-ui/feed', { headers })).status, 503)
   assert.equal(f.signs.length, 1)
   const staleGate = await f.makeGate(true, { handle() { f.sessions.revoke(family); return false } })
-  assert.equal((await request(staleGate, '/api/x', { headers })).status, 401)
+  assert.equal((await request(staleGate, '/api/omni-ui/feed', { headers })).status, 401)
   assert.equal(f.signs.length, 1)
   assert.deepEqual(f.cookieCalls, [])
 })
@@ -720,6 +736,7 @@ test('gate handlers refuse private paths and revoked owner families before reque
     if (transport === 'request') {
       let result
       await handle(req, {
+        setHeader() {},
         writeHead(code) { result = code; return this },
         end() {},
       })
@@ -1007,7 +1024,7 @@ test('a strict probe signs nothing on a bad answer', async t => {
     const f = await callerFixture(t, { probe })
     if (name === 'refused connection') await f.stopUpstream()
     const member = f.issue('member')
-    assert.equal((await request(f.gatePort, '/api/x', { method: 'POST', body: 'x', headers: member.headers })).status, 503, name)
+    assert.equal((await request(f.gatePort, '/api/omni-ui', { method: 'POST', body: 'x', headers: member.headers })).status, 503, name)
     assert.equal((await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })).status, 503, name)
     assert.deepEqual(f.signs, [], name)
     assert.deepEqual(f.seen, [], name)
@@ -1017,7 +1034,7 @@ test('a strict probe signs nothing on a bad answer', async t => {
 
 function openFeed(port, headers, agent) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ hostname: DSH_HOST, port, path: '/api/held', agent, headers: { host: HOST, ...headers } }, res => {
+    const req = http.request({ hostname: DSH_HOST, port, path: '/api/omni-ui/feed', agent, headers: { host: HOST, ...headers } }, res => {
       const ended = new Promise(done => { res.once('close', done); res.once('error', done) })
       res.once('data', () => resolve({ res, ended }))
     })
@@ -1031,7 +1048,7 @@ function heldMemberTransports() {
   return {
     feeds, muxes,
     handleRequest(req, res) {
-      if (!req.url.endsWith('/api/held')) return false
+      if (!req.url.endsWith('/api/omni-ui/feed')) return false
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.write('data: open\n\n')
       feeds.push({ res, closed: once(res, 'close') })
@@ -1141,7 +1158,7 @@ test('a browser disconnect cancels both outstanding pipelined member requests', 
   const responses = []
   browser.on('data', data => responses.push(data))
   const firstBytes = once(browser, 'data')
-  const raw = ({ headers }) => `GET /api/held HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: ${ORIGIN}\r\nCookie: ${headers.cookie}\r\n\r\n`
+  const raw = ({ headers }) => `GET /api/omni-ui/feed HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: ${ORIGIN}\r\nCookie: ${headers.cookie}\r\n\r\n`
   browser.write(raw(first) + raw(second))
   await Promise.all([firstBytes, both.promise])
   assert.equal(signedHops(f).length, 2)
@@ -1161,7 +1178,7 @@ test('finished requests do not tie a later keep-alive feed to the old family, an
   const first = f.issue('member')
   const second = f.issue('guest')
   const done = await new Promise((resolve, reject) => {
-    const req = http.request({ hostname: DSH_HOST, port: f.gatePort, path: '/api/x', agent, headers: { host: HOST, ...first.headers } }, res => {
+    const req = http.request({ hostname: DSH_HOST, port: f.gatePort, path: '/api/omni-ui', method: 'POST', agent, headers: { host: HOST, ...first.headers } }, res => {
       res.resume()
       res.on('end', () => resolve(res.statusCode))
     })
@@ -1187,7 +1204,7 @@ test('finished requests do not tie a later keep-alive feed to the old family, an
     return new net.Socket()
   } })
   victim = f.issue('member')
-  assert.equal((await request(racing, '/api/x', { headers: victim.headers })).status, 401)
+  assert.equal((await request(racing, '/api/omni-ui/feed', { headers: victim.headers })).status, 401)
   assert.equal(f.signs.length, signs)
   assert.equal(signedHops(f).length, hops)
 })
@@ -1197,7 +1214,7 @@ test('the probe and the request share one connection', async t => {
     probe: res => res.writeHead(204, { 'x-automagik-ready': '1', 'content-length': '0' }).end(),
   })
   const member = f.issue('member')
-  assert.equal((await request(f.gatePort, '/api/x', { headers: member.headers })).status, 200)
+  assert.equal((await request(f.gatePort, '/api/omni-ui/feed', { headers: member.headers })).status, 200)
   assert.equal(f.probes.length, 1)
   assert.equal(f.seen.at(-1).remotePort, f.probes.at(-1).remotePort)
   const upgraded = await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })
@@ -1395,7 +1412,7 @@ test('a restart after the probe reaches nobody', async t => {
       })
       const member = f.issue('member')
       const reply = transport === 'HTTP'
-        ? await request(f.gatePort, '/api/x', { method: 'POST', body: 'x', headers: member.headers })
+        ? await request(f.gatePort, '/api/omni-ui', { method: 'POST', body: 'x', headers: member.headers })
         : await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })
       assert.equal(reply.status, 503)
       assert.ok(next.listening)
@@ -1405,5 +1422,64 @@ test('a restart after the probe reaches nobody', async t => {
       assert.deepEqual(restarted, [])
       assert.deepEqual(f.seen, [])
     })
+  }
+})
+
+test('G3 gated replies are no-store except assets and bundles', async t => {
+  const cached = 'private, max-age=86400'
+  const f = await callerFixture(t, { handleRequest(req, res) {
+    req.resume()
+    const refused = req.url.includes('refused')
+    res.writeHead(refused ? 401 : 200, { 'cache-control': cached,
+      ...(refused ? { 'clear-site-data': '"cookies"' } : {}) }).end()
+    return true
+  } })
+  const off = await f.makeGate(false)
+  const member = f.issue('member')
+  const owner = f.issue('owner')
+  for (const [role, options] of [[owner, { method: 'GET', path: '/api/omni-ui/image' }], [member, { method: 'POST', path: '/api/omni-ui' }]]) {
+    const reply = await request(f.gatePort, options.path, { method: options.method, headers: role.headers })
+    assert.equal(reply.status, 200)
+    assert.equal(reply.headers['cache-control'], 'no-store')
+    assert.equal(reply.headers['clear-site-data'], undefined)
+  }
+  for (const role of [owner, member]) {
+    for (const path of ['/', '/index.html', '/manifest.webmanifest', '/omni-ui/app-icon.png', '/assets/x.js', '/plugins/test/client.js']) {
+      const reply = await request(f.gatePort, path, { headers: role.headers })
+      assert.equal(reply.status, 200, path)
+      assert.equal(reply.headers['cache-control'], /^\/(assets|plugins)\//.test(path) ? cached : 'no-store', path)
+      assert.equal(reply.headers['clear-site-data'], undefined, path)
+      const desktop = await request(off, path, { headers: owner.headers })
+      assert.equal(desktop.headers['cache-control'], cached)
+      assert.equal(desktop.headers['clear-site-data'], undefined)
+    }
+  }
+  const upstream401 = await request(f.gatePort, '/api/refused', { headers: owner.headers })
+  assert.equal(upstream401.status, 401)
+  assert.equal(upstream401.headers['clear-site-data'], undefined)
+})
+
+test('G4 Access sign-in, sign-out and stale cookies clear site data in multiuser mode', async t => {
+  const clear = '"cache", "storage"'
+  const f = await callerFixture(t)
+  for (const multiuser of [true, false]) {
+    const port = await f.makeGate(multiuser, undefined, { access: { signIn: async token => {
+      if (token !== 'fixture') throw new Error('Access assertion required')
+      return { issuer: 'https://id.invalid', subject: 'owner', roles: ['owner'], workspace: 'fixture' }
+    } }, auditAccess: () => {} })
+    const expected = multiuser ? clear : undefined
+    const signIn = await request(port, '/', { headers: { 'cf-access-jwt-assertion': 'fixture' } })
+    assert.equal(signIn.status, 200)
+    assert.equal(signIn.headers['clear-site-data'], expected)
+    const headers = { origin: ORIGIN, cookie: signIn.headers['set-cookie'][0].split(';', 1)[0] }
+    const signOut = await request(port, '/_gate/sign-out-everywhere', { method: 'POST', headers })
+    assert.equal(signOut.status, 200)
+    assert.equal(signOut.headers['clear-site-data'], expected)
+    const stale = await request(port, '/', { headers })
+    assert.equal(stale.status, 401)
+    assert.equal(stale.headers['clear-site-data'], expected)
+    const absent = await request(port, '/')
+    assert.equal(absent.status, 401)
+    assert.equal(absent.headers['clear-site-data'], undefined)
   }
 })

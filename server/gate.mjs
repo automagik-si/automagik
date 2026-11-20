@@ -4,7 +4,8 @@ import { Transform } from 'node:stream'
 import { COOKIE, cookieSecret, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
 import { frontendPath } from './gate-frontend.mjs'
 import { agentMcpHeaders, callerHeaders, callerUpgradeHeaders, DSH_HOST, responseHeaders, upstreamHeaders, validBodyFraming } from './gate-upstream.mjs'
-import { MEMBER_UPGRADE_PATH, memberRole, memberStatus, probeDsh } from './gate-mux.mjs'
+import { MEMBER_UPGRADE_PATH, memberStatus, probeDsh } from './gate-mux.mjs'
+import { callerTarget, CLEAR_SITE_DATA, effectiveRole, ownerFamily } from './gate-roles.mjs'
 import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
 
 export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
@@ -113,7 +114,6 @@ function refuseSocket(socket, status = 401) {
   socket.end(`HTTP/1.1 ${status} Refused\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, destroy)
 }
 
-const ownerEquivalent = family => family.principal.roles.some(role => role === 'owner' || role === 'admin')
 const apiPath = path => path === '/api' || path.startsWith('/api/')
 const exchangePath = url => url.pathname === '/connect'
 const CALLER_PREFIX = '/_automagik/caller'
@@ -134,6 +134,12 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
   if (multiuser && !caller) throw new Error('Multiuser requires a caller signer')
   const origin = pinOrigin(value)
+  const clearSite = res => { if (multiuser) res.setHeader('clear-site-data', CLEAR_SITE_DATA) }
+  const sessionRequired = (req, res) => {
+    if (res.destroyed) return
+    if (multiuser && req.headers.cookie?.split(';').some(part => part.trimStart().startsWith(COOKIE + '='))) clearSite(res)
+    answer(res, 401, { error: 'Session required' })
+  }
   const isMcpTarget = raw => new URL(raw, origin).pathname === '/api/omni-mcp'
   const sockets = new Map()
   const pendingUpgrades = new Map()
@@ -206,6 +212,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     const previous = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
     if (previous) sessions.revoke(previous)
     const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires, proof: opened.proof })
+    clearSite(res)
     res.writeHead(303, { location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
       'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
     res.end()
@@ -310,7 +317,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const mine = family => cloud ? other => samePerson(other.principal, family.principal) : undefined
   const server = http.createServer(async (req, res) => {
     if (!hasSingleHost(req) || !validBodyFraming(req)) {
-      res.writeHead(400, { connection: 'close' }).end()
+      res.writeHead(400, { connection: 'close', ...(multiuser ? { 'cache-control': 'no-store' } : {}) }).end()
       return
     }
     if (reservedPathAlias(req.url, origin)) { answer(res, 400, { error: 'Non-canonical gate path' }); return }
@@ -352,9 +359,14 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     }
     const authorization = await authorize(req)
     const family = authorization?.family
+    const role = multiuser && family ? effectiveRole(family.principal.roles) : undefined
+    if (multiuser && family && role === undefined) { answer(res, 403, { error: 'Not available' }); return }
     if (selfHosted && await selfHosted.handle(req, res, family, { bootstrap })) return
-    if (!family) { answer(res, 401, { error: 'Session required' }); return }
-    if (authorization.cookie) res.setHeader('set-cookie', authorization.cookie)
+    if (!family) { sessionRequired(req, res); return }
+    if (authorization.cookie) {
+      res.setHeader('set-cookie', authorization.cookie)
+      clearSite(res)
+    }
     try {
       // No absolute-form URLs, launch-token exchanges or token-bearing browser URLs.
       if (!req.url.startsWith('/') || req.url.startsWith('//')) { answer(res, 400, { error: 'Invalid path' }); return }
@@ -369,6 +381,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         } else if (url.pathname === '/_gate/sign-out-everywhere' && req.method === 'POST') {
           sessions.revokeAll(mine(family))
           res.setHeader('set-cookie', sessionCookie('', 0))
+          clearSite(res)
           answer(res, 200, {})
         } else answer(res, 404, { error: 'Unknown gate route' })
         return
@@ -376,16 +389,18 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       // The gate-held browser credential also admits DSH's /api and WebSocket owner peer.
       // /connect is a DSH bearer exchange, never a second browser sign-in path.
       if (exchangePath(url)) { answer(res, 401, { error: 'Session exchanges belong to the gate' }); return }
-      const owner = ownerEquivalent(family)
+      const owner = ownerFamily(family, multiuser)
       if (!owner && !multiuser) { answer(res, 403, { error: 'Owner access required' }); return }
-      if (!sessions.active(family)) { answer(res, 401, { error: 'Session required' }); return }
+      if (!sessions.active(family)) { sessionRequired(req, res); return }
       let path = req.url, headers, cookie, probe, record
       if (owner) {
         cookie = await credentials.cookie()
-        if (!sessions.active(family) || res.destroyed) { answer(res, 401, { error: 'Session required' }); return }
+        if (!sessions.active(family) || res.destroyed) { sessionRequired(req, res); return }
         headers = upstreamHeaders(req, credentials, cookie, family.principal)
       } else {
-        if (rebinding) { res.writeHead(503, { connection: 'close' }).end(); return }
+        const decision = callerTarget({ role, method: req.method, raw: req.url, origin })
+        if (!decision.allow) { answer(res, decision.status, { error: 'Not available' }); return }
+        if (rebinding) { res.writeHead(503, { connection: 'close', 'cache-control': 'no-store' }).end(); return }
         if (!apiPath(url.pathname)) {
           if (!['GET', 'HEAD'].includes(req.method)) { answer(res, 405, { error: 'Method not allowed' }); return }
           if (!frontendPath(url)) { answer(res, 404, { error: 'Unknown frontend path' }); return }
@@ -396,13 +411,16 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         try { probe = await connectDsh({ port: credentials.port, host: DSH_HOST, signal: record.abort.signal }) }
         catch {
           // Nothing is signed: no adapter answered on this connection, or the session ended.
-          if (!res.destroyed) answer(res, callerRequests.has(record) ? 503 : 401, { error: callerRequests.has(record) ? 'DSH unavailable' : 'Session required' })
+          if (!res.destroyed) {
+            if (callerRequests.has(record)) answer(res, 503, { error: 'DSH unavailable' })
+            else sessionRequired(req, res)
+          }
           return
         }
         record.probe = probe
         if (!sessions.active(family) || res.destroyed || !callerRequests.has(record)) {
           probe.destroy()
-          if (!res.destroyed) answer(res, 401, { error: 'Session required' })
+          if (!res.destroyed) sessionRequired(req, res)
           return
         }
         let assertion
@@ -419,7 +437,15 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         // A 401 drops the refused cookie. The next owner request checks its family before minting.
         // Never replay a body.
         if (owner && upstream.statusCode === 401) credentials.invalidate(cookie)
-        res.writeHead(upstream.statusCode, responseHeaders(upstream.headers))
+        const response = responseHeaders(upstream.headers)
+        if (multiuser) {
+          // Only a gate session transition can clear the browser's site data.
+          delete response['clear-site-data']
+          const asset = ['GET', 'HEAD'].includes(req.method) &&
+            (url.pathname.startsWith('/assets/') || frontendPath(url) === 'bundle')
+          if (!asset) response['cache-control'] = 'no-store'
+        }
+        res.writeHead(upstream.statusCode, response)
         upstream.pipe(res)
         upstream.on('error', () => res.destroy())
       })
@@ -450,8 +476,9 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     try {
       if (multiuser && isMcpTarget(req.url)) { refuseSocket(socket, 403); return }
       if (!req.url.startsWith('/') || req.url.startsWith('//') || new URL(req.url, origin).searchParams.has('token') || req.headers.upgrade?.toLowerCase() !== 'websocket') { refuseSocket(socket); return }
-      const owner = ownerEquivalent(family)
-      if (!owner && !(multiuser && memberRole(family.principal.roles) && req.method === 'GET' && req.url === MEMBER_UPGRADE_PATH)) { refuseSocket(socket, 403); return }
+      const owner = ownerFamily(family, multiuser)
+      if (!owner && !(multiuser && callerTarget({ role: effectiveRole(family.principal.roles),
+        method: req.method, raw: req.url, upgrade: true, origin }).allow)) { refuseSocket(socket, 403); return }
       if (!sessions.active(family)) { refuseSocket(socket, 401); return }
       if (exchangePath(new URL(req.url, origin))) { refuseSocket(socket, 401); return }
       if (!sessions.active(family)) { refuseSocket(socket, 401); return }

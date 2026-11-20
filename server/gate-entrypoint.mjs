@@ -41,7 +41,7 @@ try {
   }
   const credentials = new DshCredentials()
   const access = config ? new AccessSignIn(config, { ownerDir: dir }) : undefined
-  const selfHosted = !claimMode ? undefined : new SelfHostedClaim({ dir, origin: origin.origin, sessions, claimMode: process.env.AUTOMAGIK_GATE_CLAIM ?? 'local' })
+  const selfHosted = !claimMode ? undefined : new SelfHostedClaim({ dir, origin: origin.origin, sessions, clearOnSignIn: multiuser, claimMode: process.env.AUTOMAGIK_GATE_CLAIM ?? 'local' })
   const published = process.env.AUTOMAGIK_GATE_HOST || DSH_HOST
   if (claimMode && ![DSH_HOST, '0.0.0.0'].includes(published)) throw new claimErrors('AUTOMAGIK_GATE_HOST must be loopback or the IPv4 wildcard bind address')
   server = createGate({ origin: origin.origin, sessions, credentials, access, cloud, selfHosted, multiuser, caller })

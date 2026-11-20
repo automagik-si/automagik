@@ -1,8 +1,9 @@
 // A member's or guest's stream carrier and the adapter readiness probe (RFC 0038 delivery 5b).
 import net from 'node:net'
+import { CALLER_UPGRADE, effectiveRole } from './gate-roles.mjs'
 
 // The one upgrade a member or guest may make: DSH's stream mux, carried by the adapter.
-export const MEMBER_UPGRADE_PATH = '/api/remote.mux'
+export const MEMBER_UPGRADE_PATH = CALLER_UPGRADE.slice('GET '.length)
 export const READY_PATH = '/_automagik/caller/_ready'
 const MAX_PROBE_HEADER_BYTES = 8192
 const PROBE_TIMEOUT_MS = 2000
@@ -12,9 +13,8 @@ const PASSED = new Set([400, 401, 403, 429, 503])
 export const memberStatus = code => PASSED.has(code) ? code : 502
 
 export function memberRole(roles) {
-  if (roles.includes('member')) return 'member'
-  if (roles.length === 1 && roles[0] === 'guest') return 'guest'
-  return undefined
+  const role = effectiveRole(roles)
+  if (role === 'member' || role === 'guest') return role
 }
 
 // Accept exactly one bodyless 204 that names the adapter and keeps the connection open.
