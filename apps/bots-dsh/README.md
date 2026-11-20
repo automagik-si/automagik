@@ -80,8 +80,9 @@ How they fit:
   task can show the question, work stops with a reason and an automatic-stop notification
   when that host hook is available. Full access is unchanged.
   Unbridged Claude Code gets session-only ask rules for expressible hard steps at every
-  asking level, removed by restarting its session across Full access. Bridged Claude has no
-  Bash of its own: its DSH calls use the checks above. Codex's own tools are excluded:
+  asking level, removed by restarting its session across Full access. These rules include
+  password-manager reads. Bridged Claude has no Bash of its own: its DSH calls use the checks
+  above. Codex's own tools are excluded:
   prompt rules under its Full access `never` policy refuse instead of asking, rules have no
   per-session path, and its `agent` mode sends prompt rules to its reviewer, not the person.
   This is an unmet dependency: Codex built-ins run without `session/request_permission`.
@@ -691,6 +692,7 @@ When a Bot needs an API key, token or password, it calls `request_secret`, and a
 Limits:
 
 - On Windows, the file mode has no effect; the file is protected by your user folder only.
+- When the Bot team loads, it removes inherited password-manager unlock variables such as `BW_SESSION`, `BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`, `OP_SESSION` and `OP_SESSION_*`, `VAULT_TOKEN` and Proton Pass's unlock variables. This includes values from DSH's `.env` layers and affects new Bot shells, ACP agents, MCP servers and your DSH terminal panel. Processes already running when you update keep their environment until the app restarts. Reverting also takes an app restart to restore the launch environment. If you explicitly set an unlock variable in an MCP server's environment or DSH's terminal settings, that server or terminal still gets it. Vault-backed grants for MCP servers are planned for delivery 5 of RFC 0034. Auto asks you before password-manager reads such as `bw get` or `op read`.
 - Masking covers a value and its JSON-escaped and URL-encoded forms (`src/host/secrets.js`, the redactor). Base64, hex, split and reversed forms are not covered; a Bot that prints one can still leak it. Do not give important secrets to a Bot you do not trust.
 - On a page that is not HTTPS (for example dsh Web opened over http on a LAN), the value crosses the network in clear text. The card warns you.
 - Group chats show no cards; a Bot asks in its own chat.

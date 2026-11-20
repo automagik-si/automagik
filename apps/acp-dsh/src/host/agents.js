@@ -10,6 +10,15 @@ import { batchSafe } from './batch-spawn.js'
 // Efforts as DSH lists them, from least to most.
 const efforts = (...ids) => Object.freeze({ efforts: Object.freeze(ids.map(id => Object.freeze({ id, name: id.charAt(0).toUpperCase() + id.slice(1) }))) })
 
+const MANAGER_ASK = [
+  'bw get*', 'bw list*', 'bw export*', 'bw unlock*', 'bw serve*',
+  'bws secret get*', 'bws secret list*', 'bws run*',
+  'op read*', 'op run*', 'op inject*', 'op item get*',
+  'pass-cli item view*', 'pass-cli item get*', 'pass-cli item run*', 'pass-cli run*',
+  'keepassxc-cli show*', 'keepassxc-cli export*', 'secret-tool lookup*',
+  'vault kv get*', 'vault read*',
+]
+
 export const CLAUDE_HARD_ASK = Object.freeze([
   'Bash(rm -r*)',
   'Bash(rm -R*)',
@@ -54,6 +63,7 @@ export const CLAUDE_HARD_ASK = Object.freeze([
   'Bash(*FLUSHDB*)',
   'Bash(*flushdb*)',
   'Bash(gh auth token*)',
+  ...MANAGER_ASK.map(command => `Bash(${command})`),
   'Bash(* .env)',
   'Bash(*/.env)',
   'Bash(*.git-credentials*)',
@@ -90,6 +100,7 @@ export const CLAUDE_HARD_ASK = Object.freeze([
   ...(process.platform === 'win32' ? [
     'PowerShell(Remove-Item *-Recurse*)', 'PowerShell(git push *--force*)', 'PowerShell(git push * -f*)',
     'PowerShell(git reset *--hard*)', 'PowerShell(git clean *-*f*)',
+    ...MANAGER_ASK.map(command => `PowerShell(${command})`),
   ] : []),
 ])
 

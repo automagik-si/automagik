@@ -57,6 +57,7 @@ import * as sharedUploads from './src/host/shared-uploads.js'
 import * as browserPlugins from './src/host/browser-plugins.js'
 import * as computer from './src/host/computer/index.js'
 import * as secrets from './src/host/secrets.js'
+import { dropUnlockVariables } from './src/host/unlock-env.js'
 import * as connectors from './src/host/connectors/index.js'
 import * as capabilities from './src/host/capabilities.js'
 import * as learning from './src/host/learning.js'
@@ -102,7 +103,9 @@ const MODULES = [
 // (src/host/extend.js): Omni's channels and automations (@automagik/omni-channels-dsh),
 // its canvases (@automagik/omni-canvas-dsh).
 export function apply(ctx, config = {}) {
+  const dropped = dropUnlockVariables()
   const rt = createRuntime(ctx, config)
+  if (dropped > 0) rt.warn('ds-bot: removed %d password-manager unlock variable(s) from the Bot environment', dropped)
   ctx.provide('omniTeam', rt)
   // The plugin's own scope owns the team's end: when this plugin stops (a reload, the app
   // closing, the host unloading), every module lets go — the Code side's streams send their
