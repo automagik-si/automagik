@@ -2548,6 +2548,9 @@ var ZH = {
   "The update was undone: Automagik {version} is back. Nothing was lost.": "更新已撤销：Automagik {version} 已恢复。没有丢失任何内容。",
   "Not updated: {reason} The work that was stopped goes on.": "未更新：{reason}被停止的工作会继续。",
   'The update needs manual recovery. See "In-app updates" in docs/upgrade.md.': "此次更新需要手动恢复。请参阅 docs/upgrade.md 中的“In-app updates”。",
+  "No newer signed release is available.": "没有更新的已签名版本。",
+  "Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost.": "点击“停止并更新”时，正在进行的工作会停止，更新完成后会自动恢复。不会丢失任何内容。",
+  "this instance's update supervisor cannot roll back automatically yet, which Force update needs.": "此实例的更新监督程序尚不能自动回滚，而强制更新需要它。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
   "Update checks are off.": "已关闭更新检查。",
@@ -22246,7 +22249,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     checkSelfUpdate: () => call2("self-update-check"),
     selfUpdateResult: (runId) => call2("self-update-check-result", { runId }),
     selfUpdateStatus: () => call2("self-update-status"),
-    startSelfUpdate: () => call2("self-update-start"),
+    startSelfUpdate: (body) => call2("self-update-start", body),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = "action") => {
       noteClientError(where, error);
@@ -35011,6 +35014,9 @@ var import_react89 = require("react");
 var CHEER_MS = 1800;
 var CHECK_POLL_MS = 2e3;
 var MAX_CHECK_POLLS = 180;
+var FORCE_CHECK_DEADLINE_MS = MAX_CHECK_POLLS * CHECK_POLL_MS;
+var FORCE_STATUS_DEADLINE_MS = 5 * CHECK_POLL_MS;
+var FORCE_START_DEADLINE_MS = 3e4;
 var starCount = (count) => new Intl.NumberFormat(dateLocale(), { notation: "compact", maximumFractionDigits: 1 }).format(count);
 var inApp = (update, app) => Boolean(app.bridge) || update.source === "app";
 var updatesOff = (versions) => versions?.updates === false;
@@ -35184,6 +35190,8 @@ function selfUpdateReason(reason) {
       return t("there is no writable folder to keep the previous version in.");
     case "self-update-off":
       return t("in-app updates are turned off for this instance.");
+    case "rollback-missing":
+      return t("this instance's update supervisor cannot roll back automatically yet, which Force update needs.");
     case "update-running":
       return t("an update is already running.");
     case "check-stale":
@@ -35252,7 +35260,41 @@ function runMessage(run3) {
   }
 }
 var failedCheck = (error) => ({ reason: error?.code === "bot/read-only" ? error.code : null });
-function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2 }) {
+var cannotUpdate = (reason) => t("Cannot update: {reason}", { reason: selfUpdateReason(reason) });
+var rollbackReady = (status) => status.rollback === true;
+function matchesAttempt(run3, attempt) {
+  if (run3 == null) return false;
+  if ("requestId" in attempt) return run3.requestId === attempt.requestId;
+  if ("runId" in attempt) return run3.runId === attempt.runId;
+  return run3.runId !== attempt.previousRunId;
+}
+function freshCheck(result) {
+  const checkedAt = Date.parse(result?.checkedAt);
+  const now = Date.now();
+  return result?.state === "available" && checkedAt <= now && now < checkedAt + CHECK_FRESH_MS;
+}
+function forceBlock(status, preflight) {
+  if (!status || typeof status !== "object") return cannotUpdate(null);
+  if (status.problem) return cannotUpdate("store-invalid");
+  if (!Object.hasOwn(status, "run")) return cannotUpdate(null);
+  const phase = status.run?.phase;
+  if (phase === "manualRecovery") return runMessage(status.run);
+  if (RUNNING_PHASES.has(phase)) return cannotUpdate("update-running");
+  if (status.run !== null && !VERDICT_PHASES.has(phase)) return cannotUpdate(null);
+  if (status.available === false) return cannotUpdate(status.reason ?? status.startRefusal);
+  if (status.startEnabled !== true) return cannotUpdate(status.available === true ? "self-update-off" : null);
+  if (status.startRefusal !== null && !(preflight && status.startRefusal === "check-stale")) {
+    return cannotUpdate(status.startRefusal);
+  }
+  return rollbackReady(status) ? null : cannotUpdate("rollback-missing");
+}
+function invalidateForce(flow) {
+  flow.id++;
+  flow.sent = false;
+  flow.cancel?.();
+  flow.cancel = null;
+}
+function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2, force = false }) {
   const [starting, setStarting] = (0, import_react89.useState)(false);
   const [result, setResult] = (0, import_react89.useState)(null);
   const [checkExpired, setCheckExpired] = (0, import_react89.useState)(false);
@@ -35262,12 +35304,16 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
   const [refused, setRefused] = (0, import_react89.useState)(null);
   const [attempt, setAttempt] = (0, import_react89.useState)(null);
   const [expired2, setExpired] = (0, import_react89.useState)(false);
-  const run3 = attempt === null || status?.run?.requestId === attempt.requestId ? status?.run : null;
+  const [forceFlow] = (0, import_react89.useState)({ id: 0, sent: false, cancel: null, checkDeadline: 0 });
+  const [forceView, setForceView] = (0, import_react89.useState)(null);
+  (0, import_react89.useEffect)(() => () => invalidateForce(forceFlow), [forceFlow]);
+  const run3 = attempt === null || matchesAttempt(status?.run, attempt) ? status?.run : null;
   const runLive = RUNNING_PHASES.has(run3?.phase);
   const hasVerdict = VERDICT_PHASES.has(run3?.phase);
-  const awaitingVerdict = attempt !== null && !hasVerdict && !expired2;
+  const unconfirmedStart = attempt !== null && "previousRunId" in attempt;
+  const awaitingVerdict = attempt !== null && !unconfirmedStart && !hasVerdict && !expired2;
   const checkedAt = Date.parse(result?.checkedAt);
-  const checkFresh = () => result?.state === "available" && checkedAt <= Date.now() && Date.now() < checkedAt + CHECK_FRESH_MS;
+  const checkFresh = () => freshCheck(result);
   (0, import_react89.useEffect)(() => {
     if (result?.state !== "available" || attempt !== null || !Number.isFinite(checkedAt)) return;
     const timer = setTimeout(() => {
@@ -35295,7 +35341,7 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
       if (stopped) return;
       if (next !== void 0) setStatus(next);
       if (attempt !== null) {
-        if (next?.run?.requestId === attempt.requestId && VERDICT_PHASES.has(next.run.phase)) clearTimeout(expire);
+        if (matchesAttempt(next?.run, attempt) && VERDICT_PHASES.has(next.run.phase)) clearTimeout(expire);
         else timer = setTimeout(poll, CHECK_POLL_MS);
       } else {
         if (next !== void 0) following = RUNNING_PHASES.has(next?.run?.phase);
@@ -35312,28 +35358,99 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
   const runId = result?.state === "checking" ? result.runId : void 0;
   const waiting = runId !== void 0;
   const checking = starting || waiting;
+  const busy = checking || runLive && !expired2 || updating || awaitingVerdict;
+  const followAttempt = (target) => {
+    setExpired(false);
+    setAttempt({ ...target, deadline: Date.now() + UPDATE_POLL_DEADLINE_MS });
+  };
+  const endForce = (message2 = null) => {
+    invalidateForce(forceFlow);
+    setForceView(message2 === null ? null : { message: message2 });
+  };
+  const readForceStatus = async (id, preflight = false) => {
+    let timer;
+    const deadline = Date.now() + FORCE_STATUS_DEADLINE_MS;
+    const timeout = new Promise((resolve2) => {
+      timer = setTimeout(() => resolve2(null), FORCE_STATUS_DEADLINE_MS);
+      forceFlow.cancel = () => {
+        clearTimeout(timer);
+        resolve2(null);
+      };
+    });
+    let latest;
+    let reason;
+    try {
+      latest = await Promise.race([readStatus(), timeout]);
+    } catch (error) {
+      reason = failedCheck(error).reason;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (forceFlow.id !== id) return false;
+    forceFlow.cancel = null;
+    if (Date.now() >= deadline) {
+      latest = null;
+      reason = null;
+    }
+    setStatus(latest ?? null);
+    const blocked = latest == null ? cannotUpdate(reason) : forceBlock(latest, preflight);
+    if (blocked === null) return latest;
+    if (RUNNING_PHASES.has(latest?.run?.phase)) {
+      setRefused(null);
+      followAttempt({ runId: latest.run.runId, refusal: blocked });
+      endForce();
+    } else endForce(blocked);
+    return false;
+  };
+  const forceCheckActive = (id) => {
+    if (forceFlow.id !== id) return false;
+    if (Date.now() < forceFlow.checkDeadline) return true;
+    endForce(cannotUpdate("check-timeout"));
+    return false;
+  };
+  const finishForceCheck = async (id, value) => {
+    forceFlow.cancel?.();
+    forceFlow.cancel = null;
+    if (value?.state !== "available") {
+      setResult(value?.state === "checking" ? { state: "checking" } : value ?? failedCheck());
+      endForce(value?.state === "current" ? t("No newer signed release is available.") : null);
+      return;
+    }
+    if (!await readForceStatus(id) || forceFlow.id !== id) return;
+    if (!freshCheck(value)) {
+      endForce(cannotUpdate("check-stale"));
+      return;
+    }
+    setResult(value);
+    setForceView({ phase: "confirming", id, result: value });
+  };
+  const pollRunId = forceView?.runId ?? runId;
+  const forcePollId = forceView?.runId === void 0 ? void 0 : forceView.id;
   (0, import_react89.useEffect)(() => {
-    if (!waiting) return;
+    if (pollRunId === void 0) return;
     let stopped = false;
     let timer;
     let polls = 0;
+    const active = () => !stopped && (forcePollId === void 0 || forceCheckActive(forcePollId));
+    const finish = (value) => forcePollId === void 0 ? setResult(value) : finishForceCheck(forcePollId, value);
     const poll = async () => {
+      if (!active()) return;
       try {
-        const value = await readResult(runId);
-        if (stopped) return;
+        const value = await readResult(pollRunId);
+        if (!active()) return;
         if (value.state !== "checking") {
-          setResult(value);
+          void finish(value);
           return;
         }
       } catch (error) {
-        if (stopped) return;
+        if (!active()) return;
         const code = error?.code;
         if (code && code !== "NETWORK" && !/^HTTP_5\d\d$/.test(code)) {
-          setResult(failedCheck(error));
+          void finish(failedCheck(error));
           return;
         }
       }
-      if (++polls >= MAX_CHECK_POLLS) setResult({ reason: "check-timeout" });
+      if (++polls >= MAX_CHECK_POLLS) void finish({ reason: "check-timeout" });
       else timer = setTimeout(poll, CHECK_POLL_MS);
     };
     timer = setTimeout(poll, CHECK_POLL_MS);
@@ -35341,14 +35458,19 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
       stopped = true;
       clearTimeout(timer);
     };
-  }, [runId, readResult]);
-  const onCheck = async () => {
-    setStarting(true);
+  }, [pollRunId, readResult, forcePollId]);
+  const resetCheck = () => {
     setAttempt(null);
     setExpired(false);
     setCheckExpired(false);
     setRefused(null);
     setResult(null);
+  };
+  const onCheck = async () => {
+    if (forceFlow.sent) return;
+    endForce();
+    setStarting(true);
+    resetCheck();
     try {
       setResult(await check());
     } catch (error) {
@@ -35357,7 +35479,33 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
       setStarting(false);
     }
   };
+  const onForce = async () => {
+    if (busy || forceFlow.sent || typeof start2 !== "function") return;
+    invalidateForce(forceFlow);
+    const id = forceFlow.id;
+    setForceView({ phase: "checking" });
+    if (!await readForceStatus(id, true) || forceFlow.id !== id) return;
+    resetCheck();
+    forceFlow.checkDeadline = Date.now() + FORCE_CHECK_DEADLINE_MS;
+    const timer = setTimeout(() => {
+      if (forceFlow.id === id) endForce(cannotUpdate("check-timeout"));
+    }, FORCE_CHECK_DEADLINE_MS);
+    forceFlow.cancel = () => clearTimeout(timer);
+    let value;
+    try {
+      value = await check();
+    } catch (error) {
+      value = failedCheck(error);
+    }
+    if (!forceCheckActive(id)) return;
+    if (value?.state === "checking" && typeof value.runId === "string" && value.runId !== "") {
+      setForceView({ phase: "checking", id, runId: value.runId });
+    } else {
+      await finishForceCheck(id, value);
+    }
+  };
   const onConfirm = async () => {
+    endForce();
     setUpdating(true);
     setRefused(null);
     try {
@@ -35373,29 +35521,85 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
       setUpdating(false);
     }
   };
+  const requestStart = async (id, previousRunId) => {
+    const forced = id !== void 0;
+    const active = () => !forced || forceFlow.id === id;
+    if (!forced) setUpdating(true);
+    setRefused(null);
+    let message2 = null;
+    let timer;
+    const deadline = Date.now() + FORCE_START_DEADLINE_MS;
+    const timedOut = /* @__PURE__ */ Symbol();
+    const timeout = forced ? new Promise((resolve2) => {
+      timer = setTimeout(() => resolve2(timedOut), FORCE_START_DEADLINE_MS);
+      forceFlow.cancel = () => {
+        clearTimeout(timer);
+        resolve2(timedOut);
+      };
+    }) : null;
+    try {
+      const answer = forced ? await Promise.race([start2({ force: true }), timeout]) : await start2();
+      if (!active()) return;
+      if (forced && (answer === timedOut || Date.now() >= deadline)) {
+        followAttempt({ previousRunId });
+      } else if (answer?.started === true) {
+        followAttempt({ requestId: answer.requestId });
+      } else setRefused(answer?.reason ?? null);
+    } catch (error) {
+      if (!active()) return;
+      if (forced && error?.code !== "bot/read-only") {
+        message2 = t("The update status could not be confirmed. Check again shortly.");
+      } else {
+        setRefused(error?.code === "bot/read-only" ? error.code : "update-running");
+      }
+    } finally {
+      clearTimeout(timer);
+      if (!forced) setUpdating(false);
+      else if (active()) endForce(message2);
+    }
+  };
   const onUpdate = async () => {
     setConfirming(false);
     if (!checkFresh()) {
       setCheckExpired(true);
       return;
     }
-    setUpdating(true);
-    setRefused(null);
-    try {
-      const answer = await start2();
-      if (answer?.started === true) {
-        setExpired(false);
-        setAttempt({ requestId: answer.requestId, deadline: Date.now() + UPDATE_POLL_DEADLINE_MS });
-      } else setRefused(answer?.reason ?? null);
-    } catch (error) {
-      setRefused(error?.code === "bot/read-only" ? error.code : "update-running");
-    } finally {
-      setUpdating(false);
-    }
+    await requestStart();
   };
+  const onForceConfirm = async ({ id, result: checked }) => {
+    if (forceFlow.id !== id || forceFlow.sent) return;
+    if (!freshCheck(checked)) {
+      endForce(cannotUpdate("check-stale"));
+      return;
+    }
+    forceFlow.sent = true;
+    setForceView({ phase: "starting" });
+    const latest = await readForceStatus(id);
+    if (!latest || forceFlow.id !== id) return;
+    if (!freshCheck(checked)) {
+      endForce(cannotUpdate("check-stale"));
+      return;
+    }
+    await requestStart(id, latest.run?.runId);
+  };
+  const forceChecking = forceView?.phase === "checking";
+  const forceBusy = forceChecking || forceView?.phase === "starting";
   const canStart = !checkExpired && checkFresh() && status?.startEnabled === true && status.startRefusal === null && !awaitingVerdict && !runLive && typeof start2 === "function";
   const runText = runMessage(run3);
-  if (confirming && checkFresh()) {
+  if (forceView?.phase === "confirming" && freshCheck(forceView.result)) {
+    return (0, import_react89.createElement)(
+      Row3,
+      {
+        label: "Automagik",
+        hint: (0, import_react89.createElement)("span", { role: "status" }, t("Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost."))
+      },
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-fb-primary", onClick: () => onForceConfirm(forceView) }, t("Stop and update")),
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => {
+        if (forceFlow.id === forceView.id && !forceFlow.sent) endForce();
+      } }, t("Cancel"))
+    );
+  }
+  if (confirming && !forceBusy && checkFresh()) {
     return (0, import_react89.createElement)(
       Row3,
       {
@@ -35406,20 +35610,26 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
       (0, import_react89.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setConfirming(false) }, t("Cancel"))
     );
   }
-  const message = refused !== null ? t("Cannot update: {reason}", { reason: selfUpdateReason(refused) }) : runText !== null && (hasVerdict && attempt !== null || runLive && !expired2 || result === null) ? runText : expired2 ? t("The update status could not be confirmed. Check again shortly.") : awaitingVerdict ? null : result === null || waiting ? null : result.state === "available" && checkExpired ? t("Cannot update: {reason}", { reason: selfUpdateReason("check-stale") }) : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : result.state === "interrupted" ? t("The check was interrupted. Check again.") : result.state === "checking" ? t("A check is already running. Try again shortly.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
+  const message = forceChecking ? t("Checking for updates…") : forceView?.message ? forceView.message : attempt?.refusal && !hasVerdict && !expired2 ? attempt.refusal : refused !== null ? cannotUpdate(refused) : runText !== null && (hasVerdict && attempt !== null || runLive && !expired2 || result === null) ? runText : expired2 || unconfirmedStart ? t("The update status could not be confirmed. Check again shortly.") : awaitingVerdict ? null : result === null || waiting ? null : result.state === "available" && checkExpired ? t("Cannot update: {reason}", { reason: selfUpdateReason("check-stale") }) : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : result.state === "interrupted" ? t("The check was interrupted. Check again.") : result.state === "checking" ? t("A check is already running. Try again shortly.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
   return (0, import_react89.createElement)(
     Row3,
     { label: "Automagik", hint: (0, import_react89.createElement)("span", { role: "status" }, message) },
     ...canStart ? [(0, import_react89.createElement)(
       "button",
-      { type: "button", className: "bt-soft bt-soft-sm", disabled: updating, onClick: onConfirm },
+      { type: "button", className: "bt-soft bt-soft-sm", disabled: updating || forceBusy, onClick: onConfirm },
       t("Update now")
     )] : [],
     (0, import_react89.createElement)(
       "button",
-      { type: "button", className: "bt-soft bt-soft-sm", disabled: checking || runLive && !expired2 || updating || awaitingVerdict, onClick: onCheck },
+      { type: "button", className: "bt-soft bt-soft-sm", disabled: busy || forceBusy, onClick: onCheck },
       checking ? t("Checking…") : t("Check for updates")
-    )
+    ),
+    ...force === true ? [(0, import_react89.createElement)("button", {
+      type: "button",
+      className: "bt-soft bt-soft-sm",
+      disabled: busy || forceBusy || typeof start2 !== "function",
+      onClick: onForce
+    }, t("Force update"))] : []
   );
 }
 var linkProps = (href) => ({ className: "bt-soft bt-soft-sm bt-about-link", href, target: "_blank", rel: "noopener noreferrer" });
@@ -35536,7 +35746,7 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
     (0, import_react89.createElement)(
       Section3,
       { key: "updates", title: t("Updates") },
-      !ours && update.hostAnswered ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate }) : null,
+      !ours && update.hostAnswered ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate, force: true }) : null,
       (0, import_react89.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react89.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),

@@ -437,3 +437,69 @@ test('the start route requires the team lock and is absent from the read and too
   const reads = channel.slice(channel.indexOf('const READS ='), channel.indexOf('const CLI_LOGIN ='))
   assert.equal(reads.includes(endpoint), false)
 })
+
+for (const [name, rollback, force, refusal, problem] of [
+  ['a forced start requires explicit rollback capability', undefined, true, 'rollback-missing'],
+  ['a forced start refuses an empty rollback capability', '', true, 'rollback-missing'],
+  ['a 5a boot refuses an inherited rollback flag', '1', true, 'rollback-missing'],
+  ['a 5a boot refuses rollback capability from another boot', 'sup_old-boot', true, 'rollback-missing'],
+  ['a forced start with rollback for this boot follows the ordinary hold and request path', bootId, true],
+  ['a forced start refuses invalid state even when status is available and admission is open', bootId, true, 'store-invalid', true],
+  ['an ordinary start does not require rollback capability', undefined, false],
+  ['an ordinary start keeps its eligibility with a reported store problem and an open hold', undefined, false, null, true],
+]) {
+  test(name, async t => {
+    const key = 'AUTOMAGIK_SUPERVISOR_ROLLBACK'
+    const previous = process.env[key]
+    if (rollback === undefined) delete process.env[key]
+    else process.env[key] = rollback
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous })
+
+    const { files, agents, rt, status } = await clickBench(t)
+    assert.equal(rt.updateHold.closed, false)
+    if (problem) Object.assign(status, { run: null, problem: 'Invalid state.json', available: true })
+    const close = t.mock.method(rt.updateHold, 'close')
+    const notes = t.mock.method(rt, 'markUpdateStop')
+    const inboxes = t.mock.method(rt, 'noteUpdateInboxes')
+    const flush = t.mock.method(rt, 'flushUpdateNotes')
+    const cancel = t.mock.fn(() => rt.updateTurnEnded('running'))
+    agents.push({ id: 'running', status: 'running', cancel })
+    assert.equal(rt.selfUpdateStartRefusal(), null)
+    const result = force ? await rt.selfUpdateStart(undefined, { force: true }) : await rt.selfUpdateStart()
+    if (refusal) {
+      assert.deepEqual(result, { started: false, reason: refusal })
+      for (const step of [close, notes, inboxes, flush, cancel]) assert.equal(step.mock.callCount(), 0)
+      assert.equal(rt.updateHold.closed, false)
+      assert.equal(existsSync(files.request), false)
+      assert.equal(existsSync(join(files.home, 'inflight.json')), false)
+    } else {
+      assert.deepEqual(result, { started: true, requestId: result.requestId, stopped: 1, stillRunning: 0 })
+      for (const step of [close, notes, inboxes, cancel]) assert.equal(step.mock.callCount(), 1)
+      assert.equal(rt.updateHold.closed, true)
+      const request = JSON.parse(readFileSync(files.request))
+      assert.deepEqual(requestOf(request, bootId), request)
+      assert.equal(request.requestId, result.requestId)
+    }
+  })
+}
+
+test('the start route passes the force option only for a boolean true', async t => {
+  const { home, profileDir } = profile(t)
+  const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+  const register = ctx.connection.fetch.register
+  let route
+  ctx.connection.fetch.register = value => { route = value; return register(value) }
+  const rt = createRuntime(ctx, { home, selfUpdate: true })
+  t.after(async () => { rt.dispose(); await ctx.dispose() })
+  const start = t.mock.method(rt, 'selfUpdateStart', async () => ({ started: true }))
+
+  for (const force of [true, false, 'true', undefined]) {
+    const response = await route.fetch(new Request('http://localhost/api/omni-ui', {
+      method: 'POST', body: JSON.stringify({ endpoint: 'self-update-start', payload: { force } }),
+    }))
+    assert.deepEqual(await response.json(), { ok: true, value: { started: true } })
+  }
+  assert.deepEqual(start.mock.calls.map(call => call.arguments[1]), [
+    { force: true }, { force: false }, { force: false }, { force: false },
+  ])
+})

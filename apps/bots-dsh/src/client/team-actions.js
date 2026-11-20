@@ -339,7 +339,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     checkSelfUpdate: () => call('self-update-check'),
     selfUpdateResult: runId => call('self-update-check-result', { runId }),
     selfUpdateStatus: () => call('self-update-status'),
-    startSelfUpdate: () => call('self-update-start'),
+    startSelfUpdate: body => call('self-update-start', body),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = 'action') => {
       noteClientError(where, error)

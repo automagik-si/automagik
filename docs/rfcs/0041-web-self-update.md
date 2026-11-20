@@ -377,3 +377,16 @@ Delivery 5 ships as two PRs, 5a then 5b, as approved by the coordinator on 2026-
 
 Delivery 4 must not install anything; 5 and 6 are one setting apart from people; 7 is the switch that
 retires `?mock-1540`.
+
+**Force update (coordinator, 2026-11-20).** On an identified web host, Settings > About's Automagik line
+also has Force update, as the desktop app's (#1270). It runs a fresh signed check even when the last one
+said up to date. It asks for one confirmation when the check offers the set and the running supervisor
+supports automatic rollback (delivery 6). Stop and update makes the same start as Update now, with the
+same `request.json`, hold, supervisor run and verdict. Delivery 7 adds the modal and delivery 8 brings
+the flow to Arca. The row explains refusals. A refusal before the start stops nothing. If the host
+refuses a start after stopping work, it reopens admission and gives the work back while it still holds
+the team, as it does for Update now. Both actions can lose track of an accepted request if the page
+reloads before the supervisor records the run. The browser checks rollback capability again at
+confirmation. A host downgraded by hand during confirmation may lack the Force start gate. Reinstalling
+the current version follows delivery 6 and requires changes to the supervisor's equal-version switch rule
+and version storage.

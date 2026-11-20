@@ -539,7 +539,7 @@ export function install(rt) {
           ? { ...status, ...(rt.config.selfUpdate === true
             ? { startEnabled: true, startRefusal: rt.selfUpdateStartRefusal(status) } : {}) }
           : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId)
-            : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation))
+            : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation), { force: body.force === true })
               : await rt.selfUpdateCheck()
         return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
       }
