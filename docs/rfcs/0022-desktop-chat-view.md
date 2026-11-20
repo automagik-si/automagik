@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); 2L amended 2026-11-20, approved by the owner's delegate on 2026-11-20: a local seat's rendered face sends only to an idle seat with an empty input row, see (b); amends RFC 0024 (f)) |
+| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); 2L amended 2026-11-20, approved by the owner's delegate on 2026-11-20: a local seat's rendered face sends only to an idle seat with an empty input row, see (b); (f) amended 2026-11-20, decided by the owner's delegate: client plugins in the window's page are trusted, as in RFC 0013; amends RFC 0024 (f)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) for the shell; herdr (3.N.P) for the chat engine |
 | Created | 2026-11-09 |
@@ -384,6 +384,17 @@ it is never a tool or an automation's. So no DSH Bot reaches Chat's terminal **t
 view**, whatever a page, a file or a prompt tells it. A test pins this (phase 1). That is a
 claim about the view only: the machine link the view needs gives other paths to the same
 terminal, below ("The link's reach").
+
+**Client plugins in the window are trusted (amended 2026-11-20, decided by the owner's delegate
+on 2026-11-20).** "Another plugin" above means a host plugin, an automation or anything outside
+the window's page. The desktop marks a request as the window's by the page, its origin and the
+path (`apps/desktop/src/dsh.js`), so any DSH client plugin running in that page can make a
+request the route takes as the window's, and with it reach the view's reads and writes. As in
+RFC 0013's threat model ("Who reaches the bridge"), client plugins are trusted code; the same
+rule already holds for the vault's unlock, the Code tree and automations. This is a named
+residual, not a guarantee: if client plugins stop being trusted, the fix is an authorization
+outside the renderer for each write (a check in the desktop's main process), proposed in its
+own RFC.
 
 **The desktop has one author today, so it needs no author gate.** When the view is ever shared
 with other people (teams of humans, an instance rail), the gate Buzz uses is the model to follow
