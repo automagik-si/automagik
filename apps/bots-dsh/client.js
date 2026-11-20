@@ -3010,6 +3010,7 @@ var ZH = {
   "Nothing running right now.": "现在没有在运行的任务。",
   "Just finished": "刚刚完成",
   "This step was withdrawn: its task ended": "这一步已撤回：它的任务结束了",
+  "This step was withdrawn: its group Session ended": "这一步已撤回：它的群会话结束了",
   "The task ended with an approval unanswered": "任务结束时还有一个审批没有回答",
   "Automations": "自动化",
   "What runs on a schedule or a trigger": "按计划或触发运行的任务",
@@ -9363,6 +9364,8 @@ function withdrawnText(why) {
   switch (why) {
     case "task":
       return t("This step was withdrawn: its task ended");
+    case "group":
+      return t("This step was withdrawn: its group Session ended");
     default:
       return "";
   }
