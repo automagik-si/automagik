@@ -37,4 +37,46 @@ class PairingLinkTest {
     @Test fun theTerminalSaysPocketLink() {
         assertEquals("Pocket Link encrypted", HostProfile("id", "Mac", "0123456789ab", "", 0, transport = "iroh", ticket = ticket).encryption)
     }
+
+    @Test fun formatsTheKeyLikePocketLink() {
+        assertEquals("6d35 626d c129", keyFingerprint("6d35626dc129f365026a5cb104f735bb"))
+        assertEquals("abc", keyFingerprint("abc"))
+    }
+
+    @Test fun dropsFormatCharactersAndSeparatorsFromTheLinkName() {
+        val name = "%20%20Work%E2%80%AE%E2%80%8B%E2%80%A8%E2%80%A9%F3%A0%80%81station%20"
+        assertEquals("Workstation", PairingLink.parse("herdr-pocket://pair?v=1&n=$name&c=$code&t=$ticket")?.name)
+    }
+
+    @Test fun recognizesASavedComputerByItsFullKey() {
+        val link = PairingLink("Desktop", code, ticket)
+        val desktop = "6d35626dc129f365026a5cb104f735bb"
+        val collision = HostProfile("other", "Other desktop", desktop.take(12), "", 0, transport = "iroh", ticket = "other-ticket")
+        val saved = collision.copy(id = "saved", name = "Saved desktop", ticket = "saved-ticket")
+        val ids = mapOf(collision.ticket to "6d35626dc129f365026a5cb104f735bc", saved.ticket to desktop)
+        val offer = PairingOffer.of(1L, link, desktop, listOf(collision, saved), ids::getValue)
+        assertEquals(saved, offer.known)
+        assertEquals("6d35 626d c129", offer.fingerprint)
+        assertNull(PairingOffer.of(2L, link, desktop, listOf(collision), ids::getValue).known)
+    }
+
+    @Test fun skipsUnreadableAndLegacySavedTickets() {
+        val link = PairingLink("Desktop", code, ticket)
+        val desktop = "6d35626dc129f365026a5cb104f735bb"
+        val saved = HostProfile("saved", "Saved desktop", desktop.take(12), "", 0, transport = "iroh", ticket = "saved-ticket")
+        val ssh = saved.copy(id = "ssh", transport = "ssh")
+        val unreadable = saved.copy(id = "unreadable", ticket = "bad-ticket")
+        val ids = mapOf(saved.ticket to desktop)
+        assertEquals(saved, PairingOffer.of(1L, link, desktop, listOf(ssh, unreadable, saved), ids::getValue).known)
+        assertNull(PairingOffer.of(2L, link, desktop, listOf(ssh, unreadable), ids::getValue).known)
+    }
+
+    @Test fun onlyPairedCardsWithAStoredKeyPrefixHaveAFingerprint() {
+        val saved = HostProfile("saved", "Desktop", "6d35626dc129", "", 0, transport = "iroh", ticket = ticket)
+        assertEquals("6d35 626d c129", pairedKey(saved))
+        assertNull(pairedKey(saved.copy(transport = "ssh")))
+        assertNull(pairedKey(saved.copy(host = "6D35626DC129")))
+        assertNull(pairedKey(saved.copy(host = "6d35626dc12")))
+        assertNull(pairedKey(saved.copy(host = "desktop")))
+    }
 }

@@ -82,6 +82,7 @@ async function launch(box, { env = {} } = {}) {
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
 const profileOf = box => join(box.home, '.automagik', 'desktop', 'dsh', 'profiles', 'omni')
 const welcomeVersion = box => JSON.parse(readFileSync(join(profileOf(box), 'node_modules', '@automagik', 'welcome-dsh', 'package.json'), 'utf8')).version
+const ownerFile = box => join(box.home, '.automagik', 'desktop', 'owner.json')
 
 test('ready, the ipc relay both ways, the CDP tunnel, open, and the stop on stdin\'s end', async () => {
   const box = makeImage()
@@ -102,6 +103,7 @@ test('ready, the ipc relay both ways, the CDP tunnel, open, and the stop on stdi
     assert.equal(env.BROWSER, join(box.image, 'bin', 'xdg-open'))
     assert.equal(env.PATH.split(':')[0], join(box.image, 'bin'))
     assert.deepEqual(env.argv, ['--profile', 'omni', '--patch', join(box.home, '.automagik', 'desktop', 'privacy.patch.yml'), '--no-open', '--host', '127.0.0.1', '--port', String(port)])
+    assert.equal(env.AUTOMAGIK_INSTANCE_ID, JSON.parse(readFileSync(ownerFile(box), 'utf8')).instance_id)
 
     // Electron to DSH and back.
     electron.send({ type: 'ipc', message: { type: 'smoke:echo', payload: { n: 1, text: 'ação' } } })
@@ -148,6 +150,49 @@ test('ready, the ipc relay both ways, the CDP tunnel, open, and the stop on stdi
     const log = readFileSync(join(box.home, '.automagik', 'desktop', 'logs', 'dsh.log'), 'utf8')
     assert.match(log, /fake-dsh: up/)
     assert.match(electron.stderr, /fake-dsh: up/)
+  } finally {
+    reap()
+    rmSync(box.dir, { recursive: true, force: true })
+  }
+})
+
+test('a second guest launch in the same home hands DSH the same instance id', async () => {
+  const box = makeImage()
+  try {
+    const start = async () => {
+      const { electron } = await launch(box, { env: { AUTOMAGIK_INSTANCE_ID: 'inherited' } })
+      await electron.waitFor(frame => frame.type === 'ready', 15_000, 'ready')
+      electron.send({ type: 'ipc', message: { type: 'smoke:env' } })
+      const env = await electron.ipc('smoke:env')
+      assert.equal((await electron.close()).code, EXIT.stopped)
+      return env.AUTOMAGIK_INSTANCE_ID
+    }
+    const first = await start()
+    assert.match(first, /^[0-9a-f-]{36}$/)
+    const bytes = readFileSync(ownerFile(box), 'utf8')
+    assert.equal(JSON.parse(bytes).instance_id, first)
+    assert.equal(await start(), first)
+    assert.equal(readFileSync(ownerFile(box), 'utf8'), bytes)
+  } finally {
+    reap()
+    rmSync(box.dir, { recursive: true, force: true })
+  }
+})
+
+test('the guest warns about an invalid owner record and DSH is ready without an instance id', async () => {
+  const box = makeImage()
+  try {
+    mkdirSync(join(box.home, '.automagik', 'desktop'), { recursive: true })
+    const bytes = '{"version":1,"instance_id":"owner-only sentinel"}\n'
+    writeFileSync(ownerFile(box), bytes)
+    const { electron } = await launch(box, { env: { AUTOMAGIK_INSTANCE_ID: 'inherited' } })
+    await electron.waitFor(frame => frame.type === 'ready', 15_000, 'ready')
+    const warnings = electron.frames.filter(frame => frame.type === 'log' && frame.level === 'warn' && frame.text.includes('owner record'))
+    assert.deepEqual(warnings.map(frame => frame.text), ['owner record invalid; reservations are off'])
+    electron.send({ type: 'ipc', message: { type: 'smoke:env' } })
+    assert.equal(Object.hasOwn(await electron.ipc('smoke:env'), 'AUTOMAGIK_INSTANCE_ID'), false)
+    assert.equal((await electron.close()).code, EXIT.stopped)
+    assert.equal(readFileSync(ownerFile(box), 'utf8'), bytes)
   } finally {
     reap()
     rmSync(box.dir, { recursive: true, force: true })

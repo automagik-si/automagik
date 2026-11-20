@@ -17,7 +17,8 @@
 // the pane this proxy serves, fixed at start, and every forwarded request has its
 // `params.caller` overwritten with it. Targets are resolved with one short upstream
 // `terminal.get`, checked, and forwarded by resolved address, so a rename between the check
-// and the call cannot redirect it.
+// and the call cannot redirect it. `terminal.list` is filtered the same way (#628): its reply
+// names the caller's own pane and the terminals it may type into, never another team's.
 //
 // Fail closed: a dead upstream is a JSON-RPC error, never a fallback. The upstream core must
 // answer `server.status` with HC_PIN or the proxy refuses to start. A pane whose proxy cannot
@@ -37,7 +38,7 @@ import { parseBots } from "./model.js";
 import { AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
 import { commandArgv, sessionId } from "./restart.js";
 import { approvedDataRootProblem, executionPathProblem, shimPathOf } from "./dshTui.mjs";
-import { sharedSendAllowed, teamOf } from "./hcGuard.mjs";
+import { OWNER_QUESTION_LABEL, sharedSendAllowed, teamOf } from "./hcGuard.mjs";
 import { ENV, guardPathWith, stableGuardDir, stableHelper, stableKillDir, stableRootOf, stableRunner, templateAgent, workerArgs, workerPlan, WORKER_OF_LABEL } from "./workers.js";
 
 /** The one core version this proxy speaks (the box's herdr-core, hc 0.1.14). */
@@ -501,6 +502,15 @@ function isOwnWorkerTarget(record, policy) {
   return isOwnWorker(record, policy.caller);
 }
 
+/** A pane may set or clear only its owner question on itself. Labels come from parsed JSON. */
+function ownPaneLabelProblem(labels) {
+  if (isObject(labels) && Object.keys(labels).length === 1 && Object.hasOwn(labels, OWNER_QUESTION_LABEL)) {
+    const value = labels[OWNER_QUESTION_LABEL];
+    if (typeof value === "string" || value === null) return null;
+  }
+  return `the caller's own pane takes only the ${OWNER_QUESTION_LABEL} label`;
+}
+
 /** The team check for get/read/wait: the caller itself, its team graph, or its own workers. */
 function teamAllowed(record, policy) {
   if (record?.address === policy.terminal) return true;
@@ -515,6 +525,50 @@ function sendAllowed(record, policy) {
   if (isOwnWorker(record, policy.caller)) return true;
   if (typeof labels.bot === "string" && policy.team.has(labels.bot)) return true;
   return sharedSendAllowed(policy.file, policy.caller, labels);
+}
+
+/**
+ * The rows a `terminal.list` may show (#628): the caller's own pane and every terminal it may
+ * type into, which is the send rule. Other teams' panes are left out.
+ *
+ * A linked machine's pane is never in scope, whatever its labels say: the proxy refuses a
+ * machine address on every forwarded verb (get/read/wait/send/kill/rm/label/run), so a
+ * sandboxed bot can neither reach nor type into one, and naming it would only leak another
+ * team's pane (and sometimes the machine's target). The row is rejected by its address, not by
+ * its labels, because a `role=reviewer` label on a stranger's machine row would otherwise pass
+ * the send rule. A row without a local address is not a terminal this pane can use either.
+ */
+function listAllowed(record, policy) {
+  if (!isObject(record)) return false;
+  if (record.address === policy.terminal) return true;
+  if (typeof record.address !== "string" || !record.address || record.address.includes("/")) return false;
+  return sendAllowed(record, policy);
+}
+
+/**
+ * One `terminal.list` reply line with only the rows `listAllowed` keeps, or a refusal line when
+ * the core's answer cannot be read (fail closed, never the unfiltered rows).
+ *
+ * An error reply carries no rows: a malformed one that also holds a `result` never passes it
+ * through. The `machines` inventory is filtered the same way as the rows: a sandboxed bot may
+ * reach no machine, so the reply's list is empty, never the core's names and ssh targets.
+ */
+function listReply(line, id, policy) {
+  let reply;
+  try { reply = JSON.parse(line); } catch { reply = null; }
+  if (isObject(reply) && reply.error) {
+    const error = { ...reply };
+    delete error.result;
+    return JSON.stringify(error);
+  }
+  if (!isObject(reply) || !isObject(reply.result) || !Array.isArray(reply.result.terminals)) {
+    return JSON.stringify(refusal(id, "terminal.list: the core's answer could not be read", "unavailable"));
+  }
+  const terminals = reply.result.terminals.filter((row) => listAllowed(row, policy));
+  const result = { ...reply.result, terminals };
+  // Whatever shape the inventory came in, none of it is information this pane can use.
+  if (Object.hasOwn(reply.result, "machines")) result.machines = [];
+  return JSON.stringify({ ...reply, result });
 }
 
 /** One short upstream call: connect, send one request, read one reply, close. */
@@ -1070,7 +1124,10 @@ class Session {
       return;
     }
     if (method === "terminal.list") {
-      await this.forward(request, method, params);
+      // #628: the reply is filtered to the terminals this caller may type into, so another
+      // team's panes are never named; the request itself reaches the core unchanged.
+      await this.forward(request, method, params,
+        (line) => listReply(line, id, this.policy));
       return;
     }
     if (method === "templates.list" || method === "terminal.run") {
@@ -1154,7 +1211,9 @@ class Session {
     }
     let why = null;
     if (OWN_WORKER_METHODS.has(method)) {
-      if (!isOwnWorkerTarget(record, this.policy)) why = "the target is not the caller's own worker";
+      if (method === "terminal.label" && record.address === this.policy.terminal) {
+        why = ownPaneLabelProblem(params.labels);
+      } else if (!isOwnWorkerTarget(record, this.policy)) why = "the target is not the caller's own worker";
     } else if (method === "terminal.send") {
       if (!sendAllowed(record, this.policy)) why = "the target is not in the caller's team";
     } else if (TEAM_METHODS.has(method)) {
@@ -1168,8 +1227,10 @@ class Session {
     await this.forward(request, method, params);
   }
 
-  /** Forward one request on the client's own upstream and write its reply line back. */
-  async forward(request, method, params) {
+  /** Forward one request on the client's own upstream and write its reply line back. `transform`
+   * rewrites the reply line (the filtered `terminal.list`); it never sees a reply for a
+   * notification, which carries none. */
+  async forward(request, method, params, transform = null) {
     const id = hasId(request) ? request.id : null;
     const forwarded = { jsonrpc: "2.0", method, params };
     if (hasId(request)) forwarded.id = id;
@@ -1209,6 +1270,11 @@ class Session {
       this.readerIn.stop();
       this.client.end();
       return;
+    }
+    if (transform) {
+      // A transform that cannot read its reply fails closed with an error line, never a hang.
+      try { line = transform(line); }
+      catch { line = JSON.stringify(refusal(id, `${method}: the core's answer could not be read`, "unavailable")); }
     }
     await this.writeLine(`${line}\n`);
   }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -58,6 +58,15 @@ const start = (team = TEAM, services = {}, globals = [], shared = {}) => {
     return plainRegister(tool)
   }
   let sessions = 0
+  // Every Session the team's state names exists in DSH before the runtime loads; the ones
+  // made here join it. A DSH header always carries the Session's own id.
+  const existing = new Set([
+    ...Object.values(team.bots ?? {}).map(bot => bot.sessionId),
+    ...Object.values(team.rooms ?? {}).flatMap(room => [room.sessionId ?? room.id, ...Object.values(room.sessions ?? {})]),
+  ].filter(id => typeof id === 'string'))
+  const headerOf = id => ({ version: 1, id, cwd: '/team', createdAt: 0, isSeeded: false })
+  // Each create request and the id DSH answered with, in order.
+  const created = []
   const agentOf = (sessionId) => {
     const held = liveAgents.get(sessionId)
     if (held !== undefined) return held
@@ -65,7 +74,7 @@ const start = (team = TEAM, services = {}, globals = [], shared = {}) => {
     const nextTurn = []
     const agent = {
       id: sessionId,
-      session: { id: sessionId, header: { cwd: '/team' }, requestHeader: () => undefined, deriveMessages: () => [] },
+      session: { id: sessionId, header: headerOf(sessionId), requestHeader: () => undefined, deriveMessages: () => [] },
       ctx: {
         tools: {
           register: (tool) => {
@@ -131,13 +140,23 @@ const start = (team = TEAM, services = {}, globals = [], shared = {}) => {
       archiveSession: async () => {},
     },
     sessionController: {
-      create: async () => ({ sessionId: `s${++sessions}` }),
+      // DSH makes the Session under the id the request reserved, as the real controller does.
+      create: async (request = {}) => {
+        const sessionId = request.sessionId ?? `s${++sessions}`
+        existing.add(sessionId)
+        created.push({ request, sessionId })
+        return { sessionId }
+      },
       resolveAgent: async sessionId => ({ agent: agentOf(sessionId) }),
       selectModel: async () => {},
       page: async () => ({ records: [], hasMore: false }),
     },
     sessionTitle: { rename: async () => {} },
-    sessions: { flush: async () => {} },
+    // A live Session is read with its complete header; asking does not make an Agent.
+    sessions: {
+      flush: async () => {},
+      get: id => liveAgents.get(id)?.session ?? (existing.has(id) ? { id, header: headerOf(id) } : undefined),
+    },
   })
   // Sessions named in shared.live get their Agent into the registry before the
   // runtime and its first load — the state a restart leaves behind (#826).
@@ -164,7 +183,7 @@ const start = (team = TEAM, services = {}, globals = [], shared = {}) => {
     await unload()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { ctx, call, tool, emit, agentCreated, agentOf, scoped, restricted, home, unload, stop }
+  return { ctx, call, tool, emit, agentCreated, agentOf, scoped, restricted, created, home, unload, stop }
 }
 
 const until = async (check, ms = 3000) => {
@@ -245,10 +264,24 @@ test('a group Session made for a member has the scoped tools before its first st
   t.after(() => stop.abort())
   // The user's post starts a round; Writer has no group Session yet, so the round
   // makes one — which used to keep whatever tools a global registration left.
+  // The room's conversation has a file-tool folder before the member's Session is made.
+  const folder = mkdtempSync(join(tmpdir(), 'ds-bot-scoped-folder-'))
+  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5 }))
+  const set = await host.call('set-session-read-scope', { sessionId: 'r1', folder })
+  assert.equal(set.ok, true, JSON.stringify(set))
   host.emit('r1', 'user/message', { content: [{ type: 'text', text: 'launch moved' }], source: { kind: 'user' } })
   void host.tool('group_relay', {}, 'r1', { callId: 'r1', signal: stop.signal }).catch(() => {})
-  await until(() => hasShowView(host, 's1'), 5000)
-  assert.ok(denied(host, 's1'), 'the blocking question tool is denied in the group scope')
+  await until(() => host.created.length > 0 && hasShowView(host, host.created[0].sessionId), 5000)
+  const [{ request, sessionId: member }] = host.created
+  // DSH made the member's Session under the id reserved for the room's folder.
+  assert.match(String(request.sessionId), /^session-/)
+  assert.equal(member, request.sessionId)
+  assert.ok(denied(host, member), 'the blocking question tool is denied in the group scope')
+  // The member reads in the room's folder and cannot set its own.
+  assert.deepEqual(await rt.resolveReadScope(member), { rootId: 'r1', editable: false, folder: realpathSync(folder) })
+  const own = await host.call('set-session-read-scope', { sessionId: member, folder: null })
+  assert.equal(own.ok, false)
+  assert.match(String(own.error?.message), /Set the file-tool folder in the root Session/)
 })
 
 test('a fresh part Session has the scoped tools before its first step', async (t) => {
@@ -262,6 +295,11 @@ test('a fresh part Session has the scoped tools before its first step', async (t
     rmSync(project, { recursive: true, force: true, maxRetries: 5 })
   })
   await host.call('state', {})
+  // Writer's conversation has a file-tool folder before the part switch.
+  const folder = mkdtempSync(join(tmpdir(), 'ds-bot-scoped-folder-'))
+  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5 }))
+  const set = await host.call('set-session-read-scope', { sessionId: 'b', folder })
+  assert.equal(set.ok, true, JSON.stringify(set))
   host.agentOf('b').status = 'running'
   const moved = await host.tool('update_bot', { work_dir: project }, 'b')
   assert.equal(String(moved).includes('From your next step on'), true)
@@ -272,8 +310,15 @@ test('a fresh part Session has the scoped tools before its first step', async (t
   const run = async at => (at === chain.length ? 'next' : chain[at](payload, () => run(at + 1)))
   const answer = await run(0)
   assert.deepEqual(answer, { kind: 'reject' })
-  await until(() => hasShowView(host, 's1'), 5000)
-  assert.ok(denied(host, 's1'), 'the blocking question tool is denied in the fresh part')
+  await until(() => host.created.length > 0 && hasShowView(host, host.created[0].sessionId), 5000)
+  const [{ request, sessionId: part }] = host.created
+  // The continued part was made under the id reserved from Writer's conversation.
+  assert.match(String(request.sessionId), /^session-/)
+  assert.equal(part, request.sessionId)
+  assert.ok(denied(host, part), 'the blocking question tool is denied in the fresh part')
+  // A continuation keeps Writer's folder and stays the place to change it.
+  assert.deepEqual(await rt.resolveReadScope(part), { rootId: 'b', editable: true, folder: realpathSync(folder) })
+  assert.deepEqual((await host.call('session-read-scope', { sessionId: part })).value, { editable: true, folder: realpathSync(folder) })
 })
 
 test('a Session ds-bot does not own keeps only the global show_view', async (t) => {

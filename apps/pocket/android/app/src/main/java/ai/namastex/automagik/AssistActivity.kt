@@ -4,6 +4,7 @@ import android.app.KeyguardManager
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -32,6 +33,9 @@ import kotlinx.coroutines.launch
 object Assist {
     fun targets(sections: List<Cockpit.Section>, max: Int = 5): List<Cockpit.Entry> =
         sections.filter { it.rank == Cockpit.BLOCKED || it.rank == Cockpit.DONE }.sortedByDescending { it.rank }.flatMap { it.entries }.take(max)
+
+    fun waitsForUnlock(appLock: Boolean, keyguardLocked: Boolean, lockAnswers: Boolean) =
+        !appLock && keyguardLocked && !lockAnswers
 }
 
 /**
@@ -40,31 +44,90 @@ object Assist {
  */
 class AssistActivity : ComponentActivity() {
     private val vm get() = (application as PocketApplication).vm
+    private val keyguard get() = getSystemService(KeyguardManager::class.java)
+    private lateinit var lockAuth: AppLockAuth
+    private var keyguardLocked by mutableStateOf(false)
+    private var dismissingKeyguard by mutableStateOf(false)
+    private var unlockFirstPending = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lockAuth = AppLockAuth(this, savedInstanceState)
         if (Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(true); setTurnScreenOn(true) }
-        val keyguard = getSystemService(KeyguardManager::class.java)
-        // Off in Settings: unlock first, as the notifications' Reply asks.
-        if (keyguard.isKeyguardLocked && !vm.state.value.lockAnswers) {
-            keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
-                override fun onDismissCancelled() = finish()
-                override fun onDismissError() = finish()
-            })
-        }
+        keyguardLocked = keyguard.isKeyguardLocked
         setContent {
             AutomagikTheme {
-                AssistPanel(vm, onClose = ::finish, onOpen = { ref ->
-                    startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        .apply { ref?.let { putExtra(Notify.EXTRA_HOST, it.hostId).putExtra(Notify.EXTRA_ADDRESS, it.address) } })
-                    finish()
+                val lock by AppLock.state.collectAsState()
+                val state by vm.state.collectAsStateWithLifecycle()
+                val waitingForPhone = keyguardLocked || dismissingKeyguard
+                LockGate(lock.copy(locked = lock.enabled && (lock.locked || waitingForPhone)), cover = {
+                    lockAuth.AutoPrompt(lock, ready = !waitingForPhone)
+                    LockCover(lockAuth.canLock, ::unlock, { startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS)) }, vm::setForeground)
+                }, content = {
+                    if (Assist.waitsForUnlock(lock.enabled, keyguardLocked, state.lockAnswers)) Box(Modifier.fillMaxSize())
+                    else AssistPanel(vm, keyguardLocked = { keyguard.isKeyguardLocked }, onClose = ::finish, onOpen = { ref ->
+                        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            .apply { ref?.let { putExtra(Notify.EXTRA_HOST, it.hostId).putExtra(Notify.EXTRA_ADDRESS, it.address) } })
+                        finish()
+                    })
                 })
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        keyguardLocked = keyguard.isKeyguardLocked
+        // API 26 can't show this window over the lock screen, so it asks now. From 27 it asks once the window has
+        // focus: a request made before the window covers the lock screen is cancelled when it does.
+        if (Build.VERSION.SDK_INT < 27) askUnlockFirst()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus || Build.VERSION.SDK_INT < 27) return
+        keyguardLocked = keyguard.isKeyguardLocked
+        askUnlockFirst()
+    }
+
+    /** With the app lock and "Answer from the lock screen" off, Android's unlock comes before the panel. */
+    private fun askUnlockFirst() {
+        if (unlockFirstPending || !Assist.waitsForUnlock(AppLock.enabled, keyguardLocked, vm.state.value.lockAnswers)) return
+        unlockFirstPending = true
+        keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+            override fun onDismissSucceeded() { unlockFirstPending = false; keyguardLocked = keyguard.isKeyguardLocked }
+            override fun onDismissCancelled() { unlockFirstPending = false; finish() }
+            override fun onDismissError() { unlockFirstPending = false; finish() }
+        })
+    }
+    override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); lockAuth.save(outState) }
+
+    private fun unlock() {
+        if (dismissingKeyguard) return
+        if (!keyguard.isKeyguardLocked) {
+            keyguardLocked = false
+            if (AppLock.locked()) lockAuth.request(AppLock.Purpose.UNLOCK)
+            return
+        }
+        keyguardLocked = true
+        dismissingKeyguard = true
+        keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+            override fun onDismissSucceeded() {
+                keyguardLocked = keyguard.isKeyguardLocked
+                dismissingKeyguard = false
+                if (AppLock.locked()) {
+                    AppLock.claimAutoPrompt(AppLock.state.value.episode)
+                    lockAuth.request(AppLock.Purpose.UNLOCK)
+                }
+            }
+
+            override fun onDismissCancelled() { keyguardLocked = true; dismissingKeyguard = false }
+            override fun onDismissError() { keyguardLocked = true; dismissingKeyguard = false }
+        })
+    }
 }
 
-@Composable private fun AssistPanel(vm: PocketViewModel, onClose: () -> Unit, onOpen: (TerminalRef?) -> Unit) {
+@Composable private fun AssistPanel(vm: PocketViewModel, keyguardLocked: () -> Boolean, onClose: () -> Unit, onOpen: (TerminalRef?) -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
     val all = state.machines.flatMap { (host, machine) -> machine.terminals.filter { it.live }.map { TerminalRef(host, it.address) to it } }
     val paned = state.machines.flatMap { (h, m) -> m.spaces.flatMap { s -> s.addresses.map { TerminalRef(h, it) } } }.toSet()
@@ -113,10 +176,18 @@ class AssistActivity : ComponentActivity() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(text, { text = it }, Modifier.weight(1f), placeholder = { Text("Message ${chosen.terminal.title.ifBlank { chosen.terminal.agent }}") }, maxLines = 4)
                     Spacer(Modifier.width(6.dp))
-                    Dictate { heard -> text = dictated(text, heard) }
+                    Dictate(onHeard = { heard -> text = dictated(text, heard) })
                     IconButton(enabled = text.isNotBlank(), onClick = {
                         val send = text.trim(); val ref = chosen.ref
                         scope.launch {
+                            if (AppLock.locked()) {
+                                outcome = "Not sent: Automagik is locked. Open it to answer."
+                                return@launch
+                            }
+                            if (keyguardLocked() && (AppLock.enabled || !vm.state.value.lockAnswers)) {
+                                outcome = "Not sent: unlock the phone to answer."
+                                return@launch
+                            }
                             val result = vm.reply(ref, send)
                             outcome = result
                             if (result.startsWith("You:")) { text = ""; delay(1_200); onClose() }

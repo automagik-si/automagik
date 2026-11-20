@@ -2,7 +2,7 @@
 title: "Using Automagik Pocket"
 type: guide
 created: 2026-11-01
-updated: 2026-11-07
+updated: 2026-11-19
 tags: [guide, users]
 ---
 # Using Automagik Pocket
@@ -12,7 +12,10 @@ Everything the [README](../../README.md) keeps short. Install and first connecti
 ## Machines
 
 - Pair several machines, rename them later, and connect with one tap from the start screen.
-  Pairing a machine saves it and connects straight away.
+  Scan a QR code or paste a link in the app to pair and connect straight away. Open a pairing
+  link from outside the app to see the computer’s key fingerprint and whether its key is
+  already saved. Only tap **Pair** if the code is on your own computer’s screen. For a new
+  computer, open **Settings → Machines** and tap **Connect** when you’re ready.
 - **Pocket Link:** the phone dials the desktop by its public key over iroh. The connection is
   direct on the same network or through hole punching, and otherwise through n0's public relays.
   It is end-to-end encrypted either way. No port is opened on the computer. Removing the phone in
@@ -178,6 +181,8 @@ With **Answer from the lock screen** off, the panel asks you to unlock first. If
 stops opening it, for example after reinstalling, set the assistant again.
 
 ## Updates
+
+Google Play handles updates for the Play build. The following controls are for the GitHub APK.
 
 - The app looks for a new version when it opens (at most every 15 minutes) and every 6 hours while
   it or **Watch in background** runs. **Settings → About → Check for updates** looks now.

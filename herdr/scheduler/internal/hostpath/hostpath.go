@@ -53,6 +53,31 @@ func HCBin() string {
 	return "hc"
 }
 
+// AmBin locates the pack's `am` CLI, which starts a bot and starts a worker of
+// one for an automation target (#498). A launchd or systemd service starts
+// with a bare PATH that rarely holds ~/.local/bin, so that is the fallback
+// rather than a bare "am" that would not resolve.
+func AmBin() string {
+	if b := os.Getenv("AM_BIN"); b != "" && usable(b) {
+		return b
+	}
+	// `am` is the command's name; a pack that predates it installs the same
+	// CLI as `automagik-herdr`.
+	names := []string{"am", "automagik-herdr"}
+	for _, name := range names {
+		if b, err := exec.LookPath(name); err == nil {
+			return b
+		}
+	}
+	home, _ := os.UserHomeDir()
+	for _, name := range names {
+		if b := filepath.Join(home, ".local", "bin", name); usable(b) {
+			return b
+		}
+	}
+	return "am"
+}
+
 // usable reports whether path is something we could actually execute.
 func usable(path string) bool {
 	info, err := os.Stat(path)

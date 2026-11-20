@@ -236,7 +236,7 @@ test('through the route, a window lists, opens, reads and closes a local seat, a
     hooks: { endpoint: (name, fn, options) => { registered.set(name, { fn, options }); return () => registered.delete(name) } },
   }
   install(rt, { engine })
-  const endpoint = name => registered.get(name).fn
+  const endpoint = name => body => registered.get(name).fn(body, undefined, true)
   const listed = await endpoint('seat-chat-list')({})
   assert.deepEqual(listed.seats.map(seat => [seat.terminal, seat.status]), [['t1', 'working']])
   await assert.rejects(() => endpoint('seat-chat-open')({ client: 'win-1', terminal: 'box/t1' }), /another computer/)

@@ -7,4 +7,5 @@
 !apps/desktop/runtime/patches/**
 !apps/desktop/scripts/prune-runtime.mjs
 !apps/desktop/scripts/runtime-patches.mjs
+!apps/desktop/src/profile-patch.mjs
 server/node_modules

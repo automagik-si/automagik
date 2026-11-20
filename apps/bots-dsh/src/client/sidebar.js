@@ -1,3 +1,4 @@
+import { CodeBarList, CodeSideSwitch, setCodeSide, useCodeSide } from './code-side.js'
 import { openStops } from './stops.js'
 import { Component, createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
@@ -21,6 +22,8 @@ import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
 import { seatBotId, seatChatView, seatWithFreshPane, useSeats } from './seat-chat.js'
+import { NATIVE_WORKERS_CSS, NativeWorkers, runningWorkers } from './native-workers.js'
+import { roleOutletVisible, roleTagOf } from '../shared/roles.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -94,8 +97,10 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const awayLine = away ? workLine(roster.roomsById[groups[0].id]?.name ?? t('a group chat'), groups[0], groups.length - 1) : null
   const waits = workKeys(useWork ? useWork(work => JSON.stringify(work.waiting?.[id] ?? null)) : 'null')
   const waitsFor = state === 'waiting' ? waitingFor(roster, waits) : ''
-  // Tasks it started that still run hang under the row (BotThreads); the row says how many.
-  const threads = runningTasksOf(roster, id).length
+  // Tasks it started that still run hang under the row (BotThreads), and so do the native
+  // Claude Code subagents of its turn (NativeWorkers); the row says how many still run.
+  const nativeRunning = useWork ? useWork(work => runningWorkers(work, id)) : 0
+  const threads = runningTasksOf(roster, id).length + nativeRunning
   const threadsLine = threads === 0 ? '' : threads === 1 ? t('Working on 1 thing') : t('Working on {n} things', { n: threads })
   if (bot.hidden && !active && !main) return null
   const onContextMenu = (event) => {
@@ -104,7 +109,8 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   }
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
-  const label = [bot.name, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
+  const tag = roleTagOf(bot, roster.prefs)
+  const label = [bot.name, tag ? t(tag) : '', role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-bot-id': id, title: wide ? undefined : bot.name,
@@ -113,7 +119,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, t(tag)) : null, bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
     blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
@@ -139,7 +145,8 @@ function RowBadges(props) {
 function BotChildren({ wide, ...props }) {
   const entries = useEntries(botChildren)
   if (!wide || entries.length === 0) return null
-  return entries.map(entry => h(entry.Component, { key: entry.id, ...props, wide }))
+  return entries.filter(entry => roleOutletVisible('botChildren', entry.id, props.bot, props.roster))
+    .map(entry => h(entry.Component, { key: entry.id, ...props, wide }))
 }
 
 // A short age for a thread: now, 4m, 2h, 3d.
@@ -201,6 +208,14 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
       h('span', { className: 'bt-thread-age', 'aria-hidden': true }, threadAge(task.at ?? now, now)))
     }),
     more > 0 ? h('button', { type: 'button', className: 'bt-thread bt-thread-more', onClick: () => setOpen(true) }, t('+{n} more', { n: more })) : null)
+}
+
+// Claude Code's native subagents under the row (native-workers.js), their ages ticking like
+// the threads' while there are any.
+function BotWorkers(props) {
+  const any = props.useWork ? props.useWork(work => (work?.native?.[props.bot.id]?.length ?? 0) > 0) : false
+  const now = useMinute(props.wide && any)
+  return h(NativeWorkers, { ...props, age: ms => threadAge(ms, now) })
 }
 
 function RoomRow({ room, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useWork, wide, marked }) {
@@ -391,6 +406,7 @@ export function TeamSidebar(props) {
   const closing = useRef(false)
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
+  const code = useCodeSide()
   // The seats on this computer (RFC 0022 1L): the registry's orchestrators as the bar's rows.
   // An open seat keeps polling even where the bar is a narrow rail, so its switch learns a
   // pane that starts or stops while the panel stays open.
@@ -429,8 +445,8 @@ export function TeamSidebar(props) {
   // The shell keeps wide content during its collapse fade. Normalize through its
   // public expansion action before toggling; coalesce synchronous activations
   // until React commits the result.
-  const navigate = (open, id) => {
-    const result = open(id)
+  const navigate = (open, ...args) => {
+    const result = open(...args)
     if (wide && window.innerWidth < 1024 && !closing.current) {
       closing.current = true
       expandSidebar?.()
@@ -438,12 +454,17 @@ export function TeamSidebar(props) {
     }
     return result
   }
+  const team = () => {
+    if (code.side === 'team') return
+    actions.closeCodePane?.()
+    setCodeSide('team')
+  }
   const rowActions = {
     ...actions,
-    openSession: id => navigate(actions.openSession, id),
-    openAgent: id => navigate(actions.openAgent, id),
-    openAgentSession: id => navigate(actions.openAgentSession, id),
-    newAgentSession: id => navigate(actions.newAgentSession, id),
+    openSession: (id) => { team(); return navigate(actions.openSession, id) },
+    openAgent: (id) => { team(); return navigate(actions.openAgent, id) },
+    openAgentSession: (id) => { team(); return navigate(actions.openAgentSession, id) },
+    newAgentSession: (id) => { team(); return navigate(actions.newAgentSession, id) },
   }
   const rowProps = { roster, actions: rowActions, useSessions, useUi, useSessionStatus: props.useSessionStatus, useSessionRetainInfo: props.useSessionRetainInfo, useActivity: props.useActivity, useWork: props.useWork, wide }
   // Typing while the sidebar has focus starts a search.
@@ -458,9 +479,14 @@ export function TeamSidebar(props) {
   if (wide) {
     // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
     const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
-    const open = row => (row.bot?.seat ? rowActions.openSeat(row.bot)
-      : row.kind === 'group' ? rowActions.openSession(row.id)
-      : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
+    const open = (row) => {
+      team()
+      if (row.bot?.seat) return rowActions.openSeat(row.bot)
+      if (row.kind === 'chat') return row.source?.open?.(row.id)
+      if (row.kind === 'group') return rowActions.openSession(row.id)
+      if (row.bot?.dsh) return rowActions.openAgent(row.id)
+      if (row.kind === 'bot') return rowActions.openSession(row.id)
+    }
     const menu = (row, event) => {
       // A seat is read here and run in Herdr: it has no Bot settings or context menu.
       if (row.bot?.seat) return
@@ -474,11 +500,16 @@ export function TeamSidebar(props) {
         return agent ? h(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null
       }
       const bot = roster.byId[row.id]
-      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotChildren, { ...rowProps, bot })) : null
+      // A channel source draws the Bot's channels as the bar's own rows; the team's old rows
+      // under it come off for that Bot, so the two never draw the same channels twice.
+      const children = row.channelSource ?? row.bot?.channelSource ? null : h(BotChildren, { ...rowProps, bot })
+      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotWorkers, { ...rowProps, bot }), children) : null
     }
     return h(LeftBar, {
       roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
       open, menu, renderAfter, notice, onKeyDown: typeToSearch,
+      sideSwitch: h(CodeSideSwitch, { current: code, onSelect: side => (side === 'team' ? team() : setCodeSide(side)) }),
+      codeList: code.side === 'code' ? h(CodeBarList, { current: code, onSelect: (selected, options) => navigate(actions.openCodePane, selected, options) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {
         const bot = row.bot.dsh ? undefined : roster.byId[row.id]
@@ -510,11 +541,13 @@ export function TeamSidebar(props) {
       main ? h(Fragment, { key: main.id },
         h(BotRow, { ...rowProps, bot: main, marked: markedUnread[main.id] === true }),
         h(BotThreads, { ...rowProps, bot: main }),
+        h(BotWorkers, { ...rowProps, bot: main }),
         h(BotChildren, { ...rowProps, bot: main })) : roster.ready ? null : h('div', { className: 'bt-hint' }, bootFailed ? bootHint() : t('Setting up your Main Bot…')),
       order.map(entry => (entry.kind === 'bot'
         ? h(Fragment, { key: entry.item.id },
             h(BotRow, { ...rowProps, bot: entry.item, marked: markedUnread[entry.item.id] === true }),
             h(BotThreads, { ...rowProps, bot: entry.item }),
+            h(BotWorkers, { ...rowProps, bot: entry.item }),
             h(BotChildren, { ...rowProps, bot: entry.item }))
         : entry.kind === 'room'
           ? h(RoomRow, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true })
@@ -805,7 +838,7 @@ export function AccountLauncher({ seat = true, settingsOpen, openSettings, openO
     [
       [t('Usage'), GaugeIcon, () => actions.openSettings('usage')],
       [t('Plugins'), PlugIcon, () => actions.selectPanel('plugins')],
-      [t('Connectors'), ConnectorIcon, () => actions.openConnectors()],
+      [t('Apps'), ConnectorIcon, () => actions.openConnectors()],
       // Rows other Omni plugins add (extend.js), such as Automations.
       ...navRows.map(row => [row.label(), row.icon, () => row.run(actions)]),
       [t('Bot settings'), GearIcon, () => actions.openSettings('general')],
@@ -1025,6 +1058,7 @@ html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) [class*="_f
 @keyframes bt-thread-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.bt-thread-spin{animation-duration:3s}}
 body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
+${NATIVE_WORKERS_CSS}
 /* The first Main Bot's crown (mark.js) and its role chip, in clay gold. */
 .bt-crown{position:absolute;left:50%;top:calc(var(--bt-size,36px) * -.27);width:calc(var(--bt-size,36px) * .52);height:calc(var(--bt-size,36px) * .36);transform:translateX(-50%) rotate(-8deg);filter:drop-shadow(0 1.5px 0 var(--bt-gold-edge)) drop-shadow(0 3px 3px color-mix(in srgb,var(--bt-gold-edge) 30%,transparent));pointer-events:none;z-index:1;line-height:0}
 .bt-crown-body{fill:var(--bt-gold);stroke:var(--bt-gold-edge);stroke-width:2;stroke-linejoin:round}
@@ -1071,10 +1105,6 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
    .bt-update-dot, a card of .bt-update-* rows, and .bt-update-notes as a button. */
 .bt-side-tool{position:relative}
 .bt-update-pop button.bt-update-notes{padding:0;border:0;background:none;font-family:inherit;cursor:pointer}
-/* A card row may lead with its product's mark (BotMark), beside its name and status. */
-.bt-power-who{display:flex;align-items:center;gap:10px}
-.bt-power-who>.bt-mark{flex:none}
-.bt-power-what{min-width:0}
 
 /* A DSH bot's row and its expanding Session list. It wears DSH's own whale, the mark a
    Bot with no look of its own wears too. */

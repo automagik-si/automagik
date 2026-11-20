@@ -26,7 +26,7 @@
 // anyway), freezes it anew.
 import { assembleLlmStream } from './models.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { appendFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { HarnessError, createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -95,6 +95,29 @@ const FAILED = 'memory/failed'
 const EMPTY = 'memory/empty'
 const NEWS_TEXT_MAX = 160
 
+const POCKET_SCOPE_BYTES = 2 * 1024 * 1024
+const POCKET_SCOPE_FILES = 64
+const POCKET_REPLY_BYTES = 1024 * 1024
+const POCKET_REPLY_ENTRIES = 4000
+const POCKET_ENTRY_ID = /^[A-Za-z0-9_-]{1,32}$/
+const shortHash = text => createHash('sha256').update(text).digest('hex').slice(0, 16)
+const pocketId = id => POCKET_ENTRY_ID.test(id) ? id : `x${shortHash(id)}`
+const pocketRev = (file, raw) => shortHash(JSON.stringify([file, raw]))
+const pocketRefusal = (reason, extra) => ({ ok: false, state: 'refused', reason, ...extra })
+const pocketPending = () => ({ ok: false, state: 'unknown', reason: 'pending' })
+
+class PocketMemoryError extends Error {
+  constructor(reason) {
+    super(reason)
+    this.reason = reason
+  }
+}
+
+function checkPocketSize(sizes) {
+  if (sizes.size > POCKET_SCOPE_FILES || [...sizes.values()].reduce((total, size) => total + size, 0) > POCKET_SCOPE_BYTES) {
+    throw new PocketMemoryError('too-large')
+  }
+}
 
 export function install(rt) {
   const { ctx, config, home, state } = rt
@@ -108,6 +131,11 @@ export function install(rt) {
       memoryEndpoint: async () => { throw Object.assign(new Error('Memory is turned off on this host'), { code: REFUSED }) },
       memoryEdit: async () => { throw Object.assign(new Error('Memory is turned off on this host'), { code: REFUSED }) },
       memoryAdd: async () => { throw Object.assign(new Error('Memory is turned off on this host'), { code: REFUSED }) },
+      pocketMemory: {
+        read: async () => pocketRefusal('unavailable'),
+        edit: async () => pocketRefusal('unavailable'),
+        add: async () => pocketRefusal('unavailable'),
+      },
       memoryNews: () => ({}),
       memoryReviews: () => 0,
       memoryReviewStatus: () => ({ enabled: false, allowed: false, pending: false, running: false }),
@@ -178,17 +206,78 @@ export function install(rt) {
       return { topic, file, path: join(dir, file), content, ...parseMemory(content) }
     })
   }
+  function loadPocketScope(scope) {
+    const dir = dirOf(scope)
+    const realHome = realpathSync(home)
+    let names = []
+    // Check the parents too, even if the Bot does not have a memory folder yet.
+    for (const path of [root, dirname(dir), dir]) {
+      const stat = lstatSync(path, { throwIfNoEntry: false })
+      if (stat === undefined) break
+      if (!stat.isDirectory() || realpathSync(path) !== join(realHome, relativePath(home, path))) {
+        throw new PocketMemoryError('unavailable')
+      }
+      if (path === dir) names = readdirSync(dir).filter(name => name.endsWith('.md')).sort()
+    }
+    if (names.length > POCKET_SCOPE_FILES) throw new PocketMemoryError('too-large')
+    const stats = new Map()
+    for (const name of names) {
+      const path = join(dir, name)
+      const stat = lstatSync(path)
+      if (!stat.isFile() || stat.nlink !== 1) throw new PocketMemoryError('unavailable')
+      stats.set(path, stat)
+    }
+    checkPocketSize(new Map([...stats].map(([path, stat]) => [path, stat.size])))
+    return [MAIN, ...names.filter(name => name !== MAIN)].map((file) => {
+      const path = join(dir, file)
+      const stat = stats.get(path)
+      let content = ''
+      if (stat !== undefined) {
+        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+        try {
+          const current = fstatSync(fd)
+          if (!current.isFile() || current.nlink !== 1 || current.dev !== stat.dev || current.ino !== stat.ino || current.size !== stat.size) {
+            throw new PocketMemoryError('unavailable')
+          }
+          const data = Buffer.alloc(stat.size)
+          for (let at = 0; at < data.length;) {
+            const count = readSync(fd, data, at, data.length - at, null)
+            if (count === 0) throw new PocketMemoryError('unavailable')
+            at += count
+          }
+          content = data.toString('utf8')
+        } finally {
+          closeSync(fd)
+        }
+      }
+      return { file, path, topic: file === MAIN ? undefined : file.slice(0, -3), content, bytes: stat?.size, ...parseMemory(content) }
+    })
+  }
   const mainLimit = scope => state.prefs.memoryLimits?.[scope.kind] ?? MEMORY_LIMITS[scope.kind]
   const fileName = file => (file.topic === undefined ? MAIN : `topic [[${file.topic}]]`)
 
+  // The temporary name sits next to the file and stays short even for a long file name.
+  const tempFor = path => join(dirname(path), `.${basename(path).slice(0, 32)}.${process.pid}.${randomUUID()}.tmp`)
+
   async function writeText(path, text) {
     await mkdir(dirname(path), { recursive: true })
-    // The temporary name sits next to the file and stays short however long the
-    // file's own name is: a legal name near the system's per-name limit must
-    // still write, and one made of the whole path would not.
-    const temp = join(dirname(path), `.${basename(path).slice(0, 32)}.${process.pid}.${randomUUID()}.tmp`)
+    const temp = tempFor(path)
     await writeFile(temp, text, 'utf8')
     await replaceFile(temp, path)
+  }
+
+  async function acceptPocketChange(path, text, allowed) {
+    await mkdir(dirname(path), { recursive: true })
+    const temp = tempFor(path)
+    try {
+      await writeFile(temp, text, 'utf8')
+      const reason = allowed()
+      if (reason !== undefined) throw new PocketMemoryError(reason)
+      renameSync(temp, path)
+    } catch (error) {
+      try { unlinkSync(temp) } catch (failure) { if (failure?.code !== 'ENOENT') throw failure }
+      throw error
+    }
   }
   let writing = Promise.resolve()
   const queued = (job) => {
@@ -319,7 +408,7 @@ export function install(rt) {
   // behind, and the change is finished before memory is read or written again.
   // A move or tidy can change the resident entries even when its journal row
   // describes a topic or an entire batch. Record the actual change once here.
-  function mainChanges(scope, steps, row) {
+  function mainChanges(scope, steps, row, files) {
     const path = join(dirOf(journalScope(scope)), MAIN)
     const step = steps.findLast(item => item.path === relativePath(root, path))
     if (step === undefined) return undefined
@@ -327,7 +416,7 @@ export function install(rt) {
       const { lines, entries } = parseMemory(content)
       return Map.groupBy(entries.map(entry => ({ ...entry, raw: lines[entry.line] })), entryId)
     }
-    const before = byId(readText(path))
+    const before = byId(files === undefined ? readText(path) : files[0].content)
     const after = byId(step.text)
     const changes = [...new Set([...before.keys(), ...after.keys()])].flatMap((id) => {
       // Older entries derive a short id from their text, so several can share one.
@@ -345,19 +434,29 @@ export function install(rt) {
     return changes
   }
 
-  async function publish({ op, scope, steps, row }) {
+  async function publish({ op, scope, steps, row, pocket }) {
+    if (pocket !== undefined) {
+      const sizes = new Map(pocket.files.filter(file => file.bytes !== undefined).map(file => [file.path, file.bytes]))
+      for (const step of steps) sizes.set(inside(root, step.path), Buffer.byteLength(step.text))
+      checkPocketSize(sizes)
+    }
     const id = randomUUID()
     const time = new Date().toISOString()
-    const record = pendingRecord({ id, time, op, scope, steps, row: { ...row, mainChanges: mainChanges(scope, steps, row) } })
+    const record = pendingRecord({ id, time, op, scope, steps, row: { ...row, mainChanges: mainChanges(scope, steps, row, pocket?.files) } })
     // The record has to be readable back, so its size is checked before the change
     // is accepted: a record that cannot be read would stop the memory for good.
     const text = serializePending(record)
-    await writeText(pendingPath(root), text)
+    if (pocket === undefined) await writeText(pendingPath(root), text)
+    else await acceptPocketChange(pendingPath(root), text, pocket.allowed)
     try {
       await applySteps(steps)
       await journalRow(record.row)
       await unlink(pendingPath(root)).catch(error => { if (error?.code !== 'ENOENT') throw error })
     } catch (error) {
+      if (pocket !== undefined) {
+        rt.warn('omni-ui: Pocket memory: pending')
+        throw new PocketMemoryError('pending')
+      }
       rt.warn('omni-ui: memory change %s is pending: %s', id, failureCode(error))
       throw error
     }
@@ -534,11 +633,12 @@ export function install(rt) {
     })
   }
 
-  async function addEntryNow({ scope, topic, text, meta, actor, label, moving = false }) {
+  async function addEntryNow({ scope, topic, text, meta, actor, label, moving = false, files, pocket }) {
     writable(scope, actor)
-    const files = loadScope(scope)
+    files ??= loadScope(scope)
     const entries = allEntries(files)
     const same = entries.find(entry => squash(entry.text) === squash(text))
+    if (same !== undefined && pocket !== undefined) return { changed: false, entry: same }
     const line = formatEntry(text, { id: meta.id ?? newEntryId(entries), ...meta })
     if (same !== undefined) {
       // An exact copy lets a move finish after its destination was saved before a restart.
@@ -562,7 +662,8 @@ export function install(rt) {
     const steps = target === main
       ? [writeStep(main.path, joinLines(room.lines))]
       : [writeStep(target.path, joinLines(written)), ...(room.lines === mainLines ? [] : [writeStep(main.path, joinLines(room.lines))])]
-    await publish({ op: 'add', scope: scopeKey(scope), steps: [...steps, ...room.steps], row: { op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line, ...movedRow(room) } })
+    await publish({ op: 'add', scope: scopeKey(scope), steps: [...steps, ...room.steps], row: { op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line, ...movedRow(room) }, pocket })
+    if (pocket !== undefined) return { changed: true, file: target.file, line }
     noteNews(scope, actor, 'add', line)
     const where = target === main ? MAIN : fresh ? `the new topic [[${name}]], linked from MEMORY.md` : `topic [[${name}]]`
     const after = target === main ? room.lines : written
@@ -602,27 +703,34 @@ export function install(rt) {
   }
 
   // The entry keeps its place; `topic` only narrows where to look.
-  function replaceEntry({ scope, topic, match, expect, text, meta, actor, label, topicOnly = false }) {
+  function replaceEntry(change) {
     return queued(async () => {
       await recoverPending()
-      writable(scope, actor)
-      const files = loadScope(scope)
-      const old = findExpected(files, topic, match, expect, label)
-      if (topicOnly && old.file.topic === undefined) throw Object.assign(new Error('Changing a team entry that every conversation reads requires always: true.'), { code: DENIED })
-      const line = formatEntry(text, { id: entryId(old), ...meta, ...(old.meta.pinned === undefined ? {} : { pinned: old.meta.pinned }) })
-      const lines = [...old.file.lines]
-      const before = lines[old.line]
-      lines[old.line] = line
-      const room = old.file.topic === undefined ? makeRoom(files, scope, lines, line) : { lines, moved: [], steps: [], topics: [] }
-      await publish({
-        op: 'replace',
-        scope: scopeKey(scope),
-        steps: [writeStep(old.file.path, joinLines(room.lines)), ...room.steps],
-        row: { op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line, ...movedRow(room) },
-      })
-      noteNews(scope, actor, 'replace', line)
-      return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".${movedNote(room)}` }
+      writable(change.scope, change.actor)
+      return replaceEntryNow(change)
     })
+  }
+
+  async function replaceEntryNow({ scope, files = loadScope(scope), topic, match, expect, text, meta, actor, label, topicOnly = false, old = findExpected(files, topic, match, expect, label), pocket }) {
+    if (topicOnly && old.file.topic === undefined) throw Object.assign(new Error('Changing a team entry that every conversation reads requires always: true.'), { code: DENIED })
+    const details = { id: entryId(old), ...meta, ...(old.meta.pinned === undefined ? {} : { pinned: old.meta.pinned }) }
+    // Pocket keeps the parsed metadata verbatim, including ids from hand-written legacy lines.
+    const line = pocket === undefined ? formatEntry(text, details)
+      : `- ${text} [${Object.entries(details).map(([key, value]) => `${key}: ${value}`).join('; ')}]`
+    const lines = [...old.file.lines]
+    const before = lines[old.line]
+    lines[old.line] = line
+    const room = old.file.topic === undefined ? makeRoom(files, scope, lines, line) : { lines, moved: [], steps: [], topics: [] }
+    await publish({
+      op: 'replace',
+      scope: scopeKey(scope),
+      steps: [writeStep(old.file.path, joinLines(room.lines)), ...room.steps],
+      row: { op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line, ...movedRow(room) },
+      pocket,
+    })
+    if (pocket !== undefined) return { changed: true, file: old.file.file, line }
+    noteNews(scope, actor, 'replace', line)
+    return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".${movedNote(room)}` }
   }
 
   function removeEntry({ scope, topic, match, expect, actor, label }) {
@@ -1267,6 +1375,79 @@ export function install(rt) {
   // call whose changes go through the same path as the tools.
 
   const USER = { id: 'user', name: 'user' }
+  const pocketEntryId = entry => pocketId(entryId(entry))
+  const pocketEntryRev = entry => pocketRev(entry.file.file, entry.file.lines[entry.line])
+
+  function projectPocket(scope, files, result, affected, overhead) {
+    const day = today()
+    const entryOf = entry => ({
+      id: pocketEntryId(entry), rev: pocketEntryRev(entry), text: entry.text, topic: entry.file.topic ?? null,
+      added: entry.meta.added ?? null, until: entry.meta.until ?? null, pinned: isPinned(entry), expired: isExpired(entry, day),
+    })
+    const entries = allEntries(files)
+    const memory = { terminal: `dsh:${scope.botId}`, entries: [], size: bodySize(files[0]), limit: mainLimit(scope), truncated: entries.length !== 0 }
+    const reply = { ...result, ...(affected === undefined ? {} : { entry: entryOf(affected) }), memory }
+    let size = overhead + Buffer.byteLength(JSON.stringify(reply))
+    if (size > POCKET_REPLY_BYTES) throw new PocketMemoryError('too-large')
+    for (const entry of entries) {
+      if (memory.entries.length === POCKET_REPLY_ENTRIES) break
+      const next = entryOf(entry)
+      const last = memory.entries.length + 1 === entries.length
+      size += Buffer.byteLength(JSON.stringify(next)) + Number(memory.entries.length > 0) + Number(last)
+      if (size > POCKET_REPLY_BYTES) break
+      memory.entries.push(next)
+      if (last) memory.truncated = false
+    }
+    return reply
+  }
+
+  const pocketCall = (method, { botId, id, rev, text: raw, allowed, refresh, overhead = 0 }) => queued(async () => {
+    try {
+      await refresh()
+      let reason = allowed()
+      if (reason !== undefined) return pocketRefusal(reason)
+      await recoverPending()
+      reason = allowed()
+      if (reason !== undefined) return pocketRefusal(reason)
+      const scope = ownScope(botId)
+      const files = loadPocketScope(scope)
+      if (method === 'read') return projectPocket(scope, files, { ok: true, state: 'read' }, undefined, overhead)
+      const entries = allEntries(files)
+      let old
+      if (method === 'edit') {
+        const named = entries.filter(entry => pocketEntryId(entry) === id)
+        const matching = named.filter(entry => pocketEntryRev(entry) === rev)
+        if (matching.length !== 1) {
+          const why = named.length === 0 ? 'gone' : matching.length === 0 ? 'stale' : 'ambiguous'
+          return projectPocket(scope, files, pocketRefusal(why), undefined, overhead)
+        }
+        old = matching[0]
+      }
+      const text = cleanEntry(raw)
+      const message = entryProblem(text)
+      if (message !== undefined) return pocketRefusal('invalid', { message })
+      const unchanged = { ok: true, state: 'unchanged' }
+      if (old !== undefined && cleanEntry(old.text) === text) return projectPocket(scope, files, unchanged, old, overhead)
+      const meta = { ...(old?.meta ?? { added: today() }), by: 'user', source: 'pocket' }
+      const change = { scope, files, text, meta, actor: USER, pocket: { files, allowed } }
+      const written = old === undefined ? await addEntryNow(change) : await replaceEntryNow({ ...change, old })
+      if (!written.changed) return projectPocket(scope, files, unchanged, written.entry, overhead)
+      try {
+        const after = loadPocketScope(scope)
+        const affected = allEntries(after).find(entry => entry.file.file === written.file && entry.file.lines[entry.line] === written.line)
+        if (affected !== undefined) return projectPocket(scope, after, { ok: true, state: 'saved' }, affected, overhead)
+      } catch { /* The change has already been saved. */ }
+      return { ok: true, state: 'saved', entry: null, memory: null }
+    } catch (error) {
+      if (error instanceof PocketMemoryError) return error.reason === 'pending' ? pocketPending() : pocketRefusal(error.reason)
+      return pocketRefusal(error?.code === 'memory/too-large' ? 'too-large' : 'unavailable')
+    }
+  })
+  const pocketMemory = {
+    read: args => pocketCall('read', args),
+    edit: args => pocketCall('edit', args),
+    add: args => pocketCall('add', args),
+  }
   const languageNow = () => rt.uiLanguage?.() ?? 'the language most entries are written in'
   const panelEntries = (files, scope) => allEntries(files).map(entry => ({
     scope, topic: entry.file.topic ?? null, text: entry.text, id: entryId(entry),
@@ -1850,7 +2031,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    memoryEnabled: true, renewMemory, archiveBotMemory, archiveGroupMemory, memoryReviews, memoryReviewStatus, memoryTidyStatus,
+    memoryEnabled: true, renewMemory, archiveBotMemory, archiveGroupMemory, memoryReviews, memoryReviewStatus, memoryTidyStatus, pocketMemory,
     memoryEndpoint: panelCall(memoryEndpoint), memoryEdit: panelCall(memoryEdit), memoryAdd: panelCall(memoryAdd),
     memoryNews: () => Object.fromEntries(news), botShot, tidyMemoryNow: tidyNow,
   })

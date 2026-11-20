@@ -30,3 +30,20 @@ test('a plugin\'s suggestions for its Bots come first, the team\'s fill in, thre
   // Another Bot gets the team's own; drawing only where something draws images.
   assert.deepEqual([...suggestionsFor([genie], { bot: { kind: undefined }, images: false }).map(item => item.key)], ['team:search', 'team:remind'])
 })
+
+test('detaching Genie skips its suggestions before the provider runs', () => {
+  let called = 0
+  const entries = [
+    { id: 'genie', when: () => { called += 1; return true }, items: () => [{ id: 'wish', label: 'Wish', text: 'I wish ' }] },
+    { id: 'other', items: () => [{ id: 'help', label: 'Help', text: 'Help with ' }] },
+  ]
+  const keys = (bot, roster) => [...suggestionsFor(entries, { bot, roster }).map(item => item.key)]
+  const detached = { kind: 'genie', roles: [] }
+  assert.deepEqual(keys(detached, {}), ['other:help', 'team:search', 'team:remind'])
+  assert.equal(called, 0)
+  assert.deepEqual(keys({}, {}), ['other:help', 'team:search', 'team:remind'])
+  assert.equal(called, 0)
+  assert.deepEqual(keys({ kind: 'genie' }, {}), ['genie:wish', 'other:help', 'team:search'])
+  assert.deepEqual(keys(detached, { prefs: { roles: false } }), ['genie:wish', 'other:help', 'team:search'])
+  assert.deepEqual(keys(detached, undefined), ['genie:wish', 'other:help', 'team:search'])
+})

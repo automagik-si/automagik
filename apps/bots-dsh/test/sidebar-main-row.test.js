@@ -12,7 +12,7 @@ import { build } from 'esbuild'
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const { outputFiles } = await build({
   stdin: {
-    contents: "export { TeamSidebar } from './src/client/sidebar.js'\nexport { badges, botChildren } from './src/client/extend.js'",
+    contents: "export { TeamSidebar } from './src/client/sidebar.js'\nexport { badges, botChildren, botChannels } from './src/client/extend.js'",
     resolveDir: PLUGIN,
   },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
@@ -35,7 +35,7 @@ runInNewContext(outputFiles[0].text, {
   document: { body: { dataset: {} } },
   matchMedia: () => ({ matches: false }),
 })
-const { TeamSidebar, badges, botChildren } = module.exports
+const { TeamSidebar, badges, botChildren, botChannels } = module.exports
 
 const pip = { id: 'pip', name: 'Pip', role: 'Orchestrator', sessionId: 'pip', createdAt: 1 }
 const omni = { id: 'omni', name: 'Omni', role: 'Channel keeper', kind: 'omni', sessionId: 'omni', createdAt: 2 }
@@ -83,6 +83,19 @@ test('the first Main Bot is the bar\'s first row, then the others; what hangs un
   assert.ok(find(after('pip'), named('BotChildren')).some(node => node.props.bot.id === 'pip'))
 })
 
+test('a Bot served by a channel source keeps the team\'s old rows off, and its chats open through the source', (t) => {
+  const opened = []
+  const source = { id: 'fake-channels', botId: 'pip', useChannels: () => [], open: chatId => opened.push(chatId) }
+  t.after(botChannels.register(source))
+  const { bar, teamRows, after } = sidebar()
+  const pipRow = teamRows().props.team.bots.find(bot => bot.id === 'pip')
+  assert.equal(pipRow.channelSource, source, 'the bar reads the one source that serves it')
+  assert.equal(find(after('pip', pipRow), named('BotChildren')).length, 0, 'the bar draws its channels instead')
+  assert.equal(find(after('pip', pipRow), named('BotThreads')).length, 1, 'its running tasks stay')
+  bar.props.open({ kind: 'chat', id: 'chat-1', botId: 'pip', source })
+  assert.deepEqual(opened, ['chat-1'])
+})
+
 test('rows other plugins hang under a Bot get the rows\' own props, and opening one folds the sidebar', (t) => {
   const Thread = () => null
   t.after(botChildren.register({ id: 'thread', Component: Thread }))
@@ -95,6 +108,46 @@ test('rows other plugins hang under a Bot get the rows\' own props, and opening 
   t.after(() => { window.innerWidth = 1280 })
   thread.props.actions.openSession('thread-1')
   assert.deepEqual(calls, [['open', 'thread-1'], ['fold']])
+})
+
+test('the Team row and legacy sidebar show the Genie tag and the shared child outlet follows the role', (t) => {
+  const WishRows = () => null
+  const OtherRows = () => null
+  t.after(botChildren.register({ id: 'genie-wishes', Component: WishRows }))
+  t.after(botChildren.register({ id: 'other-rows', Component: OtherRows }))
+  const tagged = tree => find(tree, node => node.props?.className === 'bt-tag' && node.props.children.includes('Genie')).length === 1
+  for (const [kind, roles, prefs, showTag, showWishes] of [
+    ['genie', undefined, {}, true, true],
+    ['genie', [], {}, false, false],
+    ['genie', [], { roles: false }, false, true],
+    [undefined, undefined, {}, false, false],
+  ]) {
+    const record = { id: 'role-fixture', name: 'Bot', kind, ...(roles === undefined ? {} : { roles }) }
+    const team = { ...roster, bots: [record], byId: { [record.id]: record }, mainBotId: record.id, mainBotIds: [record.id], prefs }
+    const wide = sidebar({ team })
+    const rows = wide.teamRows()
+    const row = find(rows.type(rows.props), node => node.type === 'button' && node.props['data-id'] === record.id)[0]
+    assert.equal(tagged(row), showTag)
+    const outlet = find(wide.after(record.id), named('BotChildren'))[0]
+    const children = outlet.type(outlet.props)
+    assert.equal(find(children, node => node.type === WishRows).length, Number(showWishes))
+    assert.equal(find(children, node => node.type === OtherRows).length, 1)
+    const [legacy] = sidebar({ wide: false, team }).rows
+    assert.equal(tagged(legacy.type({ ...legacy.props, wide: true })), showTag)
+  }
+})
+
+test('the child outlet keeps registered rows when the roster is missing', (t) => {
+  const WishRows = () => null
+  const OtherRows = () => null
+  t.after(botChildren.register({ id: 'genie-wishes', Component: WishRows }))
+  t.after(botChildren.register({ id: 'other-rows', Component: OtherRows }))
+  const record = { id: 'detached', name: 'Genie', kind: 'genie', roles: [] }
+  const { after } = sidebar({ team: { ...roster, bots: [record], byId: { [record.id]: record } } })
+  const outlet = find(after(record.id), named('BotChildren'))[0]
+  const children = outlet.type({ ...outlet.props, roster: undefined })
+  assert.equal(find(children, node => node.type === WishRows).length, 1)
+  assert.equal(find(children, node => node.type === OtherRows).length, 1)
 })
 
 test('badges other plugins add still end a Bot\'s row, with the row\'s Bot, and never a DSH bot\'s', (t) => {

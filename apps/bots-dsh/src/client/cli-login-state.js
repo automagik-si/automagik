@@ -120,10 +120,12 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
   // A view from the host, for every row of that agent.
   function applyView(provider, view) {
     if (disposed || view === null || view === undefined) return
-    attempts[provider] = view
+    const attempt = { ...view }
+    delete attempt.signedInAs
+    attempts[provider] = attempt
     if (provider === 'acp-claude' && typeof view.url === 'string') rememberLinkState(view.url)
     if (ACTIVE.has(view.status)) {
-      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt: view })
+      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt })
       armPoll(provider)
     } else if (view.status === 'ready') succeed(provider, view)
     else if (view.status === 'confirm') askAccount(provider, view.account)
@@ -168,8 +170,12 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
   function succeed(provider, view) {
     stopPoll(provider)
     void Promise.resolve().then(() => actions.refreshModels?.()).catch(() => {})
+    const signedInAs = view?.signedInAs
     for (const row of attemptRows(provider)) {
-      setRow(row.botId, { ...row, stage: 'done', attempt: null, busy: false, confirm: false, error: null })
+      setRow(row.botId, {
+        ...row, stage: 'done', attempt: null, busy: false, confirm: false, error: null,
+        ...(signedInAs ? { signedInAs: Object.freeze({ ...signedInAs }) } : {}),
+      })
       leaveAfter(row.botId, row.seq, DONE_MS)
       if (view?.choice?.state === 'failed') applyFailed(row.botId, row.seq, view.choice)
       else if (view?.choice?.state === 'pending' || view?.choice === undefined) void followChoice(row.botId, provider, row.seq)

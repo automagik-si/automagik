@@ -429,6 +429,15 @@ test('own mode: ownModeOf reports a bridged Codex', () => {
   assert.equal(h.services[SERVICE].ownModeOf('acp-codex').bridged, true)
 })
 
+test('own mode: ownModeOf uses the Session identity for the Codex bridge default', () => {
+  const h = harness({ clis: { codex: '/fake/codex' }, bins: { [AGENTS['acp-codex'].adapter]: '/fake/adapter' } })
+  apply(h.ctx, { claude: false, codex: true }, h.deps)
+  const service = h.services[SERVICE]
+  service.botIdentity(id => id === 's1' ? { name: 'Bot', needsDshTools: true } : undefined)
+  assert.deepEqual(service.ownModeOf('acp-codex', 's1'), { mode: 'agent', bridged: true, answerer: false })
+  assert.deepEqual(service.ownModeOf('acp-codex'), { mode: 'agent', bridged: false, answerer: false })
+})
+
 test('own mode service disposers are scoped and competing registrations disable it permanently', () => {
   const h = harness({ clis: { codex: '/fake/codex' }, bins: { [AGENTS['acp-codex'].adapter]: '/fake/adapter' } })
   apply(h.ctx, { claude: false, codex: true }, h.deps)
@@ -494,7 +503,7 @@ test('one reviewer refusal followed by text does not claim a refusal stop', asyn
   assert.equal(chunks.findLast(chunk => chunk.type === 'finish').reason.kind, 'aborted', JSON.stringify(chunks))
   assert.equal(c.session.snapshotEvents().some(e => e.data?.source?.stop === 'refusals'), false)
 })
-for (const always of [false, true]) test(`mirror asks carry current input and one-shot availability: ${always}`, async t => {
+for (const always of [false]) test(`mirror asks carry current input and one-shot availability: ${always}`, async t => {
   const w = await world(t, { level: WRITE, modes: MODES, modeFor: AGENTS['acp-codex'].modeFor, env: { FAKE_ACP_ALWAYS_ONLY: always ? '1' : '0' } })
   const c = w.chat('ada'); c.say('ask edited'); const chunks = await c.step()
   const block = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call').block
@@ -505,6 +514,20 @@ for (const always of [false, true]) test(`mirror asks carry current input and on
   assert.equal(Object.hasOwn(w.asked[0].mirrorCall, 'locations'), false)
   await c.step()
   assert.match(JSON.stringify(c.messages), /It printed/)
+})
+
+test('a mirror question with only a lasting allow lets the fake agent report the refusal', async t => {
+  const w = await world(t, { level: WRITE, modes: MODES, modeFor: AGENTS['acp-codex'].modeFor, env: { FAKE_ACP_ALWAYS_ONLY: '1' } })
+  const c = w.chat('ada'); c.say('ask edited'); const chunks = await c.step()
+  const block = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call').block
+  await c.run(block)
+  assert.equal(w.asked.length, 0)
+  const tool = c.messages.find(message => message.role === 'tool' && message.toolCallId === block.id)
+  assert.deepEqual(tool.content, [{ type: 'text', text: 'Fake agent offered to allow Run echo first only from now on ("Allow"), not just once, so Automagik did not approve it.' }])
+  const next = await c.step()
+  assert.equal(next.findLast(chunk => chunk.type === 'finish').reason.kind, 'stop')
+  assert.match(c.messages.at(-1).content.map(part => part.text).join(''), /I was not allowed to run it/)
+  assert.doesNotMatch(JSON.stringify(c.messages), /It printed/)
 })
 
 for (const [answer, text] of [['rejected', 'The person rejected bash.'], ['unavailable', 'DSH could not approve bash: nobody could answer its approval request.']]) test(`plain bridge ${answer} keeps its existing text`, async t => {
@@ -622,4 +645,23 @@ test('#1092 narrowed Claude ask rules preserve ordinary environment and branch c
   for (const command of ['printenv', 'printenv GITHUB_TOKEN', 'printenv APP_SECRET', 'printenv PASSWORD', 'printenv API_KEY', 'git push origin main', 'git push origin master', 'git push origin develop']) assert.equal(matches(command), true, command)
   assert.equal(CLAUDE_HARD_ASK.includes('Read(~/.ssh/**)'), false)
   for (const rule of ['Read(~/.ssh/id_*)', 'Read(~/.ssh/*.pem)', 'Read(~/.ssh/*.key)']) assert.equal(CLAUDE_HARD_ASK.includes(rule), true, rule)
+})
+
+test('RFC 0034 Claude asks about password-manager reads', () => {
+  const reads = [
+    'bw get password x', 'bw list items', 'bw export', 'bw unlock', 'bw serve',
+    'bws secret get id', 'bws secret list', 'bws run -- env',
+    'op read op://vault/item/field', 'op run -- env', 'op inject -i a.tpl', 'op item get x',
+    'pass-cli item view pass://v/i/f', 'pass-cli item get pass://v/i/f', 'pass-cli item run -- env', 'pass-cli run -- env',
+    'keepassxc-cli show db e', 'keepassxc-cli export db', 'secret-tool lookup a b',
+    'vault kv get x', 'vault read x',
+  ]
+  for (const shell of process.platform === 'win32' ? ['Bash', 'PowerShell'] : ['Bash']) {
+    const matches = command => CLAUDE_HARD_ASK.filter(rule => rule.startsWith(shell + '(')).some(rule => {
+      const pattern = rule.slice(shell.length + 1, -1).split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')
+      return new RegExp(`^${pattern}$`).test(command)
+    })
+    for (const command of reads) assert.equal(matches(command), true, command)
+    for (const command of ['bw status', 'op whoami', 'secret-tool store x']) assert.equal(matches(command), false, command)
+  }
 })

@@ -39,6 +39,8 @@ const UNKNOWN = Object.freeze({ shown: [], bots: null, registry: [], projects: [
  * @param {{ path?: string, warn?: (...args: any[]) => void }} [options]
  * @returns {{ shown(bot: { id: string, project?: string | null, machine?: string | null }): boolean,
  *   places(): Map<string, { folder: string, machine?: string }> | null,
+ *   bindingOf(botId: string): { listed: boolean, project?: string, machine?: string,
+ *     picked(project: string, machine?: string): boolean } | undefined,
  *   registryIdOf(bot: { id: string, name?: string, project?: string | null }): string | null }}
  */
 export function shownReader({ path = homeRegistryPathOf(), warn = () => {} } = {}) {
@@ -99,6 +101,24 @@ export function shownReader({ path = homeRegistryPathOf(), warn = () => {} } = {
     return entries
   }
   return {
+    // Management uses one fresh snapshot, including rows the chat parser would discard.
+    bindingOf(botId) {
+      try {
+        const { raw, file } = parseRegistry(readFileSync(path, 'utf8'), { kind: 'home' })
+        const rows = raw.bots.filter(bot => bot?.id === botId)
+        if (rows.length > 1) return undefined
+        const row = rows[0]
+        const bot = file.bots.find(bot => bot.id === botId)
+        if (row && !bot) return undefined
+        if (row && Object.hasOwn(row, 'machine') && (typeof row.machine !== 'string' || row.machine !== bot.machine)) return undefined
+        return {
+          listed: row !== undefined, project: bot?.folder, machine: bot?.machine,
+          picked: (project, machine) => file.shown.some(entry => entry.project === project && entry.machine === machine && entry.bots.includes(botId)),
+        }
+      } catch {
+        return undefined
+      }
+    },
     shown(bot) {
       // A Bot whose place could not be read may be a project Bot: never shown as global.
       if (bot?.placeUnknown === true) return false

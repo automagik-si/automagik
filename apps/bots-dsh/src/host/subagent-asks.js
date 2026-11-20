@@ -3,6 +3,7 @@ import { answerableOwner } from './approvals.js'
 import { rankOf } from './permission-rank.js'
 import { detailOfArgs } from './turns.js'
 
+export const CHILD_ASKS_CONTEXT_NAME = 'automagik-bots:subagent-asks'
 export const CHILD_ASKS_CONTEXT = 'Approvals in this session: it keeps the permission level of the Bot that started it, with approval prompts on. Unlike what the delegated-subagent statement says, an operation that requires approval is not rejected automatically here: it is asked of the user through that Bot and runs only if the user allows it. If the user rejects it or the ask is cancelled, do not retry it; state the limitation in your reply so the delegating agent can handle it.'
 
 const put = (map, key, value, max) => {
@@ -76,8 +77,9 @@ export function install(rt) {
       else put(details, pairKey(session.id, data.subCallId), detailOfArgs(JSON.stringify(data.arguments ?? {})), 200)
     } catch {}
   })
+  // Older snapshots may store ds-bot:subagent-asks. Session restoration does not look up providers by the stored id.
   ctx.effect(() => ctx.systemPrompt.context({
-    name: 'ds-bot:subagent-asks',
+    name: CHILD_ASKS_CONTEXT_NAME,
     order: (ctx.systemPrompt.getContextOrder?.('SUBAGENT_DELEGATION') ?? 120) + 1,
     interpolate: false,
     text: context => {

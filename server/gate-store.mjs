@@ -14,6 +14,13 @@ const localPrincipal = p => p && typeof p.subject === 'string' && p.subject.leng
   typeof p.workspace === 'string' && p.workspace.length > 0 && p.issuer === `local:${p.workspace}` &&
   Array.isArray(p.roles) && p.roles.length === 1 && p.roles[0] === 'owner' &&
   Object.keys(p).sort().join(',') === 'issuer,roles,subject,workspace'
+// The Cloud renewal proof is the exact workspace token the gate verified at open, kept with the
+// in-memory Cloud session and never written to a browser, a file or a log.
+const validProof = p => p && typeof p === 'object' && !Array.isArray(p) &&
+  Object.keys(p).sort().join(',') === 'aud,exp,token' &&
+  typeof p.token === 'string' && p.token.length > 0 && p.token.length <= 8192 &&
+  typeof p.aud === 'string' && p.aud.length > 0 && p.aud.length <= 256 &&
+  Number.isSafeInteger(p.exp)
 const validFamily = f => f && typeof f.id === 'string' && typeof f.origin === 'string' &&
   localPrincipal(f.principal) && hashPattern.test(f.current) && Array.isArray(f.used) &&
   f.used.every(h => typeof h === 'string' && hashPattern.test(h)) &&
@@ -79,13 +86,16 @@ export class SessionStore extends EventEmitter {
   }
   save() { if (this.file) write(this.file, { version: 1, families: this.families }) }
   // Sign-in calls this only after authentication. `expires` (ms) is a hard end, never renewed.
-  issue(origin, principal, { expires } = {}) {
+  // `proof` is the verified Cloud workspace token the v2 renewal sends; Cloud sessions keep it
+  // in memory, and no file-backed (self-hosted) session ever holds one.
+  issue(origin, principal, { expires, proof } = {}) {
     if (!this.accepts(principal)) throw new Error('Principal refused for this session store')
     if (expires !== undefined && (!this.memory || !Number.isSafeInteger(expires))) throw new Error('Invalid session expiry')
+    if (proof !== undefined && (!this.memory || !validProof(proof))) throw new Error('Invalid session proof')
     // Ended Cloud sessions leave memory here: their browsers drop the cookie, so none returns.
     if (this.memory) this.families = this.families.filter(f => f.expires === undefined || this.now() < f.expires)
     const value = secret()
-    const family = { id: randomUUID(), origin, principal: structuredClone(principal), current: digest(value), used: [], created: this.now(), touched: this.now(), ...(expires === undefined ? {} : { expires }) }
+    const family = { id: randomUUID(), origin, principal: structuredClone(principal), current: digest(value), used: [], created: this.now(), touched: this.now(), ...(expires === undefined ? {} : { expires }), ...(proof === undefined ? {} : { proof: structuredClone(proof) }) }
     this.families.push(family)
     this.save()
     return { secret: value, family }

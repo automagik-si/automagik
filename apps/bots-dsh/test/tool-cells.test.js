@@ -115,9 +115,9 @@ const question = (callId, over = {}) => ({ id: 'question', callId, question: 'Wh
 const request = (callId, over = {}) => ({ id: 'request', callId, sessionId: chief.id, name: 'DEMO_TOKEN', purpose: 'Test card', status: 'pending', kind: 'fill', ...over })
 
 const text$ = value => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }]
-const call = (name, callId, { args = {}, content = '', subCalls = [], running = false, isError = false, error } = {}) => (running
+const call = (name, callId, { args = {}, content = '', subCalls = [], running = false, isError = false, error, meta } = {}) => (running
   ? { phase: 'start', name, callId, argsRaw: JSON.stringify(args), subCalls, turn: 0 }
-  : { kind: 'tool-result', name, callId, call: { name, argsRaw: JSON.stringify(args) }, content: text$(content), isError, ...(error === undefined ? {} : { error }), subCalls })
+  : { kind: 'tool-result', name, callId, call: { name, argsRaw: JSON.stringify(args) }, content: text$(content), isError, ...(error === undefined ? {} : { error }), ...(meta === undefined ? {} : { meta }), subCalls })
 const program = (subCalls, over = {}) => call('run_code', 'program', { subCalls, ...over })
 
 test('a member\'s messages in a row stack under its name, and an event line starts a new block', () => {
@@ -311,6 +311,37 @@ test('each sub-call shows its own state, not its program\'s', () => {
   const refused = call('post_to_group', 'program:ptc:1', { content: 'No group is called "Nope".', isError: true })
   const posted = call('post_to_group', 'program:ptc:2', { content: 'Posted in "Ops".' })
   assert.match(shown(program([refused, posted])), /Couldn't post in the group.*Posted in.*Ops/)
+})
+
+test('a message_bot refusal shows the host\'s reason instead of "Messaged"', () => {
+  const reason = 'Not sent: Omni is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back.'
+  const refused = call('message_bot', 'direct', { args: { to: 'Writer' }, content: reason, meta: { sent: false, reason } })
+  const out = shown(refused)
+  assert.doesNotMatch(out, /Messaged/)
+  assert.match(out, /Not sent: Omni is waiting for the result of the work you are doing/)
+  // A program's sub-call carries the same host signal.
+  const nested = shown(program([call('message_bot', 'program:ptc:1', { args: { to: 'Writer' }, content: reason, meta: { sent: false, reason } })]))
+  assert.doesNotMatch(nested, /Messaged/)
+  assert.match(nested, /Not sent: Omni is waiting/)
+  // A message that went out still says so.
+  assert.match(shown(call('message_bot', 'sent', { args: { to: 'Writer' }, content: 'Delivered to Writer.', meta: { sent: true } })), /Messaged.*Writer/)
+})
+
+test('a message_bot refusal with no reason and pruned content never says "Messaged"', () => {
+  // The host's `sent: false` alone is the refusal: an empty reason or content pruned away
+  // must not turn the line into a delivery claim.
+  const emptyReason = shown(call('message_bot', 'direct', { args: { to: 'Writer' }, content: '', meta: { sent: false, reason: '' } }))
+  assert.doesNotMatch(emptyReason, /Messaged/)
+  assert.match(emptyReason, /Couldn't message Writer/)
+  const pruned = shown(call('message_bot', 'direct', { args: { to: 'Writer' }, content: '', meta: { sent: false } }))
+  assert.doesNotMatch(pruned, /Messaged/)
+  assert.match(pruned, /Couldn't message Writer/)
+  // The same host signal on a program's sub-call keeps the refusal line.
+  const nested = shown(program([call('message_bot', 'program:ptc:1', { args: { to: 'Writer' }, content: '', meta: { sent: false } })]))
+  assert.doesNotMatch(nested, /Messaged/)
+  assert.match(nested, /Couldn't message Writer/)
+  // A real delivery still says "Messaged".
+  assert.match(shown(call('message_bot', 'sent', { args: { to: 'Writer' }, content: 'Delivered to Writer.', meta: { sent: true } })), /Messaged.*Writer/)
 })
 
 test('a program with no known sub-call draws nothing, as before', () => {

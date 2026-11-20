@@ -17,7 +17,7 @@ const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const PACKAGE_NAME = JSON.parse(readFileSync(join(PLUGIN, 'package.json'), 'utf8')).name
 const OUTPUT = join(PLUGIN, 'client.js')
 export const PLATFORM_MODULES = ['react', 'react-dom']
-// The Bot team's client, which the power shortcut looks up when the plugin applies
+// The Bot team's client, which the power card looks up when the plugin applies
 // (power-shortcut.js): DSH hands over the one module instance it loaded, never a copy.
 export const PLUGIN_MODULES = ['@automagik/bots-dsh/client']
 

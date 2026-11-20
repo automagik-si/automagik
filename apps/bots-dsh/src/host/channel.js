@@ -15,7 +15,10 @@ import { handoffReply, questionReply, viewReply } from './parts.js'
 import { validateViewAnswer } from 'deep-view/core'
 import { previewText } from '../shared/plain-text.js'
 import { normalizeAddressList } from './browser/address-policy.js'
-import { COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
+import { verifiedWindow } from './desktop-window.js'
+import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
+import { nativeWorkersView } from './native-workers.js'
+import { installRoles } from './roles.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -62,6 +65,7 @@ export function install(rt) {
   installBtw(rt)
   installSide(rt)
   const { ctx, state } = rt
+  installRoles(rt)
 
   // The DSH interface language of the last browser that asked for the team.
   let uiLocale
@@ -87,6 +91,16 @@ export function install(rt) {
   const staged = new Map()
   const ok = value => ({ ok: true, value })
   const fail = (message, code = 'bot/error') => ({ ok: false, error: { code, message, details: {} } })
+  // Keep native holds and releases for one Bot in order across all browser controls.
+  const browserChanges = new Set()
+  async function changeBrowser(botId, body, change) {
+    if (browserChanges.has(botId)) return fail('Control of this browser is already changing. Try again.', 'bot/refused')
+    const clientId = body.viewClientId ?? rt.browserChannel?.nativeClient()
+    if (clientId === undefined && !appBrowserBridge()) return change()
+    const holdView = held => rt.browserChannel.holdView(clientId, botId, held)
+    browserChanges.add(botId)
+    try { return await change(holdView) } finally { browserChanges.delete(botId) }
+  }
   const runningOf = (bot) => {
     try {
       if (rt.hostOwned?.(bot)) return {}
@@ -132,7 +146,7 @@ export function install(rt) {
       return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
     }).join(','),
   ].join('|')
-  const view = () => ({
+  const view = roles => ({
     revision: state.revision,
     workspaceId: state.workspaceId ?? null,
     // `mainBotId` is the first Main Bot, which the sidebar shows as its tile.
@@ -202,6 +216,7 @@ export function install(rt) {
     newBotPermission: rt.newBotPermission?.() ?? null,
     modelsKey: modelsKey(),
     prefs: state.prefs,
+    roles,
     // Whether a Desktop window should serve Bot browser reads (see browser.js).
     browser: rt.browserEnabled,
     // Each Bot's saved tabs (browser/tabs.js): the panel lists them in the Automagik app.
@@ -217,6 +232,7 @@ export function install(rt) {
     // The computer-use switch, the provider it mounts, and each Bot's level and app grants.
     computer: rt.computerView?.() ?? { enabled: false },
   })
+  const currentView = async () => view(await rt.roleRecordsView())
   // What changes without a new revision, sent with every state answer. `learning`:
   // each Bot's pending skill proposals; `learningSettled`: the answered ones of its
   // current chat part. `memoryNews`:
@@ -224,14 +240,23 @@ export function install(rt) {
   // running; `work`: per Bot, the turn it runs and its tool; per group, the members whose
   // turn there runs; the approvals waiting; permission stops; per Bot, who it waits for to hand back work;
   // and per Session, when its running turn began.
-  const live = () => ({
+  // Claude Code's native subagents, per Bot (native-workers.js): acp-dsh's run groups each
+  // subagent's calls under its Agent/Task call; the sidebar draws them under the Bot's row.
+  const nativeWorkers = () => {
+    let acp
+    try { acp = ctx.get?.('acpAgents') } catch { acp = undefined }
+    return nativeWorkersView(rt, acp)
+  }
+  const live = (roles) => ({
     activity: rt.activityView(),
-    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {} },
+    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
     memoryNews: rt.memoryNews(),
     memoryReviews: rt.memoryReviews(),
     learning: rt.learningView(),
     learningSettled: rt.learningSettledView(),
     connectors: rt.connectorsView(),
+    secretSources: rt.secretSourcesView(),
+    secretSourcesPresent: rt.secretSourcesPresent(),
     capabilityStatuses: rt.capabilityStatusesView(),
     ...rt.extended.live(),
     // Per Bot whose model menu a plugin owns, that menu (host-models.js); absent otherwise.
@@ -253,6 +278,9 @@ export function install(rt) {
     // Named apart from the state view's `computer`: the live answer merges into the
     // same object and would wipe its `enabled` and `provider` fields.
     computerLive: rt.computerLive?.() ?? {},
+    roleCatalog: rt.roleCatalogView(),
+    // File checks may change a record's status without a state write.
+    roles,
   })
   const omniLinked = () => {
     const channels = ctx.get?.('omniChannels')
@@ -271,8 +299,8 @@ export function install(rt) {
   const liveRun = randomUUID()
   let liveSeq = 0
   let liveCache = null
-  const liveAnswer = () => {
-    const value = live()
+  const liveAnswer = (roles) => {
+    const value = live(roles)
     const json = JSON.stringify(value)
     if (liveCache?.json === json) return liveCache
     return liveCache = { key: `${liveRun}:${++liveSeq}`, value, json }
@@ -281,7 +309,8 @@ export function install(rt) {
   // Updates change the dsh profile, not the team, so a reading host may run them too.
   const privacy = createPrivacy()
   const pets = createPets({ home: () => rt.home, warn: (...args) => rt.warn?.(...args) })
-  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame'])
+  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
+  READS.add('role-catalog')
   // Sign-in (cli-login.js): its replies are never cached by the browser.
   const CLI_LOGIN = new Set([
     'cli-login-start', 'cli-login-current', 'cli-login-status', 'cli-login-answer',
@@ -313,6 +342,7 @@ export function install(rt) {
   }
 
   async function setPrefs(body) {
+    const roles = body.roles
     if (body.theme !== undefined) {
       if (typeof body.theme !== 'string' || !/^[a-z][\w-]{0,31}$/.test(body.theme)) throw invalid('Unknown theme')
       state.prefs.theme = body.theme
@@ -400,7 +430,9 @@ export function install(rt) {
       if (sizes.length === 0) delete state.prefs.memoryLimits
       else state.prefs.memoryLimits = { ...state.prefs.memoryLimits, ...Object.fromEntries(sizes) }
     }
-    return rt.save()
+    const saved = await rt.save()
+    if (roles === false || roles === true || roles === null) await rt.setRolesPreference(roles)
+    return saved
   }
 
   // UI edits retain their existing concurrency. An MCP audit excludes UI config edits
@@ -446,10 +478,11 @@ export function install(rt) {
     }
   }
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),
-    'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags',
-    'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback'])
+    'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
+    'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach',
+    'role-install', 'role-uninstall'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
-  const handle = async (endpoint, payload, signal) => {
+  const handle = async (endpoint, payload, signal, desktopWindow = false) => {
     try {
       const body = payload ?? {}
       // The permission section of the diagnostics page (permission-diagnostics.js): answered
@@ -491,12 +524,13 @@ export function install(rt) {
           if (readOnly === undefined) await rt.bootstrap()
           await rt.catalog()
           await rt.loadSecrets()
-          const answer = liveAnswer()
+          const roles = await rt.roleRecordsView()
+          const answer = liveAnswer(roles)
           if (body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
             return ok({ revision: state.revision, unchanged: true, liveKey: answer.key, ...answer.value })
           }
-          return ok({ ...view(), liveKey: answer.key, ...answer.value })
+          return ok({ ...view(roles), liveKey: answer.key, ...answer.value })
         }
         case 'models':
           await rt.refreshHostModels?.()
@@ -624,8 +658,23 @@ export function install(rt) {
           await rt.load()
           return ok(await rt.setBotAuto(String(body.id ?? ''), body.rev))
         case 'update-bot':
+          if (Object.hasOwn(body, 'roles')) throw invalid("A Bot's role changes with role-attach and role-detach")
           await rt.load()
           return ok(await rt.updateBot(body.id, body))
+        case 'role-attach':
+          if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
+          return ok(await rt.attachRole(body.id, body.role))
+        case 'role-detach':
+          if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
+          return ok(await rt.detachRole(body.id))
+        case 'role-catalog':
+          return ok(await rt.roleCatalog())
+        case 'role-install':
+          if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
+          return ok(await rt.installRole(body.id))
+        case 'role-uninstall':
+          if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
+          return ok(await rt.uninstallRole(body.id))
         // A model on another route (parts.js): a new conversation with a handoff note.
         case 'switch-route':
           await rt.load()
@@ -657,18 +706,18 @@ export function install(rt) {
         case 'delete-bot':
           await rt.load()
           await rt.deleteBot(body.id)
-          return ok(view())
+          return ok(await currentView())
         case 'private-release':
           await rt.load()
           await rt.releaseArchive(String(body.id ?? ''))
-          return ok(view())
+          return ok(await currentView())
         case 'set-main':
           await rt.load()
           await rt.setMain(body.id, body.main !== false, {
             primary: body.primary === true,
             replace: typeof body.replace === 'string' ? body.replace : undefined,
           })
-          return ok(view())
+          return ok(await currentView())
         case 'create-room': {
           await rt.load()
           const room = await rt.createRoom({ members: Array.isArray(body.members) ? body.members : [], name: body.name, section: body.section, sectionId: body.sectionId, ...(typeof body.admin === 'string' ? { admin: body.admin } : {}) })
@@ -690,7 +739,7 @@ export function install(rt) {
             section: body.section,
             sectionId: body.sectionId,
           })
-          return ok({ room: view().rooms.find(entry => entry.id === room.id), changes })
+          return ok({ room: (await currentView()).rooms.find(entry => entry.id === room.id), changes })
         }
         case 'folders':
         case 'folder-probe':
@@ -736,7 +785,7 @@ export function install(rt) {
         case 'remove-agent':
           await rt.load()
           await rt.removeAgent(body.agentId)
-          return ok(view())
+          return ok(await currentView())
         case 'set-flags':
           await rt.load()
           return ok(await rt.setFlags(body.id, body))
@@ -746,17 +795,17 @@ export function install(rt) {
         case 'section-order':
           await rt.load()
           await rt.reorderSections(body.ids)
-          return ok(view())
+          return ok(await currentView())
         case 'section-delete':
           await rt.load()
           await rt.deleteSection(body.id)
-          return ok(view())
+          return ok(await currentView())
         case 'delete-room':
           await rt.load()
           await rt.deleteRoom(body.id)
-          return ok(view())
+          return ok(await currentView())
         case 'approval-answer':
-          rt.answerApproval(body.id, body.choice)
+          rt.answerApproval(body.id, body.choice, body.client)
           return ok(true)
         // A stop that fails partway still parks the goal, or it wakes the admin again.
         case 'stop-member-work':
@@ -774,12 +823,12 @@ export function install(rt) {
         case 'goal-draft': {
           await rt.load()
           const result = await rt.goalDraft(String(body.roomId ?? ''), body.text)
-          return result.error !== undefined ? fail(result.error, result.code ?? 'bot/refused') : ok(view())
+          return result.error !== undefined ? fail(result.error, result.code ?? 'bot/refused') : ok(await currentView())
         }
         case 'goal-control': {
           await rt.load()
           const result = await rt.goalControl(String(body.roomId ?? ''), body)
-          return result.error !== undefined ? fail(result.error, result.code ?? 'bot/refused') : ok(view())
+          return result.error !== undefined ? fail(result.error, result.code ?? 'bot/refused') : ok(await currentView())
         }
         case 'stop-chat':
           return ok(await rt.stopChat(String(body.botId ?? '')))
@@ -804,6 +853,9 @@ export function install(rt) {
         case 'secret-cancel':
         case 'secret-update':
         case 'secret-delete':
+        case 'secret-source-set':
+        case 'secret-source-clear':
+        case 'secret-source-detail':
           await rt.load()
           return ok(await rt.secretEndpoint(endpoint, body))
         case 'connector-connect':
@@ -965,7 +1017,7 @@ export function install(rt) {
           const clientId = typeof body.clientId === 'string' ? body.clientId.slice(0, 100) : ''
           if (clientId === '') return fail('A browser poll needs a clientId', 'bot/invalid')
           await rt.load()
-          const requests = await rt.browserChannel.wait(clientId, rt.browserOpen(body.open))
+          const requests = await rt.browserChannel.wait(clientId, rt.browserOpen(body.open), body.native === true)
           return ok({ requests, holds: rt.browserChannel.holdSnapshot() })
         }
         case 'browser-result':
@@ -993,17 +1045,62 @@ export function install(rt) {
           return ok(privacy.view())
         case 'privacy-set':
           return ok(privacy.set(String(body.share ?? ''), body.on === true))
+        case 'browser-state': {
+          if (rt.browserControl === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
+          await rt.load()
+          const botId = String(body.botId ?? '')
+          const state = await rt.browserControl(botId, 'state')
+          if (state === undefined) return fail('This Bot has no open browser', 'bot/not-found')
+          const hold = rt.browserChannel?.holdOf(botId) ?? null
+          return ok({ ...state, hold: hold === null ? null : { by: hold.by, note: hold.note } })
+        }
+        // The person driving the page from the app panel: every action of theirs holds the
+        // browser, so the Bot's own browser tools wait until it is given back.
+        case 'browser-control': {
+          if (rt.browserControl === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
+          await rt.load()
+          const botId = String(body.botId ?? '')
+          if (!rt.botOf(botId)) return fail('Unknown Bot', 'bot/not-found')
+          const action = String(body.action ?? '')
+          const args = body.args && typeof body.args === 'object' ? body.args : {}
+          // The session refuses an action while a user hold is on (the Bot must wait), so the
+          // person's own action takes the hold off for its duration and puts it back after:
+          // the Bot never sees a window to act between their actions.
+          return await changeBrowser(botId, body, async holdView => {
+            const previous = rt.browserChannel?.holdOf(botId) ?? null
+            if (rt.browserChannel !== undefined) rt.browserChannel.setHold(botId, null)
+            let value
+            try {
+              value = await rt.browserControl(botId, action, args)
+            } finally {
+              if (rt.browserChannel !== undefined && (!holdView || rt.browserChannel.holdOf(botId) === null)) {
+                rt.browserChannel.setHold(botId, previous !== null && previous.by === 'user'
+                  ? previous
+                  : { by: 'user', reason: 'takeover', note: 'The user is controlling this browser.', panel: true })
+              }
+            }
+            if (value === undefined) return fail('This Bot has no open browser', 'bot/not-found')
+            return ok({ action, value })
+          })
+        }
         case 'browser-takeover': {
           if (rt.browserChannel === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
           await rt.load()
           const botId = String(body.botId ?? '')
           if (!rt.botOf(botId)) return fail('Unknown Bot', 'bot/not-found')
-          // Taking over a handoff keeps its reason, note, and call, so its card stays up.
-          const asked = rt.browserChannel.holdOf(botId)
-          rt.browserChannel.setHold(botId, asked?.callId !== undefined
-            ? { by: 'user', reason: asked.reason, note: asked.note, callId: asked.callId }
-            : { by: 'user', reason: 'takeover', note: 'The user is controlling this browser.' })
-          return ok(true)
+          return await changeBrowser(botId, body, async holdView => {
+            // Taking over a handoff keeps its reason, note, and call, so its card stays up.
+            const asked = rt.browserChannel.holdOf(botId)
+            if (body.callId !== undefined && asked?.callId !== body.callId) return fail('This handoff is no longer open', 'bot/stale')
+            const hold = rt.browserChannel.setHold(botId, asked?.callId !== undefined
+              ? { by: 'user', reason: asked.reason, note: asked.note, callId: asked.callId }
+              : { by: 'user', reason: 'takeover', note: 'The user is controlling this browser.' })
+            if (holdView) {
+              await holdView(true)
+              if (rt.browserChannel.holdOf(botId) !== hold) return fail('This handoff is no longer open', 'bot/stale')
+            }
+            return ok(true)
+          })
         }
         // A card's 'done' or 'skip' says how the handoff went. The panel's Give back
         // sends no outcome, so its reply only says that control returned to the Bot.
@@ -1013,39 +1110,76 @@ export function install(rt) {
           const botId = String(body.botId ?? '')
           if (!rt.botOf(botId)) return fail('Unknown Bot', 'bot/not-found')
           if (body.outcome !== undefined && !['done', 'skip', 'returned'].includes(body.outcome)) return fail('Nothing to send', 'bot/invalid')
-          const hold = rt.browserChannel.holdOf(botId)
-          if (hold === null) return fail('This browser is not held', 'bot/forbidden')
-          if (body.callId !== undefined && body.callId !== hold.callId) return fail('This handoff is no longer open', 'bot/stale')
-          // Claim the hold before queueing so a second answer is refused.
-          rt.browserChannel.setHold(botId, null)
-          if (hold.callId === undefined) return ok(true)
-          try {
-            const sessionId = rt.chatOf(botId)
-            const reply = handoffReply(hold, body.outcome)
-            await rt.ensureCapabilities(sessionId)
-            const agent = await rt.resolveAgent(sessionId)
-            agent.followup(createUserMessage({ content: [{ type: 'text', text: reply.text }], source: reply.source }))
-            await ctx.sessions.flush(agent.session)
-          } catch (error) {
-            if (rt.browserChannel.holdOf(botId) === null) rt.browserChannel.setHold(botId, hold)
-            throw error
-          }
-          return ok(true)
+          return await changeBrowser(botId, body, async holdView => {
+            const hold = rt.browserChannel.holdOf(botId)
+            if (hold === null) return fail('This browser is not held', 'bot/forbidden')
+            if (body.callId !== undefined && body.callId !== (hold.callId ?? null)) return fail('This handoff is no longer open', 'bot/stale')
+            // The native relay has its own hold. Leave the host hold in place until the
+            // desktop window acknowledges release, then clear it before waking the Bot.
+            let cleared = false
+            let releaseStarted = false
+            try {
+              if (!holdView) {
+                rt.browserChannel.setHold(botId, null)
+                cleared = true
+              }
+              let agent, message
+              if (hold.callId !== undefined) {
+                const sessionId = rt.chatOf(botId)
+                const reply = handoffReply(hold, body.outcome)
+                await rt.ensureCapabilities(sessionId)
+                agent = await rt.resolveAgent(sessionId)
+                message = createUserMessage({ content: [{ type: 'text', text: reply.text }], source: reply.source })
+              }
+              if (holdView) {
+                const stillHeld = () => rt.botOf(botId) && rt.browserChannel.holdOf(botId) === hold
+                if (!stillHeld()) return fail('This handoff is no longer open', 'bot/stale')
+                releaseStarted = true
+                await holdView(false)
+                if (!stillHeld()) return fail('This handoff is no longer open', 'bot/stale')
+                rt.browserChannel.setHold(botId, null)
+                cleared = true
+              }
+              if (agent !== undefined) {
+                agent.followup(message)
+                // A successful followup already queued the answer and woke the Bot. A
+                // desktop flush failure must not take its browser away again.
+                try { await ctx.sessions.flush(agent.session) } catch (error) {
+                  if (!holdView) throw error
+                  const kind = errorKind(error)
+                  rt.noteFailure({ source: 'api', text: `${endpoint}: ${kind}`, code: kind, stack: error?.stack })
+                }
+              }
+            } catch (error) {
+              if (rt.botOf(botId)) {
+                const current = rt.browserChannel.holdOf(botId)
+                if (cleared && current === null) rt.browserChannel.setHold(botId, hold)
+                if (releaseStarted && hold.by === 'user' && !hold.panel && (current === hold || (cleared && current === null))) {
+                  await holdView(true).catch(() => {})
+                }
+              }
+              throw error
+            }
+            return ok(true)
+          })
         }
         case 'browser-stop': {
           await rt.load()
           const botId = String(body.botId ?? '')
           if (!rt.botOf(botId)) return fail('Unknown Bot', 'bot/not-found')
-          const sessionId = rt.chatOf(botId)
-          if (sessionId && rt.live.get(sessionId)?.turn !== undefined) {
-            const agent = await rt.resolveAgent(sessionId)
-            agent.cancel({ kind: 'user' })
-          }
-          for (const room of Object.values(rt.state.rooms ?? {})) {
-            if (room.members?.includes(botId)) await rt.stopMemberWork?.(room.id, botId)
-          }
-          rt.browserChannel?.setHold(botId, { by: 'user', reason: 'stopped', note: 'The user is controlling this browser.' })
-          return ok(true)
+          return await changeBrowser(botId, body, async holdView => {
+            const sessionId = rt.chatOf(botId)
+            if (sessionId && rt.live.get(sessionId)?.turn !== undefined) {
+              const agent = await rt.resolveAgent(sessionId)
+              agent.cancel({ kind: 'user' })
+            }
+            for (const room of Object.values(rt.state.rooms ?? {})) {
+              if (room.members?.includes(botId)) await rt.stopMemberWork?.(room.id, botId)
+            }
+            rt.browserChannel?.setHold(botId, { by: 'user', reason: 'stopped', note: 'The user is controlling this browser.' })
+            await holdView?.(true)
+            return ok(true)
+          })
         }
         case 'im-add':
         case 'im-update':
@@ -1093,7 +1227,7 @@ export function install(rt) {
           await rt.diagnostics.clear()
           return ok(true)
         default:
-          if (added !== undefined) return ok(await added.fn(body, signal))
+          if (added !== undefined) return ok(await added.fn(body, signal, desktopWindow))
           if (endpoint.startsWith('computer-')) {
             await rt.load()
             return ok(await rt.computerEndpoint(endpoint.slice('computer-'.length), body))
@@ -1233,7 +1367,8 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
-      const dispatch = () => handle(endpoint, body?.payload, request.signal)
+      const desktopWindow = appBrowserBridge() && verifiedWindow(request)
+      const dispatch = () => handle(endpoint, body?.payload, request.signal, desktopWindow)
       const result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
       const noStore = CLI_LOGIN.has(body?.endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)

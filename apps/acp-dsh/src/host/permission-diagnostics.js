@@ -67,6 +67,7 @@ export const REVIEW_CODES = new Set(['AUTO_REVIEW_NO_STEP', 'AUTO_REVIEW_NO_ROUT
 export const FAILURE_CODES = new Set([
   'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'NO_ADAPTER', 'EMPTY_RESPONSE', 'UNSUPPORTED', 'ABORTED',
   'MODEL_ACCESS_REQUIRED', 'ACP_AGENT',
+  'ACP_CLAUDE_USAGE_LIMIT', 'ACP_CODEX_USAGE_LIMIT',
   'AUTH', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'QUOTA', 'ACCOUNT_QUOTA', 'CONTEXT_WINDOW_EXCEEDED',
   'IMAGE_OFFLOAD_REQUIRED', 'PI_AI_ERROR',
 ])
@@ -90,7 +91,7 @@ function modesOf(values) {
 // cannot explain the decision is `other`.
 function bridgeOf(adapter, agent, state) {
   const on = state.bridge !== undefined
-  const byDefault = agent?.disableBuiltInTools === true
+  const byDefault = state?.bridgeDefault ?? (agent?.disableBuiltInTools === true)
   if (adapter.backchannel === undefined) return { on, why: on ? OTHER : 'no-backchannel' }
   if (agent?.bridge === false) return { on, why: on ? OTHER : 'agent-no-bridge' }
   return { on, why: on === byDefault ? 'agent-default' : 'setting' }
@@ -329,7 +330,7 @@ export class PermissionDiagnostics {
         out.bridge = { ...entry.bridge }
         if (entry.bridge.on) {
           const bridge = active ? state.bridge : undefined
-          out.bridge.open = bridge !== undefined && bridge.closed !== true
+          out.bridge.open = bridge !== undefined && bridge.closed !== true && bridge.disconnected !== true
         }
       }
       if (entry.modes !== undefined) {

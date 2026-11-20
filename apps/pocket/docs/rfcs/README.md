@@ -30,6 +30,8 @@ Proposals for changes that others rely on. How to write one: [RFC 0000](0000-rfc
 | [0005](0005-usage-meter.md) | Usage meter: token usage per machine as ae/1 rows, a summary doc in herdr-core | Draft | — |
 | [0007](0007-watch-after-reboot.md) | Watch in background comes back after a phone restart (RECEIVE_BOOT_COMPLETED) | Accepted | automagik-dev/automagik-pocket#38 |
 | [0008](0008-drop-ssh.md) | Drop SSH: Pocket Link (QR pairing) is the only way to connect | Accepted | automagik-dev/automagik-pocket#46 |
+| [0009](0009-keystore-phone-key.md) | The phone's Pocket Link key wrapped by Android Keystore | Draft | — |
+| [0010](0010-app-lock.md) | Optional app lock | Draft | — |
 
 Monorepo RFCs that change Pocket's contract, privacy or permissions (they live in the monorepo's
 [docs/rfcs](../../../../docs/rfcs/)):
@@ -38,6 +40,6 @@ Monorepo RFCs that change Pocket's contract, privacy or permissions (they live i
 |---|---|---|---|
 | [0015](../../../../docs/rfcs/0015-live-chat-projection.md) | Live chat projection: an agent terminal as a chat, Pocket Link's chat route | Accepted | Delivery 5: the Chat tab; transcripts reach the phone, in memory only ([privacy](../privacy.md)) |
 | [0015, amendment](../../../../docs/rfcs/0015-live-chat-projection.md#amendments) | Writes on DSH chats: send, interrupt and approve from the phone | Accepted (2026-11-07) | `dshWrite` in the chat `hello`; first answer wins, the other card closes with a receipt; the per-project yes still gates project Bots; global Bots (Main Bot included) writable under the same limits; allow for session stays on the computer; privacy.md changes with the pocket PR |
-| [0033](../../../../docs/rfcs/0033-attachments-from-pocket.md) | Attachments from Pocket | Queued | Picker, upload, attachment rows; privacy.md changes with the pocket delivery |
+| [0033](../../../../docs/rfcs/0033-attachments-from-pocket.md) | Attachments from Pocket | Accepted; delivery 0 writes the contract into RFC 0015, Pocket is delivery 3 | Picker, upload, attachment rows; privacy.md changes with the pocket delivery |
 
 Back to the [docs home](../_index.md).

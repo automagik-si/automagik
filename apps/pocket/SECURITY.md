@@ -25,7 +25,19 @@ The app installs an update only when its SHA-256 matches `latest.json` (on the `
 
 ## What the app can reach
 
-- **Your machines:** over Pocket Link only (iroh, end-to-end encrypted, no open port). The app no longer connects over SSH; it deletes the SSH key an older version stored once no machine saved over SSH is left ([RFC 0008](docs/rfcs/0008-drop-ssh.md)). Its Pocket Link key stays on the phone and is never backed up.
+- **Your machines:** over Pocket Link only (iroh, end-to-end encrypted, no open port). The app no longer connects over SSH; it deletes the SSH key an older version stored once no machine saved over SSH is left ([RFC 0008](docs/rfcs/0008-drop-ssh.md)).
+  The phone's Pocket Link key stays in app storage that Android never backs up. The app encrypts
+  it with an AES key held in Android Keystore that cannot be exported. The app decrypts the
+  Pocket Link key into memory to connect. On the first start after updating, the app wraps an
+  older plain key and deletes the plain copy once the encrypted copy is safely written and
+  verified. If the encrypted copy can't be written or read, the existing plain key stays in that
+  storage and the app retries wrapping it on each start. The app keeps a new key plain in the same
+  storage if Keystore is unavailable or sealing fails before the encrypted file is put in place.
+  It retries wrapping that key on each start.
 - **Typing into agents:** only what you send, from the app, a notification's Reply, or its Yes/No and option buttons. A button re-reads the agent's screen first and does nothing if the question changed.
-- **Lock screen:** answering from the lock screen is off by default (**Settings → Alerts**). When on, anyone holding your locked phone can read what an agent asks and answer it.
+- **Lock screen:** with the app lock off, answering from the lock screen is off by default (**Settings → Alerts**). If you allow it, anyone holding your locked phone can read what an agent asks and answer it.
+- **App lock:** turn on **Settings → Alerts → Lock Automagik** to require Android authentication
+  at startup and after 60 seconds off screen. Alerts are generic and answers happen in the app.
+  Recents hides app thumbnails. On API 26–32, the lock also blocks screenshots and screen sharing.
+  [RFC 0010](docs/rfcs/0010-app-lock.md)
 - **Microphone:** only while you dictate in the side-button panel.

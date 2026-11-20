@@ -79,31 +79,24 @@ and no other Bot is made. `state` reports it as `host`, and Omni and Genie come 
 instance: Omni's card offers no new Omni of its own, and Genie's names the command line the
 instance brought instead of the line that installs one.
 
-### The power shortcut in the Bot team's sidebar
+### Power in each Bot's settings
 
-Where the Bot team runs, the welcome puts a power button in its sidebar, between the update
-cloud and Search (and in the collapsed rail), through the Bot team's `sidebarTools`
-registry: `@automagik/bots-dsh/client` is in `dsh.client.external` and in the build's
-`external`, and is looked up only when the plugin applies, so a DSH without the Bot team
-gets no button and no error. Its card has a row per product, in the team step's order
-(Unfold only in its own instance, read-only), each led by the Bot team's own mark for that
-product (its `BotMark`) and offering the one thing to do next: power it on or off, install
-it (with a line on what that does, then its step and place, "Installing Genie · 2 of 3 ·
-Bot team", from the host's install job), try again with the reason, add the Omni Bot back,
-open Plugins, or choose where Omni lives (the Bot itself sits in the sidebar, so a row does
-not open it). Powering off is the
-team step's own (`powerOff`): it stops a run and puts the box to sleep, and undoes nothing
-on the host (a linked Omni stays linked, no Bot is removed); Genie, once on the team, stays,
-as on its box. Powering on runs the team step's own steps in a shared store
-(`src/client/power-store.js`), so it keeps going when the card or the step closes. That store
-lives in the page, so the button reads the host's `omni-plugins` and `genie-plugin` when it
-mounts and each time the card opens: an install the host is running (its `install.phase` is
-`installing`) that this window does not follow, after a reload or from another window, is
-picked up where it is, without asking for a second install, and polled every `POLL_MS`
-(900 ms) as the team step polls it, to On or to the reason with Try again. Choosing where Omni
-lives, or "Open team setup", opens the team step on purpose: there Continue only closes it and
-saves nothing, so the Main Bot keeps its name. Both show only when the Bot team passes the
-shell's onboarding opener (`actions.openHarnessOnboarding`).
+Where the Bot team runs, the welcome puts each built-in Bot's power in that Bot's own
+settings, through the Bot team's `botSettings` registry: `@automagik/bots-dsh/client` is in
+`dsh.client.external` and in the build's `external`, and is looked up only when the plugin
+applies, so a DSH without the Bot team gets no card and no error. A card titled Power shows
+that Bot's state and one switch: Omni powers on or off, and Genie and Unfold stay on once
+their Bot joins the team, as their boxes in the team step hold them. The card uses the Bot
+team's own `Card`, `Row` and `SwitchRow`, the team step's state words (`On · Connected`,
+`Powered off`, `Installing Genie · 2 of 3 · Bot team`), and the shared power store
+(`src/client/power-store.js`), so a power-on keeps going when the settings page closes. A read-only
+team gets the state line only. The card is registered for the Bot kinds `omni`, `genie` and
+`unfold`; a Bot of any other kind gets no card.
+
+A built-in Bot that is not installed has no settings page, so install does not move with the
+power. It stays where onboarding already offers it: the team step (`omni-team`) still has
+Omni's and Genie's cards, whose power buttons install the plugins and make the Bot, and a DSH's
+Plugins page installs the plugin directly. The old sidebar button was a second way into them; it is gone.
 
 The team step follows the DSH language. Its copy is the `welcome.team` namespace
 (`src/client/i18n.js`): the keys are the English text, registered in English and in Brazilian
@@ -183,9 +176,10 @@ while its CLI is missing, installing or failed, or signed in but not answering y
   it: installing or updating it by itself, failed with its error and **Retry**, or found with
   its version; with its install link and **Check again** when it is missing;
 - whether the CLI is signed in, as the CLI itself says (`claude auth status`, `codex login
-  status`; only yes or no is read). Signed out, the row has **Sign in**, and the command to run
-  in a terminal as the other way (`claude auth login`, `codex login`); not checked yet, it says
-  so, with **Check again**;
+  status`; only yes or no is read). Signed out, the row has **Sign in**. When the app shares
+  the CLI's sign-in, it also shows the terminal command (`claude auth login`, `codex login`).
+  When the app uses an isolated sign-in, use **Sign in** in a Bot's chat. Not checked yet, it
+  says so; a check that timed out or could not tell says that instead; both with **Check again**;
 - the connector acp-dsh installs in the background: installing, failed with its last error and
   **Retry**, or ready with its version;
 - once ready and signed in, *Ready: pick Claude Code in the model picker*. The model appears
@@ -197,8 +191,9 @@ The row in the chat runs the CLI's own sign-in: a link to open on any device, th
 to type there or Claude's code to paste back in that row. This page only opens the chat: it starts
 no sign-in, picks no model and never sees a link, a code or a credential. In Connect AI the step
 steps aside while the chat is in front (a small **Back to setup** brings it back) and is not
-completed by it; Settings closes its panel. Without the Bot team or a Bot the row says to run the
-command in a terminal instead. While a sign-in waits, the busy file (`src/host/busy.js`, `AUTOMAGIK_BUSY_FILE`) counts it, so an
+completed by it; Settings closes its panel. If no Bot chat is available, isolated sign-in asks
+you to set up a Bot first. With a shared sign-in, the row gives the terminal command. While a
+sign-in waits, the busy file (`src/host/busy.js`, `AUTOMAGIK_BUSY_FILE`) counts it, so an
 automatic plugin update does not restart DSH in the middle of it.
 
 The switch is acp-dsh's own `claude` or `codex` setting, written through DSH's settings service,
@@ -281,7 +276,7 @@ The shape was read from DSH 0.2.1-rc.2:
 | `provider-key`, `signin-*` | see `src/host/providers.js` | A key, or a sign-in run through DSH's authorization service. |
 | `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, and the install in progress. |
 | `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager (`installBundle`: the Bot team from this plugin's own source pointed at its sibling, else this release's tarball; Omni's from Omni's repository at the pinned release), switching on any that are off. Pressing Omni's power button in the team step calls it. |
-| `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, listed, restartNeeded }] }`. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
+| `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, signInCheck?, listed, restartNeeded }] }`. `signInCheck` is `timeout` or `unreadable`: why the last check could not tell, only while `signedIn` is absent. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |
 | `bot-type` | `{ type: 'omni' }` | What the Omni Bot starts with, as groups: model and thinking (DSH's default), plugins with versions, tool groups with their switches, skills, folder and permissions. |

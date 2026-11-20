@@ -23,9 +23,12 @@ type fakeHC struct {
 	worktree   [3]string // repo, branch, path
 	waits      []hc.Wait
 	term       hc.Terminal
+	gets       map[string]hc.Terminal // per-address `hc get` answers; nil falls back to term
 	screen     string
 	screenErr  error
 	terminals  []string
+	termSeq    [][]string // one answer per call, the last repeating; wins over terminals
+	termCalls  int
 	termErr    error
 	termLabels map[string]string
 	runErr     error
@@ -35,6 +38,14 @@ type fakeHC struct {
 	calls      []string      // kill and rm, with their address
 	readCalls  int
 	killErr    error
+	sent       []string // hc send's texts, in order
+	sendErr    error
+}
+
+func (f *fakeHC) Send(address, text string) error {
+	f.calls = append(f.calls, "send "+address)
+	f.sent = append(f.sent, text)
+	return f.sendErr
 }
 
 func (f *fakeHC) Kill(address string) error {
@@ -57,6 +68,14 @@ func (f *fakeHC) Read(string) (string, error) {
 
 func (f *fakeHC) Terminals(labels map[string]string) ([]string, error) {
 	f.termLabels = labels
+	if f.termSeq != nil {
+		at := f.termCalls
+		f.termCalls++
+		if at >= len(f.termSeq) {
+			at = len(f.termSeq) - 1
+		}
+		return f.termSeq[at], f.termErr
+	}
 	return f.terminals, f.termErr
 }
 
@@ -78,7 +97,15 @@ func (f *fakeHC) Wait(string, time.Duration) (hc.Wait, error) {
 	return w, nil
 }
 
-func (f *fakeHC) Get(string) (hc.Terminal, error) { return f.term, nil }
+func (f *fakeHC) Get(address string) (hc.Terminal, error) {
+	if f.gets != nil {
+		if t, ok := f.gets[address]; ok {
+			return t, nil
+		}
+		return hc.Terminal{}, hc.ErrNotFound
+	}
+	return f.term, nil
+}
 
 func (f *fakeHC) MainCheckout(string) (string, error) { return "/src/myapp", nil }
 

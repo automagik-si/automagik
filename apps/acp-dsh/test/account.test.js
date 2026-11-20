@@ -4,8 +4,9 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
-import { accountOf, accountView, claudeAccount, codexAccount } from '../src/host/account.js'
+import { accountEvidenceOf, accountOf, accountView, claudeAccount, codexAccount } from '../src/host/account.js'
 import { AGENTS } from '../src/host/agents.js'
+import { CODEX_PLAN_CLASSES, reservationDigests, reservationOutcome } from '../src/host/reservation-evidence.js'
 
 const CLAUDE = AGENTS['acp-claude']
 const CODEX = AGENTS['acp-codex']
@@ -130,4 +131,122 @@ test('a Codex account read that fails, exits or never answers is unknown', async
   assert.equal(await waiting, undefined)
   assert.equal(silent.children[0].child.killed, true)
   assert.equal(await accountOf(CODEX, '/opt/tools/codex', { spawn: () => { throw new Error('spawn failed') } }), undefined)
+})
+
+const reservationKey = Buffer.alloc(32, 7)
+
+test('Claude accountEvidenceOf classifies the same status that supplies consent', async () => {
+  const cases = [
+    [{}, 'complete', ['exact', 'loose']],
+    [{ apiProvider: undefined }, 'complete', ['exact', 'loose']],
+    [{ orgId: null }, 'ambiguous', ['loose']],
+    [{ orgId: undefined }, 'ambiguous', ['loose']],
+    [{ email: undefined }, 'none', []],
+    [{ email: 'ana@example.test\n' }, 'none', []],
+    [{ email: ' ana@example.test' }, 'none', []],
+    [{ email: 'ana\u0007@example.test' }, 'none', []],
+    [{ email: `${'a'.repeat(252)}@b` }, 'complete', ['exact', 'loose']],
+    [{ email: `${'a'.repeat(253)}@b` }, 'none', []],
+    [{ orgId: 'org-\uD800' }, 'ambiguous', ['loose']],
+    [{ orgId: 'org-\uD801' }, 'ambiguous', ['loose']],
+    [{ orgId: 'a'.repeat(200) }, 'complete', ['exact', 'loose']],
+    [{ orgId: 'a'.repeat(201) }, 'ambiguous', ['loose']],
+    [{ authMethod: 'api_key' }, 'none', []],
+    [{ authMethod: 'gateway', orgId: undefined }, 'none', []],
+    [{ authMethod: 'oauth_token' }, 'none', []],
+    [{ authMethod: 'future' }, 'none', []],
+    [{ apiProvider: 'bedrock' }, 'none', []],
+    [{ apiProvider: 'vertex' }, 'none', []],
+    [{ apiKeySource: 'ANTHROPIC_API_KEY' }, 'none', []],
+    [{ loggedIn: false }, 'none', []],
+  ]
+  const cli = '/opt/tools/claude'
+  const env = { PATH: '/usr/bin', AUTOMAGIK_BOT_CLI_HOME: '/fake/bot', CLAUDE_CONFIG_DIR: '/fake/bot/.claude' }
+  for (const [overrides, outcome, keys] of cases) {
+    const stdout = JSON.stringify({ ...signedIn, ...overrides })
+    const calls = []
+    const run = (file, args, options, done) => {
+      calls.push({ file, args, options })
+      done(overrides.loggedIn === false ? Object.assign(new Error('exit'), { code: 1 }) : null, stdout)
+    }
+    const answer = await accountEvidenceOf(CLAUDE, cli, { env, run, timeoutMs: 20 })
+    assert.deepEqual(answer.account, claudeAccount(stdout), stdout)
+    assert.equal(reservationOutcome(answer.evidence).outcome, outcome, stdout)
+    assert.deepEqual(Object.keys(reservationDigests(answer.evidence, reservationKey)), keys, stdout)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].file, cli)
+    assert.deepEqual(calls[0].args, ['auth', 'status', '--json'])
+    assert.equal(calls[0].options.env.CLAUDE_CONFIG_DIR, env.CLAUDE_CONFIG_DIR)
+    assert.equal(calls[0].options.cwd, env.AUTOMAGIK_BOT_CLI_HOME)
+    assert.equal(calls[0].options.timeout, 20)
+  }
+  const unread = { account: undefined, evidence: undefined }
+  for (const stdout of ['', 'not json', '{}', '[]']) {
+    const run = (file, args, options, done) => done(null, stdout)
+    assert.deepEqual(await accountEvidenceOf(CLAUDE, cli, { env, run }), unread)
+  }
+  const timeout = (file, args, options, done) => done(Object.assign(new Error('timeout'), { killed: true }))
+  assert.deepEqual(await accountEvidenceOf(CLAUDE, cli, { env, run: timeout }), unread)
+})
+
+test('Codex accountEvidenceOf classifies each account/read alongside the existing consent answer', async () => {
+  const cli = '/opt/tools/codex'
+  const env = { PATH: '/usr/bin', AUTOMAGIK_BOT_CLI_HOME: '/fake/bot', CODEX_HOME: '/fake/bot/.codex' }
+  const chatgpt = planType => ({ type: 'chatgpt', email: 'Ana@Home.example', planType })
+  const options = (result) => {
+    const server = fakeServer(message => {
+      if (message.method === 'initialize') return { id: message.id, result: {} }
+      if (message.method === 'account/read') return { id: message.id, result }
+      return undefined
+    })
+    return { env, ...server }
+  }
+  const read = async (account, outcome, keys) => {
+    const result = { account, requiresOpenaiAuth: true }
+    const fake = options(result)
+    const answer = await accountEvidenceOf(CODEX, cli, fake)
+    assert.deepEqual(answer.account, codexAccount(result))
+    assert.equal(reservationOutcome(answer.evidence).outcome, outcome)
+    const digests = reservationDigests(answer.evidence, reservationKey)
+    assert.deepEqual(Object.keys(digests), keys)
+    assert.equal(fake.children.length, 1)
+    const [{ file, args, options: childOptions, child }] = fake.children
+    assert.equal(file, cli)
+    assert.deepEqual(args, ['app-server', '--listen', 'stdio://'])
+    assert.equal(childOptions.env.CODEX_HOME, env.CODEX_HOME)
+    assert.equal(childOptions.cwd, env.AUTOMAGIK_BOT_CLI_HOME)
+    assert.deepEqual(child.sent.map(message => message.method), ['initialize', 'initialized', 'account/read'])
+    assert.deepEqual(child.sent[2].params, { refreshToken: false })
+    assert.equal(child.killed, true)
+    return { answer, digests }
+  }
+  const personal = await read(chatgpt('plus'), 'complete', ['exact', 'loose'])
+  const workspace = await read(chatgpt('team'), 'complete', ['exact', 'loose'])
+  const byClass = { personal, workspace }
+  for (const [group, plans] of Object.entries(CODEX_PLAN_CLASSES)) for (const plan of plans) {
+    const { answer, digests } = await read(chatgpt(plan), 'complete', ['exact', 'loose'])
+    assert.equal(answer.evidence.class, group, plan)
+    assert.deepEqual(digests, byClass[group].digests, plan)
+  }
+  for (const plan of [undefined, null, 'Plus', ' plus', 'sci', 'sci_plus', 'unknown', 'future-plan', 1]) {
+    const { answer, digests } = await read(chatgpt(plan), 'ambiguous', ['loose'])
+    assert.equal(answer.evidence.class, 'unknown')
+    assert.equal(digests.loose, personal.digests.loose)
+    assert.equal(digests.loose, workspace.digests.loose)
+  }
+  const { answer } = await read({ ...chatgpt('plus'), email: null }, 'none', [])
+  assert.deepEqual(answer, { account: undefined, evidence: { person: true, vendor: 'codex', class: 'personal' } })
+  for (const account of [{ type: 'apiKey' }, { type: 'amazonBedrock' }, { type: 'gcp' }, null, undefined]) {
+    const { answer } = await read(account, 'none', [])
+    assert.deepEqual(answer.evidence, { person: false })
+  }
+  const { plan: personalPlan, ...personalIdentity } = await accountOf(CODEX, cli, options({ account: chatgpt('plus') }))
+  const { plan: workspacePlan, ...workspaceIdentity } = await accountOf(CODEX, cli, options({ account: chatgpt('team') }))
+  // The owner still sees the plan. The facets and id that consent and ref use are the same.
+  assert.equal(personalPlan, 'plus')
+  assert.equal(workspacePlan, 'team')
+  assert.deepEqual(personalIdentity, workspaceIdentity)
+  assert.notEqual(personal.digests.exact, workspace.digests.exact)
+  assert.deepEqual(await accountEvidenceOf(CODEX, cli, options({ unexpected: true })),
+    { account: undefined, evidence: undefined })
 })

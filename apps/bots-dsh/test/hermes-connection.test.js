@@ -1196,6 +1196,28 @@ test('a saved SSH record from the previous release is normalized on first open: 
   assert.match(again.models[0].name, /acme\/llama-9:70b-q4/, 'a reconnect rebuilds the row from the live connection')
 })
 
+test('a carried-over legacy credentialRef moves to the stable attach ref, and the old name is removed', async t => {
+  const profiles = [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
+  const credential = randomUUID().replaceAll('-', ''), legacy = 'HERMES_REMOTE_CREDENTIAL'
+  const h = await durableRuntime(t, dashboard(), {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => {} }),
+  })
+  h.secrets.set(legacy, JSON.stringify({ kind: 'attach', credential }))
+  h.rt.state.prefs.hermesRemote = {
+    enabled: true, mode: 'ssh', attached: true, address: '', ssh: { host: 'example.invalid' }, profile: 'default', setupVersion: 1,
+    profiles, models: [attachedModelOf(profiles[0])], credentialRef: legacy, pairedBotId: 'bot1',
+  }
+  h.rt.state.bots = { bot1: { id: 'bot1', name: 'Bot', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach' } }
+  await h.endpoints.get('hermes-remote-connect')({})
+  const saved = h.rt.state.prefs.hermesRemote
+  assert.equal(saved.credentialRef, 'HERMES_REMOTE_ATTACH_CREDENTIAL')
+  assert.equal(h.secrets.has(legacy), false, 'the legacy name is removed')
+  assert.deepEqual(JSON.parse(h.secrets.get('HERMES_REMOTE_ATTACH_CREDENTIAL')), { kind: 'attach', credential })
+  assert.ok(h.secretCalls.some(call => call.endpoint === 'secret-set' && call.name === 'HERMES_REMOTE_ATTACH_CREDENTIAL'))
+  assert.ok(h.secretCalls.some(call => call.endpoint === 'secret-delete' && call.name === legacy))
+  assert.equal(JSON.parse(await readFile(h.rt.statePath, 'utf8')).prefs.hermesRemote.credentialRef, 'HERMES_REMOTE_ATTACH_CREDENTIAL')
+})
+
 test('a live chat opened through install() gets the attached wire and detaches on close', async t => {
   const profiles = [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
   const credential = randomUUID().replaceAll('-', '')
@@ -1371,10 +1393,10 @@ test('recovery attached: keep current-epoch non-Bot-Chat and Bot Chat turns, cle
     }),
   })
   // Fully normalized so opening the probe cannot cause a migration save or clear.
-  h.secrets.set('SAMPLE', JSON.stringify({ kind: 'attach', credential: f.credential }))
+  h.secrets.set('HERMES_REMOTE_ATTACH_CREDENTIAL', JSON.stringify({ kind: 'attach', credential: f.credential }))
   h.rt.state.prefs.hermesRemote = {
     enabled: true, mode: 'ssh', attached: true, ssh: { host: 'example.invalid' }, address: '',
-    profile: 'default', setupVersion: 1, credentialRef: 'SAMPLE', profiles, models: [attachedModelOf(profiles[0])],
+    profile: 'default', setupVersion: 1, credentialRef: 'HERMES_REMOTE_ATTACH_CREDENTIAL', profiles, models: [attachedModelOf(profiles[0])],
   }
   h.rt.state.hermesSessions = {
     current: recoveryTurn({ storedSessionId: 'sample-current' }),
@@ -1397,7 +1419,7 @@ test('recovery attached: keep current-epoch non-Bot-Chat and Bot Chat turns, cle
     assert.ok(wire.sent.some(call => call.method === 'session.detach'))
   }
   assert.deepEqual(h.secretCalls, [1, 2].map(() => ({
-    endpoint: 'secret-set', name: 'SAMPLE', value: JSON.stringify({ kind: 'attach', credential: f.credential }),
+    endpoint: 'secret-set', name: 'HERMES_REMOTE_ATTACH_CREDENTIAL', value: JSON.stringify({ kind: 'attach', credential: f.credential }),
     scope: [], purpose: 'Remote Hermes attached serve token',
   })), 'each SSH probe refreshes its credential separately from recovery state saves')
 })

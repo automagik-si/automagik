@@ -2,11 +2,12 @@ import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, test } fr
 import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { createHash } from 'node:crypto';
-import { readFile, readdir, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, readdir, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { SoftwareAuthenticator } from './authenticator';
+import { ORPHAN_BATCH_LIMIT, ORPHAN_MIN_AGE_MS } from '../src/cleanup';
 
 // The service runs on a subdomain of the passkey site name, as it does for real.
 const origin = 'https://id.automagik.si';
@@ -24,12 +25,81 @@ let runtime: Miniflare;
 let cookie: string;
 let ip: number;
 
+// The Worker under test, with its D1 binding wrapped so the suite can see every read it runs.
+// Each SELECT is appended to `query_log` with the SHA-256 of any session token the statement
+// returned, so a test proves that a refused route never read a particular row instead of only
+// trusting its status code. The wrapper is compiled into the bundle, outside the Worker source.
+const INSTRUMENTED_ENTRY = `
+import worker from './src/index';
+
+const originals = new WeakMap();
+
+function instrument(db) {
+  const digest = async (value) => {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  };
+  const tokenHashes = async (result) => {
+    const rows = Array.isArray(result) ? result : result ? [result] : [];
+    const found = [];
+    for (const row of rows) {
+      if (row && typeof row === 'object' && typeof row.token === 'string') found.push(await digest(row.token));
+    }
+    return found.sort().join(',');
+  };
+  const log = async (sql, result) => {
+    if (!/^\\s*(SELECT|WITH)\\b/i.test(sql)) return;
+    await db.prepare('INSERT INTO query_log (sql, token_hashes) VALUES (?, ?)')
+      .bind(sql, await tokenHashes(result)).run();
+  };
+  const wrap = (statement, sql) => {
+    const wrapped = new Proxy(statement, {
+      get(target, prop) {
+        if (prop === 'first' || prop === 'all') {
+          return async (...args) => {
+            const result = await target[prop](...args);
+            await log(sql, result);
+            return result;
+          };
+        }
+        if (prop === 'run') {
+          return async (...args) => { await log(sql, null); return target[prop](...args); };
+        }
+        if (prop === 'bind') return (...args) => wrap(target.bind(...args), sql);
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    originals.set(wrapped, statement);
+    return wrapped;
+  };
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === 'prepare') return (sql) => wrap(target.prepare(sql), sql);
+      if (prop === 'batch') return (list) => target.batch(list.map(entry => originals.get(entry) ?? entry));
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    return worker.fetch(request, { ...env, DB: instrument(env.DB) }, ctx);
+  },
+  async scheduled(controller, env, ctx) {
+    return worker.scheduled(controller, { ...env, DB: instrument(env.DB) }, ctx);
+  },
+};
+`;
+
 beforeAll(async () => {
   await mkdir('.wrangler', { recursive: true });
   root = await mkdtemp('.wrangler/test-');
   bundle = resolve(root, 'worker.mjs');
   await build({
-    entryPoints: ['src/index.ts'], outfile: bundle, bundle: true, format: 'esm',
+    stdin: { contents: INSTRUMENTED_ENTRY, resolveDir: process.cwd(), sourcefile: 'instrumented.ts', loader: 'ts' },
+    outfile: bundle, bundle: true, format: 'esm',
     platform: 'browser', target: 'es2022', conditions: ['workerd', 'worker'],
     external: ['node:*', 'cloudflare:*'], logLevel: 'silent',
   });
@@ -81,6 +151,9 @@ beforeEach(async () => {
   for (const sql of clientSeedSQL(digest(cloudSecret)).split(';').filter(Boolean)) {
     await db.prepare(sql).run();
   }
+  // The instrumented binding writes every SELECT here; the suite clears it before a route.
+  await db.prepare('CREATE TABLE query_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+    'sql TEXT NOT NULL, token_hashes TEXT NOT NULL)').run();
   cookie = '';
   ip = 1;
 });
@@ -516,6 +589,8 @@ describe('Worker + D1 identity', () => {
       response: authenticator.authenticate(options, origin),
     }));
     const metadata = await jsonOK(await request('/.well-known/openid-configuration'));
+    // The issuer every product stores with the subject; DEPLOY.md's check names this string.
+    expect(metadata.issuer).toBe('https://id.automagik.si/api/auth');
     expect(metadata.code_challenge_methods_supported).toEqual(['S256']);
     expect(metadata.registration_endpoint).toBeUndefined();
     for (const field of ['authorization_endpoint', 'token_endpoint', 'userinfo_endpoint',
@@ -1074,5 +1149,257 @@ describe('passkeys on an existing account', () => {
     const create = (headers: Record<string, string>) => hooks.user.create.before({}, { headers: new Headers(headers) });
     await expect(create({ [ADD_PASSKEY_HEADER]: '1' })).rejects.toThrow('Unauthorized');
     await expect(create({})).resolves.toBeUndefined();
+  });
+});
+
+describe('session management', () => {
+  // Signs in again with an existing passkey, returning the new session's cookie jar.
+  async function signIn(authenticator: SoftwareAuthenticator) {
+    cookie = '';
+    const options = await jsonOK(await request('/api/auth/passkey/generate-authenticate-options'));
+    await jsonOK(await request('/api/auth/passkey/verify-authentication', {
+      response: authenticator.authenticate(options, origin),
+    }));
+    return cookie;
+  }
+  async function sessionOf(jar: string) {
+    return jsonOK(await request('/api/auth/get-session', undefined, { cookie: jar }));
+  }
+  async function tokens() {
+    const db = await runtime.getD1Database('DB');
+    return (await db.prepare('SELECT id, token, userId FROM session').all<{
+      id: string; token: string; userId: string;
+    }>()).results;
+  }
+  const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+  async function clearReads() {
+    const db = await runtime.getD1Database('DB');
+    await db.prepare('DELETE FROM query_log').run();
+  }
+  async function sessionReads() {
+    const db = await runtime.getD1Database('DB');
+    const rows = (await db.prepare('SELECT sql, token_hashes FROM query_log ORDER BY seq').all<{
+      sql: string; token_hashes: string;
+    }>()).results;
+    return rows.filter(row => /\bFROM\s+"?session"?\b/i.test(row.sql));
+  }
+
+  test('list sessions shows only the caller\'s own sessions, without any token', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const a2 = await signIn(a.authenticator);
+    cookie = '';
+    const b = await signup();
+    expect((await request('/api/auth/list-sessions', undefined, { cookie: '' })).status).toBe(401);
+    const response = await request('/api/auth/list-sessions', undefined, { cookie: a2 });
+    const text = await response.clone().text();
+    const listed = await jsonOK(response) as Array<Record<string, unknown>>;
+    const stored = await tokens();
+    expect(listed.map(session => session.id).sort()).toEqual(
+      stored.filter(row => row.userId === a.userId).map(row => row.id).sort());
+    expect(listed).toHaveLength(2);
+    for (const session of listed) {
+      expect(session.userId).toBe(a.userId);
+      expect(session).not.toHaveProperty('token');
+      expect(session.ipAddress).toBeTruthy();
+    }
+    expect(stored.some(row => row.userId === b.userId)).toBe(true);
+    for (const row of stored) expect(text).not.toContain(row.token);
+    expect((await sessionOf(a1)).user.id).toBe(a.userId);
+  });
+
+  test('an unauthenticated list-sessions reads no session row', async () => {
+    await signup();
+    await clearReads();
+    expect((await request('/api/auth/list-sessions', undefined, { cookie: '' })).status).toBe(401);
+    expect(await sessionReads()).toEqual([]);
+  });
+
+  test('revoking one session by id ends it and keeps the others', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const a2 = await signIn(a.authenticator);
+    const first = (await sessionOf(a1)).session.id;
+    expect(await jsonOK(await request('/api/auth/revoke-session', { id: first }, { cookie: a2 })))
+      .toEqual({ status: true });
+    expect(await sessionOf(a1)).toBeNull();
+    expect((await sessionOf(a2)).user.id).toBe(a.userId);
+    const left = await jsonOK(await request('/api/auth/list-sessions', undefined, { cookie: a2 }));
+    expect(left.map((session: { id: string }) => session.id)).not.toContain(first);
+    expect(left).toHaveLength(1);
+  });
+
+  test('an unauthenticated revoke-session fails before any session read', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const target = (await sessionOf(a1)).session.id;
+    await clearReads();
+    expect((await request('/api/auth/revoke-session', { id: target }, { cookie: '' })).status).toBe(401);
+    // Authenticating first means the refusal happens before the Worker looks up any session row.
+    expect(await sessionReads()).toEqual([]);
+    expect((await sessionOf(a1)).user.id).toBe(a.userId);
+  });
+
+  test('another account\'s id never has its token read', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const target = (await sessionOf(a1)).session.id;
+    const targetToken = (await tokens()).find(row => row.id === target)!.token;
+    cookie = '';
+    await signup();
+    const b1 = cookie;
+    await clearReads();
+    const response = await request('/api/auth/revoke-session', { id: target }, { cookie: b1 });
+    // Better Auth answers the same for a session it will not touch; the session must survive.
+    expect(response.status).toBe(200);
+    expect(await jsonOK(response)).toEqual({ status: true });
+    const reads = await sessionReads();
+    // The caller's own session is read to authenticate; the target's token never is.
+    expect(reads.some(row => row.token_hashes.split(',').includes(sha256(targetToken)))).toBe(false);
+    // Every session lookup by id is scoped to the authenticated caller.
+    for (const row of reads.filter(row => /\bid\s*=/i.test(row.sql))) {
+      expect(row.sql, row.sql).toMatch(/\buserId\s*=/i);
+    }
+    expect((await sessionOf(a1)).user.id).toBe(a.userId);
+  });
+
+  test('revoke-sessions ends every session of the caller and no one else\'s', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const a2 = await signIn(a.authenticator);
+    cookie = '';
+    await signup();
+    const b1 = cookie;
+    expect(await jsonOK(await request('/api/auth/revoke-sessions', {}, { cookie: a1 })))
+      .toEqual({ status: true });
+    expect(await sessionOf(a1)).toBeNull();
+    expect(await sessionOf(a2)).toBeNull();
+    expect((await tokens()).some(row => row.userId === a.userId)).toBe(false);
+    expect((await sessionOf(b1)).user).toBeTruthy();
+    expect((await request('/api/auth/revoke-sessions', {}, { cookie: '' })).status).toBe(401);
+  });
+
+  test('an unauthenticated revoke-sessions reads no session row', async () => {
+    await signup();
+    await clearReads();
+    expect((await request('/api/auth/revoke-sessions', {}, { cookie: '' })).status).toBe(401);
+    expect(await sessionReads()).toEqual([]);
+  });
+
+  test('another user\'s session cannot be revoked, by id or by token', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const target = (await sessionOf(a1)).session.id;
+    const token = (await tokens()).find(row => row.id === target)!.token;
+    cookie = '';
+    await signup();
+    const b1 = cookie;
+    // Better Auth answers the same for a session it will not touch; the session must survive.
+    expect((await request('/api/auth/revoke-session', { id: target }, { cookie: b1 })).status).toBe(200);
+    expect((await request('/api/auth/revoke-session', { id: target, token }, { cookie: b1 })).status)
+      .toBe(200);
+    expect((await request('/api/auth/revoke-session', { token }, { cookie: b1 })).status).toBe(400);
+    expect((await request('/api/auth/revoke-session', { id: target }, { cookie: '' })).status).toBe(401);
+    expect((await request('/api/auth/revoke-session', { id: 'unknown' }, { cookie: '' })).status).toBe(401);
+    expect((await sessionOf(a1)).user.id).toBe(a.userId);
+    expect((await sessionOf(b1)).user).toBeTruthy();
+  });
+});
+
+describe('orphan account cleanup', () => {
+  const hour = 60 * 60 * 1000;
+  const iso = (age: number) => new Date(Date.now() - age).toISOString();
+  async function cleanup() {
+    const worker = await runtime.getWorker();
+    await worker.scheduled({ cron: '17 * * * *', scheduledTime: new Date() });
+  }
+  async function insertUser(id: string, age: number, phoneNumber: string | null = null) {
+    const db = await runtime.getD1Database('DB');
+    await db.prepare(`INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt,
+      phoneNumber) VALUES (?, 'Automagik user', ?, 0, ?, ?, ?)`)
+      .bind(id, `${id}@id.invalid`, iso(age), iso(age), phoneNumber).run();
+  }
+  async function count(sql: string, ...values: unknown[]) {
+    const db = await runtime.getD1Database('DB');
+    return (await db.prepare(sql).bind(...values).first<{ n: number }>())!.n;
+  }
+  async function age(userId: string, by: number) {
+    const db = await runtime.getD1Database('DB');
+    await db.prepare('UPDATE "user" SET createdAt = ? WHERE id = ?').bind(iso(by), userId).run();
+  }
+
+  test('cleanup removes an old passkeyless user with its sessions, accounts and challenges', async () => {
+    // A real abandoned ceremony: options were requested, no passkey was ever verified.
+    await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+    const db = await runtime.getD1Database('DB');
+    const user = (await db.prepare('SELECT id, createdAt FROM "user"').first<{
+      id: string; createdAt: string;
+    }>())!;
+    expect(user.createdAt).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    expect(await count(`SELECT count(*) AS n FROM verification
+      WHERE json_extract(value, '$.userData.id') = ?`, user.id)).toBe(1);
+    await age(user.id, ORPHAN_MIN_AGE_MS + hour);
+    const now = iso(0);
+    // An expired session row goes with the user; a live one keeps the account (next test).
+    await db.prepare(`INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, userId)
+      VALUES ('s-orphan', ?, 't-orphan', ?, ?, ?)`).bind(iso(hour), now, now, user.id).run();
+    await db.prepare(`INSERT INTO account (id, accountId, providerId, userId, createdAt, updatedAt)
+      VALUES ('a-orphan', ?, 'passkey', ?, ?, ?)`).bind(user.id, user.id, now, now).run();
+    await db.prepare(`INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt)
+      VALUES ('v-other', 'other', 'not json', ?, ?, ?)`).bind(now, now, now).run();
+    await cleanup();
+    expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', user.id)).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM session WHERE userId = ?', user.id)).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM account WHERE userId = ?', user.id)).toBe(0);
+    expect(await count(`SELECT count(*) AS n FROM verification
+      WHERE json_valid(value) AND json_extract(value, '$.userData.id') = ?`, user.id)).toBe(0);
+    expect(await count("SELECT count(*) AS n FROM verification WHERE id = 'v-other'")).toBe(1);
+  });
+
+  test('cleanup keeps an old user that still has a live session', async () => {
+    // A passkeyless account should not have a live session, but the guard is explicit rather
+    // than relying on that: a live session row means the account is in use.
+    await insertUser('live', ORPHAN_MIN_AGE_MS * 30);
+    const now = iso(0);
+    const later = new Date(Date.now() + hour).toISOString();
+    const db = await runtime.getD1Database('DB');
+    await db.prepare(`INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, userId)
+      VALUES ('s-live', ?, 't-live', ?, ?, 'live')`).bind(later, now, now).run();
+    await cleanup();
+    expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', 'live')).toBe(1);
+    expect(await count("SELECT count(*) AS n FROM session WHERE id = 's-live'")).toBe(1);
+  });
+
+  test('cleanup keeps young passkeyless users, old users with a passkey and old phone accounts', async () => {
+    const owner = await signup();
+    await age(owner.userId, ORPHAN_MIN_AGE_MS * 30);
+    // Expire the owner's session so the passkey condition, not the live-session guard, is what
+    // keeps it; the guard has its own test below.
+    const db = await runtime.getD1Database('DB');
+    await db.prepare('UPDATE session SET expiresAt = ? WHERE userId = ?')
+      .bind(iso(ORPHAN_MIN_AGE_MS * 2), owner.userId).run();
+    await insertUser('young', ORPHAN_MIN_AGE_MS - hour);
+    await insertUser('phone', ORPHAN_MIN_AGE_MS * 30, '+15555550127');
+    await cleanup();
+    for (const id of [owner.userId, 'young', 'phone']) {
+      expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', id), id).toBe(1);
+    }
+    expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', owner.userId)).toBe(1);
+  });
+
+  test('cleanup is bounded per run, leaves other accounts alone and finishes the backlog', async () => {
+    // A real old account with a passkey must survive runs that are deleting orphans.
+    const keeper = await signup();
+    await age(keeper.userId, ORPHAN_MIN_AGE_MS * 30);
+    for (let index = 0; index < ORPHAN_BATCH_LIMIT + 5; index++) {
+      await insertUser(`orphan-${String(index).padStart(4, '0')}`, ORPHAN_MIN_AGE_MS + hour + index);
+    }
+    await cleanup();
+    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(6);
+    expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', keeper.userId)).toBe(1);
+    await cleanup();
+    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(1);
+    expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', keeper.userId)).toBe(1);
+    expect((await jsonOK(await request('/api/auth/get-session'))).user.id).toBe(keeper.userId);
   });
 });

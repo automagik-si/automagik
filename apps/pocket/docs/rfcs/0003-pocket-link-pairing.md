@@ -32,8 +32,11 @@ Phone (`android/app/src/main/java/ai/namastex/automagik/`):
   `CoreClient` as SSH (`IrohLink.kt:97`).
 - Pairing sends the code and the phone's make and model (`IrohLink.kt:83`,
   `PocketViewModel.kt:254`).
-- QR scanning: bundled ZXing scanner (`android/app/build.gradle.kts:65`). Deep links open the app
-  through the `herdr-pocket://pair` intent filter (`AndroidManifest.xml:15`).
+- QR scanning: bundled ZXing scanner (`android/app/build.gradle.kts:190`). Deep links open the app
+  through the `herdr-pocket://pair` intent filter (`AndroidManifest.xml:15`) and show the computer’s
+  key fingerprint and whether its key is already saved. Confirming an external link saves the
+  pairing. A new computer waits for **Connect** in Settings → Machines (`MainActivity.kt:314`,
+  `PocketViewModel.kt:360`).
 - iroh library: `android/app/build.gradle.kts:63`. ABIs kept: arm64-v8a, armeabi-v7a, x86_64
   (`:27`); native libraries compressed (`:45`).
 
@@ -78,6 +81,40 @@ Paired desktops sit in the machine list next to SSH machines.
 
 SSH remains supported. No other transport was written down as considered.
 
+## Amendment, 2026-11-19 (#246)
+
+GitHub issue #246 is the source of this change. On 2026-11-19 the owner decided to start #246 and
+take the recommended option. The worker chose the specific dialog and connection behavior below.
+That choice awaits the owner’s review (Open question 4).
+
+Phone source paths below are under `android/app/src/main/java/ai/namastex/automagik/`.
+
+- The external link confirmation shows the same fingerprint format as the desktop, the first 12
+  hexadecimal characters of its key in groups of four. Pocket recognizes a saved computer by its
+  full key and shows the saved name. For a new computer it labels the link’s name as the computer’s
+  own claim (`IrohLink.kt:29`, `IrohLink.kt:63`, `PairScreens.kt:39`). Android resolves the ticket
+  away from the main thread and offers only the latest link. A ticket that can’t be read is refused
+  before confirmation (`PocketViewModel.kt:343`). Display names lose control, format and line
+  separator characters, and are trimmed and limited to 60 (`IrohLink.kt:32`, `PocketViewModel.kt:387`).
+- **Pair** saves the computer. A new computer opens a session when the person taps **Connect**.
+  An already saved computer keeps its existing connection or retry state. In-app QR scans and
+  pasted links still pair and connect at once (`MainActivity.kt:314`, `PocketViewModel.kt:360`,
+  `PocketViewModel.kt:380`). Settings → Machines shows the fingerprint on a paired card when
+  its key prefix is available (`Screens.kt:127`). The link format, ALPNs and bridge protocol stay
+  as documented above.
+
+Alternatives considered for #246
+
+- B. Wait for **Connect** after an in-app scan or paste too. The person starts those routes in
+  the app’s pairing dialog, and #246 covers links opened from outside the app. The paste field
+  can still prefill from the clipboard (`PairScreens.kt:17`).
+- C. Put the fingerprint on the desktop pairing card as well. That would make comparison easier
+  and would require a separate Herdr pack change and desktop verification.
+- D. Remove the `BROWSABLE` intent filter. This would break opening **Copy link** from another app.
+- E. Persist an unconfirmed flag for each new computer. Automatic retries and Watch resume use
+  existing connection state, so a new computer has no session to resume (`PocketViewModel.kt:416`,
+  `PocketViewModel.kt:500`).
+
 ## Open questions
 
 1. Why iroh rather than another way through NAT? No reason was written. — the owner.
@@ -85,6 +122,8 @@ SSH remains supported. No other transport was written down as considered.
    as a stable protocol name? — the owner.
 3. automagik-dev/automagik-pocket#4 lists "connecting paired machines automatically at launch" as not done. Still wanted? —
    the owner.
+4. Owner to confirm the #246 choice for external links, including the dialog and the separate
+   **Connect** action for new computers.
 
 ## Related
 

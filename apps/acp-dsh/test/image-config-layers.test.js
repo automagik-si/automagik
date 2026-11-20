@@ -4,7 +4,7 @@ import childProcess from 'node:child_process'
 import {
   chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { registerHooks, syncBuiltinESMExports } from 'node:module'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -12,6 +12,15 @@ import { ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import {
   codexConfigSources, configFingerprint, drawImage, IMAGE_TITLE, imageProfileFor, UNAVAILABLE,
 } from '../src/host/image.js'
+import { imageWith20261111Policy } from './support/image-policy-2026-11-11.mjs'
+
+const { drawImage: drawWith20261111Policy } = await imageWith20261111Policy()
+
+test('the shipped image policy fails closed', () => {
+  const source = readFileSync(new URL('../src/host/image.js', import.meta.url), 'utf8')
+  assert.match(source, /^const ALLOW_IMAGE_READ_ONLY_FALLBACK = false$/m)
+})
+
 
 const input = { data: Buffer.from('89504e470d0a1a0a', 'hex'), mimeType: 'image/png' }
 const systemPaths = [
@@ -41,41 +50,36 @@ function fixture(t) {
   }
 }
 const refusedEdit = error => error.code === UNAVAILABLE && error.reason === 'edit-not-isolated'
+const refused = reason => `the Codex image run is not isolated (${reason}); the image was refused`
 const fallback = reason =>
   `the Codex image run is not isolated (${reason}); falling back to read-only`
-async function withoutFallback() {
-  const suffix = '?image-layers-no-fallback'
-  const hook = registerHooks({ load(url, context, next) {
-    const result = next(url, context)
-    if (!url.endsWith(suffix)) return result
-    const policy = 'const ALLOW_IMAGE_READ_ONLY_FALLBACK = true'
-    assert.ok(String(result.source).includes(policy))
-    return { ...result,
-      source: String(result.source).replace(policy, 'const ALLOW_IMAGE_READ_ONLY_FALLBACK = false'),
-    }
-  } })
-  try { return await import(`../src/host/image.js${suffix}`) } finally { hook.deregister() }
-}
 
 // Exercise the CLI/session boundary without a child transport.
 function boundary(t, { onCheck, onMode } = {}) {
   const f = fixture(t), events = []
   const mock = t.mock.method(childProcess, 'execFile', (_command, args, options, callback) => {
     const debug = args.includes('prompt-input')
+    // The switch's effect is read too: with one required feature on, its tool must appear.
+    const table = args.find((arg, index) => args[index - 1] === '-c' && arg.startsWith('features=')) ?? ''
+    const on = name => new RegExp(`(?:^|[ {,])${name} = true`).test(table)
+    const proof = on('shell_tool') || on('view_image')
     if (debug) {
-      events.push({ event: 'check' })
-      onCheck?.(f)
+      events.push({ event: 'check', proof })
+      if (!proof) onCheck?.(f)
     }
     const grants = '<permission_profile type="managed"><file_system type="restricted">'
       + '<entry access="deny" escalatable="false"><special>:root</special></entry>'
       + `<entry access="read"><path>${options.cwd}</path></entry>`
       + '</file_system></permission_profile>'
+    const nested = ['apply_patch', ...(on('shell_tool') ? ['exec_command'] : []), ...(on('view_image') ? ['view_image'] : [])]
+    const tools = [
+      { type: 'namespace', name: 'image_gen', tools: [{ type: 'function', name: 'imagegen', parameters: {} }] },
+      { type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec', description: nested.map(name => `declare const tools: { ${name}(args: {}): Promise<unknown>; };`).join('\n') }] },
+    ]
     const answer = args.includes('features')
       ? 'shell_tool stable false\nview_image stable false\nimage_generation stable true\n'
       : debug ? JSON.stringify([
-        { type: 'additional_tools', tools: [{ type: 'namespace', name: 'image_gen', tools: [
-          { type: 'function', name: 'imagegen', parameters: {} },
-        ] }] },
+        { type: 'additional_tools', tools },
         { type: 'message', content: [{ type: 'input_text', text: grants }] },
       ]) : '[]'
     queueMicrotask(() => callback(null, answer, ''))
@@ -236,7 +240,7 @@ for (const layer of layers) {
         }
         const f = boundary(t, hooks)
         if (change !== 'created') put(f.mapped(layer.path(f)))
-        const draw = policy === 'strict' ? (await withoutFallback()).drawImage : drawImage
+        const draw = policy === 'strict' ? drawImage : drawWith20261111Policy
         const drawing = draw({ ...f.request, ...(policy === 'edit' ? { input } : {}) })
         if (policy === 'edit') await assert.rejects(drawing, refusedEdit)
         else if (policy === 'strict') {
@@ -244,7 +248,7 @@ for (const layer of layers) {
         } else assert.equal((await drawing).isolated, false)
         const prompt = f.events.findIndex(row => row.event === 'prompt')
         assert.equal(prompt !== -1, policy === 'draw')
-        const logs = policy === 'strict' ? [] : [fallback('profile config changed')]
+        const logs = policy === 'strict' ? [refused('profile config changed')] : [fallback('profile config changed')]
         assert.deepEqual(f.logs, logs)
         if (policy !== 'strict') {
           assert.equal(f.events.filter(row => row.event === 'ack').at(-1).mode, 'read-only')
@@ -293,7 +297,7 @@ for (const path of systemPaths) test(`unreadable baseline ${path} falls back`, {
   put(file)
   chmodSync(file, 0o000)
   assert.throws(() => readFileSync(file), { code: 'EACCES' })
-  assert.equal((await drawImage(f.request)).isolated, false)
+  assert.equal((await drawWith20261111Policy(f.request)).isolated, false)
   assert.deepEqual(f.logs, [fallback('profile unavailable')])
   const ack = f.events.findIndex(row => row.event === 'ack' && row.mode === 'read-only')
   assert.ok(ack >= 0 && ack < f.events.findIndex(row => row.event === 'prompt'))

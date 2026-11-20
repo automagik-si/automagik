@@ -9,6 +9,9 @@ import { ROOT, nextVersion, versionCode } from './version';
 // never Latest, and nothing that looks for "the last release" by tag or by Latest takes it.
 const read = (path: string) => readFileSync(join(ROOT, path), 'utf8');
 const release = read('.github/workflows/release.yml');
+// The lane decision is release-gates.sh's (#668), so its tag filters and Pocket since-point are
+// read there; the workflow still runs it from its "Which lane" step.
+const gates = read('scripts/release-gates.sh');
 const LANES = ['pocket-lane', 'herdr-lane', 'plugin-lane'];
 
 /** A job of release.yml, from its key up to the next job's. */
@@ -24,7 +27,7 @@ const pocketJob = buildJob + laneJob;
 
 describe('pocket-lane is never taken for a release', () => {
   test('every tag filter in release.yml takes v3.N.P and no rolling lane', () => {
-    const filters = [...release.matchAll(/grep -E '(\^v3[^']*)'/g)].map(match => new RegExp(match[1]));
+    const filters = [...(release + gates).matchAll(/grep -E '(\^v3[^']*)'/g)].map(match => new RegExp(match[1]));
     expect(filters.length).toBeGreaterThanOrEqual(3);
     for (const filter of filters) {
       for (const lane of LANES) expect(filter.test(lane)).toBe(false);
@@ -77,9 +80,10 @@ describe('pocket-lane is never taken for a release', () => {
   });
 
   test('Pocket is rebuilt from the version pocket-lane names, so a prerelease-only fix still reaches phones', () => {
-    expect(release).toContain('pocket_since=$(bun scripts/lane.ts pocket-since "${last}" "${lane_version}")');
-    expect(release).toContain('pocket=$(bun scripts/lane.ts pocket "${pocket_since}")');
-    expect(release).not.toContain('pocket=$(bun scripts/lane.ts pocket "${last}")');
+    expect(release).toContain('run: bash scripts/release-gates.sh lane');
+    expect(gates).toContain('pocket_since=$(bun scripts/lane.ts pocket-since "${last}" "${lane_version}")');
+    expect(gates).toContain('pocket=$(bun scripts/lane.ts pocket "${pocket_since}")');
+    expect(release + gates).not.toContain('pocket=$(bun scripts/lane.ts pocket "${last}")');
   });
 
   test('latest.json names the APK on its own vX.Y.Z release with its sha256, and goes up after it', () => {

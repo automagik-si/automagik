@@ -325,7 +325,7 @@ async function telegramBotId(channels, times, id) {
 // A channel the failed attach left on Omni is this move's: read where it stands, keep Hermes off.
 async function recoveredChannel(api, times, row, deps) {
   const pairing = await pairingOf(api, row.id, times, deps)
-  return { id: row.id, name: row.name, connected: pairing.connected === true, detail: pairing.detail ?? null, answering: false, reason: null, answerBot: null, attached: true, existing: false }
+  return { id: row.id, name: row.name, connected: pairing.connected === true, detail: pairing.detail ?? null, answering: false, reason: null, answerBot: null, attached: true, existing: false, recovered: true }
 }
 
 /** Hands the key to Omni: A's attach first (write-only, host to host), else the linked Omni's own create. */
@@ -396,7 +396,9 @@ export function createMigrateActions(ctx, deps = {}) {
   const times = { ...DEFAULT_TIMES, ...deps.times }
   const now = deps.now ?? Date.now
   const sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
-  const state = { job: null }
+  // `restore` is the one copy of Hermes's settings this step still holds after a move whose
+  // Omni result is unknown, so the person can take the way back once they have checked Omni.
+  const state = { job: null, restore: null }
   const team = () => teamOf(ctx, deps)
   const channels = () => channelsOf(ctx, deps)
 
@@ -498,6 +500,9 @@ export function createMigrateActions(ctx, deps = {}) {
       if (read.hermes.channel === 'off' && !stillPolling) {
         hermesOff = true
         hermesWasOff = true
+        // A retry after an unknown result finds Hermes already off; the copy this step kept
+        // from the earlier attempt is still the way back.
+        backup = state.restore?.backup ?? null
       } else if (read.hermes.channel !== 'off' && !gatewayRunning) {
         // Hermes was stopped before this: switch its settings off and leave it stopped. It
         // must not be started just to switch a channel off.
@@ -541,6 +546,10 @@ export function createMigrateActions(ctx, deps = {}) {
         const after = await telegramChannels(channels(), times)
         if (after === undefined) {
           changed = { ...changed, omniUnknown: true }
+          if (backup !== null) {
+            state.restore = { target, backup, startGateway: gatewayWasRunning }
+            error.canRestoreHermes = true
+          }
           throw error
         }
         const fresh = after.filter(row => !beforeIds.has(row.id))
@@ -575,6 +584,10 @@ export function createMigrateActions(ctx, deps = {}) {
             changed = { ...changed, omniCreated: true }
           } else if (unknown) {
             changed = { ...changed, omniUnknown: true }
+            if (backup !== null) {
+              state.restore = { target, backup, startGateway: gatewayWasRunning }
+              error.canRestoreHermes = true
+            }
             throw error
           } else {
             if (hermesOff && backup !== null) {
@@ -616,7 +629,9 @@ export function createMigrateActions(ctx, deps = {}) {
         hermesWasOff,
         hermesWasStopped,
         gatewayStopped,
+        ...(made.recovered === true ? { recovered: true } : {}),
       }
+      state.restore = null
       job.phase = 'done'
       job.finishedAt = now()
     } catch (error) {
@@ -630,7 +645,9 @@ export function createMigrateActions(ctx, deps = {}) {
         channelId,
         ...(error?.restored === true ? { restored: true } : {}),
         ...(typeof error?.restoreFailed === 'string' ? { restoreFailed: error.restoreFailed } : {}),
+        ...(error?.canRestoreHermes === true ? { canRestoreHermes: true } : {}),
       }
+      if (error?.restored === true) state.restore = null
       job.phase = 'failed'
       job.finishedAt = now()
     } finally {
@@ -742,6 +759,19 @@ export function createMigrateActions(ctx, deps = {}) {
       if (api?.call === null) throw fail('no-omni', 'Omni\'s channels plugin is not answering here.')
       const pairing = await pairingOf({ call: api.call }, id, { listenMs: 0 }, { now, sleep })
       return { connected: pairing.connected, state: pairing.state, detail: pairing.detail, chatUrl: chatUrlOf(pairing.detail) }
+    },
+    // The way back: only an unknown result leaves Hermes off with this step's own copy to put
+    // back. A channel Omni confirmed is never given a second listener.
+    async 'migrate-restore-hermes'() {
+      const pending = state.restore
+      if (pending === null || state.job?.phase !== 'failed' || state.job?.error?.changed?.omniUnknown !== true) {
+        throw fail('restore', 'Hermes is not off from this move here, so there is nothing to put back.')
+      }
+      const restored = await restoreHermes(pending.target, pending.backup, { startGateway: pending.startGateway })
+      if (restored.ok !== true) throw fail('restore', 'Hermes did not come back on. Start it again from its own settings.')
+      state.restore = null
+      state.job.error = { ...state.job.error, canRestoreHermes: false, hermesRestored: true }
+      return { restored: true }
     },
   }
 }

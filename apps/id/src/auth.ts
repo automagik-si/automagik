@@ -15,6 +15,16 @@ function strictRedirectUri(uri: string, registered: readonly string[], defaultRe
   return defaultResult;
 }
 
+// Token lifetimes in seconds: the contract in README.md, "Token lifetimes".
+// A stolen access token is bearer-usable until it expires and revocation cannot recall a JWT.
+export const ACCESS_TOKEN_TTL = 15 * 60;
+// The ID token proves one sign-in to the client; nothing should accept it hours later.
+export const ID_TOKEN_TTL = 15 * 60;
+// Desktop and Cloud stay signed in for a month of inactivity; each use rotates the token.
+export const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60;
+// No grace window: any reuse of a rotated refresh token counts as replay.
+export const REFRESH_TOKEN_REUSE_INTERVAL = 0;
+
 export interface Env {
   DB: D1Database;
   BETTER_AUTH_URL: string;
@@ -82,6 +92,10 @@ export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
         clientPrivileges: async () => false,
         clientRegistrationRequirePKCE: true,
         validateRedirectUri: strictRedirectUri,
+        accessTokenExpiresIn: ACCESS_TOKEN_TTL,
+        idTokenExpiresIn: ID_TOKEN_TTL,
+        refreshTokenExpiresIn: REFRESH_TOKEN_TTL,
+        refreshTokenReuseInterval: REFRESH_TOKEN_REUSE_INTERVAL,
       }),
       ...(whatsappEnabled(env) ? [whatsappPlugin(env)] : []),
     ],

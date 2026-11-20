@@ -19,8 +19,10 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   choose. An effort's default is the person's own setting for that model.
 - **The Session's model and effort, before each prompt.** The agent's session is put on the
   Session's model, then its effort (the model first: the efforts are that model's). No effort
-  leaves the agent's own. A model or effort the agent does not offer fails the turn, naming what
-  it offers.
+  leaves the agent's own. A model or effort the agent does not offer normally fails the turn,
+  naming what it offers. For a missing stand-in, if the agent's own model is still available,
+  DSH accepts an effort the known catalog offers for one of its models, and the reply uses the
+  agent's own model and effort and asks you to choose a model again.
 - **DSH tool cards and approvals.** With `dshTools` off (the kill switch), the agent runs its own
   tools. Each tool call it makes ends the model step with a call to `acp_tool`, a tool registered
   in that agent's scope only. DSH writes the `tool/call` and `tool/result` rows and draws the
@@ -29,15 +31,18 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   (`approval/asked`, `approval/decided`) and gives the agent DSH's answer. On DSH's Auto
   review level that answer is the review. A call the reviewer allowed, or that the person
   allowed in the dialog the reviewer raised, gets `allow_once` for the agent's first question
-  about it, with no second dialog; this holds in a subagent child too. These still ask as before:
-  a later question, a call the agent changed after its review (in its question or after it), an
-  agent that offers no `allow_once`, and a level that changed since the call.
+  about it, with no second dialog; this holds in a subagent child too. Later questions, calls
+  the agent changes after review, and level changes can still raise a dialog. When the mirror
+  body gets a question offering `allow_always` without `allow_once`, it replies with `reject_once`
+  if offered or cancels the question, skips its dialog, and explains why in the result text.
 - **DSH's own tools over the bridge (`dshTools`).** On, the agent gets the Session's preset tool
   set (standard, or cordis in creator mode) over one stdio MCP server per ACP session, named
   `dsh` and spawned by the adapter with that session's arguments. The bridge has no port; it
   reaches this plugin over a loopback back-channel with a per-session credential
-  (`DSH_BRIDGE_CREDENTIAL`), which binds a request to its Session and is revoked with the
-  bridge. Every DSH tool call is approved in DSH under the Session's level before it runs,
+  (`DSH_BRIDGE_CREDENTIAL`), which binds a request to its Session. A bridge process that exits
+  detaches, and a respawn can re-attach with the same credential. The host revokes it when the
+  ACP session ends, its agent process exits, a fork replaces it, or the probe ends.
+  Every DSH tool call is approved in DSH under the Session's level before it runs,
   whatever the agent's own allow rules or hooks say, and the bridge writes the `tool/call` and
   `tool/result` rows the chat shows. `acp-claude` runs with its built-in tools off
   (`_meta.disableBuiltInTools`); a structured call that is not an MCP name is recorded as
@@ -45,10 +50,11 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   start, and it detects and cancels because the update arrives after the call began.
   DSH's `read_image` works for Claude Code because acp-dsh declares its models as taking images;
   other ACP agents keep no declaration.
-  `acp-codex` has no such switch, so it is bridged only with an explicit `dshTools: true`;
-  absent or `false` means no bridge and its built-ins stay its own tool set. Until a structured
-  name is proven in its tool calls, it draws no ACP card for an MCP call. The person's
-  own MCP servers load beside the bridge with their own tools and sign-ins: DSH hands the session
+  `acp-codex` keeps its own tools. A team Bot gets DSH's extras over the bridge by default,
+  with Codex's own tools taking the place of DSH's twins. An explicit `dshTools: true` gives
+  Codex the whole DSH preset. Until a structured name is proven in its tool calls, it draws no
+  ACP card for an MCP call. The person's own MCP servers load beside the bridge with their own
+  tools and sign-ins: DSH hands the session
   only the `dsh` bridge, so any other `mcp__<server>__<tool>` is the CLI's own user-scope config
   (claude-agent-acp merges the person's settings MCP servers into the session), it passes the
   drift allowlist by design, and DSH's Auto review does not gate it: the agent's own rules and
@@ -66,15 +72,21 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   (after a `step/end`, before the next `step/start`) waits for the next step, at most 30 s, and is
   recorded and reviewed there; it ends with no rows if the turn ends, its caller goes away, the
   bridge is revoked or the turn is stopped (#969). Otherwise a Manual or Full call with no open
-  step is `BRIDGE_NO_STEP` (Auto: `AUTO_REVIEW_NO_STEP`); one whose advertisement or
-  call row cannot be written is `BRIDGE_RECORD_FAILED`, and the call does not run. The rows' call
-  id is the agent's own `_meta.callId` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ . : -`
+  step is `BRIDGE_NO_STEP` (Auto: `AUTO_REVIEW_NO_STEP`). A call in a turn the agent opened
+  itself, with no DSH turn at all, is different: at Manual or Full it runs without a card and
+  leaves a `plugin:acp-dsh/bridge-outside-step` record; at Auto it is refused as
+  `BRIDGE_OUTSIDE_STEP` with what to do next, because Auto review cannot see a call outside a
+  DSH step. One whose advertisement or call row cannot be written is `BRIDGE_RECORD_FAILED`,
+  and the call does not run. The rows' call id is the agent's own `_meta.callId` only when it is
+  1 to 128 characters of `A-Z a-z 0-9 _ . : -`
   and does not start with `acp_` (the mirror's ids); otherwise the plugin mints `bridge_<16 hex>`
   and logs the replacement. **Codex's MCP approvals.** With `dshTools` on, `acp-codex`'s MCP calls
   get no mirror card (it gives them no structured name), so a `session/request_permission` Codex
-  sends for one (codex-acp's MCP tool approval) is answered at once: allow once for the `dsh`
-  server (the bridge's own approval is the one dialog), the agent's reject option for any other
-  or unnamed server, which is logged (#969). **A call that
+  sends for one (codex-acp's MCP tool approval) is answered at once: for the `dsh` server, allow
+  once when the question offers it (the bridge's own approval is the one dialog), else cancelled,
+  never `allow_always` (RFC 0039; an agent may then end its turn); for any other or unnamed server,
+  the agent's reject option, which is logged, or cancelled when it offers none (#969). A question
+  that can no longer be answered is cancelled first. **A call that
   outlives its step (#957).** The agent runs its calls in parallel, and the bridge puts no
   deadline on one (a long wait, a slow command and an open approval dialog are legitimate).
   Before its step ends, an own-tool card waits for bridge calls of that step asking for approval
@@ -135,9 +147,10 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   preset with the same knobs keeps Manual (and the bridge's own approval). Full access lets every
   call through, as it does DSH's own tools. An agent that does not offer the strict mode fails
   the turn instead of running in its own default.
-  A Workspace Session on unbridged Codex can instead take `agent` when the Bot team's
-  `ownMode` answerer returns exactly `true` twice, before the prompt. After that agent session
-  has attempted the own mode, any Workspace prompt that does not take it re-sends and confirms
+  A Workspace Session on Codex, bridged or unbridged, can take `agent` when the Bot team's
+  `ownMode` answerer returns exactly `true` twice, before the prompt. RFC 0031 question 5 withholds
+  Claude Code's own `auto` mode until it is captured from a signed-in CLI. After a Codex session
+  has attempted its own mode, any Workspace prompt that does not take it re-sends and confirms
   strict `workspace-write` (or its chat profile below), even if cached; refusal ends the agent
   session and fails the turn.
   Sessions that never attempt the own mode keep the usual mode cache and failure handling.
@@ -145,6 +158,13 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   `agent-full-access`. Codex's own reviewer decides those steps, based on the
   [Codex 0.167.0 capture](test/fixtures/permission-payloads/README.md); later versions may
   decide differently. Any approval Codex still requests goes to the person.
+  Reads are not among those steps: in `agent` a read outside the workspace is no sandbox
+  escalation, so Codex's own tools read files outside the Bot's folder, wherever the OS user
+  running Codex can read, without its reviewer deciding and without asking the person. The
+  question before saving says so (RFC 0031, 2026-11-19 amendment, delivery 3; see the security
+  warning (#870) below). Delivery 4 moves Auto to an auto-reviewed mode of the Workspace profile
+  where the adapter offers one; where it does not (an older adapter, Windows, a Bot home whose
+  profile check failed), Auto keeps `agent` and these reads.
 - **An agent that stops answering never holds the chat.** Its start (`initialize`,
   `session/new`, the bridge's first list) has 60 seconds, and each request after that and
   before a prompt (a model, an effort, a mode, a fork, a close) has 15. Past the deadline, or
@@ -162,6 +182,73 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   project and local) and asks DSH only for what those leave as "ask". A call their allow rules,
   saved "always allow" rules or PreToolUse/PermissionRequest hooks approve runs with no DSH
   dialog. This is the owner's decision (RFC 0003, Decided).
+
+### Native-tools mode (`nativeTools`, #1564)
+
+Claude Code keeps its own tools and Automagik adds its extras. The owner's words: "my intention
+is to use claude code + automagik extras, not replace claude code native`s with automagik`s,
+that makes your harness lose all your power."
+
+- **The setting.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
+  `acp-dsh`), hidden from settings forms like `dshTools`. Absent (the default) or `false` is
+  today's behaviour for everyone. `true` turns it on for every Claude Code Session; an object
+  turns it on per Bot, by the Bot's name, or per DSH Session id. A key that says `false` wins
+  over one that says `true`. For one Bot, in the profile patch:
+
+  ```yaml
+  - id: acp-dsh
+    name: "@automagik/acp-dsh"
+    config:
+      nativeTools:
+        Automagik: true
+  ```
+
+  It is read at each turn's start: a flip takes effect on that Session's next turn, in a new
+  agent session (the replay carries the chat to it). Only `acp-claude` takes it (the only agent
+  whose built-ins the bridge turns off); with `dshTools: false` it has no effect, since the
+  agent then already runs only its own tools.
+- **What changes when on.** The session starts with `_meta.disableBuiltInTools: false`, so
+  Claude Code has its Agent (subagents), Bash, Read, Edit, Write, Grep, Glob, Skill, TodoWrite
+  and the rest. The `dsh` bridge stays on but drops DSH's twin of each built-in and the DSH
+  subagent family (`NATIVE_TWIN_TOOLS` in `src/host/backchannel.js`: `bash`, `job_*`, `read`,
+  `write`, `edit`, `read_image`, `apply_patch`, `str_replace_editor`, `glob`, `grep`, `skill`,
+  `todo_write`, `subagent`, `subagent_fork`, `list_agents`, `send_message`, `interrupt_agent`,
+  `wait_agent`, `list_subagent_models`, and `web_search`/`web_fetch`/`exit_plan_mode` once they
+  are offered). Everything else stays: the Bot team's tools (`message_bot`, `ask_user`,
+  `show_view`, `remember`/`recall`, groups, secrets, browser, mail...), goals, `workflow`,
+  `working_directory` and schedules. A built-in call is no longer drift.
+- **Approvals stay DSH's.** Each native call ends the model step with its `acp_tool` mirror
+  card, exactly as with the bridge off: when Claude Code asks permission, DSH's approval answers
+  it at the Session's level, and a refusal reaches Claude Code as its own reject option before
+  the call runs. The hard ask rules (`CLAUDE_HARD_ASK`) are injected as session settings, so the
+  person's allow rules cannot silently skip the ask for those Bash cases. A subagent's nested
+  call asks while its Agent card is still waiting. At Auto the Agent card runs the nested call's
+  own card through DSH's tool pipeline inside the step it holds open, so DSH's Auto review sees
+  and answers it like any other call; the person is asked only when the review escalates (or the
+  Bot team's judge, where one is set), and a delegated child that may never ask is refused. At
+  Manual and Full the Agent card asks DSH for the nested call directly, as before, and the
+  nested card follows already answered. At Auto the nested card is written before the Agent
+  card's result, and the agent's later report of that call draws no second card.
+
+  | Level | Claude Code mode | What asks DSH | What can bypass DSH |
+  |---|---|---|---|
+  | Manual | `default` | every native call its own settings leave as "ask"; DSH's dialog answers | a call its own allow rules or hooks allow (the hard asks still ask) |
+  | DSH Auto review | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers every call, a subagent's nested call included; the person only when the review escalates | whatever its auto mode runs without asking |
+  | Full | `bypassPermissions` | nothing; no hard asks injected | every native call |
+
+  Manual is the guarded level; Auto is convenience, and its review sees only what reaches the
+  mirror.
+- **A turn Claude Code opens itself.** A native background task or subagent can finish after its
+  DSH turn ended and wake Claude Code on its own. There is no DSH step then, and none can be
+  opened out of band because the DSH agent loop owns turn numbering. At Manual and Full the
+  extra still runs, without a DSH card, and a `plugin:acp-dsh/bridge-outside-step` record marks
+  it. At Auto it is refused with `BRIDGE_OUTSIDE_STEP` and a sentence naming the cause and what
+  to do (send a message, so the next turn has a DSH step), because Auto review reads a call
+  from its step. No call runs unreviewed.
+- **Native commands and edits run in Claude Code, outside DSH's file sandbox.** DSH's sandbox,
+  its read-before-write policy and its write guard do not see them; the person's OS permissions
+  and Claude Code's own permission mode and rules are the boundary. Claude Code's `CLAUDE.md`
+  memory is the project's own context, loaded by the CLI; the Bot's memory stays `remember`.
 
 ## Agents
 
@@ -231,14 +318,14 @@ differs from Claude Code and Codex:
   a model switch reaches them like any agent.
 
 `dshTools` (live, no schema default) is the bridge, its DSH approval, the drift detector and live
-switching above. Absent means the per-agent default: `acp-claude` bridges because its adapter can
-drop its own built-in tools; `acp-codex` does not, because it cannot. Codex is bridged only with
-an explicit `true`; absent or `false` means no bridge, and Codex keeps its own built-in tools as
-its only tool set. An explicit `false` is the kill switch for Claude too: the 2026-11-03
-behaviour, where each agent keeps its own tools and its own approvals. The key is public and
-stays writable through
-DSH's settings service or the profile patch, but it is hidden from settings forms (`.hidden()`):
-it is a rollback lever, not a preference. Flipping it either way ends the running agent sessions
+switching above. Absent means the per-agent default. `acp-claude` bridges because its adapter can
+drop its own built-in tools. `acp-codex` keeps its own tools and bridges when the Bot team sends
+`needsDshTools` in the Session's identity. That bridge serves DSH's extras, with Codex's own
+tools taking the place of DSH's twins. An explicit `true` gives Codex the whole DSH preset,
+including on a Genie. An explicit `false` is the kill switch for both agents. It keeps the
+2026-11-03 behaviour, where each agent keeps its own tools and its own approvals. This rollback
+lever stays writable through DSH's settings service or the profile patch. Settings forms hide it
+with `.hidden()`. Flipping it either way ends the running agent sessions
 and revokes their bridges at once; the DSH Session keeps its transcript and the next turn starts
 afresh under the new setting. A flip is also announced on the plugin context as
 `acp-dsh/dsh-tools-changed` with `{ on }`: DSH delivers `loader/volatile-update` only to the
@@ -253,18 +340,28 @@ The transcript replay is independent of the bridge: only an explicit `false` tur
 
 | `dshTools` | Claude Code: tools | Claude Code: replay | Codex: tools | Codex: replay |
 |---|---|---|---|---|
-| absent | DSH bridge, its own off | yes | its own only | yes |
+| absent | DSH bridge, its own off | yes | its own only, a team Bot: DSH extras too | yes |
 | `true` | DSH bridge | yes | DSH bridge and its own | yes |
 | `false` | its own only | no | its own only | no |
 
-So with `dshTools` absent Codex sees the chat but not the team's tools; those need an explicit
-`true` (two tool sets). A replay reaches an agent in each of these cases, redacted and capped at
+With the Codex conversation open, choose **Account → Bot settings → Feedback** and look for its
+row under **Permissions**. When the row includes agent details, it reports the DSH bridge state.
+To confirm delivery, check the receiving Bot’s chat. If your team has a native browser Bot
+(such as `@browse`), you can ask it directly to open a page. In a Bot conversation that offers
+a **Browser** tab, you can also open it from **Details → Browser**.
+
+With `dshTools` absent, a team Bot gets DSH's extras, including `message_bot` and the Bot Browser
+tools, in its current own chat and in group Sessions. Task Sessions keep their agent's default.
+A replay reaches an agent in each of these cases, redacted and capped at
 120,000 characters, the oldest messages dropped first with a marker: a move from another
 provider (with its "Switching to X" row); a new agent session in a chat that already has answers
 (after a restart, or a session a crossing or a flip ended), with no row since the chat stayed on
-that agent; and a live session resumed after the chat answered elsewhere (a move off Codex keeps
-its session), which gets only the turns it missed, from its own last answer on, with the row. A
-Bot part's handoff package (a relay marked `handoff`) is carried as the record it is: in the
+that agent; and a live session resumed after the chat answered elsewhere, which gets only the
+turns it missed, from its own last answer on, with the row. A move off Codex keeps its session
+only while that Session has no bridge. Moving to DSH from a bridged Codex Session ends the run
+with a "Switching to DSH" row. The new run on return gets the redacted replay.
+
+A Bot part's handoff package (a relay marked `handoff`) is carried as the record it is: in the
 part's first turn it stays in the prompt beside the person's words, and once the Bot team has
 answered that turn itself, the next new session gets it in the replay. Both pass the redactor.
 With `false`, an agent sees only its own session, and a new one in a chat with answers writes the
@@ -295,11 +392,11 @@ A settings page reads the agents through this host service; the plugin stays hos
 | `account(id, { fresh? })` | For the DSH owner's views only: `{ id, signedIn?, consent?, ref?, account?: { kind: 'account' \| 'key', email?, org?, plan? }, notice? }`. Who the CLI is signed in as, read from the CLI itself (below); never on a `status()` or `inspect()` row, in a log or in an event. `ref` names the account read and goes back with `accountConfirm`. |
 | `accountConfirm(id, { ref? })` | The person's word that the app may use the account this CLI is signed in to. Asks the CLI again, records the consent and announces `acp-dsh/login-ready`. Another account than `ref` is refused (`acp-account/changed`); a signed-out CLI too (`acp-account/signed-out`). |
 | `accountNoticed(id)` | The one-time notice of a vendor carried through an upgrade was shown. |
-| `imageAccess()` | `{ ready, signedIn?, reason?, unsupported? }`: whether Codex can draw an image now, on its own ChatGPT sign-in (Codex on, its CLI found, its connector installed, `codex login status` says signed in; an unknown sign-in is asked once; the person confirmed its account, else `reason: 'account'`; the image run's checks hold for this Codex, else not ready, with `reason`: `unsupported` (and `unsupported: true`), `config` or `unreadable`). Reads no credential and starts no sign-in. |
+| `imageAccess()` | `{ ready, signedIn?, reason?, unsupported? }`: preliminary readiness on Codex's own ChatGPT sign-in (Codex on, its CLI found, its connector installed, `codex login status` says signed in; an unknown sign-in is asked once; the person confirmed its account, else `reason: 'account'`; the preliminary checks hold for this Codex, else not ready, with `reason`: `unsupported` (and `unsupported: true`), `config` or `unreadable`). Selecting the permission profile is checked separately for each draw. Reads no credential and starts no sign-in. |
 | `generateImage({ prompt, size?, quality?, background?, signal?, timeoutMs? })` | Draws one image with the Codex CLI (`src/host/image.js`) and resolves `{ base64, mimeType: 'image/png' }`. Refusals carry an `acp/image-*` code (`signed-out`, `usage-limit`, `timeout`, `unavailable`, `failed`, `stopped`, `refused`) and a message to show as it is. |
 | `keepImages(keeper)` | Where an image an agent makes in a chat is kept, so the chat can show it (`src/host/agent-image.js`). `keeper` is `{ start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) -> Promise<{ file }>, fail?({ callId, sessionId, error }) }`; one at a time, and the call returns its disposer. The Bot team registers its images folder. |
-| `ownMode(answer)` | Registers one answerer for an unbridged Workspace Session's own mode. Only exact `true` within two seconds counts, twice per prompt. Returns a disposer for that registration; competing registrations disable own mode permanently. |
-| `ownModeOf(provider)` | `{ mode, bridged, answerer }` for a provider offering its own mode, otherwise undefined. |
+| `ownMode(answer)` | Registers one answerer for a Codex Workspace Session's own mode, bridged or unbridged. Only exact `true` within two seconds counts, twice per prompt. Returns a disposer for that registration; competing registrations disable own mode permanently. |
+| `ownModeOf(provider, sessionId?)` | `{ mode, bridged, answerer }` for Codex, or `undefined` for Claude Code and other providers without an own mode. Pass the Session id to include its Bot's bridge default. |
 | `ownModeIn(sessionId)` | Whether that Session is busy on a prompt in its own mode. |
 | `holdTurns(gate)` | A veto on agent turns, for a plugin that must keep an agent from acting in a Session (the Bot team: a Session whose permission level could not be set). `gate({ sessionId, agent, provider })` is asked before every model step on an agent's route and again right before a turn's prompt is sent; it answers undefined to let the Session go, or the sentence the step answers with. It can only refuse: a gate that throws, takes longer than ten seconds, or answers anything else holds the Session with a fixed sentence, and a held Session's agent session is ended. Several plugins may register: any refusal wins, and the returned disposer removes only its own gate. With none registered nothing is asked. |
 | `endSession(sessionId, why?)` | Ends one Session's agent session now, a turn under way included: the agent's process is stopped, its bridge credential revoked, and the step answers `why`. The DSH Session and its transcript stay; the next turn starts a fresh agent session, which takes its permission mode again. Answers whether one was live. |
@@ -314,12 +411,24 @@ No credential file is read, copied or linked by Automagik; each CLI owns its Bot
 CLI `--version` probes use this vendor environment too; package installation keeps its separate
 package-manager environment.
 
-An upgrade retains Bot models and DSH history, but requires a fresh in-app sign-in. Old shared
-consent is not carried. Signed-out or paused Bot work refuses with `MODEL_ACCESS_REQUIRED`,
+The upgrade from shared terminal sign-ins retains Bot models and DSH history, but requires a
+fresh in-app sign-in. Old shared consent is not carried. Signed-out or paused Bot work refuses
+with `MODEL_ACCESS_REQUIRED`,
 without a fallback model. Codex images do not use a legacy ChatGPT grant while signed out.
 Bot settings label Bot and terminal accounts separately; the terminal comparison is a read-only
 CLI account query; Automagik requests no login, logout or token refresh for that comparison.
 Missing identity is shown as unknown.
+
+An installation is identified by its resolved DSH home (`DSH_HOME`, default `~/.dsh`). The
+first installation started with this version keeps the existing `acp/cli-homes` and its sign-ins.
+Other installations use `acp/installations/<id>/cli-homes` and sign in once. Credentials are
+never copied. Two processes or profiles of one DSH home share that installation and still
+refuse account changes while the other is running. An older acp-dsh keeps using `acp/cli-homes`
+and keeps the same refusal alongside its owner until it updates. To choose the owner before
+either installation starts, write `acp/cli-homes/installation.json` with
+`{"version":1,"identity":"/absolute/path/to/the/resolved/dsh-home"}` using the chosen DSH home's
+resolved absolute path. With all installations stopped, remove that file to hand the existing
+root to the next installation that starts.
 
 `authScope: 'isolated'` identifies the service and Claude/Codex status rows. `accountSignOut(id)`
 and `accountSwitch(id, { label? })` use the Bot environment. They block admission, stop
@@ -346,9 +455,22 @@ The owner-confirmed `accountReset(id)` pauses admission and stops known work, th
 fresh, empty, uniquely named vendor home and requires fresh in-app sign-in. It never logs out,
 copies credentials from, renames or reuses the previous physical folder. Pending, damaged and
 legacy ownership evidence stays there: even a surviving old process writes only to that old
-generation. Abandoned folders are removed on later starts only after exit evidence is verified;
-unproved folders, including Windows crash records, remain retained. Mutexes and app registrations
-live outside replaceable homes.
+generation. A retired home is kept, not removed. Its `RETIRED.json` (0600) names the bound
+path, keeps the vendor's session files and the usage history recorded there, says there is no
+time limit, and says how to inspect it and that a `KEEP` file beside it opts out of any future
+collection. A later start removes nothing: the measurement side's complete post-last-write
+scan with the root frozen, its retirement record, and the session-absorption receipt are not
+available here yet, so the default is keep. A folder whose marker, note or bound path cannot be
+proved to be the retired generation's own is refused and left untouched; a missing, unreadable
+or unparseable `RETIRED.json` is refused too, because the record of what was decided is then
+ambiguous. An absent note is reported as absent and a corrupt one as corrupt. A startup line
+counts kept, missing and refused homes separately: it claims retention at a bound path only for
+a home that is still there. Unproved folders,
+including Windows crash records, remain retained. Within the installation's CLI root, each
+0-byte marker under `retired/<vendor>/` names a retired generation; its home is
+`homes/<vendor>/<generation>` (the legacy home is `<vendor>`), and
+`RETIRED.json` inside it says what is kept, for how long, and how to keep it.
+Mutexes and app registrations live outside replaceable homes.
 Launches also check the installation's selected generation, so changing an old folder's local
 version or pause marker cannot revive a captured launch. Bot models and DSH history stay intact.
 Bot CLI user settings start empty; project settings still load from the working folder.
@@ -393,37 +515,51 @@ or `:minimal` roots. Before the session starts, the draw reads Codex's resolved 
 `debug prompt-input` and accepts only root deny, scratch read and at most Codex's own helper
 folder under that home's `tmp/arg0-…/codex-arg0…`. Other grants or unknown forms fail the check.
 After `session/new`, the run selects `permission-profile:<id>` and waits for acknowledgement
-before sending the prompt. The scratch is removed afterwards. `CODEX_HOME` comes from
+before sending the prompt. Scratch cleanup is best effort. `CODEX_HOME` comes from
 `cli-homes.js`; the terminal's config is never written. The same checked overrides go through
 codex-acp's `CODEX_CONFIG`.
 
-If the profile is unavailable, its config is refused, its resolved grants are wider, or the
-adapter does not offer or acknowledge its mode, drawing continues in `read-only` mode under
-the owner's policy (`ALLOW_IMAGE_READ_ONLY_FALLBACK`). Windows keeps this fallback and refuses
-edits. One warning names the reason without private details, in the logger and stderr, and the
-result is marked internally as not isolated. There is no UI change. A passing `imageAccess()`
-check means drawing is available; it does not establish that this draw can select a profile.
-The internal `isolated=true` flag means the resolved grants passed and the mode was acknowledged;
-it does not prove that the hosted image tool reads through that profile.
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. One warning in the
+logger and stderr names the reason without private details. With no profile, the checks and
+the session may start before the refusal. Windows has no profile modes, so `imageAccess()` can
+report ready and a one-off Codex draw still returns “Update Automagik and try again.” The
+OpenAI-key path and a Codex Bot's own chat image tool are separate routes. The internal
+`isolated=true` flag records the passed grants check and the mode acknowledgement. The hosted
+tool's filesystem access also depends on Codex's runtime grants.
 
 The draw fingerprints the local config sources Codex reads for the session before the check
 and again after mode acknowledgement. These are the home's `config.toml`; on Linux and macOS,
 also `/etc/codex/config.toml`, `/etc/codex/managed_config.toml`, `/etc/codex/requirements.toml`,
-and each scratch ancestor's `.codex/config.toml` and `.git` marker. It checks at both points
-that the scratch has no `.codex` entry (including a dangling symlink). Changed or unreadable
-sources, or a scratch `.codex` entry, take the same fallback/refusal path. Change and restore
-inside that window, and changes after acknowledgement, are not covered. Neither are macOS
+and each scratch ancestor's `.codex/config.toml` and `.git` marker. At the post-acknowledgement
+check, changed or unreadable sources or a scratch `.codex` entry (including a dangling symlink)
+refuse the draw or edit before any prompt. The check covers changes visible at that point.
+Change and restore inside that window and later changes are outside its coverage, as are macOS
 managed preferences (MDM), cloud requirements or cloud-managed config. A process that can
 already write these sources controls this Codex's configuration; the image lock cannot defend
 against it.
+
+Each required switch is checked twice. Codex's feature list is read again under the whole
+config the session gets, so a layer that turns one back on fails the check. When Codex offers
+its image tool, so a draw can work, the switch is also turned on and must add the tool it
+controls (the shell tool: a command tool; image viewing: `view_image`): a name Codex lists but
+silently ignores adds none, and the draw refuses instead of going on with containment only.
+A signed-out Codex hides its image tool, so the effect proof is asked only where a draw could
+work; a signed-out run stops at the sign-in as before.
 
 **Input ownership.** Drawing sends only prompt text. An edit takes the person's uploaded
 PNG, JPEG or WebP from DSH's verified attachment store: bots-dsh resolves it in that Bot's own
 chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw scratch and sends
 an inline image block when the agent advertises image prompts. No read root is added. Edits
 run only when the adapter acknowledged the Bot home's image profile and Codex's resolved
-profile matched it; the read-only fallback refuses
-an edit. The scratch, including the input copy, is removed afterwards.
+profile matched it. An edit whose setup stops before a prompt (a connector that cannot spawn, a
+scratch folder that cannot be made, an unreadable configuration, an inert switch, a missing or
+unacknowledged profile, a signed-out Codex, a session that does not start in time) is refused
+with `reason: edit-not-isolated` too, so bots-dsh hands the Bot its own verified copy to edit as
+a file. The run attempts to remove the scratch, including the input copy, afterwards.
 
 `drawImage` accepts no user-selected local image-input path, registers no ACP filesystem-read
 callback, and receives no pre-read image-tool arguments. Codex selects and reads
@@ -521,10 +657,10 @@ the tested Read only flow, not Workspace `/tmp` denial, other versions/platforms
 application acceptance. Unsupported ordinary sessions retain their existing base behavior;
 they cannot fall back to another mode to activate a session-file grant.
 
-**Security warning (#870): full-disk reads remain in the legacy fallback.** Auto keeps `agent`:
+**Security warning (#870): legacy chat modes can read across the disk.** Auto keeps `agent`:
 codex-acp 2.6.0 gives profile modes one reviewer per session. Full access is unrestricted by
 design. Windows keeps legacy modes, as do older adapters or a config that cannot offer the
-profiles. Those modes and the one-off drawing fallback can read wherever the OS user can;
+profiles. Those legacy modes can read wherever the OS user can;
 an injected request could put a local file's contents into a picture shown in chat. Files in
 `/tmp` and `$TMPDIR` remain readable at Workspace, and no native macOS run is recorded.
 Tool checks and permission refusals alone do not prevent these reads. Prompt text itself is
@@ -545,15 +681,17 @@ when a check does not hold; Codex's profile plus runtime grants supply filesyste
   the model (`debug prompt-input`). Nothing is sent to a model, and nothing of the answers is
   kept or logged but names. The checks read the Bot's isolated Codex home, signed in or not, as
   the session will, and run in the session's own scratch folder with the trust codex-acp gives
-  it. Together they have 40 seconds; a stop from the caller ends them, and a command that
+  it. Each check sequence has 40 seconds. A stop from the caller ends it, and a command that
   hangs is killed with the Codex it started.
   - `shell_tool` and `view_image` must be listed, not removed, and off; `image_generation` must
     be on.
   - Every tool offered must be on a fixed list (`IMAGE_TOOLS_ALLOWED`, `IMAGE_NESTED_ALLOWED`)
     or be the image tool. A command tool, image viewing, an MCP tool, a tool this version does
     not know, an item of an unknown kind or no tool block at all stops the draw.
-  - An `Invalid configuration` line on check stderr stops the draw, even if Codex exits
-    successfully and uses defaults.
+  - An `Invalid configuration` line on check stderr fails the check, even if Codex exits
+    successfully and uses defaults. A config failure from a command without the profile
+    retries the sequence once, keeping the same profile when one is available. A config
+    failure from a command carrying the profile refuses the draw or edit before the session.
   - The list must be in the form this code knows. A tool of an unknown kind or with a field it
     does not know stops the draw. So does a tool `exec` reaches that is not written as Codex
     0.167 writes it (one `declare const tools: { name(…) }` block per tool, one tool per block,
@@ -582,22 +720,25 @@ when a check does not hold; Codex's profile plus runtime grants supply filesyste
 A check that does not hold answers `acp/image-unavailable`, with what the person can do: update
 Automagik (this Codex does not take the lockdown), fix Codex's config file
 (Codex could not load it), or try again (the check itself broke). One `warn` log line names the
-feature or tool; the message shown does not. `imageAccess` makes the same check, remembered per
-Codex and adapter for five minutes, and answers `{ ready: false, signedIn: true, reason }` when
+feature, tool or isolation failure. `imageAccess` makes a preliminary check without selecting
+a profile, remembers it per Codex and adapter for five minutes, and answers
+`{ ready: false, signedIn: true, reason }` when
 it does not hold (`reason`: `unsupported`, with `unsupported: true`; `config`; `unreadable`), so
 the Bot team goes on to its next image source, or says which it was. Only a check that ran out
 of time leaves Codex ready. A draw always makes its own check.
 
-**Security notes: containment limits and accepted fallback risk (#870).**
+**Security notes: containment limits (#870).**
 
-- **The image tool's own input in the fallback (risk accepted).** A prompt injection can
+- **The hosted image tool's input.** A prompt injection can
   ask Codex to use a readable local image file as input and return its contents in chat.
   codex-acp reports the image call without its arguments. No feature switch disables that
   input. In `read-only` mode codex-acp sends a full-disk `readOnly` policy on every turn;
-  `CODEX_CONFIG` cannot narrow it. The per-home image profile mode instead sends the profile id
+  `CODEX_CONFIG` cannot narrow it. The per-home image profile mode sends the profile id
   on every turn. Codex's image accessor uses a sandboxed helper, whose runtime grants widen
-  the profile's requested read boundary. The owner chose to keep the fallback enabled when
-  that mode is unavailable or rejected; that decision does not establish scratch-only reads.
+  the profile's requested read boundary. Images in permitted runtime directories remain
+  readable. The 2026-11-11 owner decision accepted the risk of continuing in legacy
+  `read-only` for draws when the profile mode was unavailable or rejected. The draft
+  proposes refusing those draws before any prompt.
   Ordinary chat images (`agent-image.js`) use the chat profiles above at Read only and
   Workspace when offered. Signed-in enforcement on the actual per-turn path still needs
   verification in the app.
@@ -620,8 +761,11 @@ of time leaves Codex ready. A draw always makes its own check.
   from coming back, it does not undo a read.
 - **The per-thread path.** The checks read Codex's command line (`-c`); the session gets the
   same overrides per thread, through codex-acp, which adds a rule of its own that turns one
-  more skill off. That Codex honours them there the same way is tested only up to the sign-in
-  (`test/image-codex.test.js`); past it needs a signed-in Codex, in the app.
+  more skill off. `test/image-codex.test.js` starts a real codex-acp session with a fixed
+  loopback Responses peer and the run's own `CODEX_CONFIG`, then reads the tools Codex built:
+  with `view_image` off the tool is absent, and the same config with it on offers it (Codex
+  0.167.0, codex-acp 2.7.0). That covers the per-thread config path, not the signed-in hosted
+  image tool's reads through the profile; those still need the app on each backend.
 - **codex-acp's own log.** codex-acp writes the config it is started with to its log file, so
   the names of the person's MCP servers and skills, and the scratch path, are there too.
 - **The caller.** A prompt built from an outside message is still the way in. The Bot team
@@ -634,7 +778,8 @@ per-turn enforcement tests on each backend, and asking Codex for a switch for `e
 home (never signed in, no model request). It is skipped unless `AUTOMAGIK_TEST_CODEX_ACP`
 (codex-acp's `dist/index.js`) and `AUTOMAGIK_TEST_CODEX` (a Codex executable) are set. The ordinary
 plugin CI job installs neither; run it by hand when the installed Codex or codex-acp changes. At
-runtime, an unknown required feature or an unrecognised offered tool refuses the draw.
+runtime, an unknown required feature, a required switch with no effect, or an unrecognised
+offered tool refuses the draw.
 Passing those checks does not prove that an image cannot contain locally read content.
 
 **Runtime read grants (pinned source audit).** The source paths and line numbers below are
@@ -789,7 +934,10 @@ check (about a day), whether or not it finds something newer; while it is still 
 for an unproven release it stays longer (below). Nothing is downloaded when a Session starts.
 
 npm is asked for a newer release once the last check is 20 hours old, by a timer that runs
-every 4 hours: at least once a day. A new release must start before it replaces the one in
+every 4 hours: at least once a day. Without the desktop app's pnpm, the check first asks the
+registry npm is configured with for the connector's scope; when npm names none, or that
+registry does not answer with an exact version (one that needs a sign-in to read, for example),
+it asks the public registry, as before. A new release must start before it replaces the one in
 use. In its fresh folder it is spawned the way a Session would spawn it and asked
 `initialize`, nothing more (`src/host/handshake.js`): it must answer within 20 seconds, on the
 protocol version the library speaks. One that fails is removed, the connector in use stays
@@ -878,6 +1026,18 @@ overlapping calls and step and turn ends through the real back-channel on a real
 loads the log with the pinned reader after every move. `FUZZ_SEED` and `FUZZ_RUNS` replay one
 seed or widen the search.
 
+**The read-time recovery for older sessions** lives in the desktop app, not in this plugin: the
+carried runtime patch (`apps/desktop/runtime/patches/acp-bridge-tool-lifecycle.patch`) over the
+pinned `dsh-session-format-v3-to-v4` bytes and the persistence worker tolerates a first
+`tool/call` with no advertisement, a bridged call a step or turn end left open, and one late
+bridge row. It reports each shape on stderr and never rewrites the session file. The recovery
+applies only where that patch is installed, pinned to the DSH version named in
+`apps/desktop/runtime/patches/patches.json`: a plain DSH CLI, or a DSH version the patch is not
+pinned to, still refuses such a session, and the file stays invalid for any reader without the
+patch. The upstream question (whether the loader should carry the advertisement forward, or the
+format should state the requirement) is recorded in issue #855; this recovery is a compatibility
+shim for sessions written before #842, not a runtime fix.
+
 **Drift.** `node scripts/acp-drift.mjs` fails when the pin is more than one minor behind npm's
 latest, and names each adapter that moved past `dev/acp-compat.json`, the record of the SDK and
 adapter versions the suite last passed against (`--record` writes it, after the suite and the
@@ -909,9 +1069,9 @@ tool name `acp_tool` are public: Sessions keep them.
 
 ### Auto on every route
 
-`acpAgents.ownMode` can request Claude Code's `auto` mode or Codex's `agent` mode, including bridged sessions. Two exact `true` answers are required before a prompt. Strict sessions retain their existing mode handling.
+`acpAgents.ownMode` can request Codex's `agent` mode, including bridged sessions, after two exact `true` answers before the prompt. Claude Code's own `auto` mode is withheld until it is captured from a signed-in CLI (RFC 0031, question 5).
 
-A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits an automatic one-shot decision. The person's answer retains the existing `allow_always` fallback.
+A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits a one-shot allow in the mirror body. Questions with no allow option keep their flow. For a bridged call the bridge answers the agent's own question with `allow_once`, or cancels it when none is offered, never `allow_always` (RFC 0039); DSH's Auto review before the mirror body keeps its existing behavior.
 
 Codex review events are counted per prompt. When an own-mode prompt ends after three consecutive or ten total refusals, or immediately after a refusal without subsequent activity, an `acp-session` notice with `stop: 'refusals'` explains that replying can continue; refused steps stay refused. The turn finishes as `stop`. Strict prompts keep their existing ending.
 

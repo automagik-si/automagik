@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-5: #267, #273, #280, #282, #286, #574; later work: #523, #655, #670, #675, #680; 6-8 unconfirmed; every question answered; amended 2026-11-07: writes on DSH chats, global Bots included) |
+| Status | In delivery (deliveries 1-5: #267, #273, #280, #282, #286, #574; later work: #523, #655, #670, #675, #680; 6-8 unconfirmed; every question answered; amended 2026-11-07: writes on DSH chats, global Bots included; amended 2026-11-19 by [RFC 0036](0036-bot-management-from-pocket.md): Bot management from Pocket, approved by the owner's delegate; amended 2026-11-20 by [RFC 0033](0033-attachments-from-pocket.md): images on DSH chats, approved by the owner's delegate) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr (3.N.P, Pocket Link included), plugin (3.N.P), pocket (3.N.P, [RFC 0011](0011-monorepo-parts-and-releases.md)) |
 | Created | 2026-11-03 |
@@ -745,9 +745,14 @@ finds out what the other accepts, and fails closed to read-only.
   team's project Bots shown under a yes and the global Bots, the Main Bot included; stop their
   turns; and approve or deny their tool calls one call at a time, at the level DSH's sandbox
   gives that Session, at up to 20 writes a minute; and it sees each request's input. It cannot
-  grant allow for session, pick a project without the yes, start a Bot, change a Bot's settings
-  or its level, or reach the socket. Undo as before: remove the phone in Pocket Link (its
-  writes end within 2 s), or turn the bridge off.
+  grant allow for session, pick a project without the yes, start a Bot, write a Bot's level,
+  change its other settings beyond what RFC 0036 allows, or reach the socket. Amended
+  2026-11-19 by [RFC 0036](0036-bot-management-from-pocket.md) (Decided): through that RFC's
+  separately negotiated management capability, a phone may also list a shown project Bot's
+  scheduled tasks without their prompts and pause, resume or rename them, change its name and
+  model (a model write can clear Auto), and read, edit and add its own memory when it is not
+  private; global Bots are not managed, and every other limit here stands. Undo as before:
+  remove the phone in Pocket Link (its writes end within 2 s), or turn the bridge off.
 - **The per-project yes still gates the chat** (0014 Threat model, item 3; `shown[]`). A DSH
   chat of a Bot whose project has no entry in the home file's `shown[]` is listed with
   `shown: false`; `subscribe` and every write on it are refused `not-shown`, by the socket and
@@ -814,6 +819,294 @@ finds out what the other accepts, and fails closed to read-only.
    receipt (its dialog closes), and the race rule does not change. A second point for the same
    check: whether DSH's Session log records an approval's outcome, which the phone's "Answered on
    the computer" receipt reads.
+
+### RFC 0033 (attachments from Pocket): images on `dsh:<botId>` chats
+
+**Accepted with RFC 0033 (2026-11-19, the owner's delegate: the design and its proposed bounds);
+written here as RFC 0033's delivery 0 (2026-11-20). The owner may amend on return.**
+
+A paired phone can send PNG, JPEG and WebP images to an Automagik Bot's DSH chat, read them back as
+small thumbnails on tap, and see them as blocks in the chat's rows. Everything below is negotiated
+at both handshakes and opted into per watch; without it every peer keeps today's text-only behavior.
+Terminal chats, documents and camera capture are not part of this amendment (RFC 0033, deliveries
+4+). The writes amendment above stays in force: same paired-key admission, same subscribed-channel
+rule, same 2 s revocation, same per-phone write limits for sends. The Undo line above ("nothing is
+stored that needs cleaning") holds for the projection; an admitted image is stored on the computer
+(Cleanup, below).
+
+#### Why a capability under `chat/1`, not `chat/2`
+
+Phone route and Contracts introduced make a change in a method's meaning a new ALPN version. No
+existing method changes meaning for a peer that does not negotiate: `chat.send` without `uploads` is
+today's `chat.send`, rows without `blocks` are today's rows. The new methods exist only after both
+sides say `attachments: 1`. This is an explicit exception to that rule for additive, negotiated
+attachment methods (RFC 0033, Open question 7), the same reasoning as `dshWrite`.
+
+#### Socket (bots-dsh, `<team home>/pocket/chat.sock`)
+
+**hello.** The bridge asks `hello {write: 1, attachments: 1, manage?: 1}`. The socket offers
+attachments only on a writable hello that asked for them, when its adapter can cite receipts and DSH
+has `fileUploads.uploadImageStream`, `attachments.readImageRequest` and usable
+`attachments.imageLimits`. The answer then adds `attachments: {version: 1, methods, mediaTypes,
+limits}` and appends the five methods to `methods`:
+
+- `mediaTypes`: `image/png`, `image/jpeg`, `image/webp` intersected with DSH's list (GIF, SVG and
+  HTML are never accepted for upload).
+- `limits.fileBytes = min(8 MiB, maxImageBytes, maxMessageImageBytes)`, `files = min(4,
+  maxImagesPerMessage)`, `messageBytes = min(16 MiB, maxMessageImageBytes)`, `maxPixels = min(40 000
+  000, maxImagePixels)`, `maxDimension = maxImageDimension`. The offer is withheld when the media
+  types are empty or any of these is not a positive safe integer.
+- Fixed values: `chunkBytes` 24 576, `deviceOutstanding` 32 MiB, `deviceDailyBytes` 256 MiB,
+  `deviceDailyCount` 128, `thumbnail {edge: 512, bytes: 131 072}`.
+- A hello without `attachments: 1`, a read-only hello, or a host that cannot offer gets exactly
+  today's answer; on such a connection each of the five methods answers the socket **error**
+  `read-only`, and a `send` that carries an `uploads` property answers the **result** `refused`
+  `invalid`. An older writable socket or bridge would drop `uploads` and send the caption alone, so
+  support is never probed by sending: the phone sends uploads only after the current bridge offered
+  attachments, the bridge only after the current socket offered them and the watch opted in, checked
+  again after every reconnect. Every hello on the shared connection (the management one included)
+  repeats `attachments: 1`.
+- A hello that switches attachments on or off closes every subscription of that connection (a
+  pending subscribe answers the error `closed`) and cancels its uploads; a hello that keeps them on
+  preserves subscriptions and uploads. Every hello revokes RFC 0036 grants, as before.
+
+**Per-watch opt-in.** One bridge connection carries every phone's subscriptions, so attachments are
+chosen per subscription: `subscribe {terminal, channel, after?, attachments: 1}` on a negotiated
+connection gets the attachment projection and may upload, send uploads and read; a subscription
+without it (or on an un-negotiated connection, where the flag is ignored) gets the legacy projection
+and none of those. On a negotiated connection, begin and read on a missing, pending or legacy
+subscription answer `not-watching`; chunk, finish and cancel answer `invalid`; an upload send on a
+legacy subscription answers `invalid`.
+
+**Line limits.** The socket's 64 KiB applies to incoming request lines (65 536 UTF-16 units without
+the newline; past it the shared connection closes), so the bridge checks each serialized request
+before writing it: a 24 KiB chunk is about 32 KiB of base64, and a 32 KiB caption can grow when
+escaped. Replies have no such limit; a thumbnail reply has its own 192 KiB (below).
+
+**The phone.** Every call carries `phone`, the stable paired key the bridge admitted
+(`[A-Za-z0-9+/=._:-]{1,256}`; missing or malformed → `refused` `read-only`). The socket checks its
+syntax and trusts the bridge to call only on the subscription that phone opened. A `name` property
+(even `null`) is `invalid` on all five methods and on an upload send: no display name from the phone
+reaches DSH, a workspace copy or a log. `by` stays receipt metadata only.
+
+| Socket method | Params | Answer |
+|---|---|---|
+| `upload-begin` | `{channel, phone, upload, mediaType, bytes}` | `{ok: true, state: 'open', upload, chunkBytes}` |
+| `upload-chunk` | `{channel, phone, upload, offset, data}` | `{ok: true, received}` |
+| `upload-finish` | `{channel, phone, upload}` | `{ok: true, state: 'admitted', upload, image: {mediaType, width, height, bytes, stored}}` |
+| `upload-cancel` | `{channel, phone, upload}` | `{ok: true}` |
+| `attachment-read` | `{channel, phone, row, block}` | `{ok: true, mediaType, width, height, data}` |
+| `send` (grows) | `{channel, phone, id, text?, uploads?, by?}` | `{ok: true, state: 'sent' \| 'queued', id, repeat?: true}` or `refused` |
+
+Refusals are `{ok: false, state: 'refused', reason, code?}` carrying the `upload` or send `id` where
+there is one. An unexpected handler failure is the error `{kind: 'failed', message: 'failed'}`.
+
+**upload-begin.** `upload` matches `[A-Za-z0-9._:-]{1,128}` and is unused by this phone (no live
+record on any connection and no retained manifest), else `invalid`. `bytes` is the image file's
+length before base64; not a positive safe integer or over `fileBytes` → `too-large`. A type outside
+`mediaTypes` → `unsupported`. One active upload per phone and one image admission per host, else
+`busy`; then the phone's outstanding bytes (its open and admitted-unsent declared lengths plus this
+one ≤ 32 MiB, else `quota`); the slots are reserved before anything is awaited. Then the Bot, its
+Session and the project's yes are checked (moved Bot → `not-watching`), free disk is checked (2 GiB
+plus `bytes` on DSH's store filesystem, else the team home's; neither readable or short → `quota`),
+and only then the daily budgets (below) are checked and charged durably with the full declared
+length and one image, and DSH's `fileUploads.uploadImageStream` starts. A charge is never refunded:
+cancel, bad data, rejection and a lost reply keep it.
+
+**upload-chunk (credit).** Send only after begin succeeded. `data` is canonical padded base64 of
+non-empty raw bytes; `offset` is the raw bytes received so far; every chunk is exactly `chunkBytes`
+raw except a last one that ends exactly at `bytes`. The answer `{ok, received}` is written only
+after DSH's reader has taken the chunk and asked for the next one, so the last chunk is acknowledged
+before finish. Wait for each acknowledgement before the next chunk **or** finish: a second chunk
+before it, a wrong offset, non-canonical base64 or a wrong length cancels the upload with `invalid`.
+The first chunk's magic bytes must match `mediaType` (else `unsupported`). PNG and WebP give their
+dimensions in that first header; for JPEG the socket may forward and acknowledge chunks while
+looking for its frame header within the first 64 KiB, and refuses `unsupported` when it is not found
+by then or by the end. Width × height over `maxPixels` or a side over `maxDimension` → `too-large`
+as soon as known. DSH decodes nothing before finish.
+
+**upload-finish / upload-cancel.** Finish before the last acknowledgement is `invalid` and leaves
+the upload open. Finish ends the stream and waits for DSH's admission; `image.bytes` is the declared
+length, `image.stored` DSH's stored length, type and dimensions are the admitted image's. A second
+finish joins the one running or gets its result; a failed or cancelled upload replays its refusal on
+finish (same watch, phone and id; 128 results kept per watch); otherwise an unknown finish is
+`invalid`. DSH's refusal is `rejected` with `code` one of `IMAGE_TOO_LARGE`,
+`IMAGE_TOO_MANY_PIXELS`, `IMAGE_DIMENSION_TOO_LARGE`, `UNSUPPORTED_IMAGE_TYPE`, `INVALID_IMAGE`,
+`timeout` (any other: `rejected` without `code`; never DSH's message). The receipt DSH staged never
+leaves the computer. Cancel aborts an open or finishing upload (its waiting calls answer `expired`)
+or forgets an admitted one; an unknown id answers `{ok: true}`; a record of this phone owned by
+another watch answers `invalid`.
+
+**Timeouts.** Begin starts a 30 s idle timer (restarted by each accepted chunk, stopped by a valid
+finish) and a 180 s total timer, which runs through finish's check before the end of the stream;
+when that check passes, a 60 s timer replaces it for the end of the stream, DSH's admission and the
+last check. A timeout answers `rejected` `code: 'timeout'`. DSH's `uploadImageStream` runs from
+begin, and the host's admission slot stays taken until it returns, even after a cancel or timeout. A
+bridge that times out first (Bridge to phone, below) cancels or closes the watch and never replays
+an unacknowledged chunk.
+
+**send with uploads.** `id` and each upload id match `[A-Za-z0-9._:-]{1,128}`; `uploads` is an
+ordered array of 1 to 4 distinct ids (else `invalid`; over a smaller `files` → `too-large`). `text`
+is optional (default `''`; a non-string, `null` included, is `invalid`; over 32 KiB in UTF-8 before
+cleaning is `too-long`); it is cleaned like a text send, and text that is blank after cleaning means
+no caption. A sign-in code in the given text is `invalid` with `message: 'sign-in-code'`. A fresh
+send re-checks the current offer: none, or an image's type no longer listed → `unsupported`; the
+count, an image's original length, dimensions or pixels, or their sum over the current limits →
+`too-large`. DSH receives one queued prompt: a text block only for a non-empty caption, then `{type:
+'file', receiptId}` per upload in order. It succeeds only when DSH answers `accepted: true`; then
+the uploads are consumed. `state` is from the running state read just before; `repeat: true` means a
+saved manifest was used.
+
+**Request id and Retry.** `textHash` is lowercase hex SHA-256 of the cleaned caption (UTF-8, the
+empty string included). The DSH request id is `pocket-a/` and the first 40 lowercase hex characters
+of SHA-256 over the NUL-joined UTF-8 sequence phone key, Session id, `id`, `textHash`, receipt ids
+in order. `/` cannot occur in a text send's id, so the two namespaces never meet, and attachment ids
+stay out of the text-send dedupe memory. Before the first prompt the host saves the manifest
+`{phoneHash, id, requestId, sessionId, textHash, uploadIds, receiptIds, at}` in the ledger file; it
+keeps the newest 64 per phone, each usable for 24 h from `at` (a Retry does not refresh it). A send
+first looks up (phone, `id`): another Session → `session-changed` (a new send is needed, never a
+silent retarget); another caption hash or upload list → `changed`; equal → the same request id and
+receipts are prompted again, from any new opted-in watch of that Session and whatever the current
+limits (DSH ignores a request id it already holds before it reads receipts, so an accepted message
+is never sent twice; a still-staged receipt may be accepted now; `FILE_NOT_STAGED` → `expired`).
+Without a manifest it is a fresh send: a missing, unfinished or expired upload → `expired` (an
+unfinished one on another watch included); an admitted, unexpired upload of another watch of the
+same phone → `invalid`. After a manifest's 24 h or its eviction the same `id` with new uploads is a
+new message. Once saved, a manifest survives a refused prompt, `upload-cancel` (which removes only
+the live record), the watch closing and a restart; a Retry sends the same `id`, caption and upload
+ids without beginning the uploads again, keeps `uploads` (without it, it is an ordinary text send)
+and may be the first acceptance. A first send that never saved a manifest, on a watch since closed,
+gets `expired`. `FILE_NOT_STAGED` answers `reason: 'expired', code: 'FILE_NOT_STAGED'`. The writes
+amendment's "a known `id` prompts nothing" is the text-send rule. Other reasons: `unavailable` (the
+ledger could not be written, nothing prompted), `rejected` (`MODEL_DOES_NOT_SUPPORT_IMAGES` or
+another admission code), `offline` (any other failure or no `accepted`), `revoked`.
+
+**Rows.** Only a committed person's message (`user/message`, `role: 'user'`, `source.kind: 'user'`)
+with an image or file part gets `blocks`, on a `kind: 'text', role: 'user'` row, in content order:
+`{type: 'text', text}`, `{type: 'image', block, mediaType, width, height}`, `{type: 'file', block,
+bytes, name?}`. `block` is the part's zero-based index in DSH's content; image blocks may name GIF
+too (desktop images); `name` is a base name with controls removed, at most 128 UTF-8 bytes, dropped
+when empty, `.` or `..`. The first 16 media parts are projected (an invalid one is skipped) and
+`{type: 'more', count}` counts the rest, so `blocks` can be empty. Text blocks share 65 536 UTF-16
+units and 512 KiB of serialized JSON; the row's own `text` is today's (text parts joined by
+newlines, cut at 65 536 with an ellipsis), `''` when blank. Render `blocks` when present (the `text`
+repeats them). Image blocks need PNG, JPEG, WebP or GIF and positive safe-integer dimensions, file
+blocks a non-negative safe-integer `bytes`. No structured field carries a storage id or a path
+(ordinary message text and tool previews still can). A DSH user row is `{id, turn, at, source:
+'session', kind: 'text', role: 'user', text, blocks?}` and carries no send, upload, receipt or
+request id: the phone settles a send by the reply's `id` only, never by matching a row (two
+image-only sends both project `text: ''`).
+
+**Legacy projection** (per watch, for snapshots, cursor recovery, backfill and live rows): `blocks`
+removed, rows whose text is blank and that exist only for attachments dropped, and a live `rows`
+event left empty is not sent. Per followed Bot up to 500 legacy-visible and 1 000 rows in all are
+kept, each projection with its own history floor, so a legacy snapshot is today's. Backfill reads
+one bounded log page before projecting, so a legacy page can be short.
+
+**attachment-read.** `row` is the canonical unsuffixed `dsh:<sessionId>:<seq>` of a row in the
+watch's own Session and `block` the image's original index (non-negative safe integers). A malformed
+id, a `#` suffix or a bad `block` → `invalid`; another Session or a closed watch → `not-watching`; a
+future sequence, no event at exactly that sequence, or a block that projection does not expose as an
+image → `not-found`. The host reads that one event from the Session log (the phone need not have
+been sent the row), checks authority, asks DSH for `readImageRequest(ref, {width: 512, height: 512,
+maxBytes: 131072})`, tries `{256, 256, 65536}` only when the first result is over its edge or bytes,
+and answers `too-large` when both are; a failed read or unusable result answers `unavailable`
+without another try. One 15 s deadline covers the whole read (timeout → `unavailable`). Authority is
+checked again just before the bytes are written (lost → `revoked`, `not-shown` or `not-watching`),
+and the whole reply line, envelope and newline included, must fit 192 KiB (else `too-large`). Reads
+count in the phone's 60 a minute shared with RFC 0036's management reads (charged before
+validation), two at once per host. Order: phone key, no `name` and an opted-in watch; then the read
+counter (`rate`); then the row, Session and sequence; then a third read at once on the host →
+`busy`. Authority is checked before the log is read. `data` is standard base64 of a non-empty image
+(PNG, JPEG, WebP or GIF, positive dimensions); only an otherwise valid oversized result moves to the
+smaller size. A timed-out read may keep its host slot until DSH returns. Nothing is cached on the
+phone or by bots-dsh; DSH keeps its own variant cache.
+
+**Ledger.** `<team home>/pocket/uploads.json` (0600, replaced atomically, in the 0700 socket folder;
+phone keys stored only as SHA-256): over a rolling 24 h, 256 MiB and 128 images per phone, 1 GiB and
+512 images per host (a charge or manifest counts while younger than 24 h); at most 64 phones, a new
+one evicts the least recently charged phone, with its manifests, only when that charge is at least
+24 h old, else `quota`. A corrupt file is moved to `uploads.json.bad` and uploads are refused
+`quota` for 24 h from that moment; a write failure answers `unavailable`. Text sends never depend on
+it. This is an admission check: normalized images, DSH's variants and workspace copies have no
+aggregate disk cap here beyond the free-space floor.
+
+#### Bridge to phone (`herdr-pocket/chat/1`)
+
+- **hello.** A phone that can attach adds `attachments: 1` to its hello. The bridge answers
+  `attachments: {version: 1, methods, mediaTypes, limits}` only when its DSH socket offered them;
+  `methods` lists `chat.attach`, `chat.attachChunk`, `chat.attachFinish`, `chat.attachCancel` and
+  `chat.attachmentRead` (mapped in that order to the five socket methods). It offers only if it can
+  carry a whole 24 576-byte chunk (32 768 base64 characters) plus its envelope inside the phone's
+  256 KiB request frame; it keeps `chunkBytes` exactly (it may not shrink it) and otherwise
+  withholds the offer. When it cannot offer it still answers the phone that asked: `attachments:
+  {version: 1, unavailable: 'app'}` (a DSH socket answers but offers no attachments: the Automagik
+  app or its runtime cannot) or `unavailable: 'none'` (no usable DSH socket, or one whose offer the
+  bridge cannot carry end to end). A phone that asked and sees no `attachments` key has an older
+  Pocket Link; a bridge older than `chat/1` refuses the route. Either way it offers no attachment
+  and names the part to update.
+- **Methods** (channel 0, JSON-RPC, each naming a `terminal` this connection subscribed to):
+  `chat.attach {terminal, upload, mediaType, bytes}`, `chat.attachChunk {terminal, upload, offset,
+  data}`, `chat.attachFinish {terminal, upload}`, `chat.attachCancel {terminal, upload}`,
+  `chat.attachmentRead {terminal, row, block}`; `chat.send` gains `uploads`. They map one to one
+  onto the socket methods on that phone's own opted-in subscription; the bridge adds the phone's key
+  and the channel, never the phone. A chunk's answer is its credit, separate from subscription
+  `CREDIT` frames; the 16 concurrent channel-0 requests stand. A thumbnail answer (at most 174 764
+  base64 characters) goes back in one channel-0 DATA reply, within the connection's 4 MiB unsent
+  limit.
+- **Deadlines.** The bridge waits for the socket at most 5 s on `chat.attach`, 25 s on a chunk, 65 s
+  on `chat.attachFinish` (DSH's admission has 60 s) and 20 s on a read; so the phone waits at least
+  75 s for `chat.attachFinish`, longer than its usual call timeout.
+- **Projection.** The bridge subscribes with `attachments: 1` only for a phone that negotiated them;
+  an older phone's subscription gets the legacy projection.
+- **Cleanup.** Removing the phone (the 2 s revoke) closes its watches; closing the chat, the
+  connection ending or a reconnect does too. A reconnect renegotiates and never strips an attachment
+  silently.
+
+#### Cleanup and what stays on the computer
+
+Closing a watch (unsubscribe, the phone removed, the connection closed, attachments switched off)
+cancels its open uploads and forgets its admitted ones at once; reusing the channel number does not
+bring them back. The Bot, its Session and the project's yes are checked at begin, before the end of
+a stream, after admission, on a read and before a prompt; a check that finds them changed cancels
+that Bot's uploads on every watch (a missing Bot → `not-watching`, a hidden one → `not-shown`, a
+moved one → `not-watching` for an upload or read, `session-changed` for a send). Closing a watch
+answers its waiting upload calls `revoked`; `upload-cancel` answers them `expired`. Chunk and cancel
+do not check the Bot on their own. An admitted upload not sent within 15 min is forgotten. None of
+this erases what DSH already stored: DSH keeps an unsent staged receipt until the Session ends and
+retires a used one when it sees the prompt; image bytes, DSH's thumbnail variants and the workspace
+copies a Bot's route makes after a send (`.automagik/bots/<botId>/uploads` by bots-dsh,
+`.automagik/uploads/<digest>/` by ACP; a copy can fail) stay, like a desktop attachment. The daily
+budgets bound how fast stored images grow and the free-space floor (a check at begin, not a cap on
+what is stored later) how far. Removing the phone does not undo a prompt DSH already accepted; one
+in flight whose answer was lost stays "Maybe not sent" on the phone.
+
+#### Threat model (grows "What it can send")
+
+A paired phone can now place image bytes on the computer, in DSH's store, for its own subscribed Bot
+chats only. It cannot name a path or a URL, a storage id, another Session's image or another phone's
+upload. The caps above bound memory (one admission per host, one unacknowledged chunk per upload,
+DSH's pixel limit before decoding), disk (daily budgets, free-space floor) and work. No attachment
+content or name is logged; refusals carry fixed reasons and DSH codes from a fixed list. A prompt
+already passed to DSH when the phone is removed is "already in DSH", as for text sends.
+
+#### Compatibility
+
+Attachments work only after a positive offer at both handshakes and the opt-in on that DSH watch.
+
+| Phone | Pocket Link | bots-dsh / Automagik app | Result |
+|---|---|---|---|
+| old | any | any | text only, legacy rows |
+| new | old | any | no `attachments` key: the phone names Pocket Link as the part to update |
+| new | new | old, or cannot offer | `unavailable: 'app'`: names the Automagik app |
+| new | new, no DSH socket | any | `unavailable: 'none'` |
+| new | new | new | attachments; reconnect renegotiates |
+
+#### Deliveries
+
+RFC 0033's: 1 plugin (socket, source, adapter), 2 Pocket Link (the phone methods, the offer,
+deadlines, cleanup on revocation), 3 Pocket (picker, progress, cancel, Retry, thumbnails,
+`privacy.md`).
 
 ## Tracking
 

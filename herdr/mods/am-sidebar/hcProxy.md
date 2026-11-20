@@ -122,10 +122,11 @@ ids are never reused, so a rename between the check and the call cannot redirect
 
 | Method | Rule |
 |---|---|
-| `terminal.list` | allowed as is: metadata only (no screen text) |
+| `terminal.list` | the caller's own pane and every terminal it may type into (the `terminal.send` rule): its team graph, its own workers and the shared review roles. Other teams' panes and every linked-machine row are left out, and the `machines` inventory is empty: a sandboxed bot can reach no machine target, so no machine is named |
 | `terminal.get`, `terminal.read`, `terminal.wait` | the caller itself, hcGuard's `teamOf` graph, and its own workers |
 | `terminal.send` | the same, plus hcGuard's shared send rules: pm/integrator/fixer callers may send to any listed bot; captain callers may send to other captains; tester/reviewer/fixer targets serve every squad. Ranks come from the approved roster. Workers inherit no caller-rank widening |
-| `terminal.kill`, `terminal.rm`, `terminal.label` | the caller's **own workers only**: the target's `parent` is the caller's pane, or its `worker.of` is the caller's bot. A team member, another bot's worker and a worker caller are refused |
+| `terminal.kill`, `terminal.rm` | a bot caller's **own workers only**: the target's `parent` is the caller's pane, or its `worker.of` is the caller's bot |
+| `terminal.label` | the same own-worker rule, plus a caller (bot or worker) may set or clear `automagik-herdr.needs-owner` on its own pane |
 | `terminal.run` | the helper shape, or the exact approved template/agent shape below; bound bot panes only |
 | `templates.list` | only the approved worker template, with its metadata unchanged |
 | `proxy.workerTransport` | local transport identification for the wrapper's verified bot pane; never forwarded |
@@ -134,6 +135,17 @@ The guard and proxy use the same shared send check. Tester targets require a ros
 `role=tester` alone grants nothing. The existing reviewer/fixer label path remains.
 Both ranks for captain-to-captain sends come from the roster, never `role=captain` labels.
 These rules widen only sends; get/read/wait keep the same team graph.
+
+`terminal.list` is filtered rather than refused (#628): the request reaches the core unchanged, and
+the reply keeps only the rows the caller may type into, plus its own pane. It is the list a
+sandboxed bot's `hc ls` sees, so another team's panes are never named there and `hc send <name>`
+can only resolve a name it may type into. A linked machine's pane is never kept, whatever its
+labels say: this proxy refuses every machine address on every forwarded verb, so a sandboxed bot
+can neither read nor type into one, and naming it would only leak another team's pane or the
+machine. For the same reason the reply's `machines` inventory is emptied: a machine's name and
+target are not information this pane can use. The remaining fields (`hidden_finished`) are kept
+as the core answered them; an error reply never carries rows, and a reply that cannot be read is
+a `hc-proxy:` error, never the unfiltered rows.
 
 A worker start needs `--bg`, `parent` = the caller, `cwd` under the caller's project
 `.claude/worktrees/`, `worker.of` = the caller's bot, only the worker labels, and this argv:
@@ -156,13 +168,16 @@ target is still team-scoped.
 
 Everything else is refused with a JSON-RPC error whose message starts `hc-proxy: `, including
 `terminal.put`, `terminal.keys`, `terminal.attach`, `terminal.interrupt`, `terminal.keep`,
-`terminal.label` (on a non-own target), `file.*`, `doc.*`, `machine.*`, `server.*`,
+`terminal.label` calls outside the table's allowance, `file.*`, `doc.*`, `machine.*`, `server.*`,
 `events.subscribe`, `rpc.discover` and `templates.list`. `hello` is refused before it can switch
 the connection to framed mode.
 
 `terminal.label` forwards only `terminal` and `labels`; the 0.1.14 schema lists no caller for
-label. It is allowed on an own worker because the pack's worker start does **not** set the
-worker's tab label: `workerArgs` sets `worker.of`, `branch`, `worker.role`, `task*` and
+label. On the caller's own pane, `labels` must be an object with exactly one key,
+`automagik-herdr.needs-owner`, whose value is a string (including an empty string) or null.
+The per-pane socket fixes the caller's identity. Labelling an own worker is allowed because
+the pack's worker start leaves the tab label for a later call. `workerArgs` sets `worker.of`,
+`branch`, `worker.role`, `task*` and
 `herdr.space`, and the sidebar's `keptSteps` sets `herdr.space`/`herdr.tab` with a later
 `hc label` once the pane is in the window. Without that call the worker's tab marker could not be
 written from the pane.
@@ -324,10 +339,13 @@ design, as the worker shape. The `terminal.list` caller refusal stays as it is.
 
 ## What a filesystem mask cannot do
 
-The hc proxy filters one Unix socket. It does not filter the network: the network stays open,
-and a path mask cannot hide a listening port without a network namespace (or equivalent). Any
-service that must not be reachable belongs on a root-only Unix socket or behind a network
-namespace.
+The hc proxy filters one Unix socket; it does not filter the network. The sandbox wrapper now
+gives a sandboxed pane its own network namespace (`--unshare-net`), so the host's loopback and
+LAN are not in reach, and the only loopback port the pane gets is the wrapper's egress relay on
+127.0.0.1:3128 (public destinations only, through a host-side CONNECT proxy). The namespace is
+the network boundary (#700, #743); the proxy remains the hc socket boundary. A service that
+must not be reachable from a pane no longer needs a port rule, only the namespace; a root-only
+Unix socket is still the stronger place for an admin endpoint.
 
 The `terminal.run` shape also constrains a process, not the task text: a deliberately forged
 worker start can still choose the task word after `--`. The final fix for that is starting

@@ -14,7 +14,7 @@
 //     owner types again (a lost first batch is never replayed);
 //   - the same pane resolution as the watch route: a Bot id (and its own folded worker
 //     terminal), confirmed by this computer's core, never a terminal id from the request;
-//   - one typing viewer per pane: a second window is refused and sees view only;
+//   - one typing viewer per terminal: a second pane or window sees view only;
 //   - keystrokes are never written anywhere: no log, store or event carries `data`; the
 //     record on disk says only who took the pane, when, and for which Bot or worker;
 //   - no start, stop, resize or kill: the attach is opened at the terminal's own size and the
@@ -55,10 +55,9 @@ function sessionOf({ viewer, pane, core, channel }) {
  *   admit?: (request: any) => { rejection?: number }, recordPath?: string, warn?: Function }} options
  */
 export function createTypingService({ env = process.env, connect = connectCore, readFile, admit, recordPath, warn = () => {}, idleMs = 60_000 } = {}) {
-  const byPane = new Map()
-  // Claimed before any wait: two windows racing for one pane must not both get in. The
-  // reservation is per Bot and worker (the pane those name), held until the take answers.
   const pending = new Set()
+  const pendingViewers = new Map()
+  const pendingTerminals = new Set()
   const byId = new Map()
   const byViewer = new Map()
   let recordQueue = Promise.resolve()
@@ -82,7 +81,6 @@ export function createTypingService({ env = process.env, connect = connectCore, 
     if (!session || session.closed) return
     session.closed = true
     clearTimeout(session.idle)
-    byPane.delete(session.pane.key)
     byId.delete(session.id)
     if (byViewer.get(session.viewer) === session) byViewer.delete(session.viewer)
     try { session.core.detach(session.channel) } catch { /* going */ }
@@ -116,21 +114,41 @@ export function createTypingService({ env = process.env, connect = connectCore, 
       if (!isBotId(bot)) return refuse(404, 'no-bot')
       if (worker !== null && worker !== undefined && !WORKER_QUERY.test(worker)) return refuse(404, 'no-worker')
       if (!VIEWER.test(String(viewer ?? ''))) return refuse(400, 'no-viewer')
-      if (byId.size >= MAX_SESSIONS) return refuse(429, 'busy')
       const held = byViewer.get(viewer)
-      if (held) await close(held, 'moved')
+      if (!held && byId.size + pending.size >= MAX_SESSIONS) return refuse(429, 'busy')
       const key = `${bot}\0${worker ?? ''}`
-      if (byPane.has(key)) return refuse(409, 'typing-elsewhere')
-      if (pending.has(key)) return refuse(409, 'typing-elsewhere')
+      if (pendingViewers.has(viewer)) return refuse(409, 'typing-elsewhere')
+      if (pending.has(key) || [...byId.values()].some(session => session !== held && session.pane.key === key)) {
+        if (held) await close(held, 'moved')
+        return refuse(409, 'typing-elsewhere')
+      }
+      // Reserve before any await, including a replacement's old release record.
+      const reservation = { cancelled: false }
       pending.add(key)
+      pendingViewers.set(viewer, reservation)
+      let terminalKey
       try {
+        if (held) await close(held, 'moved')
+        if (reservation.cancelled) return refuse(409, 'not-typing')
         const pane = await resolvePane({ botId: bot, worker: worker ?? null, env, connect, readFile, warn })
+        if (reservation.cancelled) return refuse(409, 'not-typing')
         if (!pane) return refuse(404, 'no-pane')
+        const identity = JSON.stringify([pane.core, pane.terminal])
+        if (pendingTerminals.has(identity)
+          || [...byId.values()].some(session => session.pane.core === pane.core && session.pane.terminal === pane.terminal)) {
+          return refuse(409, 'typing-elsewhere')
+        }
+        pendingTerminals.add(identity)
+        terminalKey = identity
         let core
         try {
           core = await connect({ env })
         } catch {
-          return refuse(503, 'no-core')
+          return reservation.cancelled ? refuse(409, 'not-typing') : refuse(503, 'no-core')
+        }
+        if (reservation.cancelled) {
+          core.close()
+          return refuse(409, 'not-typing')
         }
         let attached
         try {
@@ -139,10 +157,17 @@ export function createTypingService({ env = process.env, connect = connectCore, 
           attached = await core.attach({ terminal: pane.terminal, cols: pane.cols, rows: pane.rows, history: 0, observe: false })
         } catch (error) {
           core.close()
+          if (reservation.cancelled) return refuse(409, 'not-typing')
           warn(`the typing attach was refused: ${error?.kind ?? error?.message ?? error}`)
           return refuse(409, 'attach-refused')
         }
-          const session = sessionOf({ viewer, pane: { ...pane, key, worker: worker ?? null }, core, channel: attached.channel })
+        if (reservation.cancelled) {
+          core.detach(attached.channel)
+          core.close()
+          return refuse(409, 'not-typing')
+        }
+        let session
+        let ended = false
         // The attach's own output is drained and credited so the core keeps the stream healthy;
         // its bytes are thrown away here (the watch pane already draws them) and never logged. The
         // first paint marks the stream ready, so a batch sent right after taking is not dropped.
@@ -153,17 +178,34 @@ export function createTypingService({ env = process.env, connect = connectCore, 
             ready()
             try { core.credit(attached.channel, bytes.length) } catch { /* going */ }
           },
-          onClose: reason => { ready(); void close(session, reason || 'ended') },
+          onClose: reason => {
+            ended = true
+            ready()
+            if (session) void close(session, reason || 'ended')
+          },
         })
-        await Promise.race([painted, new Promise(resolve => { const timer = setTimeout(resolve, 500); timer.unref?.() })])
-        byPane.set(key, session)
+        let timer
+        await Promise.race([painted, new Promise(resolve => { timer = setTimeout(resolve, 500); timer.unref?.() })])
+        clearTimeout(timer)
+        if (reservation.cancelled || ended) {
+          core.detach(attached.channel)
+          core.close()
+          return refuse(409, 'not-typing')
+        }
+        session = sessionOf({ viewer, pane: { ...pane, key, worker: worker ?? null }, core, channel: attached.channel })
         byId.set(session.id, session)
         byViewer.set(viewer, session)
         armLease(session)
-        await record({ event: 'take', session: session.id, bot, worker: worker ?? null, terminal: pane.terminal, core: pane.core, at: session.at })
-        return ok({ session: session.id, mode: 'typing', bot, worker: worker ?? null, terminal: pane.terminal })
+        // The session now counts as held. Let finally relinquish the pending slot before
+        // waiting for the record, which can share its queue with other sessions' records.
+        return record({ event: 'take', session: session.id, bot, worker: worker ?? null, terminal: pane.terminal, core: pane.core, at: session.at })
+          .then(() => session.closed
+            ? refuse(409, 'not-typing')
+            : ok({ session: session.id, mode: 'typing', bot, worker: worker ?? null, terminal: pane.terminal }))
       } finally {
         pending.delete(key)
+        pendingViewers.delete(viewer)
+        if (terminalKey !== undefined) pendingTerminals.delete(terminalKey)
       }
     },
 
@@ -195,8 +237,11 @@ export function createTypingService({ env = process.env, connect = connectCore, 
     /** The watch stream for a viewer ended (its page went, or a refused batch closed it): that
      * viewer's typing attach goes with it, so a signed-out session leaves nothing behind. */
     async releaseViewer(viewer) {
-      const held = byViewer.get(String(viewer ?? ''))
-      if (!held) return { released: false }
+      const id = String(viewer ?? '')
+      const reservation = pendingViewers.get(id)
+      if (reservation) reservation.cancelled = true
+      const held = byViewer.get(id)
+      if (!held) return { released: Boolean(reservation) }
       await close(held, 'viewer-gone')
       return { released: true }
     },
@@ -212,7 +257,8 @@ export function createTypingService({ env = process.env, connect = connectCore, 
 
     /** The host's own way out: every session let go, nothing else touched. */
     async dispose() {
-      for (const session of [...byId.values()]) await close(session, 'host-stopped')
+      for (const reservation of pendingViewers.values()) reservation.cancelled = true
+      await Promise.all([...byId.values()].map(session => close(session, 'host-stopped')))
       await recordQueue
     },
   }
@@ -232,11 +278,12 @@ export async function routeBody(request, { max = MAX_INPUT_BYTES + 4 * 1024 } = 
 }
 
 /** The routes the service serves, as [path, handler] for one exact Fetch route each. */
-export function typingRoutes(service) {
+export function typingRoutes(service, verifyWindow = () => false) {
   const json = (answer) => answer.body === null
     ? new Response(null, { status: answer.status, headers: { 'cache-control': 'no-store' } })
     : Response.json(answer.body, { status: answer.status, headers: { 'cache-control': 'no-store' } })
   const route = (handle) => async (request) => {
+    if (!verifyWindow(request)) return json({ status: 403, body: { error: 'desktop-only' } })
     const parsed = await routeBody(request)
     if (parsed.error) return json(parsed.error)
     return json(await handle(request, parsed.body))
