@@ -145,7 +145,7 @@ export function install(rt) {
   const loadMcpPlugin = async () => {
     pluginP.p ??= (async () => {
       const loader = ctx.get?.('loader')
-      if (typeof loader?.import !== 'function') throw new Error('This DSH cannot load connectors')
+      if (typeof loader?.import !== 'function') throw refusal('This DSH cannot load connectors')
       const mod = await loader.import(MCP_CLIENT)
       return loader.unwrapExports?.(mod) ?? mod?.default ?? mod
     })()
@@ -340,7 +340,7 @@ export function install(rt) {
     if (pending === undefined || pending.kind !== 'browser') return
     try {
       if (result.error !== null && result.error !== undefined) throw new Error(result.errorDescription ?? result.error)
-      if (result.state !== pending.expectedState) throw new Error('The sign-in answer did not match this attempt (state mismatch). Try again.')
+      if (result.state !== pending.expectedState) throw refusal('The sign-in answer did not match this attempt (state mismatch). Try again.')
       const entry = entryFor(id)
       const tokens = await oauth.exchange(pending.discovery, pending.clientInformation, { code: result.code, codeVerifier: pending.codeVerifier, redirectUri: pending.redirectUri, iss: result.iss ?? undefined })
       await endPending(id)
@@ -401,10 +401,10 @@ export function install(rt) {
         return
       }
       const remote = entry.remote?.url
-      if (remote === undefined) throw new Error('This connector has no server address')
+      if (remote === undefined) throw refusal('This connector has no server address')
       if (insecure(remote)) throw refusal('Connector addresses must start with https://')
       const discovery = await oauth.discover(remote)
-      if (discovery.metadata === undefined) throw new Error('This service does not publish OAuth sign-in metadata')
+      if (discovery.metadata === undefined) throw refusal('This service does not publish OAuth sign-in metadata')
       state.connectors = { ...(state.connectors ?? {}), [id]: { ...state.connectors?.[id], oauth: { authorizationServerUrl: discovery.authorizationServerUrl, resource: discovery.resource, scope: discovery.scope } } }
       await rt.save()
       await startBrowserFlow(id, entry, { discovery })
@@ -652,7 +652,6 @@ export function install(rt) {
   const endpoints = {
     async 'connector-connect'(body) {
       const entry = known(body.id)
-      if (entry.id === 'github' && options === null) throw new Error('No such connector')
       if (entry.auth.kind === 'none') {
         await saveState(entry.id, { connectedAt: Date.now() })
         await sync()
@@ -713,18 +712,18 @@ export function install(rt) {
     async 'connector-sign-in-code'(body) {
       const entry = known(body.id)
       const pending = pendings.get(entry.id)
-      if (pending === undefined || pending.kind !== 'browser') throw new Error('No sign-in is waiting')
+      if (pending === undefined || pending.kind !== 'browser') throw refusal('No sign-in is waiting')
       const input = String(body.input ?? body.code ?? '').trim()
-      if (input === '') throw new Error('Paste the address or the code')
+      if (input === '') throw refusal('Paste the address or the code')
       let code = input, stateParam, iss
       if (/^https?:\/\//i.test(input)) {
         const url = new URL(input)
         code = url.searchParams.get('code') ?? ''
         stateParam = url.searchParams.get('state')
         iss = url.searchParams.get('iss') ?? undefined
-        if (stateParam !== pending.expectedState) throw new Error('This address is not from this sign-in attempt (state mismatch). Copy the whole address again.')
+        if (stateParam !== pending.expectedState) throw refusal('This address is not from this sign-in attempt (state mismatch). Copy the whole address again.')
       }
-      if (code === '') throw new Error('The address has no code')
+      if (code === '') throw refusal('The address has no code')
       await completeBrowser(entry.id, { code, state: pending.expectedState, iss })
       return connectorsView()
     },

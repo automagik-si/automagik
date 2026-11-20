@@ -20,6 +20,9 @@ const MAIL_ADD_REFUSALS = new Set([
   'The password was refused. Use the mailbox app password or authorization code, not the account password.',
   'Could not reach the mail server. Check the server address.',
   'The mail connection closed during verification',
+  'The mail connection is closed',
+  'The SMTP connection closed',
+  'SMTP connection timeout',
 ])
 
 // One reading of a recipient field, by the mail library's own address parser: the grammar the
@@ -556,13 +559,13 @@ export function install(rt, host) {
   async function googleCode(body) {
     const address = String(body.address ?? '').toLowerCase()
     const pending = googlePendings.get(address) ?? [...googlePendings.values()][0]
-    if (pending === undefined) throw new Error('No Google sign-in is waiting')
+    if (pending === undefined) throw refusal('No Google sign-in is waiting')
     const input = String(body.input ?? '').trim()
     const url = /^https?:/i.test(input) ? new URL(input) : undefined
     const code = url ? url.searchParams.get('code') : input
-    if (!code) throw new Error('The address has no code')
+    if (!code) throw refusal('The address has no code')
     const given = url?.searchParams.get('state')
-    if (given !== null && pending.state !== undefined && given !== pending.state) throw new Error('The sign-in answer is not for this attempt')
+    if (given !== null && pending.state !== undefined && given !== pending.state) throw refusal('The sign-in answer is not for this attempt')
     googlePendings.delete(pending.key ?? pending.address)
     pending.listener?.close()
     const client = googleClient()
@@ -580,7 +583,7 @@ export function install(rt, host) {
   async function googleEmail(token) {
     const response = await (rt.config.mail?.fetch ?? fetch)('https://openidconnect.googleapis.com/v1/userinfo', { headers: { Authorization: `Bearer ${token}` } })
     const body = await response.json().catch(() => ({}))
-    if (typeof body.email !== 'string') throw new Error('Google did not say which account this is')
+    if (typeof body.email !== 'string') throw refusal('Google did not say which account this is')
     return body.email.toLowerCase()
   }
 
