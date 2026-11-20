@@ -1,6 +1,6 @@
 import { createPublicKey, verify } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { isRoleId, isRoleVersion } from '../shared/roles.js'
+import { isPackageRoleId, isRoleVersion } from '../shared/roles.js'
 import { refusal } from './refusal.js'
 
 // Rotate in RFC 0011 order: update plugin-lane/keys.json and this copy before switching the signer.
@@ -21,6 +21,8 @@ export const isSha256 = value => typeof value === 'string' && /^[0-9a-f]{64}$/i.
 export const validCapabilities = value => Array.isArray(value) && value.every(capability => ROLE_CAPABILITIES.includes(capability))
   && new Set(value).size === value.length
 export const roleName = value => typeof value === 'string' && value.length >= 1 && value.length <= 60
+export const roleDescription = value => typeof value === 'string' && value.length <= 200
+export const roleToolName = value => typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value)
 export const parseRoleJson = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
 
 function cancel(body) {
@@ -115,13 +117,13 @@ function catalogEntries(raw, release, warn) {
       warn('roles.json: ignoring duplicate role at position %d.', position + 1)
       continue
     }
-    if (!plainObject(entry) || !isRoleId(entry.id) || !isRoleVersion(entry.version) || !roleName(entry.name)
+    if (!plainObject(entry) || !isPackageRoleId(entry.id) || !isRoleVersion(entry.version) || !roleName(entry.name)
       || !roleName(entry.publisher) || typeof entry.official !== 'boolean' || !isSha256(entry.sha256)
       || !Number.isInteger(entry.size) || entry.size < 1 || entry.size > MAX_PACKAGE || !validCapabilities(entry.capabilities)) {
       warn('roles.json: ignoring invalid role at position %d.', position + 1)
       continue
     }
-    const { id, version, name, publisher, capabilities, sha256, size, official } = entry
+    const { id, version, name, publisher, capabilities, sha256, size, official, description, tools } = entry
     const source = `${release}automagik-role-${id}-${version}.tgz`
     if (entry.source !== source) {
       warn('roles.json: ignoring invalid source at position %d.', position + 1)
@@ -130,7 +132,12 @@ function catalogEntries(raw, release, warn) {
     const installable = official && publisher === 'automagik'
     const display = Object.freeze({ id, version, name, publisher, capabilities: Object.freeze(capabilities),
       installable, ...(installable ? {} : { reason: 'community' }) })
-    entries.set(id, { display, sha256: sha256.toLowerCase(), size, source })
+    const details = Object.freeze({
+      version, sha256: sha256.toLowerCase(),
+      ...(roleDescription(description) ? { description } : {}),
+      ...(Array.isArray(tools) && tools.length <= 16 && tools.every(roleToolName) ? { tools: Object.freeze(tools) } : {}),
+    })
+    entries.set(id, { display, details, sha256: details.sha256, size, source })
   }
   return entries
 }
@@ -177,6 +184,7 @@ export function createRoleCatalog({ fetch = globalThis.fetch, keys = ROLE_KEYS, 
   }
   return {
     view: () => canFetch() ? cached.view : READ_ONLY,
+    entries: () => canFetch() ? cached.entries : undefined,
     snapshot,
     async download(entry) {
       try {

@@ -1,4 +1,7 @@
-import { BUILTIN_ROLES, GENIE_ATTACH_REFUSAL, effectiveRoleIds, rolesOn } from '../shared/roles.js'
+import {
+  attachedRoleIds, BUILTIN_ROLES, CHOOSE_NONE_FIRST, detachRoleFirst, effectiveRoleIds,
+  GENIE_ATTACH_REFUSAL, isPackageRoleId, packageAttachment, packageDeclarations, packageRecoveryId, rolesOn,
+} from '../shared/roles.js'
 import { refusal } from './refusal.js'
 import { createRoleCatalog } from './role-catalog.js'
 import { createRolePackages } from './role-package.js'
@@ -21,23 +24,72 @@ export function installRoles(rt, deps = {}) {
   rt.roleCatalogView = catalog.view
   rt.roleCatalog = async () => (await catalog.snapshot()).view
   rt.roleRecordsView = packages.recordsView
+  rt.roleDetailsView = packages.detailsView
   rt.installRole = id => serialize(() => packages.install(id))
   rt.uninstallRole = id => serialize(() => packages.uninstall(id))
-  const commit = async (apply) => {
-    await rt.saveCopy(apply, { afterWrite: () => apply(state) })
+  const commit = async (apply, beforeCommit) => {
+    await rt.saveCopy(apply, { beforeCommit, afterWrite: () => apply(state) })
     rt.reapplyToolMasks?.()
   }
   const editRole = (id, attach, roleId) => serialize(async () => {
     await rt.load()
     const bot = typeof id === 'string' ? rt.own(state.bots, id) : undefined
     if (bot === undefined) throw refusal('No such Bot')
-    if (!rolesOn(state.prefs)) throw refusal('Roles are turned off for this team.')
+    const requireRoles = () => {
+      if (!rolesOn(state.prefs) && (attach || !packageRecoveryId(bot))) {
+        throw refusal('Roles are turned off for this team.')
+      }
+    }
+    requireRoles()
+    packages.requireWriter()
+    const hasSlot = Object.hasOwn(bot, 'roles')
+    const slot = hasSlot ? JSON.stringify(bot.roles) : undefined
+    const checkSlot = () => {
+      packages.requireWriter()
+      if (rt.own(state.bots, id) !== bot || Object.hasOwn(bot, 'roles') !== hasSlot
+        || (hasSlot && JSON.stringify(bot.roles) !== slot)) throw refusal("This Bot's role changed. Try again.")
+      requireRoles()
+    }
     const effective = effectiveRoleIds(bot, state.prefs)
+    let next = []
+    let check = checkSlot
     if (attach) {
-      if (typeof roleId !== 'string' || !Object.hasOwn(BUILTIN_ROLES, roleId)) throw refusal('Unknown role')
-      if (bot.kind !== BUILTIN_ROLES[roleId].kind) throw refusal(GENIE_ATTACH_REFUSAL)
-      if (effective.includes(roleId)) return effective
-    } else if (effective.length === 0) return effective
+      if (typeof roleId !== 'string') throw refusal('Unknown role')
+      const builtIn = Object.hasOwn(BUILTIN_ROLES, roleId) ? BUILTIN_ROLES[roleId] : undefined
+      if (!builtIn && !isPackageRoleId(roleId)) throw refusal('Unknown role')
+      const rawIds = attachedRoleIds(bot)
+      const occupied = rawIds.find(rawId => rawId !== roleId)
+      const pin = packageAttachment(bot)
+      const record = builtIn ? undefined : packages.recordOf(roleId)
+      const detachFirst = rawId => {
+        const declarations = pin?.id === rawId && packageDeclarations(pin, {
+          roleDetails: packages.detailsView(), roleCatalog: catalog.view(),
+        })
+        const name = Object.hasOwn(BUILTIN_ROLES, rawId) ? BUILTIN_ROLES[rawId].name : declarations?.name
+        throw refusal(detachRoleFirst(name ?? rawId))
+      }
+      if (occupied !== undefined) detachFirst(occupied)
+      if (builtIn) {
+        if (bot.kind !== builtIn.kind) throw refusal(GENIE_ATTACH_REFUSAL)
+        if (effective.includes(roleId)) return effective
+        // P1a restores the legacy kind-based role on reattach.
+        next = undefined
+      } else {
+        if (pin?.id === roleId && pin.version === record?.version && bot.roles.length === 1) return [roleId]
+        if (rawIds.length) detachFirst(rawIds[0])
+        if (!packages.hasRecord(roleId)) throw refusal('Unknown role')
+        if (effective.length) throw refusal(CHOOSE_NONE_FIRST)
+        await packages.requireAttachable(roleId, record)
+        check = () => {
+          checkSlot()
+          packages.expectRecord(roleId, true, record)
+          packages.requireOfficial(roleId, record)
+        }
+        check()
+        next = [{ id: roleId, version: record.version, attachedAt: new Date((deps.now ?? Date.now)()).toISOString(), grants: [] }]
+      }
+    } else if ((hasSlot && Array.isArray(bot.roles) && bot.roles.length === 0)
+      || (!hasSlot && bot.kind !== BUILTIN_ROLES.genie.kind)) return effective
 
     await commit((team) => {
       const target = rt.own(team.bots, id)
@@ -45,10 +97,10 @@ export function installRoles(rt, deps = {}) {
         if (team !== state) throw refusal('No such Bot')
         return // A concurrent deletion has its own queued save.
       }
-      // P1a restores the legacy kind-based role when the owner reattaches Genie.
-      if (attach) delete target.roles
-      else target.roles = []
-    })
+      if (next === undefined) delete target.roles
+      else target.roles = next
+    }, check)
+    if (attach && next?.length) return [roleId]
     return effectiveRoleIds(rt.own(state.bots, id), state.prefs)
   })
 

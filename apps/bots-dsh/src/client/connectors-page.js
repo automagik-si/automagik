@@ -14,6 +14,9 @@ import { useMorph } from './motion.js'
 import { reserveWindow } from './open-window.js'
 import { ChevronLeftIcon, ChevronRightIcon, CheckIcon, PlusIcon, SearchIcon } from './icons.js'
 import { hostText, t } from './i18n.js'
+import { rolesOn } from '../shared/roles.js'
+import { rolePackageResult, useRolePackageAction } from './bot-settings.js'
+import { RoleShopCard, RoleShopSection, shopRoles } from './role-shop.js'
 
 const CATEGORIES = [['dev', 'Developer'], ['docs', 'Docs & files'], ['work', 'Work'], ['design', 'Design'], ['data', 'Data'], ['commerce', 'Commerce'], ['search', 'Search']]
 const PREVIEW = 6
@@ -288,11 +291,29 @@ function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
 
 function AppsPage({ roster, actions }) {
   const [query, setQuery] = useState('')
-  const [category, setCategory] = useState('')
+  const [selectedCategory, setCategory] = useState('')
   const [view, setView] = useState(null)
   const [expanded, setExpanded] = useState(null)
   const [error, setError] = useState(null)
   const run = (task, onDone) => Promise.resolve(task).then((value) => { setError(null); onDone?.(value) }, failure => setError(failure?.message ?? String(failure)))
+  const roleOperation = useRolePackageAction(run)
+  const rolesEnabled = rolesOn(roster?.prefs)
+  const requested = useRef(false)
+  useEffect(() => {
+    if (!rolesEnabled || requested.current || !actions.roleCatalog) return
+    requested.current = true
+    void run(actions.roleCatalog())
+  }, [rolesEnabled, actions.roleCatalog])
+  const roleRows = shopRoles(roster)
+  const roleView = typeof view === 'string' && view.startsWith('role:')
+  const shownRole = roleView ? roleRows.find(row => row.key === view) : undefined
+  const resetRoles = (roleView && !shownRole) || (selectedCategory === 'roles' && roleRows.length === 0)
+  const category = resetRoles ? '' : selectedCategory
+  useEffect(() => {
+    if (!resetRoles) return
+    setCategory('')
+    if (roleView) setView(null)
+  }, [resetRoles, roleView])
   const data = roster?.connectors ?? { connectors: [], mail: { accounts: [], google: false } }
   const mail = data.mail ?? { accounts: [] }
   const accounts = mail.accounts ?? []
@@ -309,6 +330,11 @@ function AppsPage({ roster, actions }) {
   const back = () => setView(null)
   const banner = error ? h('div', { className: 'bt-connector-error bt-connector-banner', role: 'alert' }, hostText(error)) : null
 
+  if (shownRole) {
+    return h(Subview, { key: shownRole.key, title: shownRole.name, onBack: back }, banner,
+      h(RoleShopCard, { row: shownRole, roster, actions, operation: roleOperation }),
+      rolePackageResult(roleOperation.result))
+  }
   if (view?.app === 'mail') {
     return h(Subview, { title: t('Mailbox'), onBack: back }, banner,
       h('div', { className: 'bt-set-card bt-connectors-card' },
@@ -343,24 +369,34 @@ function AppsPage({ roster, actions }) {
   const searching = queryText !== ''
   // The official apps have no upstream category: they stay in the All view only.
   const official = category === '' ? OFFICIAL_APPS.filter(app => matches(queryText, app.name, app.about, t(app.about))) : []
+  const foundRoles = category === '' || category === 'roles' ? roleRows.filter(row =>
+    matches(queryText, row.name, row.id, row.listed?.name, row.listed?.publisher, row.record?.publisher,
+      row.record?.version, row.listed?.version, row.declarations?.description,
+      row.builtIn ? t('Built in') : row.listed ? t(row.listed.installable ? 'Official' : 'Community') : t('Installed'))) : []
+  const rolesSection = foundRoles.length ? h(RoleShopSection, {
+    key: 'roles', rows: foundRoles, roster, actions, operation: roleOperation, open: setView,
+  }) : null
   const found = apps.filter(app => (category === '' || app.category === category) && matches(queryText, app.name, app.about ?? ''))
   const toggle = id => setExpanded(current => (current === id ? null : id))
   let body
   if (searching || category !== '') {
-    body = found.length === 0 && official.length === 0
+    body = found.length === 0 && official.length === 0 && foundRoles.length === 0
       ? h('p', { className: 'bt-app-empty' }, t('Nothing matches'))
       : [
         official.length === 0 ? null : h(OfficialSection, { key: 'official', apps: official, roster, actions, expanded, onToggle: toggle }),
+        rolesSection,
         found.length === 0 ? null : h(Grid, { key: 'found', apps: found, actions, open }),
       ]
   } else {
     body = [
       h(OfficialSection, { key: 'official', apps: official, roster, actions, expanded, onToggle: toggle }),
+      rolesSection,
       ...CATEGORIES.map(([id, label]) => h(Section, { key: id, title: t(label), apps: inCategory(id), actions, open, onAll: () => setCategory(id) })),
     ]
   }
   return h('div', { className: 'bt-apps' },
     banner,
+    rolePackageResult(roleOperation.result),
     h('div', { className: 'bt-app-bar' },
       h('label', { className: 'bt-app-search' },
         h(SearchIcon),
@@ -368,7 +404,7 @@ function AppsPage({ roster, actions }) {
       h('button', { type: 'button', className: 'bt-app-pill', onClick: () => setView('custom') }, h(PlusIcon), t('Custom')),
       h(ConnectedSummary, { apps: marks, count, onClick: () => setView('connected') })),
     h('div', { className: 'bt-app-chips', role: 'group', 'aria-label': t('Category') },
-      [['', 'All'], ...CATEGORIES].map(([id, label]) => h('button', { key: id || 'all', type: 'button', 'aria-pressed': category === id, onClick: () => setCategory(id) }, t(label)))),
+      [['', 'All'], ...(roleRows.length ? [['roles', 'Roles']] : []), ...CATEGORIES].map(([id, label]) => h('button', { key: id || 'all', type: 'button', 'aria-pressed': category === id, onClick: () => setCategory(id) }, t(label)))),
     body)
 }
 

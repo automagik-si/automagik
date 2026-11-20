@@ -328,3 +328,37 @@ test('a mixed roles update is rejected before the ordinary description update ru
   assert.equal(accepted.ok, true)
   assert.equal((await disk()).bots.ordinary.role, 'Changed')
 })
+
+test('package readers recognize own pins and unambiguous recovery IDs without widening P1a', async () => {
+  const { packageAttachment, packageRecoveryId, roleOutletVisible, roleTagOf } = await import('../src/shared/roles.js')
+  const pin = { ...ATTACHMENT, id: 'constructor' }
+  const record = { kind: 'genie', roles: [pin] }
+  assert.deepEqual(packageAttachment(record), { id: pin.id, version: pin.version, attachedAt: pin.attachedAt })
+  assert.equal(packageRecoveryId(record), 'constructor')
+  assert.equal(roleTagOf(record), 'constructor')
+  assert.deepEqual(effectiveRoleIds(record), [])
+  assert.equal(roleOutletVisible('botChildren', 'genie-wishes', record, { prefs: {} }), false)
+  assert.equal(roleOutletVisible('suggestions', 'genie', record, { prefs: { roles: false } }), true)
+  assert.equal(roleTagOf(record, { roles: false }), undefined)
+  assert.equal(packageAttachment({ roles: [Object.create(pin)] }), undefined)
+  assert.equal(packageAttachment({ roles: [{ id: 'constructor' }] }), undefined)
+  assert.equal(packageRecoveryId({ roles: [{ id: 'constructor' }] }), 'constructor')
+  for (const invalid of [{}, { roles: [] }, { roles: [ATTACHMENT] }, { roles: [pin, ATTACHMENT] }, { roles: [pin, pin] }, Object.create(record)]) {
+    assert.equal(packageRecoveryId(invalid), undefined)
+  }
+})
+
+test('the rollback switch restores Genie masks around a package pin without rewriting it', async t => {
+  const { rt, call, disk, assemble } = await fixture(t)
+  const pin = { ...ATTACHMENT, id: 'fixture-role' }
+  rt.state.bots.first.roles = [pin]
+  await rt.save()
+  const chat = await rt.resolveAgent('first')
+  assert.equal((await assemble(chat)).includes(WISH), false)
+  assert.equal((await call('set-prefs', { roles: false })).ok, true)
+  assert.equal((await assemble(chat)).includes(WISH), true)
+  assert.deepEqual((await disk()).bots.first.roles, [pin])
+  assert.equal((await call('set-prefs', { roles: true })).ok, true)
+  assert.equal((await assemble(chat)).includes(WISH), false)
+  assert.deepEqual((await disk()).bots.first.roles, [pin])
+})

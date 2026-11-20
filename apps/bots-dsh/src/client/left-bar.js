@@ -146,7 +146,7 @@ export function teamOf({ roster = {}, order, status, marked = {}, current, now =
     // A Bot's channels come from the one plugin that serves it (extend.js's botChannels): with
     // a source the bar draws them under its row, and while there is none the team's own
     // botChildren rows stay exactly as today. Never both.
-    const roleTag = roleTagOf(roster.byId?.[item.id] ?? item, roster.prefs)
+    const roleTag = roleTagOf(roster.byId?.[item.id] ?? item, roster.prefs, roster, t)
     return { ...item, ...(roleTag ? { roleTag } : {}), channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
   }
   const agent = (item) => {

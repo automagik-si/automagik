@@ -201,3 +201,22 @@ test('uses per-outcome TTLs, shares in-flight work and skips fetching without th
   assert.equal((await f.catalog.snapshot()).view.available, true)
   assert.equal(f.calls.length, 4)
 })
+
+test('projects bounded declarations separately and drops Genie only from new catalog admission', async () => {
+  const f = fixture()
+  const declared = entryOf(undefined, { id: 'constructor', description: 'x'.repeat(200), tools: ['sample_tool'] })
+  const oversized = entryOf(undefined, { id: 'oversized', description: 'x'.repeat(201), tools: Array(17).fill('tool') })
+  const malformed = entryOf(undefined, { id: 'malformed', description: false, tools: ['UPPER', 1] })
+  f.setIndex(first.index([declared, oversized, malformed, entry, entryOf(undefined, { id: 'genie' })]))
+  const { view } = await f.catalog.snapshot()
+  assert.deepEqual(view.roles.map(role => role.id), ['constructor', 'oversized', 'malformed', entry.id])
+  assert.equal(f.warnings.length, 1)
+  assert.deepEqual(f.catalog.entries().get('constructor').details, {
+    version: declared.version, sha256: declared.sha256, description: declared.description, tools: ['sample_tool'],
+  })
+  for (const raw of [oversized, malformed, entry]) {
+    assert.deepEqual(f.catalog.entries().get(raw.id).details, { version: raw.version, sha256: raw.sha256 })
+  }
+  assert.equal(Object.hasOwn(view.roles[0], 'description'), false)
+  assert.equal(Object.hasOwn(view.roles[0], 'tools'), false)
+})

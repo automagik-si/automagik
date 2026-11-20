@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fsPromises from 'node:fs/promises'
 import { dirname, isAbsolute, join, posix } from 'node:path'
-import { attachedRoleIds, isRoleId, isRoleVersion, rolesOn } from '../shared/roles.js'
-import { isSha256, parseRoleJson, plainObject, roleName, validCapabilities } from './role-catalog.js'
+import { attachedRoleIds, isPackageRoleId, isRoleId, isRoleVersion, ROLE_SOURCE_UNCONFIRMED, rolesOn } from '../shared/roles.js'
+import { isSha256, parseRoleJson, plainObject, roleDescription, roleName, roleToolName, validCapabilities } from './role-catalog.js'
 import { MAX_ROLE_BYTES, MAX_ROLE_FILES, MAX_ROLE_FILE_SIZE, readRoleTar, roleFilePath } from './role-tar.js'
 import { refusal } from './refusal.js'
 
@@ -39,7 +39,7 @@ function validateManifest(files, entry) {
     throw invalidManifest('prompt file')
   }
   if (!Array.isArray(tools) || tools.length > 16 || !tools.every(tool => plainObject(tool)
-    && typeof tool.name === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(tool.name)
+    && roleToolName(tool.name)
     && typeof tool.description === 'string' && tool.description.length >= 1 && tool.description.length <= 1024
     && plainObject(tool.parameters)) || new Set(tools.map(tool => tool.name)).size !== tools.length) {
     throw invalidManifest('tools')
@@ -51,7 +51,13 @@ function validateManifest(files, entry) {
   if (requires !== undefined && (!Array.isArray(requires) || !requires.every(item => typeof item === 'string'))) throw invalidManifest('requires')
   if (requires?.length) throw refusal('Required role features are not supported yet.')
   if (description !== undefined && typeof description !== 'string') throw invalidManifest('description')
-  return Object.keys(manifest).filter(key => !MANIFEST_FIELDS.has(key))
+  return {
+    warnings: Object.keys(manifest).filter(key => !MANIFEST_FIELDS.has(key)),
+    declarations: {
+      name, ...(roleDescription(description) ? { description } : {}),
+      tools: tools.map(tool => tool.name), capabilities, verified: true,
+    },
+  }
 }
 
 const ownRecord = (map, id) => map !== null && typeof map === 'object' && Object.hasOwn(map, id)
@@ -146,8 +152,11 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
   // The install record pins the compressed archive. Keep verified file digests for this
   // host's lazy checks without changing the on-disk record or keeping an archive in memory.
   const fingerprints = new WeakMap()
+  // Declarations here also attest that this exact record passed official install admission.
+  const verified = new WeakMap()
   const warn = (...args) => rt.warn?.(...args)
-  const recordOf = id => ownRecord(state.roles, id) ? state.roles[id] : undefined
+  const hasRecord = id => Boolean(ownRecord(state.roles, id))
+  const recordOf = id => hasRecord(id) ? state.roles[id] : undefined
   const expectRecord = (id, hadRecord, record) => {
     if (Boolean(ownRecord(state.roles, id)) !== hadRecord || !Object.is(recordOf(id), record)) {
       throw refusal('The role install record changed. Try again.')
@@ -163,11 +172,52 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
       throw refusal('Detach this role from every Bot before uninstalling it.')
     }
   }
+  const attachable = (id, record, entry) => isPackageRoleId(id) && (verified.has(record)
+    || (entry?.display.installable === true && entry.display.version === record.version && entry.sha256 === record.sha256.toLowerCase()))
+
+  function requireOfficial(id, record) {
+    if (!attachable(id, record, catalog.entries()?.get(id))) throw refusal(ROLE_SOURCE_UNCONFIRMED)
+  }
+
+  async function requireAttachable(id, record) {
+    const status = await statusOf(id, record)
+    if (status === 'broken') throw refusal('The role install is broken. Uninstall it first.')
+    if (status !== 'ok') throw refusal('The role install is damaged. Uninstall it first.')
+    requireOfficial(id, record)
+  }
+
+  function detailsView() {
+    const entries = catalog.entries()
+    const details = new Map([...(entries ?? [])].map(([id, entry]) => [id, { catalog: entry.details }]))
+    for (const [id, record] of Object.entries(state.roles ?? {})) {
+      if (!validRecord(state.roles, id, record)) continue
+      details.set(id, {
+        ...details.get(id),
+        installed: {
+          version: record.version, sha256: record.sha256.toLowerCase(),
+          attachable: attachable(id, record, entries?.get(id)),
+          ...verified.get(record),
+        },
+      })
+    }
+    return Object.fromEntries(details)
+  }
 
   async function statusOf(id, record) {
     if (!validRecord(state.roles, id, record)) return 'damaged'
     const cached = statuses.get(id)
     if (cached?.record === record) return cached.status
+    const pending = { record, status: inspectStatus(id, record).then(status => {
+      const current = statuses.get(id)
+      if (current !== pending && current?.record === record) return current.status
+      if (recordOf(id) === record && current === pending) pending.status = status
+      return status
+    }) }
+    statuses.set(id, pending)
+    return pending.status
+  }
+
+  async function inspectStatus(id, record) {
     const paths = rolePaths(rt.home, id, record.version)
     const expected = fingerprints.get(record)
     let status
@@ -186,15 +236,13 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
           && prompt && prompt.isFile() && /\.(?:md|txt)$/.test(manifest.prompt) && prompt.size <= 16 * 1024) status = 'ok'
       }
     } catch { /* An unreadable or unsafe package is damaged. */ }
-    status ??= 'damaged'
-    if (recordOf(id) === record && statuses.get(id) === cached) statuses.set(id, { record, status })
-    return statuses.get(id)?.record === record ? statuses.get(id).status : status
+    return status ?? 'damaged'
   }
 
   async function install(id) {
     requireWriter()
     if (!rolesOn(state.prefs)) throw refusal('Roles are turned off for this team.')
-    if (!isRoleId(id)) throw refusal('Unknown role')
+    if (!isPackageRoleId(id)) throw refusal('Unknown role')
     const snapshot = await catalog.snapshot()
     requireWriter()
     if (!snapshot.view.available) throw refusal('The role catalog is unavailable.')
@@ -215,7 +263,12 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     const bytes = await catalog.download(entry)
     if (bytes.length !== entry.size || digest(bytes) !== sha256) throw refusal('The role download does not match the catalog size or checksum.')
     const files = readRoleTar(bytes)
-    const warnings = validateManifest(files, entry.display)
+    const { warnings, declarations } = validateManifest(files, entry.display)
+    const expected = new Map([...files].map(([path, data]) => [path, { length: data.length, sha256: digest(data) }]))
+    const remember = record => {
+      verified.set(record, declarations)
+      fingerprints.set(record, expected)
+    }
     const result = { id, version, warnings }
     const admit = () => {
       requireWriter()
@@ -235,7 +288,10 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
       admit()
       if (hadRecord) {
         statuses.set(id, { record: previous, status: equal ? 'ok' : current && !current[3] ? 'broken' : 'damaged' })
-        if (equal) return result
+        if (equal) {
+          remember(previous)
+          return result
+        }
         throw refusal('The role install is damaged. Uninstall it first.')
       }
       if (!equal) throw refusal(`A folder is in the way: ${verDir}`)
@@ -248,7 +304,6 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     let parents = current
     let refusedBeforeCommit = false
     const record = { id, version, publisher, sha256, installedAt: new Date(now()).toISOString(), source }
-    fingerprints.set(record, new Map([...files].map(([path, bytes]) => [path, { length: bytes.length, sha256: digest(bytes) }])))
     const add = team => { team.roles = { ...team.roles, [id]: record } }
     try {
       if (!published) {
@@ -286,7 +341,7 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
         beforeCommit: () => {
           try { admit() } catch (error) { refusedBeforeCommit = true; throw error }
         },
-        afterWrite: () => add(state),
+        afterWrite: () => { add(state); remember(record) },
       })
       return result
     } catch (error) {
@@ -346,7 +401,12 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     try {
       await rt.saveCopy(remove, {
         beforeCommit: admit,
-        afterWrite: () => { remove(state); committed = true },
+        afterWrite: () => {
+          remove(state)
+          verified.delete(record)
+          fingerprints.delete(record)
+          committed = true
+        },
       })
     } catch (error) {
       if (!committed || !paths) throw error
@@ -388,5 +448,5 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     }
   }
 
-  return { install, uninstall, recordsView }
+  return { install, uninstall, recordsView, detailsView, hasRecord, recordOf, expectRecord, requireWriter, requireAttachable, requireOfficial }
 }
