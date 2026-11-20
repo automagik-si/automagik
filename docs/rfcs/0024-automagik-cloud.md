@@ -1300,10 +1300,15 @@ machines.**
   exists.
 - **The check**: in bots-dsh's host, after acp-dsh reports a signed-in read of a Bot's vendor, and
   at every fresh read after it (a start, the card, a new Bot session), never mid-turn:
-  1. evidence not reservable: allowed;
+  1. a read that names no subscription person (a key, a token, another provider, an unreadable
+     account): allowed. A subscription read that is only *not reservable* (Claude without `orgId`,
+     Codex of an unknown class) is not allowed here: it is ambiguous and goes to step 2 (clarified
+     2026-11-20 with R0, to match (m));
   2. the `exact` file, else any `<vendor>-*.json` whose `loose` matches and whose evidence is
-     ambiguous against this read: found for another instance means **refused**; for this
-     instance, allowed and shown as "reserved for this instance";
+     ambiguous against this read: found for another instance means **refused**, even when the same
+     email also has a reservation for this instance; for this instance only, allowed and shown as
+     "reserved for this instance". A complete read whose `exact` differs (another `orgId` or class)
+     is another account, allowed even when `loose` matches;
   3. refused, in an isolated Bot home: the app signs that vendor out of the Bot's own home (never
      the terminal's sign-in) and the card shows "Reserved for {label} on another instance. Sign in
      with another account, or ask its owner to make it shared." In consent mode (the Bot uses the
