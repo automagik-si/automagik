@@ -2,7 +2,7 @@
 
 // Runs against the real herdr-core and an open Herdr app window:
 //
-//	go test -tags hc ./internal/host/ -run Live
+//	AUTOMAGIK_HERDR_APP_CHECK=1 go test -tags hc ./internal/host/ -run Live
 //
 // It pins what ADR 0010 rests on and the unit tests can only script: that the
 // app adopts a terminal by its labels, and how hc reports the two endings a
@@ -11,6 +11,7 @@ package host
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -19,6 +20,10 @@ import (
 
 func liveHost(t *testing.T) *hcHost {
 	t.Helper()
+	// The opt-in every herdr test needs before it runs the real herdr-app (herdr/AGENTS.md).
+	if os.Getenv("AUTOMAGIK_HERDR_APP_CHECK") != "1" {
+		t.Skip("runs the real herdr-app and herdr-core: set AUTOMAGIK_HERDR_APP_CHECK=1, with a Herdr app window open")
+	}
 	if exec.Command("herdr-app", "status").Run() != nil {
 		t.Skip("needs an open Herdr app window")
 	}

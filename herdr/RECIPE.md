@@ -70,11 +70,11 @@ Every mod brings its own `RECIPE.md`, `LICENSE` and keys.
 
 ## Done when
 
-- `herdr-app check mods/am-mods` passes.
+- `herdr-app check mods/am-mods` passes, run as the contributor gate in a scratch `HERDR_APP_HOME` on a machine with no live Herdr (the check runs the mod's `init()` for real: `AGENTS.md`).
 - `node scripts/catalog.mjs` writes an index whose first entry is this pack, whose `modNames` is
   exactly the folders under `mods/`, and with no mod name claimed twice; `--check` exits 0 on that
   index and 1 when any entry drifted (never for its age or head commit).
 - `HERDR_APP_HOME=<temp> sh install.sh --yes` installs every mod, adds only free keys, writes the
-  catalog config and prints `check passed` for each mod.
+  catalog config and prints `check passed` for each mod. Run it, too, only on a machine with no live Herdr: the installer runs `herdr-app check` on each mod.
 - In the app: `⌘⇧M` opens the table; a mod installed from our catalog shows its repo and stars;
   `d` reports equal or differing file counts; a switch moves the folder to `mods-disabled/`.
