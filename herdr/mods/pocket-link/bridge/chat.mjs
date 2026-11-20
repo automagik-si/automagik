@@ -20,6 +20,10 @@
 // RFC 0036 adds memory.read, memory.edit, memory.add, schedule.list, schedule.pause,
 // schedule.resume and schedule.rename on channel 0. They need a grant opened at hello
 // for this connection's opted-in methods. Their replies are live-only.
+// RFC 0033 adds image upload, send with uploads and thumbnail reads on opted-in DSH watches.
+// The phone asks for attachments at hello and gets live-only replies. Row frames carry metadata;
+// a queued thumbnail is checked again when its write comes up. Cancel has its own request slot.
+// The phone needs a timeout of at least 75 s for chat.attachFinish and 30 s for the other calls.
 
 /** Frame kinds, as herdr-core's. */
 export const DATA = 0
@@ -47,6 +51,14 @@ export const MAX_QUEUED = 2 * 1024 * 1024
 export const MAX_ENGINES = 8
 
 export const METHODS = ['chat.list', 'chat.subscribe', 'chat.backfill', 'chat.send', 'chat.sendHeld', 'chat.cancelHeld', 'chat.answer', 'chat.interrupt']
+const ATTACH = {
+  'chat.attach': 'uploadBegin', 'chat.attachChunk': 'uploadChunk', 'chat.attachFinish': 'uploadFinish',
+  'chat.attachCancel': 'uploadCancel', 'chat.attachmentRead': 'attachmentRead',
+}
+export const ATTACH_METHODS = Object.keys(ATTACH)
+const attachmentRequest = (m) => typeof m?.method === 'string' && (Object.hasOwn(ATTACH, m.method)
+  || (m.method === 'chat.send' && m.params && Object.hasOwn(m.params, 'uploads')))
+export const phoneId = (id) => typeof id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(id)
 export const MEMORY_METHODS = ['memory.read', 'memory.edit', 'memory.add']
 export const SCHEDULE_METHODS = ['schedule.list', 'schedule.pause', 'schedule.resume', 'schedule.rename']
 export const MANAGE_METHODS = [...MEMORY_METHODS, ...SCHEDULE_METHODS]
@@ -55,9 +67,9 @@ export const memoryRefused = (reason) => ({ ok: false, state: 'refused', reason 
 /** Queue writes in wire order, checking whether a chunk can still go when its turn comes. */
 export function chatWriter({ send, isClosed, isRevoked, onFail }) {
   let writing = Promise.resolve()
-  const write = (bytes, { liveOnly = false } = {}) => (writing = writing.then(() => {
+  const write = (bytes, { liveOnly = false, valid, fallback } = {}) => (writing = writing.then(() => {
     if (isRevoked() || (liveOnly && isClosed())) return
-    return send(bytes)
+    return send(valid && !valid() ? fallback : bytes)
   }).catch(onFail))
   write.done = () => writing
   return write
@@ -95,10 +107,12 @@ export function page(rows) {
 }
 
 const errorOf = (id, kind, message = kind) => ({ jsonrpc: '2.0', id, error: { code: -32000, message, data: { kind } } })
+const resultOf = (id, result) => ({ jsonrpc: '2.0', id, result })
+const replyFrame = (m) => frame(0, DATA, Buffer.from(JSON.stringify(m)))
 
 /**
  * One phone connection on the chat route.
- * @param {{ engine: any, write(bytes: Buffer, opts?: {liveOnly?: boolean}): (Promise<void> | void), end(reason: string): void, log?: (l: string) => void,
+ * @param {{ engine: any, write(bytes: Buffer, opts?: {liveOnly?: boolean, valid?: () => boolean, fallback?: Buffer}): (Promise<void> | void), end(reason: string): void, log?: (l: string) => void,
  *   device?: string, window?: number, maxQueued?: number, maxUnsent?: number }} options
  *   device: the paired key guard.mjs admitted (stable across reconnects): message ids are kept under it
  *   write: bytes to the phone, in order; a promise that settles once they are taken counts them
@@ -112,6 +126,8 @@ export class ChatConnection {
     this.length = 0
     this.unsent = 0
     this.inFlight = 0
+    this.attachmentInFlight = 0
+    this.cancelInFlight = false
     this.framed = false
     this.negotiating = false
     this.closed = false
@@ -132,6 +148,7 @@ export class ChatConnection {
     const p = this.sendBytes(bytes, opts)
     if (p && typeof p.then === 'function') p.then(done, done)
     else done()
+    return p
   }
 
   /** The first `n` bytes read and not yet taken, as one buffer (joins only those chunks). */
@@ -198,6 +215,10 @@ export class ChatConnection {
     const answer = (manage) => {
       if (this.closed) return
       if (manage?.length) result.manage = manage
+      if (m.params.attachments === 1) {
+        result.attachments = this.engine.attachHello?.(this.client) ?? { version: 1, unavailable: 'none' }
+        if (!result.attachments.unavailable) result.methods = [...METHODS, ...ATTACH_METHODS]
+      }
       this.write(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n'))
       this.framed = true
     }
@@ -224,6 +245,7 @@ export class ChatConnection {
       if (kind !== DATA) return
       let m
       try { m = JSON.parse(payload.toString('utf8')) } catch { return this.close('bad request') }
+      if (attachmentRequest(m)) return this.onAttachment(m)
       const memory = typeof m?.method === 'string' && m.method.startsWith('memory.')
       const schedule = typeof m?.method === 'string' && m.method.startsWith('schedule.')
       const liveOnly = memory || schedule
@@ -247,7 +269,61 @@ export class ChatConnection {
     else if (kind === CLOSE) this.unsubscribe(channel, { answer: true })
   }
 
-  reply(m, opts) { if (!this.closed) this.write(frame(0, DATA, Buffer.from(JSON.stringify(m))), opts) }
+  reply(m, opts) { if (!this.closed) return this.write(replyFrame(m), opts) }
+
+  onAttachment(m) {
+    const { id, method, params } = m
+    const opts = { liveOnly: true }
+    const refuse = (reason) => resultOf(id, memoryRefused(reason))
+    if (!(Number.isInteger(id) || (typeof id === 'string' && id.length <= 64))) {
+      this.reply(errorOf(null, 'invalid_params'), opts)
+      return
+    }
+    if (params && Object.hasOwn(params, 'name')) { this.reply(refuse('invalid'), opts); return }
+    const cancelling = method === 'chat.attachCancel'
+    if (cancelling ? this.cancelInFlight : this.inFlight >= MAX_IN_FLIGHT || this.attachmentInFlight >= 2) {
+      this.reply(refuse('busy'), opts)
+      return
+    }
+    if (cancelling) this.cancelInFlight = true
+    else this.attachmentInFlight++
+    this.inFlight++
+    const finish = () => {
+      if (this.closed) return
+      if (cancelling) this.cancelInFlight = false
+      else this.attachmentInFlight--
+    }
+    const sub = this.subs.get(this.byTerminal.get(params?.terminal))
+    // The general request limit counts until a reply is queued. The attachment slots
+    // also cover replies waiting for the phone writer.
+    const reply = (answer) => {
+      this.inFlight--
+      return this.reply(answer, opts)
+    }
+    this.requestAttachment(method, params ?? {}).then((result) => {
+      if (method === 'chat.attachmentRead' && result?.ok === true && sub) {
+        opts.valid = () => this.subs.get(this.byTerminal.get(sub.terminal)) === sub && sub.handle.attachmentLive?.() === true
+        opts.fallback = replyFrame(refuse('not-watching'))
+      }
+      return reply(resultOf(id, result))
+    }, () => {
+      this.log('chat: attachment request failed')
+      return reply(refuse('failed'))
+    }).then(finish, finish)
+  }
+
+  async requestAttachment(method, p) {
+    if (!this.engine.attachOffer?.(this.client)) return memoryRefused('read-only')
+    const terminal = typeof p.terminal === 'string' && p.terminal.length <= 128 ? p.terminal : null
+    if (!terminal) return memoryRefused('invalid')
+    if (!terminal.startsWith('dsh:')) return memoryRefused('unsupported')
+    if (method !== 'chat.send') return this.engine[ATTACH[method]](this.client, terminal, p)
+    const { id, uploads, text = '' } = p
+    if (!phoneId(id) || !Array.isArray(uploads) || uploads.length < 1 || uploads.length > 4
+      || !uploads.every(phoneId) || new Set(uploads).size !== uploads.length || typeof text !== 'string') return memoryRefused('invalid')
+    if (Buffer.byteLength(text) > SEND_TEXT_MAX) return { ...memoryRefused('too-long'), id }
+    return this.engine.send(this.client, terminal, { text, id, uploads })
+  }
 
   async request(m) {
     const id = m?.id ?? null
@@ -334,6 +410,11 @@ export class ChatConnection {
   event(channel, e) {
     const sub = this.subs.get(channel)
     if (!sub || this.closed) return
+    if (e.type === 'gone' && sub.handle.attachments) {
+      // Give a reconnect a new watch, while letting the old channel deliver its queued events.
+      sub.gone = true
+      this.byTerminal.delete(sub.terminal)
+    }
     const out = e.type === 'rows' || e.type === 'screen' ? { ...e, rows: e.rows.map(cutRow) } : e
     const bytes = Buffer.from(JSON.stringify(out) + '\n')
     sub.queue.push(bytes)
@@ -352,13 +433,14 @@ export class ChatConnection {
       sub.credit -= bytes.length
       this.write(frame(channel, DATA, bytes))
     }
+    if (sub?.gone && !sub.queue.length) this.unsubscribe(channel)
   }
 
   unsubscribe(channel, { answer = false, reason } = {}) {
     const sub = this.subs.get(channel)
     if (!sub) return
     this.subs.delete(channel)
-    this.byTerminal.delete(sub.terminal)
+    if (this.byTerminal.get(sub.terminal) === channel) this.byTerminal.delete(sub.terminal)
     sub.handle?.close()
     if (answer && !this.closed) this.write(frame(channel, CLOSE, reason ? Buffer.from(JSON.stringify({ reason })) : Buffer.alloc(0)))
   }
@@ -368,6 +450,8 @@ export class ChatConnection {
     if (this.closed) return
     this.client.closed = true
     this.closed = true
+    this.attachmentInFlight = 0
+    this.cancelInFlight = false
     this.chunks = []
     this.length = 0
     try {
