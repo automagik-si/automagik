@@ -32,6 +32,25 @@ export function restartAtProblem(value) {
   return Number.isInteger(value) && value > 0
     ? null : `restartAt ${JSON.stringify(value)} isn't a positive whole number of tokens`;
 }
+
+/** A daily wake is a two-digit time on the machine that owns the roster. */
+export function wakeProblem(value) {
+  return typeof value === "string" && /^daily@(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)
+    ? null : `wake ${JSON.stringify(value)} isn't daily@HH:MM`;
+}
+
+export function wakeCron(value) {
+  if (wakeProblem(value)) return null;
+  const [hour, minute] = value.slice(6).split(":");
+  return `${Number(minute)} ${Number(hour)} * * *`;
+}
+
+/** FNV-1a over the project key's UTF-8 bytes keeps identical bot ids in clones apart. */
+export function wakeAutomationName(botId, projectKey) {
+  const bytes = encodeURIComponent(projectKey).replace(/%([0-9A-F]{2})/g,
+    (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+  return `wake-${botId}-${fnv1a(bytes).toString(16).padStart(8, "0")}`;
+}
 /**
  * A bot's rank (A16): a closed set, for the pane's `role=` label the event meter reads. The
  * free-text `role` stays for the briefing. Optional. `main` is not a rank: role=main is the
@@ -253,6 +272,13 @@ export function parseBots(text) {
     if (bot.restartAt !== undefined && restartWhy) {
       warnings.push(`${where}: ${restartWhy}; ignored`);
       delete bot.restartAt;
+    }
+    if ("wake" in bot) {
+      const why = wakeProblem(bot.wake);
+      if (why) {
+        warnings.push(`${where}: ${why}; ignored`);
+        delete bot.wake;
+      }
     }
     // #1413: a bot's own Claude Code permission mode. Kept as text so `show` can report what was
     // written; a value Claude Code doesn't accept, or one on another agent, is dropped with the
@@ -1000,6 +1026,7 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   // #1556: the context threshold a seat restarts at. A front end that doesn't edit it keeps the
   // stored one; one that names it empty (--no-restart-at) clears it.
   if ("restartAt" in bot && (bot.restartAt === undefined || bot.restartAt === null || bot.restartAt === "")) delete merged.restartAt;
+  if ("wake" in bot && (bot.wake === undefined || bot.wake === null || bot.wake === "")) delete merged.wake;
   if (("crossMembers" in entry || "members" in entry) && !bot.crossMembers) {
     delete merged.crossMembers;
     delete merged.members;
