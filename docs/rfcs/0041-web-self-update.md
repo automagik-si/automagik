@@ -11,9 +11,11 @@
 ## Summary
 
 A web instance (a DSH profile served by a service: a system unit on a plain host, a container in
-Arca) has no update path inside the app today: each update is done by hand — download the release
-plugins, check them against `PLUGINS.SHA256SUMS`, install them into the profile, restart the service,
-check it came back. This RFC designs that path inside the app, in the shape the owner approved
+Arca) has no update path inside the app today for the way it is installed: the sidebar's own update
+action covers only an instance installed from the registry or a git tag
+(`apps/bots-dsh/src/host/update.js:203`), and a web instance installed from release tarballs is
+updated by hand — download the release plugins, check them against `PLUGINS.SHA256SUMS`, install them
+into the profile, restart the service, check it came back. This RFC designs that path inside the app, in the shape the owner approved
 (#1540): a nod at the bottom of the left menu when a newer version exists; a full-screen modal that
 says what changes in plain words; then the steps live — download, check the signature, install beside
 the current version, restart, health check; a success screen; and an automatic rollback to the
@@ -40,8 +42,7 @@ The updater reads **only** the signed lane pointer, never the releases list:
 3. **The update set is every Automagik plugin the profile has, at one version.** From the verified
    pointer the updater takes, for each lane plugin the profile has installed (acp, bots, locale-pt-br,
    vault, welcome; `scripts/lane.ts:91`), its `version`, `url`, `integrity` (sha512), `sha256`, `size`
-   and `engines.dsh`. One release for the whole set, as the desktop takes it
-   (`apps/desktop/src/lane.js:52`) and a server image requires it (`server/profile-state.mjs:6`,
+   and `engines.dsh`. One release for the whole set, as a server image requires it (`server/profile-state.mjs:6`,
    `:24-26`); the owner asked to update "o automagik".
 4. It downloads each tarball from GitHub only, checks the **sha256**, the size and the `integrity`
    before unpacking, and refuses anything that does not match.
@@ -68,9 +69,12 @@ with it (`server/entrypoint.mjs:158-159`). So the **supervisor is the process th
 - **Plain host:** a small wrapper the unit's `ExecStart` runs once the owner switches it on
   (documented in `docs/upgrade.md`, a one-time host change). It starts DSH as its child and restarts
   that child itself, so an update never calls `systemctl` or `sudo`. It runs from its own copy under
-  the version store, refreshed only after a healthy run, so an update never replaces the running
-  supervisor and a broken new one is never started. Its code ships in the Bots plugin under an
-  already shipped path (`src/host/`), so adding it does not change the package's install fields.
+  the version store, so an update never replaces the running supervisor. The copy is refreshed only
+  after a healthy run, and only when the new code passes a self-check run (it loads every module and
+  exits); the previous copy is kept beside it, and the few fixed lines the unit's `ExecStart` runs start
+  the current copy and fall back to the kept one when the current one does not start. Its code ships in
+  the Bots plugin under an already shipped path (`src/host/`), so adding it does not change the
+  package's install fields.
 - **Arca (a server image):** the supervisor is the image's own entrypoint (`server/entrypoint.mjs`),
   which already starts DSH and prepares the profile before it (`:117`, `:134`). Arca keeps doing what
   the owner chose (Q2): it restarts the container. The entrypoint records the pending step in the
@@ -88,22 +92,41 @@ The version store lives **beside** the profile, never in it: `$DSH_HOME/update/<
 `state.json`, `current.json` and `versions/<version>/`. The image's follow copies and renames the whole
 profile directory (`server/profile-follow.mjs:144-174`), which would carry or drop a store inside it.
 
-- `versions/<version>/` keeps exactly what the installer owns for that version: the profile's
-  Automagik plugin pins (the `@automagik/*` entries of the profile's `package.json`) and its
-  `pnpm-lock.yaml`. The dependencies themselves stay in the profile's pnpm store, so a rollback
-  reinstalls offline from the kept lockfile (`dsh plugin install --offline --frozen-lockfile`) and never
-  re-downloads.
-- The install is staged: the new set goes into a staged copy of the profile through DSH
-  (`dsh plugin add file:<tgz>` with the verified tarballs), and the live profile is switched by rename
-  only once that install has converged, the same staging-and-rename the image's follow uses
-  (`server/profile-follow.mjs:144-174`) and the same never-half-updated rule as the host upgrade's
-  atomic switch (`docs/upgrade.md:132-136`). The live profile is never edited in place.
+- **Only installer-owned files move.** The installer owns, in the profile: `node_modules/`, the
+  `pnpm-lock.yaml`, the local archives that lockfile names (`vendor/*.tgz` on an image host), and in
+  `package.json` only the entries of the selected lane plugins (`@automagik/acp-dsh`, `bots-dsh`,
+  `locale-pt-br-dsh`, `vault-dsh`, `welcome-dsh` — never every `@automagik/*` name, which other
+  publishers' plugins also use). Everything else in the profile — settings, secrets, model keys, other
+  plugins' entries — belongs to the person and is never copied, moved or written by an update or a
+  rollback.
+- **The install is staged on those files alone.** A staging profile beside the live one gets a copy of
+  `package.json` and the lockfile (and the archives the lockfile names) — no settings, no secrets — and
+  the new set is installed into it through DSH (`dsh plugin add file:<tgz>` with the verified tarballs),
+  under a staging `DSH_HOME` on the same pnpm store, as the image's follow stages its install
+  (`server/profile-follow.mjs:144-174`). The live profile is not touched while it runs.
+- **The switch happens with DSH stopped, and only if nothing changed meanwhile.** The supervisor
+  stops the DSH child, checks that the live `package.json` and lockfile are byte-equal to what was
+  staged from (if the person changed a plugin meanwhile, the switch is refused and the pre-switch
+  failure path below runs), then: moves the live `node_modules/` and the archives into
+  `versions/<previous>/` by rename, renames the staged `node_modules/` in, writes the selected lane
+  plugins' entries into the live `package.json` (leaving every other key as it is) and puts the staged
+  lockfile in place. It then relinks that tree in place, offline (`dsh plugin install --offline
+  --frozen-lockfile` on the live profile: every package is already in the store), so no path written
+  under the staging profile survives the move; a relink that fails is a failed candidate and the
+  rollback below runs. Plugin installs and removals are refused while an update runs.
+- **The previous version is kept whole, so a rollback installs nothing.** `versions/<previous>/` holds
+  the previous `node_modules/` (moved aside, not deleted), its lockfile, its lane plugins' entries and
+  the archives its lockfile names. A rollback renames them back the same way; it needs no network, no
+  registry and no dependency store, so it works on a fresh Arca volume as on a plain host. The store
+  and the profile must be on one filesystem for those renames; where they are not, the updater
+  refuses before the click. This is the host upgrade's never-half-updated rule
+  (`docs/upgrade.md:132-136`) at the profile's scale.
 - `current.json` names the live version, the version kept beside it and the last lane `sequence`
   taken. At most two versions are kept; the third is removed only after a healthy run of the new one,
   and never the one a rollback would return to.
 - **The data a person cares about — sessions, Bots, memory, settings, secrets and model keys — is not
-  part of a version** and is never copied, restored or touched by an update or a rollback. A rollback
-  writes back only the Automagik pins and the lockfile above; it never restores a whole-profile backup.
+  part of a version** and is never copied, restored or touched by an update or a rollback. Both move
+  only the installer-owned files above; neither restores a whole-profile copy or backup.
   That is what "nothing was lost" means here, and the rollback screen says it in those words.
 - **In Arca** the in-app update moves the profile ahead of the image. The image's follow learns that a
   profile a signed in-app update put there, recorded in `current.json`, is followed and healthy: it
@@ -144,23 +167,38 @@ The restart kills the web socket under the open page, so the modal cannot be dri
 ## Automatic rollback
 
 - Triggered by any health check failing or timing out, or by the new DSH exiting before health.
-- Steps: write back the kept version's Automagik pins and lockfile, reinstall offline from them,
-  restart the same way, then run the same health checks against the **previous** version.
+- Steps: stop the DSH child, rename the kept version's installer-owned files back (its
+  `node_modules/`, lockfile, archives and lane plugins' entries), restart the same way, then run the
+  same health checks against the **previous** version.
 - If the previous version is healthy, the state records `rolledBack` with both versions, and the modal
   says the previous version came back and nothing was lost.
 - If the previous version is also unhealthy, the state records `manualRecovery` with what was tried;
   the instance stops in a state the owner can see, and the message names the kept version and the
   command (or, in Arca, the image) that brings it back. The updater never loops.
-- A rollback never re-downloads: it restores from the kept directory and the profile's pnpm store.
+- A rollback never re-downloads and never installs: it renames the kept version back.
+
+## When the update fails before the switch
+
+Work stops at the click, before the download (Q6), so a failure before the switch must give it back:
+a refused or failed download, a failed check, a staged install that does not converge, a refused
+switch, or a supervisor restart before the switch. In each case the supervisor discards the staging
+profile, confirms the still-current instance answers the health checks above, records `notUpdated`
+with the reason, reopens admission and releases the held work once, through the same resume as after a
+healthy update. The modal says the update did not happen, why, and that the work came back.
 
 ## Trust, consent and what the updater never does
 
-- Only the owner may start an update (the nod is in the owner's own window; the route is owner-only,
-  like the rest of the team's routes), and a Bot, automation or tool can never call it: the new
-  endpoints are not agent tools, not runtime calls a Bot can make, and not reads a read-only host may
-  run.
-- The request to start carries no URL, version or hash: the supervisor fetches and verifies everything
-  itself, so a forged request can at most start an update to the newest signed version.
+- Only the owner may start an update: the nod is in the owner's own window, the route is owner-only
+  like the rest of the team's routes, and the new endpoints are not agent tools, not runtime calls a
+  Bot can make, and not reads a read-only host may run.
+- **The limit, named:** on today's hosts a Bot is not kept out of the owner's routes by an unforgeable
+  boundary. A Bot that reads the DSH launch credential can act as the owner on loopback
+  (`server/README.md:739-745`, RFC 0024's single-human limit), and so could start an update. The
+  updater does not claim more than that boundary gives. What such a start can do is bounded: the
+  request carries no URL, version or hash, the supervisor fetches and verifies everything itself, so it
+  can only update to the newest signed version that passes every check before the click, with the same
+  stop, resume and rollback; every start is recorded in the state with the principal DSH reported. The
+  gap closes when the caller principal of RFC 0024 reaches DSH's routes; this RFC adds no new way in.
 - No update runs while the signature or the hash is unverified, or while there is no writable home to
   keep a version in.
 - A failed verification, a refused version or a downgrade stops before touching the profile.
@@ -211,7 +249,7 @@ is interrupted at the click, and it comes back by itself once a healthy version 
    nothing new starts.
 3. **Hold the records through the trial run.** After the restart the resume pass does not run on its
    usual boot timer while the update's state says health is pending: it waits for the supervisor to
-   record `healthy` (or `rolledBack` with the previous version healthy). A trial boot that fails health
+   record `healthy`, `rolledBack` with the previous version healthy, or `notUpdated` with the current one healthy. A trial boot that fails health
    therefore never resumes work only to stop it again. Update and rollback restarts do not count
    toward the resume pass's daily limit and do not mark a record as already resumed, so a Bot stopped
    by an update is not left stopped by the "second interruption" guard.
@@ -240,7 +278,7 @@ one keeps its problem; 0041 reuses what it can and never adds a second copy.
 | `scripts/upgrade.ts` + `docs/upgrade.md` | upgrades an **installed host**: latest release or `--to`, verifies the signed lane and `PLUGINS.SHA256SUMS` (`scripts/upgrade.ts:516-545`), backs up, stages `releases/<version>/` and swaps the `runtime` symlink atomically (`docs/upgrade.md:132-136`), re-adds tarballs through `dsh plugin`, smoke-checks, rolls back on failure, prints one `RESULT:` | the lane verifier (moved to `plugin-lane/verify.mjs`), the sha256/integrity and `engines.dsh` checks, the never-half-updated switch, the automatic rollback and the one-line result | the manual "stop, re-add, restart, check" sequence **for plugins only**, from inside the app | nothing — it stays the way a host upgrades its runtime; 0041 never touches `runtime/` |
 | `server/profile-follow.mjs` | a server image's profile follows the **image** on start: an offline install from the image's own materialized inputs, under a volume lock (`:46-89`, entered at `server/entrypoint.mjs:117`), with `compareRelease`/`validBuild`/ownership state (`server/profile-state.mjs`) | its staging-and-rename pattern, its volume lock, and the entrypoint as the supervisor in Arca | nothing: it cannot install lane tarballs (it consumes the image's lock and offline store), so the in-app update uses its own staged install and the follow learns to leave a profile a signed update moved ahead | nothing — it keeps updating image-hosted instances when a newer image starts |
 | `apps/bots-dsh/src/host/update.js` | updates the Bots plugin of an instance installed from the registry or a git tag; one installed from a local folder or a `file:` tarball, which is how a web instance is installed, is told to update where it was installed (`:47`; `apps/bots-dsh/src/client/about.js:42`) | its place in Settings > About for the check line | nothing | nothing — it stays for registry and git installs; the lane updater serves supervised web instances |
-| `apps/desktop/src/lane.js` | the desktop app reads the same signed pointer and takes the whole plugin set | the rules: the whole set, `engines.dsh`, github.com URLs only | nothing | nothing — the desktop app keeps its own updater and never shows this nod |
+| `apps/desktop/src/lane.js` | the desktop app reads the same signed pointer and takes each installed plugin that is newer and whose `engines.dsh` it satisfies, so it can take a subset (`:129-134`) | the rules: `engines.dsh`, github.com URLs only, the signed pointer as the only source | nothing | nothing — the desktop app keeps its own updater and never shows this nod; the web takes the whole set at one version instead, for the image's one-release rule |
 
 am (`am/lib/lane.mjs`) reads its own pointer (`am-lane`, am's keys), not this one; its sequence refusal
 is the reference for the same rule here.
@@ -269,8 +307,17 @@ and the sections above now carry the corrected design:
 7. **Stopping and resuming:** admission closes and work stops at the click, before the download; the
    resume waits for the supervisor's health verdict; update restarts do not use up the resume limit;
    and the RFC no longer promises step-level idempotency that DSH cannot give yet.
-8. **Corrections to "What exists already":** the Bots plugin's own updater and the desktop's lane
-   reader are listed; am reads its own pointer; the plugin pointer moves only on releases that ship
+8. **Only installer-owned files move, with DSH stopped:** the staging profile carries no owner file,
+   the switch is refused if the person changed a plugin meanwhile, and the previous `node_modules/` is
+   kept whole, so a rollback renames it back and installs nothing (it works offline on a fresh Arca
+   volume). The rollback selector is the selected lane plugins, not every `@automagik/*` name.
+9. **A failure before the switch gives the work back** ("When the update fails before the switch").
+10. **The owner-only limit is named:** a Bot holding the launch credential can act as the owner today;
+    a start it forges is bounded to the newest signed, checked version.
+11. **The plain-host wrapper is refreshed only after a self-check**, with the previous copy kept as the
+    fallback the unit starts.
+12. **Corrections to "What exists already":** the Bots plugin's own updater and the desktop's lane
+   reader are listed (the desktop can take a subset; the web takes the whole set); am reads its own pointer; the plugin pointer moves only on releases that ship
    plugins; the supervisor ships under an already shipped path, so the plugin-only lane holds.
 
 ## Deliveries (each one PR)
@@ -281,8 +328,8 @@ and the sections above now carry the corrected design:
 | 2 | This RFC | no |
 | 3 | Host half: the version store, `current.json`, `state.json` and its stale-run rule, the read-only `self-update-status` answer the page and the supervisor use | no (no update yet) |
 | 4 | Verified check: `plugin-lane/verify.mjs` and the plugin's checked copy; read `lane.json`, take the set the profile has, download and check every tarball, check `engines.dsh`, the sequence and the registry, and stop — a dry run that writes what it would do | a "check for updates" line in Settings, no install |
-| 5 | The supervisor and the plain-host wrapper (documented in `docs/upgrade.md`): the click closes admission and stops work, the staged install of the set, the switch by rename, the restart of the DSH child, the state written at every step | a real update behind a setting, off by default |
-| 6 | Health and automatic rollback, as above; the resume held until health | the rollback screen tells the truth |
+| 5 | The supervisor and the plain-host wrapper with its self-check and fallback (documented in `docs/upgrade.md`): the click closes admission and stops work, the staged install of the set on installer-owned files, the switch with DSH stopped, the restart of the DSH child, the pre-switch failure path, the state written at every step | a real update behind a setting, off by default |
+| 6 | Health and automatic rollback by renaming the kept version back; the resume held until health | the rollback screen tells the truth |
 | 7 | The nod and the full-screen modal wired to the real state instead of the mock's timers; the mock and its flag retire | the approved flow, working |
 | 8 | Arca: the entrypoint as the supervisor (record, exit for Arca's restart, finish on the next start), and the follow and the health check keeping a profile a signed update moved ahead; a server image change, documented in `server/README.md` (closes #1540) | an instance in Arca updating itself |
 
