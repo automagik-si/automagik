@@ -5,7 +5,7 @@
 // hc/herdr-core, no installer, no hooks, no private server), `herdr-app check` passes AND the mod
 // has no dead references to other mods. Per mod in mods/am-*, this script
 //   1. copies only mods/<name>/ into a fresh scratch app home and runs `herdr-app check` there
-//      (skipped, with a note, where herdr-app is not installed — CI);
+//      (skipped, with a note, where no herdr-app answers --version);
 //   2. lists, statically, what the mod reaches outside its own folder: other mods and layout nodes
 //      that Herdr does not ship, hc/herdr-core calls, programs it executes (node, usagemeter, …),
 //      network hosts, and reads of installer state (data/am-mods/catalog.json, ownership record).
@@ -15,6 +15,8 @@
 // under the system temp folder when it is unset. The real app home is refused: nothing here
 // writes ~/.config/herdr-app. The scan is a reader of source text; a mod's code never runs here
 // (`herdr-app check` loads and renders a mod once; it does not run the programs a mod executes).
+// `herdr-app check` runs the mod's init() for real, and a mod may call Herdr's hc API there and
+// contact a live core: run this only on a machine with no live Herdr (the tests use a stand-in).
 //
 //   node scripts/standalone-check.mjs [--json] [--no-check] [--keep]
 
@@ -222,7 +224,11 @@ function checkAlone(app, name, runDir) {
     timeout: 60000,
     env: { ...process.env, HERDR_APP_HOME: home },
   });
-  if (r.error) return { status: "fail", detail: String(r.error.message ?? r.error) };
+  // A check that could not start, timed out or was killed says nothing about the mod: marked crashed.
+  if (r.error || r.signal) {
+    const why = r.error ? String(r.error.message ?? r.error) : `killed by ${r.signal}`;
+    return { status: "fail", crashed: true, detail: why };
+  }
   if (r.status === 0) return { status: "pass", detail: "" };
   const out = `${r.stderr}\n${r.stdout}`.split("\n").map((l) => l.trim()).filter(Boolean);
   const first = out.find((l) => !l.startsWith("at ") && !l.startsWith("check failed")) ?? out[0] ?? `exit ${r.status}`;
@@ -263,7 +269,7 @@ export function run({ check = true, keep = false, env = process.env } = {}) {
   const names = readdirSync(MODS).filter((n) => n.startsWith("am-") && statSync(join(MODS, n)).isDirectory()).sort();
   const base = check ? scratchBase(env) : null;   // refused before anything runs
   const app = check ? findHerdrApp() : null;
-  const skipped = check ? "skipped: herdr-app not installed (CI)" : "skipped: --no-check";
+  const skipped = check ? "skipped: herdr-app not installed" : "skipped: --no-check";
   let runDir = null;
   if (app) {
     mkdirSync(base, { recursive: true });

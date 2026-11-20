@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readJsonLines } from "./log-lines.mjs";
+import { pathWithout } from "./system-path.mjs";
 import { UNIT_MARK as UNIT_MARK_LINE } from "../mods/am-sidebar/revive.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -105,7 +106,7 @@ fi
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "test", "fake-hc.mjs")}" "$@"\n`);
   const extraEnv = { HC_FAKE_STATE: hcState, HC_FAKE_LOG: hcLog };
   const env = {
-    HOME: home, TMPDIR: tmp, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    HOME: home, TMPDIR: tmp, PATH: `${bin}:${pathWithout([dirname(process.execPath), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])}`,
     AUTOMAGIK_HERDR_RELEASE_URL: `file://${rel}`, AUTOMAGIK_HERDR_TTY: join(root, "no-tty"), AUTOMAGIK_HERDR_APPS: apps,
     AUTOMAGIK_HERDR_PACK_KEYS: JSON.stringify({ keys: TEST_KEYS }),
   };
@@ -980,9 +981,25 @@ test("install, update, rollback, uninstall: a planted pocket-link stays byte-ide
   s.publish("9.10.0");
   assert.equal(s.run("--yes").code, 0);
   assert.equal(treeSum(pocket), sum, "after update");
-  const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: s.home, HERDR_APP_HOME: s.appHome };
+  // The rollback moves the briefing hooks with the window's folders (herdr-app ls, hc ls --json): stand-ins
+  // of its own, first on a PATH that otherwise keeps only node and system folders.
+  const noWindow = join(s.root, "rollback-bin");
+  const appLog = join(s.root, "rollback-herdr-app.log"), hcLog = join(s.root, "rollback-hc.log");
+  mkdirSync(noWindow);
+  exe(join(noWindow, "herdr-app"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${appLog}"\necho "herdr-app: no window is open" >&2\nexit 1\n`);
+  exe(join(noWindow, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "test", "fake-hc.mjs")}" "$@"\n`);
+  writeFileSync(appLog, "");
+  writeFileSync(hcLog, "");
+  const env = {
+    PATH: `${noWindow}:${pathWithout([dirname(process.execPath), "/usr/bin", "/bin"])}`,
+    HOME: s.home, HERDR_APP_HOME: s.appHome, HC_FAKE_STATE: s.extraEnv.HC_FAKE_STATE, HC_FAKE_LOG: hcLog,
+  };
   const back = spawnSync(s.link, ["update", "--rollback"], { encoding: "utf8", env });
   assert.equal(back.status, 0, back.stderr);
+  const lines = readFileSync(appLog, "utf8").split("\n").filter(Boolean);
+  assert.ok(lines.length > 0 && lines.every((l) => l === "ls"), `the rollback asked the test's herdr-app only for ls: ${lines}`);
+  const calls = readJsonLines(hcLog);
+  assert.ok(calls.length > 0 && calls.every((c) => c[0] === "ls" && c.includes("--json")), `the rollback asked the test's hc only for ls --json: ${JSON.stringify(calls)}`);
   assert.deepEqual(s.versions(), s.all("9.9.0"));
   assert.match(s.mark(), /^version=9\.9\.0$/m);
   // The record's usagemeter line survives update.mjs's update and rollback (Group 6c).
