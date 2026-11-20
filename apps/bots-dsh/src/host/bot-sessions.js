@@ -3,12 +3,14 @@ import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openS
 import { join } from 'node:path'
 import { multiuserMode } from './multiuser.js'
 
+export const MAX_SESSION_LINEAGE_DEPTH = 32
+
 // Only a current team and a known end to the lineage can rule out a Bot.
 export function classifySession(rt, sessionId, agent, recordedBotOf) {
   const checkExternal = rt.botRunnerRequired !== undefined
   const seen = new Set()
   try {
-    for (let depth = 0; depth <= 32 && typeof sessionId === 'string'; depth += 1) {
+    for (let depth = 0; depth <= MAX_SESSION_LINEAGE_DEPTH && typeof sessionId === 'string'; depth += 1) {
       if (seen.has(sessionId)) return undefined
       seen.add(sessionId)
       if (rt.teamLoaded?.() !== true || rt.teamCurrent?.() !== true) return undefined
