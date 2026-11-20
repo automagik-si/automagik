@@ -832,7 +832,8 @@ Terminal chats, documents and camera capture are not part of this amendment (RFC
 4+). The writes amendment above stays in force: same paired-key admission, same subscribed-channel
 rule, same 2 s revocation, same per-phone write limits for sends. The Undo line above ("nothing is
 stored that needs cleaning") holds for the projection; an admitted image is stored on the computer
-(Cleanup, below).
+(Cleanup, below). The [documents amendment](#rfc-0033-delivery-4-documents-txt-pdf-on-dshbotid-chats)
+covers TXT and PDF.
 
 #### Why a capability under `chat/1`, not `chat/2`
 
@@ -1107,6 +1108,540 @@ Attachments work only after a positive offer at both handshakes and the opt-in o
 RFC 0033's: 1 plugin (socket, source, adapter), 2 Pocket Link (the phone methods, the offer,
 deadlines, cleanup on revocation), 3 Pocket (picker, progress, cancel, Retry, thumbnails,
 `privacy.md`).
+
+### RFC 0033 delivery 4: documents (TXT, PDF) on `dsh:<botId>` chats
+
+A paired phone can send TXT and PDF to its subscribed DSH chats. Documents use the negotiated
+attachments methods on `herdr-pocket/chat/1` and on the bots-dsh socket. A send can mix documents
+and images. Document rows show metadata. Terminal chats and camera capture are outside this
+delivery.
+
+**Images clauses amended.** **The phone** allows `name` on document begins only. The **Rows file
+sanitizer** adopts the generic file-name projection below for every file block. **attachment-read**
+stays image-only. The **send fresh-limit check** adds the document rules and shared totals below.
+The **manifest rule** gains one exception for a send containing a document. **Ledger** counts
+attachments in place of images.
+
+#### Negotiation and watches
+
+**Socket hello.** Pocket Link's `documents` constructor option is enabled at the production entry
+point. With it off, the bridge uses the images-only wire. With it on, every hello on the shared
+connection asks for `write: 1, attachments: 1, documents: 1`. The management handshake still uses
+two hellos. The second adds `manage: 1`. These flags belong to the bridge and are independent of
+what any phone asks for.
+
+The socket adds `attachments.documents` only when it offers attachments, the hello asks for
+`documents: 1`, and `fileUploads.uploadStream` is a function. The sub-offer lists `text/plain` and
+`application/pdf` and sets `limits.fileBytes` to 8 MiB (8 388 608 bytes). The outer `mediaTypes`
+still lists only images. This is an optimistic offer. DSH provides no reliable flag for file
+storage, and `uploadStream` can exist on a store that refuses files. The desktop's
+`LocalAttachmentStore` supports them. A change in effective document availability at hello
+follows the attachments switch rule. It closes that connection's subscriptions, answers pending
+subscribes with the socket error `closed`, and cancels its uploads. The same effective state
+preserves subscriptions and uploads. Every hello still revokes management grants.
+
+These are complete socket hellos for a host that offers attachments and memory management.
+Each object is one socket line or one phone message. Long objects are wrapped for reading.
+
+```json
+{"id":1,"method":"hello","params":{"write":1,"attachments":1,"documents":1}}
+{
+  "id":1,"result":{
+    "protocol":1,"readOnly":false,"write":1,"dedupe":"log",
+    "methods":["hello","list","subscribe","unsubscribe","backfill","send","interrupt","answer",
+               "upload-begin","upload-chunk","upload-finish","upload-cancel","attachment-read"],
+    "attachments":{
+      "version":1,"methods":["upload-begin","upload-chunk","upload-finish","upload-cancel","attachment-read"],
+      "mediaTypes":["image/png","image/jpeg","image/webp"],
+      "limits":{"fileBytes":8388608,"files":4,"messageBytes":16777216,"maxPixels":40000000,
+                "maxDimension":65535,"chunkBytes":24576,"deviceOutstanding":33554432,
+                "deviceDailyBytes":268435456,"deviceDailyCount":128,"thumbnail":{"edge":512,"bytes":131072}},
+      "documents":{"mediaTypes":["text/plain","application/pdf"],"limits":{"fileBytes":8388608}}
+    }
+  }
+}
+{"id":2,"method":"hello","params":{"write":1,"attachments":1,"documents":1,"manage":1}}
+{
+  "id":2,"result":{
+    "protocol":1,"readOnly":false,"write":1,"dedupe":"log","manage":1,
+    "methods":["hello","list","subscribe","unsubscribe","backfill","send","interrupt","answer",
+               "upload-begin","upload-chunk","upload-finish","upload-cancel","attachment-read"],
+    "manageMethods":["manage-open","manage-close","memory-read","memory-edit","memory-add"],
+    "attachments":{
+      "version":1,"methods":["upload-begin","upload-chunk","upload-finish","upload-cancel","attachment-read"],
+      "mediaTypes":["image/png","image/jpeg","image/webp"],
+      "limits":{"fileBytes":8388608,"files":4,"messageBytes":16777216,"maxPixels":40000000,
+                "maxDimension":65535,"chunkBytes":24576,"deviceOutstanding":33554432,
+                "deviceDailyBytes":268435456,"deviceDailyCount":128,"thumbnail":{"edge":512,"bytes":131072}},
+      "documents":{"mediaTypes":["text/plain","application/pdf"],"limits":{"fileBytes":8388608}}
+    }
+  }
+}
+```
+
+**Phone hello and grant.** The phone adds `documents: 1` beside `attachments: 1` in its hello
+params. The bridge replies with `attachments.documents` only if that phone asked and the socket
+has a valid sub-offer. The bridge intersects the sub-offer's list with the two document types
+and caps its positive safe-integer `fileBytes` at 8 MiB. An absent, malformed or empty sub-offer
+leaves the image offer usable. The bridge records the grant for this phone connection, team
+and socket. A document begin from a phone without the grant answers `unsupported` locally. The
+bridge never probes support with a trial upload. A reconnect renegotiates both offers.
+
+This `herdr-pocket/chat/1` hello grants documents to this phone. A second phone that asks for
+`attachments: 1` alone gets the same image offer with the `documents` key omitted.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1,"framed":true,"attachments":1,"documents":1}}
+{
+  "jsonrpc":"2.0","id":1,"result":{
+    "generation":1,"framed":true,"chat":1,"credit":262144,"dshWrite":true,
+    "methods":["chat.list","chat.subscribe","chat.backfill","chat.send","chat.sendHeld","chat.cancelHeld",
+               "chat.answer","chat.interrupt","chat.attach","chat.attachChunk","chat.attachFinish",
+               "chat.attachCancel","chat.attachmentRead"],
+    "limits":{"subscriptions":8,"rowText":65536,"backfillRows":200,"backfillBytes":1048576,"sendText":32768},
+    "attachments":{
+      "version":1,
+      "methods":["chat.attach","chat.attachChunk","chat.attachFinish","chat.attachCancel","chat.attachmentRead"],
+      "mediaTypes":["image/png","image/jpeg","image/webp"],
+      "limits":{"fileBytes":8388608,"files":4,"messageBytes":16777216,"maxPixels":40000000,
+                "maxDimension":65535,"chunkBytes":24576,"deviceOutstanding":33554432,
+                "deviceDailyBytes":268435456,"deviceDailyCount":128,"thumbnail":{"edge":512,"bytes":131072}},
+      "documents":{"mediaTypes":["text/plain","application/pdf"],"limits":{"fileBytes":8388608}}
+    }
+  }
+}
+```
+
+**Per-watch grant.** The phone subscribes as before. The bridge sends `subscribe {terminal,
+channel, after?, attachments: 1, documents?: 1}`. It adds `documents: 1` only for a phone
+connection with the grant. The socket records the document opt-in on that subscription. It
+requires the grant for a document begin and a Retry of a document manifest. Without it, those
+operations answer `unsupported`. A fresh send checks `files` first (over the limit is `too-large`),
+then looks up each upload's live admission for this phone. If a rich watch without the grant names
+a document upload, the send answers `unsupported`. Only after the applicable grant check passes
+does an admission owned by another watch answer `invalid`. The flag has no effect on rows.
+An images-only rich watch still gets file blocks.
+
+Phone request and reply (channel 0 DATA), then the corresponding socket request and reply:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"chat.subscribe","params":{"terminal":"dsh:example"}}
+{"jsonrpc":"2.0","id":2,"result":{"channel":1}}
+{"id":3,"method":"subscribe","params":{"terminal":"dsh:example","channel":7,"attachments":1,"documents":1}}
+{"id":3,"result":{"channel":7}}
+```
+
+Phone requests after hello and their replies are in channel 0 DATA frames. The bridge supplies
+the socket channel and the stable paired `phone` key (`[A-Za-z0-9+/=._:-]{1,256}`).
+
+#### Admission and names
+
+**Begin.** `upload-begin` and `chat.attach` accept an optional `name` only for a document type.
+A `name` property on an image begin, any of the other four attachment methods, or an upload
+send is `invalid`, including `null`. The bridge forwards the document's supplied display name
+and includes it when checking the serialized request line. The socket reduces it before using
+it for the sign-in-code check and storage. The sign-in-code check used for the caption also
+applies to the reduced name. A match is `invalid` with `message: 'sign-in-code'`. Document bodies
+are not scanned for sign-in codes.
+
+```json
+{"id":4,"method":"upload-begin",
+ "params":{"channel":7,"phone":"example-phone","upload":"doc-1","mediaType":"application/pdf","bytes":19,"name":"Report.PDF"}}
+{"id":4,"result":{"ok":true,"state":"open","upload":"doc-1","chunkBytes":24576}}
+{"jsonrpc":"2.0","id":3,"method":"chat.attach",
+ "params":{"terminal":"dsh:example","upload":"doc-1","mediaType":"application/pdf","bytes":19,"name":"Report.PDF"}}
+{"jsonrpc":"2.0","id":3,"result":{"ok":true,"state":"open","upload":"doc-1","chunkBytes":24576}}
+```
+
+**Canonical leaf.** An absent `name` uses the stem `document`. A present name must be a string
+of at most 1 024 UTF-8 bytes and well-formed UTF-16 (no lone surrogates). A violation, including
+`null`, is `invalid`. For a valid string:
+
+1. Keep the part after the last `/` or `\`.
+2. Remove every code point of General Category Cc or Cf, including C0, DEL, C1, bidi and other
+   format controls, BOM and zero-width controls.
+3. Normalize to NFC.
+4. Replace each of `<>:"|?*` with `_`.
+5. Trim white space, then drop trailing dots and ASCII spaces.
+6. Drop one trailing extension of the declared type, case-insensitively (`.txt` or `.pdf`).
+   The remainder is the stem.
+7. Cut the stem to 124 UTF-8 bytes on a code-point boundary and normalize to NFC again. Repeat
+   the cut and normalization until the stem is at most 124 bytes. Drop trailing dots and ASCII
+   spaces again.
+8. Replace an empty stem, `.` or `..` with `document`.
+9. Take the stem's first component (up to the first dot) and remove its trailing dots and ASCII
+   spaces for this check. If it is `con`, `prn`, `aux`, `nul`, `com1` through `com9`, or `lpt1`
+   through `lpt9`, in any case, prefix the stem with `_`, cut it again to 124 UTF-8 bytes on a
+   code-point boundary and drop trailing dots and ASCII spaces.
+10. Append the lowercase extension of the declared type (`.txt` or `.pdf`).
+
+The leaf is NFC, has no Cc or Cf code points, and is at most 128 UTF-8 bytes. Applying the same
+rule to the leaf with the same declared type returns the same leaf. A stem prefixed with `_`
+passes the device-name check on replay. DSH's `fileLeafName` and the generic row projection below
+also leave the leaf unchanged. 4b and 4c share the
+[document-name vectors](fixtures/0033-document-names.json).
+
+**Where a document's name goes.**
+
+- The raw phone display name passes through the bridge in the request line to the socket and
+  lives in socket memory only until reduction. The bridge computes the expected leaf from that
+  begin for finish validation and keeps only the leaf for that comparison. The raw name is
+  never stored, logged or returned in a reply.
+- The reduced name is the object alias leaf in DSH's store. It goes into the Session log's user
+  message as durable chat history, the prompt sent to the Bot's model provider, desktop and
+  phone rows, and ACP's workspace copy path.
+- The desktop's optional sharing of a whole Session is off by default
+  (`apps/desktop/src/privacy.js:14`). 4d names normal delivery and optional Session sharing
+  separately in [Pocket's privacy notice](../../apps/pocket/docs/privacy.md).
+- Diagnostic logs in bots-dsh, Pocket Link and acp-dsh carry neither name nor document content.
+  Attachment diagnostics, refusals and copy/read errors on these paths use fixed strings and
+  the allowlisted codes below. The Session log holds the reduced name as chat history, as it
+  does for a desktop attachment.
+
+**Limits and credit.** The upload id matches `[A-Za-z0-9._:-]{1,128}`. It must be unused by
+this phone, including in retained manifests in either store. A reused id is `invalid`.
+The declared length is a positive safe integer in bytes before base64,
+at most the offered document `fileBytes`. Zero, an invalid length or a length over the cap is
+`too-large`. Image pixel and dimension limits apply only to images. Images and documents share
+one active upload per phone, one admission per host and 32 MiB outstanding per phone. The
+free-space check at begin needs 2 GiB plus the declared length on DSH's store filesystem, or on
+the team home's filesystem if the store's is unavailable. The socket charges the full declared
+length and one attachment to the same ledger as images before storage starts. Chunk credit
+stays one acknowledgement per chunk, with 24 576 raw bytes per chunk except the last. Socket
+timers stay 30 s idle, 180 s total through the pre-end-of-stream check, then 60 s through
+admission and the last check. Bridge waits stay 5 s for begin, 25 s for a chunk and 65 s for
+finish. The phone waits at least 75 s for finish.
+
+**Content checks.** The socket calls `fileUploads.uploadStream({sessionId, data, signal, name})`
+with the canonical leaf and the original bytes. It accepts only these declared types:
+
+- `text/plain` uses one fatal streaming UTF-8 decoder across all chunks, with its final flush
+  before end-of-stream. Invalid UTF-8 or a NUL byte is `unsupported`. The original bytes,
+  including any BOM, go to DSH verbatim. HTML, SVG and other markup can be present as text.
+  HTML and SVG as declared media types are refused. Nothing on the host renders the document.
+- `application/pdf` requires exactly the five bytes `%PDF-` at offset 0. A shorter file or
+  different prefix is `unsupported`. The host parses nothing else.
+
+**Publication boundary.** DSH's local store writes the chunks into a private temporary file.
+If the stream fails before end-of-stream, it publishes no object or named alias. The socket
+finishes the content checks and checks authority before yielding end-of-stream. A refusal
+rejects the pending iterator pull and aborts the signal. After end-of-stream DSH may publish
+the object and named alias even if the upload is cancelled or loses authority. The charge stays
+and the host's admission slot stays held until DSH settles. A late receipt is discarded. The
+no-publication promise applies only before end-of-stream.
+
+#### Finish, refusals and cancel
+
+**Finish.** The reply has exactly one of `image` or `file`, matching the kind opened at begin.
+The bridge matches the upload id to its opening record and rebuilds the reply from the fields
+of that arm only. On the file arm, `mediaType` equals the declared type, `bytes` is the stored
+length and equals the declared length, and `name` equals the canonical leaf computed for this
+begin. An image's admitted type may differ from its declared type. Its `bytes` is the declared
+length and `stored` is separate. The bridge keeps the existing image checks. No DSH receipt or
+storage id crosses the socket. On a malformed success the bridge sends a compensating cancel
+only on the original socket while live and answers `failed`. A lost written finish answers
+`{ok: false, state: 'unknown', reason: 'offline', upload}` and the bridge attempts that same
+cleanup if possible.
+
+```json
+{"id":6,"method":"upload-finish","params":{"channel":7,"phone":"example-phone","upload":"doc-1"}}
+{"id":6,
+ "result":{"ok":true,"state":"admitted","upload":"doc-1","file":{"mediaType":"application/pdf","bytes":19,"name":"Report.pdf"}}}
+{"jsonrpc":"2.0","id":5,"method":"chat.attachFinish","params":{"terminal":"dsh:example","upload":"doc-1"}}
+{"jsonrpc":"2.0","id":5,
+ "result":{"ok":true,"state":"admitted","upload":"doc-1","file":{"mediaType":"application/pdf","bytes":19,"name":"Report.pdf"}}}
+```
+
+**Fixed refusals.** No offered document type or grant gives `unsupported`. A socket chunk or
+finish for an upload with a saved terminal refusal replays that refusal on the same watch,
+phone and upload id. Other unknown uploads follow the images rules. The socket and bridge use
+the following document mappings.
+
+| Condition | Reason | Extra field |
+|---|---|---|
+| Store refuses file uploads | `unsupported` | `code: 'ATTACHMENT_FILES_UNSUPPORTED'` |
+| The current subagent refuses file admission | `unsupported` | `code: 'SUBAGENT_FILE_UNSUPPORTED'` |
+| Other storage failure | `unavailable` | none |
+| Admission timeout | `rejected` | `code: 'timeout'` |
+| Stored length differs from the declared length | `rejected` | none |
+| Reduced name matches the sign-in-code check | `invalid` | `message: 'sign-in-code'` |
+| Receipt missing at send or bind time | `expired` | `code: 'FILE_NOT_STAGED'` |
+
+The bridge adds the two `unsupported` codes to its allowlist. The fixed `sign-in-code` marker
+on `invalid` is the only forwarded `message` value. On the first
+`ATTACHMENT_FILES_UNSUPPORTED` the charge stays recorded. The socket refuses every later
+document begin with that code before charging and omits `documents` from its next hello and
+all subsequent hellos until restart. The bridge withdraws the cached document sub-offer for
+later phone hellos when it sees that code. `SUBAGENT_FILE_UNSUPPORTED` affects only that
+admission.
+
+Here the store refused after begin. The next chunk returns the saved refusal.
+
+```json
+{"id":20,"method":"upload-chunk",
+ "params":{"channel":7,"phone":"example-phone","upload":"doc-2","offset":0,"data":"JVBERi0="}}
+{"id":20,
+ "result":{"ok":false,"state":"refused","reason":"unsupported","code":"ATTACHMENT_FILES_UNSUPPORTED","upload":"doc-2"}}
+{"jsonrpc":"2.0","id":20,"method":"chat.attachChunk",
+ "params":{"terminal":"dsh:example","upload":"doc-2","offset":0,"data":"JVBERi0="}}
+{"jsonrpc":"2.0","id":20,
+ "result":{"ok":false,"state":"refused","reason":"unsupported","code":"ATTACHMENT_FILES_UNSUPPORTED","upload":"doc-2"}}
+```
+
+A subagent can refuse file admission for its Session while the socket keeps offering documents.
+
+```json
+{"id":26,"method":"upload-chunk",
+ "params":{"channel":7,"phone":"example-phone","upload":"doc-9","offset":0,"data":"JVBERi0="}}
+{"id":26,
+ "result":{"ok":false,"state":"refused","reason":"unsupported","code":"SUBAGENT_FILE_UNSUPPORTED","upload":"doc-9"}}
+{"jsonrpc":"2.0","id":26,"method":"chat.attachChunk",
+ "params":{"terminal":"dsh:example","upload":"doc-9","offset":0,"data":"JVBERi0="}}
+{"jsonrpc":"2.0","id":26,
+ "result":{"ok":false,"state":"refused","reason":"unsupported","code":"SUBAGENT_FILE_UNSUPPORTED","upload":"doc-9"}}
+```
+
+In this example the sign-in-code check recognizes the state `example-state` in the reduced name.
+
+```json
+{"id":21,"method":"upload-begin",
+ "params":{"channel":7,"phone":"example-phone","upload":"doc-3","mediaType":"text/plain","bytes":8,"name":"notes#example-state.txt"}}
+{"id":21,"result":{"ok":false,"state":"refused","reason":"invalid","message":"sign-in-code","upload":"doc-3"}}
+{"jsonrpc":"2.0","id":21,"method":"chat.attach",
+ "params":{"terminal":"dsh:example","upload":"doc-3","mediaType":"text/plain","bytes":8,"name":"notes#example-state.txt"}}
+{"jsonrpc":"2.0","id":21,
+ "result":{"ok":false,"state":"refused","reason":"invalid","message":"sign-in-code","upload":"doc-3"}}
+```
+
+Here a TXT chunk contains a NUL byte. The content check refuses the upload.
+
+```json
+{"id":22,"method":"upload-chunk",
+ "params":{"channel":7,"phone":"example-phone","upload":"doc-4","offset":0,"data":"YQA="}}
+{"id":22,"result":{"ok":false,"state":"refused","reason":"unsupported","upload":"doc-4"}}
+{"jsonrpc":"2.0","id":22,"method":"chat.attachChunk",
+ "params":{"terminal":"dsh:example","upload":"doc-4","offset":0,"data":"YQA="}}
+{"jsonrpc":"2.0","id":22,"result":{"ok":false,"state":"refused","reason":"unsupported","upload":"doc-4"}}
+```
+
+A phone without a document grant gets a local refusal. On the socket, a document begin on an
+attachments watch without `documents: 1` also answers `unsupported`. These are independent
+examples. The bridge never forwards the ungranted phone's request.
+
+```json
+{"id":23,"method":"upload-begin",
+ "params":{"channel":8,"phone":"other-phone","upload":"doc-5","mediaType":"application/pdf","bytes":19}}
+{"id":23,"result":{"ok":false,"state":"refused","reason":"unsupported","upload":"doc-5"}}
+{"jsonrpc":"2.0","id":23,"method":"chat.attach",
+ "params":{"terminal":"dsh:example","upload":"doc-5","mediaType":"application/pdf","bytes":19}}
+{"jsonrpc":"2.0","id":23,"result":{"ok":false,"state":"refused","reason":"unsupported"}}
+```
+
+Here DSH times out during admission.
+
+```json
+{"id":24,"method":"upload-finish","params":{"channel":7,"phone":"example-phone","upload":"doc-6"}}
+{"id":24,"result":{"ok":false,"state":"refused","reason":"rejected","code":"timeout","upload":"doc-6"}}
+{"jsonrpc":"2.0","id":24,"method":"chat.attachFinish","params":{"terminal":"dsh:example","upload":"doc-6"}}
+{"jsonrpc":"2.0","id":24,
+ "result":{"ok":false,"state":"refused","reason":"rejected","code":"timeout","upload":"doc-6"}}
+```
+
+A document one byte over the offered file limit is refused before storage. Each hop enforces
+the limit. In normal use the bridge refuses it locally and sends no socket request.
+
+```json
+{"id":25,"method":"upload-begin",
+ "params":{"channel":7,"phone":"example-phone","upload":"doc-7","mediaType":"application/pdf","bytes":8388609}}
+{"id":25,"result":{"ok":false,"state":"refused","reason":"too-large","upload":"doc-7"}}
+{"jsonrpc":"2.0","id":25,"method":"chat.attach",
+ "params":{"terminal":"dsh:example","upload":"doc-7","mediaType":"application/pdf","bytes":8388609}}
+{"jsonrpc":"2.0","id":25,"result":{"ok":false,"state":"refused","reason":"too-large"}}
+```
+
+**Admitted cancel.** Pocket Link keeps up to 128 admitted, unsent uploads per phone with their
+client, watch, socket, team and upload id. The bridge removes an entry on a successful send that
+names it, a confirmed cancel, watch loss or 15 min after admission. `chat.attachCancel` on an
+owned admitted upload now forwards `upload-cancel`. This also fixes images. A lost acknowledgement
+answers `{ok: false, state: 'unknown', reason: 'offline'}` and keeps the entry until expiry or
+watch loss. A foreign cancel still answers `{ok: true}` locally and forwards nothing. Cancel
+removes the live admission. A saved manifest survives it.
+
+#### Mixed sends and Retry
+
+**Fresh send.** Keep the images send schema. The send id and upload ids match
+`[A-Za-z0-9._:-]{1,128}`. The ordered `uploads` array holds 1 to 4 distinct ids. An invalid
+shape is `invalid`. The optional caption defaults to the empty string and has a 32 KiB UTF-8
+limit before cleaning. On a valid request, check the current shared `files` limit first (over
+the limit is `too-large`). Then, in upload order, look up each live admission for this phone.
+A missing, unfinished or expired upload is `expired`. A document upload named from a rich
+watch without the document grant is `unsupported`. Once the applicable grant check passes,
+an admission owned by another watch of this phone is `invalid`. The image rules use the image
+type list, image `fileBytes`, dimensions and pixels. The document rules also require a current
+document offer, an offered document type and the document `fileBytes` limit. A missing type
+or offer is `unsupported`. An exceeded limit is `too-large`. Finally, the sum of original bytes across
+images and documents must fit the one `messageBytes` limit (at most 16 MiB), even when the
+document `fileBytes` is larger than that limit. DSH gets one queued prompt, with a text block
+for a non-empty cleaned caption and one `{type: 'file', receiptId}` for each upload in phone
+order. Only `accepted: true` consumes the uploads. `MODEL_DOES_NOT_SUPPORT_IMAGES` applies to
+images in the send.
+
+```json
+{"id":7,"method":"send",
+ "params":{"channel":7,"phone":"example-phone","id":"send-1","by":"Phone","text":"Review these.","uploads":["img-1","doc-1"]}}
+{"id":7,"result":{"ok":true,"state":"queued","id":"send-1"}}
+{"jsonrpc":"2.0","id":6,"method":"chat.send",
+ "params":{"terminal":"dsh:example","id":"send-1","text":"Review these.","uploads":["img-1","doc-1"]}}
+{"jsonrpc":"2.0","id":6,"result":{"ok":true,"state":"queued","id":"send-1"}}
+```
+
+**Ledger.** `<team home>/pocket/uploads.json` keeps the existing 0600 atomic format and charges.
+Each document charge is a regular charge of at most 8 MiB. The rolling 24 h caps count both
+kinds (256 MiB and 128 attachments per phone, 1 GiB and 512 attachments per host). The 64-phone
+limit, corruption handling and phone-key hashes stay as in the images ledger. A charge is
+never refunded.
+
+**Document manifests.** In 4b, the host looks up `(phone, id)` in both manifest stores before
+choosing a manifest. If both stores hold an entry, which can happen after a rollback to delivery 1
+and an upgrade back to 4b, the host refuses the send with `invalid` and sends no prompt for either
+set of receipts. The images ledger still holds image-only manifests, including
+all pre-4b entries. Before the first prompt for a document or mixed send, the host saves its
+manifest atomically in the 0600 `<team home>/pocket/document-manifests.json`. It has the same
+fields (`phoneHash, id, requestId, sessionId, textHash, uploadIds, receiptIds, at`) plus `kinds`
+(`'image'` or `'document'` per upload, in order). It keeps the newest 64 per phone for 24 h from
+`at`. Retry does not refresh it. A failed manifest write answers `unavailable` before any prompt.
+The separate file keeps the old ledger readable on rollback. A missing file is an empty store. A
+file that cannot be read or does not validate is moved to `document-manifests.json.bad`, as the
+ledger is: for 24 h from that moment every upload begin and every send with `uploads` (images
+included, since both stores must be consulted) is refused `quota` and prompts nothing; text sends
+keep working. A `.bad` file without a readable replacement (an interrupted move) counts as broken,
+as for the ledger. In 4b a broken ledger (`uploads.json`) also refuses every send with `uploads`
+`quota` before either store is consulted, for the same 24 h.
+
+**Manifest exception.** The caption hash and the `pocket-a/` DSH request id use the images
+rule. A Retry sends the same id, caption and ordered uploads. On a saved document manifest,
+check the Session first (`session-changed`), then the caption hash and upload list (`changed`),
+then the current document offer and this watch's grant (`unsupported`). Withdrawal stops
+both first acceptance and acknowledgement recovery. No prompt is sent and the phone keeps
+“Maybe not sent”. When those checks pass, the host prompts again with the saved request id and
+receipts. DSH deduplicates before reading receipts. Missing staged receipts, including ones
+missing at bind time, answer `expired` with `FILE_NOT_STAGED`. Delivery 1 cannot replay a
+document manifest. After reinstalling delivery 1, a Retry follows its fresh-send order. It checks
+the upload count against `files` first and can answer `too-large`. A Retry that passes those
+checks reaches the missing admission and answers `expired`. Image-only Retry still follows
+the images rule across reconnect, even with a smaller `files` limit.
+
+In the first exchange a mixed send is retried from an images-only rich watch. In the second,
+the host saved the manifest but DSH never accepted the prompt. An enabled watch retries it
+and a receipt is missing at bind time.
+
+```json
+{"id":31,"method":"send",
+ "params":{"channel":8,"phone":"example-phone","id":"send-1","by":"Phone","text":"Review these.","uploads":["img-1","doc-1"]}}
+{"id":31,"result":{"ok":false,"state":"refused","reason":"unsupported","id":"send-1"}}
+{"jsonrpc":"2.0","id":31,"method":"chat.send",
+ "params":{"terminal":"dsh:example","id":"send-1","text":"Review these.","uploads":["img-1","doc-1"]}}
+{"jsonrpc":"2.0","id":31,"result":{"ok":false,"state":"refused","reason":"unsupported","id":"send-1"}}
+{"id":32,"method":"send",
+ "params":{"channel":7,"phone":"example-phone","id":"send-2","by":"Phone","text":"Review these.","uploads":["img-2","doc-8"]}}
+{"id":32,"result":{"ok":false,"state":"refused","reason":"expired","code":"FILE_NOT_STAGED","id":"send-2"}}
+{"jsonrpc":"2.0","id":32,"method":"chat.send",
+ "params":{"terminal":"dsh:example","id":"send-2","text":"Review these.","uploads":["img-2","doc-8"]}}
+{"jsonrpc":"2.0","id":32,
+ "result":{"ok":false,"state":"refused","reason":"expired","code":"FILE_NOT_STAGED","id":"send-2"}}
+```
+
+#### Rows, routes and cleanup
+
+**Generic file rows.** Desktop and Pocket file blocks keep `{type: 'file', block, bytes, name?}`.
+DSH keeps no media type in its file reference. Take the base name after the last `/` or `\`.
+Replace lone surrogates with the Unicode replacement character (`toWellFormed`). Remove Cc and
+Cf, cut to 128 UTF-8 bytes on a code-point boundary and omit the name when empty, `.` or `..`.
+The projector adds no suffix, default name or device prefix. The stored canonical leaf, finish
+`file.name` and projected `name` are byte-equal. 4b checks all three. Existing row assertions for
+a 128-byte extensionless name and omitted `.` and `..` still apply. Legacy projection drops
+document-only rows and keeps the caption on a mixed text and file row. `attachment-read` on a file
+block answers `not-found`. Documents have no Pocket preview or download in delivery 4.
+
+**Routes.** DSH stores the bytes verbatim. The model gets a text handle with the quoted
+name, byte length and the first eight hex digits of the SHA-256 digest. It gets a readable
+path only when its execution environment can map one. Ordinary bots-dsh routes make no
+Bot-owned document copy. `shared-uploads.js` uses `withPaths` for image blocks only. ACP
+tries to make a verified read-only copy at `.automagik/uploads/<digest>/<name>`, subject to
+the 64 MiB copy ceiling and 10 s preparation deadline. An ordinary copy failure sends the
+unreadable handle. A preparation deadline or cancellation can end the turn before a prompt
+is sent. Admission and a row show no evidence that the Bot read the bytes.
+
+**Cleanup.** The images watch and authority rules cover both upload kinds. Closing a watch,
+losing the connection or revoking the phone (within 2 s) cancels its open uploads and forgets
+its unsent admissions. Session or visibility changes use the same authority checks as images.
+An unsent admission expires after 15 min. Closing a watch, cancelling and revoking a phone
+leave any published object, named alias and route copy on disk, like a desktop attachment.
+DSH keeps an unsent staged receipt until the Session ends and retires a used receipt when it
+sees the prompt. Once DSH accepts a prompt, removing the phone cannot undo it.
+
+**Threat model.** A paired phone can place UTF-8 text and PDF bytes in DSH's store for its own
+subscribed Bot chats, with a display name it chose. Session and project visibility still
+gate access. The name supplies neither a path nor authority to read one. Daily budgets,
+the free-space check and the admission slot bound the upload work and how fast stored bytes
+grow. A Bot's tools can later parse phone-chosen PDF bytes, as with a desktop attachment.
+The upload cap does not bound that later parsing work. The file name is model-visible text
+and can carry prompt injection, as can the body when read. Removing bidi controls still
+leaves room for confusable characters and right-to-left text in the stem. Desktop and
+Pocket display the name as plain text in their own direction and choose the document icon
+only from the final ASCII suffix.
+
+#### Compatibility and Pocket picker
+
+**Phone generations.** Documents need the positive sub-offer at both hellos and a grant on the
+watch. An older delivery 1 socket offers no documents and would refuse a named begin as
+`invalid`. An older delivery 2 bridge offers no documents and would refuse `name` too. The
+phone offers the document picker only on a positive grant and the bridge never sends a document
+to the old socket. The images amendment's unavailable markers still apply to attachments.
+
+| Phone | Pocket Link and socket | Result |
+|---|---|---|
+| Pre-attachments | Any | Caption only. Legacy projection drops document-only rows. |
+| Images-only attachments | Rich watch | Images work as negotiated. Pocket documents appear as file blocks with name and size, like desktop files. |
+| Documents | Either peer lacks the document offer | No document uploads. Images and the rich or legacy rows follow the attachment offer. |
+| Documents | Both peers offer documents and the watch has the grant | TXT, PDF and images as negotiated. Rich rows carry document metadata. |
+
+**Picker.** Use the system picker and keep picked bytes in phone memory. Send display metadata
+only (the name, declared type and length) along with the upload bytes. Never send a picker URI
+or path. Take the display base name before cutting it to 1 024 UTF-8 bytes on a code-point
+boundary. Omit `name` when the picker supplies none. An explicit `application/pdf` selects the
+PDF check and `text/plain` selects the TXT check. A missing MIME or
+`application/octet-stream` uses the display name's extension (`.pdf` or `.txt`,
+case-insensitive). Refuse other MIME types, an unrecognized fallback extension or bytes that
+fail the selected validator locally. Use the same content checks as the socket. For an
+unknown length, read into phone memory up to the offered document `fileBytes` plus one before
+begin. Refuse an oversized file. Upload from that buffer. After reconnect, discard unsent
+admissions and begin again. Keep a sent message's Retry with its original id, caption and
+upload list.
+
+#### Deliveries
+
+**4a.** This contract and the shared name vectors.
+
+**ACP warning fix (#1829).** Replace the copy-failure warning with a fixed line
+(`apps/acp-dsh/src/host/upload-content.js:101`) before 4b merges. bots-dsh and acp-dsh ship together
+on the plugin lane. Every supported installation takes all plugins from one release, as the
+desktop does. Any release offering documents carries the fixed ACP warning. Hand-pinning
+plugins from mixed releases is unsupported.
+
+**4b plugin.** Offer and authorize documents, reduce the name once, check TXT/PDF before
+ending the stream, admit with `uploadStream`, and implement file finishes, mixed sends,
+document manifests and generic file rows. Make the `fileText` read warning a fixed line
+(`apps/bots-dsh/src/host/delivery.js:390`) before offering documents. Test the shared name
+vectors.
+
+**4c Pocket Link.** Relay the document offer and per-phone grant to the watch, forward document
+names on begin, check the finish arm against the opening record using the same name vectors,
+and forward admitted cancels. Test the shared vectors and both hops.
+
+**4d Pocket.** Add the TXT/PDF picker, names and sizes, cancel and Retry behavior, and update
+[the privacy notice](../../apps/pocket/docs/privacy.md) in the same delivery. Broader files
+and camera capture need separate approval.
 
 ## Tracking
 
