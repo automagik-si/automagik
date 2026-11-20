@@ -104,8 +104,6 @@ export async function runSupervisor({
   const save = (changes = {}) => {
     const proposed = { ...run, ...changes, updatedAt: stamp() }
     try {
-      // Once the verdict is visible, the admitted owner can already ask for another update.
-      if ((active || recovering) && TERMINAL.has(proposed.phase)) takeRequest(store, read, bootId, true, seen)
       write('state.json', proposed)
     } catch (error) {
       if (TERMINAL.has(proposed.phase)) {
@@ -118,6 +116,18 @@ export async function runSupervisor({
       throw error
     }
     Object.assign(run, proposed)
+    // A request posted while this run was live is discarded only once its verdict is visible, and only when it is
+    // older than the verdict: the admitted owner can already ask for another update.
+    if ((active || recovering) && TERMINAL.has(proposed.phase)) {
+      try {
+        const pending = read('request.json')
+        if (pending !== undefined && !(Date.parse(pending?.requestedAt) > Date.parse(proposed.updatedAt))) {
+          takeRequest(store, read, bootId, true, seen)
+        }
+      } catch {
+        warn('a request posted during the update could not be discarded')
+      }
+    }
   }
   const phase = (next, reason = null) => save({ phase: next, reason })
 
@@ -186,11 +196,14 @@ export async function runSupervisor({
     const versionsMatch = !legacy || !run.fromVersions || isDeepStrictEqual(baseline(profileDir), run.fromVersions)
     signal.throwIfAborted()
     if (!result.ok || unchanged.result || !versionsMatch) return manualRecovery(unchanged.result?.code)
-    // The verdict comes first: a cut before the cleanup leaves a terminal run whose leftovers the next start removes,
-    // never an open journal whose kept data is already gone.
+    // Staging is gone before the verdict is visible (5a's order). A cut between the two replays this give-back with no
+    // snapshot to compare, which costs nothing here: the candidate never served, so the team was not touched.
+    try { finishNotUpdated(staging) } catch {
+      // The verdict still stands; the next start's cleanup of a notUpdated run removes what is left.
+      warn('update cleanup did not finish')
+    }
     save({ phase: 'notUpdated', reason, ...(legacy ? { detail: 'previous-unsupported' } : {}) })
     trial = false
-    finishNotUpdated(staging)
   }
 
   async function manualRecovery(code = 1, reason = 'health-failed', fields = {}) {
