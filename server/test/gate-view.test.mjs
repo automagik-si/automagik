@@ -355,3 +355,21 @@ test('a custom home that does not exist yet does not stop the view from being pr
   assert.equal(statSync(view).mode & 0o7777, 0o700)
   assert.deepEqual(readdirSync(view), [])
 })
+
+test('a stale three-plugin gate report is invalid until four keys are published', async t => {
+  const f = fixture(t)
+  const pkg = JSON.parse(readFileSync(new URL('../profile/package.json', import.meta.url), 'utf8'))
+  for (const name of PLUGINS) pkg.dependencies[name] = `file:vendor/automagik-${name.split('/')[1]}-${version}.tgz`
+  writeFileSync(join(f.profile, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+  markSeed(f.profile, version)
+  const state = f.state()
+  const legacy = { ...state.plugins }
+  delete legacy['@automagik/multiuser-dsh']
+  writeFileSync(f.profileFile, JSON.stringify({ at: new Date().toISOString(), schemaVersion: 1,
+    plugins: legacy, followsImage: true, ownerManaged: false, reason: 'matching-image' }))
+  assert.equal((await f.report(gateEnv)).reason, 'no-profile-state')
+  writeProfileState(f.viewDir, state)
+  const actual = await f.report(gateEnv)
+  assert.deepEqual(actual.plugins, plugins)
+  assert.equal(actual.healthy, true)
+})

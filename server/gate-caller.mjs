@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign } from 'node:crypto'
-import { chmodSync, closeSync, fchmodSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { cloudConfig } from './gate-cloud.mjs'
@@ -13,6 +13,7 @@ const privateKey = d => createPrivateKey({ key: Buffer.from(d, 'base64url'), typ
 const canonical = (s, length) => typeof s === 'string' && s.length === length && Buffer.from(s, 'base64url').toString('base64url') === s
 const keyDir = dir => join(dir, 'caller')
 const keyFile = dir => join(keyDir(dir), 'keys.json')
+const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK } = constants
 const rotationActions = ['stage', 'promote', 'retire']
 const MAX_TARGET_BYTES = 4096
 const MAX_ASSERTION_BYTES = 8192
@@ -69,14 +70,27 @@ function atomicWrite(file, value, mode) {
   }
 }
 
+function openStoreDir(dir, create = false) {
+  const folder = keyDir(resolve(dir))
+  if (create) mkdirSync(dir, { recursive: true, mode: 0o700 })
+  let stat = lstatSync(folder, { throwIfNoEntry: false })
+  if (!stat && create) {
+    try { mkdirSync(folder, { mode: 0o700 }) }
+    catch (error) { if (error.code !== 'EEXIST') throw error }
+    stat = lstatSync(folder)
+  }
+  if (!stat) return undefined
+  if (!stat.isDirectory() || realpathSync(folder) !== keyDir(realpathSync(dir))) throw new Error('Invalid caller key directory')
+  return openSync(folder, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+}
+
 function withLock(dir, fn) {
   const folder = keyDir(dir)
-  mkdirSync(folder, { recursive: true, mode: 0o700 })
-  chmodSync(folder, 0o700)
+  const guard = openStoreDir(dir, true)
   // Use the stable directory inode to serialize reclaiming a stale .lock along
   // with all other operations. The lease also survives a suspended process.
-  const guard = openSync(folder, 'r')
   try {
+    fchmodSync(guard, 0o700)
     const flock = spawnSync('/usr/bin/flock', ['--exclusive', '--nonblock', '3'], {
       stdio: ['ignore', 'ignore', 'ignore', guard],
     })
@@ -97,10 +111,31 @@ function withLock(dir, fn) {
   }
 }
 
+function withStoreFile(dir, fn) {
+  const folder = openStoreDir(dir)
+  if (folder === undefined) return undefined
+  try {
+    let fd
+    try { fd = openSync(keyFile(dir), O_RDONLY | O_NOFOLLOW | O_NONBLOCK) }
+    catch (error) {
+      if (error.code === 'ENOENT') return undefined
+      throw error
+    }
+    try {
+      const stat = fstatSync(fd)
+      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) throw new Error('Invalid caller key file')
+      return fn(fd, stat)
+    } finally {
+      closeSync(fd)
+    }
+  } finally {
+    closeSync(folder)
+  }
+}
+
 function readStore(dir) {
-  let state
-  try { state = JSON.parse(readFileSync(keyFile(dir), 'utf8')) }
-  catch (error) { if (error.code === 'ENOENT') return undefined; throw error }
+  const state = withStoreFile(dir, fd => JSON.parse(readFileSync(fd, 'utf8')))
+  if (state === undefined) return undefined
   if (state?.version !== 1 || !Array.isArray(state.keys) || state.keys.length < 1 || state.keys.length > 2 ||
       (state.pending !== undefined && !rotationActions.includes(state.pending)) ||
       (state.promoted !== undefined && !Number.isSafeInteger(state.promoted))) throw new Error('Invalid caller key store')
@@ -154,10 +189,8 @@ function finishPublication(dir, publicDir, state, instance, now) {
   }
 }
 
-const stampOf = dir => {
-  const { ino, size, mtimeMs } = lstatSync(keyFile(dir))
-  return `${ino}:${size}:${mtimeMs}`
-}
+const stampOf = dir => withStoreFile(dir,
+  (_, { ino, size, ctimeMs, mtimeMs }) => `${ino}:${size}:${ctimeMs}:${mtimeMs}`)
 
 export function createSigner({ dir, publicDir, instance, now = Date.now, monotonicNow = () => performance.now(), random = randomBytes }) {
   let state, stamp, signingKey

@@ -22,7 +22,7 @@ FROM gcr.io/distroless/nodejs24-debian12@sha256:61f4f4341db81820c24ce771b83d202e
 
 FROM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS builder
 
-ARG AUTOMAGIK_VERSION=3.90.1
+ARG AUTOMAGIK_VERSION=3.160.6
 ARG DSH_VERSION=0.2.2-rc.2
 ARG IMAGE_REVISION=unknown
 ARG AUTOMAGIK_REPOSITORY=https://github.com/automagik-si/automagik
@@ -142,13 +142,13 @@ FROM scratch AS runtime
 # the repository's) and the commit that built it name the image: the tag is
 # <content>-<short revision>, :latest compares the version label, and the revision is the full
 # workflow commit. `AUTOMAGIK_VERSION` in the builder is that plugin release.
-ARG IMAGE_VERSION=3.90.1
+ARG IMAGE_VERSION=3.160.6
 ARG IMAGE_REVISION=unknown
 ARG INPUT_KIND=release
 ARG INPUT_MANIFEST=
 
 LABEL org.opencontainers.image.title="Automagik server" \
-      org.opencontainers.image.description="The automagik-web DeepSeek Harness profile for a host: the Bot team, the welcome and ACP agents" \
+      org.opencontainers.image.description="The automagik-web DeepSeek Harness profile for a host: the Bot team, the welcome, ACP agents and the multiuser adapter" \
       org.opencontainers.image.source="https://github.com/automagik-si/automagik" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \

@@ -13,15 +13,17 @@
 // one line naming the route that served it, and the checks below run on those bytes whichever
 // route served them.
 //
-//   node fetch-plugins.mjs --version 3.90.1 --out vendor
+//   node fetch-plugins.mjs --version 3.160.6 --out vendor
 //     [--repository https://github.com/automagik-si/automagik]
-//     [--packages @automagik/bots-dsh,@automagik/welcome-dsh,@automagik/acp-dsh]
+//     [--packages @automagik/bots-dsh,@automagik/welcome-dsh,@automagik/acp-dsh,@automagik/multiuser-dsh]
 import { createHash } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const DEFAULT_PACKAGES = ['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh']
+export const DEFAULT_PACKAGES = [
+  '@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh', '@automagik/multiuser-dsh',
+]
 
 const DEFAULT_REPOSITORY = 'https://github.com/automagik-si/automagik'
 const PUBLIC_ROUTE = 'public release download'
