@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-19, approved by the owner's delegate: the design and its proposed bounds; amends RFC 0015; no delivery merged) |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: the design and its proposed bounds; amends RFC 0015; delivery 0: the final contract is written in [RFC 0015's amendment](0015-live-chat-projection.md#rfc-0033-attachments-from-pocket-images-on-dshbotid-chats)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-14 |
@@ -122,7 +122,7 @@ disk caching. `attachments.readImage(ref,signal)` is verified in
 
 ## Contracts introduced
 
-All method names and limits here are proposed. The proposed RFC 0015 amendment covers message
+All method names and limits here are proposed; the final ones, which supersede them, are in RFC 0015's amendment (delivery 0, 2026-11-20). The proposed RFC 0015 amendment covers message
 and row shapes, attachment transport and limits, rendering, privacy and its DSH-write amendment:
 `docs/rfcs/0015-live-chat-projection.md:254`, `docs/rfcs/0015-live-chat-projection.md:331`,
 `docs/rfcs/0015-live-chat-projection.md:577`. Write it into 0015 with this RFC's delivery 0,
@@ -164,8 +164,9 @@ Pocket promises memory-only chat data (`apps/pocket/docs/privacy.md:31`), no aut
 loads (`apps/pocket/docs/privacy.md:59`) and camera use only for pairing
 (`apps/pocket/docs/privacy.md:97`). Propose memory-only previews and tap-to-load reads, with no
 camera capture initially. The pocket delivery would update `privacy.md` in the same PR to name
-picker bytes and display names sent to the computer, desktop persistence and workspace copies,
-retention/cleanup, and authenticated thumbnail reads. It would keep the phone-memory, explicit
+picker bytes, declared type and length and opaque upload ids sent to the computer (no display
+name), desktop persistence and workspace copies, retention/cleanup, and authenticated thumbnail
+reads. It would keep the phone-memory, explicit
 load and pairing-only camera promises. This follows `apps/pocket/AGENTS.md:43`.
 
 ## Deliveries
