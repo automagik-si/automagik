@@ -132,8 +132,8 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     voicePane: (sessionId, paneId, open, active) => call('voice-pane', { sessionId, paneId, open, active }),
     voiceWait: (sessionId, paneId, callId, signal) => call('voice-wait', { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call('voice-spoken', { sessionId, paneId, callId, outcome }),
-    // A model on another route: the host starts a new conversation with a handoff note
-    // (parts.js). `patch` carries the thinking level picked with it.
+    // A model on another route: the host changes it in place on a chat with nothing said.
+    // `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),
     switchRouteInChat: async (id, ref, patch = {}) => {
       try { return await after(call('switch-route', { id, ...patch, model: ref })) } catch (error) {
