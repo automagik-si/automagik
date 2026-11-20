@@ -78,7 +78,9 @@ switch (command) {
     else if (options.unlock === 'malformed') writeSync(1, JSON.stringify({ session: key }))
     else if (options.unlock !== 'empty') writeSync(1, key + '\n')
     break
-  case 'lock': break
+  case 'lock':
+    if (options.lock === 'error') process.exitCode = 1
+    break
   case 'sync':
     if (options.sync === 'truncated') writeSync(1, '{"success":')
     else if (options.sync === 'oversize') {

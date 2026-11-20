@@ -413,7 +413,7 @@ function AddSecret({ actions, run, onDone }) {
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: !ready, onClick: save }, t('Save key'))))
 }
 
-function AddVaultKey({ actions, connection, roster, run, onDone }) {
+function AddVaultKey({ actions, provider, connection, roster, run, onDone }) {
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState('')
   const [search, setSearch] = useState('')
@@ -423,6 +423,22 @@ function AddVaultKey({ actions, connection, roster, run, onDone }) {
   const [scope, setScope] = useState('all')
   const [busy, setBusy] = useState(false)
   const item = items?.find(row => row.id === itemId)
+  const onePassword = provider === 'onepassword'
+  const itemOption = row => h('option', { key: row.id, value: row.id }, row.name)
+  const vaults = new Map()
+  if (onePassword) for (const row of items ?? []) {
+    const id = row.id.split('/')[0]
+    if (!vaults.has(id)) vaults.set(id, { name: row.vault, options: [] })
+    vaults.get(id).options.push(itemOption(row))
+  }
+  const fieldLabel = row => {
+    if (!onePassword) return row.selector.startsWith('field:') ? row.label : t(row.label)
+    if (!item.fields.some(other => other !== row && other.label === row.label)) return row.label
+    const section = row.section ?? row.selector
+    const suffix = item.fields.some(other => other !== row && other.label === row.label && other.section === section)
+      ? row.selector : section
+    return t('{label} ({section})', { label: row.label, section: suffix })
+  }
   const ready = !busy && typedKeyName.test(name.trim()) && item?.fields.some(row => row.selector === field)
   const find = async (event) => {
     event.preventDefault()
@@ -432,7 +448,8 @@ function AddVaultKey({ actions, connection, roster, run, onDone }) {
     setItemId('')
     setField('')
     try {
-      await run(actions.vaultItems(search).then(answer => setItems(answer.items)))
+      const listed = onePassword ? actions.vaultItems(search, provider) : actions.vaultItems(search)
+      await run(listed.then(answer => setItems(answer.items)))
     } finally { setBusy(false) }
   }
   const save = async () => {
@@ -440,6 +457,7 @@ function AddVaultKey({ actions, connection, roster, run, onDone }) {
     setBusy(true)
     try {
       const mapping = { name: name.trim().replace(/-/g, '_'), purpose, connection, item: itemId, field, scope }
+      if (onePassword) mapping.provider = provider
       if (await run(actions.secretSourceSet(mapping))) onDone()
     } finally { setBusy(false) }
   }
@@ -454,12 +472,12 @@ function AddVaultKey({ actions, connection, roster, run, onDone }) {
       className: 'bt-input', 'aria-label': t('Vault item'), value: itemId,
       onChange: event => { setItemId(event.target.value); setField('') },
     }, h('option', { value: '' }, t('Choose an item')),
-    items.map(row => h('option', { key: row.id, value: row.id }, row.name))) : null,
+    onePassword ? [...vaults].map(([id, { name, options }]) => h('optgroup', { key: id, label: name }, options))
+      : items.map(itemOption)) : null,
     item ? h('select', {
       className: 'bt-input', 'aria-label': t('Vault field'), value: field, onChange: event => setField(event.target.value),
     }, h('option', { value: '' }, t('Choose a field')),
-    item.fields.map(row => h('option', { key: row.selector, value: row.selector },
-      row.selector.startsWith('field:') ? row.label : t(row.label)))) : null,
+    item.fields.map(row => h('option', { key: row.selector, value: row.selector }, fieldLabel(row)))) : null,
     h(ScopeEditor, { secret: { scope: 'all' }, roster, onChange: setScope }),
     h('div', { className: 'bt-secret-row-actions' },
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onDone }, t('Cancel')),
@@ -472,9 +490,11 @@ const vaultStates = {
   unauthenticated: 'Not signed in to Bitwarden CLI',
   unavailable: 'The vault did not answer.',
 }
+const vaultProviders = { bitwarden: 'Bitwarden', onepassword: '1Password' }
 
 function VaultSection({ roster, actions, run, Section }) {
   const [status, setStatus] = useState(null)
+  const [choice, setChoice] = useState(undefined)
   const [busy, setBusy] = useState(false)
   const [adding, setAdding] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -482,50 +502,77 @@ function VaultSection({ roster, actions, run, Section }) {
   const readOnly = roster.readOnly != null
   const state = readOnly ? 'unavailable' : status?.state
   const connection = status?.connection
+  const provider = status?.provider ?? choice ?? 'bitwarden'
+  const onePassword = provider === 'onepassword'
+  const local = !insecure()
   useEffect(() => {
     if (readOnly || busy || typeof actions.vaultStatus !== 'function') return
     const control = new AbortController()
     let timer
     const refresh = async () => {
       try {
-        const answer = await actions.vaultStatus(control.signal)
+        const answer = await actions.vaultStatus(control.signal, choice)
         if (!control.signal.aborted) setStatus(answer)
       } catch {
-        if (!control.signal.aborted) setStatus({ state: 'unavailable' })
+        if (!control.signal.aborted) setStatus(previous => ({ ...previous, state: 'unavailable', reason: undefined }))
       }
       if (!control.signal.aborted) timer = setTimeout(refresh, 5000)
     }
     void refresh()
     return () => { control.abort(); clearTimeout(timer) }
-  }, [actions, busy, readOnly, refreshKey])
+  }, [actions, busy, readOnly, refreshKey, choice])
   useEffect(() => { if (state !== 'unlocked') setAdding(false) }, [state])
-  const changed = () => { setStatus(null); setBusy(false); setRefreshKey(key => key + 1) }
+  const changed = () => {
+    setStatus(previous => ({ ...previous, state: undefined }))
+    setBusy(false)
+    setRefreshKey(key => key + 1)
+  }
+  const choose = event => {
+    const next = event.target.value
+    if (password.current) password.current.value = ''
+    setAdding(false)
+    setStatus(previous => ({ ...previous, provider: next, state: undefined, reason: undefined }))
+    setChoice(next)
+  }
   const unlock = async () => {
     const input = password.current
     if (busy || !input?.value) return
     setBusy(true)
-    try { await run(actions.vaultUnlock(input.value)) }
-    finally { input.value = ''; changed() }
+    const credential = input.value
+    input.value = ''
+    try {
+      await run(onePassword ? actions.vaultTokenSet(provider, credential, connection) : actions.vaultUnlock(credential, connection))
+    } finally { changed() }
   }
   const lock = async () => {
     if (busy) return
     setBusy(true)
     setAdding(false)
-    try { await run(actions.vaultLock()) }
+    try { await run(onePassword ? actions.vaultTokenClear(provider) : actions.vaultLock()) }
     finally { changed() }
   }
   return h(Section, { title: t('Vault') },
+    status?.providers?.length > 1 ? h('div', { className: 'bt-set-row' },
+      h('select', { className: 'bt-input', 'aria-label': t('Vault provider'), value: provider,
+        disabled: readOnly || busy || (roster.secretSources?.rows?.length ?? 0) > 0, onChange: choose },
+      status.providers.map(id => h('option', { key: id, value: id }, t(vaultProviders[id]))))) : null,
     h('div', { className: 'bt-set-row', role: 'status' },
-      h('span', { className: 'bt-tag' }, t(vaultStates[state] ?? 'Checking vault status…')),
-      h('span', { className: 'bt-set-hint' }, t('The vault locks after the idle time set in the plugin’s settings.')),
-      state === 'unlocked' ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: lock }, t('Lock')) : null),
-    state === 'locked' && insecure() ? h('div', { className: 'bt-secret-warn', role: 'note' },
+      h('span', { className: 'bt-tag' }, t(status?.reason ?? vaultStates[state] ?? 'Checking vault status…')),
+      h('span', { className: 'bt-set-hint' }, t(onePassword
+        ? 'The token is cleared when the vault locks or the app quits.' : 'The vault locks after the idle time set in the plugin’s settings.')),
+      state === 'unlocked' && (!onePassword || local)
+        ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: lock }, t(onePassword ? 'Clear token' : 'Lock')) : null),
+    (state === 'locked' || (onePassword && state === 'unlocked')) && !local ? h('div', { className: 'bt-secret-warn', role: 'note' },
       h(WarnIcon), t('Unlock the vault in Settings on this computer.')) : null,
-    state === 'locked' && !insecure() && !roster.secretSources?.broken ? h('div', { className: 'bt-set-row bt-set-paste' },
-      h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, { inputRef: password, disabled: busy, onEnter: unlock, label: t('Bitwarden master password') })),
-      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: unlock }, t('Unlock'))) : null,
+    (state === 'locked' || (onePassword && state === 'unlocked')) && local && !roster.secretSources?.broken
+      ? h('div', { className: 'bt-set-row bt-set-paste' },
+        h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, {
+          key: JSON.stringify([provider, connection]), inputRef: password, disabled: busy, onEnter: unlock,
+          label: t(onePassword ? '1Password service account token' : 'Bitwarden master password') })),
+        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: unlock },
+          t(onePassword ? (state === 'unlocked' ? 'Replace token' : 'Set token') : 'Unlock'))) : null,
     state === 'unlocked' && !roster.secretSources?.broken
-      ? adding ? h(AddVaultKey, { key: connection, actions, connection, roster, run, onDone: () => setAdding(false) })
+      ? adding ? h(AddVaultKey, { key: provider + '/' + connection, actions, provider, connection, roster, run, onDone: () => setAdding(false) })
         : h('div', { className: 'bt-set-row' }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => setAdding(true) }, t('Add a vault key')))
       : null)
 }
