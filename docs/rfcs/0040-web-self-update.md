@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and repaired in #1546; layout follow-up #1719; no delivery merged) |
+| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and repaired in #1546 and landed by its takeover with this RFC (deliveries 1 and 2); layout follow-up #1719; technical amendment 2026-11-20: Q5 re-decided, the version store, the update set and the verifier's shipping, see "Amendment 2026-11-20"; deliveries 3-8 open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin only (3.N.P): `apps/bots-dsh` gains the UI and the host half; nothing here builds the desktop app |
 | Created | 2026-11-18 |
@@ -18,7 +18,7 @@ version exists; a full-screen modal that says what changes in plain words; then 
 download, check the signature, install beside the current version, restart, health check; a success
 screen; and an automatic rollback to the previous version, saying nothing was lost, when health fails.
 
-Step 1, the clickable mock, was reviewed as #1541 and is approved; the repaired mock lands in #1546. Its layout follow-up is #1719. Everything below is what the real thing adds
+Step 1, the clickable mock, was reviewed as #1541 and is approved; the repaired mock lands with this RFC (the takeover of #1546). Its layout follow-up is #1719. Everything below is what the real thing adds
 around it, in small deliveries that each land on their own.
 
 ## Where the new version and its signature come from
@@ -59,7 +59,7 @@ DSH). Before switching, the updater stores the version that is running:
   healthy run of the new one.
 - **Where the instance lives in Arca (a server image)**: the image already follows the lane on start,
   offline and under a volume lock: `followImage`/`installOffline`/`reuseInstalledIndexes` in
-  `server/profile-follow.mjs:33-76`, entered from `server/entrypoint.mjs:21`. So in that case the
+  `server/profile-follow.mjs:46-89`, entered from `server/entrypoint.mjs:117`. So in that case the
   updater does **not** write a second installer: it materializes the payload the same way the image
   does and hands it to that path (the follow installs beside/over the profile under
   `server/volume-lock.mjs`), then asks Arca to restart the instance. On a plain host — the layout
@@ -145,7 +145,7 @@ Decided by the chief of staff on 2026-11-18 — technical, not the owner's:
 - **Q3** health never calls a model. At most it is an option, off by default, and only if a real case
   needs it.
 - **Q4** start with 60 s + 60 s, and adjust from a real measurement on the dev instance.
-- **Q5** the supervisor is a **host plugin in this profile**: it already runs with the team, shares the
+- **Q5** (re-decided by the 2026-11-20 amendment below: the supervisor is the parent of DSH, not a host plugin) the supervisor is a **host plugin in this profile**: it already runs with the team, shares the
   profile's paths and secrets, starts and stops with the service, and survives a restart of the served
   app. A separate launcher would be a second thing to install, keep current and log, with no gain here.
 
@@ -186,7 +186,7 @@ one keeps its problem; 0040 reuses what it can and never adds a second copy.
 | exists | what it does | 0040 reuses | 0040 replaces | 0040 retires |
 |---|---|---|---|---|
 | `scripts/upgrade.ts` + `docs/upgrade.md` | upgrades an **installed host**: latest release or `--to`, verifies the signed lane and `PLUGINS.SHA256SUMS` (`scripts/upgrade.ts:516-540`, `verifyLane` from `scripts/lane.ts` at `:50`), backs up, stages `releases/<version>/` and swaps the `runtime` symlink atomically (`:9-17`), re-adds tarballs through `dsh plugin`, smoke-checks, rolls back on failure, prints one `RESULT:` (`docs/upgrade.md:28-46`) | the lane verifier (`verifyLane`, `plugin-lane/keys.json`), the integrity check of a tarball (`scripts/upgrade.ts:316`), the beside-the-running-version layout and the atomic switch, the automatic rollback and the one-line result | the manual "stop, backfill, re-add, restart, check" sequence **for plugins only**, from inside the app | nothing — it stays the way a host upgrades its runtime; 0040 never touches `runtime/` or the service unit |
-| `server/profile-follow.mjs` | a server image's profile follows the lane on start: offline install from materialized archives, under a volume lock (`:33-76`, entered at `server/entrypoint.mjs:21`), with `compareRelease`/`validBuild`/ownership state (`server/profile-state.mjs`) | `followImage`/`installOffline`/`reuseInstalledIndexes` as **the** installer when the instance runs from a server image (Arca), its volume lock, and its state checks | 0040's own install step on that kind of host — the plan now hands the payload to this path instead of keeping a second installer (delivery 5, delivery 8) | nothing — it keeps updating image-hosted instances on start; 0040 only adds the in-app trigger and the visible state |
+| `server/profile-follow.mjs` | a server image's profile follows the lane on start: offline install from materialized archives, under a volume lock (`:46-89`, entered at `server/entrypoint.mjs:117`), with `compareRelease`/`validBuild`/ownership state (`server/profile-state.mjs`) | `followImage`/`installOffline`/`reuseInstalledIndexes` as **the** installer when the instance runs from a server image (Arca), its volume lock, and its state checks | 0040's own install step on that kind of host — the plan now hands the payload to this path instead of keeping a second installer (delivery 5, delivery 8) | nothing — it keeps updating image-hosted instances on start; 0040 only adds the in-app trigger and the visible state |
 | the signed lane + `am` as loaders (`docs/rfcs/0011-*`, `0012-*`; `am/lib/lane.mjs`) | the lane is the signed pointer (`lane.json` + `lane.json.sig`, `plugin-lane/keys.json`); `am` is the one command that reads it and loads the parts | the lane as the only source of a version and its signature, and am's lane reader (`am/lib/lane.mjs`: `LANE_RELEASE`, the sequence and no-downgrade refusal) as the reference for the same rules | the manual download of release tarballs, checking them by hand against `PLUGINS.SHA256SUMS` | the instruction "update by hand" as the normal path on a web instance; am keeps loading a host, and 0040 adds the in-app trigger that uses the same lane |
 
 The plan changes that follow from this comparison, all inside the deliveries table below:
@@ -201,15 +201,73 @@ The plan changes that follow from this comparison, all inside the deliveries tab
 - **Delivery 8 becomes smaller**: the Arca hand-over is just "materialize, follow, restart", because the
   installer already exists there.
 
+## Amendment 2026-11-20 (technical; no owner decision changed)
+
+A review of this RFC against the code, before delivery 3, found that four of its technical choices
+cannot work as written. The owner's decisions (Q2, Q6, Q7) stand; these replace technical text only.
+
+1. **The supervisor is the parent of DSH (Q5 re-decided).** A host plugin dies with the restart it
+   must supervise: the plain host's `automagik-web.service` runs with `KillMode=control-group`, and
+   `setsid` does not escape it (`docs/upgrade.md:121`, `:203`); in a server image the entrypoint
+   forwards termination to DSH and exits with it (`server/entrypoint.mjs:158-159`). So the supervisor
+   is the process that starts DSH, as "How the modal continues" already allowed ("the service's own
+   restart wrapper"): `server/entrypoint.mjs` in a server image, and a small wrapper set once as the
+   unit's `ExecStart` on a plain host (documented in `docs/upgrade.md`). It restarts its own DSH child,
+   so an update never calls `systemctl` or `sudo`, and a broken new plugin cannot stop the rollback.
+   The host plugin only asks for an update and reads the state; where no supervisor runs, it refuses
+   with a sentence the person can read, as it does without a writable home.
+2. **The version store lives beside the profile, not in it:** `$DSH_HOME/update/<profile>/`
+   (`state.json`, `current.json`, `versions/<version>/`). The image's follow copies and renames the
+   whole profile directory (`server/profile-follow.mjs:144-174`), which would carry or drop a store
+   inside it.
+3. **The update set is every Automagik plugin the profile has, at one version.** The lane names one
+   release for all its plugins (acp, bots, locale-pt-br, vault, welcome; `scripts/lane.ts:91`); a server
+   image requires ACP, Bots and Welcome at the same release (`server/profile-state.mjs:6`, `:24-26`); the
+   desktop takes the whole set (`apps/desktop/src/lane.js:52`); and the owner asked to update
+   "o automagik". "This plugin's entry" in "Where the new version and its signature come from" reads as
+   "each plugin of the set that the profile has installed". On a server image the in-app update moves
+   the profile ahead of the image; delivery 8 teaches `server/profile-state.mjs` and
+   `server/healthcheck.mjs` that a profile a signed in-app update put there, recorded in `current.json`,
+   is healthy and still followed, and a rollback after a failed health check restores from the
+   follow's backup (`server/profile-follow.mjs:144-148`).
+4. **The verifier ships as one plain-JS module with a checked copy.** `scripts/lane.ts` cannot be
+   imported by an installed plugin (TypeScript, Bun's `import.meta.dir`, outside the package's
+   `files`). Its `verifyLane` moves to `plugin-lane/verify.mjs`, which `scripts/lane.ts` re-exports, and
+   the Bots plugin carries a byte-equal copy checked by a test, as its role keys already are. The keys
+   are the plugin's existing copy of `plugin-lane/keys.json`. `keyId` is read only to choose the key;
+   no other field is read before the signature passes.
+5. **A version the instance's DSH cannot run is refused in the check, before the click.** Each plugin's
+   `engines.dsh` is checked as `scripts/upgrade.ts:543-545` and the desktop (`apps/desktop/src/lane.js:132`)
+   do, so the nod never offers an update that would stop work and then fail.
+6. **Resuming work uses what exists, and says what it cannot promise.** The Bots plugin already notes
+   running turns in `inflight.json` and resumes them after a restart with a "check what is done before
+   repeating" prompt (`apps/bots-dsh/src/host/resume.js`). The update's stop is the supervisor's
+   SIGTERM to DSH, the resume is that pass with an "update" reason, and update and rollback restarts do
+   not count toward its daily resume limit. Never replaying a completed tool step needs a per-step
+   journal and a resume-into-a-turn call DSH does not have; until DSH adds them, a step whose outcome
+   is unknown is reported to the person instead of being run again.
+7. **Corrections to "What exists already".** The Bots plugin's own `src/host/update.js` already updates
+   an instance installed from the registry or a git tag; one installed from a local folder or a
+   `file:` tarball, which is how a web instance is installed (`docs/upgrade.md`), is told to update
+   where it was installed (`apps/bots-dsh/src/host/update.js:47`, `apps/bots-dsh/src/client/about.js:42`). That
+   path stays for registry and git installs, and the lane updater serves supervised web instances.
+   `am/lib/lane.mjs` reads am's own pointer (`am-lane`, am's keys); its sequence refusal
+   (`am/lib/self.mjs:369`) is the reference for the same rule here, not a reader of this lane. The
+   plugin pointer moves only on releases that ship plugins.
+
+The deliveries keep their numbers. Delivery 3 adds the store above; delivery 4 the shared verifier and
+the `engines.dsh` check; delivery 5 the supervisor and, on a plain host, its wrapper; delivery 8 the
+image's supervisor and its health and state rules.
+
 ## Deliveries (each one PR, plugin lane)
 
 | # | What it adds | Visible to the person |
 |---|---|---|
-| 1 | The mock (approved; reviewed as #1541, lands in #1546) | the whole flow, with sample data, behind `?mock-1540` |
+| 1 | The mock (approved; reviewed as #1541, repaired in #1546, lands with this RFC) | the whole flow, with sample data, behind `?mock-1540` |
 | 2 | This RFC | no |
 | 3 | Host half: version store, `current.json`, `update-status`, and the "did the last run finish" read the page uses | no (no update yet) |
 | 4 | Verified fetch: read `lane.json` through `verifyLane` (`scripts/lane.ts`, as `scripts/upgrade.ts:50` does), take this plugin's `version`/`sha256`, download the tarball, check it, and stop — a dry run that writes what it would do | a "check for updates" line in Settings, no install |
-| 5 | Install beside and switch: on an image host hand the payload to `installOffline`/`followImage` (`server/profile-follow.mjs:47,76`); on a plain host unpack into `versions/<version>` and switch atomically as `scripts/upgrade.ts:13` does; write the state, restart through the supervisor | a real update behind a setting, off by default |
+| 5 | Install beside and switch: on an image host hand the payload to `installOffline`/`followImage` (`server/profile-follow.mjs:60,89`); on a plain host unpack into `versions/<version>` and switch atomically as `scripts/upgrade.ts:13` does; write the state, restart through the supervisor | a real update behind a setting, off by default |
 | 6 | Health and automatic rollback, as above | the rollback screen tells the truth |
 | 7 | The nod and the full-screen modal wired to the real state instead of the mock's timers; the mock retires | the approved flow, working |
 | 8 | Arca hand-over: materialize, follow (`server/profile-follow.mjs`), and the restart call and the home it uses, documented for the owner | an instance in Arca updating itself |
