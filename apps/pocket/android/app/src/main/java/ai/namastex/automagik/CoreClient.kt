@@ -17,6 +17,9 @@ class CoreClient(
     input: InputStream, private val output: OutputStream, private val transport: Closeable,
     private val scope: CoroutineScope, private val disconnected: (String) -> Unit
 ) : Closeable {
+    companion object { const val CALL_TIMEOUT_MS = 30_000L }
+    @Volatile internal var callTimeoutMs: Long = CALL_TIMEOUT_MS
+
     private val input = DataInputStream(input)
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<JSONObject>>()
     private val ids = AtomicInteger(1)
@@ -32,9 +35,10 @@ class CoreClient(
     lateinit var hello: JSONObject
         private set
 
-    suspend fun start(manage: JSONArray? = null): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun start(manage: JSONArray? = null, attachments: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
         val params = JSONObject().put("framed", true).put("generation", 1)
         if (manage != null && manage.length() > 0) params.put("manage", manage)
+        if (attachments) params.put("attachments", 1)
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 0).put("method", "hello").put("params", params)
         synchronized(output) { output.write((request.toString() + "\n").toByteArray()); output.flush() }
         val line = java.io.ByteArrayOutputStream()
@@ -88,14 +92,14 @@ class CoreClient(
         hello
     }
 
-    suspend fun call(method: String, params: JSONObject = JSONObject()): JSONObject {
+    suspend fun call(method: String, params: JSONObject = JSONObject(), timeoutMs: Long = callTimeoutMs): JSONObject {
         check(!closed) { "Disconnected" }
         val id = ids.getAndIncrement()
         val deferred = CompletableDeferred<JSONObject>()
         pending[id] = deferred
         return try {
             send(0, Wire.DATA, JSONObject().put("jsonrpc", "2.0").put("id", id).put("method", method).put("params", params).toString().toByteArray())
-            withTimeout(30_000) { deferred.await() }
+            withTimeout(timeoutMs) { deferred.await() }
         } finally { pending.remove(id) }
     }
 

@@ -74,7 +74,8 @@ object Chat {
         /** A question's option labels, in order (option 1 first), and whether several can be picked. */
         val options: List<String> = emptyList(), val multi: Boolean = false,
         /** An assistant text row whose turn was interrupted (bots-dsh pocket-chat.js rowsOf): it reads [STOPPED]. */
-        val interrupted: Boolean = false
+        val interrupted: Boolean = false,
+        val blocks: List<Attach.Block>? = null
     ) {
         companion object {
             fun parse(j: JSONObject?): Row? {
@@ -85,7 +86,7 @@ object Chat {
                     s("input"), s("output"), j.optBoolean("ok", true), s("call"), j.optJSONArray("choices").strings(),
                     j.optBoolean("open", false), j.optBoolean("answerable", true), s("prompt"), j.optBoolean("cut", false),
                     s("why"), s("state"), s("msg"), j.optJSONArray("options").strings(), j.optBoolean("multi", false),
-                    j.opt("interrupted") == true)
+                    j.opt("interrupted") == true, Attach.blocks(j.opt("blocks")))
             }
         }
     }
@@ -582,7 +583,7 @@ object ChatActions {
  * Row text as the phone shows it: plain text only (RFC 0015, "Rendering, both clients"). Escape
  * sequences and control characters are removed; raw HTML stays as the characters it is, never
  * parsed or rendered; nothing loads by itself; an http(s) link is a span showing its own target,
- * opened only on a tap. There is no image block: nothing here can fetch.
+ * opened only on a tap. Image blocks load only on a tap ([Attach]).
  */
 object ChatText {
     sealed interface Span { val text: String }
