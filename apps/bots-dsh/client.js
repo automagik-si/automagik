@@ -15946,7 +15946,7 @@ function RolePackagesCard({ roster, actions, run: run3 }) {
         !record && role.reason === "community" && t("Community: not installable yet")
       ].filter(Boolean);
       const version = record ? record.version : role.version;
-      const button = record ? (0, import_react40.createElement)("button", {
+      const button2 = record ? (0, import_react40.createElement)("button", {
         type: "button",
         className: "bt-soft bt-soft-sm",
         disabled: pending || readOnly || inUse,
@@ -15957,7 +15957,7 @@ function RolePackagesCard({ roster, actions, run: run3 }) {
         disabled: pending || readOnly,
         onClick: () => change(actions.installRole, role.id)
       }, t("Install"));
-      return (0, import_react40.createElement)(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(" · "), hint: hints.join(" · ") }, button || null);
+      return (0, import_react40.createElement)(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(" · "), hint: hints.join(" · ") }, button2 || null);
     }),
     result ? (0, import_react40.createElement)(
       "div",
