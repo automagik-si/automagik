@@ -1051,7 +1051,8 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 - **Ledger:** `worker`, `start` and `attach` append one row per terminal to
   `<app home>/automagik-herdr/workers.jsonl`: `{ event: "start", kind: "worker" | "seat",
   terminal, pid, botId, task, worktree, agent, model, effort, template, role, branch, project,
-  lead, base, created, swap, override, override_requested, at }` (`at` is ISO 8601).
+  lead, base, created, swap, override, override_requested, generation, sequence, at }` (`at` is
+  ISO 8601).
   - `task`: Genie's task id (`--task`), else null; a seat's is null. `project`: the main
     checkout's absolute path, the project key, on seats too. Usage joins to tasks on
     **(project, task)**: task ids are unique per project only.
@@ -1063,6 +1064,13 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
     effort or template itself. `override_requested`: on a swap task, what it asked for and
     didn't get, else null.
   - `template` is the hc template a worker runs, else null (seats and agent workers).
+  - `generation` and `sequence`: the Bot login generation and the generation record's sequence
+    the launch used, read once at launch from ACP's `generation.json` beside the pointer
+    exported as `AUTOMAGIK_BOT_CLI_POINTER` (#1527, #1532). `generation` is that record's field
+    for the launch's vendor (`claude` or `codex`); `sequence` is the record's own. Both are null
+    when the launch has no such record (another agent, a template whose agent is unknown, no
+    pointer, no readable record, or no generation for that vendor), never a guessed value. The
+    entrypoint's export of the pointer is not this command's.
   - Rows written before a field have no such key. A worker row with no `branch` key predates
     the task contract: its `task` is the branch, not a Genie id.
   When a template runs, `agent`, `model` and `effort` are null: the template sets them. The

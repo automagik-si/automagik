@@ -815,6 +815,27 @@ const stamp = (at) => new Date(at ?? Date.now()).toISOString();
 const orNull = (x) => (x === undefined || x === "" ? null : x);
 const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
 
+/** The vendors ACP's Bot login generation record carries (its `generation.json`, #1527). */
+export const LOGIN_VENDORS = ["claude", "codex"];
+/** A Bot login generation as ACP writes one: a v4 UUID. */
+const GENERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * The generation and sequence a launch records, from the Bot login generation record (ACP's
+ * `generation.json`, written beside its pointer, #1527) and the vendor it launches. One record
+ * names both vendors and one sequence; a launch records that vendor's `generation` and the
+ * record's `sequence`. Both are null when the record is absent, unreadable or not version 1,
+ * names no generation for this vendor, or holds no usable sequence: never a guess.
+ */
+export function loginGeneration(record, vendor) {
+  const field = record && typeof record === "object" && !Array.isArray(record) && record.version === 1
+    && LOGIN_VENDORS.includes(vendor) ? record[vendor] : null;
+  const generation = field && typeof field === "object" && !Array.isArray(field)
+    && typeof field.generation === "string" && GENERATION_ID.test(field.generation) ? field.generation : null;
+  const sequence = record && Number.isSafeInteger(record.sequence) && record.sequence >= 0 ? record.sequence : null;
+  return generation !== null && sequence !== null ? { generation, sequence } : { generation: null, sequence: null };
+}
+
 /**
  * A start row: a worker (`kind: "worker"`, `worktree` its cwd as a real path) or a bot seat
  * (`kind: "seat"`, from start, restart, attach and --tree; `worktree` its folder). `task`:
@@ -831,16 +852,20 @@ const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. A seat's worker-only fields are null or false.
+ * --session-id, or the one it resumed), else null. `generation` and `sequence`: the Bot login
+ * generation and record sequence this launch used (loginGeneration), both null when it has no
+ * Claude/Codex generation record (another agent or template, no pointer, or no record). A seat's
+ * worker-only fields are null or false.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
-  template, role, swap, override, overrideRequested, core, createdMs, squad, session, at }) {
+  template, role, swap, override, overrideRequested, core, createdMs, squad, session, generation, sequence, at }) {
   const requested = overrideRequested && Object.keys(overrideRequested).length ? { ...overrideRequested } : null;
   return { event: "start", kind, terminal, pid: Number.isInteger(pid) ? pid : null, botId, task: orNull(task),
     worktree: orNull(worktree), agent: orNull(agent), model: orNull(model), effort: orNull(effort), template: orNull(template),
     role: orNull(role), branch: orNull(branch), project: orNull(project), lead: orNull(lead), base: orNull(base),
     created: created === true, swap: swap === true, override: override === true, override_requested: requested,
-    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session), at: stamp(at) };
+    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session),
+    generation: orNull(generation), sequence: msOrNull(sequence), at: stamp(at) };
 }
 
 /**
