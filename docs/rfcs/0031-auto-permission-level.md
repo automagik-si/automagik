@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; owed: question 5's capture of Claude Code's `auto` mode, and the amendment's unmet dependency on Codex; amends RFC 0003 with its delivery 2) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-11 |
@@ -368,6 +368,32 @@ groups, tasks, the team default.
    mode is captured from a signed-in CLI and the bridge's part is designed.
 6. **Two names, "Auto" and DSH's "Auto review",** in one list when that plugin is on.
    Recommended: keep both; they are different levels and the second is marked Experimental.
+
+## Answers (2026-11-19)
+
+The owner's delegate accepted this RFC on 2026-11-19 (issue #1092) and answered every open
+question with this RFC's own recommendation. Each answer is that recommendation, restated; the
+questions above stay as they were asked. Deliveries 1 and 2 had already merged (#1085, #1106), as
+had the amendment (#1264) and Auto on every route (#1110); where what merged differs from an
+answer, the answer says so.
+
+1. **Question 1:** the mark. Auto is stored as Workspace plus `permissionAuto`, so nothing that
+   already reasons about levels can read it as wider than Workspace. As merged in #1106.
+2. **Question 2:** (b), every turn of the Bot's own chat, said in plain words in the question
+   before saving: any message that reaches the chat can lead to a step the judge allows.
+3. **Question 3:** yes. Ending Auto ends the agent session, as merged in #1106.
+4. **Question 4:** decide after delivery 2; until then Auto is not offered on a provider's model.
+   Delivery 2 merged first (#1106); #1110 then offered Auto there, with (a), a judge of the Bot
+   team's own: the Bot's own model decides sandbox escalations in a separate request, and an
+   unsure, failed or late answer reaches the person. That merge is the decision this answer
+   deferred.
+5. **Question 5:** not offered on Claude Code until its `auto` mode is captured from a signed-in
+   CLI and the bridge's part is designed. #1110 already offers Auto on Claude Code, and the
+   capture is still missing (`apps/acp-dsh/test/fixtures/permission-payloads/README.md`: "Claude
+   Code is not captured yet"). Owed: that capture, or the owner's decision to keep Claude Code on
+   Auto without it.
+6. **Question 6:** keep both names, "Auto" and DSH's "Auto review"; they are different levels and
+   the second is marked Experimental.
 
 ## Links
 
