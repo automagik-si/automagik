@@ -10,10 +10,9 @@
 // lost. Arca supplies the kept version and the health answer in the real thing; here the toast
 // says so in one line.
 import { t } from './i18n.js'
+import { MOCK_FLAG, mock1540On } from './self-update-flag.js'
 
-/** The flag: `?mock-1540` or `#mock-1540` in the page's URL. */
-export const MOCK_FLAG = 'mock-1540'
-const PARAM_FLAG = 'mock-1540'
+export { MOCK_FLAG }
 
 /** The five steps, in order, as the real flow names them. */
 export const MOCK_STEPS = Object.freeze([
@@ -148,37 +147,33 @@ function head(box, title, onClose) {
  * on the nod does; every screen returns to the nod when closed. All timers are cleared on dispose,
  * so a test never has to wait for the flow.
  */
-export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, successMs = SUCCESS_MS, seat = null } = {}) {
+export function mountSelfUpdateMock(root, {
+  sample = MOCK_DATA, stepMs = STEP_MS, successMs = SUCCESS_MS, seat = null, getSeat = null,
+} = {}) {
   let timers = []
-  let seatButton = null
+  let nodButton = null
   const stop = () => { for (const id of timers) clearTimeout(id); timers = [] }
   const later = (fn, ms) => { timers.push(setTimeout(fn, ms)) }
   const place = (node) => { root.replaceChildren(node) }
-  // The modal is the only thing the preview puts in `root`; closing returns to the nod and owns
-  // no layer any more. Without this the seat path only swapped the nod and the full-screen layer
-  // stayed mounted, with `screen()` still saying changes/success/rollback.
-  const clearLayer = () => root.replaceChildren()
+
+  const placeNod = () => {
+    if (!nodButton || root.querySelector('.su-layer')) return
+    const target = (getSeat ? getSeat() : seat) ?? root
+    if (nodButton.parentNode !== target) target.append(nodButton)
+  }
 
   const nod = () => {
     stop()
-    const button = el('button', 'su-nod bt-round')
-    button.type = 'button'
-    button.dataset.mock = MOCK_FLAG
-    button.title = t('Update available')
-    button.setAttribute('aria-label', t('Update available'))
-    button.append(arrowSvg(), el('span', 'su-dot'), el('span', 'su-label', t('Update available')))
-    button.addEventListener('click', () => open())
-    if (seat) {
-      // The bottom row owns this seat: the same line as the app's other footer entries. The nod
-      // joins them and leaves only itself behind on dispose; it never takes the seat's entries.
-      seatButton?.remove()
-      seat.append(button)
-      seatButton = button
-      clearLayer()
-    } else {
-      // No seat: the nod is the root's only child, which already takes the layer with it.
-      place(button)
-    }
+    nodButton?.remove()
+    nodButton = el('button', 'su-nod bt-round')
+    nodButton.type = 'button'
+    nodButton.dataset.mock = MOCK_FLAG
+    nodButton.title = t('Update available')
+    nodButton.setAttribute('aria-label', t('Update available'))
+    nodButton.append(arrowSvg(), el('span', 'su-dot'), el('span', 'su-label', t('Update available')))
+    nodButton.addEventListener('click', () => open())
+    root.replaceChildren()
+    placeNod()
   }
 
   const open = () => changes()
@@ -336,6 +331,9 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
   doc?.addEventListener('keydown', onKeydown)
 
   nod()
+  const Observer = doc?.defaultView?.MutationObserver
+  const observer = getSeat && Observer ? new Observer(placeNod) : null
+  observer?.observe(doc.body, { childList: true, subtree: true })
   return {
     open,
     close: nod,
@@ -348,11 +346,12 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
       return 'changes'
     },
     dispose: () => {
+      observer?.disconnect()
       stop()
       doc?.removeEventListener('keydown', onKeydown)
-      seatButton?.remove()
-      seatButton = null
-      clearLayer()
+      nodButton?.remove()
+      nodButton = null
+      root.replaceChildren()
       root.remove()
     },
   }
@@ -363,20 +362,17 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
  * start of the app is what it was; the disposer removes the nod and the styles.
  */
 export function installSelfUpdateMock({ location = globalThis.location, document: doc = globalThis.document } = {}) {
-  if (!doc || !location) return () => {}
-  const search = typeof location.search === 'string' ? location.search : ''
-  const hash = typeof location.hash === 'string' ? location.hash : ''
-  if (!new RegExp(`(?:[?&])${PARAM_FLAG}(?:=|&|$)`).test(search) && !hash.includes(MOCK_FLAG)) return () => {}
+  if (!doc || !mock1540On(location)) return () => {}
   const offStyles = installStyle(CSS, doc)
   const root = doc.createElement('div')
   root.id = 'ds-bot-self-update-mock'
   doc.body.append(root)
   // The app's bottom row is DSH's own footer area; inside it the nod sits in the same line as
   // the footer's other entries. A harness can offer its own seat with `data-mock-seat`.
-  const seat = doc.querySelector('.lb-foot')
+  const getSeat = () => doc.querySelector('.lb-foot')
     ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div')
     ?? doc.querySelector('[data-mock-seat]')
-  const control = mountSelfUpdateMock(root, { seat })
+  const control = mountSelfUpdateMock(root, { getSeat })
   return () => {
     control.dispose()
     offStyles()

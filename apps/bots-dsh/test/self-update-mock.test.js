@@ -210,6 +210,78 @@ test('the hash form mounts it too', t => {
   off()
 })
 
+test('an unrelated fragment containing the flag mounts nothing', t => {
+  const document = dom(t)
+  const observe = t.mock.method(document.defaultView.MutationObserver.prototype, 'observe')
+  const off = installSelfUpdateMock({ location: { search: '', hash: '#notes-mock-1540-old' }, document })
+  t.after(off)
+  assert.equal(document.getElementById('ds-bot-self-update-mock'), null)
+  assert.equal(document.querySelector('.su-nod'), null)
+  assert.equal(document.querySelectorAll('style').length, 0)
+  assert.equal(observe.mock.callCount(), 0)
+})
+
+test('the nod moves to a replacement footer and leaves its entries intact', async t => {
+  const document = dom(t)
+  const sidebar = document.createElement('div')
+  const foot = document.createElement('div')
+  foot.className = 'lb-foot'
+  foot.innerHTML = '<button type="button" aria-label="Account">Account</button>'
+    + '<button type="button" aria-label="Rail">Rail</button>'
+  const nextFoot = foot.cloneNode(true)
+  const entries = [...nextFoot.children]
+  sidebar.append(foot)
+  document.body.append(sidebar)
+  const off = installSelfUpdateMock({ location: { search: '?mock-1540', hash: '' }, document })
+  t.after(off)
+  const nod = foot.querySelector('.su-nod')
+  assert.notEqual(nod, null)
+
+  foot.remove()
+  await Promise.resolve()
+  sidebar.append(nextFoot)
+  await Promise.resolve()
+
+  assert.equal(foot.querySelector('.su-nod'), null)
+  assert.equal(document.querySelectorAll('.su-nod').length, 1)
+  assert.equal(nextFoot.children.length, entries.length + 1)
+  entries.forEach((entry, index) => assert.equal(nextFoot.children[index], entry))
+  assert.equal(nextFoot.lastElementChild, nod)
+})
+
+test('the nod moves out of the preview root when a footer first appears', async t => {
+  const document = dom(t)
+  const off = installSelfUpdateMock({ location: { search: '?mock-1540', hash: '' }, document })
+  t.after(off)
+  const root = document.getElementById('ds-bot-self-update-mock')
+  const nod = root.querySelector('.su-nod')
+  assert.notEqual(nod, null)
+
+  const foot = document.createElement('div')
+  foot.className = 'lb-foot'
+  document.body.append(foot)
+  await Promise.resolve()
+
+  assert.equal(root.querySelector('.su-nod'), null)
+  assert.equal(foot.querySelector('.su-nod'), nod)
+  assert.equal(document.querySelectorAll('.su-nod').length, 1)
+})
+
+test('disposing disconnects the observer and a later footer gets no nod', async t => {
+  const document = dom(t)
+  const disconnect = t.mock.method(document.defaultView.MutationObserver.prototype, 'disconnect')
+  const off = installSelfUpdateMock({ location: { search: '?mock-1540', hash: '' }, document })
+  off()
+
+  const foot = document.createElement('div')
+  foot.className = 'lb-foot'
+  document.body.append(foot)
+  await Promise.resolve()
+
+  assert.equal(disconnect.mock.callCount(), 1)
+  assert.equal(document.querySelector('.su-nod'), null)
+})
+
 test('the nod opens what changes, then the steps, then success', async t => {
   const document = dom(t)
   const root = document.createElement('div')

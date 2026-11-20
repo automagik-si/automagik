@@ -21465,9 +21465,15 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
   };
 }
 
-// src/client/self-update-mock.js
+// src/client/self-update-flag.js
 var MOCK_FLAG = "mock-1540";
-var PARAM_FLAG = "mock-1540";
+function mock1540On(location2 = globalThis.location) {
+  const search = typeof location2?.search === "string" ? location2.search : "";
+  const hash = typeof location2?.hash === "string" ? location2.hash : "";
+  return new RegExp(`(?:[?&])${MOCK_FLAG}(?:=|&|$)`).test(search) || new RegExp(`(?:^#|&)${MOCK_FLAG}(?:=|&|$)`).test(hash);
+}
+
+// src/client/self-update-mock.js
 var MOCK_STEPS = Object.freeze([
   { key: "download", label: () => t("Downloading the new version") },
   { key: "signature", label: () => t("Checking the signature") },
@@ -21580,9 +21586,15 @@ function head(box, title, onClose) {
   row.append(close);
   box.append(row);
 }
-function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, successMs = SUCCESS_MS, seat = null } = {}) {
+function mountSelfUpdateMock(root, {
+  sample = MOCK_DATA,
+  stepMs = STEP_MS,
+  successMs = SUCCESS_MS,
+  seat = null,
+  getSeat = null
+} = {}) {
   let timers = [];
-  let seatButton = null;
+  let nodButton = null;
   const stop3 = () => {
     for (const id of timers) clearTimeout(id);
     timers = [];
@@ -21593,24 +21605,23 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
   const place = (node) => {
     root.replaceChildren(node);
   };
-  const clearLayer = () => root.replaceChildren();
+  const placeNod = () => {
+    if (!nodButton || root.querySelector(".su-layer")) return;
+    const target = (getSeat ? getSeat() : seat) ?? root;
+    if (nodButton.parentNode !== target) target.append(nodButton);
+  };
   const nod = () => {
     stop3();
-    const button2 = el("button", "su-nod bt-round");
-    button2.type = "button";
-    button2.dataset.mock = MOCK_FLAG;
-    button2.title = t("Update available");
-    button2.setAttribute("aria-label", t("Update available"));
-    button2.append(arrowSvg(), el("span", "su-dot"), el("span", "su-label", t("Update available")));
-    button2.addEventListener("click", () => open());
-    if (seat) {
-      seatButton?.remove();
-      seat.append(button2);
-      seatButton = button2;
-      clearLayer();
-    } else {
-      place(button2);
-    }
+    nodButton?.remove();
+    nodButton = el("button", "su-nod bt-round");
+    nodButton.type = "button";
+    nodButton.dataset.mock = MOCK_FLAG;
+    nodButton.title = t("Update available");
+    nodButton.setAttribute("aria-label", t("Update available"));
+    nodButton.append(arrowSvg(), el("span", "su-dot"), el("span", "su-label", t("Update available")));
+    nodButton.addEventListener("click", () => open());
+    root.replaceChildren();
+    placeNod();
   };
   const open = () => changes();
   const changes = () => {
@@ -21768,6 +21779,9 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
   };
   doc?.addEventListener("keydown", onKeydown);
   nod();
+  const Observer = doc?.defaultView?.MutationObserver;
+  const observer = getSeat && Observer ? new Observer(placeNod) : null;
+  observer?.observe(doc.body, { childList: true, subtree: true });
   return {
     open,
     close: nod,
@@ -21780,28 +21794,25 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
       return "changes";
     },
     dispose: () => {
+      observer?.disconnect();
       stop3();
       doc?.removeEventListener("keydown", onKeydown);
-      seatButton?.remove();
-      seatButton = null;
-      clearLayer();
+      nodButton?.remove();
+      nodButton = null;
+      root.replaceChildren();
       root.remove();
     }
   };
 }
 function installSelfUpdateMock({ location: location2 = globalThis.location, document: doc = globalThis.document } = {}) {
-  if (!doc || !location2) return () => {
-  };
-  const search = typeof location2.search === "string" ? location2.search : "";
-  const hash = typeof location2.hash === "string" ? location2.hash : "";
-  if (!new RegExp(`(?:[?&])${PARAM_FLAG}(?:=|&|$)`).test(search) && !hash.includes(MOCK_FLAG)) return () => {
+  if (!doc || !mock1540On(location2)) return () => {
   };
   const offStyles = installStyle(CSS2, doc);
   const root = doc.createElement("div");
   root.id = "ds-bot-self-update-mock";
   doc.body.append(root);
-  const seat = doc.querySelector(".lb-foot") ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div') ?? doc.querySelector("[data-mock-seat]");
-  const control2 = mountSelfUpdateMock(root, { seat });
+  const getSeat = () => doc.querySelector(".lb-foot") ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div') ?? doc.querySelector("[data-mock-seat]");
+  const control2 = mountSelfUpdateMock(root, { getSeat });
   return () => {
     control2.dispose();
     offStyles();
@@ -25128,14 +25139,6 @@ var LEFT_BAR_CSS = `
 ${tokenCss("body", LEFT_BAR_TOKENS)}
 ${tokenCss("[data-lb-skin=flat]", LEFT_BAR_SKINS.flat)}
 ${tokenCss("[data-lb-skin=stage]", LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS2}${MARKS2}${FACES3}${HOST}`;
-
-// src/client/self-update-flag.js
-var MOCK_FLAG2 = "mock-1540";
-function mock1540On(location2 = globalThis.location) {
-  const search = typeof location2?.search === "string" ? location2.search : "";
-  const hash = typeof location2?.hash === "string" ? location2.hash : "";
-  return new RegExp(`(?:[?&])${MOCK_FLAG2}(?:=|&|$)`).test(search) || hash.includes(MOCK_FLAG2);
-}
 
 // src/client/left-bar.js
 var import_react58 = require("react");
