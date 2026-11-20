@@ -2152,6 +2152,22 @@ var ZH = {
   "Collection: {collection}": "集合：{collection}",
   "Created: {time}": "创建时间：{time}",
   "Secret": "密钥",
+  "Proton Pass": "Proton Pass",
+  "Proton Pass personal access token": "Proton Pass 个人访问令牌",
+  "The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits.": "令牌仅用于一次登录，并需要有保管库的读取权限。单独共享的条目不会列出。保管库锁定、达到 110 分钟上限或退出应用时，会话结束。",
+  "Proton Pass is unavailable in Automagik Cloud.": "Automagik Cloud 不支持 Proton Pass。",
+  "Enter your Proton Pass personal access token.": "请输入 Proton Pass 个人访问令牌。",
+  "Install Proton Pass CLI 2.7.1.": "请安装 Proton Pass CLI 2.7.1。",
+  "The Proton Pass token could not be set.": "无法设置 Proton Pass 令牌。",
+  "Email": "电子邮箱",
+  "Note": "备注",
+  "Cardholder name": "持卡人姓名",
+  "Card number": "卡号",
+  "Security code": "安全码",
+  "Expiration date": "到期日期",
+  "PIN": "PIN",
+  "Wi-Fi name": "Wi-Fi 名称",
+  "Private key": "私钥",
   "HashiCorp Vault": "HashiCorp Vault",
   "Vault address": "Vault 地址",
   "Vault token": "Vault 令牌",
@@ -5909,6 +5925,7 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
     const item = detail?.value;
     const hashicorp = item?.provider === "hashicorp-vault";
     const keyring = item?.provider === GNOME_PROVIDER_ID;
+    const proton = item?.provider === "proton-pass";
     const allow2 = () => {
       if (item && !busy) void run3(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }));
     };
@@ -5926,7 +5943,7 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
       item ? (0, import_react10.createElement)(
         "div",
         { className: "bt-secret-note" },
-        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: keyring ? t(GNOME_PROVIDER_LABEL) : hashicorp ? t("HashiCorp Vault") : item.provider })),
+        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: keyring ? t(GNOME_PROVIDER_LABEL) : hashicorp ? t("HashiCorp Vault") : proton ? t("Proton Pass") : item.provider })),
         (0, import_react10.createElement)("div", null, t("Item: {item}", { item: item.item })),
         keyring ? (0, import_react10.createElement)("div", null, t("Collection: {collection}", { collection: item.collection })) : null,
         keyring ? (0, import_react10.createElement)("div", null, createdLabel(item.created)) : null,
@@ -6299,6 +6316,19 @@ function AddSecret({ actions, run: run3, onDone }) {
     )
   );
 }
+var protonFieldLabels = {
+  username: "Username",
+  email: "Email",
+  password: "Password",
+  note: "Note",
+  cardholder_name: "Cardholder name",
+  number: "Card number",
+  verification_number: "Security code",
+  expiration_date: "Expiration date",
+  pin: "PIN",
+  ssid: "Wi-Fi name",
+  private_key: "Private key"
+};
 function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone }) {
   const [name, setName] = (0, import_react10.useState)("");
   const [purpose, setPurpose] = (0, import_react10.useState)("");
@@ -6314,6 +6344,7 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
   const keyring = provider === GNOME_PROVIDER_ID;
   const item = items?.find((row) => itemId !== "" && (keyring ? row.handle : row.id) === itemId && !row.folder);
   const onePassword = provider === "onepassword";
+  const proton = provider === "proton-pass";
   const hashicorp = provider === "hashicorp-vault";
   const namedSearch = provider === "onepassword" || provider === GNOME_PROVIDER_ID;
   const optionId = (row) => hashicorp && row.folder ? row.id + "/" : row.id;
@@ -6332,12 +6363,13 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
     );
   };
   const vaults = /* @__PURE__ */ new Map();
-  if (onePassword) for (const row of items ?? []) {
+  if (onePassword || proton) for (const row of items ?? []) {
     const id = row.id.split("/")[0];
     if (!vaults.has(id)) vaults.set(id, { name: row.vault, options: [] });
     vaults.get(id).options.push(itemOption(row));
   }
   const fieldLabel = (row) => {
+    if (proton) return t(protonFieldLabels[row.selector]);
     if (!onePassword) return row.selector.startsWith("field:") ? row.label : t(row.label);
     if (!item.fields.some((other) => other !== row && other.label === row.label)) return row.label;
     const section = row.section ?? row.selector;
@@ -6356,7 +6388,7 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
     setBusy(true);
     resetItems();
     try {
-      const listed = hashicorp ? actions.vaultItems({ mount, folder: nextFolder }, provider) : namedSearch ? actions.vaultItems(search, provider) : actions.vaultItems(search);
+      const listed = hashicorp ? actions.vaultItems({ mount, folder: nextFolder }, provider) : namedSearch || proton ? actions.vaultItems(search, provider) : actions.vaultItems(search);
       await run3(listed.then((answer) => setItems(answer.items)));
     } finally {
       setBusy(false);
@@ -6388,7 +6420,7 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
     try {
       const key = name.trim().replace(/-/g, "_");
       const mapping = keyring ? { name: key, purpose, scope, provider, handle: itemId } : { name: key, purpose, connection, item: hashicorp ? JSON.stringify([mount, itemId]) : itemId, field, scope };
-      if (onePassword || hashicorp) mapping.provider = provider;
+      if (onePassword || hashicorp || proton) mapping.provider = provider;
       if (await run3(actions.secretSourceSet(mapping))) onDone();
     } finally {
       setBusy(false);
@@ -6449,7 +6481,7 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
         onChange: selectItem
       },
       (0, import_react10.createElement)("option", { value: "" }, t("Choose an item")),
-      onePassword ? [...vaults].map(([id, { name: name2, options }]) => (0, import_react10.createElement)("optgroup", { key: id, label: name2 }, options)) : items.map(itemOption)
+      onePassword || proton ? [...vaults].map(([id, { name: name2, options }]) => (0, import_react10.createElement)("optgroup", { key: id, label: name2 }, options)) : items.map(itemOption)
     ) : null,
     item && !keyring ? (0, import_react10.createElement)(
       "select",
@@ -6485,7 +6517,8 @@ var vaultProviders = Object.fromEntries([
   ["bitwarden", "Bitwarden"],
   ["onepassword", "1Password"],
   ["hashicorp-vault", "HashiCorp Vault"],
-  [GNOME_PROVIDER_ID, GNOME_PROVIDER_LABEL]
+  [GNOME_PROVIDER_ID, GNOME_PROVIDER_LABEL],
+  ["proton-pass", "Proton Pass"]
 ]);
 function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const [status, setStatus] = (0, import_react10.useState)(null);
@@ -6502,8 +6535,9 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const provider = status?.provider ?? choice ?? "bitwarden";
   const keyring = provider === GNOME_PROVIDER_ID;
   const onePassword = provider === "onepassword";
+  const proton = provider === "proton-pass";
   const hashicorp = provider === "hashicorp-vault";
-  const canEnter = state2 === "locked" || (onePassword || hashicorp) && state2 === "unlocked";
+  const canEnter = state2 === "locked" || (onePassword || hashicorp || proton) && state2 === "unlocked";
   const local = !insecure();
   (0, import_react10.useEffect)(() => {
     if (readOnly || busy || typeof actions.vaultStatus !== "function") return;
@@ -6553,7 +6587,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
         namespace.current.value = "";
         await run3(actions.vaultTokenSet(provider, credential, endpoint));
       } else {
-        await run3(onePassword ? actions.vaultTokenSet(provider, credential, connection) : actions.vaultUnlock(credential, connection));
+        await run3(onePassword || proton ? actions.vaultTokenSet(provider, credential, connection) : actions.vaultUnlock(credential, connection));
       }
     } finally {
       changed();
@@ -6564,7 +6598,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
     setBusy(true);
     setAdding(false);
     try {
-      await run3(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring ? actions.vaultLock(provider) : actions.vaultLock());
+      await run3(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton ? actions.vaultLock(provider) : actions.vaultLock());
     } finally {
       changed();
     }
@@ -6591,7 +6625,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
       "div",
       { className: "bt-set-row", role: "status" },
       (0, import_react10.createElement)("span", { className: "bt-tag" }, t(status?.reason ?? vaultStates[state2] ?? "Checking vault status…")),
-      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(keyring ? "Locking here closes Automagik’s access. Manage the keyring lock in GNOME." : hashicorp ? "The address, namespace and token are cleared when the vault locks or the app quits." : onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
+      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(keyring ? "Locking here closes Automagik’s access. Manage the keyring lock in GNOME." : hashicorp ? "The address, namespace and token are cleared when the vault locks or the app quits." : proton ? "The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits." : onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
       state2 === "unlocked" && (!onePassword || local) ? (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: lock }, t(onePassword ? "Clear token" : "Lock")) : null
     ),
     canEnter && !local ? (0, import_react10.createElement)(
@@ -6630,13 +6664,13 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
         inputRef: password,
         disabled: busy,
         onEnter: unlock,
-        passwordType: hashicorp,
-        label: t(hashicorp ? "Vault token" : onePassword ? "1Password service account token" : "Bitwarden master password")
+        passwordType: hashicorp || proton,
+        label: t(hashicorp ? "Vault token" : proton ? "Proton Pass personal access token" : onePassword ? "1Password service account token" : "Bitwarden master password")
       })),
       (0, import_react10.createElement)(
         "button",
         { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: unlock },
-        t(hashicorp ? "Connect" : onePassword ? state2 === "unlocked" ? "Replace token" : "Set token" : "Unlock")
+        t(hashicorp ? "Connect" : onePassword || proton ? state2 === "unlocked" ? "Replace token" : "Set token" : "Unlock")
       )
     ) : null,
     state2 === "unlocked" && !status?.mismatch && !roster.secretSources?.broken ? adding ? (0, import_react10.createElement)(AddVaultKey, { key: provider + "/" + connection, actions, provider, connection, roster, run: run3, onDone: () => setAdding(false) }) : (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => setAdding(true) }, t("Add a vault key"))) : null

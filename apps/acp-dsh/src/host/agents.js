@@ -15,6 +15,9 @@ const MANAGER_ASK = [
   'bws secret get*', 'bws secret list*', 'bws run*',
   'op read*', 'op run*', 'op inject*', 'op item get*',
   'pass-cli item view*', 'pass-cli item get*', 'pass-cli item run*', 'pass-cli run*',
+  'pass-cli item show*', 'pass-cli item totp*', 'pass-cli inject*', 'pass-cli export*',
+  'pass-cli item attachment*', 'pass-cli pat create*', 'pass-cli pat renew*', 'pass-cli personal-access-token create*',
+  'pass-cli personal-access-token renew*', 'pass-cli agent create*', 'pass-cli agent renew*', 'pass-cli item list *--show-secrets*',
   'keepassxc-cli show*', 'keepassxc-cli export*', 'secret-tool lookup*',
   'vault kv get*', 'vault read*',
 ]
