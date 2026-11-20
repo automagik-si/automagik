@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892; the amendment's 5b-5d open) |
+| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892; the amendment's 5b-5d open; narrowed the same day by the owner's delegate: member and guest prompting moves to 5e) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P); the gate and the server image |
 | Created | 2026-11-20 |
@@ -482,8 +482,9 @@ exists.
    a guest cannot reach settings. *Rollback:* revert to owner-only admission; members stay off.
    *Specified* by the amendment "Delivery 5 specified" below: the role table, the stream carrier,
    the one `automagik` policy, the Bot UI's caller routes and the `people` field, in four steps
-   (5a-5d); delivery 5 is complete with 5d. The refusal of terminals and Code mode ships with it;
-   the positive per-Bot grant takes effect with delivery 4.
+   (5a-5d, with member and guest prompting specified there as 5e). Delivery 5 is complete with 5d.
+   The refusal of terminals and Code mode ships with it. The positive per-Bot grant takes effect
+   with delivery 4.
 6. **Cloud enablement** (Cloud service, outside this repository). Members and guests are admitted
    only after deliveries 1-5 and the isolation review pass; the workspace switches from
    owner-only to the role table. *Unlocked by:* the Cloud service's workspace token, role
@@ -647,9 +648,9 @@ On the pinned DSH that leaves a member or guest with nothing to use:
 
 ### The role table
 
-The roles are contracts-v1's (`docs/cloud/contracts-v1.md` § 1); the per-Bot author gate is RFC
-0024 (f)'s. A person's **effective role** is the strongest of their roles: owner or admin, then
-member, then guest (so `guest` with `member` is a member). An owner or admin never reaches the
+The roles come from contracts-v1 (`docs/cloud/contracts-v1.md` § 1). The per-Bot author gate in
+5e follows RFC 0024 (f). A person's **effective role** is the strongest of their roles: owner or
+admin, then member, then guest (so `guest` with `member` is a member). An owner or admin never reaches the
 carrier (the gate sends them to DSH's owner interface), so a carrier call whose principal lists
 owner or admin, or no known role, is refused before dispatch.
 
@@ -662,8 +663,9 @@ and the current assertion's role.
 | What | Owner, admin | Member | Guest |
 |---|---|---|---|
 | List a Bot and open its chat | every Bot | visible Bots | visible Bots |
-| Read the Bot's own chat and send in it | yes, authored | visible Bots, authored | visible Bots, authored |
-| Answer or dismiss a question or a view card | yes | cards of their own turns | cards of their own turns |
+| Read the Bot's own chat | yes | visible Bots, from the part the share opened | visible Bots, from the part the share opened |
+| Send in the Bot's chat | yes | from 5e: visible Bots, authored | from 5e: visible Bots, authored |
+| Answer or dismiss a question or a view card | yes | from 5e: cards of their own turns | from 5e: cards of their own turns |
 | Answer an approval | yes | no (Q2) | no (Q2) |
 | Stop, cancel, steer, retry, fork, rename, edit the queue | yes | never | never |
 | Settings, credentials, Bot admin, schedules, jobs, workspace writes | yes | never | never |
@@ -672,7 +674,7 @@ and the current assertion's role.
 | Terminals and Code mode | yes | refused; per-Bot grant with delivery 4 | never |
 | Agent access (MCP) in multiuser mode | refused | refused | refused |
 
-**Authored** is RFC 0024 (f)'s provenance and § 2's rule: every message in a shared chat carries
+**Authored** (from delivery 5e) is RFC 0024 (f)'s provenance and § 2's rule: every message in a shared chat carries
 its author's verified principal, in the durable message, in the chat and feed projections and in
 what the Bot is told (as data). A **shared Bot** is one visible to anyone but owners. For members
 and guests the author is the carrier's verified caller. Owners and admins share DSH's owner Peer:
@@ -690,27 +692,31 @@ turn's restrictions. An input of no known class is refused. Two pieces enforce i
   private carrier still refuses them);
 - a check on DSH's `agent/pre-step` hook, run before queued input enters a model step, reads the
   author from each message's own source, as LiveShare's reader check does
-  (`dsh-experimental-liveshare/src/host/share-host.ts:478-493`), and asks for a current decision:
-  the person's roles from an assertion the adapter verified no longer than an assertion's
-  lifetime (60 seconds) ago, and the Bot's current `people`. The roles DSH stored with the prompt
-  are the ones of its admission, never reused. An input with no verified author is refused; one
+  (`dsh-experimental-liveshare/src/host/share-host.ts:478-493`), and asks the gate, at the step, for its
+  signed decision on the input's own session family (a renewal carries it to the renewed family
+  with the rechecked roles and a revocation ends it), and reads the Bot's current `people`. DSH
+  keeps the admission roles with the prompt and uses the step-time roles to decide access. An input with no verified author is refused; one
   with no current decision (the person left, was revoked or demoted, or DSH restarted) is
-  quarantined, not run, until the person returns with an assertion that still allows the Bot.
+  quarantined. It never runs on its own, and its person can see it and send it again.
 
-History written before is marked unattributed, never given an author.
+History written before is marked unattributed, never given an author. Until 5e no member or
+guest input exists. Every human input to a Bot's chat is an owner's or an admin's, shown without
+an author.
 
 **The Bot's shared chat** (Q1): a visible Bot's own chat, the owner's turns included, is visible
-only to the people the owner allows on that Bot. A **card** (a question or a view the Bot raised)
+only to the people the owner allows on that Bot. Members read it from the part that opened
+when the Bot was shared in the current DSH start. Earlier parts, a part a Bot-to-Bot message
+entered, and card answers stay the owner's. From 5e, a **card** (a question or a view the Bot raised)
 keeps its id, its originating turn, the verified person whose turn raised it and its Bot, across
 part moves. Creation, replacement, reply, dismissal and implicit supersession check the exact card
 and the current grant when they happen: only that person (or an owner) answers or dismisses it,
 and a message or a card of anyone else's neither closes nor overwrites it. Today a session holds
 one question and one view slot (`apps/bots-dsh/src/host/tools.js:878, 915`), a dismissal names
 only the session, and any user message supersedes the open card
-(`apps/bots-dsh/src/host/turns.js:1016-1030`); 5d changes that for multiuser mode. A card with no
+(`apps/bots-dsh/src/host/turns.js:1016-1030`); 5e changes that for multiuser mode. A card with no
 recorded person is the owner's.
 
-**What the model sees.** DSH builds a turn's model request from the whole session
+**What the model sees** (from 5e). DSH builds a turn's model request from the whole session
 (`dsh-agent-loop/src/agent.ts:734, 744`), and a part's handoff note carries it forward
 (`apps/bots-dsh/src/host/parts.js:532`), so content the Bot chat hides (a Bot-to-Bot exchange's
 turns) is still in the model's context, and the Bot can repeat it. A member or guest therefore
@@ -719,9 +725,9 @@ visible to them; a part that holds hidden content takes no member or guest promp
 can start a fresh part. What the Bot itself knows (its memory, its folder) is the Bot's scope,
 which the owner shares by allowing people on the Bot.
 
-**A turn a member or guest started.** The Bot works with § 2's intersection, so its tools are
+**A turn a member or guest started** (from 5e). The Bot works with § 2's intersection, so its tools are
 checked against the initiating person as well as the Bot, at each tool's execution. A tool that
-acts beyond the Bot's own chat is refused to such a turn in delivery 5: stopping a turn
+acts beyond the Bot's own chat is refused to such a turn in 5e: stopping a turn
 (`stop_bot`, `apps/bots-dsh/src/host/tools.js:393`), reading a room (`read_group_chat`,
 `groups.js:1701`), relaying to another Bot, and Bot administration. Work the turn delegates keeps
 the restriction. A main Bot visible through its allowlist is the case that matters most.
@@ -777,12 +783,11 @@ MIT); the WebSocket library is `ws` at the version bots-dsh pins (8.18.3).
   person too, across gate families: at most 4 at once and one budget of pending bytes, released
   on disconnect (today each feed queues up to 512 events of its own,
   `apps/bots-dsh/src/host/feed.js:20`).
-- **Withdrawn Bots.** The carrier and the caller routes index every open stream and HTTP feed by
-  gate session family and by the Bots it was allowed for. When a Bot stops being visible to that
-  person (a `people` change, the Bot made a main Bot, a session moved, a role change) the
-  affected streams and feeds end and their queued frames are dropped; the feed checks visibility
-  again before each event it sends.
-  The mux passes `resourceKey` to both the frame projection and the stream withdrawal predicate.
+- **Withdrawn Bots.** From 5d the caller routes track each open feed by gate session family and the
+  Bots it was allowed for. When a Bot or part stops being readable, the affected feeds end and
+  their queued frames are dropped. The feed checks access before each event it sends.
+  Bound native streams follow the same withdrawal rule in 5e. The mux passes `resourceKey` to
+  both the frame projection and the stream withdrawal predicate.
   For `session/follow` it is the Session ID from the DSH open's `args.request.address`, using
   `childSessionId` for a subagent address. The carrier requires a nonempty string of at most
   512 UTF-8 bytes, and DSH authorizes the same open arguments before the projection sees a
@@ -814,29 +819,40 @@ multiuser-dsh registers the only policy for the `automagik` kind, resolves the e
 owns every role's action list and condition. It registers an empty policy (no bindings) in 5b,
 before it dispatches any caller HTTP or stream traffic, and keeps it for its life: a failed
 registration (another plugin's policy came first) or a lost one closes member admission and their
-open streams. 5c fills the rules. Other plugins never build bindings: bots-dsh, the one designated
-provider, supplies **resource facts** through `automagikCaller` version 2 (which Bot owns which
-session and workspace, and each Bot's visible people), and the adapter checks them and builds the
-bindings itself. Session ownership needs provenance: during a period when Bots ran as DSH's uid,
+open streams. Through 5d the policy stays empty (the owner's delegate, 2026-11-20). No native
+method, stream or forwarded event is bound for members or guests, who read through the Bot UI's
+caller routes in 5d. 5e binds `am:bot-session-prompt`. A native read is bound only once its fields,
+cost and withdrawal are proven safe.
+
+bots-dsh is the designated provider. In 5c and 5d it supplies only Bot visibility facts through
+`automagikCaller` version 2. The adapter checks the facts, builds no native bindings and returns
+an empty visibility set if the provider throws. Session and workspace ownership facts take
+effect with delivery 5e. The adapter builds any native bindings from those facts.
+
+Session ownership needs provenance. During a period when Bots ran as DSH's uid,
 both the team file's record of a Bot's parts (`bot.segments`, indexed at
 `apps/bots-dsh/src/host/store.js:765`) and DSH's own Session files were writable by Bots, so neither
 vouches for the other. Parts from such a period stay owner-only, and a Bot shared with members
 starts a clean part once the isolation holds; members see its chat from that part on. A later loss
-of isolation applies the same rule again. A provider that throws makes the decision `policy-failed`,
-a denial (`dsh-api-remote-access/lib/index.js:228, 233`). Plugins run in the same process and are
+of isolation applies the same rule again. Until delivery 3 attests the isolation, the host
+trusts no record from before the current DSH start. Every start resets `people`, readable
+parts are kept in host memory for that start only, and every share begins with a new part that
+the host creates. Real members are admitted only with delivery 6. In 5e, a provider that
+throws makes the native policy decision `policy-failed`, a denial
+(`dsh-api-remote-access/lib/index.js:228, 233`). Plugins run in the same process and are
 trusted code the owner installed; this interface keeps a mistake in one from widening a role, not a
 hostile plugin from patching another. The roles follow LiveShare's non-owner policy, the template
 for a second principal kind (`dsh-experimental-liveshare/lib/index.js:6760-6850, 7038`, registered
 at `:8000`):
 
-- `am:global` (global): `session/control` and `workspace/follow`. Native `session/list` is a
+- `am:global` (global, delivery 5e): `session/control` and `workspace/follow`. Native `session/list` is a
   unary read whose rows carry each session's summary projections (its pending inbox, permission
-  and model values included), which the stream filter below never sees, so it stays unbound; 5c
-  serves a caller-projected session list through the caller routes instead. Every unary native
-  read follows that rule: bound only when every field it returns is safe for the caller.
-- `am:bot-session-read` (session): on a visible Bot's own chat sessions, only the native methods,
-  arguments, event names and result fields 5c lists, the two list actions above included (DSH
-  checks them per session too, `dsh-api-session-controller/lib/index.js:3988-3992, 4271-4291`,
+  and model values included). The stream filter below cannot filter a unary result, so the
+  method stays unbound. The caller routes serve a visible Bot's readable parts. A unary native
+  read can be bound only when every field it returns is safe for the caller.
+- `am:bot-session-read` (session, delivery 5e): on a visible Bot's own chat sessions, only the
+  native methods, arguments, event names and result fields listed and verified in 5e, including
+  the actions above (DSH checks them per session too, `dsh-api-session-controller/lib/index.js:3988-3992, 4271-4291`,
   and `dsh-api-workspace-controller/src/index.ts:207-210`), and `session/follow` never with
   `activate: true` (it starts the Agent, `src/web/controller.ts:62`). A native result can carry
   fields the caller may not see (`session/control` sends each visible session's whole projection
@@ -848,16 +864,15 @@ at `:8000`):
   and its content comes through the caller routes. Never bound: a room's, an aside's or a side
   conversation's session, and a session whose hidden-turn record is incomplete (it keeps the last
   400 turns, `apps/bots-dsh/src/host/turns.js:447`).
-- `am:bot-session-prompt` (session): `session/prompt`, with a condition on its arguments: a
+- `am:bot-session-prompt` (session, delivery 5e): `session/prompt`, with a condition on its arguments: a
   nonempty, queued prompt to the visible Bot's current chat session, of text and images the
   caller staged; steering (`mode: 'steer'`), an empty retry or continuation, a write to an older
   part and a file receipt not verified as the caller's and that Bot's are refused
   (`dsh-api-session-controller/lib/index.js:892-900, 924-933`; receipts resolve against the
   Agent, `:906`). The condition and the staged-image limits apply to every invocation, RPC
   included. DSH records the caller's principal on the prompt (`:4150-4155`); the pre-step check
-  above checks it again before the turn runs. The grant stays unbound until 5d's authorship and
-  card guards are active.
-- `am:bot-workspace` (workspace): `workspace/follow` on a workspace holding a visible Bot's
+  above checks it again before the turn runs. The grant stays unbound until 5e.
+- `am:bot-workspace` (workspace, delivery 5e): `workspace/follow` on a workspace holding a visible Bot's
   session.
 - `am:terminal`: a reserved name, bound by no one in delivery 5.
 
@@ -865,13 +880,13 @@ Never bound: cancel, fork, rename and queue edits, `job/*`, `settings/*`, creden
 workspace write. bots-dsh signals the adapter to invalidate on every team save that changes a
 Bot's `people`, its sessions, its main flag or its existence.
 
-DSH's native session and workspace reads return a Bot's working folder path (a session header's
-`cwd`, a workspace's `path`). A member allowed on a Bot sees that path; its files stay behind the
-member wall (§ 4).
+The native session and workspace reads specified for 5e return a Bot's working folder path
+(the session header's `cwd` or the workspace's `path`). A member allowed on a Bot sees that path.
+Its files stay behind the member wall (§ 4).
 
 ### The Bot UI's routes for a caller: `automagikCallerRoutes`
 
-bots-dsh provides one service, `automagikCallerRoutes` version 1:
+From 5d, bots-dsh provides `automagikCallerRoutes` version 1:
 `{version: 1, match(path, method)}`, where `match` returns `handler(request, principal, peer)` or
 nothing. The carrier asks it only for the method and path pairs in the role-path fixture below,
 before `api.fetch`: a match runs the caller-aware handler with the verified principal and the
@@ -884,19 +899,22 @@ may call, by endpoint:
   permission or `people`);
 - the team state, built per caller from visible Bots (never the owner's full state, nor its side
   cards, side conversations, rooms or notices, `channel.js:205-211`);
-- `chat`, `earlier`, `thinking`: on a visible Bot's own chat, without its side cards or hidden
-  exchange turns (`parts.js:2896-2909`);
-- `stage-image`, `send`: on a visible Bot. A staged image is bound to its caller and Bot, bounded
+- `chat`, `earlier`: the readable parts of a visible Bot's own chat, its users' and its own
+  messages only. Card answers, cards, tool calls, side cards and hidden exchange turns stay
+  private. The host reads the page without resuming a Session;
+- from 5e, `stage-image`, `send`: on a visible Bot. A staged image is bound to its caller and Bot, bounded
   in count and bytes per person, and checked again on send (today staged images sit in one map
   for the process, `channel.js:98-99, 990-1006`). The prompt goes through the gateway's `invoke`
   of `session/prompt` with the caller's Peer, so the policy decides and the Session log records
   the author;
-- `answer-question`, `view-reply`, `dismiss-question`, `dismiss-view`: only on a card whose
+- from 5e, `answer-question`, `view-reply`, `dismiss-question`, `dismiss-view`: only on a card whose
   recorded person is the caller.
 
-Every other endpoint is refused to them. The feed (`GET /api/omni-ui/feed`) is filtered per
+Every other endpoint is refused to them. Until 5e the six writes (`stage-image`, `send`,
+`answer-question`, `view-reply`, `dismiss-question`, `dismiss-view`) are refused too, and so is
+`thinking`. The feed (`GET /api/omni-ui/feed`) is filtered per
 caller: the hello without the notice cursor (`feed.js:120`), content-free revision and live
-signals, and the message and stream events of visible Bots' own chats. Generated images, gen-UI
+signals, and the message and stream events of visible Bots' readable parts. Generated images, gen-UI
 media, pets and the Code routes stay owner-only, and `/api/omni-mcp` is refused to every role in
 multiuser mode. In front, the gate keeps a URL-level role filter as the second fence: a member or
 guest reaches only the paths in one fixture, `server/test/fixtures/caller-role-paths.json`, that
@@ -935,9 +953,9 @@ people: { mode: 'owners' | 'allowlist' | 'workspace', allow: [{ issuer, subject,
 - It lives in the team's existing file: no new storage prefix, the format stays version 2
   (`store.js:11`), and a build that does not know the field keeps it as it reads the file
   (`store.js:224`).
-- Before delivery 3 a Bot's shell runs as DSH's user and can write that file. So the first time
-  multiuser is enabled on an installation where Bots shared DSH's uid, every `people` field is
-  reset to `owners` and earlier parts stay owner-only (above), and the owner grants again once
+- Before delivery 3 a Bot's shell runs as DSH's user and can write that file. So every time DSH starts with
+  multiuser on, until delivery 3 attests the boundary, every `people` field is reset to `owners`
+  with an empty list and earlier parts stay owner-only (above), and the owner grants again once
   the boundary holds (a step of "Migration and rollout"'s checks before members are
   enabled).
 
@@ -952,7 +970,8 @@ agent policy needs its own amendment. Owner-only mode keeps its agent route.
 
 ### What delivery 5 leaves out, and what stays outside this repository
 
-Left out, each refused rather than half-offered: the positive terminal and Code grant (the
+Left out, each refused rather than half-offered: member and guest prompting, card answers and
+staged images (5e). The positive terminal and Code grant (the
 refusal ships now; the grant takes effect with delivery 4, #1406's member runner), so #1373's
 terminal and Code clause waits for delivery 4; approvals (Q2); rooms, side conversations and
 Bot-to-Bot exchanges (Q3); stop, cancel and steering (RFC 0024 (f)); generated images, gen-UI
@@ -968,14 +987,15 @@ admits only owner and admin, `server/gate-cloud.mjs:45, 177`); Cloud's people di
 All additive; no route, plugin id or storage prefix that exists today is renamed or moved.
 
 - **The `automagik` policy**, registered by multiuser-dsh alone, with the role names above.
-- **`automagikCaller` version 2**: version 1's fields, plus the resource-fact provider hook,
-  `invalidate(principal?)`, `verify(request)` (an owner-path author) and `seen()` (owner only).
+- **`automagikCaller` version 2**: version 1's fields, plus `roleOf(principal)`, `visibleBotIds(principal)`, the
+  Bot visibility provider hook, `invalidate(principal?)` and `seen()` (owner only).
+  `verify(request)` (an owner-path author) follows in 5e.
   bots-dsh reads `current()` at version 1 or 2; what needs version 2 refuses on version 1.
 - **`automagikCallerRoutes` version 1**, provided by bots-dsh: `match(path, method)`.
 - **The private stream route** `/_automagik/caller/api/remote.mux`, under the carrier's existing
   private namespace, and the gate's one member upgrade path, `/api/remote.mux`.
 - **The `people` field** on a Bot's record, version 2 of the team file kept.
-- **A card's recorded person**, on the question and view cards bots-dsh already saves.
+- **A card's recorded person** (from 5e), on the question and view cards bots-dsh already saves.
 - **The `whoami` endpoint** on `/api/omni-ui`, and the reduced Bot view for a caller.
 - **The role-path fixture**, `server/test/fixtures/caller-role-paths.json`.
 
@@ -988,6 +1008,10 @@ mount and its body limit (until then the server image refuses to start with mult
 `server/profile-multiuser.mjs:6-12`, `server/entrypoint.mjs:118-127`). Delivery 4's positive grant
 needs all of delivery 4's runner, this policy, a caller-aware Code route and the current per-Bot
 grant.
+
+*Narrowed by the owner's delegate on 2026-11-20 (option B).* 5c ships the read model and every
+refusal. 5d exposes the reads to members and guests. Their prompting is 5e, which starts from a
+DSH capability asked in RFC 0023's form or one certified route.
 
 - **5a. This amendment** (docs). *Check:* the index row matches; `git diff --check` clean.
   *Rollback:* revert the docs.
@@ -1003,79 +1027,84 @@ grant.
   ends the feed; after the adapter unloads, a handler registered on its path receives no member
   connection. *Rollback:* stop member and guest admission, revoke their sessions and close their
   sockets and feeds, then remove the route; the gate refuses member upgrades again, as delivery 1.
-- **5c. The policy, the `people` field and authorship** (multiuser-dsh and bots-dsh). *Check:* the
-  role table on fixtures of each role and of mixed roles (`guest` with `member` is a member; `owner`
-  with `member` takes the gate's owner path and is refused at the carrier); a guest is bound to an
-  allowlisted Bot and not to an ungranted one; a member to a "workspace" Bot, and to a main Bot only
-  through its allowlist; an unreadable `people` is owner-only; a Bot actor's `people` edit is
-  refused; the migration reset turns a planted broad grant to `owners`, and a part from the
-  shared-uid period stays owner-only on a freshly granted Bot; native `session/list` is unbound and
-  the caller list omits the inbox, permission and model values, with a private relay pending; a part
-  holding an exchange's turns takes no member prompt, checked on the model request itself and after
-  a part move; a queued prompt of a member demoted to guest, with `people` unchanged, is
-  quarantined, and so is one queued before a restart; a scheduled turn and a turn with host context
-  on a shared Bot still run; a throwing provider denies; the prompt grant stays unbound; a room, an
-  aside and a session with an incomplete hidden-turn record are not bound; `session/control` and a
-  followed session reach the caller without permission values, model selection or hidden turns, the
-  opening snapshot included; `activate: true` is refused; an open follow ends when the Bot stops
-  being visible; a member-started turn of an allowlisted main Bot cannot stop another turn or read a
-  room; both mixed versions of `automagikCaller` and bots-dsh fail closed. *Rollback:* stop member
-  and guest admission and close their streams, then empty the policy; DSH answers no member business
-  call again.
-- **5d. The routes, the filter, cards and the client** (bots-dsh and the gate).
-  `automagikCallerRoutes`, the caller-aware `/api/omni-ui` and feed, card ownership, the owner-path
-  author, the gate's URL filter, the member and guest client mode, and the owner's "who may talk to
-  this Bot" row (multiuser only); `client.js` rebuilt. *Check:* delivery 5's checks above; a guest
-  lists an allowed Bot and not an ungranted one; a member's forged URL reaches no terminal, Code
-  route or setting; one person's ordinary message or new card leaves another's card open, and they
-  cannot answer or dismiss it, across a part move too; two admins' posts in a shared chat carry two
-  authors, and an owner's native composer post to a shared Bot without an author never reaches a
-  model step; a queued prompt whose author lost the Bot is refused before its step; a native file
-  receipt of another Bot is refused; an owner-only image URL is not served from the browser cache
-  after the account changes; the feed, `earlier` and the state carry no side card, room, notice or
-  content of an invisible Bot; a feed open when its Bot is withdrawn sends nothing more; a staged
-  image of another person or Bot is refused; a different person's sign-in on a browser clears the
-  owner's unsent draft and an image cached before multiuser was enabled; a fifth feed of one person
-  is refused. *Rollback:* stop member and guest admission, revoke their sessions and close their
-  streams and feeds first, keeping the gate's deny rules, and drain member-started work (checked
-  with a turn running and a prompt queued); then remove the service and the row. Delivery 5 is
-  complete with 5d, the last of the three code pull requests, which completes #1373; the positive
-  terminal and Code grant takes effect with delivery 4.
+- **5c. The policy, the `people` field and the member read model** (multiuser-dsh and bots-dsh). *Check:* the role
+  table on fixtures of each role and of mixed roles (`guest` with `member` is a member; `owner` with `member` takes
+  the gate's owner path and is refused at the carrier); a guest sees an allowlisted Bot and not an ungranted one,
+  also while another family of the same person is a member; a member sees a "workspace" Bot, and a main Bot only
+  through its allowlist; an unreadable `people` is owner-only; a Bot actor's, the agent route's, a create's or a
+  duplicate's `people` is refused; every start resets a planted grant and no Session from before it is readable;
+  sharing refuses a Bot with queued input, an open card, an active goal or running work, and opens a fresh part
+  that carries nothing; members read only from it on, without card answers, cards, tool calls or hidden exchange
+  turns, and never a part a Bot-to-Bot message entered; a read never resumes a Session; an outside edit of the team
+  file only narrows; every installed DSH method and forwarded event is denied to a member and a guest, the access
+  snapshot grants nothing and `$events` sends only its ready frame; every Bot UI exact route answers them 403, and
+  every Bot UI endpoint but the six reads is refused by name (settings, credentials, Bot admin, approvals, stop and
+  cancel, rooms, side conversations, agent access, sending, cards, staged images); both mixed versions of
+  `automagikCaller` and bots-dsh fail closed; with multiuser off nothing changes. *Rollback:* stop member and guest
+  admission and close their streams and feeds, then revert; the `people` field stays, unread with multiuser off.
+- **5d. The member view, the filter and the people row** (bots-dsh and the gate). `automagikCallerRoutes` serving
+  5c's reads, the caller-aware `/api/omni-ui` reads and feed, the gate's URL filter, the read-only member and guest
+  client mode, and the owner's "who may talk to this Bot" row (multiuser only); `client.js` rebuilt. *Check:* a
+  guest lists an allowed Bot and not an ungranted one; a member's forged URL reaches no terminal, Code route or
+  setting; a member's send, card answer, staged image and every other write is refused before any handler runs;
+  the feed, `earlier` and the state carry no card answer, side card, room, notice or content of an invisible Bot
+  or an unreadable part; a feed open when its Bot is withdrawn or its part closes sends nothing more; a fifth feed of
+  one person is refused; an owner-only image URL is not served from the browser cache after the account changes; a
+  different person's sign-in on a browser clears the owner's unsent draft; with multiuser off the Bot UI and the
+  owner's composer are unchanged. *Rollback:* stop member and guest admission, revoke their sessions and close their
+  streams and feeds first, keeping the gate's deny rules; then remove the service and the row. Delivery 5 is
+  complete with 5d, which completes #1373; the positive terminal and Code grant takes effect with delivery 4.
+- **5e. Member and guest prompting** (a later delivery; the owner's delegate, 2026-11-20). *Scope:* a member or
+  guest sends in a visible Bot's chat (`am:bot-session-prompt`, the caller routes' `send` and `stage-image`) and
+  answers or dismisses the cards of their own turns, and every human input to a shared Bot carries a verified
+  author, the owner's included, under the rules marked "from 5e" above: **Authored** and the pre-step check with
+  its quarantine, **What the model sees**, **A turn a member or guest started**, the card's recorded person and the
+  drain in "Rollback"; questions 5-8 below take effect with it. *Unlocked by:* 5d and either a DSH capability asked
+  in RFC 0023's form (DSH itself enforces each input's author and a caller-scoped guard over each turn's tools,
+  model route, compaction and recovery) or one certified route whose whole turn a test proves caller-safe, every
+  other route refusing member prompts. *Check:* specified with it; at least a demoted, revoked or withdrawn member's
+  queued or continuing work never reaches a model step or a tool; a member-started turn's model request holds no
+  hidden content, MEMORY.md or recall; two admins' posts in a shared chat carry two authors and an owner's post
+  without one never reaches a model step; a card answers only to its person; the rollback drains member-started
+  work with a turn running and a prompt queued. *Rollback:* stop member and guest admission and drain
+  member-started work, then revert; members read as with 5d.
 
 ### Threat model additions
 
 - **A member reads a Bot they were not given.** Visibility is computed per call from the `people`
-  field and the current assertion's role; the policy, the caller routes and the feed read the
-  same rule, an unreadable field is owner-only, and a withdrawn Bot ends the open streams.
+  field and the current assertion's role. The caller routes and feed apply that rule in 5d, and
+  the native bindings apply it in 5e. An unreadable field is owner-only. Withdrawing a Bot ends
+  its open feeds and, from 5e, its bound streams.
 - **A member reads the owner's history on a shared Bot.** By design (Q1), only on a Bot the owner
   allowed them on; the owner decides per Bot. Rooms, asides and exchanges with other Bots stay
   out.
-- **A member reaches hidden content through the model.** A part whose model context holds content
+- **A member reaches hidden content through the model** (from 5e). A part whose model context holds content
   the chat hides takes no member or guest prompt; unary native reads are bound only when every
   field is safe.
-- **A member acts in someone else's turn.** Steering, retries, stop and cancel are refused; cards
+- **A member acts in someone else's turn.** Steering, retries, stop and cancel are refused. From 5e, cards
   answer only to the person whose turn raised them.
-- **A stale grant.** A `people` save invalidates and ends affected streams; a revoked or expired
-  session closes its sockets and feeds; an assertion lives at most 60 seconds, and queued input
-  runs only on a decision that fresh.
+- **A stale grant.** A `people` save invalidates access and ends affected feeds and, from 5e,
+  bound streams. Revocation or expiry closes the session's sockets and feeds. From 5e, queued
+  input runs only on the gate's decision for its own session family, asked at the step.
 - **Stream exhaustion.** The per-stream inbox, the stream, socket and message limits, the
-  downlink bound and the heartbeat bound one person's load; feeds and staged images are bounded
-  per person.
+  downlink and heartbeat bound one person's load. Feeds and, from 5e, staged images also have
+  per-person bounds.
 - **A plugin widens the policy.** Only multiuser-dsh owns the role lists; bots-dsh supplies
   facts, which the adapter checks; a foreign policy for the kind closes member admission.
 - **A Bot grants itself to people.** `people` is refused from a Bot actor and from the agent
-  route, a value from before the boundary is reset, earlier parts are verified, and delivery 3
-  takes the file out of a Bot's reach.
-- **A member's turn reaches past its chat.** The Bot's tools check the initiating person: no
+  route. The reset withdraws grants saved before the boundary. Sessions from before this start
+  stay owner-only, and outside edits can only narrow access. Delivery 3 takes the file out of a
+  Bot's reach.
+- **A member's turn reaches past its chat** (from 5e). The Bot's tools check the initiating person: no
   stopping other turns, no rooms, no relays, no Bot administration from such a turn.
-- **A forged author.** An author is a verified principal, from the carrier's or the owner path's
+- **A forged author** (from 5e). An author is a verified principal, from the carrier's or the owner path's
   assertion; a post to a shared Bot without one is refused.
 
 ### Rollback
 
 Each delivery reverts alone, in reverse order, and each revert refuses more, never less: before any
 of them is reverted, member and guest admission stops, their sessions are revoked and their sockets,
-streams and feeds close, and the gate's deny rules stay; and before a prompt, authorship or tool
+streams and feeds close, and the gate's deny rules stay; and, from 5e, before a prompt, authorship or tool
 guard is removed, Bot dispatch stops, member- and guest-started work that is running finishes or is
 cancelled under its existing restrictions, and its queued and delegated work is quarantined, across
 a restart too (the RFC's Bot drain, applied to that work). Then without 5d members see nothing,
@@ -1089,8 +1118,8 @@ Answered by the owner's delegate on 2026-11-20, each with the recommended option
 
 1. **The chat: the Bot's shared chat (recommended) or a chat per person?** Shared: RFC 0024 (f)
    already gives per-message authorship, and a per-person chat would split a Bot's context and
-   memory per person. *Answered: the Bot's shared chat; the owner's history is visible only to the
-   people the owner allows; authorship per message (RFC 0024 (f)).*
+   memory per person. *Answered: the Bot's shared chat; the owner's readable history is visible only to the
+   people the owner allows. Authorship per message starts in 5e (RFC 0024 (f)).*
 2. **Approvals: owner-only in delivery 5 (recommended), or members answer their own turns'?**
    Owner-only: an approval lets the Bot act with its scope, which a member does not hold, and DSH
    gives pending events only to owner Peers. *Answered: approvals stay owner-only in this
@@ -1102,6 +1131,29 @@ Answered by the owner's delegate on 2026-11-20, each with the recommended option
    wait for Cloud's directory?** Now: it needs no new service and the pair is the principal's own
    identity; the directory can later fill the same entries. *Answered: by `(issuer, subject)`
    among those the gate already admitted, without waiting for Cloud's directory.*
+
+5. **The Bot's MEMORY.md on a turn a member or guest started?** An entry from a hidden Bot-to-Bot
+   exchange could reach the model request through memory. *Answered by the owner's delegate on
+   2026-11-20: It stays out of every such turn. The owner keeps it. Takes effect with delivery 5e.*
+6. **Automatic recall on a shared Bot's part?** Recall can add history that members cannot read.
+   *Answered by the owner's delegate on 2026-11-20: The owner keeps recall. When it fires on a
+   shared part, that part stops taking member or guest prompts and the owner opens a fresh part.
+   Takes effect with delivery 5e.*
+7. **Queued input whose author lost the Bot?** Replay needs a release callback, a destination after
+   sharing again, card handling and idempotency across a restart. *Answered by the owner's delegate
+   on 2026-11-20: It is quarantined. It never runs on its own, and its person can see it and send
+   it again. Takes effect with delivery 5e.*
+8. **The owner's composer on a shared Bot?** DSH's composer submits through `session.prompt` with
+   no author. The shared composer gives up file attachments, `@`-references and steering.
+   *Answered by the owner's delegate on 2026-11-20: The Bot UI's composer replaces DSH's on a
+   shared Bot so every owner post has a verified author. Owner-only Bots keep DSH's composer.
+   Takes effect with delivery 5e.*
+9. **Member and guest prompting in delivery 5?** Reviews of a plugin-side design identified DSH
+   paths the plugin does not own, including model routes with their own tools, compaction and
+   fallback turns, inbox edits and forwards, continuing turns, renewals and the drain.
+   *Answered by the owner's delegate on 2026-11-20: 5c and 5d give read access and every refusal.
+   Prompting is 5e, which starts from a DSH capability asked in RFC 0023's form or one certified
+   route.*
 
 ## Amendment (2026-11-20): a Bot's files and its commands live in two trees
 
