@@ -27,3 +27,25 @@ export interface Config {
 export const name: 'multiuser-dsh'
 export const Config: Schema<Partial<Config>, Config>
 export function apply(ctx: Context, config: Config): void
+
+export type CallerRole = 'owner' | 'member' | 'guest'
+
+export interface BotFact {
+  readonly id: string
+  readonly main: boolean
+  readonly people: {
+    readonly mode: 'owners' | 'allowlist' | 'workspace'
+    readonly allow: readonly { readonly issuer: string; readonly subject: string }[]
+  }
+}
+
+export interface AutomagikCaller {
+  readonly version: 2
+  readonly multiuser: boolean
+  current(): AutomagikPrincipal | undefined
+  roleOf(principal: unknown): CallerRole | undefined
+  visibleBotIds(principal: unknown): ReadonlySet<string>
+  provide(provider: { bots(): Iterable<BotFact> }): () => void
+  invalidate(principal?: AutomagikPrincipal): void
+  seen(): readonly Readonly<Pick<AutomagikPrincipal['person'], 'issuer' | 'subject' | 'roles'> & { lastSeen: number }>[]
+}

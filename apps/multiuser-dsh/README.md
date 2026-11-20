@@ -144,3 +144,13 @@ as a public entry point (a `./stream-server` export of `RemoteStreamMuxServer` w
 `wireStream.serve(req, socket, head, peer)` that runs DSH's own mux on a plugin's upgrade
 route. When it lands, the rebuilt carrier and its parity test go; the limits above stay as
 options.
+
+The `automagik` policy stays empty through delivery 5d. Members and guests read through
+the Bot UI's caller routes once 5d exposes them.
+
+The frozen `automagikCaller` service is version 2. It retains `multiuser` and `current()`.
+`roleOf(principal)` returns the effective role. `visibleBotIds(principal)` computes Bot
+visibility from the facts supplied by `provide({ bots })`, which registers one provider
+and returns its disposer. Without usable facts, visibility is empty. `invalidate()`
+wakes remote-access followers. `seen()` lists recently admitted identities for the
+owner during this activation and refuses inside a carried caller scope.

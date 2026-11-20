@@ -1294,7 +1294,7 @@ export function install(rt) {
   // `threshold` the part is over; 'aside': no route answers beside the agent). The fresh
   // part carries the latest messages that fit, and the old part is archived only once the
   // fresh part's first answer comes from its route.
-  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, hard = overflow || folder || fresh || cutoff || manual } = {}) {
+  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, shareId, hard = overflow || folder || fresh || cutoff || manual } = {}) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     let handedOff = false
     try {
@@ -1305,6 +1305,10 @@ export function install(rt) {
       const place = placeOf(agentId)
       if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
       const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
+      if (job.roomId === undefined && job.botId !== undefined && rt.hostAuthority !== undefined) {
+        job.isShare = shareId !== undefined
+        job.shareId = shareId ?? rt.shareIdOf(job.botId)
+      }
       job.noCommands = rt.botRunnerRequired?.(agentId, agent) === true
       switches.set(agentId, job)
       const running = runSwitch(agent, job)
@@ -1313,6 +1317,7 @@ export function install(rt) {
       job.done = running.then(() => {}, () => {})
       void running
         .catch(error => {
+          if (job.isShare) rt.spoilShare?.(job.botId, job.shareId)
           job.runnerRefused = error?.code === NO_BOT_RUNNER
           const name = rt.botOf(job.botId)?.name ?? rt.roomOf(job.roomId)?.name ?? agent.id
           if (unloaded(error)) return noteInfo('omni-ui: plugin unloaded while %s switched parts; input kept in part %s', name, agent.id)
@@ -1511,6 +1516,7 @@ export function install(rt) {
       if (room !== undefined) room.sessions[bot.id] = entry.oldId
       else {
         bot.sessionId = entry.oldId
+        if (rt.hostAuthority !== undefined) rt.unpublishPart?.(bot.id, freshId)
         if (state.questions?.[freshId] !== undefined && state.questions[entry.oldId] === undefined) {
           state.questions[entry.oldId] = state.questions[freshId]
           delete state.questions[freshId]
@@ -1763,11 +1769,13 @@ export function install(rt) {
       // The card's call stays in the old part: the fresh part raises it in the
       // composer dock while pending, and closing it records at the part that asked it.
       if (state.questions[agent.id] !== undefined) {
+        if (job.isShare) job.cardMoved = true
         const pending = state.questions[agent.id]
         state.questions[freshId] = pending.callId && !pending.callSessionId ? { ...pending, callSessionId: agent.id } : pending
         delete state.questions[agent.id]
       }
       if (state.views?.[agent.id] !== undefined) {
+        if (job.isShare) job.cardMoved = true
         const pending = state.views[agent.id]
         state.views[freshId] = pending.callId && !pending.callSessionId ? { ...pending, callSessionId: agent.id } : pending
         delete state.views[agent.id]
@@ -1809,10 +1817,12 @@ export function install(rt) {
       freshParts.set(freshId, estimateTokens(text))
       fresh.followup(createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
       // Before the flush, so the goal's own record is written with the part it belongs to.
+      if (job.isShare) job.goalMoved = ctx.get('goals')?.get?.(agent)?.phase === 'active'
       carryGoal(agent, fresh, room, name)
       await ctx.sessions.flush(fresh.session)
       carry.push(...job.carry.splice(0))
       await forward(job, [...carry, ...held], agent.session.id)
+      if (job.isShare) job.movedIn = carry.length + held.length
     } catch (error) {
       job.kept = true
       try { restore(agent, [...carry, ...job.carry.splice(0)]) } catch {}
@@ -1826,6 +1836,14 @@ export function install(rt) {
         try { restore(agent, late) } catch {}
         throw error
       })
+      if (job.isShare) job.movedIn += late.length
+    }
+    if (job.shareId !== undefined && rt.hostAuthority !== undefined) {
+      void rt.publishPart?.({
+        botId: job.botId, fromPart: agent.id, freshId, shareId: job.shareId,
+        kind: job.isShare ? 'share' : job.fresh ? 'fresh' : 'move',
+        carried: (job.movedIn ?? 0) > 0 || job.goalMoved === true || job.cardMoved === true,
+      })?.catch(() => rt.warn('omni-ui: publishing a fresh part for caller sharing failed'))
     }
     ctx.logger.info('ds-bot: %s%s moved on to part %d at %d tokens (check line %d, hard line %d); %s; %d latest and %d earlier messages carried%s', name, bot !== undefined && room !== undefined ? ` in ${room.name}` : '', number + 1, tokens ?? -1, lines?.check ?? -1, lines?.hard ?? -1,
       written !== undefined ? `note written in ${written.attempts} attempt(s)` : `note put together by Omni (${noted.fallback}${noted.note ? `, carries part ${noted.noteFrom}'s` : ', nothing to carry'})`,
@@ -2873,7 +2891,7 @@ export function install(rt) {
 
   // The user's "New conversation" for a Bot's own chat: once the Bot is idle, it goes on in
   // a fresh part.
-  async function startFresh(botId) {
+  async function startFresh(botId, { shareId } = {}) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     try {
       const bot = rt.botOf(botId)
@@ -2881,7 +2899,7 @@ export function install(rt) {
       if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
       if (bot.sessionPinned === true) throw refused('refused', pinnedText(bot, 'fresh'))
       const agent = await rt.resolveAgent(rt.chatOf(botId))
-      if (!startSwitch(agent, { fresh: true })) throw Object.assign(new Error(`${bot.name} is already moving to a new conversation.`), { code: 'bot/refused' })
+      if (!startSwitch(agent, { fresh: true, shareId })) throw Object.assign(new Error(`${bot.name} is already moving to a new conversation.`), { code: 'bot/refused' })
       return { id: botId }
     } finally { leave() }
   }
@@ -3129,7 +3147,7 @@ export function install(rt) {
     } finally { leave() }
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
     // A fresh part still waiting for its first answer: its failure goes back with the part.
     // A no-note move may still have to go back to the part it left.
     returnsTo: id => [...awaiting.values()].some(entry => entry.oldId === id),

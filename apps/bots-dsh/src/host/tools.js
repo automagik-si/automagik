@@ -15,6 +15,7 @@ import { checkShownView, showViewDescription, showViewParameters } from 'deep-vi
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
+import { refusal } from './refusal.js'
 import { registerTrustedTool } from './tool-registrations.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
@@ -501,6 +502,10 @@ export function install(rt) {
     },
     output,
     async execute(args, exec) {
+      if (Object.hasOwn(args, 'people')) {
+        const bot = args.bot ? rt.findBot(args.bot) : rt.botOf(rt.selfOf(exec.agent?.id))
+        throw refusal('Only the user can choose who may talk to ' + (bot?.name ?? 'this Bot'))
+      }
       const leave = rt.enterOwnership?.() ?? (() => {})
       try {
         await rt.load()

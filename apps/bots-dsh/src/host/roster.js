@@ -15,6 +15,7 @@ import { contextPatch } from '../shared/context-policy.js'
 import { commandCapableAgent, crossesHarness, shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
+import { peopleOf } from './people.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -615,6 +616,7 @@ export function install(rt) {
   }
 
   async function updateBot(id, patch, actorId, fromSessionId, options) {
+    if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
     const run = () => updateBotRecord(id, patch, actorId, fromSessionId, options)
     return patch.model !== undefined || patch.effort !== undefined ? withModelChange(id, run, options?.admit !== undefined) : run()
   }
@@ -1417,11 +1419,37 @@ export function install(rt) {
   // The first Main Bot is the sidebar tile. `replace` gives a Main Bot's place to
   // another Bot in one step, so the team never has none; `primary` moves a Bot to the
   // front and keeps the others.
-  async function setMain(id, main, { primary = false, replace } = {}) {
+  async function setMain(id, main, options) {
+    if (rt.hostAuthority === undefined) return writeMain(id, main, options)
+    return rt.peopleQueue(() => writeMain(id, main, options))
+  }
+
+  async function writeMain(id, main, { primary = false, replace } = {}) {
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
     if (main && bot.private === true) throw refusal(`${bot.name} is private, so it cannot be a Main Bot`)
     const others = state.mainBotIds.filter(other => other !== id)
+    const sharing = rt.hostAuthority !== undefined
+    const apply = (team, next) => {
+      const chosen = rt.own(team.bots, id)
+      // The sidebar shows every Main Bot, so a hidden Bot would vanish again once demoted.
+      if (main) delete chosen.hidden
+      // A held setup greeting says "you are the Main Bot" and must stay with that role.
+      for (const other of team.mainBotIds.filter(other => !next.includes(other))) {
+        const demoted = rt.own(team.bots, other)
+        if (demoted?.kickoff?.main) delete demoted.kickoff
+      }
+      team.mainBotIds = next
+      if (next[0] && team.bots[next[0]]) delete team.bots[next[0]].sectionId
+      if (sharing && main) {
+        const people = peopleOf(chosen)
+        if (people.mode === 'workspace') chosen.people = { ...people, mode: 'allowlist' }
+      }
+    }
+    const commit = next => rt.saveCopy(team => apply(team, next), { afterWrite: () => {
+      apply(state, next)
+      if (sharing) rt.accessChanged()
+    } })
     if (main && replace !== undefined) {
       const unavailable = rt.readOnly()
       if (unavailable !== undefined) throw refusal(unavailable)
@@ -1429,16 +1457,9 @@ export function install(rt) {
       if (!state.mainBotIds.includes(replace) || rt.botOf(replace) === undefined) throw refusal('Only a Main Bot can be replaced')
       if (rt.isMain(id)) throw refusal('Choose a Bot that is not already a Main Bot')
       const next = state.mainBotIds.with(state.mainBotIds.indexOf(replace), id)
-      const apply = team => {
-        team.mainBotIds = next
-        delete team.bots[id].hidden
-        if (team.bots[replace].kickoff?.main) delete team.bots[replace].kickoff
-        if (team.bots[next[0]]) delete team.bots[next[0]].sectionId
-      }
       // Publish the replacement only after the required copy reaches disk. Other
       // writes see either the earlier roster or the committed one.
-      await rt.saveCopy(apply, { afterWrite: () => apply(state) })
-      return
+      return commit(next)
     }
     let next
     if (!main) {
@@ -1450,14 +1471,9 @@ export function install(rt) {
     } else {
       next = rt.isMain(id) ? state.mainBotIds : [...others, id]
     }
-    // The sidebar shows every Main Bot, so a hidden Bot would vanish again once demoted.
-    if (main) delete bot.hidden
-    // A held setup greeting says "you are the Main Bot"; it must not go out after demotion.
-    for (const other of state.mainBotIds.filter(other => !next.includes(other))) {
-      if (rt.botOf(other)?.kickoff?.main) delete rt.botOf(other).kickoff
-    }
-    state.mainBotIds = next
-    if (next[0] && state.bots[next[0]]) delete state.bots[next[0]].sectionId
+    // With caller access active, the role and its narrower grant reach disk together.
+    if (sharing) return commit(next)
+    apply(state, next)
     await rt.save()
   }
 
@@ -1546,6 +1562,7 @@ export function install(rt) {
     let removed
     try { removed = rt.botOf(id) } catch {}
     delete state.bots[id]
+    rt.forgetShare?.(id)
     rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
     // The shared capability list is the user's and keeps its items; only a

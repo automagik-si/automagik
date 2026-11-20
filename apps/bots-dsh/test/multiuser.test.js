@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import { createRuntime } from '../index.js'
 import { appOf, appRoutes } from '../src/host/app-manifest.js'
-import { callerOf, multiuserMode } from '../src/host/multiuser.js'
+import { callerOf, callerService, multiuserMode } from '../src/host/multiuser.js'
 import { fakeContext } from './fake-ctx.js'
 
 test('mode parsing and the versioned caller service', () => {
@@ -16,8 +16,16 @@ test('mode parsing and the versioned caller service', () => {
   for (const value of ['1', 'yes']) assert.equal(multiuserMode({ AUTOMAGIK_MULTIUSER: value }), true)
   assert.equal(callerOf(undefined), undefined)
   assert.equal(callerOf({ get: () => undefined }), undefined)
-  assert.equal(callerOf({ get: () => ({ version: 2, current() { assert.fail('unknown service version') } }) }), undefined)
+  assert.equal(callerOf({ get: () => ({ version: 3, current() { assert.fail('unknown service version') } }) }), undefined)
   const principal = Object.freeze({ kind: 'automagik' })
+  for (const version of [1, 2, 3]) {
+    for (const multiuser of [false, true]) {
+      const service = { version, multiuser, current: () => principal }
+      const ctx = { get: () => service }
+      assert.equal(callerOf(ctx), version <= 2 ? principal : undefined)
+      assert.equal(callerService(ctx), version === 2 && multiuser ? service : undefined)
+    }
+  }
   assert.equal(callerOf({ get(name) {
     assert.equal(name, 'automagikCaller')
     return { version: 1, current: () => principal }

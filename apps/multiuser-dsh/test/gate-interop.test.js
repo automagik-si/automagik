@@ -130,7 +130,7 @@ async function setup(t, { names = ['fixture-a', 'fixture-b'], fixtureDist = true
     } }
   })
   await activate()
-  assert.equal(ctx.get('automagikCaller').version, 1)
+  assert.equal(ctx.get('automagikCaller').version, 2)
   const route = webServer.match(prefix + '/api/fixture')
   assert.equal(route?.path, prefix)
   assert.equal(typeof route.handler, 'function')
@@ -698,7 +698,7 @@ test('a replacement connection inherits an unpersisted rollback cutoff', async t
   await first.dispose()
   wall = start * 1000
   await provideConnection(f.ctx)
-  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  assert.equal(f.ctx.get('automagikCaller').version, 2)
   observeFixture(f.ctx)
   const atWatermark = (await member()).status
   wall += 6000
@@ -725,7 +725,7 @@ test('a delayed claim projects from its claim time before the first request', as
   mono += 100_000
   const claimedAt = Math.floor(wall / 1000)
   await provideConnection(f.ctx)
-  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  assert.equal(f.ctx.get('automagikCaller').version, 2)
   observeFixture(f.ctx)
   inProcessGate(t, f)
   const principal = person('first')
@@ -867,7 +867,7 @@ test('adapter disposal leaves the permanent guard ahead of the fallback and late
   removePrefix()
   await f.activate()
   assert.equal(f.webServer.match, match)
-  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  assert.equal(f.ctx.get('automagikCaller').version, 2)
   assert.equal(f.webServer.match(prefix + fixturePath).path, prefix)
 })
 
@@ -964,7 +964,7 @@ for (const event of ['adapter disposal', 'connection loss']) {
     const connection = provideConnection(f.ctx)
     await connection
     const service = ctx.get('automagikCaller')
-    assert.equal(service.version, 1)
+    assert.equal(service.version, 2)
     if (ctx !== f.ctx) assert.equal(f.ctx.get('automagikCaller'), undefined)
     const entered = Promise.withResolvers()
     const hold = Promise.withResolvers()
@@ -1000,7 +1000,7 @@ for (const event of ['adapter disposal', 'connection loss']) {
     } else {
       await f.activate(ctx)
     }
-    assert.equal(ctx.get('automagikCaller').version, 1)
+    assert.equal(ctx.get('automagikCaller').version, 2)
     assert.notEqual(ctx.get('automagikCaller'), service)
     assert.equal(result(await member('second')).value, 'second')
   })
@@ -1085,7 +1085,7 @@ test('a duplicate caller provider fails the injected child and releases its rese
   await dispose()
   await fixture.dispose()
   await f.activate()
-  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  assert.equal(f.ctx.get('automagikCaller').version, 2)
   assert.equal(result(await member()).value, 'first')
 })
 
@@ -1112,7 +1112,7 @@ test('a waiting owner reloads the watermark and refuses the previous owner’s s
 
   await provideConnection(waiting)
   observeFixture(waiting)
-  assert.equal(waiting.get('automagikCaller').version, 1)
+  assert.equal(waiting.get('automagikCaller').version, 2)
   const route = f.webServer.match(prefix + fixturePath)
   assert.equal(route.path, prefix)
   const replay = await invoke(route.handler, { url: path, method, headers, body: rpc() })

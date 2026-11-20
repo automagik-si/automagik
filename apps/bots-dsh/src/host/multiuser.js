@@ -5,5 +5,10 @@ export function multiuserMode(env = process.env) {
 
 export function callerOf(ctx) {
   const service = ctx?.get?.('automagikCaller')
-  return service?.version === 1 ? service.current() : undefined
+  return service?.version === 1 || service?.version === 2 ? service.current() : undefined
+}
+
+export function callerService(ctx) {
+  const service = ctx?.get?.('automagikCaller')
+  return service?.version === 2 && service.multiuser === true ? service : undefined
 }

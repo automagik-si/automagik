@@ -21,6 +21,7 @@ import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, P
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
 import { CHECK_READ_ONLY } from './self-update-check.js'
+import { callerService } from './multiuser.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -325,7 +326,7 @@ export function install(rt) {
   // Updates change the dsh profile, not the team, so a reading host may run them too.
   const privacy = createPrivacy()
   const pets = createPets({ home: () => rt.home, warn: (...args) => rt.warn?.(...args) })
-  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
+  const READS = new Set(['people-seen', 'privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
   READS.add('role-catalog')
   // Sign-in (cli-login.js): its replies are never cached by the browser.
   const CLI_LOGIN = new Set([
@@ -516,6 +517,15 @@ export function install(rt) {
   const handle = async (endpoint, payload, signal, windowSeen = false) => {
     try {
       const body = payload ?? {}
+      if ((endpoint === 'create-bot' || endpoint === 'duplicate-bot') && Object.hasOwn(body, 'people')) {
+        return fail('Only the user can choose who may talk to a Bot, in its settings', 'bot/refused')
+      }
+      if (endpoint === 'update-bot' && Object.hasOwn(body, 'people')) {
+        if (Object.keys(body).some(key => key !== 'id' && key !== 'people')) {
+          return fail('Save who may talk to a Bot on its own', 'bot/refused')
+        }
+        if (!callerService(ctx)) return fail('Sharing needs multiuser mode', 'bot/refused')
+      }
       // The permission section of the diagnostics page (permission-diagnostics.js): answered
       // from memory before the refresh below, which may load the team or take its lock. It
       // takes no input.
@@ -715,7 +725,15 @@ export function install(rt) {
         case 'set-bot-auto':
           await rt.load()
           return ok(await rt.setBotAuto(String(body.id ?? ''), body.rev))
+        case 'people-seen': {
+          const service = callerService(ctx)
+          return service ? ok(service.seen()) : fail('Sharing needs multiuser mode', 'bot/refused')
+        }
         case 'update-bot':
+          if (Object.hasOwn(body, 'people')) {
+            await rt.load()
+            return ok(await rt.setPeople(String(body.id ?? ''), body.people))
+          }
           if (Object.hasOwn(body, 'roles')) throw invalid("A Bot's role changes with role-attach and role-detach")
           await rt.load()
           return ok(await rt.updateBot(body.id, body))
