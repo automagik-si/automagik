@@ -111,7 +111,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/created',
     'on session/event',
     'effect ds-bot: subagent asks context',
-    'prompt context ds-bot:subagent-asks 121',
+    'prompt context automagik-bots:subagent-asks 121',
     'on agent/inbox/discarded',
     'on session/event',
     'effect omni-ui: resume interrupted turns',

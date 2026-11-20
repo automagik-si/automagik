@@ -16,6 +16,7 @@ import { validateViewAnswer } from 'deep-view/core'
 import { previewText } from '../shared/plain-text.js'
 import { normalizeAddressList } from './browser/address-policy.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
+import { nativeWorkersView } from './native-workers.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -246,9 +247,16 @@ export function install(rt) {
   // running; `work`: per Bot, the turn it runs and its tool; per group, the members whose
   // turn there runs; the approvals waiting; permission stops; per Bot, who it waits for to hand back work;
   // and per Session, when its running turn began.
+  // Claude Code's native subagents, per Bot (native-workers.js): acp-dsh's run groups each
+  // subagent's calls under its Agent/Task call; the sidebar draws them under the Bot's row.
+  const nativeWorkers = () => {
+    let acp
+    try { acp = ctx.get?.('acpAgents') } catch { acp = undefined }
+    return nativeWorkersView(rt, acp)
+  }
   const live = () => ({
     activity: rt.activityView(),
-    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {} },
+    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
     memoryNews: rt.memoryNews(),
     memoryReviews: rt.memoryReviews(),
     learning: rt.learningView(),

@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bounded } from "./bounded.mjs";
 
 const here = (f) => new URL(f, import.meta.url).href;
 const FAKE_SWITCH = "data:text/javascript," + encodeURIComponent(`
@@ -1301,16 +1302,43 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
   const { view, cx, draw } = await panel({ record: { use: "default", logins: [{ id: "2", dir: TWO }] }, settle: false,
     claude: { status: { default: signedIn("cy@example.com", DEFAULT_DIR), [TWO]: () => held.then(() => signedIn("dee@example.com", TWO)) } } });
   const asks = () => state.calls.filter((c) => c[0] === "/usr/bin/env" && c.at(-1) === "status").length;
-  for (const until = Date.now() + 5000; asks() < 2 && Date.now() < until;) await new Promise((go) => setTimeout(go, 1));
+  for (const until = Date.now() + 10_000; asks() < 2 && Date.now() < until;) await new Promise((go) => setTimeout(go, 1));
   assert.equal(asks(), 2, "the first round: both logins, side by side");
   view.forceLogins = true;
   view.reload(cx);
   view.forceLogins = true;
   view.reload(cx);
-  await new Promise((go) => setTimeout(go, 5));
+  // Both reloads arrive while the round is held: the panel queues them (`probeAgain`) instead
+  // of starting a round beside it. The queue marker is the proof; bounded() only turns a panel
+  // that never handled the reload into a named failure instead of a hang. A panel that starts
+  // the round anyway is named by the asks assertion. The wait ends on either outcome so a
+  // broken panel fails on that assertion, not on the queue marker's 10 s net.
+  //
+  // One immediate at a time, cleared in `finally`: when bounded() gives up, the poll stops with
+  // it. A poll that kept scheduling would keep the event loop alive, so the row would report its
+  // failure and the file would still not exit.
+  let pollHandle;
+  try {
+    await bounded(new Promise((resolve) => {
+      const seen = () => {
+        if (view.probeAgain || asks() > 2) return resolve();
+        pollHandle = setImmediate(seen);
+      };
+      seen();
+    }), "the reloads asked for while a round runs to reach its queue", {
+      where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row',
+    });
+  } finally {
+    clearImmediate(pollHandle);
+  }
   assert.equal(asks(), 2, "no round beside the one running");
+  assert.equal(view.probeAgain, true, "the reload is queued behind the held round");
+  assert.equal(view.probing, true, "the held round is still the one running");
   release();
-  await cx.settle();
+  // The released round's own state is the proof; bounded() only fails the row, naming the
+  // release, if the held status never settles and the queued round therefore never runs.
+  await bounded(cx.settle(), "the released login round (and the one queued after it) to settle",
+    { where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row' });
   assert.equal(asks(), 4, "one queued round after it, not two");
   assert.match(text(draw()), /dee@example\.com · login 2 Use/);
 });

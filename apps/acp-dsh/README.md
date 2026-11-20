@@ -19,8 +19,9 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   choose. An effort's default is the person's own setting for that model.
 - **The Session's model and effort, before each prompt.** The agent's session is put on the
   Session's model, then its effort (the model first: the efforts are that model's). No effort
-  leaves the agent's own. A model or effort the agent does not offer fails the turn, naming what
-  it offers.
+  leaves the agent's own. A model or effort the agent does not offer normally fails the turn,
+  naming what it offers. For a missing stand-in, if the agent's own model is still available,
+  the reply uses that model without the requested effort and asks you to choose a model again.
 - **DSH tool cards and approvals.** With `dshTools` off (the kill switch), the agent runs its own
   tools. Each tool call it makes ends the model step with a call to `acp_tool`, a tool registered
   in that agent's scope only. DSH writes the `tool/call` and `tool/result` rows and draws the

@@ -3040,7 +3040,17 @@ Object.assign(ZH, {
   'the {name} plugin is missing from this DSH': '这个 DSH 里没有 {name} 插件',
   'the {name} plugin is switched off in this DSH': '这个 DSH 里已关闭 {name} 插件',
   'the {name} plugin did not load in this DSH': '{name} 插件在这个 DSH 里没有加载',
-  'the {name} plugin did not load in this DSH ({code})': '{name} 插件在这个 DSH 里没有加载（{code}）'
+  'the {name} plugin did not load in this DSH ({code})': '{name} 插件在这个 DSH 里没有加载（{code}）',
+  // Claude Code's native subagents as workers under a Bot's row (native-workers.js, issue 1564).
+  "Subagents {name} started": "{name} 启动的子代理",
+  "{step}…": "{step}…",
+  "Starting…": "正在启动…",
+  "Worker details": "工作详情",
+  "Result: {line}": "结果：{line}",
+  "still running": "仍在运行",
+  "Steps": "步骤",
+  "Steps (latest {n})": "步骤（最近 {n} 个）",
+  "No steps yet.": "还没有步骤。"
 })
 // The Apps page's Automagik overlay (official.js).
 Object.assign(ZH, {
@@ -3048,7 +3058,6 @@ Object.assign(ZH, {
   'Official': '官方',
   'Install': '安装',
   'Installed': '已安装',
-  'Not installed': '未安装',
   'State': '状态',
   'SAMPLE DATA': '示例数据',
   'Included with Automagik': '随 Automagik 提供',

@@ -1088,12 +1088,11 @@ test("#1262: a template worker that reports no status is waited for past hc's 60
   // hc itself waits 60 s for a template's new terminal to report a status before it answers.
   const done = join(s.root, "run-answered");
   hcStateExtra(s, { runDelayMs: 61_000, runDelayDone: done });
-  const began = Date.now();
   const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
-  const took = Date.now() - began;
   assert.equal(r.code, 0, r.err);
+  // The fake writes `done` only when its own 61 s wait reaches the answer, never when the CLI
+  // killed the call: its presence is the proof that the wait outlasted the old 15 s timeout.
   assert.ok(existsSync(done), "hc's run was allowed to answer, not killed at 15 s");
-  assert.ok(took >= 60_000, `the start waited hc's first-status wait (${took} ms)`);
   const row = s.ledger().find((x) => x.kind === "worker");
   assert.equal(row.terminal, "t100");
   assert.equal(row.template, "mystery");

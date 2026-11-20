@@ -38,6 +38,9 @@ export function callArguments(tool) {
     ...(diffs.length ? { diffs } : {}),
     // An image being made: the chat draws its image card from the first sight of the call.
     ...(isImageCall(tool) ? { image: true } : {}),
+    // A native subagent's call: the agent's id of the Agent/Task call it ran inside, so the
+    // card's own row says which worker it belongs to.
+    ...(typeof tool.parent === 'string' ? { parent: tool.parent } : {}),
   }
 }
 
@@ -183,6 +186,7 @@ export function mirrorTool(host) {
       locations: { type: 'json' },
       diffs: { type: 'json' },
       image: { type: 'boolean' },
+      parent: { type: 'string', description: "The agent's id of the subagent call this call ran inside." },
     },
     output: {
       schema: {

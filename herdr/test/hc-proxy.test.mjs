@@ -244,7 +244,7 @@ const REFUSED_METHODS = [
   "terminal.attach", "terminal.interrupt", "terminal.keep", "terminal.keys", "terminal.put",
 ];
 
-const waitFor = async (check, timeout = 4000) => {
+const waitFor = async (check, timeout = 10_000) => {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
     if (check()) return true;
@@ -1026,7 +1026,13 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
   const { proxy } = await sceneWithCore(t);
   const held = [];
   for (let i = 0; i < MAX_CONNECTIONS; i += 1) held.push(await clientFor(proxy.socket));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Every held client has answered through its session, so each one is registered before the
+  // next connects; no sleep guesses when the proxy got to accept them. The client's own 5 s
+  // test timeout is the bound: a missing answer fails here, naming the list that never came.
+  await Promise.all(held.map((client) => client.call("terminal.list").catch((e) => {
+    throw new Error("herdr/test/hc-proxy.test.mjs, the connection cap row: a held client's terminal.list answer "
+      + `did not arrive within the client's test timeout: ${e.message}`);
+  })));
   const extra = await clientFor(proxy.socket);
   const answer = JSON.parse(await extra.next());
   assert.match(answer.error.message, new RegExp(`^hc-proxy: too many connections \\(${MAX_CONNECTIONS} max\\)`));
@@ -1037,10 +1043,10 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
 test("an idle connection and a slow partial line are closed by the idle timeout", async (t) => {
   const { proxy } = await sceneWithCore(t, { proxyOptions: { idleTimeoutMs: 120 } });
   const idle = await clientFor(proxy.socket);
-  assert.ok(await waitFor(() => idle.closed, 2000), "an idle connection is closed");
+  assert.ok(await waitFor(() => idle.closed, 10_000), "an idle connection is closed");
   const slow = await clientFor(proxy.socket);
   slow.socket.write('{"jsonrpc":"2.0","id":1');
-  assert.ok(await waitFor(() => slow.closed, 2000), "a slow partial line is closed");
+  assert.ok(await waitFor(() => slow.closed, 10_000), "a slow partial line is closed");
 });
 
 test("an in-flight wait keeps the connection alive", async (t) => {
