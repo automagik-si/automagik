@@ -1,9 +1,10 @@
-import { CliproxyPayload, DonePayload, MigrateOmniPayload, MigrateStartPayload, MigrateStatusPayload, RequestBody, Secret, parse } from './payloads.js'
+import { CliproxyPayload, DonePayload, MigrateOmniPayload, MigrateStartPayload, MigrateStatusPayload, OmniServerPayload, RequestBody, Secret, parse } from './payloads.js'
 import { createMigrateActions } from './hermes-migrate.js'
 import { createAiActions } from './ais.js'
 import { createProviderActions, saveRoute, unsetRoute } from './providers.js'
 import { createCompanionActions } from './companion.js'
 import { createBotTypeActions } from './bot-types.js'
+import { createOmniServerCheck } from './release-resolve.js'
 import { createAcpActions } from './acp.js'
 import { hostOf, machineOf } from './host.js'
 import { preloadOf } from './preload.js'
@@ -34,6 +35,8 @@ import { UNFOLD_BOT } from './companion.js'
 //   unfold-plugin, unfold-plugin-install, bot-type
 //                      the Omni plugins, Genie's and Unfold's, installed through DSH's plugin
 //                      manager, and what a Bot type starts with (src/host/bot-types.js)
+//   omni-server-check { version }
+//                      whether the Omni installer can run here and npm has its version
 //   acp, acp-switch, acp-retry
 //                      Claude Code and Codex through @automagik/acp-dsh: its acpAgents
 //                      service's status, and its claude/codex settings (src/host/acp.js)
@@ -245,7 +248,17 @@ export function install(ctx, deps = {}) {
       }), 'omni-ai: Add Omni')
     })
   }
-  const actions = { ...createActions(ctx, { ...deps, anyOn }), ...createProviderActions(ctx), ...aiEndpoints, ...createAcpActions(ctx), ...companion, ...createBotTypeActions(ctx, { team, omniProjectOf, env: deps.env ?? process.env, ...(deps.checkGit ? { checkGit: deps.checkGit } : {}), ...(deps.genieSkills ? { genieSkills: deps.genieSkills } : {}), ...(deps.genieCli ? { genieCli: deps.genieCli } : {}), ...(deps.release ? { release: deps.release } : {}), ...(deps.offersUnfold !== undefined ? { offersUnfold: deps.offersUnfold } : {}) }) }
+  const botTypes = createBotTypeActions(ctx, {
+    team, omniProjectOf, env: deps.env, checkGit: deps.checkGit, genieSkills: deps.genieSkills, genieCli: deps.genieCli,
+    release: deps.release, releases: deps.releases, offersUnfold: deps.offersUnfold,
+  })
+  const actions = { ...createActions(ctx, { ...deps, anyOn }), ...createProviderActions(ctx), ...aiEndpoints, ...createAcpActions(ctx), ...companion, ...botTypes }
+  const checkOmniServer = deps.releases?.checkOmniServer ?? createOmniServerCheck({ fetch: deps.fetch, env: deps.env, ...deps.omniServer })
+  actions['omni-server-check'] = (payload) => {
+    const fields = parse(OmniServerPayload, payload)
+    if (fields === undefined) throw invalid('Name an Omni server version.')
+    return checkOmniServer(fields.version)
+  }
   const migrate = createMigrateActions(ctx, deps.migrate ?? {})
   // The move's own payloads are parsed here, as every other endpoint's are.
   actions['migrate-start'] = (payload, signal) => migrate['migrate-start'](parse(MigrateStartPayload, payload) ?? {}, signal)

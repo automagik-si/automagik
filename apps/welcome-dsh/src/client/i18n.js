@@ -11,6 +11,11 @@ export const PT_BR = {
   // Installs and their errors
   'The install was cancelled.': 'A instalação foi cancelada.',
   'Omni\'s installer stopped (exit code {code}). What it printed is above.': 'O instalador do Omni parou (código de saída {code}). A saída está acima.',
+  'Omni {version} is not on npm, where Omni\'s installer gets it. The newest there is {npm}.': 'O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.',
+  'Omni {github} is out on GitHub and not on npm yet.': 'O Omni {github} já saiu no GitHub e ainda não chegou ao npm.',
+  'Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.': 'Desligue e ligue o Omni novamente para usar os plugins compatíveis com essa versão ou use um Omni em outro computador.',
+  'Omni\'s installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.': 'O instalador do Omni precisa do systemd, que não está disponível neste computador (como acontece em um contêiner, por exemplo). Use um Omni em outro computador.',
+  'unknown': 'desconhecida',
 
   // A found Omni, and where Omni comes from
   'Your Omni on this Mac': 'Seu Omni neste Mac',
