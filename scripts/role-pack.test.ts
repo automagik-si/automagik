@@ -86,7 +86,7 @@ function repo() {
   for (const path of [
     'scripts/lane.ts', 'scripts/role-pack.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json',
     ...['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'multiuser-dsh', 'vault-dsh', 'welcome-dsh'].map(plugin => 'apps/' + plugin + '/package.json'),
-    ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js'].map(file => PLUGIN + '/src/host/' + file),
+    ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js', 'bounded-get.js'].map(file => PLUGIN + '/src/host/' + file),
     PLUGIN + '/src/shared/roles.js',
   ]) copy(root, path);
   put(root, '.gitignore', '/out/\n');
@@ -688,7 +688,7 @@ test('a plugin upgrade keeps unchanged role pins attachable and flags byte-chang
       const plugin = join(root, 'out', 'consumer-' + version);
       for (const file of [
         'host/role-catalog.js', 'host/role-package.js', 'host/role-runtime.js', 'host/role-tar.js', 'host/role-settings.js',
-        'host/role-voice.js', 'host/roles.js', 'host/role-keys.json', 'host/refusal.js',
+        'host/role-voice.js', 'host/roles.js', 'host/role-keys.json', 'host/refusal.js', 'host/bounded-get.js',
         'shared/roles.js', 'shared/routes.js', 'shared/machine-reservations.js', 'client/role-shop.js', 'client/i18n.js',
       ]) {
         put(plugin, 'src/' + file, readFileSync(join(ROOT, PLUGIN, 'src', file)));

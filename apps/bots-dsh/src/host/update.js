@@ -6,6 +6,9 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { refusal } from './refusal.js'
 import { join } from 'node:path'
 import { inDesktopApp, inUnfoldInstance } from './constants.js'
+import { cleanVersion } from './supervisor/records.js'
+
+export { cleanVersion } from './supervisor/records.js'
 
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 export const OFFICIAL_REGISTRY = 'https://registry.npmjs.org/'
@@ -15,11 +18,6 @@ export const CHECK_TTL_MS = 10 * 60_000
 export const FETCH_TIMEOUT_MS = 8000
 // The first check waits until the host has settled its own start.
 const STARTUP_DELAY_MS = 15_000
-const VERSION = /^v?(\d+\.\d+\.\d+(?:-[\w.]+)?)(?:\+[\w.]+)?$/
-
-/** A release version without its `v` and build metadata, or null. */
-export const cleanVersion = value => VERSION.exec(String(value ?? '').trim())?.[1] ?? null
-
 /** Whether version `a` is newer than `b` (semver order, prereleases before their release). */
 export function newer(a, b) {
   const parse = (value) => {
