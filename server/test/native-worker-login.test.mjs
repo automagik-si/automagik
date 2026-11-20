@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -9,130 +8,144 @@ import {
   BOT_CLI_POINTER_ENV,
   NATIVE_WORKER_LOGIN_ENV,
   NATIVE_WORKER_LOGIN_REQUIRED,
+  installationIdentity,
   nativeWorkerEnv,
+  panelCliHomes,
 } from '../native-worker-login.mjs'
-import { generationAt } from '../../apps/acp-dsh/src/host/cli-generations.js'
+import { installationCliHome } from '../../apps/acp-dsh/src/host/installation.js'
+import { CliGenerations } from '../../apps/acp-dsh/src/host/cli-generations.js'
 
-const VENDORS = ['claude', 'codex']
-const READ_ENV = 'process.stdout.write(JSON.stringify({pointer:process.env.AUTOMAGIK_BOT_CLI_POINTER,marker:process.env.AUTOMAGIK_NATIVE_WORKER_LOGIN,home:process.env.HOME}))'
-
-function fixture() {
+function scratch(t) {
   const home = mkdtempSync(join(tmpdir(), 'native-worker-login-'))
-  const root = join(home, 'acp', 'cli-homes')
-  const pointers = {}
-  for (const vendor of VENDORS) {
-    const generation = randomUUID()
-    pointers[vendor] = generation
-    mkdirSync(join(root, 'homes', vendor, generation), { recursive: true })
-    mkdirSync(join(root, 'current'), { recursive: true })
-    writeFileSync(join(root, 'current', vendor), generation, { mode: 0o600 })
-  }
-  return { home, root, pointers }
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const acp = join(home, 'acp')
+  const dsh = join(home, 'dsh')
+  const other = join(home, 'dsh-other')
+  mkdirSync(join(acp, 'cli-homes'), { recursive: true })
+  mkdirSync(dsh)
+  mkdirSync(other)
+  return { home, acp, dsh, other, claim: join(acp, 'cli-homes', 'installation.json') }
 }
 
-test('bounded unit: one helper export derives both vendor pointers and their fixture homes', () => {
-  const { home, root, pointers } = fixture()
-  try {
-    const exported = nativeWorkerEnv({ AUTOMAGIK_HOME: home })
-    assert.equal(exported[BOT_CLI_POINTER_ENV], join(root, 'current', 'claude'))
-    assert.equal(exported[NATIVE_WORKER_LOGIN_ENV], NATIVE_WORKER_LOGIN_REQUIRED)
-    assert.equal(exported.DEEPSEEK_API_KEY, undefined)
-    assert.deepEqual(Object.keys(exported).filter((key) => key.startsWith('AUTOMAGIK_BOT_CLI_POINTER_')), [])
-    for (const vendor of VENDORS) {
-      const pointer = join(dirname(exported[BOT_CLI_POINTER_ENV]), vendor)
-      const generation = generationAt(pointer)
-      assert.equal(generation, pointers[vendor])
-      const recordedHome = join(root, 'homes', vendor, generation)
-      assert.ok(existsSync(recordedHome))
-      const launch = spawnSync(process.execPath, ['-e', READ_ENV], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          ...exported,
-          [BOT_CLI_POINTER_ENV]: pointer,
-          AUTOMAGIK_BOT_CLI_HOME: recordedHome,
-          HOME: recordedHome,
-          ...(vendor === 'codex' ? { CODEX_HOME: join(recordedHome, '.codex') } : { CLAUDE_CONFIG_DIR: join(recordedHome, '.claude') }),
-        },
-      })
-      assert.equal(launch.status, 0, launch.stderr)
-      const seen = JSON.parse(launch.stdout)
-      assert.equal(seen.pointer, pointer)
-      assert.equal(seen.marker, NATIVE_WORKER_LOGIN_REQUIRED)
-      assert.equal(seen.home, recordedHome)
-    }
-  } finally {
-    rmSync(home, { recursive: true, force: true })
+const claimOf = identity => JSON.stringify({ version: 1, identity })
+
+// Each case is decided by the export first (read-only), then by the panel's own function, which
+// may publish the claim: the export must name the root the panel then signs in under.
+const CASES = {
+  'no claim yet (the panel claims the shared root)': () => {},
+  'this installation owns the claim': ({ claim, dsh }) => writeFileSync(claim, claimOf(installationIdentity(dsh))),
+  'another installation owns the claim': ({ claim, other }) => writeFileSync(claim, claimOf(installationIdentity(other))),
+  'a corrupt claim': ({ claim }) => writeFileSync(claim, '{'),
+  'a claim that is a link': ({ claim, other }) => {
+    writeFileSync(`${other}.claim`, claimOf(installationIdentity(other)))
+    symlinkSync(`${other}.claim`, claim)
+  },
+  'an oversized claim': ({ claim, dsh }) => writeFileSync(claim, claimOf(installationIdentity(dsh)) + ' '.repeat(5000)),
+  'a claim that is a folder': ({ claim }) => mkdirSync(claim),
+}
+
+for (const [name, plant] of Object.entries(CASES)) {
+  test(`the exported root is the panel's sign-in root: ${name}`, t => {
+    const s = scratch(t)
+    plant(s)
+    const exported = panelCliHomes(s.acp, s.dsh)
+    const { root } = installationCliHome(s.acp, s.dsh)
+    assert.equal(exported, root)
+  })
+}
+
+test('the pointer names the panel root\'s current/, and each vendor\'s own pointer derives from it', t => {
+  const s = scratch(t)
+  writeFileSync(s.claim, claimOf(installationIdentity(s.other)))
+  const env = nativeWorkerEnv({ AUTOMAGIK_HOME: s.home, DSH_HOME: s.dsh })
+  const { root } = installationCliHome(s.acp, s.dsh)
+  assert.notEqual(root, join(s.acp, 'cli-homes'))
+  const generations = new CliGenerations(root, 'test')
+  for (const vendor of ['claude', 'codex']) {
+    assert.equal(join(dirname(env[BOT_CLI_POINTER_ENV]), vendor), generations.pointer(vendor))
   }
+  assert.equal(env[NATIVE_WORKER_LOGIN_ENV], NATIVE_WORKER_LOGIN_REQUIRED)
+  assert.deepEqual(Object.keys(env).sort(), ['AUTOMAGIK_HOME', BOT_CLI_POINTER_ENV, 'DSH_HOME', NATIVE_WORKER_LOGIN_ENV].sort())
 })
 
-test('bounded unit: a Node core-shaped child and its pane, and the copied env -i allowlist', () => {
-  const { home, root, pointers } = fixture()
-  try {
-    const exported = nativeWorkerEnv({ AUTOMAGIK_HOME: home })
-    const core = spawnSync(process.execPath, ['-e', `
-      const { spawnSync } = require('node:child_process')
-      const pane = spawnSync(process.execPath, ['-e', ${JSON.stringify(READ_ENV)}], { encoding: 'utf8' })
-      if (pane.status !== 0) { process.stderr.write(pane.stderr); process.exit(1) }
-      process.stdout.write(pane.stdout)
-    `], { encoding: 'utf8', env: { ...process.env, ...exported } })
-    assert.equal(core.status, 0, core.stderr)
-    const pane = JSON.parse(core.stdout)
-    assert.equal(pane.pointer, exported[BOT_CLI_POINTER_ENV])
-    assert.equal(pane.marker, NATIVE_WORKER_LOGIN_REQUIRED)
-
-    const allow = {
-      USER: process.env.USER || 'bot',
-      LOGNAME: process.env.LOGNAME || 'bot',
-      PATH: process.env.PATH || '/usr/bin:/bin',
-      HOME: home,
-      HERDR_APP_HOME: home,
-      TMPDIR: tmpdir(),
-      XDG_RUNTIME_DIR: tmpdir(),
-      HERMES_HOME: home,
-      VIRTUAL_ENV: home,
-      AUTOMAGIK_HERDR_SESSION: 'test',
-    }
-    const stripped = spawnSync('env', ['-i', ...Object.entries(allow).map(([key, value]) => `${key}=${value}`), process.execPath, '-e', READ_ENV], { encoding: 'utf8' })
-    assert.equal(stripped.status, 0, stripped.stderr)
-    const without = JSON.parse(stripped.stdout)
-    assert.equal(without.pointer, undefined)
-    assert.equal(without.marker, undefined)
-
-    const readerAllow = {
-      ...allow,
-      [BOT_CLI_POINTER_ENV]: exported[BOT_CLI_POINTER_ENV],
-      [NATIVE_WORKER_LOGIN_ENV]: exported[NATIVE_WORKER_LOGIN_ENV],
-    }
-    const carried = spawnSync('env', ['-i', ...Object.entries(readerAllow).map(([key, value]) => `${key}=${value}`), process.execPath, '-e', READ_ENV], { encoding: 'utf8' })
-    assert.equal(carried.status, 0, carried.stderr)
-    const rerun = JSON.parse(carried.stdout)
-    assert.equal(rerun.pointer, exported[BOT_CLI_POINTER_ENV])
-    assert.equal(rerun.marker, NATIVE_WORKER_LOGIN_REQUIRED)
-
-    for (const vendor of VENDORS) {
-      const pointer = join(dirname(exported[BOT_CLI_POINTER_ENV]), vendor)
-      assert.equal(generationAt(pointer), pointers[vendor])
-      assert.ok(existsSync(join(root, 'homes', vendor, pointers[vendor])))
-    }
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
+test('the export reads no record, pointer or home: it names a path that need not exist yet', t => {
+  const s = scratch(t)
+  const env = nativeWorkerEnv({ AUTOMAGIK_HOME: s.home, DSH_HOME: s.dsh })
+  assert.equal(env[BOT_CLI_POINTER_ENV], join(s.acp, 'cli-homes', 'current', 'claude'))
 })
 
-test('the marker is set, not auth, and a damaged pointer leaves the record unverified', () => {
-  const { home, root } = fixture()
-  try {
-    const exported = nativeWorkerEnv({ AUTOMAGIK_HOME: home })
-    assert.equal(exported[NATIVE_WORKER_LOGIN_ENV], 'required')
-    assert.equal(exported.DEEPSEEK_API_KEY, undefined)
-    const damaged = join(dirname(exported[BOT_CLI_POINTER_ENV]), 'claude')
-    writeFileSync(damaged, 'not-a-generation', { mode: 0o600 })
-    assert.throws(() => generationAt(damaged), /account|sign|again/i)
-    const missing = join(dirname(exported[BOT_CLI_POINTER_ENV]), 'other')
-    assert.equal(generationAt(missing), 'legacy')
-    assert.ok(!existsSync(join(root, 'other')))
-  } finally {
-    rmSync(home, { recursive: true, force: true })
+// The real entrypoint, with data preparation, the image follow and the DSH process replaced:
+// the env DSH is spawned with carries both values, under this installation's own root.
+const LIB = new URL('../lib.mjs', import.meta.url).href
+const FOLLOW = new URL('../profile-follow.mjs', import.meta.url).href
+const harness = `
+  import { registerHooks } from 'node:module'
+  const lib = await import(${JSON.stringify(`${LIB}?test-original`)})
+  globalThis.serverTestLib = {
+    ...lib,
+    ensureDataDirs() {}, prepareWorkspace() {}, pinStore() {},
+    async seedProfile() { return { seeded: false, target: 'test-profile' } },
   }
+  registerHooks({
+    load(url, context, nextLoad) {
+      if (url === ${JSON.stringify(FOLLOW)}) return { format: 'module', shortCircuit: true,
+        source: 'export async function followImage() { return { seeded: false, target: "test-profile", result: "owner-managed", reason: "owner-managed" } }',
+      }
+      if (url === ${JSON.stringify(LIB)}) return {
+        format: 'module', shortCircuit: true,
+        source: Object.keys(lib).map(key => 'export const ' + key + ' = globalThis.serverTestLib.' + key).join(';'),
+      }
+      if (url === 'node:child_process') return {
+        format: 'module', shortCircuit: true,
+        source: \`
+          import { EventEmitter } from 'node:events'
+          import { PassThrough } from 'node:stream'
+          export function spawn(command, args, options) {
+            const env = options.env ?? process.env
+            console.log('SPAWNENV ' + JSON.stringify({ pointer: env.${BOT_CLI_POINTER_ENV}, marker: env.${NATIVE_WORKER_LOGIN_ENV} }))
+            const child = new EventEmitter()
+            child.stdout = new PassThrough()
+            child.stderr = new PassThrough()
+            setImmediate(() => {
+              child.stdout.end('dsh web: http://127.0.0.1:3081/?token=test-launch-value\\\\n')
+              child.stderr.end()
+            })
+            return child
+          }
+        \`,
+      }
+      return nextLoad(url, context)
+    },
+  })
+  await import(${JSON.stringify(new URL('../entrypoint.mjs', import.meta.url).href)})
+`
+
+function entrypointSpawnEnv(s) {
+  const env = { ...process.env, AUTOMAGIK_HOME: s.home, DSH_HOME: s.dsh, AUTOMAGIK_WORKSPACE: s.home, DEEPSEEK_API_KEY: 'test-only' }
+  delete env.AUTOMAGIK_PUBLIC_URL
+  delete env[BOT_CLI_POINTER_ENV]
+  delete env[NATIVE_WORKER_LOGIN_ENV]
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], { env, encoding: 'utf8', timeout: 30_000 })
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  const line = result.stdout.split('\n').find(row => row.startsWith('SPAWNENV '))
+  assert.ok(line, result.stdout)
+  return JSON.parse(line.slice('SPAWNENV '.length))
+}
+
+test('the real entrypoint spawns DSH with the pointer and the marker (the shared root it owns)', t => {
+  const s = scratch(t)
+  writeFileSync(s.claim, claimOf(installationIdentity(s.dsh)))
+  assert.deepEqual(entrypointSpawnEnv(s), {
+    pointer: join(s.acp, 'cli-homes', 'current', 'claude'), marker: NATIVE_WORKER_LOGIN_REQUIRED,
+  })
+})
+
+test('the real entrypoint never exports another installation\'s login on a reused volume', t => {
+  const s = scratch(t)
+  writeFileSync(s.claim, claimOf(installationIdentity(s.other)))
+  const seen = entrypointSpawnEnv(s)
+  assert.equal(seen.pointer, join(installationCliHome(s.acp, s.dsh).root, 'current', 'claude'))
+  assert.ok(!seen.pointer.startsWith(join(s.acp, 'cli-homes')))
+  assert.equal(seen.marker, NATIVE_WORKER_LOGIN_REQUIRED)
 })
