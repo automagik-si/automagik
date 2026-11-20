@@ -123,6 +123,8 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   answer adds `chat: 1`, `credit` (the window each subscription starts with, 256 KiB; read it
   from here) and `limits`. Then frames, as herdr-core's: a 9-byte little-endian header (channel
   u32, kind u8, length u32), kinds DATA 0, CREDIT 1, CLOSE 2.
+  A phone may add `groups: 1`. The answer includes `groups: true` only when the Bot plugin's
+  socket offered groups. The grant belongs to that chat connection, socket and team home.
 - **Requests** (JSON-RPC on channel 0): `chat.list`; `chat.subscribe {terminal, after?}` →
   `{channel}`; `chat.backfill {terminal, before, limit}` (≤ 200 rows, ≤ 1 MiB); `chat.send
   {terminal, text, id}` (≤ 32 KiB; answers `sent`, `queued`, `held` or `refused`);
@@ -166,6 +168,7 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   `question`, `held`, `sent`, `sending`, `matched`, `source`, `gone` and `offline`. A row's text
   is cut at 64 KiB (`cut: true`). A subscriber that stops granting credit gets CLOSE `slow` and
   resubscribes with its cursor. A CLOSE from the phone ends the subscription.
+  A group's `gone` goes out without waiting for credit and drops undelivered events on that channel.
 - Rows are kept in memory only, the last 500 per terminal, while a phone watches and 10 minutes
   after; a restarted bridge numbers them again, so a phone's cursor gets `reset`. Row text is
   never logged. A message held for a terminal goes with the phone that wrote it: once that
@@ -204,6 +207,16 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   at once, and file-based forget is checked every second. The bridge drops the DSH socket if a grant
   close has no ack within 500 ms. Revocation ends host authority within 2 seconds while the bridge's
   timers run on schedule.
+- **Group chats (RFC 0040).** `chat.list` includes `dsh:room:<roomId>` rows (`chat: "group"`)
+  only for a connection with a group grant. Without one, a subscribe returns `not_found` and
+  writes return `not-watching`. The prefix is reserved and negotiated management methods return
+  `invalid` for those terminals. Group watches are text-only. Attachment methods, thumbnail
+  reads and sends with `uploads` return `unsupported`. The bridge passes `retry: true` on
+  `chat.send` through to the host, which may answer `unknown`. A group watch tracks each open
+  approval by id and uses the same per-phone limits as Bot chats. On `gone`, the bridge drops
+  pending replies for the watch. A socket reconnect, a host that stops offering groups or a team
+  change ends group watches with `gone`. The phone needs a fresh chat connection and hello to
+  see groups again.
 
 ## For other mods
 

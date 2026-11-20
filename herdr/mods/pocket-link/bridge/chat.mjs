@@ -25,6 +25,10 @@
 // a display name. Row frames carry metadata and reads serve image thumbnails. Attachment replies
 // are live-only and queued thumbnails are checked again when written. Cancel has its own slot.
 // The phone needs a timeout of at least 75 s for chat.attachFinish and 30 s for the other calls.
+// RFC 0040 adds text-only group chats at the reserved `dsh:room:` prefix. A phone asking for
+// `groups: 1` gets `groups: true` only when the DSH socket offers them. Only that connection
+// can list, subscribe or write to groups. A group's gone drops queued events and pending replies
+// for the watch and is sent without waiting for credit.
 
 /** Frame kinds, as herdr-core's. */
 export const DATA = 0
@@ -67,12 +71,17 @@ export const SETTINGS_METHODS = ['settings.read', 'settings.name', 'settings.mod
 export const MANAGE_METHODS = [...MEMORY_METHODS, ...SCHEDULE_METHODS, ...SETTINGS_METHODS]
 export const memoryRefused = (reason) => ({ ok: false, state: 'refused', reason })
 
+/** RFC 0040: a group chat's terminal prefix, parsed before any Bot routing. */
+export const ROOM_PREFIX = 'dsh:room:'
+export const isRoom = (terminal) => typeof terminal === 'string' && terminal.startsWith(ROOM_PREFIX)
+
 /** Queue writes in wire order, checking whether a chunk can still go when its turn comes. */
 export function chatWriter({ send, isClosed, isRevoked, onFail }) {
   let writing = Promise.resolve()
   const write = (bytes, { liveOnly = false, valid, fallback } = {}) => (writing = writing.then(() => {
     if (isRevoked() || (liveOnly && isClosed())) return
-    return send(valid && !valid() ? fallback : bytes)
+    if (valid && !valid()) return fallback === undefined ? undefined : send(fallback)
+    return send(bytes)
   }).catch(onFail))
   write.done = () => writing
   return write
@@ -224,7 +233,14 @@ export class ChatConnection {
         }) ?? { version: 1, unavailable: 'none' }
         if (!result.attachments.unavailable) result.methods = [...METHODS, ...ATTACH_METHODS]
       }
-      this.write(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n'))
+      const groups = m.params.groups === 1 && this.engine.groupsHello?.(this.client) === true
+      if (groups) result.groups = true
+      const line = (r) => Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: r }) + '\n')
+      if (!groups) this.write(line(result))
+      else {
+        const { groups: _, ...without } = result
+        this.write(line(result), { valid: () => this.engine.groupsFor?.(this.client) === true, fallback: line(without) })
+      }
       this.framed = true
     }
     const requested = Array.isArray(m.params.manage) ? MANAGE_METHODS.filter((method) => m.params.manage.includes(method)) : []
@@ -258,13 +274,22 @@ export class ChatConnection {
       const opts = liveOnly ? { liveOnly: true } : undefined
       if (this.inFlight >= MAX_IN_FLIGHT) { this.reply(errorOf(m?.id ?? null, 'busy', `at most ${MAX_IN_FLIGHT} requests at once`), opts); return }
       this.inFlight += 1
+      const bound = this.#roomWatch(m)
+      const release = (answer) => {
+        if (bound) {
+          const valid = () => this.#liveGroup(bound.channel, bound.sub)
+          if (!valid()) return
+          return this.reply(answer, { ...opts, valid })
+        }
+        return this.#releaseList(m, answer, opts)
+      }
       this.request(m)
-        .then((answer) => this.reply(answer, opts), () => {
+        .then(release, () => {
           if (memory) this.log('chat: memory request failed')
           else if (schedule) this.log('chat: schedule request failed')
           else if (settings) this.log('chat: settings request failed')
           else this.log('chat: request failed')
-          this.reply(errorOf(m?.id ?? null, 'failed'), opts)
+          release(errorOf(m?.id ?? null, 'failed'))
         })
         .finally(() => { this.inFlight -= 1 })
       return
@@ -278,12 +303,37 @@ export class ChatConnection {
 
   reply(m, opts) { if (!this.closed) return this.write(replyFrame(m), opts) }
 
+  #roomWatch(m) {
+    const terminal = m?.params?.terminal
+    if (!isRoom(terminal) || !['chat.backfill', 'chat.send', 'chat.answer', 'chat.interrupt'].includes(m.method)) return
+    const channel = this.byTerminal.get(terminal)
+    const sub = this.subs.get(channel)
+    if (sub) return { channel, sub }
+  }
+
+  #liveGroup(channel, sub) {
+    return !this.closed && this.subs.get(channel) === sub && sub.handle.groupLive?.() === true
+  }
+
+  #releaseList(m, answer, opts) {
+    const terminals = answer.result?.terminals
+    if (m?.method !== 'chat.list' || !Array.isArray(terminals) || !terminals.some((t) => isRoom(t?.terminal))) return this.reply(answer, opts)
+    const without = { ...answer, result: { ...answer.result, terminals: terminals.filter((t) => !isRoom(t?.terminal)) } }
+    const valid = () => this.engine.groupsFor?.(this.client) === true
+    if (!valid()) return this.reply(without, opts)
+    return this.reply(answer, { ...opts, valid, fallback: replyFrame(without) })
+  }
+
   onAttachment(m) {
     const { id, method, params } = m
     const opts = { liveOnly: true }
     const refuse = (reason) => resultOf(id, memoryRefused(reason))
     if (!(Number.isInteger(id) || (typeof id === 'string' && id.length <= 64))) {
       this.reply(errorOf(null, 'invalid_params'), opts)
+      return
+    }
+    if (isRoom(params?.terminal)) {
+      this.reply(refuse('unsupported'), opts)
       return
     }
     const document = method === 'chat.attach' && DOCUMENT_TYPES.includes(params?.mediaType)
@@ -325,6 +375,7 @@ export class ChatConnection {
   }
 
   async requestAttachment(method, p) {
+    if (isRoom(p.terminal)) return memoryRefused('unsupported')
     const document = method === 'chat.attach' && DOCUMENT_TYPES.includes(p.mediaType)
     if (!this.engine.attachOffer?.(this.client)) return memoryRefused(document ? 'unsupported' : 'read-only')
     const terminal = typeof p.terminal === 'string' && p.terminal.length <= 128 ? p.terminal : null
@@ -348,13 +399,15 @@ export class ChatConnection {
         // A just-made engine has not heard from herdr-core yet: wait for its first snapshot.
         await this.engine.ready()
         // The DSH chats (dsh-source.mjs) are listed over a socket: list() may be async.
-        return ok({ terminals: await this.engine.list() })
+        return ok({ terminals: await this.engine.list(this.client) })
       case 'chat.subscribe': {
         if (!terminal) return errorOf(id, 'invalid_params', 'terminal')
+        if (isRoom(terminal) && this.engine.groupsFor?.(this.client) !== true) return errorOf(id, 'not_found', 'terminal')
         if (this.byTerminal.has(terminal)) return ok({ channel: this.byTerminal.get(terminal) })
         if (this.subs.size >= MAX_SUBSCRIPTIONS) return errorOf(id, 'too_many', `at most ${MAX_SUBSCRIPTIONS} subscriptions`)
         const channel = this.subscribe(terminal, typeof p.after === 'string' ? p.after : null)
-        return channel === null ? errorOf(id, 'too_many', 'this session holds too many terminals') : ok({ channel })
+        if (channel !== null) return ok({ channel })
+        return isRoom(terminal) ? errorOf(id, 'not_found', 'terminal') : errorOf(id, 'too_many', 'this session holds too many terminals')
       }
       case 'chat.backfill': {
         const sub = terminal && this.subs.get(this.byTerminal.get(terminal))
@@ -366,7 +419,7 @@ export class ChatConnection {
       case 'chat.send': {
         if (!terminal || typeof p.id !== 'string') return errorOf(id, 'invalid_params')
         if (typeof p.text !== 'string' || Buffer.byteLength(p.text, 'utf8') > SEND_TEXT_MAX) return ok({ state: 'refused', id: p.id, reason: 'too-long' })
-        return ok(await this.engine.send(this.client, terminal, { text: p.text, id: p.id }))
+        return ok(await this.engine.send(this.client, terminal, { text: p.text, id: p.id, ...(Object.hasOwn(p, 'retry') ? { retry: p.retry } : {}) }))
       }
       case 'chat.sendHeld':
         if (!terminal || typeof p.id !== 'string') return errorOf(id, 'invalid_params')
@@ -427,6 +480,18 @@ export class ChatConnection {
   event(channel, e) {
     const sub = this.subs.get(channel)
     if (!sub || this.closed) return
+    if (sub.handle.group === true) {
+      if (e.type === 'gone') {
+        // Nothing queued for a group reaches the phone after it ends, and gone never waits for credit.
+        sub.queue = []
+        sub.queued = 0
+        sub.gone = true
+        this.write(frame(channel, DATA, Buffer.from(JSON.stringify(e) + '\n')))
+        this.unsubscribe(channel)
+        return
+      }
+      if (sub.handle.groupLive?.() !== true) return
+    }
     if (e.type === 'gone' && sub.handle.attachments) {
       // Give a reconnect a new watch, while letting the old channel deliver its queued events.
       sub.gone = true
@@ -448,7 +513,8 @@ export class ChatConnection {
       const bytes = sub.queue.shift()
       sub.queued -= bytes.length
       sub.credit -= bytes.length
-      this.write(frame(channel, DATA, bytes))
+      if (sub.handle.group === true) this.write(frame(channel, DATA, bytes), { valid: () => this.#liveGroup(channel, sub) })
+      else this.write(frame(channel, DATA, bytes))
     }
     if (sub?.gone && !sub.queue.length) this.unsubscribe(channel)
   }
