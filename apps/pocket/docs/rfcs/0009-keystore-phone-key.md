@@ -77,9 +77,8 @@ Before #244, the endpoint read the phone's 32-byte iroh key from `iroh.key` in
   already be consumed before a save fails, `rememberLinked` saves the full list, and Watch
   reconciles `watched_hosts` against it. The desktop ticket exposes the endpoint ID and
   addresses. The paired phone key controls desktop access.
-- **App lock.** Set policy for notification Reply and Yes writes, Assist keyguard ordering,
-  intents with side effects, the lock timeout, Recents below API 33, and older Android versions
-  with gaps in AndroidX Biometric support.
+- **Next → [App lock](0010-app-lock.md).** Decide when to require authentication and how to
+  protect Assist, notifications and Recents.
 
 ## Decisions
 
@@ -101,12 +100,21 @@ Before #244, the endpoint read the phone's 32-byte iroh key from `iroh.key` in
 ## Open questions
 
 1. Accept the plain fallback in no-backup storage? — the owner.
+   **Proposed:** Keep the fallback in no-backup storage so pairing works if Keystore is unavailable.
 2. Keep clearing app storage and pairing again as the recovery path, or add a “new phone key”
    action that preserves other app data? — the owner.
+   **Proposed:** Clear app storage and pair again. Use this deliberate recovery path for a rare failure.
 3. When should the future app lock time out? — the owner.
+   **Proposed:** Require authentication at each process start and after 60 seconds off screen.
 4. Which notification actions should take precedence over the app lock? — the owner.
+   **Proposed:** While the app lock is enabled, post generic alerts and require opening Automagik
+   to answer. Refuse stale notification actions.
 5. How should the app handle Recents below API 33? — the owner.
+   **Proposed:** Use `FLAG_SECURE` on API 26–32. This keeps content out of Recents and also blocks
+   screenshots and screen sharing. On API 33 and later, omit only the Recents screenshot.
 6. Which saved machine fields and tickets should be sealed? — the owner.
+   **Proposed:** Seal the entire saved machine list as one record, including tickets, addresses and
+   linked names. Carry save results through the view model in the next slice.
 
 ## Related
 
