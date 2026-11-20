@@ -598,9 +598,7 @@ export function ModelMenu(props) {
   return h(props.roster?.hostModels?.[props.bot?.id] === undefined ? DshModelMenu : HostModelMenu, props)
 }
 
-// The word before a crossing: the route (or the agent inside ACP) changes, which starts a
-// new conversation with a handoff note (RFC 0030, Decided 6 and 10). Nothing is applied
-// until the person confirms here.
+// Confirm a route or agent change. A conversation with history needs New conversation first.
 export function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
   const from = current === undefined ? undefined : modelRoute(roster, current)
   const to = modelRoute(roster, target.ref)
@@ -612,14 +610,15 @@ export function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm
       : to.route === 'hermes-remote' ? t('Full access: Hermes still asks you in the chat when it wants an approval. Its own rules apply there.')
       : to.provider === 'acp-claude' || to.provider === 'acp-codex' ? t("Full access: the CLI's own no-ask mode.")
         : t("Full access: the agent's actions run without asking.")
-  return h('div', { className: 'bt-model-step bt-model-confirm', role: 'group', 'aria-label': t('Start a new conversation?') },
-    h('div', { className: 'bt-model-confirm-title' }, t('Start a new conversation?')),
+  const title = routeChanged ? t('Change route?') : t('Change agent?')
+  return h('div', { className: 'bt-model-step bt-model-confirm', role: 'group', 'aria-label': title },
+    h('div', { className: 'bt-model-confirm-title' }, title),
     h('div', { className: 'bt-model-confirm-move' },
       from ? `${routeName(from.route)} · ${from.connection} → ` : '',
       `${routeName(to.route)} · ${to.connection}`),
     h('div', { className: 'bt-model-confirm-text' }, routeChanged
-      ? t('Changing the route starts a new conversation. {name} writes a handoff note first.', { name: bot.name })
-      : t('Changing the agent starts a new conversation. {name} writes a handoff note first.', { name: bot.name })),
+      ? t('Changing the route requires a new conversation if this one has history.')
+      : t('Changing the agent requires a new conversation if this one has history.')),
     fullAccessLine === undefined ? null : h('div', { className: 'bt-model-confirm-access', role: 'note' }, fullAccessLine),
     h('div', { className: 'bt-model-confirm-actions' },
       h('button', { type: 'button', className: 'bt-model-confirm-cancel', onClick: onCancel }, t('Keep this conversation')),
@@ -636,7 +635,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     remote.current.mounted = true
     return () => { remote.current.mounted = false; remote.current.active = false; remote.current.generation++ }
   }, [])
-  // A route change waits for the person's word here, because it starts a new conversation.
+  // A route change waits for the person's confirmation.
   const [confirm, setConfirm] = useState(undefined)
   // The provider's key, for a model that needs one, is asked for inside the menu when the
   // window can save it; elsewhere the row leads to the models page.
@@ -757,8 +756,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       return undefined
     }
     if (routeChange) {
-      // The host moves the Bot to a fresh part with a handoff note (parts.js), so the pane
-      // shows a new conversation and nothing of the old harness crosses silently.
+      // The host can apply the crossing in place on a chat with nothing said. A history
+      // refusal guides the person to New conversation before picking the route again.
       const pick = chat && actions.switchRouteInChat ? actions.switchRouteInChat : actions.switchRoute
       if (typeof pick === 'function') return run(pick(bot.id, ref, level || effort !== undefined ? { effort: effort ?? null } : {}))
     }
@@ -1017,7 +1016,11 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
     setBusy(ref)
     setError('')
     return Promise.resolve(actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref) : actions.updateBot(bot.id, { model: ref }))
-      .then(() => true, (failure) => { setError(failure?.message ?? String(failure)); void actions.refreshModels?.(); return false })
+      .then(() => true, (failure) => {
+        setError(failure?.message ?? String(failure))
+        if (failure?.reason !== 'needs-new-conversation') void actions.refreshModels?.()
+        return false
+      })
       .finally(() => setBusy(''))
   }
   // Models that can run and none chosen yet: no grid of choices. The Bot offers the model

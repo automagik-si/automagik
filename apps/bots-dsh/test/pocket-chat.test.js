@@ -1355,3 +1355,11 @@ test('install hands the team’s stop lines to the phone', async (t) => {
   assert.deepEqual(snapshot.event.rows.filter(row => row.kind === 'status').map(row => [row.id, row.state, row.msg]), [['dsh:s-omni-2:7#stop', 'error', 'x']])
   c.socket.destroy()
 })
+
+test('the source offers settings only with writable Sessions and an enabled host', () => {
+  const adapter = { prompt() {}, cancel() {} }
+  for (const [writable, enabled, expected] of [[false, true, false], [true, false, false], [true, true, true]]) {
+    const source = new DshChatSource({ adapter, writable, settings: { enabled: () => enabled } })
+    assert.equal(source.managesSettings, expected)
+  }
+})

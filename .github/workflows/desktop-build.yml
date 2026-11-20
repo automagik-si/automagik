@@ -434,15 +434,18 @@ jobs:
             # A rebuild replaces the release's desktop files: one this build did not make goes.
             # The cut's own files stay: every one PLUGINS.SHA256SUMS lists (the plugins, the
             # add-ons the lane carries, plugins.json, addons.json), that list itself, and the
-            # release's signed lane (lane.json, lane.json.sig). A lane names those tarballs, so
-            # deleting one breaks every app's download of it, and a welcome of this version
-            # installs nothing without its lane. Pocket's APK and latest.json, and the meter's
+            # release's signed lane (lane.json, lane.json.sig) and role catalog (roles.json,
+            # roles.json.sig). A lane names those tarballs, so deleting one breaks every app's
+            # download of it, and a welcome of this version installs nothing without its lane.
+            # Pocket's APK and latest.json, and the meter's
             # binaries, usagemeter.SHA256SUMS and signed pointer (release.yml's meter jobs), are
             # its jobs' own, and server-image.json is server-image.yml's record of the pushed
             # image digest.
             cut=$(gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" -p PLUGINS.SHA256SUMS -O - 2>/dev/null | awk '{print $2}' || true)
             for name in ${assets}; do
               case "${name}" in automagik-*.tgz|plugins.json|PLUGINS.SHA256SUMS|lane.json|lane.json.sig|automagik-pocket-*.apk|latest.json|usagemeter-*|usagemeter.SHA256SUMS|meter.json|meter.json.sig|server-image.json) continue ;; esac
+              case "${name}" in roles.json|roles.json.sig) continue ;; esac
+              case "${name}" in automagik-role-*.tgz.sha256) continue ;; esac
               grep -qxF -- "${name}" <<< "${cut}" && continue
               [[ -e "assets/${name}" ]] || gh release delete-asset "${TAG}" "${name}" --yes --repo "${GITHUB_REPOSITORY}"
             done

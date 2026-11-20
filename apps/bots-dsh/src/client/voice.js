@@ -7,6 +7,7 @@ import { Shimmer } from './cells.js'
 import { useEscape, usePaneLeft } from './overlay-hooks.js'
 import { t } from './i18n.js'
 import { speakWith } from './voice-settings.js'
+import { spokenLanguage, useRolePlayback } from './role-playback.js'
 import { openCapture, preparationStep, speechCatalog, transcribeWave, turnDetector } from './speech.js'
 
 // Voice chat: listen, send what the user said, read the Bot's answer aloud, listen
@@ -104,13 +105,28 @@ export function VoiceMode({ sessionId, roster, actions, useSessions, useSessionS
   reply.current = lastReply
   // Bumped on pause and close, so a transcript that arrives later is dropped.
   const turn = useRef(0)
-  const close = () => { turn.current += 1; window.speechSynthesis?.cancel(); actions.closeVoice() }
+  const closing = useRef(null)
+  const queuedReply = useRef(null)
+  const ownChat = bot && (bot.sessionId ?? bot.id) === sessionId && !room
+  const roleSpeech = useRolePlayback({ sessionId: ownChat ? sessionId : undefined, actions, paused: phase === 'paused',
+    closing, afterSpeech: () => {
+      const next = queuedReply.current
+      queuedReply.current = null
+      next?.()
+    } })
+  const close = () => {
+    turn.current += 1
+    queuedReply.current = null
+    roleSpeech.close()
+    window.speechSynthesis?.cancel()
+    actions.closeVoice()
+  }
   useEscape(close)
   const submit = (text) => {
     setHeard(text)
     setPhase('thinking')
     waiting.current = reply.current.split('|')[0]
-    void actions.send(sessionId, text.trim()).catch(() => setPhase('listening'))
+    void actions.send(sessionId, text.trim(), roleSpeech.paneId()).catch(() => setPhase('listening'))
   }
   const dictation = useDictation((text, final) => {
     setHeard(text)
@@ -133,7 +149,7 @@ export function VoiceMode({ sessionId, roster, actions, useSessions, useSessionS
     }, () => { if (live) setPhase('setup') })
     return () => { live = false }
   }, [speech])
-  const listen = phase === 'listening'
+  const listen = phase === 'listening' && !roleSpeech.caption
   useEffect(() => {
     if (speech || !listen || dictation.listening) return undefined
     const timer = setTimeout(() => dictation.start({ continuous: false, onEnd: () => {} }), 250)
@@ -141,8 +157,8 @@ export function VoiceMode({ sessionId, roster, actions, useSessions, useSessionS
   }, [listen, dictation.listening])
   // Recognition stops on silence; keep listening until the user pauses or ends.
   useEffect(() => {
-    if (phase !== 'listening') dictation.stop()
-  }, [phase])
+    if (!listen) dictation.stop()
+  }, [listen])
   // The plugin's recognizer: record one utterance, end it after a pause, transcribe it.
   useEffect(() => {
     if (!speech || !catalog || !listen) return undefined
@@ -213,12 +229,22 @@ export function VoiceMode({ sessionId, roster, actions, useSessions, useSessionS
       setHeard('')
       if (!window.speechSynthesis || !spoken) { setPhase('listening'); return }
       // The voice and speed chosen in Settings → General → Voice chat (voice-settings.js).
-      const utterance = speakWith(spoken, /[\u3400-\u9fff]/.test(spoken) ? 'zh-CN' : 'en-US')
-      utterance.onend = () => setPhase(current => (current === 'speaking' ? 'listening' : current))
-      utterance.onerror = utterance.onend
-      setPhase('speaking')
-      window.speechSynthesis.cancel()
-      window.speechSynthesis.speak(utterance)
+      const play = () => {
+        const utterance = speakWith(spoken, spokenLanguage(spoken))
+        utterance.onend = () => {
+          if (closing.current !== utterance) return
+          closing.current = null
+          setPhase(current => (current === 'speaking' ? 'listening' : current))
+          roleSpeech.notify()
+        }
+        utterance.onerror = utterance.onend
+        setPhase('speaking')
+        closing.current = utterance
+        window.speechSynthesis.cancel()
+        window.speechSynthesis.speak(utterance)
+      }
+      if (roleSpeech.busy()) queuedReply.current = play
+      else play()
     }
     // The outline commits at turn/end but only holds a bounded preview; the
     // closing Assistant text can trail it, so the answer is read through the
@@ -239,6 +265,9 @@ export function VoiceMode({ sessionId, roster, actions, useSessions, useSessionS
   const togglePause = () => {
     if (phase === 'paused') { setPhase('listening'); return }
     turn.current += 1
+    queuedReply.current = null
+    closing.current = null
+    roleSpeech.pause()
     window.speechSynthesis?.cancel()
     setPhase('paused')
   }
@@ -276,25 +305,26 @@ export function VoiceMode({ sessionId, roster, actions, useSessions, useSessionS
       if (started === false) { setPhase('setup'); setNote(t("Couldn't prepare voice input")) }
     })
   }
-  const caption = phase === 'speaking' ? said : heard
+  const shownPhase = roleSpeech.caption && phase !== 'paused' ? 'speaking' : phase
+  const caption = roleSpeech.caption || (phase === 'speaking' ? said : heard)
   const shownNote = note || dictation.note
   return h('div', { className: 'bt-pane bt-voice-pane', style: { left: paneLeft } },
-    h('div', { className: 'bt-voice-stage', role: 'dialog', 'aria-label': t('Voice chat with {name}', { name }), 'data-phase': phase === 'transcribing' ? 'thinking' : phase },
+    h('div', { className: 'bt-voice-stage', role: 'dialog', 'aria-label': t('Voice chat with {name}', { name }), 'data-phase': shownPhase === 'transcribing' ? 'thinking' : shownPhase },
       h('div', { className: 'bt-voice-orb', style: { '--bt-level': level } },
         h('span', { className: 'bt-voice-ring', 'aria-hidden': true }),
         h('span', { className: 'bt-voice-ring bt-voice-ring-2', 'aria-hidden': true }),
         bot ? h(BotMark, { bot, size: 112, state: markState, live: true, gaze: phase === 'listening' }) : room ? h(RoomAvatar, { room, roster, size: 112 }) : null),
       h('div', { className: 'bt-voice-name' }, name),
       h('div', { className: 'bt-voice-status', role: 'status' },
-        phase === 'thinking' ? h(Shimmer, null, t('Thinking…'))
-          : phase === 'transcribing' ? h(Shimmer, null, t('Recognizing…'))
-            : VOICE_LABELS[phase] ? t(VOICE_LABELS[phase]) : ''),
+        shownPhase === 'thinking' ? h(Shimmer, null, t('Thinking…'))
+          : shownPhase === 'transcribing' ? h(Shimmer, null, t('Recognizing…'))
+            : VOICE_LABELS[shownPhase] ? t(VOICE_LABELS[shownPhase]) : ''),
       h('div', { className: 'bt-voice-caption', key: `${phase}:${caption.slice(0, 12)}` }, caption),
       openSetup ? h('button', { type: 'button', className: 'bt-voice-setup', onClick: startSetup }, t('Set up voice input')) : null,
       shownNote ? h('div', { className: 'bt-voice-note' }, shownNote) : null),
     h('div', { className: 'bt-voice-bar' },
       h('button', {
-        type: 'button', className: 'bt-voice-btn', 'aria-pressed': phase === 'paused', disabled: blocked,
+        type: 'button', className: 'bt-voice-btn', 'aria-pressed': phase === 'paused', disabled: blocked && !roleSpeech.caption,
         'aria-label': phase === 'paused' ? t('Resume listening') : t('Pause'), onClick: togglePause,
       }, h(MicIcon, { size: 20 }), phase === 'paused' ? h('span', { className: 'bt-voice-slash', 'aria-hidden': true }) : null),
       h('button', { type: 'button', className: 'bt-voice-btn bt-voice-end', 'aria-label': t('End voice chat'), onClick: close }, h(CloseIcon))))

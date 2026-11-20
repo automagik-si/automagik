@@ -124,7 +124,7 @@ window.setState = (options) => { Object.assign(state, options); render() }
 
 // The Code drawer uses the same SidebarRoot and TeamSidebar as the other cases. The
 // fixture's layout keeps a seat selected under the real Code panel and records its stream.
-window.mountCodeDrawer = () => {
+window.mountCodeDrawer = ({ multi = false } = {}) => {
   const styles = document.createElement('style')
   styles.textContent = SEAT_CHAT_CSS
   document.head.append(styles)
@@ -140,8 +140,15 @@ window.mountCodeDrawer = () => {
   window.EventSource = class {
     constructor(url) { this.url = url; traffic.streams.push(url) }
     addEventListener(type, listener) {
-      if (type === 'pane') queueMicrotask(() => listener({ data: '{}' }))
-      if (type === 'data') queueMicrotask(() => listener({ data: btoa('fixture output') }))
+      if (type !== 'pane' && type !== 'data') return
+      const count = new URL(this.url, location.href).searchParams.getAll('bot').length
+      const output = btoa('fixture output')
+      queueMicrotask(() => {
+        for (let p = 0; p < count; p += 1) {
+          const tagged = type === 'pane' ? { p } : { p, d: output }
+          listener({ data: count > 1 ? JSON.stringify(tagged) : type === 'pane' ? '{}' : output })
+        }
+      })
     }
     close() { traffic.closed.push(this.url) }
   }
@@ -150,6 +157,16 @@ window.mountCodeDrawer = () => {
       { id: 'b-aaaaaaaaaa', name: 'Atlas', status: 'idle', terminal: { id: 't7' }, workers: [{ terminal: 't8', role: 'Reviewer', status: 'needs-you' }] },
     ],
   }] }
+  if (multi) {
+    const [atlas] = tree.projects[0].bots
+    atlas.workers[0].branch = 'refs/heads/feature'
+    atlas.workers.push(...['Builder', 'Tester', 'Runner'].map((role, index) => ({
+      terminal: `t${9 + index}`, role, status: 'idle',
+    })))
+    traffic.tree = tree
+    traffic.refresh = () => codeStore.loadTree({ fresh: true })
+    traffic.snapshot = codeStore.snapshot
+  }
   window.fetch = async (url, init = {}) => {
     const body = JSON.parse(init.body)
     traffic.calls.push({ url, body })
@@ -168,5 +185,5 @@ window.mountCodeDrawer = () => {
     return null
   }
   createRoot(document.querySelector('#center')).render(h(Main))
-  window.mount({ drawer: true, width: 336 })
+  window.mount({ drawer: !multi, width: 336 })
 }

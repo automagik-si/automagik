@@ -711,16 +711,30 @@ test('a send without a card goes only to allowed addresses, read as the mail lib
     assert.deepEqual([row.card, row.sent], [true, 0], JSON.stringify(fields))
     assert.match(row.answer, /send card/)
   }
-  // Every recipient is allowed: sent with no card, to the addresses the rule read.
-  for (const [fields, to, cc] of [
-    [{ to: 'known@allowed.example' }, ['known@allowed.example'], undefined],
-    [{ to: 'Known Person <KNOWN@allowed.example>', cc: 'second@allowed.example' }, ['known@allowed.example'], ['second@allowed.example']],
-    [{ to: '"A \\"quoted\\" name" <known@allowed.example>; second@allowed.example' }, ['known@allowed.example', 'second@allowed.example'], undefined],
-    [{ to: 'team: known@allowed.example, second@allowed.example;' }, ['known@allowed.example', 'second@allowed.example'], undefined],
+  // Every recipient is allowed: sent with no card, to the addresses the rule read, in the spelling the
+  // rule stores (lower case), each with its display name; the record keeps that list, not the Bot's text.
+  const known = { name: '', address: 'known@allowed.example' }
+  const second = { name: '', address: 'second@allowed.example' }
+  for (const [fields, [to, cc, bcc], saved] of [
+    [{ to: 'known@allowed.example' }, [[known]], ['known@allowed.example', '', '']],
+    [{ to: 'Known Person <KNOWN@allowed.example>', cc: 'second@allowed.example' },
+      [[{ name: 'Known Person', address: 'known@allowed.example' }], [second]],
+      ['Known Person <known@allowed.example>', 'second@allowed.example', '']],
+    [{ to: '"A \\"quoted\\" name" <known@allowed.example>; second@allowed.example' },
+      [[{ name: 'A "quoted" name', address: 'known@allowed.example' }, second]],
+      ['"A \\"quoted\\" name" <known@allowed.example>, second@allowed.example', '', '']],
+    [{ to: 'team: known@allowed.example, second@allowed.example;' }, [[known, second]],
+      ['known@allowed.example, second@allowed.example', '', '']],
+    [{ to: 'team: Known Person <KnOwN@allowed.example>, known@allowed.example;',
+        cc: 'team: second@allowed.example;', bcc: '"Second, Person" <SECOND@allowed.example>; second@allowed.example' },
+      [[{ name: 'Known Person', address: 'known@allowed.example' }], [second], [{ name: 'Second, Person', address: 'second@allowed.example' }]],
+      ['Known Person <known@allowed.example>', 'second@allowed.example', '"Second, Person" <second@allowed.example>']],
   ]) {
     const row = await run(fields)
-    assert.deepEqual([row.card, row.sent, row.last.to, row.last.cc, row.last.bcc], [false, 1, to, cc, undefined], JSON.stringify(fields))
-    assert.match(row.answer, /^Sent "S" to known@allowed\.example/)
+    assert.deepEqual([row.card, row.sent, row.last.to, row.last.cc, row.last.bcc], [false, 1, to, cc, bcc], JSON.stringify(fields))
+    const request = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).mailRequests.m1.at(-1)
+    assert.deepEqual([request.to, request.cc, request.bcc], saved, JSON.stringify(fields))
+    assert.equal(row.answer, `Sent "S" to ${saved.filter(Boolean).join(', ')} from ${addressAt('163.com')}.`)
   }
   // "Allow recipient" on a card adds the addresses the mail goes to, not text inside a name.
   await rt.connectorEndpoint('mail-rule-set', { addRecipient: '"<inside@name.example>" real@added.example' })
@@ -879,6 +893,63 @@ test('connector-sign-in-code refuses a wrong state and accepts the pasted URL or
   assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), 'AT-9')
 })
 
+// A pasted answer the panel cannot use is a refusal (code bot/refused), so the card shows its
+// sentence instead of "Something went wrong" (#1322).
+test('connector-sign-in-code answers an unusable paste with a coded refusal', async (t) => {
+  const home = teamHome()
+  const ctx = fakeContext()
+  const rt = createRuntime(ctx, { home, github: false })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+  rt.connectorsInternals.pendings.set('notion', {
+    kind: 'browser', expectedState: 'STATE1', codeVerifier: 'v', redirectUri: 'http://127.0.0.1:9/callback',
+    discovery: { authorizationServerUrl: 'https://as.test', metadata: AS, resource: 'https://mcp.test/mcp' },
+    clientInformation: { client_id: 'c1' }, timer: setTimeout(() => {}, 60_000), listener: { close: cb => cb?.() },
+  })
+  for (const [input, message] of [
+    ['  ', 'Paste the address or the code'],
+    ['http://x/?code=C&state=WRONG', 'This address is not from this sign-in attempt (state mismatch). Copy the whole address again.'],
+    ['http://x/?state=STATE1', 'The address has no code'],
+  ]) {
+    await assert.rejects(rt.connectorEndpoint('connector-sign-in-code', { id: 'notion', input }), { code: 'bot/refused', message })
+  }
+  assert.ok(rt.connectorsInternals.pendings.has('notion'), 'a refused paste keeps the sign-in waiting')
+})
+
+test('mail-sign-in-code answers an unusable Google answer with a coded refusal', async (t) => {
+  const oldId = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID
+  const oldSecret = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET
+  process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID = 'google-test'
+  process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET = 'google-test-secret'
+  t.after(() => {
+    if (oldId === undefined) delete process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID
+    else process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID = oldId
+    if (oldSecret === undefined) delete process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET
+    else process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET = oldSecret
+  })
+  const home = teamHome()
+  const ctx = fakeContext()
+  const rt = createRuntime(ctx, { home, github: false, mail: { fetch: async url => {
+    const u = String(url)
+    if (u.includes('oauth-authorization-server')) return json(AS)
+    if (u === 'https://as.test/token') return json({ access_token: 'tok-cccc', expires_in: 3600, token_type: 'Bearer' })
+    if (u.includes('userinfo')) return json({})
+    return notFound()
+  } } })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+  await assert.rejects(rt.connectorEndpoint('mail-sign-in-code', { input: 'C' }), { code: 'bot/refused', message: 'No Google sign-in is waiting' })
+  const view = await rt.connectorEndpoint('mail-account-add', { google: true })
+  const state = new URL(view.pending[0].url).searchParams.get('state')
+  for (const [input, message] of [
+    ['http://x/?code=C&state=WRONG', 'The sign-in answer is not for this attempt'],
+    [`http://x/?state=${state}`, 'The address has no code'],
+    [`http://x/?code=C&state=${state}`, 'Google did not say which account this is'],
+  ]) {
+    await assert.rejects(rt.connectorEndpoint('mail-sign-in-code', { input }), { code: 'bot/refused', message })
+  }
+})
+
 test('OAuth loopback keeps an error listener after binding, including repeated errors', async (t) => {
   const real = globalThis.fetch
   globalThis.fetch = async (url, init) => {
@@ -1029,9 +1100,11 @@ test('gmail transport: search, read, draft, send, modify, trash, and one refresh
   const calls = []
   let refreshes = 0
   let authed = false
-  const fakeFetch = async (url) => {
+  const bodies = []
+  const fakeFetch = async (url, init) => {
     const u = String(url?.url ?? url)
     calls.push(u)
+    if (u.includes('/messages/send')) bodies.push(String(init?.body ?? url?.body ?? ''))
     if (!authed && u.includes('/messages/1?format=full')) {
       authed = true
       return new Response('unauth', { status: 401 })
@@ -1052,6 +1125,11 @@ test('gmail transport: search, read, draft, send, modify, trash, and one refresh
   assert.equal((await gmail.read({ uid: '1' })).messages[0].text, 'hi')
   assert.ok((await gmail.draft({ to: 'a@b', subject: 'd', text: 'x' })).folder)
   await gmail.send({ to: 'a@b', subject: 's', text: 'x' })
+  // A Bcc reaches Gmail in the raw message (Gmail delivers to it and removes it): the composer drops it by default.
+  await gmail.send({ to: [{ name: 'To Person', address: 'to@x.example' }], bcc: [{ name: '', address: 'hidden@x.example' }], subject: 'b', text: 'x' })
+  const raw = Buffer.from(JSON.parse(bodies.at(-1)).raw, 'base64url').toString('utf8')
+  assert.match(raw, /^To: To Person <to@x\.example>$/m)
+  assert.match(raw, /^Bcc: hidden@x\.example$/m)
   await gmail.update({ uid: '1', seen: true })
   await gmail.update({ uid: '1', move: 'trash' })
   // The 401 on the first read was refreshed exactly once, then retried.

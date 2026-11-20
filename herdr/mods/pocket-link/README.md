@@ -130,15 +130,36 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   text?}` (an approval's `allow`/`deny`; a question's option digit, digits joined by `,` on a
   multi-select, or `other` with `text`; `chat/question.js`);
   `chat.interrupt {terminal}`. Every chat write needs a subscription to that terminal on the
-  same connection. The memory methods are `memory.read {terminal}`, `memory.edit
-  {terminal, id, rev, text}` and `memory.add {terminal, text}`. They can run with the Bot's
-  chat closed. The 16-request limit applies first, with a JSON-RPC `busy` error. Memory
-  refusals then come in the result as `{ok:false, state:'refused', reason}`: `read-only`
-  for missing authority, then `invalid` for bad fields, `busy` for another memory call
-  for this phone and Bot, and `rate` after 60 reads or 20 writes per minute per phone.
-  Memory edits and adds share the Bot chat write budget. A lost read reply is `offline`;
-  a lost edit or add reply is `unknown` with reason `offline` once sent. A phone that
-  asks for edit or add should also ask for read to reconcile an unknown outcome.
+  same connection.
+- **Management.** The methods are `memory.read {terminal}`, `memory.edit {terminal, id, rev, text}`,
+  `memory.add {terminal, text}`, `schedule.list {terminal, id?}`, `schedule.pause {terminal, id, rev}`,
+  `schedule.resume {terminal, id, rev}`, `schedule.rename {terminal, id, rev, title}`,
+  `settings.read {terminal}`, `settings.name {terminal, rev, name}` and `settings.model {terminal, rev, model}`. They can
+  run with the Bot's chat closed. The bridge limits the `dsh:<botId>` terminal to 128 characters.
+  The 16-request transport limit applies first and returns a JSON-RPC `busy` error. Management
+  refusals then come in the result as `{ok:false, state:'refused', reason}` and start with
+  `read-only` for missing authority, then `invalid` for bad fields, `busy` for another management call
+  for this phone and terminal, and `rate` after 60 reads or 20 writes per minute per phone.
+  Memory, schedules and settings share the same slot across connections and the same read and write limits.
+  Bot chat writes also count toward the write limit. The host's reasons follow these bridge checks.
+  The host keeps prompts, targets and other Bots' titles out of schedule replies.
+  Before taking a slot for settings, the bridge checks that `rev` is 16 lowercase hex digits,
+  `name` is a string of at most 4096 UTF-8 bytes, and `model` is a string of 3 to 512 UTF-8 bytes
+  without ASCII control characters, with its first `/` neither first nor last. The host controls
+  level, effort, role and every other Bot field. A settings read waits up to 5 s for the host and
+  a settings write waits up to 25 s. The host sizes each settings reply to fit its 1 MiB socket line.
+- **Recovery.** A lost management read reply is `offline`. A lost write reply is `unknown` with
+  reason `offline` once sent. A phone that asks for memory edit or add should also ask for read to
+  reconcile an unknown outcome. After a lost or `unknown` schedule write, the phone must avoid
+  automatic resends and reconcile with `schedule.list {terminal, id}` on the original team and
+  terminal. The outcome stays unknown on `busy`, `rate`, `unavailable`, `offline` or `unknown`.
+  Only a successful `read` carrying that id allows a fresh user action. A phone that negotiated
+  writes without `schedule.list` needs a fresh hello on a new chat connection to ask for it. The
+  phone cannot see the team, so if a bridge reconnect between the lost write and the read could
+  have failed over to another team, the outcome stays unknown.
+  A phone gets either settings write only with `settings.read`. For a lost settings write or an
+  `unknown` result without settings, the phone calls `settings.read {terminal}` once. It uses the
+  settings from a reply that carries them and only sends another write on a fresh user action.
 - **Events** (JSON lines on the subscription's channel, sent while the phone has credit; it
   grants more with CREDIT): first a `snapshot` (rows, screen, status, approval, question, held;
   `reset` when the cursor in `after` is no longer held), then `rows`, `screen`, `status`, `approval`,
@@ -172,13 +193,17 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   from the Bot's DSH Session log (a cursor is `dsh:<session>:<seq>`). A writable socket
   can take `chat.send`, `chat.answer` and `chat.interrupt` on a subscribed chat. A read-only
   socket refuses these writes. Its approval and question rows say "Answer on the computer".
-  For memory, the phone includes the methods it wants in `manage` in its chat hello. The bridge
-  returns the methods both peers support after it opens a grant for that connection. A bridge
-  failover to another team home requires a fresh phone hello. Memory replies are sent only
-  while the connection is live. Forget closes each grant. The control socket starts that close
-  at once, and file-based forget is checked every second. The bridge drops the DSH socket if a
-  grant close has no ack within 500 ms. Revocation ends host authority within 2 seconds
-  while the bridge's timers run on schedule.
+  For memory, schedules and settings, the phone includes the methods it wants in one `manage` list in its
+  chat hello. The bridge returns the methods the phone requested that the bridge and host support
+  after opening one grant for that connection. A bridge failover to another team home requires a
+  fresh hello on a new chat connection. The bridge reads the host's offer once per socket because
+  another hello on the shared socket would revoke every grant. Schedule writes that become available
+  appear in the offer after the next socket connection. If the host withdraws writes, it answers
+  already-negotiated writes with `unavailable` while list still works. Management replies are sent
+  only while the connection is live. Forget closes each grant. The control socket starts that close
+  at once, and file-based forget is checked every second. The bridge drops the DSH socket if a grant
+  close has no ack within 500 ms. Revocation ends host authority within 2 seconds while the bridge's
+  timers run on schedule.
 
 ## For other mods
 

@@ -155,7 +155,7 @@ lane() {
 gate_base() {
   bun install --frozen-lockfile --ignore-scripts
   bun run check
-  for app in acp-dsh bots-dsh locale-pt-br-dsh welcome-dsh; do
+  for app in acp-dsh bots-dsh locale-pt-br-dsh vault-dsh welcome-dsh; do
     (cd "apps/${app}" && bun install --frozen-lockfile --ignore-scripts && { [ ! -f scripts/build-client.mjs ] || node scripts/build-client.mjs --check; })
   done
 }

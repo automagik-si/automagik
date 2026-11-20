@@ -1,0 +1,233 @@
+{
+  "description": "RFC 0033 delivery 4 canonical document leaves (RFC 0015). Missing names use absent: true. Invalid inputs have no leaf.",
+  "cases": [
+    {
+      "absent": true,
+      "type": "text/plain",
+      "leaf": "document.txt",
+      "note": "Absent name uses the TXT default."
+    },
+    {
+      "absent": true,
+      "type": "application/pdf",
+      "leaf": "document.pdf",
+      "note": "Absent name uses the PDF default."
+    },
+    {
+      "name": null,
+      "type": "application/pdf",
+      "invalid": true,
+      "note": "A present null is invalid."
+    },
+    {
+      "name": "\ud800.txt",
+      "type": "text/plain",
+      "invalid": true,
+      "note": "A lone high surrogate is invalid."
+    },
+    {
+      "name": "notes\udc00.pdf",
+      "type": "application/pdf",
+      "invalid": true,
+      "note": "A lone low surrogate is invalid."
+    },
+    {
+      "name": "../../x.pdf",
+      "type": "application/pdf",
+      "leaf": "x.pdf",
+      "note": "Only the last forward-slash component survives."
+    },
+    {
+      "name": "C:\\parent\\Draft.PDF",
+      "type": "application/pdf",
+      "leaf": "Draft.pdf",
+      "note": "Only the last backslash component survives."
+    },
+    {
+      "name": "a/b\\c/d.txt",
+      "type": "text/plain",
+      "leaf": "d.txt",
+      "note": "The last separator wins when both separator styles occur."
+    },
+    {
+      "name": "report.PDF",
+      "type": "application/pdf",
+      "leaf": "report.pdf",
+      "note": "The PDF extension is replaced with the lowercase form."
+    },
+    {
+      "name": "Notes.TXT",
+      "type": "text/plain",
+      "leaf": "Notes.txt",
+      "note": "The TXT extension is replaced with the lowercase form."
+    },
+    {
+      "name": "a.pdf.pdf",
+      "type": "application/pdf",
+      "leaf": "a.pdf.pdf",
+      "note": "Only one extension is removed before the type suffix is added."
+    },
+    {
+      "name": "report.txt",
+      "type": "application/pdf",
+      "leaf": "report.txt.pdf",
+      "note": "A different extension stays in the stem."
+    },
+    {
+      "name": " report.PDF.  . ",
+      "type": "application/pdf",
+      "leaf": "report.pdf",
+      "note": "Trim white space and drop trailing dots and spaces before the suffix."
+    },
+    {
+      "name": "draft .txt",
+      "type": "text/plain",
+      "leaf": "draft.txt",
+      "note": "Drop trailing dots and spaces exposed by removing the type extension."
+    },
+    {
+      "name": ".txt",
+      "type": "text/plain",
+      "leaf": "document.txt",
+      "note": "An extension alone leaves an empty stem."
+    },
+    {
+      "name": "",
+      "type": "application/pdf",
+      "leaf": "document.pdf",
+      "note": "An empty string uses the PDF default."
+    },
+    {
+      "name": " / ",
+      "type": "text/plain",
+      "leaf": "document.txt",
+      "note": "A blank final component uses the TXT default."
+    },
+    {
+      "name": "..",
+      "type": "application/pdf",
+      "leaf": "document.pdf",
+      "note": "A dot-dot component uses the PDF default."
+    },
+    {
+      "name": "bad<>:\"|?*.txt",
+      "type": "text/plain",
+      "leaf": "bad_______.txt",
+      "note": "Replace each Windows-forbidden character with an underscore."
+    },
+    {
+      "name": "cafe\u0301.txt",
+      "type": "text/plain",
+      "leaf": "café.txt",
+      "note": "Normalize a decomposed accent to NFC."
+    },
+    {
+      "name": "e\u200b\u0301.txt",
+      "type": "text/plain",
+      "leaf": "é.txt",
+      "note": "Remove the format character before composing the accented letter."
+    },
+    {
+      "name": "\ufeff\u202ereport\u2069\u200d\u200e.pdf",
+      "type": "application/pdf",
+      "leaf": "report.pdf",
+      "note": "Remove BOM, bidi and zero-width format characters."
+    },
+    {
+      "name": "no\u0000t\u0009e\u007f\u0085s.txt",
+      "type": "text/plain",
+      "leaf": "notes.txt",
+      "note": "Remove C0, DEL and C1 controls."
+    },
+    {
+      "name": "abc\u00addef.txt",
+      "type": "text/plain",
+      "leaf": "abcdef.txt",
+      "note": "Remove a soft hyphen in General Category Cf."
+    },
+    {
+      "name": "😀.txt",
+      "type": "text/plain",
+      "leaf": "😀.txt",
+      "note": "A well-formed surrogate pair is accepted."
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé😀.txt",
+      "type": "text/plain",
+      "leaf": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé.txt",
+      "note": "Stop before a four-byte code point that would cross byte 124."
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéz.txt",
+      "type": "text/plain",
+      "leaf": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé.txt",
+      "note": "Keep a two-byte code point that ends at byte 124."
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀z.pdf",
+      "type": "application/pdf",
+      "leaf": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀.pdf",
+      "note": "Keep a four-byte code point that ends at byte 124."
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "type": "text/plain",
+      "leaf": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "note": "Cut a 128-byte stem to 124 bytes."
+    },
+    {
+      "name": "con",
+      "type": "text/plain",
+      "leaf": "_con.txt",
+      "note": "Prefix a bare device name, regardless of case."
+    },
+    {
+      "name": "LPT9 .notes.PDF",
+      "type": "application/pdf",
+      "leaf": "_LPT9 .notes.pdf",
+      "note": "Trim spaces in the first component before testing a device name."
+    },
+    {
+      "name": "COM0.pdf",
+      "type": "application/pdf",
+      "leaf": "COM0.pdf",
+      "note": "COM0 is outside the device-name list."
+    },
+    {
+      "name": "CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "application/pdf",
+      "leaf": "_CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf",
+      "note": "The device prefix and second cut yield a 128-byte leaf."
+    },
+    {
+      "name": "CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "application/pdf",
+      "leaf": "_CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf",
+      "note": "Both cuts shorten the stem around the device prefix."
+    },
+    {
+      "name": "CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéz",
+      "type": "application/pdf",
+      "leaf": "_CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf",
+      "note": "The first cut keeps é, then the device prefix makes the second cut drop it."
+    },
+    {
+      "name": "CON                                                                                                                             x",
+      "type": "text/plain",
+      "leaf": "_CON.txt",
+      "note": "The cut and trim expose a device name."
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀",
+      "type": "text/plain",
+      "leaf": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "note": "A 1024-byte input is valid."
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀",
+      "type": "text/plain",
+      "invalid": true,
+      "note": "A 1025-byte input is invalid."
+    }
+  ]
+}

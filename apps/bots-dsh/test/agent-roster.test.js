@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { EMPTY_ROSTER, indexRoster, isAgentSession } from '../src/client/sources.js'
 import { groupsFor } from '../src/client/surface.js'
+import { DEFAULT_ROUTE_POLICY } from '../src/shared/route-policy.js'
 
 const ROSTER_VALUE = {
   revision: 3,
@@ -68,4 +69,13 @@ test('the New DSH bot UI requests team membership and opens the native member se
 test('the plain flag maps to the mounted groups', () => {
   assert.deepEqual(groupsFor({ mode: 'bot', plain: isAgentSession(indexRoster(ROSTER_VALUE), new Set(), 's1') }), { shell: true, conversation: false })
   assert.deepEqual(groupsFor({ mode: 'bot', plain: isAgentSession(indexRoster(ROSTER_VALUE), new Set(), 'm1') }), { shell: true, conversation: true })
+})
+
+test('the default selector policy leaves the adopted DSH own chat on the native composer', () => {
+  const dsh = { id: 'adopted', sessionId: 'current', kind: 'dsh', name: 'Brain' }
+  const roster = indexRoster({ ...ROSTER_VALUE, bots: [...ROSTER_VALUE.bots, dsh], routePolicy: DEFAULT_ROUTE_POLICY })
+  assert.deepEqual(roster.routePolicy, DEFAULT_ROUTE_POLICY)
+  assert.deepEqual(groupsFor({ mode: 'bot', plain: isAgentSession(roster, new Set(), dsh.sessionId) }), {
+    shell: true, conversation: false,
+  })
 })

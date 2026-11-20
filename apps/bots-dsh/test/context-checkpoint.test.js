@@ -711,6 +711,29 @@ test('case 3b: the surface fits the window but is over thresholdTokens, no expli
   assert.equal(b.recorded(), b.recordedBefore, 'no message deleted from the record')
 })
 
+test('the automatic threshold move still tracks its target until the fresh part answers', async t => {
+  const b = await switchBench({ perNode: 20_000 })
+  t.after(b.stop)
+  const idle = deferred()
+  t.after(() => idle.resolve())
+  b.agent.whenIdle = () => idle.promise
+  const outcome = await b.step('api', 'small')
+  assert.equal(outcome.stopped, true)
+  const [job] = [...b.rt.switchJobs()]
+  assert.equal(job.target, 'api/small')
+  assert.equal(job.noNote, 'switch')
+  assert.equal(b.rt.switchingChat('b1'), true, 'the threshold move owns the held switch window')
+  assert.equal(Object.hasOwn(job, 'routeChange'), false, 'the removed explicit crossing is no longer job state')
+  idle.resolve()
+  assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && [...b.rt.switchJobs()].length === 0))
+  assert.deepEqual(b.calls.selected, [['fresh1', 'api/small']])
+  assert.deepEqual(b.calls.archived, [])
+  b.firstTurn('fresh1', { answer: true })
+  assert.ok(await until(() => b.calls.archived.length > 0))
+  assert.deepEqual(b.calls.archived, ['s1'])
+  assert.equal(b.rt.switchingChat('b1'), false, 'the settled threshold move no longer owns a switch window')
+})
+
 test('case 4: a failed switch does not leave the new model pending in a loop', async (t) => {
   // The Bot was on its agent (confirmed) and the person picked an API model that declares no
   // window: DSH's guard still refuses that one.
@@ -1055,6 +1078,144 @@ test('case 8b, a first call that fails at once, during the handoff itself, still
   assert.deepEqual(b.streams(), [])
 })
 
+test('a same-harness no-note rollover settles after interruption, host disposal, or user Stop', async t => {
+  const cuts = [
+    ['ACP interruption', { kind: 'error', error: { code: 'AGENT_INTERRUPTED', message: 'The agent was interrupted before it finished.' } }],
+    ['repaired interruption', { kind: 'interrupted' }],
+    ['host disposal', { kind: 'aborted', reason: { kind: 'disposed' } }],
+  ]
+  const scenarios = cuts.flatMap(([label, reason]) => [true, false].map(answer => ({
+    label: `${label}, then ${answer ? 'answer' : 'failure'}`, reason, answer, cut: true,
+  })))
+  scenarios.push({ label: 'user Stop rolls back', reason: { kind: 'error', error: { code: 'ABORTED', message: 'Stopped' } }, answer: false, cut: false })
+  for (const { label, reason, answer, cut } of scenarios) await t.test(label, async t => {
+    const model = 'acp-codex/default'
+    const b = await switchBench({ perNode: 170_000, model })
+    t.after(b.stop)
+    b.rt.cutByRestart = cutByRestart
+    b.bot.effort = 'low'
+    b.rt.desiredEffort = async bot => bot.effort
+    const select = b.rt.selectSessionModel
+    b.rt.selectSessionModel = async (id, selection) => {
+      await select(id, selection)
+      if (id !== 'fresh1') return
+      const session = b.sessions.get(id)
+      const event = session.append('request/header', { reason: 'model-change', header: { config: selection } })
+      await b.ctx.parallel('session/event', session, event)
+    }
+    const snapshots = []
+    b.rt.save = async () => { snapshots.push(structuredClone(b.state)) }
+    const moving = deferred(), release = deferred()
+    t.after(() => release.resolve())
+    b.rt.moveSchedules = async () => { moving.resolve(); await release.promise }
+    const history = b.session.snapshotEvents()
+    assert.equal((await b.step('acp-codex', 'default')).stopped, true)
+    await moving.promise
+    const [job] = [...b.rt.switchJobs()]
+    assert.equal(job.noNote, 'aside')
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+    const fresh = b.sessions.get('fresh1')
+    assert.deepEqual(fresh.requestHeader().config, { provider: 'acp-codex', model: 'default', reasoningEffort: 'low' })
+    const emit = async (type, data, options) => {
+      const event = fresh.append(type, data, options)
+      await b.ctx.parallel('session/event', fresh, event)
+      return event
+    }
+    await emit('turn/start', { turn: 1 })
+    const owner = b.agents.get('fresh1')
+    for (const message of owner.inbox.nextTurn.splice(0)) await emit('user/message', message, { surfaceOp: 'append' })
+    const kept = structuredClone(b.bot)
+    const warnings = [...b.calls.warnings]
+    const ended = await emit('turn/end', { turn: 1, reason })
+    assert.deepEqual(fresh.snapshotEvents().at(-1), ended)
+    assert.equal([...b.rt.switchJobs()][0], job, 'event delivery finishes before the held move')
+    release.resolve()
+    await job.done
+    assert.ok(await until(() => [...b.rt.switchJobs()].length === 0 && Object.keys(b.state.switching).length === 0))
+    assert.deepEqual(b.streams(), [], 'no background call or fallback')
+    if (cut) {
+      assert.deepEqual(b.bot, kept, 'restart cannot undo the fresh Session, route or segment')
+      assert.equal(b.bot.sessionId, 'fresh1')
+      assert.equal(b.bot.segments.at(-1).archivePending, true)
+      assert.deepEqual(snapshots.at(-1).bots.b1, kept, 'durable state retains archivePending and the new choice')
+      assert.deepEqual(b.calls.warnings, warnings)
+      assert.deepEqual(b.calls.archived, [], 'neither Session is archived by a cut')
+      assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+      assert.deepEqual(b.session.snapshotEvents(), history)
+
+      await emit('turn/start', { turn: 2 })
+      if (answer) await emit('assistant/message', {
+        turn: 2, message: { role: 'assistant', source: { provider: 'acp-codex', model: 'default' }, content: [{ type: 'text', text: 'Continued after the cut.' }] },
+      }, { surfaceOp: 'append' })
+      await emit('turn/end', { turn: 2, reason: answer ? { kind: 'stop' } : { kind: 'error', error: { code: 'ACP_AGENT', message: 'The agent failed' } } })
+    }
+    assert.ok(await until(() => b.calls.archived.length > 0), 'the real outcome settles without a stranded promise')
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
+    assert.deepEqual(b.calls.archived, [answer ? 's1' : 'fresh1'])
+    assert.equal(b.bot.sessionId, answer ? 'fresh1' : 's1')
+    assert.equal(b.bot.model, model)
+    assert.equal(b.bot.appliedModel, model)
+    assert.equal(b.bot.segments.at(-1)?.archivePending, undefined)
+    assert.deepEqual(b.session.snapshotEvents(), history)
+    assert.deepEqual(snapshots.at(-1).bots.b1, b.bot)
+    if (answer) {
+      assert.deepEqual(b.calls.warnings, warnings)
+    } else {
+      assert.equal(b.calls.warnings.length, warnings.length + 1)
+      assert.deepEqual(b.calls.warnings.slice(0, -1), warnings)
+      assert.match(b.calls.warnings.at(-1), /first call in the fresh part .* failed before any answer/)
+    }
+  })
+})
+
+test('same-harness first-answer rollback restores cards before saving and archives only after a successful save', async t => {
+  for (const failSave of [false, true]) await t.test(failSave ? 'EIO is surfaced' : 'successful snapshots are coherent', async t => {
+    const model = 'acp-codex/default'
+    const b = await switchBench({ perNode: 170_000, model })
+    t.after(b.stop)
+    Object.assign(b.bot, { appliedModel: model, effort: 'high', appliedEffort: 'high', previousModel: model })
+    b.rt.desiredEffort = async bot => bot.effort
+    const history = b.session.snapshotEvents()
+    assert.equal((await b.step('acp-codex', 'default')).stopped, true)
+    assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && [...b.rt.switchJobs()].length === 0))
+    b.state.questions.fresh1 = { question: 'pending question' }
+    b.state.views.fresh1 = { view: 'pending view' }
+    const snapshots = []
+    b.rt.save = async () => {
+      snapshots.push(structuredClone(b.state))
+      if (failSave) throw Object.assign(new Error('injected rollback EIO'), { code: 'EIO' })
+    }
+    b.firstTurn('fresh1', { answer: false })
+    assert.ok(await until(() => failSave
+      ? b.calls.warnings.some(line => line.includes('injected rollback EIO'))
+      : b.calls.archived.length > 0))
+    assert.ok(snapshots.length > 0)
+    for (const snapshot of [...snapshots, b.state]) {
+      const bot = snapshot.bots.b1
+      assert.equal(bot.sessionId, 's1', 'no save may strand the old choice on the fresh chat')
+      assert.equal(bot.model, model)
+      assert.equal(bot.appliedModel, model)
+      assert.equal(bot.effort, 'high')
+      assert.equal(bot.appliedEffort, 'high')
+      assert.equal(bot.previousModel, model)
+      assert.deepEqual(bot.segments, [])
+      assert.deepEqual(snapshot.questions, { s1: { question: 'pending question' } })
+      assert.deepEqual(snapshot.views, { s1: { view: 'pending view' } })
+      assert.deepEqual(snapshot.switching, {})
+    }
+    assert.deepEqual(b.session.snapshotEvents(), history)
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
+    if (failSave) {
+      assert.equal(snapshots.length, 1, 'the failed write is not swallowed or retried')
+      assert.deepEqual(b.calls.archived, [], 'a failed write cannot authorize archival')
+      assert.ok(b.calls.warnings.some(line => line.includes('going back from the fresh part') && line.includes('injected rollback EIO')))
+    } else {
+      assert.deepEqual(b.calls.archived, ['fresh1'])
+      assert.deepEqual(b.calls.selected.at(-1), ['s1', model])
+    }
+  })
+})
+
 test('case 8b\', a first answer that comes at once, during the handoff itself, archives the old part', async (t) => {
   const b = await switchBench({ perNode: 170_000, model: 'acp-codex/default' })
   t.after(b.stop)
@@ -1260,221 +1421,44 @@ for (const trigger of ['idle', 'pre-step']) {
 }
 
 
-// #1631: an explicit managed crossing from an agent that cannot answer beside its turn
-// uses the existing first-answer boundary. Selection alone must not log completion.
-test('an explicit route crossing settles on its first answer or restores its full choice on failure', async (t) => {
-  for (const outcome of ['answer', 'failure', 'newer', 'newer effort']) {
-    const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
-    t.after(b.stop)
-    Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high' })
-    const history = b.session.snapshotEvents()
-    const notes = []
-    b.rt.desiredEffort = async bot => bot.effort
-    b.rt.resolveModel = async ref => ref
-    b.rt.resolveEffort = async (_ref, effort) => effort
-    b.rt.cachedCatalog = () => ['acp-codex/default', 'api/small'].map(ref => ({ ref }))
-    b.rt.noteFailure = entry => notes.push(entry)
-    const result = await b.rt.switchRoute('b1', 'api/small', 'low')
-    assert.equal(result.status, 'switching')
-    assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && !b.rt.switchingChat('b1')))
-    assert.deepEqual(notes.map(entry => entry.text), ['Route change acp-codex/default → api/small accepted'])
-    assert.deepEqual(b.calls.archived, [])
-    if (outcome === 'newer') Object.assign(b.bot, { model: 'api/big', appliedModel: 'api/big', effort: 'newer', appliedEffort: 'newer' })
-    if (outcome === 'newer effort') {
-      b.bot.effort = 'medium'
-      await b.rt.applyModel(b.bot, { force: true })
-      b.bot.appliedEffort = 'medium'
-    }
-    b.firstTurn('fresh1', { answer: outcome === 'answer' })
-    assert.ok(await until(() => notes.length === 2))
-    assert.equal(notes[1].text, outcome === 'answer'
-      ? 'Route change acp-codex/default → api/small completed'
-      : 'Route change acp-codex/default → api/small rolled back (fresh conversation could not answer)')
-    assert.deepEqual(b.session.snapshotEvents(), history)
-    if (outcome === 'answer') {
-      assert.equal(b.bot.sessionId, 'fresh1')
-      assert.deepEqual(b.calls.archived, ['s1'])
-    } else {
-      assert.equal(b.bot.sessionId, 's1')
-      assert.deepEqual(b.bot.segments, [])
-      assert.deepEqual(b.calls.archived, ['fresh1'])
-      assert.equal(b.bot.model, outcome === 'newer' ? 'api/big' : outcome === 'newer effort' ? 'api/small' : 'acp-codex/default')
-      assert.equal(b.bot.effort, outcome === 'newer' ? 'newer' : outcome === 'newer effort' ? 'medium' : 'high')
-      assert.equal(b.bot.appliedModel, outcome === 'newer' ? 'api/big' : outcome === 'newer effort' ? 'api/small' : 'acp-codex/default')
-      assert.equal(b.bot.appliedEffort, outcome === 'newer' ? 'newer' : outcome === 'newer effort' ? 'medium' : 'high')
-      assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
-      assert.equal(b.bot.previousModel, undefined)
-    }
-  }
-})
-
-// #1631 + #1626: real Session logs on a managed ACP -> ACP crossing without a note.
-// Cut the first turn while the move still owns its job, then keep the host alive.
-test('managed ACP crossing keeps a restart-cut first turn eligible for a real answer or failure', { timeout: 15000 }, async t => {
-  const failure = { kind: 'error', error: { code: 'ACP_AGENT', message: 'The agent failed' } }
-  const stop = { kind: 'error', error: { code: 'ABORTED', message: 'Stopped' } }
-  const cuts = [
-    ['ACP interruption', { kind: 'error', error: { code: 'AGENT_INTERRUPTED', message: 'Claude Code was interrupted before it finished.' } }],
-    ['repaired interruption', { kind: 'interrupted' }],
-    ['host disposal', { kind: 'aborted', reason: { kind: 'disposed' } }],
-  ]
-  const cases = cuts.flatMap(([name, reason]) => ['answer', 'failure'].map(outcome => ({ name: `${name}, then ${outcome}`, reason, outcome, cut: true })))
-  cases.push({ name: 'actual ACP user Stop rolls back', reason: stop }, { name: 'genuine ACP failure rolls back', reason: failure })
-  for (const { name, reason, outcome, cut = false } of cases) await t.test(name, { timeout: 1500 }, async t => {
-    const b = await switchBench({ perNode: 10, model: 'acp-codex/default', fallback: false })
-    t.after(b.stop)
-    b.rt.cutByRestart = cutByRestart
-    b.rt.config.fallback = false
-    installFallback(b.rt)
-    b.ctx.llm.registerAdapter(['acp-claude'], new AgentRoute(b.calls.agent))
-    Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high' })
-    b.rt.desiredEffort = async bot => bot.effort
-    b.rt.resolveModel = async ref => ref
-    b.rt.resolveEffort = async (_ref, effort) => effort
-    b.rt.cachedCatalog = () => ['acp-codex/default', 'acp-claude/default'].map(ref => ({ ref }))
-    const notes = [], snapshots = []
-    b.rt.noteFailure = entry => notes.push(entry.text)
-    b.rt.save = async () => { snapshots.push(structuredClone(b.state)) }
-    const select = b.rt.selectSessionModel
-    b.rt.selectSessionModel = async (id, selection) => {
-      await select(id, selection)
-      const session = b.sessions.get(id)
-      await b.ctx.parallel('session/event', session, session.append('request/header', { reason: 'model-change', header: { config: selection } }))
-    }
-    const moving = deferred(), release = deferred()
-    t.after(() => release.resolve())
-    b.rt.moveSchedules = async () => { moving.resolve(); await release.promise }
-    const history = b.session.snapshotEvents()
-    assert.equal(await b.rt.backgroundModel(), undefined)
-    assert.ok(b.session.deriveMessages().length > 0)
-    assert.equal((await b.rt.switchRoute('b1', 'acp-claude/default', 'low')).status, 'switching')
-    await moving.promise
-    const job = [...b.rt.switchJobs()][0]
-    assert.equal(job.noNote, 'aside')
-    const noNoteWarnings = [...b.calls.warnings]
-    assert.equal(noNoteWarnings.length, 1)
-    assert.match(noNoteWarnings[0], /no model answers beside it.*handoff note/)
-    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
-    const fresh = b.sessions.get('fresh1')
-    const emit = async (type, data, options) => {
-      const event = fresh.append(type, data, options)
-      await b.ctx.parallel('session/event', fresh, event)
-      return event
-    }
-    await emit('turn/start', { turn: 1 })
-    const owner = b.agents.get('fresh1')
-    for (const message of [...owner.inbox.nextStep.splice(0), ...owner.inbox.nextTurn.splice(0)]) await emit('user/message', message, { surfaceOp: 'append' })
-    const kept = structuredClone(b.bot)
-    const accepted = 'Route change acp-codex/default → acp-claude/default accepted'
-    assert.equal(cutByRestart(reason), cut)
-    const ended = await emit('turn/end', { turn: 1, reason })
-    assert.deepEqual(fresh.snapshotEvents().at(-1), ended)
-    assert.equal(b.rt.switchingChat('b1'), true, 'event delivery finishes before the held move')
-    release.resolve()
-    await job.done
-    assert.ok(await until(() => !b.rt.switchingChat('b1')))
-    assert.deepEqual(b.state.switching, {}, 'the move clears its marker without a future turn')
-    assert.notEqual(b.rt.fallbackArmed?.('fresh1'), true)
-    assert.deepEqual(b.streams(), [], 'no background call or fallback')
-    if (cut) {
-      assert.deepEqual(b.bot, kept, 'restart cannot undo the fresh Session, route, effort or segment')
-      assert.equal(b.bot.sessionId, 'fresh1')
-      assert.equal(b.bot.model, 'acp-claude/default')
-      assert.equal(b.bot.appliedModel, 'acp-claude/default')
-      assert.equal(b.bot.effort, 'low')
-      assert.equal(b.bot.appliedEffort, 'low')
-      assert.deepEqual(fresh.requestHeader().config, { provider: 'acp-claude', model: 'default', reasoningEffort: 'low' })
-      assert.equal(b.bot.segments.at(-1).archivePending, true)
-      assert.deepEqual(snapshots.at(-1).bots.b1, kept, 'durable state retains archivePending and the new choice')
-      assert.deepEqual(notes, [accepted], 'no false completion or rollback')
-      assert.deepEqual(b.calls.warnings, noNoteWarnings)
-      assert.deepEqual(b.calls.archived, [], 'neither Session is archived by a cut')
-      assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
-      assert.deepEqual(b.session.snapshotEvents(), history)
-      await emit('turn/start', { turn: 2 })
-      if (outcome === 'answer') await emit('assistant/message', { turn: 2, message: { role: 'assistant', source: { provider: 'acp-claude', model: 'default' }, content: [{ type: 'text', text: 'Continued after the cut.' }] } }, { surfaceOp: 'append' })
-      await emit('turn/end', { turn: 2, reason: outcome === 'answer' ? { kind: 'stop' } : failure })
-    }
-    assert.ok(await until(() => notes.length === 2), 'the real outcome settles without a stranded promise')
-    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
-    assert.deepEqual(b.session.snapshotEvents().slice(0, history.length), history)
-    if (outcome === 'answer') {
-      assert.equal(b.bot.sessionId, 'fresh1')
-      assert.equal(b.bot.model, 'acp-claude/default')
-      assert.equal(b.bot.effort, 'low')
-      assert.equal(b.bot.segments.at(-1).archivePending, undefined)
-      assert.deepEqual(b.calls.archived, ['s1'], 'the answered fresh Session is never archived')
-      assert.equal(notes[1], 'Route change acp-codex/default → acp-claude/default completed')
-      assert.deepEqual(b.calls.warnings, noNoteWarnings)
-    } else {
-      assert.equal(b.bot.sessionId, 's1')
-      assert.equal(b.bot.model, 'acp-codex/default')
-      assert.equal(b.bot.appliedModel, 'acp-codex/default')
-      assert.equal(b.bot.effort, 'high')
-      assert.equal(b.bot.appliedEffort, 'high')
-      assert.deepEqual(b.bot.segments, [])
-      assert.deepEqual(b.calls.archived, ['fresh1'])
-      assert.equal(notes[1], 'Route change acp-codex/default → acp-claude/default rolled back (fresh conversation could not answer)')
-      assert.equal(b.calls.warnings.length, 2)
-      assert.equal(b.calls.warnings[0], noNoteWarnings[0])
-      assert.match(b.calls.warnings[1], /first call in the fresh part .* failed before any answer/)
-    }
-    assert.deepEqual(snapshots.at(-1).bots.b1, b.bot)
-  })
-})
-
-// Real Session projection and first-turn events; only the save sink fails. Every attempted
-// snapshot must already own the old chat coherently, even when persistence rejects it.
-test('explicit route first-answer rollback restores ownership before successful or EIO saves', async (t) => {
-  for (const failSave of [false, true]) await t.test(failSave ? 'EIO is surfaced' : 'successful snapshots are coherent', async t => {
+// A crossing refusal leaves the actual Session log and the owner's pending cards intact.
+test('explicit crossings with history keep the real Session, its cards, and its route', async t => {
+  for (const target of ['api/small', 'acp-claude/default']) await t.test(target, async t => {
     const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
     t.after(b.stop)
     Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high', previousModel: 'acp-codex/default' })
+    b.state.questions.s1 = { question: 'pending question' }
+    b.state.views.s1 = { view: 'pending view' }
     const history = b.session.snapshotEvents()
+    const before = structuredClone(b.state)
     const notes = []
-    b.rt.desiredEffort = async bot => bot.effort
     b.rt.resolveModel = async ref => ref
     b.rt.resolveEffort = async (_ref, effort) => effort
-    b.rt.cachedCatalog = () => ['acp-codex/default', 'api/small'].map(ref => ({ ref }))
-    b.rt.noteFailure = entry => notes.push(entry)
-    assert.equal((await b.rt.switchRoute('b1', 'api/small', 'low')).status, 'switching')
-    assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && !b.rt.switchingChat('b1')))
-    b.state.questions.fresh1 = { question: 'pending question' }
-    b.state.views.fresh1 = { view: 'pending view' }
-    const snapshots = []
-    b.rt.save = async () => {
-      snapshots.push(structuredClone(b.state))
-      if (failSave) throw Object.assign(new Error('injected rollback EIO'), { code: 'EIO' })
-    }
-    b.firstTurn('fresh1', { answer: false })
-    assert.ok(await until(() => failSave
-      ? b.calls.warnings.some(line => line.includes('injected rollback EIO'))
-      : notes.length === 2))
-    assert.ok(snapshots.length > 0)
-    for (const snapshot of [...snapshots, b.state]) {
-      const bot = snapshot.bots.b1
-      assert.equal(bot.sessionId, 's1', 'no save may strand the old choice on the fresh chat')
-      assert.equal(bot.model, 'acp-codex/default')
-      assert.equal(bot.appliedModel, 'acp-codex/default')
-      assert.equal(bot.effort, 'high')
-      assert.equal(bot.appliedEffort, 'high')
-      assert.equal(bot.previousModel, 'acp-codex/default')
-      assert.deepEqual(bot.segments, [])
-      assert.deepEqual(snapshot.questions, { s1: { question: 'pending question' } })
-      assert.deepEqual(snapshot.views, { s1: { view: 'pending view' } })
-      assert.deepEqual(snapshot.switching, {})
-    }
+    b.rt.cachedCatalog = () => ['acp-codex/default', target].map(ref => ({ ref }))
+    b.rt.noteFailure = entry => notes.push(entry.text)
+    b.rt.save = async () => assert.fail('a route refusal must never save the team')
+    assert.ok(b.session.deriveMessages().length > 0)
+    await assert.rejects(b.rt.switchRoute('b1', target, 'low'), {
+      code: 'bot/refused', reason: 'needs-new-conversation',
+    })
+    assert.deepEqual(b.state, before)
     assert.deepEqual(b.session.snapshotEvents(), history)
+    assert.deepEqual(b.calls.archived, [])
+    assert.deepEqual(b.calls.selected, [])
+    assert.deepEqual(b.streams(), [])
+    assert.equal(b.rt.switchingChat('b1'), false)
     assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
-    if (failSave) {
-      assert.equal(snapshots.length, 1, 'the failed write is not swallowed or retried')
-      assert.deepEqual(b.calls.archived, [], 'a failed write cannot authorize archival')
-      assert.deepEqual(notes.map(entry => entry.text), ['Route change acp-codex/default → api/small accepted'], 'no false success or completed rollback')
-      assert.ok(b.calls.warnings.some(line => line.includes('going back from the fresh part') && line.includes('injected rollback EIO')))
-    } else {
-      assert.deepEqual(b.calls.archived, ['fresh1'])
-      assert.deepEqual(b.calls.selected.at(-1), ['s1', 'acp-codex/default'])
-      assert.equal(notes.at(-1).text, 'Route change acp-codex/default → api/small rolled back (fresh conversation could not answer)')
-    }
+    assert.deepEqual(notes, [`Route change acp-codex/default → ${target} refused (needs-new-conversation)`])
   })
+})
+
+// The restart classifier is also used by same-harness moves and their first turns.
+test('first-turn interruptions distinguish host cuts from failures and the user stopping', () => {
+  for (const [reason, cut] of [
+    [{ kind: 'error', error: { code: 'AGENT_INTERRUPTED', message: 'Claude Code was interrupted before it finished.' } }, true],
+    [{ kind: 'interrupted' }, true],
+    [{ kind: 'aborted', reason: { kind: 'disposed' } }, true],
+    [{ kind: 'error', error: { code: 'ABORTED', message: 'Stopped' } }, false],
+    [{ kind: 'error', error: { code: 'ACP_AGENT', message: 'The agent failed' } }, false],
+  ]) assert.equal(cutByRestart(reason), cut)
 })

@@ -21,10 +21,10 @@ export function voicePrefs(storage = globalThis.localStorage) {
 }
 const saveVoicePrefs = (prefs) => { try { localStorage.setItem(VOICE_KEY, JSON.stringify(prefs)) } catch { /* storage unavailable */ } }
 
-/** An utterance read with the saved voice and speed; the language picks a voice when none is saved. */
-export function speakWith(text, lang, synth = globalThis.speechSynthesis) {
+/** A role supplies its own voice and rate. Normal voice chat uses this browser's settings. */
+export function speakWith(text, lang, override, synth = globalThis.speechSynthesis) {
   const utterance = new SpeechSynthesisUtterance(text)
-  const { voice, rate } = voicePrefs()
+  const { voice, rate } = override ?? voicePrefs()
   const chosen = voice ? synth?.getVoices?.().find(entry => entry.voiceURI === voice) : undefined
   if (chosen) utterance.voice = chosen
   utterance.lang = chosen?.lang ?? lang
@@ -32,12 +32,12 @@ export function speakWith(text, lang, synth = globalThis.speechSynthesis) {
   return utterance
 }
 
-function useVoices() {
+export function useVoices() {
   const [voices, setVoices] = useState(() => globalThis.speechSynthesis?.getVoices?.() ?? [])
   useEffect(() => {
     const synth = globalThis.speechSynthesis
     if (!synth) return undefined
-    const load = () => setVoices(synth.getVoices())
+    const load = () => setVoices(synth.getVoices?.() ?? [])
     synth.addEventListener?.('voiceschanged', load)
     load()
     return () => synth.removeEventListener?.('voiceschanged', load)

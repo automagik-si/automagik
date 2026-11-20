@@ -2,8 +2,9 @@
 // share this directory, so a new conversation part keeps the login. Another Bot never
 // opens it: profiles are not copied across the team.
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, realpath, rm, stat, unlink } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative as relativePath } from 'node:path'
+import { localRefusal } from './address-policy.js'
 import { gateScope } from './gate.js'
 import { runIsolatedScript } from './script-runner.js'
 import { keepTabs, restoreTabs } from './tabs.js'
@@ -89,6 +90,88 @@ async function loadChromium(playwrightUrl) {
   return chromium
 }
 
+const addressError = message => Object.assign(new Error(message), { code: 'ADDRESS_REFUSED' })
+
+async function mandatoryRefusal(addressPolicy, url, kind) {
+  const refusal = addressPolicy?.local === undefined
+    ? localRefusal(url, kind)
+    : await addressPolicy.local(String(url), kind)
+  return refusal === undefined ? undefined : addressError(refusal.message)
+}
+
+async function listRefusal(addressPolicy, url) {
+  try {
+    const decision = await addressPolicy?.check?.(String(url), 'open')
+    if (decision?.allowed === false) return addressError(decision.message ?? 'This address is blocked by the profile.')
+  } catch { /* list unavailable */ }
+  return undefined
+}
+
+function topPage(request) {
+  try {
+    if (!request.isNavigationRequest?.()) return undefined
+    const frame = request.frame?.()
+    const page = frame?.page?.()
+    if (page && frame === page.mainFrame?.()) return page
+  } catch { /* frame unavailable */ }
+  return undefined
+}
+
+function installGuard(context, { addressPolicy, onTopRefusal, webSockets }) {
+  const pattern = '**/*'
+  const abort = async route => {
+    try { await route.abort('blockedbyclient') } catch { /* request ended */ }
+  }
+  const handleRequest = async route => {
+    let request, url, refusal
+    try {
+      request = route.request()
+      url = request.url()
+      refusal = await mandatoryRefusal(addressPolicy, url, 'request')
+    } catch {
+      return abort(route)
+    }
+    const page = topPage(request)
+    if (page && refusal === undefined) refusal = await listRefusal(addressPolicy, url)
+    if (refusal !== undefined) {
+      if (page) onTopRefusal(page, refusal)
+      return abort(route)
+    }
+    try { await route.continue() } catch { /* request ended */ }
+  }
+  const handleSocket = async socket => {
+    let refused = true
+    try {
+      refused = await mandatoryRefusal(addressPolicy, socket.url(), 'request') !== undefined
+    } catch { /* policy unavailable */ }
+    try {
+      if (refused) await socket.close()
+      else socket.connectToServer()
+    } catch { /* socket ended */ }
+  }
+  let routed = false
+  const ready = (async () => {
+    if (typeof context.route !== 'function') throw new Error('Browser request routing is unavailable.')
+    await context.route(pattern, handleRequest)
+    routed = true
+    if (webSockets) {
+      if (typeof context.routeWebSocket !== 'function') throw new Error('Browser WebSocket routing is unavailable.')
+      await context.routeWebSocket(/.*/, handleSocket)
+    }
+  })()
+  return {
+    ready,
+    remove() {
+      if (!routed) return
+      routed = false
+      Promise.resolve().then(() => context.unroute?.(pattern, handleRequest)).catch(() => {})
+    },
+  }
+}
+
+const routesWebSockets = (context, browser, addressPolicy) => !browser
+  && (addressPolicy?.local !== undefined || typeof context.routeWebSocket === 'function')
+
 /**
  * The Bot's tabs come back when its browser opens with none (tabs.js), and are saved as they
  * change; `onTabs` hears each saved list.
@@ -105,7 +188,7 @@ async function loadChromium(playwrightUrl) {
  *   getHold?: () => any,
  *   onHold?: (hold: any) => void,
  *   onTabs?: (tabs: any) => void,
- *   addressPolicy?: { check: Function },
+ *   addressPolicy?: { check?: Function, local?: Function },
  * }} options
  */
 export async function openBotBrowser({
@@ -115,10 +198,14 @@ export async function openBotBrowser({
   const getDownloadDir = typeof downloadDir === 'function' ? downloadDir : async () => downloadDir
   const userDataDir = join(profileRoot, botId)
   const chromium = await loadChromium(playwrightUrl)
+  await mkdir(userDataDir, { recursive: true })
+  // Both hosts use the browser's own cookie storage. Remove the legacy export on open.
+  const cookieFile = join(userDataDir, 'cookies.json')
+  const entry = await lstat(cookieFile).catch(() => undefined)
+  if (entry?.isFile() || entry?.isSymbolicLink()) await rm(cookieFile, { force: true }).catch(() => {})
   const browser = connect
     ? await chromium.connectOverCDP(await connect(botId))
     : undefined
-  await mkdir(userDataDir, { recursive: true })
   const context = browser
     ? browser.contexts()[0]
     : await chromium.launchPersistentContext(userDataDir, {
@@ -128,29 +215,39 @@ export async function openBotBrowser({
       ...(executablePath ? { executablePath } : {}),
       args: ['--disable-dev-shm-usage'],
     })
-  if (!context) throw new Error('The app browser relay has no browser context.')
-  const first = context.pages()[0] ?? await context.newPage()
-  const allowed = addressPolicy === undefined
-    ? undefined
-    : url => addressPolicy.check(url, 'open').then(d => d.allowed, () => true)
-  const page = await restoreTabs(context, userDataDir, first, allowed)
-  const cookieFile = join(userDataDir, 'cookies.json')
-  if (!browser) {
-    try {
-      const saved = JSON.parse(await readFile(cookieFile, 'utf8'))
-      if (Array.isArray(saved) && saved.length > 0) await context.addCookies(saved)
-    } catch { /* no cookies yet */ }
+  let guard, page
+  let refusedByPage = new WeakMap()
+  try {
+    if (!context) throw new Error('The app browser relay has no browser context.')
+    guard = installGuard(context, {
+      addressPolicy,
+      onTopRefusal: (target, refusal) => refusedByPage.set(target, refusal),
+      webSockets: routesWebSockets(context, browser, addressPolicy),
+    })
+    await guard.ready
+    const first = context.pages()[0] ?? await context.newPage()
+    page = await restoreTabs(context, userDataDir, first, async url => {
+      try {
+        return await mandatoryRefusal(addressPolicy, url, 'open') === undefined
+          && await listRefusal(addressPolicy, url) === undefined
+      } catch {
+        return false
+      }
+    })
+  } catch (error) {
+    try { await (browser ?? context)?.close() } catch { /* opening failed */ }
+    throw error
   }
-  const session = createSession({ context, browser, page, botId, userDataDir, cookieFile,
+  refusedByPage = new WeakMap()
+  const session = createSession({ context, browser, page, botId, userDataDir,
     downloadDir: getDownloadDir, actionTimeout, getHold, onHold, uploadRoots,
-    onTabs: onTabs ?? (() => {}), addressPolicy })
-  await session.addressReady
+    onTabs: onTabs ?? (() => {}), addressPolicy, installedGuard: { ...guard, refusedByPage } })
   return session
 }
 
 export function createSession({
-  context, browser, page, botId, userDataDir, cookieFile, downloadDir, actionTimeout,
-  getHold, onHold, uploadRoots, onTabs, addressPolicy,
+  context, browser, page, botId, userDataDir, downloadDir, actionTimeout,
+  getHold, onHold, uploadRoots, onTabs, addressPolicy, installedGuard,
 }) {
   const pages = new Set()
   const unknownByOrigin = new Map()
@@ -163,21 +260,7 @@ export function createSession({
   let activeDownloads = null
   let pendingDelete = null
   let pendingDeleteLocator = null
-  const refusedByPage = new WeakMap()
-  let removal = () => {}
-  let addressReady = Promise.resolve()
-
-  const refusalOf = async (url) => {
-    if (addressPolicy?.check === undefined) return undefined
-    try {
-      const decision = await addressPolicy.check(String(url), 'open')
-      if (decision?.allowed !== false) return undefined
-      const message = decision.message ?? 'This address is blocked by the profile.'
-      return Object.assign(new Error(message), { code: 'ADDRESS_REFUSED' })
-    } catch {
-      return undefined
-    }
-  }
+  const refusedByPage = installedGuard?.refusedByPage ?? new WeakMap()
 
   const ready = () => {
     const externalHold = getHold?.()
@@ -219,38 +302,13 @@ export function createSession({
 
   for (const target of context.pages()) trackPage(target)
   context.on('page', target => trackPage(target, true))
-  if (typeof context.route === 'function') {
-    const guard = async route => {
-      try {
-        const request = route.request()
-        if (typeof request?.isNavigationRequest !== 'function' || !request.isNavigationRequest()) {
-          return route.continue()
-        }
-        const frame = request.frame?.()
-        const target = frame?.page?.()
-        if (target === undefined || frame !== target.mainFrame?.()) return route.continue()
-        const refusal = await refusalOf(request.url())
-        if (refusal === undefined) return route.continue()
-        refusedByPage.set(target, refusal)
-        return route.abort('blockedbyclient')
-      } catch {
-        return route.continue().catch(() => {})
-      }
-    }
-    try {
-      addressReady = Promise.resolve(context.route('**/*', guard)).then(() => {
-        // One shot, skipped once the browser has gone, and never left unhandled: a rejected
-        // unroute on a closed context must not reach the host's unhandledRejection exit.
-        removal = () => {
-          removal = () => {}
-          if (closed) return
-          Promise.resolve(context.unroute?.('**/*', guard)).catch(() => {})
-        }
-      }, () => {})
-    } catch {
-      addressReady = Promise.resolve()
-    }
-  }
+  const guard = installedGuard ?? installGuard(context, {
+    addressPolicy,
+    onTopRefusal: (target, refusal) => refusedByPage.set(target, refusal),
+    webSockets: routesWebSockets(context, browser, addressPolicy),
+  })
+  const addressReady = guard.ready.catch(() => {})
+  const removal = () => { if (!closed) guard.remove() }
   const keeper = onTabs !== undefined ? keepTabs({ context, dir: userDataDir, activePage: () => activePage(), onSave: onTabs }) : undefined
   // A browser that goes away (a killed Chrome, a dropped app relay, a crashed app page) ends
   // the session; the Bot's next call opens a new one.
@@ -651,7 +709,7 @@ export function createSession({
       ready()
       await clearPendingDelete()
       const target = activePage()
-      const refusal = await refusalOf(url)
+      const refusal = await mandatoryRefusal(addressPolicy, url, 'open') ?? await listRefusal(addressPolicy, url)
       if (refusal !== undefined) throw refusal
       return finishAction(async () => {
         try {
@@ -950,9 +1008,6 @@ export function createSession({
       removal()
       keeper?.stop()
       if (browser) { await browser.close().catch(() => {}); return }
-      const cookies = await context.cookies().catch(() => [])
-      const kept = cookies.map(cookie => cookie.expires > 0 ? cookie : { ...cookie, expires: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60 })
-      await writeFile(cookieFile, JSON.stringify(kept)).catch(() => {})
       await context.close().catch(() => {})
     },
   }

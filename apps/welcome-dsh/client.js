@@ -9192,8 +9192,8 @@ var PT_BR = {
   "Continue with just {name}": "Continuar só com {name}",
   "Continue with {who}": "Continuar com {who}",
   " and ": " e ",
-  // Claude Code and Codex (acp-agents.js), in Connect AI and in Settings
-  "Claude Code and Codex": "Claude Code e Codex",
+  // Coding agents (acp-agents.js), in Connect AI and in Settings
+  "Coding agents": "Agentes de código",
   "Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.": "Use os agentes de código que você já tem como modelos no DSH. Cada um roda a sua própria CLI, com o seu login e as suas configurações.",
   "Looking at what this computer has…": "Vendo o que este computador tem…",
   "The ACP agents plugin is not running in this DSH.": "O plugin de agentes ACP não está rodando neste DSH.",
@@ -9219,6 +9219,10 @@ var PT_BR = {
   "The {name} installation or update failed: {error}": "A instalação ou atualização do {name} falhou: {error}",
   "The {name} installation or update failed.": "A instalação ou atualização do {name} falhou.",
   "Signed in to {name}.": "Login feito no {name}.",
+  "Signed in to {name} as {account}.": "Login feito no {name} como {account}.",
+  "Switch account": "Trocar de conta",
+  "Bots in this installation share this account. Your terminal sign-in stays as it is.": "Os Bots desta instalação compartilham esta conta. O login no terminal continua como está.",
+  "This stops running Bot work for this account. Continue?": "Isso interrompe o trabalho dos Bots nesta conta. Continuar?",
   "Not signed in to {name}. Sign in from a Bot's chat.": "Sem login no {name}. Entre pelo chat de um Bot.",
   "Or run {command} in a terminal, then check again.": "Ou rode {command} em um terminal e verifique de novo.",
   "Not signed in to {name}. Run {command} in a terminal, then check again.": "Sem login no {name}. Rode {command} em um terminal e verifique de novo.",
@@ -9771,7 +9775,7 @@ body[data-ds-dark-theme] .oai-overlay::before{background:radial-gradient(1100px 
 .oai-clay-omni{--oai-clay-atlas:var(--oai-omni)}
 .oai-clay-genie{--oai-clay-atlas:var(--oai-genie)}
 .oai-clay-unfold{--oai-clay-atlas:var(--oai-unfold)}
-.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
+path.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
 .oai-octo:hover .oai-cyan,.oai-glitch .oai-cyan{opacity:.55;transform:translate(-2.5px,0);animation:oai-glitch 2.4s steps(1) infinite}
 .oai-octo:hover .oai-magenta,.oai-glitch .oai-magenta{opacity:.55;transform:translate(2.5px,0);animation:oai-glitch 2.4s steps(1) infinite reverse}
 .oai-eyes{transform-origin:50px 36px;animation:oai-blink 5s infinite}
@@ -12147,7 +12151,7 @@ function badgeOf(agent) {
   if (state === "ready") return t("Ready");
   return null;
 }
-function agentLines(agent) {
+function agentLines(agent, entry) {
   const name = agent.name;
   const cli = CLI_OF[agent.id] ?? agent.key;
   const lines = [];
@@ -12166,7 +12170,16 @@ function agentLines(agent) {
     return lines;
   }
   lines.push({ tone: "ok", text: agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli }) });
-  if (agent.signedIn === true && agent.consent !== "needed") lines.push({ tone: "ok", text: t("Signed in to {name}.", { name }) });
+  if (agent.signedIn === true && agent.consent !== "needed") {
+    const canSwitch = isolatedSignIn(agent) && entry?.authScope === "isolated" && entry.signedIn === true;
+    const account = canSwitch && entry.account?.kind === "account" ? entry.account.email ?? entry.account.org : void 0;
+    lines.push({
+      tone: "ok",
+      text: account ? t("Signed in to {name} as {account}.", { name, account }) : t("Signed in to {name}.", { name }),
+      ...canSwitch ? { action: "switch" } : {}
+    });
+    if (canSwitch) lines.push({ tone: "muted", text: t("Bots in this installation share this account. Your terminal sign-in stays as it is.") });
+  }
   if (agent.signedIn === true && agent.consent === "needed" && !cliBusy(agent)) lines.push({ tone: "bad", text: t("{name} is signed in on this computer. Confirm its account in a Bot's chat before Bots use it.", { name }), action: "login", label: t("Confirm account") });
   if (agent.signedIn === false && isNative(agent)) lines.push({ tone: "bad", text: t("Not signed in to {name}. Run {command} in a terminal, then check again.", { name, command: signInCommand(agent) }), action: "check" });
   if (agent.signedIn === false && !isNative(agent) && !cliBusy(agent)) {
@@ -12258,6 +12271,7 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     view,
     busy,
     problems,
+    setProblem: say,
     isOn: (agent) => wanted[agent.id] ?? agent.on,
     flip: async (agent) => {
       const on2 = !(wanted[agent.id] ?? agent.on);
@@ -12283,18 +12297,24 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }
   };
 }
-function AcpLine({ line, agent, acp, busy }) {
+function AcpLine({ line, agent, acp, busy, accountControls }) {
+  const canSwitch = line.action === "switch" && accountControls !== void 0;
+  const confirming = canSwitch && accountControls.pending === agent.id;
+  const accountButton = (label, onClick) => (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick }, label);
   return (0, import_react9.createElement)(
     "div",
     { className: "oai-acp-line-block" },
     (0, import_react9.createElement)(
       "p",
       { className: `oai-acp-line oai-acp-${line.tone}${line.tone === "wait" ? " oai-waiting" : ""}`, ...line.tone === "bad" ? { role: "status" } : {} },
-      line.text,
+      confirming ? t("This stops running Bot work for this account. Continue?") : line.text,
       line.link ? [" ", (0, import_react9.createElement)("a", { key: "link", className: "oai-link", href: line.link.href, target: "_blank", rel: "noreferrer" }, line.link.text)] : null,
       line.action === "retry" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.retry(agent) }, t("Retry")) : null,
       line.action === "login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t("Sign in")) : null,
-      line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null
+      line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null,
+      canSwitch && !confirming ? accountButton(t("Switch account"), () => accountControls.ask(agent)) : null,
+      confirming ? accountButton(t("Continue"), () => accountControls.confirm(agent)) : null,
+      confirming ? accountButton(t("Cancel"), accountControls.cancel) : null
     ),
     line.details ? (0, import_react9.createElement)(
       "details",
@@ -12305,11 +12325,11 @@ function AcpLine({ line, agent, acp, busy }) {
     ) : null
   );
 }
-function AcpAgentRow({ agent, acp }) {
+function AcpAgentRow({ agent, acp, accountControls }) {
   const on2 = acp.isOn(agent);
-  const busy = acp.busy !== null;
+  const busy = acp.busy !== null || accountControls?.busy === true;
   const badge = badgeOf({ ...agent, on: on2 });
-  const lines = agentLines(agent);
+  const lines = agentLines(agent, accountControls?.accounts[agent.id]);
   return (0, import_react9.createElement)(
     "div",
     { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },
@@ -12326,29 +12346,91 @@ function AcpAgentRow({ agent, acp }) {
       badge ? (0, import_react9.createElement)("em", { className: "oai-found" }, badge) : null,
       (0, import_react9.createElement)("button", { type: "button", role: "switch", className: "oai-switch", "aria-checked": on2 ? "true" : "false", "aria-label": agent.name, disabled: busy, onClick: () => acp.flip(agent) })
     ),
-    (0, import_react9.createElement)("div", { className: "oai-acp-lines" }, lines.map((line, i) => (0, import_react9.createElement)(AcpLine, { key: i, line, agent, acp, busy }))),
+    (0, import_react9.createElement)("div", { className: "oai-acp-lines" }, lines.map((line, i) => (0, import_react9.createElement)(AcpLine, { key: i, line, agent, acp, busy, accountControls }))),
     acp.problems[agent.id] ? (0, import_react9.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, acp.problems[agent.id]) : null
   );
 }
-function AcpAgents({ acp }) {
+function AcpAgents({ acp, accountControls }) {
   if (acp.view?.available !== true || acp.view.agents.length === 0) return null;
   return (0, import_react9.createElement)(
     "section",
-    { className: "oai-group oai-acp-group", "aria-label": t("Claude Code and Codex") },
-    (0, import_react9.createElement)("div", { className: "oai-list" }, acp.view.agents.map((agent) => (0, import_react9.createElement)(AcpAgentRow, { key: agent.id, agent, acp })))
+    { className: "oai-group oai-acp-group", "aria-label": t("Coding agents") },
+    (0, import_react9.createElement)("div", { className: "oai-list" }, acp.view.agents.map((agent) => (0, import_react9.createElement)(AcpAgentRow, { key: agent.id, agent, acp, accountControls })))
   );
 }
-function AcpSettingsSection({ close } = {}) {
+var BOTS_CLIENT = "@automagik/bots-dsh/client";
+var loadBots = () => require(BOTS_CLIENT);
+async function readAccounts(load) {
+  try {
+    const omni = load()?.omni;
+    const face = omni?.face?.();
+    if (typeof face?.actions?.cliLoginAccounts !== "function" || typeof face.actions.cliLoginSwitch !== "function") return null;
+    const result = await face.actions.cliLoginAccounts();
+    return { face, hostText: face.hostText ?? omni.hostText, accounts: result?.accounts ?? {} };
+  } catch {
+    return null;
+  }
+}
+function AcpSettingsSection({ close, load = loadBots } = {}) {
   const acp = useAcp(void 0, { onLoginOpen: () => close?.() });
+  const [accountView, setAccountView] = (0, import_react9.useState)(null);
+  const [pending, setPending] = (0, import_react9.useState)(null);
+  const [busy, setBusy] = (0, import_react9.useState)(false);
+  const switchBusy = (0, import_react9.useRef)(false);
+  (0, import_react9.useEffect)(() => {
+    let live = true;
+    void readAccounts(load).then((view) => {
+      if (live) setAccountView(view);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const confirm2 = async (agent) => {
+    if (switchBusy.current) return;
+    switchBusy.current = true;
+    setBusy(true);
+    acp.setProblem(agent.id, null);
+    try {
+      const { face } = accountView;
+      const snapshot = face.hooks?.roster?.getSnapshot?.();
+      const main = [...snapshot?.mainBotIds ?? [], snapshot?.mainBotId].find((id) => id && snapshot.byId?.[id]);
+      if (!main) {
+        acp.setProblem(agent.id, t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first."));
+        return;
+      }
+      await face.actions.cliLoginSwitch(main, agent.id);
+      await face.actions.refreshModels?.();
+      acp.login(agent);
+    } catch (error) {
+      const message = error?.message ?? String(error);
+      acp.setProblem(agent.id, accountView.hostText?.(message) ?? message);
+    } finally {
+      setPending(null);
+      setBusy(false);
+      switchBusy.current = false;
+    }
+  };
+  const accountControls = accountView === null ? void 0 : {
+    accounts: accountView.accounts,
+    pending,
+    busy,
+    confirm: confirm2,
+    ask: (agent) => {
+      acp.setProblem(agent.id, null);
+      setPending(agent.id);
+    },
+    cancel: () => setPending(null)
+  };
   return (0, import_react9.createElement)(
     "div",
     { className: "oai-acp-page" },
     (0, import_react9.createElement)(
       "div",
       { className: "oai-card" },
-      (0, import_react9.createElement)("h1", null, t("Claude Code and Codex")),
+      (0, import_react9.createElement)("h1", null, t("Coding agents")),
       (0, import_react9.createElement)("p", null, t("Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.")),
-      acp.view === null ? (0, import_react9.createElement)("p", { className: "oai-muted oai-waiting" }, t("Looking at what this computer has…")) : acp.view.available ? (0, import_react9.createElement)(AcpAgents, { acp }) : (0, import_react9.createElement)("p", { className: "oai-muted" }, t("The ACP agents plugin is not running in this DSH."))
+      acp.view === null ? (0, import_react9.createElement)("p", { className: "oai-muted oai-waiting" }, t("Looking at what this computer has…")) : acp.view.available ? (0, import_react9.createElement)(AcpAgents, { acp, accountControls }) : (0, import_react9.createElement)("p", { className: "oai-muted" }, t("The ACP agents plugin is not running in this DSH."))
     )
   );
 }
@@ -12371,7 +12453,7 @@ function AcpSectionIcon({ size = 16 }) {
   );
 }
 function installAcpSection(ctx) {
-  const section = ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: SETTINGS_SECTION, order: 30, label: () => t("Claude Code and Codex") }, AcpSettingsSection)) ?? (() => {
+  const section = ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: SETTINGS_SECTION, order: 30, label: () => t("Coding agents") }, AcpSettingsSection)) ?? (() => {
   });
   const icon = ctx.slots.inject("settings.section.icon", () => ctx.slots.register({ name: "settings.section.icon", id: SETTINGS_SECTION, order: 30 }, AcpSectionIcon)) ?? (() => {
   });

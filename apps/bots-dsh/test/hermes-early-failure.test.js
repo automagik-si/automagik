@@ -26,7 +26,7 @@ function fixture(t, overrides = {}) {
   const source = overrides.source ?? desktop8Session(randomUUID(), randomUUID())
   const snapshot = source.create
   class Socket extends EventTarget {
-    constructor() { super(); queueMicrotask(() => this.event('gateway.ready', { replay_epoch: 'epoch-a' })) }
+    constructor() { super(); this.turns = 0; queueMicrotask(() => this.event('gateway.ready', { replay_epoch: 'epoch-a' })) }
     frame(frame) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) })) }
     event(type, payload, seq) { this.frame({ jsonrpc: '2.0', method: 'event', params: { type, payload, session_id: snapshot.session_id, ...(seq ? { seq } : {}) } }) }
     reply(frame, result) { this.frame({ jsonrpc: '2.0', id: frame.id, result }) }
@@ -38,6 +38,9 @@ function fixture(t, overrides = {}) {
         : ['session.create', 'session.resume', 'session.activate'].includes(frame.method) ? { ...(frame.method === 'session.create' ? snapshot : source.live), ...overrides.snapshot }
           : frame.method === 'session.events.since' ? { events: [], latest_seq: 9, epoch: 'epoch-a', truncated: false, count: 0, open_requests: [] }
             : { status: 'streaming' }
+      // The real wire starts a turn with a stamped `message.start` before it streams or
+      // completes; a completion carries no turn id of its own.
+      if (frame.method === 'prompt.submit' && overrides.autoStart !== false) this.event('message.start', { turn_id: `turn-${++this.turns}` })
       queueMicrotask(() => {
         this.reply(frame, result)
         if (frame.method === 'session.create') queueMicrotask(() => this.event('session.info', source.info))

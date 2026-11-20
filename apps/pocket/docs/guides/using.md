@@ -2,7 +2,7 @@
 title: "Using Automagik Pocket"
 type: guide
 created: 2026-11-01
-updated: 2026-11-19
+updated: 2026-11-20
 tags: [guide, users]
 ---
 # Using Automagik Pocket
@@ -138,6 +138,13 @@ What the numbers mean:
 - **Bot chats** (Settings → Machines, on a connected computer) lists the Automagik Bots' chats and
   says what the phone can do there: **Writable** when the bridge advertises phone writes (send,
   answer approvals and questions, interrupt), **Read only** with the reason when it does not.
+- **Images** (Automagik Bots' chats that take phone writes): tap **+** (**Add images**) to pick up to 4 pictures, add a
+  caption or not, and send. The bubble shows the upload's progress, with **Cancel** until it is sent. **Retry** sends
+  the same message again and never twice. When the phone can't tell whether the first one arrived it
+  says *Maybe not sent*; **Send as new** then sends the pictures as another message, after asking. **Send again** sends
+  a message that could not be used (the images expired on the computer, or the Bot started a new chat) as a new one.
+  **Remove** drops an unsent picture message from the phone. Without images on that computer, **+** says what to
+  update: Pocket Link or the Automagik app. Images in a chat show their size; tap **Show** to load a small copy.
 - Chat text is plain text: HTML shows as the characters it is, nothing loads by itself, and a link
   opens only when you tap it and confirm. Rows stay in memory and are dropped when you leave the chat.
 

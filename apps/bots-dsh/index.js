@@ -4,9 +4,12 @@
 // types. That home is $AUTOMAGIK_BOTS_HOME, else $AUTOMAGIK_HOME/bots (~/.automagik/bots),
 // never under DSH_HOME: installed into someone's own DSH, the team keeps its files apart from
 // DSH's and from other plugins'.
-import { cpSync, existsSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import fs, { cpSync, existsSync } from 'node:fs'
+import os from 'node:os'
 import { join } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
+import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
 import * as diagnostics from './src/host/diagnostics.js'
 import * as extend from './src/host/extend.js'
 import * as store from './src/host/store.js'
@@ -15,6 +18,8 @@ import * as models from './src/host/models.js'
 import * as modelState from './src/host/model-state.js'
 import * as modelAccessHooks from './src/host/model-access-hooks.js'
 import * as cliLogin from './src/host/cli-login.js'
+import { RESERVATION_FILE } from './src/host/account-reservations.js'
+import { createMachineRecord, reservationsDir } from './src/host/machine-reservations.js'
 import * as acpAdoption from './src/host/acp-adoption.js'
 import * as subscriptionMove from './src/host/subscription-move.js'
 import * as providers from './src/host/providers.js'
@@ -47,6 +52,7 @@ import * as stops from './src/host/stops.js'
 import * as whoRefused from './src/host/who-refused.js'
 import * as subagentAsks from './src/host/subagent-asks.js'
 import * as resume from './src/host/resume.js'
+import * as wakeLog from './src/host/wake-log.js'
 import * as memory from './src/host/memory.js'
 import * as parts from './src/host/parts.js'
 import * as images from './src/host/images.js'
@@ -69,6 +75,7 @@ import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
 import * as channel from './src/host/channel.js'
 import * as codeSide from './src/host/code-side.js'
+import * as automations from './src/host/automations.js'
 import * as agentSpace from './src/host/agent-space.js'
 import * as feed from './src/host/feed.js'
 import * as genui from './src/host/genui.js'
@@ -84,6 +91,26 @@ export { COLORS } from './src/host/constants.js'
 export const name = 'omni-ui'
 export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'sessions', 'sessionTitle', 'workspaceRegistry', 'connection']
 
+const random = (size, encoding) => randomBytes(size).toString(encoding)
+const sleepWord = new Int32Array(new SharedArrayBuffer(4))
+const sleep = ms => Atomics.wait(sleepWord, 0, 0, ms)
+let passwd
+function userName(uid) {
+  try {
+    if (uid === process.getuid?.()) return os.userInfo().username
+    passwd ??= fs.readFileSync('/etc/passwd', 'utf8').split('\n').map(line => line.split(':'))
+    const entry = passwd.find(([, , id]) => id === String(uid))
+    if (entry?.[0]) return entry[0]
+  } catch {}
+  return `uid ${uid}`
+}
+
+const machineOf = rt => rt.machineRecord ??= createMachineRecord({
+  fs, platform: process.platform, pid: process.pid, dir: () => reservationsDir(),
+  uid: () => process.getuid?.(), random, now: Date.now, wait: sleep, userName,
+})
+const instanceId = () => process.env.AUTOMAGIK_INSTANCE_ID
+
 // Each module's install(rt) registers its listeners, tools, and effects, and puts on `rt`
 // the functions other modules call; they call them through `rt` at run time, never during
 // install. Listeners run and tools are listed in registration order, so this order holds:
@@ -93,9 +120,18 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
   turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
-  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
+  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
+  parts, fallback, modelState,
+  { install: rt => modelAccessHooks.install(rt, { machine: machineOf(rt), instanceId }) },
+  { install: rt => cliLogin.install(rt, {
+    path: join(rt.home, RESERVATION_FILE), fs, pid: process.pid,
+    random,
+    decodeKey: key => Buffer.from(key, 'base64url'),
+    instanceId, machine: machineOf(rt),
+  }) },
+  sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, dshUpdate, thinking, agentSpace, feed, codeSide, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
+  update, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
   officeSkills, goalSkills,
 ]
 
@@ -117,7 +153,7 @@ export function apply(ctx, config = {}) {
 // when the home has no team yet. Only on request: the source is left as it was.
 function importTeam(home, from) {
   if (!from || existsSync(join(home, 'state.json')) || !existsSync(join(from, 'state.json'))) return false
-  cpSync(from, home, { recursive: true, force: false, filter: source => !source.endsWith('state.lock') })
+  cpSync(from, home, { recursive: true, force: false, filter: source => !source.endsWith('state.lock') && !/[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source) })
   return true
 }
 
@@ -128,7 +164,7 @@ export function createRuntime(ctx, config = {}) {
   const rt = {
     ctx,
     config,
-    routePolicy: selectorRoutePolicy(config.routePolicy),
+    routePolicy: selectorRoutePolicy(config.routePolicy ?? DEFAULT_ROUTE_POLICY),
     dshHome,
     home,
     statePath: join(home, 'state.json'),

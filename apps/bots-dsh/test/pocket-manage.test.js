@@ -29,7 +29,8 @@ const HELLO = { write: 1, manage: 1 }
 const READ_METHODS = ['hello', 'list', 'subscribe', 'unsubscribe', 'backfill']
 const OLD_READ = { protocol: 1, readOnly: true, methods: READ_METHODS }
 const OLD_WRITE = { protocol: 1, readOnly: false, write: 1, methods: [...READ_METHODS, 'send', 'interrupt', 'answer'], dedupe: 'log' }
-const MANAGED = { ...OLD_WRITE, manage: 1, manageMethods: ['manage-open', 'manage-close', 'memory-read', 'memory-edit', 'memory-add'] }
+const SETTINGS = ['settings-read', 'settings-name', 'settings-model']
+const MANAGED = { ...OLD_WRITE, manage: 1, manageMethods: ['manage-open', 'manage-close', 'memory-read', 'memory-edit', 'memory-add', ...SETTINGS] }
 const READ_ONLY = { kind: 'read-only', message: 'This socket only reads; answer on the computer.' }
 const REFUSED = reason => ({ ok: false, state: 'refused', reason })
 const UNKNOWN = { ok: false, state: 'unknown', reason: 'pending' }
@@ -193,14 +194,16 @@ test('hello is additive and old hello replies are byte-equal', async (t) => {
 })
 
 for (const [label, options, hello] of [
-  ['memory off', { config: { memory: false } }, OLD_WRITE],
+  ['memory off', { config: { memory: false } }, { ...OLD_WRITE, manage: 1, manageMethods: ['manage-open', 'manage-close', ...SETTINGS] }],
   ['a read-only Session controller', { writable: false }, OLD_READ],
 ]) {
-  test(`${label} does not negotiate management`, async (t) => {
+  test(`${label} does not negotiate memory management`, async (t) => {
     const h = await setup(t, options)
     const c = await h.connect({ hello: null })
     assert.deepEqual((await c.exchange('hello', HELLO, 42)).wire, { id: 42, result: hello })
-    for (const method of ['manage-open', 'memory-read', 'memory-edit', 'memory-add']) {
+    const { wire: opened } = await c.exchange('manage-open', { grant: GRANT, phone: PHONE }, 42)
+    assert.deepEqual(opened, label === 'memory off' ? { id: 42, result: { grant: GRANT } } : { id: 42, error: READ_ONLY })
+    for (const method of ['memory-read', 'memory-edit', 'memory-add']) {
       assert.deepEqual((await c.exchange(method, { grant: GRANT, terminal: TERMINAL }, 42)).wire, { id: 42, error: READ_ONLY })
     }
     assert.deepEqual((await c.exchange('manage-close', { grant: GRANT }, 42)).wire, { id: 42, result: {} })

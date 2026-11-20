@@ -83,11 +83,24 @@ export function install(rt) {
     }
   }
   const lock = homeLock(join(home, 'state.lock'))
+  let lockTerm = 0
+  const gainedListeners = new Set()
+  const onLockGained = (fn) => {
+    gainedListeners.add(fn)
+    return () => gainedListeners.delete(fn)
+  }
+  const lockGained = () => {
+    for (const fn of gainedListeners) {
+      try { fn() } catch (error) { warn('ds-bot: a lock listener failed: %s', error) }
+    }
+  }
   const claimLock = () => {
     if (lockBroken) return
     try {
+      const held = holder === undefined && lock.owns()
       mkdirSync(home, { recursive: true })
       holder = lock.claim()
+      if (!held && holder === undefined && lock.owns()) lockTerm += 1
     } catch (error) {
       // An unusable lock (a read-only or odd file system) must not stop the team; a
       // save that then cannot write still rejects.
@@ -488,6 +501,7 @@ export function install(rt) {
         warn('omni-ui: the other dsh has closed; this one now saves the Bot team')
         warnedReadOnly = false
         adopt(readFileState())
+        lockGained()
         return
       }
     } else if (!lockBroken && !lock.owns()) {
@@ -498,6 +512,7 @@ export function install(rt) {
       if (lockBroken) return
       if (holder === undefined) {
         await reclaimHeld()
+        lockGained()
         return
       }
       warn('omni-ui: %s', readOnly())
@@ -531,7 +546,8 @@ export function install(rt) {
       if (holder === undefined) {
         // A changed file is adopted first; the save queues behind that adopt.
         const pending = reclaimHeld()
-        if (pending !== undefined) void pending.catch(() => {})
+        if (pending !== undefined) void pending.then(lockGained, lockGained)
+        else queueMicrotask(lockGained)
         return true
       }
     }
@@ -539,6 +555,11 @@ export function install(rt) {
   }
 
   rt.holdsLock = () => !stopped && !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  // RFC 0039 delivery 3: the team an ending operation began in. An adopt replaces the team in memory (`epoch`);
+  // a lost and re-claimed lock ends this host's term (`term`, claimLock). Only a host that holds the team now,
+  // in the same epoch and term, may publish an end.
+  rt.teamGeneration = () => ({ epoch: lockEpoch, term: lockTerm })
+  rt.sameTeam = gen => gen !== undefined && gen.epoch === lockEpoch && gen.term === lockTerm && rt.holdsLock()
   rt.dropAutoMarks = () => {
     let dropped = false
     for (const bot of Object.values(state.bots ?? {})) {
@@ -651,12 +672,13 @@ export function install(rt) {
         for (const listener of savedListeners) {
           try { listener() } catch (error) { warn('omni-ui: saved listener failed: %s', error) }
         }
+        return true
       } catch (error) {
         await unlink(temp).catch(() => {})
         throw error
       }
     })
-    writing = run.catch(() => {})
+    writing = run.then(() => {}, () => {})
     return run.catch(error => {
       warn('omni-ui: state write failed: %s', error)
       throw error
@@ -748,6 +770,7 @@ export function install(rt) {
     // the scoped tools with this ownership (drops Sessions that left, scopes
     // live Agents that joined); both install after this.
     rt.indexAgents?.()
+    rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
     restoreCurrent()
   }
@@ -813,6 +836,7 @@ export function install(rt) {
   // or was saved since: false before the first load, and after a file that could not be
   // read or was set aside as corrupt. It reads memory only.
   const teamLoaded = () => teamRead
+  const teamCurrent = () => adopting === undefined && stamp() === seen
 
   const savedListeners = new Set()
   const onSaved = (listener) => {
@@ -831,7 +855,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, teamLoaded, own, onSaved, closeCard, assertShellChoice, refreshShellChoice,
+    state, load, save, refresh, readOnly, teamLoaded, teamCurrent, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,
