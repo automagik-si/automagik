@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; deliveries 0a, 1 and 2 under way, none merged; 3a held until the trial's result has been reviewed) |
+| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); deliveries 1 and 2 under way, none merged; 3a also held until the trial's result has been reviewed) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr patches (the pack: am-quota and the sidebar's CLI), each carrying am's generated copies of the CLI |
 | Created | 2026-11-20 |
@@ -20,6 +20,8 @@ machine is read back before it is called switched; one that is away or failed is
 fixed reason and retried. Nothing moves without a person's press. Claude only moves between
 logins already signed in on each machine (#453: nothing is copied). Codex copying is decided by
 the owner's trial (delivery 0), which tests whether one Codex grant survives three holders.
+Delivery 0a found no transport that qualifies, so that trial and Codex copying wait (Delivery
+0a's findings).
 
 ## Motivation
 
@@ -63,8 +65,9 @@ machines, which has not run (#424 and #438 comments, 2026-11-19).
   (`automagik-herdr.mjs:10494-10496`), so even an unknown command is not side-effect free.
 - A mod's `exec` has no stdin (`automagik-herdr.mjs:1944`); `docGet.mjs` is a CLI helper that
   writes one JSON-RPC request to `hc connect`'s stdin (`herdr/mods/am-sidebar/docGet.mjs:26-30`,
-  `:88`). Nothing in this repository shows a herdr-core file-write method a secret can safely
-  ride: `file.edit` and `file.write` appear only in the hc-proxy test that refuses them
+  `:88`). herdr-core's whole-file write to a path the caller picks, `file.write`, does not qualify
+  for a secret, nor do its other writes (Delivery 0a's findings); in this repository `file.edit`
+  and `file.write` appear only in the hc-proxy test that refuses them
   (`herdr/test/hc-proxy.test.mjs:240-244`), and `hc file edit` takes its text in `argv`
   (`herdr/mods/am-sidebar/remoteFile.js:9`).
 - The panel's Restart runs the CLI in an hc terminal that starts in herdr-core's environment,
@@ -107,6 +110,57 @@ zero bytes. A synthetic canary key goes on the controller's proxy request and is
 enter an hc request. If the documentation shows no such method, or no core-id binding, 0a records
 that, the linked trial and 3a are blocked, and the owner is told.
 
+#### Delivery 0a's findings (2026-11-20)
+
+Read, never run: herdr-core's protocol schema (`schema/hc.openrpc.json`, `info.version` 0.1.21)
+and its `docs/machines.md` and `docs/security.md`, at herdr-core commit `c7517808` (2026-11-16);
+its source (`crates/herdr-core/src/remote.rs` and `files.rs`) at the tag `v0.1.21` and at that
+commit, the same in every part cited here; the herdr-core binary on the checking computer,
+searched as text, whose method descriptions match the schema word for word; and this
+repository's uses of hc. The schema and the docs are the contract; the source only shows what
+one version does.
+
+| Needed | Found |
+|---|---|
+| A method that writes a file on a linked machine, the body inside the request | Yes: `file.write` (`path`, `data`, `cwd`, `on`), the whole-file write to a path the caller picks. `data` is "Its new content, base64, at most 8 MB raw"; sent on `hc connect`'s stdin, the body is in no `argv`. "Swapped in whole: a reader sees old or new, never half." It makes missing folders. |
+| The other methods that write request bytes to a file | `terminal.put` (and its pieces `terminal.put_begin`, `terminal.put_chunk`, `terminal.put_finish`) writes base64 bytes beside a live terminal, on that terminal's machine, for its program to read: it is addressed by terminal, not by machine, and the caller names the file but not its folder. `file.edit` carries replacement text, takes `on` like `file.write` and changes an existing text file, "Written like file.write". Neither documents a destination bound to a core id or what is logged, so neither qualifies either. |
+| Its size limit | 8 MiB raw (8,388,608 bytes in the source; the schema says 8 MB), sent as base64. |
+| Its file mode | Not documented for a new file, and no method takes a mode: "An existing file keeps its mode; a symlink is followed." In the source, a new file and the folders it makes get the core's default (0666 and 0777 less its umask, commonly readable by every user there), so it cannot make a private folder either; `0600` is asked only while an existing file's mode is carried over. A symlink is followed even to a target not there yet. A `0600` file on this computer says nothing about the file there. |
+| Its replies and errors | `{ path, bytes }`; errors `invalid_params`, `io`, `machine_unknown`, `unavailable`, `needs_update`, with no descriptions. `unavailable` is also what a link dropped mid-call answers, so a lost answer may have written. |
+| Delivery only to the expected core id, checked before any byte is released | **Not in the protocol.** The schema describes `on` as "On another machine (see `hc machine ls`)", the docs address machines by name only, and no parameter names an expected destination core id (`hello`'s `core` is the caller's). In the source, `on` is first matched against this core's own id and name (the write then stays here), then against each machine's name or core id in one test, the first machine in the list that matches either winning; a link carries calls only after the core that answered gave the id the selected machine record holds ("a different core answers there"). That check proves the line reaches the record the match picked, not the core id the caller meant: an id string that is also this core's name, or an earlier machine's name, picks another record, whose own check passes. It is also undocumented and unversioned, and runs when the link dials rather than on each call. |
+| Neither end traces or logs the body | **Not documented** either way. The docs name `core.log` and `holder.log` in each core's state folder and call that folder private and unencrypted. The two source files read log no request data and read no trace setting; the rest of the source (request dispatch, `hc` itself, the holder) was not read. |
+
+**Result: no route qualifies.** Neither the binding nor the logging is part of herdr-core's
+protocol, nor is the mode of a created file; and a helper that checks a name's core id and then
+writes by name is the check-then-send this delivery rules out, so no helper is built. As the
+delivery says, the linked trial (Q3) and 3a are blocked, and the owner decides what comes next
+(below). Deliveries 1 and 2 move no credential and are not affected (Q2); 3a also keeps Q4's
+hold.
+
+**What would unblock it**, each read again from herdr-core's own versioned documentation, never
+by running a core:
+
+- the destination named by core id alone (an `on` that takes a core id and matches no name, or a
+  parameter naming the expected core id), refused by the sending core unless the link's checked
+  identity matches, before any part of the request is forwarded, on every call and after every
+  reconnect;
+- a statement of what each core and `hc` log or trace, with no request parameters among it;
+- the mode of a file the write creates, `0600` or set by a mode parameter, documented.
+
+Then 0a runs again against that version: the CLI helper (the body read from a `0600` file, sent
+on `hc connect`'s stdin, never in `argv`) and its fake-link tests: a canary body, raw and in
+base64, in no `argv`, log, notification, shared state, error or record, with canaries also put in
+failure answers and stderr; the controller's synthetic management key in no hc request; and a
+core replacing the expected one under the same name receiving zero bytes. The source's behaviour
+today would not do instead: its id check binds the record the name-or-id match picked, not the id
+the caller meant. Writing into a private staging folder in place of a documented mode is no
+fallback either: `file.write` makes folders with the default mode, and a file keeps its mode when
+moved, so staging would need its own amendment that makes the file private before it is moved
+into place. Such an amendment, a route outside the hc link (for example a separate
+`ssh <target> hc connect`, which the owner's rule of 2026-11-05 keeps credentials out of), or
+Q3's (b) (both test homes on this computer, a preliminary result that cannot open 3a) is the
+owner's decision.
+
 ### Delivery 0b: the Codex grant trial (the owner runs it)
 
 The one piece of evidence is Claude's: the proxy renewed a grant the panel had copied, and the
@@ -118,7 +172,8 @@ renewals?**
 - **Holders.** The proxy, plus two Codex homes that are nobody's working login: test folders
   given to Codex as `CODEX_HOME`, so no real `auth.json` is touched. Where the homes live is Q3:
   one on this computer and one on a linked machine (the owner's setup, seeded through 0a's
-  route), or both on this computer (a preliminary result only).
+  route) (blocked while 0a finds no qualified route), or both on this computer (a preliminary
+  result only).
 - **Grant.** A Codex account no bot depends on, downloaded **once** from the proxy and placed in
   both homes, so both hold exactly the proxy's grant. The management key stays on this computer.
   Both test homes are set to keep credentials in `auth.json`, not the OS keyring (Codex has both,
@@ -500,8 +555,8 @@ am-quota ships switched off; none of this reaches an install that has not turned
 
 ## Deliveries
 
-0. **0a, the transport qualification** (no secret; may run before the trial), and **0b, the
-   owner's trial**.
+0. **0a, the transport qualification** (no secret; done 2026-11-20: no route qualified, see its
+   findings), and **0b, the owner's trial**.
 1. **Read-only view.** `am accounts here`, the per-machine rows and bots, and `fleet.json` (a
    record on this computer only; nothing is written or repaired on any machine). Lane: herdr
    patch with am's copies. Acceptance: a fake `hc` with `local`, one machine away, one with an old
@@ -535,7 +590,9 @@ later amendment.
    without copies, Codex copying only after a qualified route and a pass.
 2. **Q2.** Deliveries 0a, 1 and 2 may start before the trial.
 3. **Q3.** The trial runs with one test home on this computer and one on a linked machine, seeded
-   through 0a's route; a single-host run would only be preliminary.
+   through 0a's route; a single-host run would only be preliminary. Blocked for now: delivery
+   0a found no qualified route (Delivery 0a's findings); the trial waits for one, or for the
+   owner to choose another option by an amendment.
 4. **Q4.** A pass opens 3a, limited to what was tested; a fail or an inconclusive result keeps
    Codex on this computer only. In addition, the delegate holds 3a: the trial is prepared with a
    test home, and its result goes to the coordinator for review before any real credential is
