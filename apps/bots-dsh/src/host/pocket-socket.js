@@ -15,7 +15,12 @@
 // phone by it, across connections, and a write without one is refused `read-only`. `by` is the
 // phone's name, for receipts only: renaming a phone, or a `by` naming another, changes no count.
 // To a `hello` without `write` the answer is today's (`readOnly: true`) and every write is refused
-// `read-only`, so an older bridge stays read only. Every other method is answered `read-only`.
+// `read-only`, so an older bridge stays read only.
+//
+// Management (RFC 0036) also needs `manage: 1` in hello. The bridge opens a grant for each
+// phone connection and closes it when access ends. Memory calls name that grant and a Bot's
+// terminal, and need no subscription. Reads have their own limit and writes share the chat
+// limit. A revoked grant stays revoked for queued requests, even if its id is opened again.
 import { lstatSync, unlinkSync } from 'node:fs'
 import { chmod, lstat, mkdir } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
@@ -29,6 +34,13 @@ export const PROTOCOL = 1
 export const METHODS = Object.freeze(['hello', 'list', 'subscribe', 'unsubscribe', 'backfill'])
 /** The write methods, served only to a connection that asked for them in its hello. */
 export const WRITE_METHODS = Object.freeze(['send', 'interrupt', 'answer'])
+const MANAGE_METHODS = Object.freeze(['manage-open', 'manage-close', 'memory-read', 'memory-edit', 'memory-add'])
+const MANAGE_GRANT = /^[A-Za-z0-9._:-]{1,64}$/
+const MEMORY_ID = /^[A-Za-z0-9_-]{1,32}$/
+const MEMORY_REV = /^[0-9a-f]{16}$/
+const MAX_GRANTS = 16
+const MAX_MANAGE_READS = 60
+const MAX_MANAGE_TEXT = 4 * 1024
 /** Writes per paired phone (its `phone` key) in a minute, across its chats and connections. */
 export const MAX_WRITES_PER_MINUTE = 20
 export const WRITE_WINDOW_MS = 60_000
@@ -56,12 +68,21 @@ const refusedWrite = (reason, extra = {}) => ({ ok: false, state: 'refused', rea
  */
 export function writeLimits(now = Date.now) {
   const writes = new Map()
+  const reads = new Map()
   const interrupts = new Map()
   const inFlight = new Set()
   return {
     busy: key => inFlight.has(key),
     begin: key => inFlight.add(key),
     end: key => inFlight.delete(key),
+    takeRead(phone) {
+      const at = now()
+      const recent = (reads.get(phone) ?? []).filter(time => at - time < WRITE_WINDOW_MS)
+      reads.set(phone, recent)
+      if (recent.length >= MAX_MANAGE_READS) return false
+      recent.push(at)
+      return true
+    },
     /** Count one write, or say it is past a cap (and count nothing). */
     take(phone, chat, interrupt) {
       const at = now()
@@ -173,6 +194,24 @@ function serve(socket, source, log, limits) {
   let buffer = ''
   let closed = false
   let writes = false
+  let manages = false
+  let ending = false
+  let generation = 0
+  const grants = new Map()
+  const closeGrant = (id) => {
+    const grant = grants.get(id)
+    if (grant !== undefined) grant.open = false
+    grants.delete(id)
+  }
+  const revoke = () => {
+    for (const grant of grants.values()) grant.open = false
+    grants.clear()
+  }
+  const finish = () => {
+    ending = true
+    manages = false
+    revoke()
+  }
   /** channel -> handle (or a pending marker while its watch opens) */
   const subs = new Map()
   /** channel -> the terminal it watches */
@@ -185,11 +224,51 @@ function serve(socket, source, log, limits) {
   const close = () => {
     if (closed) return
     closed = true
+    finish()
     for (const handle of subs.values()) handle?.close?.()
     subs.clear()
     terminals.clear()
   }
   const end = () => { close(); socket.destroy() }
+
+  async function memoryRequest(id, method, params) {
+    const reply = (result) => { if (!ending) write({ id, result }) }
+    const grant = grants.get(params.grant)
+    if (!grant?.open) return reply(refusedWrite('revoked'))
+    const { terminal, text, id: entryId, rev } = params
+    const reading = method === 'memory-read'
+    const editing = method === 'memory-edit'
+    if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+      || (!reading && (typeof text !== 'string' || Buffer.byteLength(text) > MAX_MANAGE_TEXT))
+      || (editing && (typeof entryId !== 'string' || !MEMORY_ID.test(entryId) || typeof rev !== 'string' || !MEMORY_REV.test(rev)))) {
+      return reply(refusedWrite('invalid'))
+    }
+    const botId = terminal.slice(4)
+    const key = `manage\0${grant.phone}\0${terminal}`
+    if (limits.busy(key)) return reply(refusedWrite('busy'))
+    if (!(reading ? limits.takeRead(grant.phone) : limits.take(grant.phone, terminal, false))) return reply(refusedWrite('rate'))
+    const allowed = () => {
+      if (!grant.open) return 'revoked'
+      try { return source.memoryAllowed(botId) } catch { return 'unavailable' }
+    }
+    limits.begin(key)
+    try {
+      // Count the id, envelope and newline, leaving the result's bytes to the projector.
+      const overhead = Buffer.byteLength(JSON.stringify({ id, result: null })) - 4 + 1
+      const result = await source.manageMemory(method.slice(7), { botId, id: entryId, rev, text, allowed, overhead })
+      // Nothing asynchronous can run between the final check and the socket write.
+      if (result.memory !== undefined || result.state === 'saved') {
+        const reason = allowed()
+        if (reason !== undefined) return reply(refusedWrite(reason, result.state === 'saved' ? { applied: true } : undefined))
+      }
+      return reply(result)
+    } catch {
+      log('pocket memory: unavailable')
+      return reply(refusedWrite('unavailable'))
+    } finally {
+      limits.end(key)
+    }
+  }
 
   async function request(message) {
     const id = message?.id ?? null
@@ -199,9 +278,31 @@ function serve(socket, source, log, limits) {
         // Writes only for a bridge that asks, and only when the source takes them: an older
         // bridge, which drops any socket that is not `readOnly: true`, gets today's answer.
         writes = params.write === 1 && source.writable === true
+        revoke()
+        generation += 1
+        manages = !ending && writes && params.manage === 1 && source.manages === true
         return writes
-          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS], dedupe: 'log' } }
+          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS], dedupe: 'log', ...(manages ? { manage: 1, manageMethods: MANAGE_METHODS } : {}) } }
           : { id, result: { protocol: PROTOCOL, readOnly: true, methods: METHODS } }
+      case 'manage-close':
+        closeGrant(params.grant)
+        return { id, result: {} }
+      case 'manage-open': {
+        if (!manages) return readOnly(id)
+        const { grant, phone } = params
+        if (typeof grant !== 'string' || !MANAGE_GRANT.test(grant) || typeof phone !== 'string' || !PHONE_KEY.test(phone)) {
+          return { id, error: { kind: 'invalid_params', message: 'grant, phone' } }
+        }
+        if (grants.has(grant)) return { id, error: { kind: 'invalid_params', message: 'grant in use' } }
+        if (grants.size >= MAX_GRANTS) return { id, error: { kind: 'too_many', message: `at most ${MAX_GRANTS} grants` } }
+        grants.set(grant, { id: grant, phone, generation, open: true })
+        return { id, result: { grant } }
+      }
+      case 'memory-read':
+      case 'memory-edit':
+      case 'memory-add':
+        if (!manages) return readOnly(id)
+        return memoryRequest(id, message.method, params)
       case 'list':
         return { id, result: { terminals: await source.list() } }
       case 'subscribe': {
@@ -276,12 +377,13 @@ function serve(socket, source, log, limits) {
       if (!line.trim()) continue
       let message
       try { message = JSON.parse(line) } catch { end(); return }
-      request(message).then(write, (error) => {
+      request(message).then(reply => { if (reply !== undefined) write(reply) }, (error) => {
         log('pocket chat: %s', error?.message ?? error)
         write({ id: message?.id ?? null, error: { kind: 'failed', message: 'failed' } })
       })
     }
   })
+  socket.on('end', finish)
   socket.on('error', () => close())
-  return { close, end: () => socket.end(), destroy: () => socket.destroy() }
+  return { close, end: () => { finish(); socket.end() }, destroy: () => socket.destroy() }
 }
