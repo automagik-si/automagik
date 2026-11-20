@@ -750,6 +750,8 @@ var ZH = {
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.': "{bot} 在保存会话 {session} 时发生了变化。Bot 团队没有任何改动，请重试。在这次拒绝之前，会话 {session} 的原生预设已被设为「{preset}」。",
   "{name} could not switch to {model}. It stays on {kept}.": "{name} 无法切换到 {model}，仍使用 {kept}。",
   "{name} cannot use the {route} route.": "{name} 无法使用“{route}”路线。",
+  "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route}.": "{name} 的对话已有记录，切换到 {route} 需要开启新对话。请选择“新对话”，然后选择 {route}。",
+  "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route} (pause an active goal first).": "{name} 的对话已有记录，切换到 {route} 需要开启新对话。如果有进行中的目标，请先暂停目标，再选择“新对话”，然后选择 {route}。",
   // A Bot's capability pills (capability-pills.js); 'Channels' is the Channels page's.
   "Computer": "电脑",
   "Leads the team": "带领团队",
@@ -1659,12 +1661,13 @@ var ZH = {
   "Not available yet": "尚不可用",
   "{agent}, current model {model}": "{agent}，当前模型 {model}",
   "{route}, current model {model}": "{route}，当前模型 {model}",
-  "Start a new conversation?": "开始新对话？",
-  "Changing the route starts a new conversation. {name} writes a handoff note first.": "更改路线会开始新对话。{name} 会先写一份交接说明。",
+  "Change route?": "更改路线？",
+  "Change agent?": "更改代理？",
+  "Changing the route requires a new conversation if this one has history.": "如果当前对话已有记录，更改路线需要开启新对话。",
   "Full access: DSH's own tools run without asking.": "完全访问：DSH 自己的工具无需询问即可运行。",
   "Full access: the CLI's own no-ask mode.": "完全访问：CLI 自身的免询问模式。",
   "Full access: the agent's actions run without asking.": "完全访问：代理的操作无需询问即可运行。",
-  "Changing the agent starts a new conversation. {name} writes a handoff note first.": "更改代理会开始新对话。{name} 会先写一份交接说明。",
+  "Changing the agent requires a new conversation if this one has history.": "如果当前对话已有记录，更改代理需要开启新对话。",
   "Keep this conversation": "保留当前对话",
   "Change route": "更改路线",
   "Change agent": "更改代理",
@@ -3534,6 +3537,8 @@ var HOST_TEMPLATES = [
   MACHINE_MESSAGES.conflict,
   "{name} could not switch to {model}. It stays on {kept}.",
   { template: "{name} cannot use the {route} route.", host: ["route"] },
+  { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route} (pause an active goal first).", host: ["route"] },
+  { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route}.", host: ["route"] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
   // message (the store's read-only reason) is worded in turn.
   { template: "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}", host: ["reason"] },
@@ -3702,6 +3707,7 @@ var call = async (endpoint, payload, signal) => {
     const code = result.error?.code ?? "bot/error";
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
+    if (code === "bot/refused" && result.error?.reason === "needs-new-conversation") error.reason = result.error.reason;
     if (!vault && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? "Request failed"), { code }));
       markNoted(error);
@@ -8575,17 +8581,18 @@ function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
   const routeChanged = from?.route !== to.route;
   const fullAccess = bot.permission === "danger-full-access";
   const fullAccessLine = !fullAccess ? void 0 : to.route === "native" ? t("Full access: DSH's own tools run without asking.") : to.route === "hermes-remote" ? t("Full access: Hermes still asks you in the chat when it wants an approval. Its own rules apply there.") : to.provider === "acp-claude" || to.provider === "acp-codex" ? t("Full access: the CLI's own no-ask mode.") : t("Full access: the agent's actions run without asking.");
+  const title = routeChanged ? t("Change route?") : t("Change agent?");
   return (0, import_react16.createElement)(
     "div",
-    { className: "bt-model-step bt-model-confirm", role: "group", "aria-label": t("Start a new conversation?") },
-    (0, import_react16.createElement)("div", { className: "bt-model-confirm-title" }, t("Start a new conversation?")),
+    { className: "bt-model-step bt-model-confirm", role: "group", "aria-label": title },
+    (0, import_react16.createElement)("div", { className: "bt-model-confirm-title" }, title),
     (0, import_react16.createElement)(
       "div",
       { className: "bt-model-confirm-move" },
       from ? `${routeName(from.route)} · ${from.connection} → ` : "",
       `${routeName(to.route)} · ${to.connection}`
     ),
-    (0, import_react16.createElement)("div", { className: "bt-model-confirm-text" }, routeChanged ? t("Changing the route starts a new conversation. {name} writes a handoff note first.", { name: bot.name }) : t("Changing the agent starts a new conversation. {name} writes a handoff note first.", { name: bot.name })),
+    (0, import_react16.createElement)("div", { className: "bt-model-confirm-text" }, routeChanged ? t("Changing the route requires a new conversation if this one has history.") : t("Changing the agent requires a new conversation if this one has history.")),
     fullAccessLine === void 0 ? null : (0, import_react16.createElement)("div", { className: "bt-model-confirm-access", role: "note" }, fullAccessLine),
     (0, import_react16.createElement)(
       "div",
@@ -9018,7 +9025,7 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
     setError("");
     return Promise.resolve(actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref) : actions.updateBot(bot.id, { model: ref })).then(() => true, (failure) => {
       setError(failure?.message ?? String(failure));
-      void actions.refreshModels?.();
+      if (failure?.reason !== "needs-new-conversation") void actions.refreshModels?.();
       return false;
     }).finally(() => setBusy(""));
   };
@@ -21576,8 +21583,8 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     voicePane: (sessionId, paneId, open, active) => call2("voice-pane", { sessionId, paneId, open, active }),
     voiceWait: (sessionId, paneId, callId, signal) => call2("voice-wait", { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call2("voice-spoken", { sessionId, paneId, callId, outcome }),
-    // A model on another route: the host starts a new conversation with a handoff note
-    // (parts.js). `patch` carries the thinking level picked with it.
+    // A model on another route: the host changes it in place on a chat with nothing said.
+    // `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call2("switch-route", { id, ...patch, model: ref })),
     switchRouteInChat: async (id, ref, patch = {}) => {
       try {

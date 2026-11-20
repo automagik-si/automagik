@@ -2,13 +2,16 @@
 // a stub hands `ref` to the component like any prop, while React keeps it for itself, so a
 // model route passed as `ref` only fails here (React error 290, a string ref with no owner).
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
 import { build } from 'esbuild'
+import { apply } from '../index.js'
+import { fakeContext } from './fake-ctx.js'
 
 const plugin = dirname(dirname(fileURLToPath(import.meta.url)))
 const harness = process.env.DSH_HARNESS
@@ -30,7 +33,11 @@ const { createRoot } = nativeRequire('react-dom/client')
 const { flushSync } = nativeRequire('react-dom')
 
 const { outputFiles } = await build({
-  entryPoints: [join(plugin, 'src/client/model-menu.js')],
+  stdin: { contents: `
+    export * from './model-menu.js'
+    export { call } from './api.js'
+    export { teamActions } from './team-actions.js'
+  `, resolveDir: join(plugin, 'src/client') },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
@@ -45,7 +52,7 @@ class Slot extends React.Component {
   render() { return this.state.error ? null : this.props.children }
 }
 
-async function renderDock(t, { models, defaultModel = models[0]?.ref }) {
+async function renderDock(t, { models, defaultModel = models[0]?.ref, recovery }) {
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
   const globals = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'MutationObserver']
   const saved = globals.map(key => Object.getOwnPropertyDescriptor(globalThis, key))
@@ -56,20 +63,22 @@ async function renderDock(t, { models, defaultModel = models[0]?.ref }) {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
     requestAnimationFrame: fn => setTimeout(fn, 0), cancelAnimationFrame: clearTimeout,
-    console, setTimeout, clearTimeout, Promise, Map, Set,
+    console, setTimeout, clearTimeout, Promise, Map, Set, fetch: recovery?.fetch,
   })
   const errors = []
   const consoleError = console.error
   console.error = (...args) => { errors.push(args.map(String).join(' ')) }
   const picked = []
   const patches = []
-  const bot = { id: 'chief', name: 'Omni' }
-  const roster = { ready: true, byId: { chief: bot }, models, defaultModel }
+  const bot = recovery?.bot ?? { id: 'chief', name: 'Omni' }
+  const roster = { ready: true, byId: { [bot.sessionId ?? bot.id]: bot }, models, defaultModel }
   const actions = { updateBot: (id, patch) => { picked.push([id, patch.model]); patches.push(patch); return Promise.resolve() }, refreshModels: () => {} }
+  if (recovery) Object.assign(actions, module.exports.teamActions({ call: module.exports.call, after: promise => promise }),
+    recovery.refresh === undefined ? {} : { refreshModels: recovery.refresh })
   const caught = []
   const root = createRoot(dom.window.document.getElementById('root'))
   flushSync(() => root.render(React.createElement(Slot, { onError: error => caught.push(error) },
-    React.createElement(module.exports.ModelChoiceDock, { sessionId: bot.id, useRoster: select => select(roster), actions }))))
+    React.createElement(module.exports.ModelChoiceDock, { sessionId: bot.sessionId ?? bot.id, useRoster: select => select(roster), actions }))))
   await tick()
   t.after(() => {
     flushSync(() => root.unmount())
@@ -77,7 +86,7 @@ async function renderDock(t, { models, defaultModel = models[0]?.ref }) {
     dom.window.close()
     globals.forEach((key, index) => saved[index] ? Object.defineProperty(globalThis, key, saved[index]) : delete globalThis[key])
   })
-  return { document: dom.window.document, caught, errors, picked, patches }
+  return { document: dom.window.document, caught, errors, picked, patches, call: module.exports.call }
 }
 
 const models = [
@@ -187,3 +196,130 @@ for (const [label, effort] of [['High', 'high'], ['Default', undefined]]) {
     assert.deepEqual(JSON.parse(JSON.stringify(patches)), [{ model: 'deepseek-official/deepseek-flash' }, ...(effort ? [{ effort }] : [])])
   })
 }
+
+const oldRoute = 'acp-example/retired'
+const historyReason = 'needs-new-conversation'
+
+async function checkHttpCrossingRefusal(t, { rollover = false } = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'crossing-recovery-'))
+  const ctx = fakeContext()
+  t.after(async () => {
+    await ctx.dispose()
+    rmSync(home, { recursive: true, force: true })
+  })
+  const provider = oldRoute.split('/')[0]
+  const blocked = { kind: 'model', code: rollover ? 'MISSING_CREDENTIAL' : 'MODEL_ACCESS_REQUIRED', provider, at: 1 }
+  const bot = { id: 'b1', name: 'Test Bot', role: 'Orchestrator', sessionId: 's1', createdAt: 1,
+    model: oldRoute, appliedModel: oldRoute, blocked, ...(rollover ? { segments: [{ sessionId: 's0', endedAt: 1 }] } : {}) }
+  writeFileSync(join(home, 'state.json'), JSON.stringify({
+    version: 1, mainBotIds: [bot.id], bots: { [bot.id]: bot }, rooms: {}, exchanges: [], questions: {},
+  }))
+  let route
+  ctx.connection.fetch.register = options => {
+    if (options.path.endsWith('/omni-ui')) route = options
+    return () => {}
+  }
+  apply(ctx, { home })
+  const rt = ctx.provided.get('omniTeam')
+  await rt.load()
+  const messages = rollover ? [
+    { role: 'user', source: { kind: 'bot', role: 'handoff', handoff: true }, content: [{ type: 'text', text: '[Handoff · part 2]\n## Latest messages\nContinue the report.' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'Noted.' }] },
+  ] : [{ role: 'user', source: { kind: 'user' } }]
+  rt.resolveAgent = async () => ({
+    id: 's1', session: { id: 's1', deriveMessages: () => messages },
+    ...(!rollover && {
+      whenIdle: () => new Promise(() => {}),
+      runMaintenance: async fn => fn(),
+    }),
+  })
+  rt.resolveModel = async ref => ref
+  rt.assertModelAccess = async () => {}
+  const before = structuredClone(rt.botOf(bot.id))
+  assert.ok(before.blocked)
+  const wire = []
+  let refreshed = 0
+  let credentialAvailable = false
+  if (rollover) {
+    // A refresh on mount sees the old catalog. A refresh after the click would clear
+    // this MISSING_CREDENTIAL block through the real host model endpoint.
+    rt.catalog = async ({ fresh } = {}) => {
+      if (fresh && credentialAvailable) rt.unblockBots({ keyed: new Set([provider]) })
+      return models
+    }
+  }
+  const { document, call } = await renderDock(t, { models, recovery: {
+    bot,
+    ...(rollover ? {} : { refresh: () => { refreshed++ } }),
+    fetch: async (url, options) => {
+      const response = await route.fetch(new Request(new URL(url, 'http://localhost/'), options))
+      wire.push(await response.clone().json())
+      return response
+    },
+  } })
+  if (rollover) {
+    assert.equal(wire.length, 1, 'the initial model refresh settled')
+    assert.equal(wire.shift().ok, true)
+    assert.deepEqual(rt.botOf(bot.id).blocked, before.blocked)
+    credentialAvailable = true
+  }
+  const initialRefreshes = refreshed
+  const choice = document.querySelector('.bt-model-choice-chips button')
+  assert.ok(choice)
+  flushSync(() => choice.click())
+  await tick()
+  await tick()
+  assert.deepEqual(rt.botOf(bot.id).blocked, before.blocked)
+  assert.equal(wire.length, 1)
+  assert.equal(wire[0].ok, false)
+  assert.deepEqual(wire[0].error, {
+    code: 'bot/refused', reason: historyReason, details: {},
+    message: `${bot.name}'s conversation has history, so changing to Native needs a new conversation. Use New conversation, then pick Native.`,
+  })
+  assert.equal(document.querySelector('.bt-model-error[role="alert"]')?.textContent, wire[0].error.message)
+  assert.equal(choice.disabled, false)
+  assert.equal(refreshed, initialRefreshes)
+  assert.deepEqual(rt.botOf(bot.id).blocked, before.blocked)
+  assert.equal(rt.botOf(bot.id).model, before.model)
+  assert.equal(rt.switchingChat(bot.id), false)
+  await assert.rejects(call('switch-route', { id: bot.id, model: models[0].ref }), {
+    code: 'bot/refused', reason: historyReason,
+  })
+  assert.deepEqual(rt.botOf(bot.id).blocked, before.blocked)
+
+  for (const [code, reason] of [['bot/refused', 'unrelated'], ['bot/invalid', historyReason]]) {
+    rt.assertModelAccess = async () => { throw Object.assign(new Error('Unavailable.'), { code, reason }) }
+    await assert.rejects(call('switch-route', { id: bot.id, model: models[0].ref }), { code })
+    assert.deepEqual(wire.at(-1).error, { code, message: 'Unavailable.', details: {} })
+  }
+}
+
+test('the real HTTP crossing refusal leaves the recovery card terminal and the turn block intact', t => checkHttpCrossingRefusal(t))
+
+test('the HTTP recovery card is terminal for a hookless rollover and preserves the credential block', t =>
+  checkHttpCrossingRefusal(t, { rollover: true }))
+
+test('only the history refusal reason is rebuilt and stops a recovery refresh', async t => {
+  const bot = { id: 'b1', model: oldRoute }
+  const message = 'Use New conversation before picking again.'
+  let refreshed = 0
+  let error = { code: 'bot/refused', reason: historyReason, message }
+  const { document, call } = await renderDock(t, { models, recovery: {
+    bot, refresh: () => { refreshed++ },
+    fetch: async () => Response.json({ ok: false, error }),
+  } })
+  await assert.rejects(call('switch-route', {}), { code: 'bot/refused', reason: historyReason })
+  const choice = document.querySelector('.bt-model-choice-chips button')
+  const initialRefreshes = refreshed
+  flushSync(() => choice.click())
+  await tick()
+  assert.equal(document.querySelector('.bt-model-error[role="alert"]')?.textContent, message)
+  assert.equal(refreshed, initialRefreshes)
+
+  for (error of [{ code: 'bot/refused', reason: 'other', message }, { code: 'bot/invalid', reason: historyReason, message }]) {
+    await assert.rejects(call('switch-route', {}), failure => failure.code === error.code && !Object.hasOwn(failure, 'reason'))
+  }
+  flushSync(() => choice.click())
+  await tick()
+  assert.equal(refreshed, initialRefreshes + 1)
+})
