@@ -983,6 +983,8 @@ export function install(rt) {
       }
       void rt.save().catch(error => rt.warn('ds-bot: saving a task failed: %s', error))
     } else if (event?.type === 'turn/end') {
+      // RFC 0039 delivery 3: the team and task record this end happens in, at event time.
+      const gen = rt.teamGeneration?.()
       // A restart cut the turn: the task is not done. resume.js sets it going again, or
       // ends it as stopped when it will not.
       if (rt.cutByRestart?.(event.data?.reason)) return
@@ -1030,7 +1032,12 @@ export function install(rt) {
         }
       }
       Object.assign(task, { status, endedAt, summary })
-      void rt.save().catch(error => rt.warn('ds-bot: saving a task failed: %s', error))
+      // RFC 0039 delivery 3: publish after this end's own write commits, while its team and task record still hold.
+      void rt.save().then((committed) => {
+        const valid = () => rt.sameTeam?.(gen) === true && state.tasks?.[id] === task && task.status === status
+        if (committed === true && valid()) return rt.endApprovals?.(id, 'task', { task }, valid)
+      }, error => rt.warn('ds-bot: saving a task failed: %s', error))
+        .catch(error => rt.warn('ds-bot: the asks of task %s were not withdrawn: %s', id, error))
       if (delivery === undefined) return
       const options = written ? rt.wakeLog.firstOptions(delivery.exchangeId) : undefined
       void rt.deliver(delivery, options)

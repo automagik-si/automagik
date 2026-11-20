@@ -11845,6 +11845,8 @@ var ZH = {
   "Wants to use {tool}": "想要使用 {tool}",
   "Nothing running right now.": "现在没有在运行的任务。",
   "Just finished": "刚刚完成",
+  "This step was withdrawn: its task ended": "这一步已撤回：它的任务结束了",
+  "The task ended with an approval unanswered": "任务结束时还有一个审批没有回答",
   "Automations": "自动化",
   "What runs on a schedule or a trigger": "按计划或触发运行的任务",
   "Failed: {reason}": "失败：{reason}",
@@ -12094,6 +12096,7 @@ var HOST_ERRORS = [
   [/^Memory cannot change now: [\s\S]*$/, "现在不能修改记忆：另一个 dsh 正在使用这个 Bot 团队"]
 ];
 var HOST_ZH = {
+  "This approval is no longer open": "这个审批已经关闭了",
   "The Server address must start with ws:// or wss://": "服务器地址必须以 ws:// 或 wss:// 开头",
   "Enter the Server address first": "请先填服务器地址",
   "Turn on phone access first": "请先打开手机访问",
