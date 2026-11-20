@@ -25,6 +25,78 @@ const ipv4Of = address => address.kind() === 'ipv6' && address.isIPv4MappedAddre
   ? address.toIPv4Address()
   : address
 
+const SCHEME_REFUSAL = 'Only web addresses open in the Bot browser.'
+const OWN_SERVER_REFUSAL = "This address is Automagik's own server; the Bot browser never opens it."
+const WEB_PROTOCOLS = new Map([
+  ['http:', 'http:'], ['https:', 'https:'], ['ws:', 'http:'], ['wss:', 'https:'],
+])
+
+export function schemeRefusal(url, kind) {
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return SCHEME_REFUSAL
+  }
+  if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return undefined
+  const document = parsed.href.split('#', 1)[0]
+  if (document === 'about:blank') return undefined
+  if (kind === 'request' && (document === 'about:srcdoc'
+    || ['ws:', 'wss:', 'data:', 'blob:'].includes(parsed.protocol))) return undefined
+  return SCHEME_REFUSAL
+}
+
+const normalizedHost = host => stripBrackets(host).replace(/\.$/, '').toLowerCase()
+
+function literalOf(host) {
+  const value = normalizedHost(host)
+  if (value.includes('%') || isIP(value) === 0) return undefined
+  return ipv4Of(ipaddr.parse(value))
+}
+
+function isLoopbackAlias(address) {
+  return address.range() === 'loopback' || ['0.0.0.0', '::'].includes(address.toString())
+}
+
+function effectivePort(url) {
+  const protocol = WEB_PROTOCOLS.get(url.protocol)
+  return protocol === undefined ? undefined : Number(url.port || (protocol === 'https:' ? 443 : 80))
+}
+
+const originHost = url => literalOf(url.hostname)?.toString() ?? normalizedHost(url.hostname)
+const pathOf = url => url.pathname.replace(/%2f|%5c/gi, '/')
+
+export function ownServerRefusal(url, { listener, advertised } = {}) {
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return undefined
+  }
+  const port = effectivePort(parsed)
+  if (port === undefined) return undefined
+  if (listener?.port === port) {
+    const bound = literalOf(listener.host)
+    const target = literalOf(parsed.hostname)
+    if (!bound || !target || bound.toString() === target.toString()
+      || (bound.range() === 'loopback' && isLoopbackAlias(target))) {
+      return OWN_SERVER_REFUSAL
+    }
+  }
+  if (advertised && WEB_PROTOCOLS.get(parsed.protocol) === WEB_PROTOCOLS.get(advertised.protocol)
+    && port === effectivePort(advertised) && originHost(parsed) === originHost(advertised)) {
+    const mount = pathOf(advertised).replace(/\/$/, '')
+    const path = pathOf(parsed)
+    if (path === mount || path.startsWith(`${mount}/`)) return OWN_SERVER_REFUSAL
+  }
+  return undefined
+}
+
+export function localRefusal(url, kind, own) {
+  const message = schemeRefusal(url, kind) ?? ownServerRefusal(url, own)
+  return message === undefined ? undefined : { code: 'ADDRESS_REFUSED', message }
+}
+
 function ipEntry(text) {
   const value = stripBrackets(text)
   if (value === '') return undefined
