@@ -27,7 +27,8 @@ import { acceptOne, slots, throttle, rotateLog, routesFor, endRemoved, sessionNa
 import { ChatConnection, ChatEngines, chatWriter } from './chat.mjs'
 import { DshSource, withDsh } from './dsh-source.mjs'
 import { createEngine } from '../chat/engine.js'
-import { judgeCode, cancelCode, shortenCode, fingerprint } from './pairing.mjs'
+import { judgeCode, cancelCode, shortenCode, fingerprint, desktopFingerprint } from './pairing.mjs'
+import { pipeSession } from './pipe.mjs'
 import { open as openState } from './state.mjs'
 import { presence, publicStatus, writePublic, HEARTBEAT } from './presence.mjs'
 import { store, listen, unlinkOwn, forget, bridgeState, claim, stopBridge, startedAt, withLock, SOCKET } from './devices.mjs'
@@ -109,27 +110,17 @@ async function session({ conn, bi, value, rest, peer: phone }) {
   phoneList.touch(phone)
   log('session:', device.name, 'session', name)
   const hc = spawn(hcPath(), ['connect'], { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, HC_SESSION: name } })
-  if (rest.length) hc.stdin.write(rest)
+  hc.on('error', e => {
+    log('session: hc failed:', e.message)
+    conn.close(2n, [...Buffer.from('hc failed')])
+  })
   const open = { phone, conn, hc, end: () => { hc.kill(); try { conn.close(1n, [...Buffer.from('not paired')]) } catch {} } }
   live.add(open)
   // Counted from here until the phone hangs up or hc exits (a removed phone's hc is killed), whichever comes first.
   const close = phones.open(phone, device.name)
-  hc.on('exit', () => { live.delete(open); close() })
-  let writing = Promise.resolve()
-  hc.stdout.on('data', chunk => {
-    hc.stdout.pause()
-    writing = writing.then(() => bi.send.writeAll([...chunk])).then(() => hc.stdout.resume(), () => hc.kill())
-  })
-  hc.on('exit', () => { writing.then(() => bi.send.finish()).catch(() => {}) })
-  hc.on('error', e => { log('session: hc failed:', e.message); conn.close(2n, [...Buffer.from('hc failed')]) })
-  try {
-    for (;;) {
-      const data = await bi.recv.read(65536).catch(() => null)
-      if (!data || data.length === 0) break
-      if (!hc.stdin.write(Buffer.from(data))) await new Promise(r => hc.stdin.once('drain', r))
-    }
-    hc.stdin.end()
-  } finally { close() }
+  hc.on('exit', close); hc.on('close', close)
+  try { await pipeSession({ hc, conn, bi, rest, log, onClosed: () => live.delete(open) }) }
+  finally { close() }
 }
 
 // The chat's engines, one per hc session name (chat.mjs), each reaching herdr-core through its
@@ -391,10 +382,11 @@ try {
   if (command === 'serve') await serve()
   else if (command === 'pair') out(await pair(arg))
   else if (command === 'status') {
+    const { running } = await bridgeState({ dir: STATE })
     const s = readJson(files.status, {})
     const p = readJson(files.pairing, null)
-    const { running } = await bridgeState({ dir: STATE })
     out({ running, id: s.id ?? null, name: s.name ?? null, ticket: s.ticket ?? null,
+      fingerprint: desktopFingerprint(s, running),
       devices: devices().map(({ id, name, paired, seen }) => ({ id, name, fingerprint: fingerprint(id), paired, seen })),
       pairing: !s.rotating && p && (!p.id || p.id === s.id) && Date.now() < p.expires ? { expires: p.expires } : null,
       login: existsSync(loginService().path), state: STATE })
