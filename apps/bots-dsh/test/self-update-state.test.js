@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { AGENT_TOOLS } from '../src/host/agent-access.js'
 import { ROUTE } from '../src/host/constants.js'
+import { install as installLocalAgents } from '../src/host/local-agents/index.js'
 import {
   REASON_CODES, install, readSelfUpdate, selfUpdateStatus, storeDirOf, supervisorOf, usableStore, writeJsonAtomic,
 } from '../src/host/self-update.js'
@@ -597,7 +598,7 @@ test('runtime installation captures the supervisor and polls the configured prof
 
 const endpoint = 'self-update-status'
 
-function statusChannel(profileDir, teamHome) {
+function statusChannel(profileDir, teamHome, routeEndpoint = endpoint) {
   const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
   const register = ctx.connection.fetch.register
   let route
@@ -606,8 +607,8 @@ function statusChannel(profileDir, teamHome) {
     return register(options)
   }
   const rt = createRuntime(ctx, { home: teamHome, browser: false, memory: false, updateCheck: false })
-  const post = async () => (await route.fetch(new Request('http://fixture.invalid' + ROUTE, {
-    method: 'POST', body: JSON.stringify({ endpoint }),
+  const post = async (payload, name = routeEndpoint) => (await route.fetch(new Request('http://fixture.invalid' + ROUTE, {
+    method: 'POST', body: JSON.stringify({ endpoint: name, payload }),
   }))).json()
   const dispose = async () => {
     try { await ctx.dispose() } finally { rt.dispose() }
@@ -669,5 +670,208 @@ test('the channel refuses self-update-status after lock acquisition throws', req
   } finally {
     write.mock.restore()
     syncBuiltinESMExports()
+  }
+})
+
+test('the self-update check requires the team lock ahead of read extensions and takes no input', requiresStore, async t => {
+  const { home, profileDir } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  const checkEndpoint = 'self-update-check'
+  const teamHome = join(home, 'team')
+  const { rt, post, dispose } = statusChannel(profileDir, teamHome, checkEndpoint)
+  const extension = t.mock.fn(() => ({ extension: true }))
+  rt.hooks.endpoint(checkEndpoint, extension, { read: true })
+  const value = { state: 'current', reason: 'not-newer' }
+  assert.equal(typeof rt.selfUpdateCheck, 'function')
+  rt.selfUpdateCheck = t.mock.fn(async () => value)
+  try {
+    assert.deepEqual(await post({ url: 'https://fixture.invalid/update' }), { ok: true, value })
+    assert.equal(rt.holdsLock(), true)
+    assert.deepEqual(rt.selfUpdateCheck.mock.calls[0].arguments, [])
+
+    const lockPath = join(teamHome, 'state.lock')
+    writeFileSync(lockPath, JSON.stringify({ pid: process.ppid, host: hostname(), token: 'other' }))
+    const reply = await post()
+    assert.deepEqual(reply, refused)
+    assert.equal(reply.error.message.includes(teamHome), false)
+    assert.equal(rt.holdsLock(), false)
+    assert.equal(rt.selfUpdateCheck.mock.callCount(), 1)
+    assert.equal(extension.mock.callCount(), 0)
+    assert.equal(AGENT_TOOLS.some(tool => tool.endpoint === checkEndpoint || /^self[-_]update[-_]check$/.test(tool.name)), false)
+  } finally {
+    await dispose()
+  }
+})
+
+
+const checkEndpoint = 'self-update-check'
+const resultEndpoint = 'self-update-check-result'
+const laneUrl = 'https://github.com/automagik-si/automagik/releases/download/plugin-lane/lane.json'
+
+function pausedLane(t) {
+  const urls = []
+  let pending
+  const pause = () => {
+    const started = Promise.withResolvers()
+    const resume = Promise.withResolvers()
+    pending = { started, resume }
+    return { started: started.promise, resume: resume.resolve }
+  }
+  const first = pause()
+  t.mock.method(globalThis, 'fetch', async url => {
+    urls.push(url)
+    if (url === laneUrl) {
+      const { started, resume } = pending
+      started.resolve()
+      await resume.promise
+      return new Response('{"keyId":"unknown","schemaVersion":1}')
+    }
+    if (url === laneUrl + '.sig') return new Response('fixture signature')
+    assert.fail(`Unexpected URL: ${url}`)
+  })
+  return { ...first, pause, urls }
+}
+
+test('deferred checks join in flight and the result route stays bound to the requested run', requiresStore, async t => {
+  const { home, profileDir, storeDir } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  const prior = {
+    version: 1, runId: 'completed-before-restart', checkedAt: run.startedAt, state: 'current', reason: 'not-newer',
+    laneVersion: '1.2.3', sequence: 4, plugins: [], supervisor: true,
+  }
+  writeJsonAtomic(join(storeDir, 'check.json'), prior, { profileDir })
+  const { rt, post, dispose } = statusChannel(profileDir, join(home, 'team'), checkEndpoint)
+  const lane = pausedLane(t)
+  let nextLane
+  const replies = []
+  const wait = Promise.withResolvers()
+  const set = globalThis.setTimeout
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+    if (ms === 5000) {
+      replies.push(() => callback(...args))
+      if (replies.length === 2) wait.resolve()
+    }
+    return set(callback, ms, ...args)
+  })
+  try {
+    const initial = post()
+    await lane.started
+    const joined = post()
+    await wait.promise
+    for (const reply of replies) reply()
+
+    const first = await initial
+    const { runId } = first.value
+    const marker = JSON.parse(readFileSync(join(storeDir, `check-${runId}`, 'check.running.json'), 'utf8'))
+    assert.match(marker.runId, /^[a-f0-9-]{36}$/)
+    assert.equal(marker.runId, runId)
+    const checking = { ok: true, value: { state: 'checking', runId } }
+    const interrupted = { ok: true, value: { state: 'interrupted', runId } }
+    assert.deepEqual(first, checking)
+    assert.deepEqual(await joined, checking)
+    assert.deepEqual(await post({ runId }, resultEndpoint), checking)
+    assert.equal((await post({}, resultEndpoint)).error.code, 'bot/invalid')
+
+    // A fresh module has the same disk records and none of the interrupted process's memory.
+    const checkBeforeRestart = rt.selfUpdateCheck
+    const resultBeforeRestart = rt.selfUpdateCheckResult
+    const restarted = await import('../src/host/self-update-check.js?restart-fixture')
+    restarted.install(rt)
+    assert.deepEqual(await post({ runId }, resultEndpoint), interrupted)
+    assert.deepEqual(await post({ runId: prior.runId }, resultEndpoint), { ok: true, value: prior })
+    rt.selfUpdateCheck = checkBeforeRestart
+    rt.selfUpdateCheckResult = resultBeforeRestart
+    assert.deepEqual(lane.urls, [laneUrl])
+
+    // A caller arriving just before completion gets the result in its check response.
+    const admitted = Promise.withResolvers()
+    const check = rt.selfUpdateCheck
+    t.mock.method(rt, 'selfUpdateCheck', () => {
+      const answer = check()
+      admitted.resolve()
+      return answer
+    })
+    const finishing = post()
+    await admitted.promise
+    lane.resume()
+    const answer = await finishing
+    assert.equal(answer.ok, true)
+    assert.equal(answer.value.state, 'refused')
+    assert.equal(answer.value.reason, 'signature-invalid')
+    assert.deepEqual(answer.value, JSON.parse(readFileSync(join(storeDir, 'check.json'), 'utf8')))
+    assert.equal(answer.value.runId, runId)
+    assert.deepEqual(await post({ runId }, resultEndpoint), answer)
+    assert.deepEqual(lane.urls, [laneUrl, laneUrl + '.sig'])
+
+    // A second window starts a new check before the first window polls again.
+    nextLane = lane.pause()
+    const next = post()
+    await nextLane.started
+    assert.deepEqual(await post({ runId }, resultEndpoint), interrupted)
+    nextLane.resume()
+    const newer = await next
+    assert.equal(newer.ok, true)
+    assert.notEqual(newer.value.runId, runId)
+    assert.deepEqual(await post({ runId }, resultEndpoint), interrupted)
+    assert.deepEqual(await post({ runId: newer.value.runId }, resultEndpoint), newer)
+    assert.deepEqual(lane.urls, [laneUrl, laneUrl + '.sig', laneUrl, laneUrl + '.sig'])
+  } finally {
+    nextLane?.resume()
+    lane.resume()
+    await dispose()
+  }
+})
+
+test('losing the team during a check leaves the previous record intact and refuses both routes', requiresStore, async t => {
+  const { home, profileDir, storeDir } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  const teamHome = join(home, 'team')
+  const checkPath = join(storeDir, 'check.json')
+  const prior = {
+    version: 1, runId: 'prior-run', checkedAt: run.startedAt, state: 'current', reason: 'not-newer',
+    laneVersion: '1.2.3', sequence: 4, plugins: [], supervisor: true,
+  }
+  writeJsonAtomic(checkPath, prior, { profileDir })
+  const previousBytes = readFileSync(checkPath)
+  const { rt, post, dispose } = statusChannel(profileDir, teamHome, checkEndpoint)
+  const lane = pausedLane(t)
+  const extension = t.mock.fn(() => ({ extension: true }))
+  rt.hooks.endpoint(resultEndpoint, extension, { read: true })
+  try {
+    assert.deepEqual(await post({ runId: prior.runId, url: 'https://fixture.invalid/update' }, resultEndpoint), { ok: true, value: prior })
+    assert.deepEqual(lane.urls, [])
+    const request = post()
+    await lane.started
+    const generation = rt.teamGeneration()
+    assert.equal(rt.sameTeam(generation), true)
+    writeFileSync(join(teamHome, 'state.lock'), JSON.stringify({ pid: process.ppid, host: hostname(), token: 'other' }))
+    assert.equal(rt.sameTeam(generation), false)
+    lane.resume()
+    assert.deepEqual(await request, refused)
+    assert.deepEqual(await post({ runId: prior.runId }, resultEndpoint), refused)
+    assert.deepEqual(readFileSync(checkPath), previousBytes)
+    assert.equal(extension.mock.callCount(), 0)
+  } finally {
+    lane.resume()
+    await dispose()
+  }
+})
+
+test('the two check routes are absent from the MCP, Bot and local-agent tool lists', requiresStore, async t => {
+  const { home, profileDir } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  const { rt, dispose } = statusChannel(profileDir, join(home, 'team'))
+  try {
+    assert.ok(AGENT_TOOLS.length > 0)
+    assert.ok(rt.teamTools.length > 0)
+    installLocalAgents(rt)
+    assert.ok(rt.localAgentTools.some(tool => tool.name === 'approve_agent_action'))
+    for (const tools of [AGENT_TOOLS, rt.teamTools, rt.localAgentTools]) {
+      for (const endpoint of [checkEndpoint, resultEndpoint]) {
+        assert.equal(tools.some(tool => tool.endpoint === endpoint || tool.name?.replaceAll('_', '-') === endpoint), false)
+      }
+    }
+  } finally {
+    await dispose()
   }
 })

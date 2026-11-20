@@ -12,6 +12,7 @@ export const REASON_CODES = Object.freeze([
   'download-failed', 'signature-invalid', 'hash-mismatch', 'not-newer', 'sequence-lower',
   'engines-dsh', 'registry-unreachable', 'stage-failed', 'switch-refused', 'health-failed',
   'rollback-failed', 'supervisor-restarted', 'no-writable-home', 'health-check-finished',
+  'desktop-app', 'no-store', 'store-invalid', 'profile-invalid', 'lane-invalid',
 ])
 const FILE_LIMIT = 64 * 1024
 const ISO_TIMESTAMP = /^(?:\d{4}|[+-]\d{6})-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/
@@ -121,17 +122,9 @@ function projectedRealpath(path) {
   }
 }
 
-export function writeJsonAtomic(path, value, { profileDir, readMountInfo } = {}) {
-  const json = JSON.stringify(value)
-  const checkStore = () => usableStore(profileDir, readMountInfo)
-  const storeDir = checkStore()
-  const dir = dirname(path)
-  const invalidStore = () => new Error('Invalid update store directory')
-  if (storeDir === undefined) throw invalidStore()
-  const realDir = projectedRealpath(storeDir)
-  const target = join(realDir, basename(path))
-  if (dirname(target) !== realDir || projectedRealpath(dir) !== realDir) throw invalidStore()
+const invalidStore = () => new Error('Invalid update store directory')
 
+function ensureStoreDirectories(storeDir, checkStore) {
   for (const folder of [dirname(storeDir), storeDir]) {
     if (fs.lstatSync(folder, { throwIfNoEntry: false }) === undefined) {
       try { fs.mkdirSync(folder, { mode: 0o700 }) } catch (error) {
@@ -140,6 +133,28 @@ export function writeJsonAtomic(path, value, { profileDir, readMountInfo } = {})
     }
     if (!fs.lstatSync(folder).isDirectory() || checkStore() !== storeDir) throw invalidStore()
   }
+}
+
+export function prepareStore(profileDir, readMountInfo) {
+  const checkStore = () => usableStore(profileDir, readMountInfo)
+  const storeDir = checkStore()
+  if (storeDir === undefined) throw invalidStore()
+  const realDir = projectedRealpath(storeDir)
+  ensureStoreDirectories(storeDir, checkStore)
+  if (fs.realpathSync(storeDir) !== realDir) throw invalidStore()
+  return realDir
+}
+
+export function writeJsonAtomic(path, value, { profileDir, readMountInfo } = {}) {
+  const json = JSON.stringify(value)
+  const checkStore = () => usableStore(profileDir, readMountInfo)
+  const storeDir = checkStore()
+  const dir = dirname(path)
+  if (storeDir === undefined) throw invalidStore()
+  const realDir = projectedRealpath(storeDir)
+  const target = join(realDir, basename(path))
+  if (dirname(target) !== realDir || projectedRealpath(dir) !== realDir) throw invalidStore()
+  ensureStoreDirectories(storeDir, checkStore)
 
   const checkedStore = () => {
     if (checkStore() !== storeDir || fs.realpathSync(storeDir) !== realDir
@@ -244,11 +259,16 @@ function readJson(checkStore, storeDir, file, io) {
   return null
 }
 
+export function readCheckRecord(profileDir) {
+  const checkStore = () => usableStore(profileDir)
+  return readJson(checkStore, checkStore(), 'check.json', fs)
+}
+
 function readStore(profileDir, io = fs, readMountInfo) {
   const checkStore = () => usableStore(profileDir, readMountInfo)
   const storeDir = checkStore()
   return {
-    storeAvailable: storeDir !== undefined,
+    storeDir,
     currentRecord: readJson(checkStore, storeDir, 'current.json', io),
     supervisorRecord: readJson(checkStore, storeDir, 'supervisor.json', io),
     runRecord: readJson(checkStore, storeDir, 'state.json', io),
@@ -296,22 +316,27 @@ function runView(run) {
   return view
 }
 
-function statusOf(profileDir, env, inDesktop, readMountInfo) {
+export function selfUpdateDetails(profileDir, env, readMountInfo) {
   const records = readStore(profileDir, fs, readMountInfo)
   const bootIds = bootIdsOf(records, env?.AUTOMAGIK_SUPERVISOR_BOOT)
   const announced = supervisorOf(env)
   const supervisor = announced !== null && !hasBootId(announced.version, bootIds) ? announced : null
   const status = stateOf(records, supervisor?.bootId, bootIds)
   const currentInvalid = records.currentRecord !== undefined && status.current === null
-  const reason = inDesktop ? 'desktop-app' : supervisor === null ? 'no-supervisor'
-    : !records.storeAvailable ? 'no-store' : currentInvalid ? 'store-invalid' : null
   return {
-    available: reason === null,
-    reason,
+    storeDir: records.storeDir,
+    currentInvalid,
     supervisor: supervisor === null ? null : { version: supervisor.version },
     ...status,
     run: runView(status.run),
   }
+}
+
+function statusOf(profileDir, env, inDesktop, readMountInfo) {
+  const { storeDir, currentInvalid, ...status } = selfUpdateDetails(profileDir, env, readMountInfo)
+  const reason = inDesktop ? 'desktop-app' : status.supervisor === null ? 'no-supervisor'
+    : storeDir === undefined ? 'no-store' : currentInvalid ? 'store-invalid' : null
+  return { available: reason === null, reason, ...status }
 }
 
 export function selfUpdateStatus({ profileDir, env = process.env, inDesktop = inDesktopApp(), readMountInfo }) {

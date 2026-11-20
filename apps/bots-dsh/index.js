@@ -71,6 +71,7 @@ import * as schedules from './src/host/schedules.js'
 import * as usage from './src/host/usage.js'
 import * as update from './src/host/update.js'
 import * as selfUpdate from './src/host/self-update.js'
+import * as selfUpdateCheck from './src/host/self-update-check.js'
 import * as dshUpdate from './src/host/dsh-update.js'
 import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
@@ -132,7 +133,7 @@ const MODULES = [
   }) },
   sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, selfUpdate, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
+  update, selfUpdate, selfUpdateCheck, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
   officeSkills, goalSkills,
 ]
 

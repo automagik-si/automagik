@@ -72,6 +72,7 @@ import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { createRequire } from 'node:module';
 import type { ReleasePlugins } from './release-plugins';
 import { CRATES, FIELDS, MAX_PART, VERSION, cargoVersionLine } from './version';
 
@@ -657,12 +658,12 @@ function verifyRoleFiles(file: string, signature: string, version: string) {
 
 /** The keys a consumer trusts: plugin-lane/keys.json, { keys: [{ keyId, publicKey (PEM) }] }. */
 export function verifyLane(bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[]): Lane {
-  const lane = JSON.parse(bytes.toString('utf8')) as Lane;
-  const key = keys.find(entry => entry.keyId === lane.keyId);
-  if (!key) throw new Error(`lane: no key ${lane.keyId}`);
-  if (!verifyBytes(null, bytes, createPublicKey(key.publicKey), Buffer.from(signature.trim(), 'base64'))) throw new Error('lane: the signature does not match');
-  if (lane.schemaVersion !== SCHEMA_VERSION) throw new Error(`lane: schema ${lane.schemaVersion}`);
-  return lane;
+  // The one verifier (RFC 0041), loaded on first use: tools and tests that copy this file alone
+  // to compute a release kind never need it.
+  const { verifyLane: verifyPluginLane } = createRequire(import.meta.url)('../plugin-lane/verify.mjs') as {
+    verifyLane: (bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[]) => Lane;
+  };
+  return verifyPluginLane(bytes, signature, keys);
 }
 
 const git = (...args: string[]) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });

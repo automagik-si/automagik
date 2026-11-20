@@ -336,6 +336,8 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     diagnosticsClear: () => call('diagnostics-clear'),
     diagnosticsPermissions: () => call('diagnostics-permissions'),
     repoStars: () => call('repo-stars'),
+    checkSelfUpdate: () => call('self-update-check'),
+    selfUpdateResult: runId => call('self-update-check-result', { runId }),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = 'action') => {
       noteClientError(where, error)
