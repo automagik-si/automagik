@@ -384,8 +384,8 @@ export function pocketSince(last: string, laneVersion: string | undefined, tags:
 }
 
 /**
- * `am` when everything shipping in `sinceLast` (the changes since the last release, any tag) is am's,
- * `meter` when it is the meter's (with or without am's): that part alone. `herdr` when it is
+ * `am` when everything shipping in `sinceLast` (the changes since the last release, any tag, less the
+ * `inertSince` ones, read against that release) is am's, `meter` when it is the meter's (with or without am's): that part alone. `herdr` when it is
  * under herdr/ (with or without the meter's and am's): the pack alone, no app and no plugin. `pocket` when it is all under apps/pocket/,
  * or under apps/pocket/ and the herdr part (herdr/, herdr-layout/): Pocket's app (the pack along when herdr/ shipped). Otherwise whether the changes since the last
  * full release are the plugins' alone: every changed path inside a plugin, or under herdr/ or apps/pocket/ (no app
@@ -393,8 +393,14 @@ export function pocketSince(last: string, laneVersion: string | undefined, tags:
  * themselves write, the release tooling, tests, `inert` ones), none in a plugin's dev/harness (that
  * moves DSH), no lockfile, and no field a plugin is installed or admitted by.
  */
-export function kindOf(changed: string[], installChanged: (plugin: string) => boolean, inert: (path: string) => boolean = () => false, sinceLast?: string[]): 'am' | 'meter' | 'herdr' | 'pocket' | 'plugins' | 'full' {
-  const shipping = (sinceLast ?? []).filter(path => !neverShipped(path) && !inert(path));
+export function kindOf(
+  changed: string[],
+  installChanged: (plugin: string) => boolean,
+  inert: (path: string) => boolean = () => false,
+  sinceLast?: string[],
+  inertSince = inert,
+): 'am' | 'meter' | 'herdr' | 'pocket' | 'plugins' | 'full' {
+  const shipping = (sinceLast ?? []).filter(path => !neverShipped(path) && !inertSince(path));
   if (shipping.length > 0 && shipping.every(path => AM.test(path))) return 'am';
   if (shipping.length > 0 && shipping.every(path => METER.test(path) || AM.test(path))) return 'meter';
   if (shipping.length > 0 && shipping.every(path => HERDR.test(path) || METER.test(path) || AM.test(path))) return 'herdr';
@@ -687,24 +693,15 @@ if (import.meta.main) {
       process.exit(0);
     }
     if (!last) { console.log(command === 'kind' ? 'full' : 'yes'); process.exit(0); }
-    const diff = (from: string) => {
-      const paths = git('diff', '--name-only', `${from}..HEAD`).split('\n').filter(Boolean);
-      if (command === 'ships' || command === 'kind') {
-        // A rename into an unpacked path can still remove a shipped role or server plugin file.
-        const serverRoots = SERVER_PLUGINS.map(name => `apps/${name}/`);
-        const shippingPaths = git('diff', '--name-only', '--no-renames', '-z', `${from}..HEAD`, '--', `${ROLE_ROOT}/`, ...serverRoots)
-          .split('\0').filter(path => ROLE_SOURCE.test(path) || serverRoots.some(root => path.startsWith(root)));
-        return [...new Set([...paths, ...shippingPaths])];
-      }
-      return paths;
-    };
+    // A rename can remove a shipped file, so count both paths.
+    const diff = (from: string) => git('diff', '--name-only', '--no-renames', '-z', `${from}..HEAD`).split('\0').filter(Boolean);
     const changed = diff(last);
-    const before = (path: string) => git('show', `${last}:${path}`);
+    const before = (path: string, base = last) => git('show', `${base}:${path}`);
     const read = (get: () => string) => { try { return get(); } catch { return undefined; } };
     const unpacked = unpackedIn(Object.fromEntries([...PLUGINS, ...SERVER_PLUGINS].map(plugin => [plugin, JSON.parse(readFileSync(join(ROOT, 'apps', plugin, 'package.json'), 'utf8')).files ?? []])));
     // A file only the version fields of changed in (a release's own bump), or the held meter's.
-    const bumped = (path: string) => versionOnly(path, read(() => before(path)), read(() => readFileSync(join(ROOT, path), 'utf8')));
-    const inert = (path: string) => bumped(path) || (held && METER.test(path));
+    const bumped = (path: string, base: string) => versionOnly(path, read(() => before(path, base)), read(() => readFileSync(join(ROOT, path), 'utf8')));
+    const inert = (path: string, base = last) => bumped(path, base) || (held && METER.test(path));
     if (command === 'ships') {
       console.log(ships(changed, path => inert(path) || unpacked(path)) ? 'yes' : 'no');
     } else if (command === 'herdr') {
@@ -721,13 +718,15 @@ if (import.meta.main) {
         return pick(was) !== pick(JSON.parse(readFileSync(join(ROOT, path), 'utf8')));
       };
       // The profile with only the lane's add-on pins moved needs no app: the lane carries them.
-      const addonPins = (path: string) => {
-        try { return path === PROFILE && addonPinsOnly(before(path), readFileSync(join(ROOT, path), 'utf8')); } catch { return false; }
+      const addonPins = (path: string, base: string) => {
+        try { return path === PROFILE && addonPinsOnly(before(path, base), readFileSync(join(ROOT, path), 'utf8')); } catch { return false; }
       };
+      const kindInert = (base: string) => (path: string) => inert(path, base) || addonPins(path, base) || unpacked(path);
       // The changes since the last release of any kind: a herdr-only run of them is a herdr patch, and
       // a run under apps/pocket/ (with herdr/ or alone) a pocket patch.
-      const sinceLast = args[1] ? diff(args[1]) : undefined;
-      console.log(kindOf(changed, installChanged, path => inert(path) || addonPins(path) || unpacked(path), sinceLast));
+      const lastRelease = args[1];
+      const sinceLast = lastRelease ? diff(lastRelease) : undefined;
+      console.log(kindOf(changed, installChanged, kindInert(last), sinceLast, lastRelease ? kindInert(lastRelease) : undefined));
     }
   } else if (command === 'pocket-since' && (args.length === 1 || args.length === 2)) {
     console.log(pocketSince(args[0], args[1], git('tag', '--list', 'v3.*').split('\n').filter(Boolean)));

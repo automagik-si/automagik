@@ -26,6 +26,19 @@ describe('the plugin lane', () => {
     expect(kindOf(['meter/statusline/automagik-statusline.mjs', 'meter/statusline/test/statusline.test.mjs', 'apps/bots-dsh/client.js'], none)).toBe('plugins');
   });
 
+  test('kindOf can filter changes since the last release against their own baseline', () => {
+    const desktop = 'apps/desktop/package.json';
+    const welcome = 'apps/welcome-dsh/package.json';
+    const am = 'am/bin/am.mjs';
+    const changed = [desktop, am];
+    const sinceLast = [welcome, am];
+    const inert = (path: string) => path === desktop || path === welcome;
+    const installChanged = () => false;
+
+    expect(kindOf(changed, installChanged, inert, sinceLast)).toBe('am');
+    expect(kindOf(changed, installChanged, inert, sinceLast, () => false)).toBe('plugins');
+  });
+
   test('an engines-only rc.2 floor change selects a full release', () => {
     const repo = mkdtempSync(join(tmpdir(), 'lane-engines-'));
     const root = join(import.meta.dir, '..');
@@ -87,6 +100,131 @@ describe('the plugin lane', () => {
       expect(shipping.status).toBe(0);
       expect(shipping.stdout.trim()).toBe('yes');
     } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
+  describe('renames in the lane CLI', () => {
+    const full = 'v3.200.0';
+    const patch = 'v3.200.1';
+    const desktop = 'apps/desktop/src/x.js';
+    const checkRename = (
+      from: string, to: string, check: (lane: (...args: string[]) => string) => void,
+      { base = full, content, patchChange }: {
+        base?: string; content?: string; patchChange?: { path: string; edit: (text: string) => string };
+      } = {},
+    ) => {
+      const repo = mkdtempSync(join(tmpdir(), 'lane-rename-'));
+      const root = join(import.meta.dir, '..');
+      const git = (...args: string[]) => {
+        const result = spawnSync('git', [
+          '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+          '-c', 'tag.gpgsign=false', ...args,
+        ], { cwd: repo, encoding: 'utf8' });
+        expect(result.status).toBe(0);
+        return result.stdout.trim();
+      };
+      const copy = (file: string) => {
+        mkdir(dirname(join(repo, file)), { recursive: true });
+        cpSync(join(root, file), join(repo, file));
+      };
+      const lane = (...args: string[]) => {
+        const result = spawnSync('bun', [join(repo, 'scripts/lane.ts'), ...args], { cwd: repo, encoding: 'utf8' });
+        expect(result.status).toBe(0);
+        return result.stdout.trim();
+      };
+      try {
+        for (const file of ['scripts/lane.ts', 'scripts/version.ts', 'package.json', 'am/part.json',
+          'meter/usagemeter/part.json', METER_CONTRACT, 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
+          'apps/locale-pt-br-dsh/package.json', 'apps/multiuser-dsh/package.json', 'apps/vault-dsh/package.json',
+          'apps/welcome-dsh/package.json']) copy(file);
+        writeFileSync(join(repo, METER_KEYS), '{"keys":[]}\n');
+        git('init', '-q');
+        git('config', '--local', 'diff.renames', 'true');
+        git('config', '--local', 'core.quotePath', 'true');
+        git('add', '.');
+        git('commit', '-qm', 'lane inputs');
+        if (content === undefined) copy(from);
+        else {
+          mkdir(dirname(join(repo, from)), { recursive: true });
+          writeFileSync(join(repo, from), content);
+        }
+        git('add', from);
+        git('commit', '-qm', 'add the carried file');
+        git('tag', full, base === patch && !patchChange ? 'HEAD^' : 'HEAD');
+        if (patchChange) {
+          const file = join(repo, patchChange.path);
+          const original = readFileSync(file, 'utf8');
+          writeFileSync(file, patchChange.edit(original));
+          git('commit', '-qam', 'publish the patch edit');
+          writeFileSync(file, original);
+        }
+        if (base === patch) git('tag', patch);
+        mkdir(dirname(join(repo, to)), { recursive: true });
+        git('mv', from, to);
+        git('commit', '-qam', 'move the file');
+        const rename = ['R100', from, to, ''];
+        const status = patchChange ? ['M', patchChange.path, ...rename] : rename;
+        expect(git('diff', '-O/dev/null', '--name-status', '-z', `${base}..HEAD`)).toBe(status.join('\0'));
+        check(lane);
+      } finally { rmSync(repo, { recursive: true, force: true }); }
+    };
+
+    test('a desktop file moved into the server harness ships on a full release', () => {
+      checkRename(desktop, 'apps/multiuser-dsh/dev/harness/x.js', lane => {
+        expect([lane('ships', full), lane('kind', full, full)]).toEqual(['yes', 'full']);
+      }, { content: 'export {};\n' });
+    });
+
+    test('a desktop file moved into docs still ships on a full release', () => {
+      checkRename(desktop, 'docs/x.js', lane => {
+        expect([lane('ships', full), lane('kind', full, full)]).toEqual(['yes', 'full']);
+      }, { content: 'export {};\n' });
+    });
+
+    test('a plugin file added by a patch and moved into am stays on the plugin lane', () => {
+      checkRename('apps/welcome-dsh/src/host/busy.js', 'am/lib/busy.js', lane => {
+        expect(lane('kind', full, patch)).toBe('plugins');
+      }, { base: patch });
+    });
+
+    test('a plugin patch rollback still selects the plugin lane when an am file moves to docs', () => {
+      checkRename('am/runner/VM-RUN.md', 'docs/VM-RUN.md', lane => {
+        expect(lane('kind', full, patch)).toBe('plugins');
+      }, {
+        base: patch,
+        patchChange: {
+          path: 'apps/welcome-dsh/package.json',
+          edit: text => {
+            const manifest = JSON.parse(text);
+            manifest.automagik.genie.commit = 'b'.repeat(40);
+            return JSON.stringify(manifest, null, 2) + '\n';
+          },
+        },
+      });
+    });
+
+    test('a pack file moved into docs still ships on the herdr lane', () => {
+      checkRename('herdr/mods/am-sidebar/spaceIcon.js', 'docs/spaceIcon.js', lane => {
+        expect([lane('herdr', full), lane('ships', full)]).toEqual(['yes', 'yes']);
+      });
+    });
+
+    test('a Pocket file moved into its docs still builds Pocket', () => {
+      checkRename('apps/pocket/android/app/build.gradle.kts', 'apps/pocket/docs/build.gradle.kts', lane => {
+        expect(lane('pocket', full)).toBe('yes');
+      });
+    });
+
+    test('a rename within docs ships nothing', () => {
+      checkRename('docs/a.md', 'docs/café.md', lane => {
+        expect(lane('ships', full)).toBe('no');
+      }, { content: '# Docs\n' });
+    });
+
+    test('a rename between carried plugin paths stays on the plugin lane', () => {
+      checkRename('apps/welcome-dsh/src/host/endpoint.js', 'apps/welcome-dsh/src/host/companion.js', lane => {
+        expect(lane('kind', full, full)).toBe('plugins');
+      });
+    });
   });
 
   test('the server adapter ships source and stays outside the signed desktop lane', () => {
