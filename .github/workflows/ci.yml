@@ -4,6 +4,11 @@ on:
   push:
     branches: [dev, main]
   pull_request:
+  # RFC 0029 (d): the merge queue builds a PR on dev and runs CI on the result.
+  # Like a push, it checks every area.
+  merge_group:
+    branches: [dev]
+    types: [checks_requested]
   # A manual run checks everything, exactly like a push: every area's output is true.
   workflow_dispatch:
 
@@ -42,9 +47,9 @@ jobs:
     # changes now reads `skipped` instead of claiming a runner to check out and skip.
     # A failed `changes` job must not hide a check: a gated job's `if` skips only an explicit
     # `false` output, so a failed detection (an empty output) runs the area instead (fail-open).
-    # A push, and a manual run, check every area: no dev check and no release is ever silently
-    # skipped. Each gated job keeps its own "Assert the steps ran" step, which reads the same
-    # diff a second time (#895). Nothing else moves: the rules and the checks are unchanged.
+    # A push, the merge queue and a manual run check every area. Each gated job keeps its own
+    # "Assert the steps ran" step, which reads the same diff a second time (#895). No dev check
+    # or release is silently skipped.
     name: Changed paths
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -81,8 +86,8 @@ jobs:
             printf '| %s | %s |\n' "$1" "$2" >> "${report}"
           }
           every=''
-          # Only a pull request narrows the run: a push (dev included) and a manual run check
-          # everything, so a dev check is never skipped.
+          # Only a pull request narrows the run: a push (dev included), the merge queue and a
+          # manual run check everything, so a dev check is never skipped.
           if [[ "${EVENT}" != pull_request ]]; then
             every="${EVENT} checks every area"
           elif [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] ||
@@ -800,6 +805,7 @@ jobs:
       # One shared debug key for PR APKs (docs/decisions/shared-debug-signing-key.md). With the
       # secret, the job signs with it and publishes the APK; without it (a fork), the default key.
       - name: Materialize the shared debug keystore
+        if: github.event_name != 'merge_group'
         id: debug_key
         env:
           KEYSTORE: ${{ secrets.POCKET_DEBUG_SIGNING_KEYSTORE }}
@@ -1597,3 +1603,68 @@ jobs:
     uses: ./.github/workflows/boot-check.yml
     permissions:
       contents: read
+
+  ci-result:
+    # RFC 0029 (f): the ruleset requires this aggregate alongside pr-reviewer. It needs every
+    # other job, so add new jobs here too (scripts/ci-result.test.ts fails until they are listed).
+    # A pull request can skip an unchanged area. On every other event, a skip fails the check.
+    name: CI result
+    needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
+            pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
+            plugin, acp-image-read, pets, desktop, acp-windows, boot]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          results="${RUNNER_TEMP}/ci-results.txt"
+          if ! jq -er 'to_entries[] | "\(.key) \(.value.result)"' <<< "${RESULTS}" > "${results}" ||
+            [[ ! -s "${results}" ]]; then
+            echo '::error::CI job results are missing or invalid'
+            exit 1
+          fi
+
+          declare -A gated=(
+            [herdr]=herdr
+            [scheduler]=scheduler
+            [am]=am
+            [pocket]=pocket
+            [pocket-link]=link
+            [meter]=meter
+            [usagemeter]=usagemeter
+            [dsh-sandbox]=sandbox
+          )
+          report="${RUNNER_TEMP}/ci-result.md"
+          printf '| job | result |\n| --- | --- |\n' > "${report}"
+          bad=()
+          while IFS= read -r line; do
+            job="${line%% *}"
+            result="${line#* }"
+            printf '| %s | %s |\n' "${job}" "${result}" >> "${report}"
+            if [[ "${result}" == success ]]; then
+              continue
+            fi
+            if [[ "${result}" == skipped && "${EVENT}" == pull_request && -n "${job}" ]]; then
+              area="${gated[${job}]:-}"
+              if [[ -n "${area}" ]] && jq -e --arg area "${area}" \
+                '.changes.outputs[$area] == "false"' <<< "${RESULTS}" > /dev/null; then
+                continue
+              fi
+            fi
+            bad+=("${job} (${result})")
+          done < "${results}"
+
+          cat "${report}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            cat "${report}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          if (( ${#bad[@]} > 0 )); then
+            printf '::error::CI jobs did not pass: %s\n' "${bad[*]}"
+            exit 1
+          fi

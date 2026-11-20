@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; no question open; no delivery merged) |
+| Status | In delivery (delivery 2 merged: ci.yml's merge_group trigger and the CI result job; delivery 1 waits on the owner registering the App and the release environment; 3-6 open; approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; no question open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none (docs here; every delivery is under `.github/`, `scripts/` or top-level `*.md` such as `AGENTS.md`, which never ship, so none cuts a release) |
 | Created | 2026-11-10 |
