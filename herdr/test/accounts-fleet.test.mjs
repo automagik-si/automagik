@@ -4,13 +4,14 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { botsOff, DISCOVER, execOutcome, fleetAfter, fleetMembers, HERE_MARGIN_S, HERE_SINCE, hereArgv, hereWithin, parseDiscover, pickCli, readHere, READ_SECONDS, RUN_HERE } from "../mods/am-sidebar/accountsFleet.js";
+import { botsOff, DISCOVER, execOutcome, fleetAfter, fleetMembers, HERE_MARGIN_S, HERE_SINCE, hereArgv, hereWithin,
+  parseDiscover, pickCli, pickWriter, readHere, READ_SECONDS, RUN_HERE, setArgv, setOutcome, WRITE_SINCE } from "../mods/am-sidebar/accountsFleet.js";
 import { hereAnswer } from "../mods/am-sidebar/accountsHere.js";
 import { PRESENT_SCRIPT } from "../mods/am-sidebar/loginProbe.js";
 import { BOT_ID, CHANGED_MS, FLEET_V, nextObs, parseFleet, rowFor } from "../mods/am-sidebar/accountsRows.js";
 import { BOT_SHAPE } from "../mods/am-sidebar/attach.js";
 import { fleetRows } from "../mods/am-quota/fleet.js";
-import { AM, AT, BOT, PACK, READER, auth, exe, fixtureHere, fpr, json, scene, snapshot } from "./accounts-fixture.mjs";
+import { AM, AT, BOT, PACK, READER, auth, exe, fakeClaude, fixtureHere, fpr, json, scene, snapshot } from "./accounts-fixture.mjs";
 
 const LATER = "2026-11-20T11:00:00.000Z";
 const NOW = Date.parse(LATER);
@@ -28,14 +29,46 @@ const claudeRow = (state, here, account = "ana@example.com", code = null) => ({ 
 
 test("parseDiscover and pickCli: newest qualified, pack tie, marker required, strict versions, nothing found", () => {
   const newer = "3.999.0";
-  const found = parseDiscover(`pack ${HERE_SINCE} yes /pack here\nam ${newer} yes /new am\nodd 4.0.0 yes /x\npack 4.0.0 yes relative\npack 4.0.0 nope /x\npack 4.0.0 yes /x\t\npack 4.0.0 yes /${"x".repeat(601)}`);
+  const found = parseDiscover(`pack ${HERE_SINCE} yes no /pack here\nam ${newer} yes yes /new am\nodd 4.0.0 yes yes /x\npack 4.0.0 yes yes relative\npack 4.0.0 nope yes /x\npack 4.0.0 yes yes /x\t\npack 4.0.0 yes yes /${"x".repeat(601)}`);
   assert.equal(found.length, 2);
-  assert.deepEqual(pickCli(found), { cli: { kind: "am", marker: true, version: newer, dir: "/new am" } });
+  assert.deepEqual(pickCli(found), { cli: { kind: "am", marker: true, write: true, version: newer, dir: "/new am" } });
   assert.equal(pickCli(found.map((row) => ({ ...row, version: newer }))).cli.kind, "pack");
-  for (const line of [`pack ${HERE_SINCE} no /p`, `am ${HERE_SINCE}-rc.1 yes /p`, "am 03.999.0 yes /p", "am 3.999.0-.. yes /p"]) {
+  for (const line of [`pack ${HERE_SINCE} no yes /p`, `am ${HERE_SINCE}-rc.1 yes yes /p`, "am 03.999.0 yes yes /p", "am 3.999.0-.. yes yes /p"]) {
     assert.deepEqual(pickCli(parseDiscover(line)), { reason: "old-cli" }, line);
   }
   assert.deepEqual(pickCli([]), { reason: "no-cli" });
+});
+
+test("DISCOVER prints five fields and parseDiscover rejects missing or invalid write flags", (t) => {
+  const s = scene(t, { scratchClaude: true });
+  const vm = s.machine("vm-one");
+  const pack = vm.ship("pack");
+  const am = vm.ship("am");
+  unlinkSync(join(am, "accountsWrite.js"));
+  const { status, stdout } = spawnSync("sh", ["-c", DISCOVER], { cwd: vm.home, encoding: "utf8",
+    env: { ...s.env, ...vm.env, HOME: vm.home } });
+  assert.equal(status, 0);
+  assert.deepEqual(stdout.trim().split("\n"), [`pack ${HERE_SINCE} yes yes ${pack}`, `am ${HERE_SINCE} yes no ${am}`]);
+  assert.deepEqual(parseDiscover(`pack ${HERE_SINCE} yes /old\npack ${HERE_SINCE} yes maybe /wrong`), []);
+});
+
+test("pickWriter takes the newest writer, prefers the pack on a tie and refuses here-only or prerelease CLIs", () => {
+  const version = `${WRITE_SINCE.split(".")[0]}.999.999`;
+  const found = parseDiscover(`pack ${WRITE_SINCE} yes yes /pack\nam ${version} yes yes /am`);
+  assert.equal(pickWriter(found).cli.kind, "am");
+  assert.equal(pickWriter(found.map((row) => ({ ...row, version }))).cli.kind, "pack");
+  assert.equal(pickWriter([found[0], { ...found[1], write: false }]).cli.kind, "pack");
+  for (const line of [`pack ${version} yes no /p`, `pack ${version} no yes /p`, `am ${WRITE_SINCE}-rc.1 yes yes /p`]) {
+    assert.deepEqual(pickWriter(parseDiscover(line)), { reason: "old-cli" });
+  }
+  assert.deepEqual(pickWriter([]), { reason: "no-cli" });
+});
+
+test("WRITE_SINCE is a strict X.Y.Z no later than the patch after this checkout's VERSION", () => {
+  const version = readFileSync(new URL("../mods/am-sidebar/VERSION", import.meta.url), "utf8").trim();
+  const ordinal = (v) => v.split(".").reduce((n, part) => n * 1000 + Number(part), 0);
+  assert.match(WRITE_SINCE, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  assert.ok(ordinal(WRITE_SINCE) <= ordinal(version) + 1);
 });
 
 test("HERE_SINCE is a strict X.Y.Z no later than the patch after this checkout's VERSION", () => {
@@ -112,6 +145,45 @@ test("an unresolved record route names no effective account, received or stored,
   const [row] = fleetRows({ record, tool: "claude", ref: claudeRef, now: NOW });
   assert.equal(row.words, "unknown: own-launcher");
   assert.equal(row.lines.some((line) => line.includes("same account")), false);
+});
+
+test("here and fleet preserve validated writer evidence and accept delivery 1 records", () => {
+  const before = fixtureHere({ email: "ana@example.test" });
+  const legacy = structuredClone(before);
+  for (const key of ["appHome", "writer", "core"]) delete legacy[key];
+  delete legacy.claude.nextSlot;
+  assert.deepEqual(readHere(JSON.stringify(legacy)), before);
+  const legacyFleet = { v: FLEET_V, at: AT, linked: null, machines: { "core-one": observation(legacy) } };
+  const old = parseFleet(JSON.stringify(legacyFleet)).machines["core-one"];
+  assert.deepEqual([old.appHome, old.writer, old.write, old.core, old.claude.nextSlot], [null, null, null, null, null]);
+  const appHome = "/example-home/app", core = "core-one", nextSlot = "/example-home/.claude-2";
+  const current = { ...before, appHome, core, claude: { ...before.claude, nextSlot } };
+  for (const panel of ["on", "off", "absent", "unknown"]) {
+    current.writer = { setLogin: true, panel, panelWrites: true, sidebarWrites: false, confirmed: false };
+    assert.deepEqual(readHere(JSON.stringify(current)), current);
+  }
+  const read = { ...observation(current), appHome, core, writer: current.writer, write: false };
+  const fleet = { ...legacyFleet, machines: { [core]: read } };
+  assert.deepEqual(parseFleet(JSON.stringify(fleet)).machines[core], read);
+  assert.deepEqual(parseFleet(JSON.stringify({ ...fleet, machines: { [core]: { ...read, write: "yes" } } })).machines, {});
+  for (const edit of [
+    (x) => { x.appHome = "relative"; }, (x) => { x.core = "x".repeat(129); },
+    (x) => { x.core = "core one"; }, (x) => { x.claude.nextSlot = "relative"; },
+    (x) => { x.writer.panel = "failed"; }, (x) => { x.writer.setLogin = false; },
+    (x) => { x.writer.sidebarWrites = 1; }, (x) => { delete x.writer.confirmed; },
+  ]) {
+    const edited = structuredClone(current);
+    edit(edited);
+    assert.deepEqual(readHere(JSON.stringify(edited)), { reason: "bad-answer" });
+  }
+});
+
+test("readHere refuses a complete inventory with duplicate slot IDs", () => {
+  const answer = fixtureHere({ email: "bo@example.test" });
+  const effective = answer.claude.slots.find(({ id }) => id === answer.claude.effective);
+  answer.claude.slots.unshift({ ...effective, email: "ana@example.test" });
+  assert.equal(answer.claude.slotsComplete, true);
+  assert.deepEqual(readHere(JSON.stringify(answer)), { reason: "bad-answer" });
 });
 
 test("fleetMembers: nonzero, temporary, duplicate and malformed membership replies", () => {
@@ -286,6 +358,79 @@ const oldStub = (where, log, version = "3.160.2") => {
     `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(log)}, "old cli ran");\n`);
   exe(join(where, "bin/run.sh"), `#!/bin/sh\necho old runner ran >> "${log}"\n`);
 };
+
+test("RUN_SET never starts a missing or replaced writer and only returns fixed replies", (t) => {
+  const s = scene(t, { scratchClaude: true });
+  const dir = join(s.app, "mods/am-sidebar"), log = join(s.root, "writer.log");
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  writeFileSync(join(dir, "bin/accounts.mjs"), "");
+  writeFileSync(join(dir, "VERSION"), WRITE_SINCE + "\n");
+  const snapshot = "a".repeat(64);
+  exe(join(dir, "bin/run.sh"), `#!/bin/sh
+printf "%s\n" "$@" > "${log}"
+printf '%s\n' CANARY-STDERR-0043 >&2
+printf '%s\n' '{"ok":true,"snapshot":"${snapshot}","use":"2","extra":"CANARY-RPC-0043"}'
+`);
+  const cli = { dir, version: WRITE_SINCE };
+  const [command, ...args] = setArgv(cli, ["--use", "2"]);
+  const run = () => spawnSync(command, args, { env: s.env, cwd: s.home, encoding: "utf8" });
+  const wrap = (code, stdout = "", extra = {}) => ({ code: 0, stdout: JSON.stringify({
+    code, stdout: Buffer.from(stdout).toString("base64"), stderr: "CANARY-RPC-0043", ...extra,
+  }) });
+  assert.equal(run().status, 90);
+  writeFileSync(join(dir, "accountsWrite.js"), "");
+  writeFileSync(join(dir, "VERSION"), WRITE_SINCE + "-rc.1\n");
+  assert.equal(run().status, 91);
+  const longVersion = "1.0.0+" + "a".repeat(58);
+  writeFileSync(join(dir, "VERSION"), longVersion + "b\n");
+  const [checked, ...checkedArgs] = setArgv({ dir, version: longVersion }, ["--use", "2"]);
+  assert.equal(spawnSync(checked, checkedArgs, { env: s.env, cwd: s.home }).status, 91);
+  assert.equal(existsSync(log), false);
+  writeFileSync(join(dir, "VERSION"), WRITE_SINCE + "\n");
+  const allowed = run();
+  assert.equal(allowed.status, 0);
+  assert.equal(allowed.stderr, "");
+  assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [join(dir, "bin/accounts.mjs"), "set-login", "--use", "2"]);
+  assert.deepEqual(setOutcome(wrap(0, allowed.stdout)), { ok: true, snapshot, use: "2" });
+  assert.deepEqual(setOutcome(wrap(90)), { error: "old-cli" });
+  assert.deepEqual(setOutcome(wrap(91)), { error: "failed" });
+  assert.deepEqual(setOutcome(wrap(1, '{"error":"conflict","extra":"CANARY-RPC-0043"}')), { error: "conflict" });
+  assert.deepEqual(setOutcome(wrap(1, '{"error":"CANARY-RPC-0043"}')), { kind: "unreachable" });
+  assert.deepEqual(setOutcome(wrap(0, '{"ok":true,"snapshot":"CANARY-RPC-0043","use":"2"}')), { kind: "unreachable" });
+  assert.deepEqual(setOutcome(wrap(0, '{"ok":true,"cancelled":true}')), { ok: true, cancelled: true });
+  const receipt = { ok: true, cancelled: true, outcome: "written", snapshot };
+  assert.deepEqual(setOutcome(wrap(0, JSON.stringify(receipt))), receipt);
+  assert.deepEqual(setOutcome(wrap(0, JSON.stringify({ ...receipt, snapshot: "CANARY-RPC-0043" }))), { kind: "unreachable" });
+  assert.deepEqual(setOutcome(wrap(null, "", { timed_out: true })), { kind: "timeout" });
+  assert.deepEqual(setOutcome({ stdout: "CANARY-RPC-0043" }), { kind: "unreachable" });
+});
+
+test("fleet stores discovered writers independently of the CLI selected for reading", (t) => {
+  const s = scene(t, { scratchClaude: true });
+  exe(join(s.bin, "claude"), fakeClaude("ana@example.test"));
+  const readerOnly = (vm, kind, version) => {
+    const dir = vm.ship(kind, version);
+    unlinkSync(join(dir, "accountsWrite.js"));
+    const answer = fixtureHere({ email: "bo@example.test" });
+    Object.assign(answer, { appHome: vm.app, core: vm.id });
+    answer.claude.nextSlot = join(vm.home, ".claude-2");
+    writeFileSync(join(dir, "bin/accounts.mjs"), `process.stdout.write(${JSON.stringify(JSON.stringify(answer) + "\n")});\n`);
+  };
+  const mixed = s.machine("vm-mixed", { email: "bo@example.test" });
+  mixed.ship("pack", WRITE_SINCE);
+  readerOnly(mixed, "am", "3.999.0");
+  const old = s.machine("vm-old", { email: "bo@example.test" });
+  readerOnly(old, "pack", HERE_SINCE);
+  const out = safeFleet(s, READER);
+  assert.deepEqual(out.machines.map(({ core, cli, state }) => [core, cli, state]), [
+    [mixed.id, "am", "read"], [old.id, "pack", "read"],
+  ]);
+  const { machines } = parseFleet(readFileSync(s.file, "utf8"));
+  assert.deepEqual([machines.local.write, machines[mixed.id].write, machines[old.id].write], [true, true, false]);
+  assert.deepEqual([machines[mixed.id].core, machines[mixed.id].appHome, machines[mixed.id].claude.nextSlot],
+    [mixed.id, mixed.app, join(mixed.home, ".claude-2")]);
+  assert.deepEqual([machines.local.appHome, machines.local.writer.panel, machines.local.core], [s.app, "absent", null]);
+});
 
 test("the fleet read (acceptance): local, vm-away, vm-old, vm-two, vm-other give exact rows through the sidebar and am", (t) => {
   const s = scene(t);

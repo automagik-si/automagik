@@ -10,15 +10,15 @@
 
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
-  readSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
-import { homedir, uptime } from "node:os";
+import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
+  readSync, renameSync, rmdirSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+import { homedir, hostname, uptime } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
-import { coreStatus, inTestRoots } from "../coreSocket.mjs";
+import { coreStatus, inTestRoots, userCoreSockets } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId, rateLimitModeOf,
@@ -61,11 +61,19 @@ import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
-import { CONFIG_VAR, chooseLogin } from "../logins.js";
-import { hereAnswer, HERE_BUDGET_MS, HERE_MAX_BYTES } from "../accountsHere.js";
+import { CONFIG_VAR, DEFAULT_LOGIN, DEFAULT_WORDS, chooseLogin, loginsPath } from "../logins.js";
+import { CODEX_MAX_BYTES, defaultLaunchHome, hereAnswer, HERE_BUDGET_MS, HERE_MAX_BYTES, readClaude } from "../accountsHere.js";
 import { botsOff, DISCOVER, execOutcome, fleetAfter, fleetMembers, FLEET_BUDGET_MS, HERE_BUDGET_S, HERE_MIN_S, hereArgv, hereWithin, MAX_BINDINGS,
-  MAX_EXTRA_PROJECTS, MAX_LOOKUPS, parseDiscover, pickCli, readHere, READ_SECONDS, REAL_SCRIPT, slotsWithDir } from "../accountsFleet.js";
-import { coreOkay, FLEET_FILE, FLEET_V, object, parseFleet, pathOkay, rowFor, TERMINAL } from "../accountsRows.js";
+  MAX_EXTRA_PROJECTS, MAX_LOOKUPS, parseDiscover, pickCli, pickWriter, readHere, READ_SECONDS, REAL_SCRIPT, setArgv, setOutcome, slotsWithDir } from "../accountsFleet.js";
+import { applyRun } from "../accountsApply.js";
+import { coreOkay, FLEET_FILE, FLEET_V, ID as SLOT_ID, matches, object, parseFleet, pathOkay, rowFor, TERMINAL } from "../accountsRows.js";
+import { buildPreview, close as closeAttempt, commitPreview, fence, settle, startAttempt, suspend, viewsFrom } from "../accountsPlan.js";
+import { planRows } from "../accountsPlanRows.js";
+import { claudeMember, confirmedClaude, idDigest, isClaudeKey, isCodexKey, isFingerprint, isHash, isHome, isIso, isMachine, isProxyId, LOCAL,
+  LOCAL_FENCE_MS, LOCAL_START_MS, LOCK_FILE as ACCOUNTS_LOCK, own, parsePlan, parseRead, PLAN_FILE, planText as accountsPlanText,
+  PENDING_WHY, PREVIEWS_DIR, PREVIEW_TTL_MS, recoverable, REQUESTS_DIR, snapshotOf, TOOLS } from "../accountsPlanRecord.js";
+import { loginEdit, setLoginOp, writerCapability, writerQualified, WRITER_MAX_BYTES } from "../accountsWrite.js";
+import { exceptionWarning, routeManaged } from "../accountsLaunch.js";
 import { paneLogin } from "../loginProbe.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
@@ -521,8 +529,10 @@ const fileName = ({ key, machine, dir = key }) => `${under(dir, BOTS_PATH)}${mac
 // herdr-core there: its file ops (remoteFile.js) and one program, as `hc exec --on` runs it.
 const remoteIo = {
   hc: hcReal,
-  exec: async (command, args, machine, { cwd, timeout } = {}) =>
-    decodeExec(await hcReal(["exec", "--json", ...(timeout ? ["--timeout", String(timeout)] : []), "--on", machine, ...(cwd ? ["--cwd", cwd] : []), "--", command, ...args], { timeout: timeout ? (timeout + 10) * 1000 : undefined }), timeout ?? 60),
+  exec: async (command, args, machine, { cwd, timeout, limit } = {}) =>
+    decodeExec(await hcReal(["exec", "--json", ...(timeout ? ["--timeout", String(timeout)] : []), "--on", machine,
+      ...(cwd ? ["--cwd", cwd] : []), "--", command, ...args],
+    { timeout: limit ?? (timeout ? (timeout + 10) * 1000 : undefined) }), timeout ?? 60),
 };
 
 // What hc said: its error's message when it printed one as JSON.
@@ -746,6 +756,7 @@ export function staleLimit(raw) {
 const LOCK_STALE = staleLimit(process.env.AUTOMAGIK_HERDR_LOCK_STALE_MS);
 // A wait longer than this says so on stderr, once, naming the lock and its holder.
 const LOCK_NOTE_AFTER = 3000;
+class LockHeld extends Error {}
 // An async holder (withLockAsync) touches its lock this often, so a hold across slow hc calls
 // (15 s each) never reads as stale; a holder that dies stops touching it (#225, #223).
 const LOCK_REFRESH = Math.max(10, Math.floor(LOCK_STALE / 3));
@@ -787,7 +798,7 @@ function tryLock(lock, w) {
   takeOverStale(lock);
   if (Date.now() > w.start + w.wait) {
     const who = lockHolder(lock);
-    throw new Error(`${w.what ? `${w.what} (${lock})` : lock} is held by another am${who ? ` (${who})` : ""}`
+    throw new LockHeld(`${w.what ? `${w.what} (${lock})` : lock} is held by another am${who ? ` (${who})` : ""}`
       + `${w.noted && w.wait > LOCK_NOTE_AFTER ? ` after ${Math.round(w.wait / 1000)} s` : ""}`);
   }
   if (!w.noted && Date.now() - w.start >= LOCK_NOTE_AFTER) {
@@ -2004,6 +2015,11 @@ Usage: am <command> [options]                   (every command takes --json and 
   accounts here [PROJECT…]      what this machine's Codex and Claude logins are, read-only, as JSON
   accounts fleet                the Accounts panel's read of every linked machine, as JSON
                                 (writes only fleet.json)
+  accounts plan --show          the Accounts plan and each machine's row, as JSON
+  accounts apply [--retry]       switch linked machines to their approved Claude login
+                                (changes only claude-logins.json's use through set-login)
+  accounts set-login --use ID|--add ID --dir DIR|--remove ID --snapshot S
+                                change this machine's claude-logins.json under its lock
 
 Antigravity (\`agy\`, 1.5.3): --model takes the ids \`agy models\` lists (a Gemini or Claude
 id, e.g. gemini-4-argon-high), never the label its settings.json keeps. The pack caches that
@@ -4506,20 +4522,21 @@ async function guardThere(machine, path, folder = "guard") {
  */
 async function paneEnvOn(machine, key) {
   const path = under(key, PANE_ENV_PATH);
-  const none = (why) => ({ prepend: null, appHome: null, refused: true,
+  const none = (why, unread = false) => ({ prepend: null, appHome: null, refused: true, unread,
     warnings: [`${path} on ${machine} was left out (${why}): the pane starts as it would without it.`] });
   let text;
-  try { text = await readRemoteText(remoteIo, machine, path); } catch (e) { return none(e?.message ?? String(e)); }
+  try { text = await readRemoteText(remoteIo, machine, path); } catch (e) { return none(e?.message ?? String(e), true); }
+  // The fleet read treats larger pane environments as unresolved. Keep the old launch intact.
+  const unread = text !== null && Buffer.byteLength(text) > 4096;
   const env = paneEnvOf(text);
-  return env.error ? none(env.error) : { prepend: env.prepend, appHome: env.appHome, refused: false, warnings: [] };
+  return env.error ? none(env.error, unread) : { prepend: env.prepend, appHome: env.appHome, refused: false, unread, warnings: [] };
 }
 
 /** That machine's default app home, ~/.config/herdr-app by its own $HOME, or null when it gives none. */
-async function appHomeOn(machine) {
-  const r = await remoteIo.exec("sh", ["-c", 'printf %s "$HOME"'], machine, { timeout: AGENT_WAIT_S });
+async function appHomeOn(machine, { timeout = AGENT_WAIT_S, exec = remoteIo.exec } = {}) {
+  const r = await exec("sh", ["-c", 'printf %s "$HOME"'], machine, { timeout });
   const home = r.code === 0 ? r.stdout : "";
-  // eslint-disable-next-line no-control-regex
-  return home.startsWith("/") && !/[\x00-\x1f\x7f]/.test(home) ? `${home.replace(/\/+$/, "")}/.config/herdr-app` : null;
+  return defaultLaunchHome(home);
 }
 
 /**
@@ -4529,16 +4546,86 @@ async function appHomeOn(machine) {
  * pane-env that was left out means none at all, never the default. Resolves { dir (null: none),
  * warning (why, null when dir) }.
  */
-async function launchHomeOn(machine, bot, paneEnv, purpose) {
+export async function launchHomeOn(machine, bot, paneEnv, purpose, { timeout = AGENT_WAIT_S, exec = remoteIo.exec } = {}) {
   const none = (why) => ({ dir: null, warning: `${bot.name} runs on ${machine} without ${purpose}: ${why}` });
   if (paneEnv.refused) return none(`its ${PANE_ENV_PATH} there was left out, so no app home there is used, not even the default one`);
-  const dir = paneEnv.appHome ?? await appHomeOn(machine);
+  const dir = paneEnv.appHome ?? await appHomeOn(machine, { timeout, exec });
   if (!dir) return none(`${machine} gave no home folder for its app home`);
-  if ((await remoteIo.exec("test", ["-d", dir], machine, { timeout: AGENT_WAIT_S })).code !== 0) {
+  if ((await exec("test", ["-d", dir], machine, { timeout })).code !== 0) {
     return none(`its app home there, ${dir}, isn't a folder, and a start never makes one. Install Automagik Herdr on ${machine}, `
       + `or set HERDR_APP_HOME in the project's ${PANE_ENV_PATH} there to an app home that is there`);
   }
   return { dir, warning: null };
+}
+
+const MANAGED_BUDGET_MS = 20_000;
+const MANAGED_RESERVE_MS = 2000;
+const MANAGED_LATE = Symbol("late");
+const managedLaunchIo = {
+  readPlanFile, deadlineLeft, now: Date.now,
+  machines: async (opts) => fleetMembers(await hcReal(["machine", "ls", "--json"], opts)),
+  async discover(machine, limit) {
+    const result = await remoteIo.exec("sh", ["-c", DISCOVER], machine, { timeout: Math.floor(limit / 1000), limit });
+    return result.code === 0 ? pickWriter(parseDiscover(result.stdout)).cli : null;
+  },
+  async resolve(machine, cli, words, limit) {
+    const [command, ...args] = setArgv(cli, words);
+    const result = await remoteIo.exec(command, args, machine, { timeout: Math.floor(limit / 1000), limit });
+    if (result.code !== 0 && result.code !== 1 || Buffer.byteLength(result.stdout) > 4096) return null;
+    return JSON.parse(result.stdout);
+  },
+};
+
+/** Login words for one linked Claude seat. An exception leaves the seat's old route in place. */
+export async function managedLoginOn(machine, core, paneEnv, bot, io = managedLaunchIo, launcher = "shipped") {
+  const { state, plan } = io.readPlanFile();
+  const member = state === "ok" ? claudeMember(plan, core) : null;
+  if (!member) return null;
+  const exception = (why) => ({ words: null, warning: exceptionWarning(bot.name, machine, why) });
+  if (launcher !== "shipped") return exception(launcher);
+  const route = paneEnv.unread ? "unread" : paneEnv.refused ? "refused-env"
+    : paneEnv.appHome && paneEnv.appHome !== member.home ? "own-app-home" : paneEnv.prepend ? "own-path" : null;
+  if (!routeManaged(route)) return exception(route === "own-app-home" ? "other-home" : route);
+
+  const left = io.deadlineLeft();
+  const budget = left === Infinity ? MANAGED_BUDGET_MS : left - (DEADLINE_MARGIN_MS + DEADLINE_PLACE_MS + MANAGED_RESERVE_MS);
+  if (budget < 3000) return exception("late");
+  const until = io.now() + budget;
+  const remaining = () => {
+    const ms = until - io.now();
+    if (ms < 1000) throw MANAGED_LATE;
+    return ms;
+  };
+  const resolve = async () => {
+    let why = "rebound";
+    try {
+      const bound = await io.machines({ timeout: remaining() });
+      const names = bound?.list.filter((m) => m.name === machine);
+      if (!bound?.complete || names?.length !== 1 || names[0].id !== core) return exception(why);
+      why = "unread";
+      const cli = await io.discover(machine, remaining());
+      if (!cli) return exception(why);
+      const result = await io.resolve(machine, cli, ["--launch-login", "--expect-home", member.home, "--expect-core", core,
+        ...(paneEnv.appHome ? ["--project-home"] : [])], remaining());
+      if (["no-core", "wrong-core"].includes(result?.error)) return exception("rebound");
+      if (result?.error === "no-home") return exception("no-home");
+      if (result?.error === "home") return exception("other-home");
+      if (result?.ok !== true) return exception(why);
+      if (result.core !== core) return exception("rebound");
+      if (result.home !== member.home) return exception("other-home");
+      if (typeof result.fallback !== "boolean" || (result.dir !== null && !isHome(result.dir))) return exception(why);
+      return { words: result.dir === null ? [...DEFAULT_WORDS] : [`${CONFIG_VAR}=${result.dir}`],
+        warning: result.fallback ? exceptionWarning(bot.name, machine, "fallback") : null };
+    } catch (error) {
+      return exception(error === MANAGED_LATE ? "late" : why);
+    }
+  };
+  let timer;
+  try {
+    const late = exception("late");
+    const result = await Promise.race([new Promise((done) => { timer = setTimeout(() => done(late), budget); }), resolve()]);
+    return io.now() >= until ? late : result;
+  } finally { clearTimeout(timer); }
 }
 
 /** launchHomeOn for the briefing (#582): { dir (null: no briefing file and no hook there), warnings (one when null) }. */
@@ -4688,7 +4775,8 @@ async function seatOnMachine(project, bot, over = {}) {
   await checkLinkedProxy(project, bot, over.agent ?? bot.agent);
   const m = await connectedMachine(machine, "nothing was started");
   const agentKey = over.agent ?? bot.agent;
-  const agent = agentTable()[agentKey];
+  const table = agentTable();
+  const agent = table[agentKey];
   if (!agent?.run?.length) throw new CliError(`${bot.name}'s coding agent "${agentKey}" isn't one Herdr can start.`);
   // Antigravity's mode: validated even when over.argv (a restart's plan) already carries it.
   const agyMode = launchAgyMode(bot, agentKey);
@@ -4728,6 +4816,8 @@ async function seatOnMachine(project, bot, over = {}) {
   // #612: a local absolute override that isn't there falls back to the shipped run when that is.
   const there = await agentThere(machine, command, agent.name ?? agentKey, paneEnv.prepend,
     shippedRunFor(agentKey, agent.run, command));
+  const managed = launchAgent(there.argv, table) === "claude"
+    ? await managedLoginOn(machine, m.id, paneEnv, bot, managedLaunchIo, claudeLauncher(accountsTable(), command[0])) : null;
   if (agySettings) {
     try { await ownFileOn(machine, agySettings.path, agySettings.text); }
     catch (e) {
@@ -4774,9 +4864,10 @@ async function seatOnMachine(project, bot, over = {}) {
   const name = hcName(bot.name, bot.id, taken);
   const args = startArgs({ botId: bot.id, name, cwd: over.cwd ?? key, space: place?.space, tab: place?.tab,
     // No hc parent: hc run's default is the terminal it is started from, and the pane would end with it.
-    parent: ["--no-parent"], argv, labels, path: there.path, env, agent: agentKey, guard: remoteGuard });
+    parent: ["--no-parent"], argv, labels, path: there.path, env, login: managed?.words ?? [], agent: agentKey, guard: remoteGuard });
   args.splice(1, 0, "--on", machine);
-  const warnings = [...paneEnv.warnings, ...there.warnings, ...guardWarnings, ...briefingHome.warnings, ...briefed.warnings, ...hook.warnings,
+  const paneWarnings = managed?.warning && (paneEnv.refused || paneEnv.unread) ? [] : paneEnv.warnings;
+  const warnings = [...paneWarnings, ...(managed?.warning ? [managed.warning] : []), ...there.warnings, ...guardWarnings, ...briefingHome.warnings, ...briefed.warnings, ...hook.warnings,
     ...(agySettings?.warnings ?? []), ...codexNotes];
   const run = async () => {
     if (deadlineLeft() < DEADLINE_MARGIN_MS) throw tooLate(bot, machine, key, DEADLINE_MARGIN_MS, place?.spare ? place.space : null);
@@ -11758,8 +11849,8 @@ function accountsPrograms() {
 
 const FLEET_READ_MAX = 4 * 1024 * 1024;
 
-function accountsBytes(path, max) {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+function accountsBytes(path, max, { noFollow = false } = {}) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0));
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > max) throw new Error();
@@ -11790,21 +11881,35 @@ const shippedClaude = (table) => {
   return Array.isArray(run) && run.length === shipped.length && run.every((w, i) => w === shipped[i]);
 };
 
-async function cmdAccountsHere(projects, { print = false, limit = Infinity, table } = {}) {
-  const programs = accountsPrograms();
-  const deadline = Math.min(Date.now() + HERE_BUDGET_MS, limit);
+export function claudeLauncher(table, command = AGENTS.claude.run[0]) {
+  if (table === null) return "unread";
+  return shippedClaude(table) && command === AGENTS.claude.run[0] ? "shipped" : "own-launcher";
+}
+
+const accountsHash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+// The Claude probe's io for this host: `table` is the programs table read once (null when it
+// can't be read, and then the record route stays unresolved).
+function accountsClaudeIo(programs, deadline, table = accountsTable()) {
   const dir = home();
   const exec = (command, args, { timeout }) => programs.run(command,
     (now) => now < deadline ? { args, timeout: Math.min(timeout, deadline - now) } : null, { cwd: dir });
+  // The record route is probed only for the shipped claude command (delivery 1).
+  const launcher = claudeLauncher(table);
+  const recordRoute = launcher === "own-launcher" ? "own" : launcher;
+  const program = programPath(AGENTS.claude.run[0]);
+  const bareWhere = { program, path: program ? launchPath(AGENTS.claude.run[0]).path : null };
+  return { env: process.env, home: dir, appHome: appHome(), readBytes: accountsBytes, exec, sha256: accountsHash,
+    bareWhere, recordRoute, realpath: realpathSync, isDir: (path) => statSync(path).isDirectory(), paneEnvOf, now: Date.now };
+}
+
+async function cmdAccountsHere(projects, { print = false, limit = Infinity, table } = {}) {
+  const programs = accountsPrograms();
+  const deadline = Math.min(Date.now() + HERE_BUDGET_MS, limit);
   try {
     if (table === undefined) table = accountsTable();
-    const recordRoute = table === null ? "unread" : shippedClaude(table) ? "shipped" : "own";
-    const program = programPath(AGENTS.claude.run[0]);
-    const bareWhere = { program, path: program ? launchPath(AGENTS.claude.run[0]).path : null };
-    const answer = await hereAnswer({ env: process.env, home: dir, appHome: appHome(), amStore: amStore(),
-      readBytes: accountsBytes, exec, sha256: (bytes) => createHash("sha256").update(bytes).digest("hex"),
-      bareWhere, recordRoute,
-      realpath: realpathSync, isDir: (path) => statSync(path).isDirectory(), paneEnvOf, now: Date.now }, projects, deadline);
+    const answer = await hereAnswer({ ...accountsClaudeIo(programs, deadline, table), amStore: amStore(),
+      dir: writerIo.dir, readable: writerIo.readable, coreHere: (until) => coreHere(process.env, { deadline: until }) }, projects, deadline);
     if (!answer) throw new Error();
     if (print) {
       const line = `${JSON.stringify(answer)}\n`;
@@ -11885,8 +11990,8 @@ async function cmdAccountsFleet() {
       const first = fleetMembers(listed);
       const localAnswer = await cmdAccountsHere([], { limit: workUntil, table });
       const when = () => new Date().toISOString();
-      const reads = new Map([["local", { answer: localAnswer, at: when() }]]);
-      const bareUnresolved = !shippedClaude(table);
+      const reads = new Map([["local", { answer: localAnswer, at: when(), write: true }]]);
+      const bareUnresolved = claudeLauncher(table) !== "shipped";
       let bindings = [];
       let ledgerFailed = false;
       try {
@@ -11908,10 +12013,12 @@ async function cmdAccountsFleet() {
           return execOutcome(result);
         };
         try {
-          const found = await remote(["sh", "-c", DISCOVER]);
-          if (found.kind !== "ok") return status("failed", found.kind);
-          if (found.code !== 0) return status("failed", "failed");
-          const { cli, reason } = pickCli(parseDiscover(found.stdout));
+          const discovery = await remote(["sh", "-c", DISCOVER]);
+          if (discovery.kind !== "ok") return status("failed", discovery.kind);
+          if (discovery.code !== 0) return status("failed", "failed");
+          const found = parseDiscover(discovery.stdout);
+          const write = pickWriter(found).cli !== undefined;
+          const { cli, reason } = pickCli(found);
           if (!cli) return status("unknown", reason);
           const bound = bindings.filter((b) => b.core === id);
           const lookable = bound.slice(0, MAX_LOOKUPS);
@@ -11934,7 +12041,7 @@ async function cmdAccountsFleet() {
           const bots = ledgerFailed || table === null ? { reason: "failed" } :
             await accountsBots(machine, answer, bound, new Set(projects), table, (args, opts) => ask(args, { ...opts, until: botsUntil, stderr: true }),
               (argv, seconds) => remote(argv, seconds, botsUntil)).catch(() => ({ reason: "failed" }));
-          reads.set(id, { name, cli: cli.kind, answer, at, bots });
+          reads.set(id, { name, cli: cli.kind, write, answer, at, bots });
         } catch { status("failed", "failed"); }
       }));
       const final = fleetMembers(await ask(membership, { until: deadline }));
@@ -11979,8 +12086,727 @@ async function cmdAccountsFleet() {
   }
 }
 
+const ACCOUNT_VERBS = "accounts takes here, fleet, plan, apply or set-login.";
+const opaqueId = (id) => matches(/^[0-9a-f]{32}$/, id);
+const accountSnapshot = (value) => value === "none" || isHash(value);
+const refusal = (error) => ({ error });
+const planPath = () => join(appHome(), PLAN_FILE);
+
+export function readPlanFile() {
+  let bytes;
+  try { bytes = accountsBytes(planPath(), undefined, { noFollow: true }); } catch (error) {
+    return { state: error?.code === "ENOENT" ? "absent" : "corrupt", plan: null, rev: 0, digest: null };
+  }
+  const { state, plan } = parsePlan(bytes.toString("utf8"));
+  return { state, plan, rev: plan?.rev ?? 0, digest: accountsHash(bytes) };
+}
+
+function writeAccountsTemp(tmp, text) {
+  const fd = openSync(tmp, "wx", 0o600);
+  try {
+    try { writeFileSync(fd, text); fchmodSync(fd, 0o600); } finally { closeSync(fd); }
+  } catch (error) {
+    try { unlinkSync(tmp); } catch { /* Already removed. */ }
+    throw error;
+  }
+}
+
+function atomicAccountsWrite(path, text, beforeRename, { writeTemp = writeAccountsTemp, rename = renameSync } = {}) {
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeTemp(tmp, text);
+  try {
+    beforeRename?.();
+    rename(tmp, path);
+  } finally {
+    try { unlinkSync(tmp); } catch { /* Renamed or already removed. */ }
+  }
+}
+
+function writePlanFile(plan, beforeRename) {
+  atomicAccountsWrite(planPath(), accountsPlanText(plan), beforeRename);
+}
+
+function keepCorrupt(now) {
+  const path = planPath();
+  let aside;
+  do { aside = `${path}.corrupt-${new Date(now++).toISOString().replace(/:/g, "")}`; }
+  while (existsSync(aside));
+  chmodSync(path, 0o600);
+  renameSync(path, aside);
+  return aside;
+}
+
+function requirePlanHome() {
+  try { if (statSync(appHome()).isDirectory()) return; } catch { /* No app home. */ }
+  throw new CliError("no-home");
+}
+
+function privatePlanDir(folder) {
+  const path = join(appHome(), folder);
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  if (!lstatSync(path).isDirectory()) throw new Error();
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function planJsonPath(folder, id) {
+  if (!opaqueId(id)) throw new Error();
+  return join(appHome(), folder, `${id}.json`);
+}
+
+function readPlanJson(path, max) {
+  if (!lstatSync(dirname(path)).isDirectory()) throw new Error();
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.size > max) throw new Error();
+  return { value: JSON.parse(accountsBytes(path, max, { noFollow: true }).toString("utf8")), mtime: stat.mtimeMs };
+}
+
+function readRequest(id) {
+  if (!opaqueId(id)) return null;
+  const path = planJsonPath(REQUESTS_DIR, id);
+  try {
+    // Claim by rename so two CLI processes cannot use the same request.
+    if (!lstatSync(dirname(path)).isDirectory() || !lstatSync(path).isFile()) return null;
+    const claimed = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    renameSync(path, claimed);
+    try { return readPlanJson(claimed, 64 * 1024).value; }
+    finally { unlinkSync(claimed); }
+  } catch { return null; }
+}
+
+function sweepPlanFiles(now, commitId) {
+  for (const folder of [PREVIEWS_DIR, REQUESTS_DIR]) {
+    const dir = join(appHome(), folder);
+    let names;
+    try { if (lstatSync(dir).isDirectory()) names = readdirSync(dir); } catch { /* Nothing to sweep. */ }
+    for (const name of names ?? []) {
+      if (!/^[0-9a-f]{32}\.json(?:\.\d+\.[0-9a-f-]{36}\.tmp)?$/.test(name)
+        || folder === PREVIEWS_DIR && name === `${commitId}.json`) continue;
+      const path = join(dir, name);
+      try {
+        const stat = lstatSync(path);
+        if (stat.isFile() && now - stat.mtimeMs >= PREVIEW_TTL_MS) unlinkSync(path);
+      } catch { /* A reader or another sweep got there first. */ }
+    }
+  }
+}
+
+export function planPreview(request, { base, plan, views, now = Date.now() }) {
+  if (base.state === "corrupt" && base.digest === null) return refusal("failed");
+  const id = randomUUID().replaceAll("-", "");
+  const { preview, error } = buildPreview({ plan, base: { state: base.state, rev: base.rev, digest: base.digest },
+    views, request, now, id, sha256Hex: accountsHash, controllerHome: appHome() });
+  if (error) return refusal(error);
+  requirePlanHome();
+  const dir = privatePlanDir(PREVIEWS_DIR);
+  const text = `${JSON.stringify(preview)}\n`;
+  if (Buffer.byteLength(text) > 256 * 1024) return refusal("too-many");
+  atomicAccountsWrite(join(dir, `${id}.json`), text);
+  return { v: 1, kind: "accounts.preview", id, rev: base.rev, moves: preview.moves, flags: preview.flags, changes: preview.changes };
+}
+
+function readAccountsFleet() {
+  try { return parseFleet(accountsBytes(join(appHome(), FLEET_FILE), FLEET_READ_MAX).toString("utf8")); }
+  catch { return parseFleet(null); }
+}
+
+// Accounts locks contain one uniquely named owner file. Publishing the nonempty directory
+// by rename prevents a waiter cleaning up a dead owner from removing a new holder's lock.
+function processStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const start = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    return start && boot ? `${boot}:${start}` : null;
+  } catch { return null; }
+}
+
+function accountOwnerGone(owner) {
+  if (owner?.host !== hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return false;
+  try { process.kill(owner.pid, 0); }
+  catch (error) { return error?.code === "ESRCH"; }
+  const start = processStart(owner.pid);
+  return Boolean(start && matches(/^[a-f0-9-]{36}:\d+$/, owner.start) && start !== owner.start);
+}
+
+function clearAbandonedAccountsLock(path) {
+  try {
+    if (!lstatSync(path).isDirectory()) return; // An older lock has no host or start identity.
+    const [token, extra] = readdirSync(path);
+    if (extra || token && !opaqueId(token)) return;
+    if (token) {
+      const owner = join(path, token);
+      if (!accountOwnerGone(JSON.parse(readFileSync(owner, "utf8")))) return;
+      unlinkSync(owner);
+    }
+    rmdirSync(path);
+  } catch { /* A competing waiter or an unreadable owner leaves the lock alone. */ }
+}
+
+function accountsLockWaiter(path, wait) {
+  const token = randomUUID().replaceAll("-", "");
+  const holder = { pid: process.pid, host: hostname(), start: processStart(process.pid) };
+  const stage = mkdtempSync(`${path}.owner-`);
+  const staged = join(stage, token);
+  const end = Date.now() + wait;
+  try { writeFileSync(staged, JSON.stringify(holder), { flag: "wx", mode: 0o600 }); }
+  catch (error) { try { unlinkSync(staged); } catch { /* No owner yet. */ } rmdirSync(stage); throw error; }
+  return {
+    take() {
+      clearAbandonedAccountsLock(path);
+      try { renameSync(stage, path); return true; }
+      catch (error) {
+        if (!["EEXIST", "ENOTEMPTY", "ENOTDIR"].includes(error?.code)) throw error;
+        if (wait === 0 || Date.now() >= end) throw new LockHeld();
+        return false;
+      }
+    },
+    drop() {
+      // A waiter that never acquired the lock still owns its staged marker.
+      for (const dir of [stage, path]) {
+        try { unlinkSync(join(dir, token)); rmdirSync(dir); } catch { /* Already gone or held by another process. */ }
+      }
+    },
+  };
+}
+
+function withLoginLock(path, fn) {
+  const lock = accountsLockWaiter(path, LOCK_WAIT);
+  try {
+    while (!lock.take()) pause(retryIn());
+    return fn();
+  } finally { lock.drop(); }
+}
+
+async function withAccountsLock(fn, wait = LOCK_WAIT) {
+  requirePlanHome();
+  const path = join(appHome(), ACCOUNTS_LOCK);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const lock = accountsLockWaiter(path, wait);
+  try {
+    while (!lock.take()) await new Promise((resolve) => setTimeout(resolve, retryIn()));
+    return await fn();
+  } catch (error) { if (error instanceof LockHeld) return refusal("busy"); throw error; }
+  finally { lock.drop(); }
+}
+
+async function cmdAccountsApply({ retry }) {
+  if (!isDir(appHome())) return refusal("no-plan");
+  return withAccountsLock(() => withLinkedAccountsIo((io) => applyRun({ io, retry })), 0);
+}
+
+async function withLinkedAccountsIo(run) {
+  const programs = accountsPrograms();
+  const membership = ["machine", "ls", "--json"];
+  const remote = (name, words, until) => {
+    let hcBin;
+    try { hcBin = hcExecutable(realHcPath()); } catch { return { code: 127 }; }
+    return programs.run(hcBin, (now) => {
+      const seconds = Math.min(READ_SECONDS, Math.floor((until - now) / 1000));
+      const args = typeof words === "function" ? words(seconds) : words;
+      return seconds >= 2 && args ? { args: hcExecArgs(name, args, seconds), timeout: seconds * 1000 } : null;
+    });
+  };
+  const io = {
+    readPlan: readPlanFile,
+    quotaOn,
+    async machines(until) {
+      const timeout = Math.min(20_000, until - Date.now());
+      if (timeout <= 0) return null;
+      try { return fleetMembers(await hcReal(membership, { timeout })); }
+      catch { return null; }
+    },
+    fleet: readAccountsFleet,
+    async discover(name, until) {
+      const result = execOutcome(await remote(name, ["sh", "-c", DISCOVER], until));
+      if (result.kind !== "ok") return { reason: result.kind };
+      return result.code === 0 ? parseDiscover(result.stdout) : { reason: "failed" };
+    },
+    async here(name, cli, until) {
+      const result = execOutcome(await remote(name, (left) => {
+        const within = hereWithin(left);
+        return within ? hereArgv(cli, [], within) : null;
+      }, until));
+      if (result.kind !== "ok") return { reason: result.kind };
+      if (result.code !== 0) return { reason: result.code === 90 ? "old-cli" : "failed" };
+      return readHere(result.stdout);
+    },
+    async setLogin(name, cli, words, until) {
+      return setOutcome(await remote(name, setArgv(cli, words), until));
+    },
+    write(edit, rev) {
+      const { state, plan } = readPlanFile();
+      if (state !== "ok" || plan.rev !== rev) return null;
+      const next = edit(plan);
+      if (next !== plan) writePlanFile(next);
+      return next;
+    },
+    clock: Date.now,
+    sha256Hex: accountsHash,
+    dispatchId: () => randomUUID().replaceAll("-", ""),
+  };
+  try { return await run(io); }
+  finally { programs.stop(); }
+}
+
+function commitAccountsPlan(id, expectRev, now, confirmForget) {
+  const path = planJsonPath(PREVIEWS_DIR, id);
+  let stored;
+  try { stored = readPlanJson(path, 256 * 1024); } catch { return refusal("missing"); }
+  const { value: preview, mtime } = stored;
+  if (preview?.v !== 1 || preview.kind !== "accounts.preview" || preview.id !== id || !object(preview.base)) {
+    return refusal("missing");
+  }
+  if (!isIso(preview.at) || now - Math.min(Date.parse(preview.at), mtime) >= PREVIEW_TTL_MS) {
+    unlinkSync(path);
+    return refusal("expired");
+  }
+  const base = readPlanFile();
+  const result = commitPreview(base.plan, base, preview, { expectRev, now, sha256Hex: accountsHash, confirmForget });
+  if (result.error) {
+    if (["stale", "newer-plan"].includes(result.error)
+      && (base.state !== preview.base.state || base.rev !== preview.base.rev
+        || base.state === "corrupt" && base.digest !== preview.base.digest
+        || expectRev === preview.base.rev)) unlinkSync(path);
+    return result;
+  }
+  let aside;
+  try {
+    writePlanFile(result.plan, () => { if (base.state === "corrupt") aside = keepCorrupt(now); });
+  } catch (error) {
+    if (aside) renameSync(aside, planPath());
+    throw error;
+  }
+  unlinkSync(path);
+  return { ok: true, rev: result.plan.rev };
+}
+
+function showAccountsPlan({ state, plan }) {
+  const fleet = readAccountsFleet();
+  const local = fleet.machines.local;
+  const ref = { codex: { fingerprint: local?.codex?.account },
+    claude: { email: local?.claude?.state === "eligible" ? local.claude.email : null } };
+  const rows = planRows({ plan, fleet, ref, now: Date.now() });
+  const tools = Object.fromEntries(TOOLS.map((tool) => {
+    const section = plan?.[tool];
+    return [tool, { mode: section?.mode ?? null, account: section?.account ?? null, rows: rows[tool] }];
+  }));
+  return { v: 1, kind: "accounts.plan", state, rev: plan?.rev ?? null, at: plan?.at ?? null, tools,
+    ...(plan?.exposures ? { exposures: plan.exposures } : {}) };
+}
+
+const exactKeys = (value, keys) => object(value) && Object.keys(value).length === keys.length
+  && keys.every((key) => Object.hasOwn(value, key));
+const nullable = (check, value) => value === null || check(value);
+const slotId = (value) => matches(SLOT_ID, value);
+const localAttempt = (plan, tool) => own(plan[tool].progress, LOCAL)?.attempt;
+// A commit can retire an attempt entirely. Keep each revision's local attempt numbers apart
+// so a delayed write or outcome can't match a new attempt by the same owner.
+const LOCAL_ATTEMPTS_PER_REV = 1_000_000;
+
+function startLocalPlan(plan, tool, { owner, rev, evidence }, now) {
+  if (plan.rev !== rev) return refusal("stale");
+  const section = plan[tool];
+  const progress = own(section.progress, LOCAL);
+  const assign = own(section.assign, LOCAL);
+  if (progress?.state !== "pending" || !assign) return refusal("not-pending");
+  if (progress.attempt?.outcome === null) return refusal("claimed");
+  const claude = tool === "claude";
+  if (!exactKeys(evidence, ["v", "kind", "assign", "before", "eff", "effSlot", "slot", "home", "proxy"])
+    || evidence.v !== 1 || evidence.kind !== "evidence" || !isHome(evidence.home)
+    || !(claude ? isClaudeKey : isCodexKey)(evidence.assign)) return refusal("bad-request");
+  const { before, eff, effSlot, slot, home, proxy } = evidence;
+  if (claude ? !accountSnapshot(before) || !nullable(isClaudeKey, eff) || !slotId(effSlot) || !slotId(slot) || proxy !== null
+    : !nullable(isHash, before) || eff !== null || effSlot !== null || slot !== null || !isProxyId(proxy)) {
+    return refusal("bad-request");
+  }
+  if (evidence.assign !== assign) return refusal("stale");
+  const seen = own(section.seen, LOCAL);
+  const changed = home !== seen.home || (claude
+    ? home !== appHome() || before !== seen.snapshot && before !== progress.attempt?.after
+      || Boolean(seen.email && eff && seen.email !== eff)
+    : before !== seen.generation || Boolean(seen.proxy && proxy !== seen.proxy));
+  if (changed) {
+    writePlanFile(suspend(plan, tool, LOCAL, "changed", now));
+    return refusal("changed");
+  }
+  const start = Math.max(rev - 1, 0) * LOCAL_ATTEMPTS_PER_REV + 1;
+  const number = Math.max(start, (progress.attempt?.n ?? 0) + 1);
+  if (!Number.isSafeInteger(number) || number >= start + LOCAL_ATTEMPTS_PER_REV) return refusal("failed");
+  const next = startAttempt(plan, tool, LOCAL, { rev, number, slot, before, eff, home, owner, proxy, now,
+    slotDigest: claude ? idDigest(slot, assign, accountsHash) : null,
+    effDigest: claude ? idDigest(effSlot, eff ?? "", accountsHash) : null });
+  writePlanFile(next);
+  const { n, at } = localAttempt(next, tool);
+  return { ok: true, attempt: { n, at, rev, assign, slot, proxy }, seen };
+}
+
+function liveLocalAttempt(plan, tool, n, owner, now) {
+  const attempt = localAttempt(plan, tool);
+  return attempt?.n === n && attempt.outcome === null && attempt.owner === owner && attempt.rev === plan.rev
+    && attempt.assign === own(plan[tool].assign, LOCAL) && now - Date.parse(attempt.at) < LOCAL_START_MS ? attempt : null;
+}
+
+// A core on another socket cannot speak for the socket that dispatched this command.
+export async function coreHere(env = process.env, { sockets = userCoreSockets, status = coreStatus, deadline = Infinity } = {}) {
+  const dispatch = env.AUTOMAGIK_HERDR_CORE_SOCKET || env.HC_SOCKET || env.HC_TERMINAL_SOCKET;
+  if (!dispatch || !isAbsolute(dispatch) || !inTestRoots(dispatch, env)) return null;
+  const until = Math.min(Date.now() + 2000, deadline);
+  if (Date.now() >= until) return null;
+  let candidates;
+  try { candidates = [...new Set([dispatch, ...sockets(env)])]; } catch { return null; }
+  const answers = await Promise.allSettled(candidates.map(async (path) => {
+    const timeoutMs = until - Date.now();
+    if (timeoutMs > 0) return status(env, { sockets: [path], timeoutMs, strict: true });
+  }));
+  const ids = new Set();
+  for (const [i, answer] of answers.entries()) {
+    if (answer.status !== "fulfilled") return null;
+    if (answer.value?.none === true && i !== 0) continue; // Other stale sockets are normal.
+    const id = answer.value?.status?.core?.id;
+    if (!coreOkay(id) || !isMachine(id)) return null;
+    ids.add(id);
+  }
+  return ids.size === 1 ? ids.values().next().value : null;
+}
+
+const writerAbsent = (error) => error?.code === "ENOENT" || error?.code === "ENOTDIR";
+const writerIo = {
+  dir(path) {
+    try { return statSync(path).isDirectory() ? "dir" : "other"; }
+    catch (error) { return writerAbsent(error) ? "none" : "unknown"; }
+  },
+  readable(path) {
+    try { accountsBytes(path, WRITER_MAX_BYTES); return "yes"; }
+    catch (error) { return writerAbsent(error) ? "none" : "unknown"; }
+  },
+  readText(path) {
+    try { return accountsBytes(path, WRITER_MAX_BYTES).toString("utf8"); } catch { return null; }
+  },
+};
+const quotaOn = () => writerIo.dir(join(appHome(), "mods/am-quota")) === "dir";
+
+async function readClaudeForWrite() {
+  const programs = accountsPrograms();
+  try {
+    const deadline = Date.now() + 10_000;
+    return await readClaude(accountsClaudeIo(programs, deadline), deadline);
+  } finally { programs.stop(); }
+}
+
+function checkSlotIdentity(read, { snapshot, id, slotDigest, effDigest }) {
+  if (snapshotOf(read) !== snapshot) return refusal("conflict");
+  const slot = read.slots.find((slot) => slot.id === id);
+  const late = (state) => state === "timeout" || state === "failed";
+  if (!read.slotsComplete || late(slot?.state) || late(read.state)) return refusal("timeout");
+  if (slot?.state !== "eligible" || !slot.email
+    || slotDigest !== undefined && slotDigest !== idDigest(id, slot.email, accountsHash)
+    || effDigest !== undefined && effDigest !== idDigest(read.effective, read.email ?? "", accountsHash)) return refusal("slot-changed");
+  return null;
+}
+
+// Read a slot's identity before taking the sync lock. The snapshot still has to match inside it.
+export async function setLoginRun(op, {
+  appHome: resolveHome = appHome, coreHere: targetCore = coreHere, kind = writerIo.dir, readBytes = accountsBytes,
+  readClaude: probe = readClaudeForWrite, capabilityIo = writerIo, writeTemp, rename, lock = withLoginLock,
+  form = { home: home(), realpath: realpathSync, isDir: (path) => statSync(path).isDirectory() },
+} = {}) {
+  try {
+    const { home: expectedHome, core, snapshot, slotDigest, effDigest, canWrite } = op;
+    const dir = op.kind === "launch" && !op.projectHome ? defaultLaunchHome(form.home) : resolveHome();
+    if (expectedHome !== undefined && expectedHome !== dir) return refusal("home");
+    if (!dir || kind(dir) !== "dir") return refusal("no-home");
+    if (core !== undefined) {
+      if (!["use", "cancel", "launch"].includes(op.kind)) return refusal("failed");
+      const found = await targetCore();
+      if (!found) return refusal("no-core");
+      if (found !== core) return refusal("wrong-core");
+      if (op.kind === "launch") {
+        let text;
+        try { text = readBytes(loginsPath(dir), WRITER_MAX_BYTES).toString("utf8"); }
+        catch (error) {
+          if (error?.code !== "ENOENT") return refusal("unreadable");
+          return { ok: true, core: found, home: dir, dir: null, fallback: false };
+        }
+        const login = chooseLogin(dir, { ...form, read: () => text });
+        const slot = isHome(login.dir) ? login.dir : null;
+        return { ok: true, core: found, home: dir, dir: slot, fallback: Boolean(login.warning) || slot !== login.dir };
+      }
+    }
+    const probeRefusal = slotDigest !== undefined || effDigest !== undefined ? checkSlotIdentity(await probe(), op) : null;
+    const path = loginsPath(dir);
+    return lock(`${path}.lock`, () => {
+      let receipt;
+      const keep = (outcome, snapshot = null) => atomicAccountsWrite(receipt, JSON.stringify({ outcome, snapshot }),
+        undefined, { writeTemp, rename });
+      if (op.attempt) {
+        const { rev, n, dispatch } = op.attempt;
+        receipt = `${path}.cancelled-${accountsHash(`${rev}:${n}:${dispatch}`)}`;
+        let bytes = null;
+        try { bytes = readBytes(receipt, 256, { noFollow: true }); }
+        catch (error) { if (error?.code !== "ENOENT") throw error; }
+        if (op.kind === "cancel") {
+          let previous;
+          try { previous = JSON.parse(bytes); } catch { /* Older empty receipts are indeterminate. */ }
+          const written = previous?.outcome === "written" && isHash(previous.snapshot);
+          const outcome = written ? "written" : previous?.outcome === "not-written" ? "not-written" : "indeterminate";
+          if (bytes === null) keep(outcome);
+          return { ok: true, cancelled: true, outcome, snapshot: written ? previous.snapshot : null };
+        }
+        if (bytes !== null) return refusal("stale");
+      }
+      const refuseWrite = (code) => {
+        if (receipt) keep("not-written");
+        return refusal(code);
+      };
+      if (probeRefusal) return refuseWrite(probeRefusal.error);
+      if (core !== undefined && !writerCapability(dir, capabilityIo).qualified) return refuseWrite("update-first");
+      let bytes = null;
+      try { bytes = readBytes(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+      if ((bytes === null ? "none" : accountsHash(bytes)) !== snapshot) return refuseWrite("conflict");
+      const edit = loginEdit(bytes === null ? null : bytes.toString("utf8"), op, form);
+      if (edit.error) return refuseWrite(edit.error);
+      const after = accountsHash(edit.text), refused = new Error();
+      let code;
+      try {
+        atomicAccountsWrite(path, edit.text, () => {
+          if (canWrite && (code = canWrite())) throw refused;
+          // If the process dies between the two renames, recovery cannot assume it never wrote.
+          if (receipt) keep("indeterminate");
+        }, { writeTemp, rename });
+      } catch (error) {
+        if (error === refused) return refuseWrite(code);
+        throw error;
+      }
+      if (receipt) keep("written", after);
+      return { ok: true, snapshot: after, use: edit.use };
+    });
+  } catch (error) { return refusal(error instanceof LockHeld ? "busy" : "failed"); }
+}
+
+async function writeLocalPlan(plan, { n, owner, snapshot }, now) {
+  const attempt = liveLocalAttempt(plan, "claude", n, owner, now);
+  if (!attempt || attempt.after !== null || attempt.home !== appHome()) return refusal("stale");
+  if (snapshot !== attempt.before) return refusal("conflict");
+  const result = await setLoginRun({ home: attempt.home, kind: "use", id: attempt.slot, snapshot,
+    slotDigest: attempt.slotDigest, effDigest: attempt.effDigest,
+    canWrite: () => !quotaOn() ? "off" : Date.now() - Date.parse(attempt.at) >= LOCAL_START_MS ? "stale" : null });
+  if (result.error) return result;
+  plan.claude.progress.local.attempt.after = result.snapshot;
+  plan.at = new Date().toISOString();
+  writePlanFile(plan);
+  return { ok: true, snapshot: result.snapshot };
+}
+
+function fenceLocalPlan(plan, { n, owner, generation, intended, proxy }, now) {
+  const attempt = liveLocalAttempt(plan, "codex", n, owner, now);
+  if (!attempt || attempt.fencedAt || proxy !== attempt.proxy) return refusal("stale");
+  if (generation !== attempt.before) return refusal("changed");
+  writePlanFile(fence(plan, "codex", LOCAL, n, { intended, now }));
+  return { ok: true };
+}
+
+// The panel has already staged and fenced this payload. The CLI owns the final rename
+// so an install cannot outlive the attempt that authorized it.
+function installLocalCodex(plan, { n, owner, rev, intended, stamp }, now) {
+  const allowed = (plan, at) => {
+    const attempt = plan && localAttempt(plan, "codex");
+    return attempt?.n === n && attempt.owner === owner && attempt.outcome === null
+      && attempt.rev === rev && plan.rev === rev && attempt.assign === own(plan.codex.assign, LOCAL)
+      && attempt.intended === intended && attempt.fencedAt && at - Date.parse(attempt.fencedAt) < LOCAL_FENCE_MS;
+  };
+  if (!allowed(plan, now)) return refusal("stale");
+  if (!quotaOn()) return refusal("off");
+  const attempt = localAttempt(plan, "codex");
+  const payload = join(appHome(), "data/am-quota", `codex-${stamp}.json`);
+  const file = join(attempt.home, "auth.json");
+  const bytes = accountsBytes(payload, CODEX_MAX_BYTES, { noFollow: true });
+  if (accountsHash(bytes) !== intended) return refusal("changed");
+
+  // A panel that loses the installer reply must distinguish this from a fence
+  // whose owner never reached the installer.
+  attempt.installStarted = true;
+  writePlanFile(plan);
+  mkdirSync(attempt.home, { recursive: true });
+  const stale = new Error(), changed = new Error(), off = new Error();
+  try {
+    atomicAccountsWrite(file, bytes, () => {
+      if (!allowed(readPlanFile().plan, Date.now())) throw stale;
+      let original = null;
+      try { original = accountsBytes(file, CODEX_MAX_BYTES); }
+      catch (error) { if (error?.code !== "ENOENT") throw error; }
+      if ((original && accountsHash(original)) !== attempt.before) throw changed;
+      if (!quotaOn()) throw off;
+      if (original) writeAccountsTemp(`${file}.bak-${stamp}`, original);
+      if (!quotaOn()) throw off;
+    });
+  } catch (error) {
+    if (error === stale) return refusal("stale");
+    if (error === changed) return refusal("changed");
+    if (error === off) return refusal("off");
+    throw error;
+  }
+  try {
+    const backups = readdirSync(attempt.home).filter((name) => /^auth\.json\.bak-\d{4}-\d\d-\d\dT/.test(name)).sort();
+    for (const name of backups.slice(0, -3)) unlinkSync(join(attempt.home, name));
+  } catch { /* Rotation does not change the outcome of an installed credential. */ }
+  return { ok: true };
+}
+
+function recordLocalPlan(plan, tool, { n, owner, outcome }, now) {
+  const attempt = localAttempt(plan, tool);
+  if (attempt?.n !== n || attempt.outcome !== null || attempt.assign !== own(plan[tool].assign, LOCAL)) return refusal("stale");
+  const keys = ["v", "kind", "state", "why", "read"];
+  if (tool === "codex" && Object.hasOwn(outcome ?? {}, "placed")) keys.push("placed");
+  if (!exactKeys(outcome, keys) || outcome.v !== 1 || outcome.kind !== "outcome") return refusal("bad-request");
+  const { state, why, placed } = outcome;
+  const reasons = { done: [null], failed: PENDING_WHY, changed: [null, "changed"], lost: [null, "lost"] };
+  if (!own(reasons, state)?.includes(why)) return refusal("bad-request");
+  if (owner !== attempt.owner && (state === "failed" || !recoverable(attempt, now))) return refusal("claimed");
+
+  let read;
+  try { read = parseRead(outcome.read, tool, LOCAL); } catch { return refusal("bad-request"); }
+  if (read && (!exactKeys(outcome.read, Object.keys(read)) || read.home !== attempt.home
+    || tool === "claude" && !read.slots.every((slot, i) => exactKeys(outcome.read.slots[i], Object.keys(slot))))) {
+    return refusal("bad-request");
+  }
+  const snapshot = tool === "claude" ? snapshotOf(read) : null;
+  let seen, placement;
+  if (state === "done") {
+    if (tool === "claude") {
+      if (confirmedClaude(read) !== attempt.assign) return refusal("bad-request");
+      seen = { home: read.home, snapshot, email: read.email };
+    } else {
+      if (!read || !attempt.fencedAt || read.generation !== attempt.intended || read.proxy !== attempt.proxy
+        || !isFingerprint(read.account)) return refusal("bad-request");
+      seen = { home: read.home, account: read.account, generation: read.generation, proxy: read.proxy };
+      placement = placed === undefined ? null : { name: attempt.assign, proxy: read.proxy, account: read.account, generation: read.generation };
+    }
+  }
+  if (placed !== undefined && (!placement || !exactKeys(placed, Object.keys(placement))
+    || Object.keys(placement).some((key) => placement[key] !== placed[key]))) return refusal("bad-request");
+  const next = settle(plan, tool, LOCAL, {
+    state: state === "changed" ? "suspended" : state === "done" ? "done" : "pending",
+    why: state === "changed" || state === "lost" ? state : why, seen,
+    read: read && (tool === "codex" || snapshot) ? read : undefined,
+    placed: placement ? { ...placement, at: new Date(now).toISOString() } : placement, now,
+  });
+  writePlanFile(closeAttempt(next, tool, LOCAL, n, state));
+  return placement ? { ok: true, rev: plan.rev } : { ok: true };
+}
+
+function suspendLocalPlan(plan, tool, rev, now) {
+  if (rev !== plan.rev) return refusal("stale");
+  if (own(plan[tool].progress, LOCAL)?.state !== "done") return refusal("not-done");
+  writePlanFile(suspend(plan, tool, LOCAL, "changed", now));
+  return { ok: true };
+}
+
+// Some refusals happen before a slot or a usable proxy can be claimed.
+function failLocalPlan(plan, tool, rev, outcome, now) {
+  if (rev !== plan.rev) return refusal("stale");
+  const section = plan[tool];
+  const progress = own(section.progress, LOCAL);
+  const assign = own(section.assign, LOCAL);
+  if (progress?.state !== "pending" || !assign) return refusal("not-pending");
+  if (progress.attempt?.outcome === null) return refusal("claimed");
+  if (!exactKeys(outcome, ["v", "kind", "assign", "why", "read"]) || outcome.v !== 1
+    || outcome.kind !== "outcome" || outcome.assign !== assign) return refusal("bad-request");
+  let read;
+  try { read = parseRead(outcome.read, tool, LOCAL); } catch { return refusal("bad-request"); }
+  const seen = own(section.seen, LOCAL);
+  const claude = tool === "claude";
+  if (!read || (claude ? !["no-login", "not-eligible"].includes(outcome.why)
+    || read.core !== null || read.home !== appHome() || !read.slotsComplete || !snapshotOf(read)
+    : outcome.why !== "proxy-url" || read.proxy !== null)) return refusal("bad-request");
+  const changed = read.home !== seen.home || (claude
+    ? snapshotOf(read) !== seen.snapshot && snapshotOf(read) !== progress.attempt?.after
+      || Boolean(seen.email && read.email && seen.email !== read.email)
+    : read.generation !== seen.generation);
+  writePlanFile(changed ? suspend(plan, tool, LOCAL, "changed", now)
+    : settle(plan, tool, LOCAL, { state: "pending", why: outcome.why, read, now }));
+  return { ok: true };
+}
+
+const PLAN_OPERATIONS = {
+  request: [], commit: ["expect-rev"], show: [], "start-local": ["owner", "expect-rev", "evidence"],
+  "write-local": ["attempt", "owner", "snapshot"],
+  "fence-local": ["attempt", "owner", "generation", "intended", "proxy"],
+  "install-local": ["attempt", "owner", "expect-rev", "intended", "stamp"],
+  "record-local": ["attempt", "owner", "outcome"], "suspend-local": ["expect-rev"],
+  "fail-local": ["expect-rev", "outcome"],
+};
+const PLAN_OPTIONS = Object.fromEntries([...new Set(Object.entries(PLAN_OPERATIONS).flat(2)), "json", "confirm-forget"]
+  .map((key) => [key, { type: ["json", "show", "confirm-forget"].includes(key) ? "boolean" : "string" }]));
+const wholeRevision = (value) => matches(/^(0|[1-9][0-9]*)$/, value) && Number.isSafeInteger(Number(value));
+
+const SET_LOGIN_OPTIONS = Object.fromEntries(["json", "use", "add", "dir", "remove", "snapshot", "expect-home",
+  "expect-core", "expect-slot", "expect-eff", "expect-rev", "attempt", "dispatch", "cancel-attempt", "launch-login", "project-home"]
+  .map((key) => [key, { type: ["json", "cancel-attempt", "launch-login", "project-home"].includes(key) ? "boolean" : "string" }]));
+
+function parseSetLoginOptions(args) {
+  const { values, tokens } = parseArgs({ args, options: SET_LOGIN_OPTIONS, allowPositionals: false, strict: true, tokens: true });
+  if (tokens.some((token) => token.kind !== "option") || tokens.length !== Object.keys(values).length) return null;
+  return setLoginOp(values).op;
+}
+
+function parseApplyOptions(args) {
+  const { values, tokens } = parseArgs({ args, options: { json: OPTIONS.json, retry: { type: "boolean" } },
+    allowPositionals: false, strict: true, tokens: true });
+  if (tokens.some((token) => token.kind !== "option") || tokens.length !== Object.keys(values).length) return null;
+  return values;
+}
+
+function parsePlanOptions(args) {
+  const { values, tokens } = parseArgs({ args, options: PLAN_OPTIONS, allowPositionals: false, strict: true, tokens: true });
+  const operations = Object.keys(PLAN_OPERATIONS).filter((key) => Object.hasOwn(values, key));
+  if (operations.length !== 1) return null;
+  const [op] = operations;
+  const fields = [op, ...PLAN_OPERATIONS[op]];
+  const requestId = (value) => typeof value === "string";
+  const checks = { request: requestId, commit: opaqueId, show: (value) => value === true,
+    "start-local": (tool) => TOOLS.includes(tool), "write-local": (tool) => tool === "claude",
+    "fence-local": (tool) => tool === "codex", "install-local": (tool) => tool === "codex",
+    "record-local": (tool) => TOOLS.includes(tool),
+    "suspend-local": (tool) => TOOLS.includes(tool), "fail-local": (tool) => TOOLS.includes(tool), "expect-rev": wholeRevision,
+    attempt: (value) => wholeRevision(value) && Number(value) > 0, owner: opaqueId, evidence: requestId, outcome: requestId,
+    snapshot: accountSnapshot, generation: accountSnapshot, intended: isHash, proxy: isProxyId,
+    stamp: (value) => matches(/^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z$/, value) };
+  const optional = op === "commit" ? ["json", "confirm-forget"] : ["json"];
+  if (tokens.some((token) => token.kind !== "option" || !optional.includes(token.name) && !fields.includes(token.name))
+    || tokens.length !== Object.keys(values).length || !fields.every((key) => checks[key](values[key]))) return null;
+  return { op, values };
+}
+
+async function cmdAccountsPlan({ op, values }) {
+  sweepPlanFiles(Date.now(), values.commit);
+  if (op === "show") return showAccountsPlan(readPlanFile());
+  if (op === "request") {
+    const request = readRequest(values.request);
+    const base = readPlanFile();
+    return planPreview(request, { base, plan: base.plan, views: viewsFrom(readAccountsFleet(), base.plan, writerQualified) });
+  }
+  const rev = Number(values["expect-rev"]);
+  if (op === "commit") return withAccountsLock(() => commitAccountsPlan(values.commit, rev, Date.now(), values["confirm-forget"]), 0);
+  const tool = values[op];
+  const { owner, snapshot, generation, intended, proxy } = values;
+  const n = Number(values.attempt);
+  return withAccountsLock(() => {
+    const { state, plan } = readPlanFile();
+    if (state !== "ok") return refusal(state === "newer" ? "newer-plan" : "no-plan");
+    const now = Date.now();
+    if (op === "start-local") return startLocalPlan(plan, tool, { owner, rev, evidence: readRequest(values.evidence) }, now);
+    if (op === "write-local") return writeLocalPlan(plan, { n, owner, snapshot }, now);
+    if (op === "fence-local") return fenceLocalPlan(plan, { n, owner, generation: generation === "none" ? null : generation, intended, proxy }, now);
+    if (op === "install-local") return installLocalCodex(plan, { n, owner, rev, intended, stamp: values.stamp }, now);
+    if (op === "record-local") return recordLocalPlan(plan, tool, { n, owner, outcome: readRequest(values.outcome) }, now);
+    if (op === "fail-local") return failLocalPlan(plan, tool, rev, readRequest(values.outcome), now);
+    return suspendLocalPlan(plan, tool, rev, now);
+  });
+}
+
 async function cmdAccounts(opts, [verb, ...rest]) {
-  if (verb !== "here" && verb !== "fleet") throw new CliError("accounts takes here or fleet.", 2);
+  if (verb !== "here" && verb !== "fleet") throw new CliError(ACCOUNT_VERBS, 2);
   if (Object.keys(opts).some((flag) => flag !== "json" && flag !== "within" && flag !== "started")) throw new CliError("accounts takes only --json.", 2);
   const { within, started } = opts;
   const seconds = Number(within);
@@ -12011,8 +12837,25 @@ async function cmdAccounts(opts, [verb, ...rest]) {
   }
 }
 
-/** The dedicated reader and the person-facing command share this command's output. */
+/** The dedicated accounts program and the person-facing command share this dispatch. */
 export async function accountsMain(argv) {
+  const at = argv.findIndex((word) => !word.startsWith("-"));
+  const verb = argv[at];
+  if (verb === "plan" || verb === "set-login" || verb === "apply") {
+    let parsed;
+    const prefix = argv.slice(0, at);
+    const parse = { plan: parsePlanOptions, "set-login": parseSetLoginOptions, apply: parseApplyOptions }[verb];
+    try { if (prefix.every((word) => word === "--json")) parsed = parse([...prefix, ...argv.slice(at + 1)]); }
+    catch { /* One fixed usage line. */ }
+    if (!parsed) { process.stderr.write(`am: accounts ${verb}: usage\n`); return 2; }
+    let answer;
+    const run = { plan: cmdAccountsPlan, "set-login": setLoginRun, apply: cmdAccountsApply }[verb];
+    try { answer = await run(parsed); }
+    catch (error) { answer = refusal(error instanceof CliError && error.message === "no-home" ? "no-home" : "failed"); }
+    process.stdout.write(`${JSON.stringify(answer)}\n`);
+    if (answer.error) process.stderr.write(`am: accounts ${verb}: ${answer.error}\n`);
+    return answer.error ? 1 : 0;
+  }
   try {
     const { positionals, values: { within, started } } = parseArgs({
       args: argv, options: { json: OPTIONS.json, within: { type: "string" }, started: { type: "string" } }, allowPositionals: true,
@@ -12025,7 +12868,7 @@ export async function accountsMain(argv) {
       process.stderr.write(`am: ${e.message}\n`);
       return e.code;
     }
-    process.stderr.write("am: accounts takes here or fleet.\n");
+    process.stderr.write(`am: ${verb === "here" || verb === "fleet" ? "accounts takes here or fleet." : ACCOUNT_VERBS}\n`);
     return 2;
   }
 }
@@ -12038,6 +12881,10 @@ const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */
 export async function main(argv = process.argv.slice(2), io = {}) {
+  const at = argv.findIndex((word) => !word.startsWith("-"));
+  if (argv[at] === "accounts" && argv.slice(0, at).every((word) => word === "--json")) {
+    return accountsMain(argv.slice(at + 1));
+  }
   let parsed;
   try {
     parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true, tokens: true });

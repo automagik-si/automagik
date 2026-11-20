@@ -46,7 +46,7 @@ export function snapshot(root, skip = () => false) {
   return rows;
 }
 
-export function scene(t) {
+export function scene(t, { scratchClaude = false } = {}) {
   const root = scratchRoot(t, "am-accounts-");
   const home = join(root, "home"), app = join(home, "app"), store = join(home, "am"),
     bin = join(root, "bin"), codex = join(home, "codex");
@@ -70,18 +70,25 @@ exit "$result"
   hcWrapper();
   exe(join(bin, "claude"), fakeClaude("ana@example.com"));
   const nodeDir = dirname(process.execPath);
-  const env = { HOME: home, HERDR_APP_HOME: app, AM_HOME: store, CODEX_HOME: codex, CLAUDE_CONFIG_DIR: "",
+  const testEnv = (scope, dir) => ({
+    AUTOMAGIK_HERDR_TEST_ROOTS: scope, AUTOMAGIK_HERDR_CORE_SOCKET: join(scope, "no-core.sock"),
+    XDG_STATE_HOME: join(scope, "state"), XDG_CONFIG_HOME: join(scope, "config"), XDG_RUNTIME_DIR: join(scope, "runtime"),
+    HERDR_APP_BIN: "/bin/false", CLAUDE_CONFIG_DIR: scratchClaude ? join(dir, ".claude") : "",
+  });
+  const env = { ...testEnv(root, home), HOME: home, HERDR_APP_HOME: app, AM_HOME: store, CODEX_HOME: codex,
     HC_SOCKET: "", HC_SESSION: "", HC_TERMINAL_ID: "", SHELL: fakeShell,
-    AUTOMAGIK_HERDR_TEST_ROOTS: root, AUTOMAGIK_HERDR_CORE_SOCKET: join(root, "no-core.sock"),
     GIT_CEILING_DIRECTORIES: root, TMPDIR: root, PATH: `${bin}:${nodeDir}:/usr/bin:/bin`,
     HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath };
   const states = () => JSON.parse(readFileSync(statePath, "utf8"));
   const setState = (edit) => { const state = states(); edit(state); json(statePath, state); };
   const spawnEnv = (overrides) => {
     const all = { ...env, ...overrides };
-    for (const name of ["HOME", "HERDR_APP_HOME", "AM_HOME", "CODEX_HOME"]) {
+    for (const name of ["HOME", "HERDR_APP_HOME", "AM_HOME", "CODEX_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME",
+      "XDG_RUNTIME_DIR", "AUTOMAGIK_HERDR_CORE_SOCKET", ...(all.CLAUDE_CONFIG_DIR ? ["CLAUDE_CONFIG_DIR"] : [])]) {
       assert.ok(all[name].startsWith(`${root}/`), name);
     }
+    assert.equal(all.AUTOMAGIK_HERDR_TEST_ROOTS, root);
+    assert.equal(all.HERDR_APP_BIN, "/bin/false");
     return all;
   };
   const output = () => {
@@ -125,7 +132,7 @@ exit "$result"
       targetStore = join(targetHome, "am"), targetBin = join(targetHome, "bin"), targetCodex = join(targetHome, "codex");
     for (const path of [targetApp, targetStore, targetBin, targetCodex]) mkdirSync(path, { recursive: true });
     const m = { name, id: `core-${name}`, state: options.state ?? "connected", home: targetHome, path: `${targetBin}:${nodeDir}`,
-      env: { HERDR_APP_HOME: targetApp, AM_HOME: targetStore, CODEX_HOME: targetCodex, CLAUDE_CONFIG_DIR: "" } };
+      env: { ...testEnv(target, targetHome), HERDR_APP_HOME: targetApp, AM_HOME: targetStore, CODEX_HOME: targetCodex } };
     exe(join(targetBin, "claude"), fakeClaude(options.email ?? "ana@example.com"));
     exe(join(targetBin, "node"), capture(`"${process.execPath}"`));
     writeFileSync(join(targetCodex, "auth.json"), auth(options.account));
@@ -159,9 +166,9 @@ exit "$result"
 }
 
 export function fixtureHere({ account = fpr("account-a"), email = "ana@example.com" } = {}) {
-  return { v: 1, kind: "accounts.here", versions: { pack: HERE_SINCE, am: null }, panel: "off",
+  return { v: 1, kind: "accounts.here", versions: { pack: HERE_SINCE, am: null }, panel: "off", appHome: null, writer: null, core: null,
     codex: { home: "/example-home/codex", from: "env", file: "present", account, accountId: "present", lastRefresh: AT, generation: "a".repeat(64) },
-    claude: { record: "absent", snapshot: null, selected: "default", effective: "default", slotsComplete: true,
+    claude: { record: "absent", snapshot: null, selected: "default", effective: "default", slotsComplete: true, nextSlot: null,
       slots: [{ id: "default", dir: null, email, state: "eligible" }], state: "eligible", email,
       routes: { bare: { email, state: "eligible" }, record: { email, state: "eligible" } }, routesDiffer: false },
     exceptions: noExceptions() };

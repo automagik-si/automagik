@@ -3,6 +3,7 @@ import { askBare, CREDENTIAL_VARS, DEFAULT_LOGIN, loginsPath, probeLogin, readRe
 import { chooseLogin } from "./logins.js";
 import { PROJECTS_FILE, MAX_LISTED_PROJECTS, listedProjects } from "./model.js";
 import { bytesOf, checkHere, HERE_KIND, HERE_MAX_BYTES, HERE_V, matches, pathOkay, REFRESH, ROUTE_CODES, versionOkay, accountFingerprint } from "./accountsRows.js";
+import { nextSlotDir, writerCapability, WRITER_MAX_BYTES } from "./accountsWrite.js";
 
 export { HERE_KIND, HERE_MAX_BYTES, HERE_V };
 export const HERE_BUDGET_MS = 15_000;
@@ -12,6 +13,10 @@ export const CODEX_MAX_BYTES = 1 << 20;
 const trim = (path) => path.replace(/\/+$/, "");
 const absent = (e) => e?.code === "ENOENT" || e?.code === "ENOTDIR";
 const size = (bytes) => typeof bytes === "string" ? bytesOf(bytes) : bytes.byteLength;
+
+// eslint-disable-next-line no-control-regex
+export const defaultLaunchHome = (home) => home.startsWith("/") && !/[\x00-\x1f\x7f]/.test(home)
+  ? `${trim(home)}/.config/herdr-app` : null;
 
 export function codexHome(env, home) {
   const given = env.CODEX_HOME?.trim();
@@ -78,14 +83,15 @@ export async function readClaude(io, deadline) {
   const bareRoute = { email: bareEmail, state: bareEmail ? "eligible" : ({ out: "not-signed-in", late: "timeout" })[bare.state] ?? "failed" };
   return { record, snapshot: bytes === undefined ? null : io.sha256(bytes), selected, effective, slots,
     slotsComplete: record !== "bad" && !slots.some((s) => ["timeout", "failed"].includes(s.state)),
+    nextSlot: nextSlotDir(io.home, r.logins),
     email: route === "shipped" && chosen.state === "eligible" ? chosen.email : null,
     state: route === "shipped" ? chosen.state : route === "own" ? "unresolved" : "failed",
     routes: { record: recordRoute, bare: bareRoute },
     routesDiffer: Boolean(bareEmail && recordRoute.email && bareEmail !== recordRoute.email) };
 }
 
-const textAt = (io, path) => {
-  try { return String(io.readBytes(path)); } catch { return null; }
+const textAt = (io, path, max) => {
+  try { return String(io.readBytes(path, max)); } catch { return null; }
 };
 
 export function exceptions(io, boundProjects) {
@@ -99,6 +105,9 @@ export function exceptions(io, boundProjects) {
   const listed = [PROJECTS_FILE, "automagik-herdr/projects.json"].flatMap((file) => listedProjects(textAt(io, `${io.appHome}/${file}`)));
   const projects = [...new Set([...bound, ...[...listed, ...shared].filter(pathOkay).map((p) => trim(p) || "/")])].slice(0, MAX_LISTED_PROJECTS);
   const result = { bound: [], list: [], more: 0 };
+  const defaults = { bound: [], list: [], more: 0 };
+  const defaultHome = defaultLaunchHome(io.home);
+  const otherHome = (home) => home && trim(home) !== trim(io.appHome);
   for (const project of projects) {
     let why;
     try {
@@ -106,17 +115,26 @@ export function exceptions(io, boundProjects) {
       if (size(bytes) > 4096) throw new Error();
       const { appHome, prepend, error } = io.paneEnvOf(String(bytes));
       if (error) why = "unread";
-      else if (appHome && trim(appHome) !== trim(io.appHome)) why = "own-app-home";
+      else if (otherHome(appHome)) why = "own-app-home";
       else if (prepend) why = "own-path";
+      else if (!appHome && otherHome(defaultHome)) why = "default-app-home";
     } catch (e) {
       if (!absent(e)) why = "unread";
+      else if (otherHome(defaultHome)) why = "default-app-home";
     }
-    if (why && bound.has(project)) result.bound.push({ project, why });
+    if (why === "default-app-home") defaults[bound.has(project) ? "bound" : "list"].push(project);
+    else if (why && bound.has(project)) result.bound.push({ project, why });
     else if (why && why !== "unread") result.list.push({ project, why });
   }
   result.list.sort((a, b) => a.project < b.project ? -1 : a.project > b.project ? 1 : 0);
   result.more = Math.max(0, result.list.length - 20);
   result.list = result.list.slice(0, 20);
+  if (defaults.bound.length || defaults.list.length) {
+    defaults.list.sort();
+    defaults.more = Math.max(0, defaults.list.length - 20);
+    defaults.list = defaults.list.slice(0, 20);
+    result.defaults = defaults;
+  }
   return result;
 }
 
@@ -136,11 +154,20 @@ export function panelState(io) {
 }
 
 export async function hereAnswer(io, boundProjects = [], deadline = io.now() + HERE_BUDGET_MS) {
-  let codex = null, claude = null;
+  let codex = null, claude = null, core = null;
+  const coreRead = until([Promise.resolve().then(() => io.coreHere?.(deadline)).then((id) => {
+    core = id ?? null;
+  })], deadline, io.now);
   try { codex = readCodex(io); } catch { /* This tool could not be read. */ }
   try { claude = await readClaude(io, deadline); } catch { /* This tool could not be read. */ }
+  await coreRead;
+  const appHome = trim(io.appHome) || "/";
+  const writer = writerCapability(appHome, {
+    dir: io.dir ?? (() => "unknown"), readable: io.readable ?? (() => "unknown"),
+    readText: (path) => textAt(io, path, WRITER_MAX_BYTES),
+  }).writer;
   const answer = checkHere({ v: HERE_V, kind: HERE_KIND, versions: versions(io), panel: panelState(io),
-    codex, claude, exceptions: exceptions(io, boundProjects) }, { source: true });
+    appHome, writer, core, codex, claude, exceptions: exceptions(io, boundProjects) }, { source: true });
   if (answer && bytesOf(JSON.stringify(answer)) + 1 > HERE_MAX_BYTES) {
     if (answer.claude) {
       const { slots, effective } = answer.claude;
@@ -152,6 +179,10 @@ export async function hereAnswer(io, boundProjects = [], deadline = io.now() + H
     }
     answer.exceptions.more += answer.exceptions.list.length;
     answer.exceptions.list = [];
+    if (answer.exceptions.defaults) {
+      answer.exceptions.defaults.more += answer.exceptions.defaults.list.length;
+      answer.exceptions.defaults.list = [];
+    }
   }
   return answer;
 }

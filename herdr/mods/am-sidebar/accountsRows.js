@@ -29,6 +29,11 @@ const ENTRY_STATES = ["read", "away", "failed", "unknown"];
 const WHY = ["own-app-home", "own-path", "unread"];
 export const noExceptions = () => ({ bound: [], list: [], more: 0 });
 
+export function defaultHomeExceptions(exceptions) {
+  const { bound = [], list = [] } = exceptions?.defaults ?? {};
+  return [...bound, ...list].map((project) => ({ project, why: "default-app-home" }));
+}
+
 export const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 export const matches = (shape, value) => typeof value === "string" && shape.test(value);
 export const versionOkay = (value) => matches(VERSION, value) && value.length <= 64;
@@ -97,6 +102,8 @@ export function checkHere(answer, { source = false } = {}) {
     return null;
   };
   const optional = (test, value) => value === null || source && !test(value) ? null : need(test, value);
+  // Delivery 1 answers and fleet entries predate the writer and route binding fields.
+  const added = (test, value) => optional(test, value ?? null);
   const one = (choices) => (value) => choices.includes(value);
   const id = (value) => matches(ID, value);
   const email = (value) => optional((e) => matches(EMAIL, e) && matches(EMAIL, e.toLowerCase()), value)?.toLowerCase() ?? null;
@@ -119,6 +126,12 @@ export function checkHere(answer, { source = false } = {}) {
   };
   const versions = record(answer.versions, (v) => ({ pack: optional(versionOkay, v.pack), am: optional(versionOkay, v.am) }));
   const panel = need(one(PANEL), answer.panel);
+  const appHome = added(pathOkay, answer.appHome);
+  const core = added((value) => coreOkay(value) && value.length <= 128, answer.core);
+  const capability = added((w) => object(w) && w.setLogin === true && [...PANEL, "unknown"].includes(w.panel)
+    && bool(w.panelWrites) && bool(w.sidebarWrites) && bool(w.confirmed), answer.writer);
+  const writer = capability && { setLogin: true, panel: capability.panel, panelWrites: capability.panelWrites,
+    sidebarWrites: capability.sidebarWrites, confirmed: capability.confirmed };
   const codex = tool(answer.codex, (c) => ({
     home: need(pathOkay, c.home),
     from: need(one(["env", "default"]), c.from),
@@ -140,6 +153,7 @@ export function checkHere(answer, { source = false } = {}) {
       return { id: need(id, s.id), dir: optional(pathOkay, s.dir), email: address,
         state: source && state === "eligible" && !address ? "failed" : state };
     }));
+    need((list) => new Set(list.map((s) => s?.id)).size === list.length, slots);
     const routes = record(c.routes, (r) => ({ record: route(r.record), bare: route(r.bare) }));
     const state = need(effectiveCode, c.state);
     const address = email(c.email);
@@ -151,6 +165,7 @@ export function checkHere(answer, { source = false } = {}) {
     return {
       record: need(one(RECORD), c.record), snapshot: hash(c.snapshot), selected: need(id, c.selected),
       effective: need(id, c.effective), slots, slotsComplete: complete && (!source || !slots.some((s) => s?.state === "failed")),
+      nextSlot: added(pathOkay, c.nextSlot),
       email: unprobed ? null : address,
       state: unprobed ? "unresolved" : source && state === "eligible" && !address ? "failed" : state,
       routes, routesDiffer: Boolean(routes?.record?.email && routes?.bare?.email && routes.record.email !== routes.bare.email),
@@ -159,8 +174,11 @@ export function checkHere(answer, { source = false } = {}) {
   const exception = (value) => record(value, (e) => ({ project: need(pathOkay, e.project), why: need(one(WHY), e.why) }));
   const exceptions = record(answer.exceptions, (e) => ({
     bound: array(e.bound, exception), list: array(e.list, exception), more: need(countOkay, e.more),
+    ...(e.defaults === undefined ? {} : { defaults: record(e.defaults, (d) => ({
+      bound: array(d.bound, (p) => need(pathOkay, p)), list: array(d.list, (p) => need(pathOkay, p)), more: need(countOkay, d.more),
+    })) }),
   }));
-  return invalid ? null : { v: HERE_V, kind: HERE_KIND, versions, panel, codex, claude, exceptions };
+  return invalid ? null : { v: HERE_V, kind: HERE_KIND, versions, panel, appHome, writer, core, codex, claude, exceptions };
 }
 
 export function nextObs(tool, prev, read, at) {
@@ -178,7 +196,8 @@ function fleetEntry(entry, core) {
   if (!object(entry) || !timeOkay(entry.at) || !ENTRY_STATES.includes(entry.state)
     || (core === "local" ? entry.name !== null : !matches(NAME, entry.name))
     || !(entry.reason === null || REASONS.includes(entry.reason)) || ![null, "pack", "am"].includes(entry.cli)
-    || !(entry.panel === null || PANEL.includes(entry.panel))) return null;
+    || !(entry.panel === null || PANEL.includes(entry.panel))
+    || !(entry.write == null || typeof entry.write === "boolean")) return null;
   const { name, at, state, reason, cli, panel } = entry;
   const checked = checkHere({ ...entry, v: HERE_V, kind: HERE_KIND, panel: panel ?? "absent",
     claude: Array.isArray(entry.claude?.slots) ? { ...entry.claude, slots: entry.claude.slots.map((s) => ({ ...s, dir: null })) } : entry.claude });
@@ -193,7 +212,9 @@ function fleetEntry(entry, core) {
   const codex = stored("codex", "prevAccount", FINGERPRINT);
   const claude = stored("claude", "prevEmail", EMAIL);
   if (codex === undefined || claude === undefined) return null;
-  return { name, at, state, reason, cli, versions: checked.versions, panel, codex, claude, exceptions: checked.exceptions };
+  const { appHome, writer, core: answeredCore } = checked;
+  return { name, at, state, reason, cli, versions: checked.versions, panel, appHome, writer, write: entry.write ?? null, core: answeredCore,
+    codex, claude, exceptions: checked.exceptions };
 }
 
 export function parseFleet(text) {

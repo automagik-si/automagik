@@ -23,6 +23,8 @@ export async function readTextFile(path) {
   return state.files.has(path) ? state.files.get(path) : null;
 }
 export async function writeTextFile(path, text, expected) {
+  const pause = state.onWrite?.(path, text, expected);
+  if (pause?.then) await pause;
   const now = state.files.has(path) ? state.files.get(path) : null;
   if ((expected ?? null) !== now) throw new Error(`stale write to ${path}`);
   state.files.set(path, text);
@@ -44,11 +46,12 @@ async function runRestart(args) {
   const at = args.indexOf("--");
   const privateRun = args[at + 3].startsWith("umask 077");
   const [out, ...words] = args.slice(at + 5);
-  const [err, code, ...argv] = privateRun ? [null, ...words] : words;
+  const [err, code, ...argv] = privateRun ? [null, words[0], ...words.slice(2)] : words;
   if (privateRun) {
+    const slug = words[1];
     const folder = out.slice(0, out.lastIndexOf("/"));
     for (const path of state.files.keys()) {
-      if (path.startsWith(`${folder}/fleet-`) && Date.now() - state.fileMtimes?.get(path) >= 11 * 60_000) state.files.delete(path);
+      if (path.startsWith(`${folder}/${slug}-`) && Date.now() - state.fileMtimes?.get(path) >= 1441 * 60_000) state.files.delete(path);
     }
   }
   const address = `t${900 + (state.runs ??= []).length}`;

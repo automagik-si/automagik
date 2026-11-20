@@ -1,5 +1,7 @@
 // The words and restart bindings shown for the linked accounts read.
-import { barName, BOT_ID, coreOkay, countOkay, FLEET_V, machineList, matches, object, pathOkay, REASONS, rowFor, TERMINAL, timeOkay } from "./accountsRows.js";
+import { barName, BOT_ID, coreOkay, countOkay, defaultHomeExceptions, FLEET_V, machineList, matches, object, pathOkay, REASONS, rowFor, TERMINAL, timeOkay } from "./accountsRows.js";
+import { planRowFor } from "./accountsPlanRows.js";
+import { claudeMember, LOCAL, machineOrder, own, routeManaged } from "./accountsPlanRecord.js";
 import { who } from "./view.js";
 
 const LINES = Object.freeze({
@@ -47,19 +49,63 @@ function wordsFor(tool, row, ref, refName) {
   return `signed in as ${acct}; this Mac has no Claude login to compare with`;
 }
 
-export function fleetRows({ record, answer, tool, ref, refName, now }) {
+export function planWords(row) {
+  const { state, code, account, wanted, grant } = row;
+  const acct = account ?? "an unknown account";
+  if (code === "held") return "Codex isn't moved on other machines yet.";
+  if (state === "gone") return "gone: unlinked";
+  if (state === "changed") return `changed on the machine: now ${acct}`;
+  if (state === "on") {
+    const origin = grant === "placed" ? ", placed here" : grant === "origin-unknown" ? ", grant origin unknown" : "";
+    return `on ${acct}${origin}`;
+  }
+  if (state === "still-on") return `still on ${acct}`;
+  if (state === "switching") return `switching to ${wanted}…`;
+  if (state === "no-login") return `no login of ${wanted} here`;
+  if (code === "update-first") return "update this machine first";
+  if (state === "away") return "away (not connected)";
+  return `${state}: ${code}`;
+}
+
+export function fleetRows({ record, answer, tool, ref, refName, now, plan = null }) {
   const current = answer && record && answer.at === record.at;
-  return Object.entries(record?.machines ?? {}).filter(([core]) => core !== "local")
-    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([core, entry]) => {
-      const { name } = entry;
-      const row = rowFor(tool, entry.state ? entry : null, ref, now);
+  const machines = record?.machines;
+  const ids = [...new Set([...Object.keys(machines ?? {}), ...Object.keys(plan?.[tool]?.members ?? {})])]
+    .filter((core) => core !== LOCAL);
+  const cores = plan ? machineOrder(ids) : ids.sort();
+  return cores
+    .map((core) => {
+      const entry = own(machines, core);
+      const name = entry?.name ?? own(plan?.names, core) ?? core;
+      const row = rowFor(tool, entry?.state ? entry : null, ref, now);
+      const planned = plan && planRowFor(tool, entry?.state ? entry : null, plan, core, ref, now);
       const { state, here, code } = row;
       const words = wordsFor(tool, row, ref, refName);
       const tone = state === "observed" && here === "same" ? "good" :
         state === "observed" && here === "other" || ["changed", "no-login", "failed"].includes(state) ? "warn" : "none";
       const lines = [];
-      if (code && LINES[code]) lines.push(LINES[code]);
+      const out = { core, name, state, words, tone, lines, bots: [], restart: null };
+      if (planned) {
+        out.actions = planned.actions;
+        if (planned.managed || planned.code === "held") {
+          out.state = planned.state;
+          out.words = planWords(planned);
+          if (planned.managed) {
+            out.tone = planned.state === "on" ? "good" :
+              ["changed", "gone", "no-login", "failed"].includes(planned.state) || planned.code === "not-eligible" ? "warn" : "none";
+          }
+          // Keep the read-only comparison when it can't vouch for this machine's assignment.
+          if (entry && (planned.code === "held" || entry.state === "read" && entry.core !== core)) lines.push(words);
+        }
+      }
+      if (!entry) return out;
+      const looked = current && entry.state === "read" && Object.hasOwn(answer.bots ?? {}, core) ? answer.bots[core] : null;
+      let bots = looked?.[tool] ?? [];
       const obs = entry[tool];
+      const exceptions = entry.exceptions;
+      const projects = [...(exceptions?.bound ?? []), ...(exceptions?.list ?? [])];
+      let moreProjects = exceptions?.more ?? 0;
+      if (code && LINES[code]) lines.push(LINES[code]);
       if (entry.state !== "read" && obs?.readAt) {
         const last = rowFor(tool, { ...entry, state: "read" }, ref, Date.parse(obs.readAt));
         lines.push(`Last read ${timeWords(obs.readAt)}: ${wordsFor(tool, last, ref, refName)}`);
@@ -67,27 +113,46 @@ export function fleetRows({ record, answer, tool, ref, refName, now }) {
       if (state === "changed" && tool === "codex" && here !== "none") {
         lines.push(here === "same" ? "The same account as this Mac." : "Another account than this Mac's.");
       }
-      let restart = null;
       if (tool === "claude" && obs) {
         for (const slot of obs.slots) {
           if (slot.state !== "eligible") lines.push(`${slot.email ?? `login ${slot.id}`} · ${LINES[slot.state]}`);
         }
         const bare = routeWords(obs.routes.bare);
         const tree = obs.routes.record.state === "unresolved" ? "its own Claude launcher, which this read doesn't run" : routeWords(obs.routes.record);
-        if (obs.routes.bare.email || obs.routes.record.email) {
-          lines.push(`A start or restart from here starts ${bare}; a tree restart there starts ${tree}.${obs.routesDiffer ? " They differ." : ""}`);
+        const member = claudeMember(plan, core);
+        const managed = member && entry.core === core && entry.appHome === member.home
+          && obs.routes.bare.state !== "unresolved";
+        if (managed) {
+          projects.push(...defaultHomeExceptions(exceptions));
+          moreProjects += exceptions?.defaults?.more ?? 0;
+          const start = obs.routes.record.state === "unresolved" ? "the login in its record (unconfirmed)" : tree;
+          const exceptionsByProject = new Map(projects.map(({ project, why }) => [project, why]));
+          if (projects.length || moreProjects) {
+            if (start) lines.push(`A start or restart in a managed project starts ${start}.`);
+            bots = bots.map((bot) => {
+              const why = exceptionsByProject.get(bot.project.replace(/\/+$/, "") || "/");
+              const login = routeManaged(why) ? start
+                : (why === "default-app-home" ? bare : null) ?? "a login this read couldn't confirm";
+              return login ? { ...bot, restart: `Restart starts ${login}` } : bot;
+            });
+          } else if (start) {
+            out.restart = `A start or restart from here starts ${start}`;
+            lines.push(`${out.restart}.`);
+          }
+        } else {
+          if (obs.routes.bare.email || obs.routes.record.email) {
+            lines.push(`A start or restart from here starts ${bare}; a tree restart there starts ${tree}.${obs.routesDiffer ? " They differ." : ""}`);
+          }
+          if (bare) out.restart = `A restart from here starts ${bare}`;
         }
-        if (bare) restart = `A restart from here starts ${bare}`;
       }
-      const exceptions = entry.exceptions;
-      for (const { project, why } of [...(exceptions?.bound ?? []), ...(exceptions?.list ?? [])]) {
+      for (const { project, why } of projects) {
         lines.push(why === "own-app-home" ? `${project} uses its own app home: not managed` :
+          why === "default-app-home" ? `${project} uses the default app home: not managed` :
           why === "own-path" ? `${project} sets its own PATH: not covered by this read` : `${project} · ${LINES.unread}`);
       }
-      if (exceptions?.more) lines.push(`+${exceptions.more} more`);
-      const looked = current && entry.state === "read" && Object.hasOwn(answer.bots ?? {}, core) ? answer.bots[core] : null;
+      if (moreProjects) lines.push(`+${moreProjects} more`);
       if (answer && !current && entry.state === "read") lines.push("Its bots are listed again after the next read.");
-      const bots = looked?.[tool] ?? [];
       if (looked?.reason) lines.push("Its bots couldn't be read.");
       if (looked?.ownHome) lines.push(`${count(looked.ownHome, "bot")} there use their project's own app home: not checked`);
       if (looked?.unbound) lines.push(`${count(looked.unbound, "bot")} there have no binding here, so they are not listed`);
@@ -95,7 +160,8 @@ export function fleetRows({ record, answer, tool, ref, refName, now }) {
       if (tool === "codex" && bots.length && looked.codexReliable === false) {
         lines.push("Which login each Codex bot there started with can't be told: all are listed.");
       }
-      return { core, name, state, words, tone, lines, bots, restart };
+      out.bots = bots;
+      return out;
     });
 }
 
