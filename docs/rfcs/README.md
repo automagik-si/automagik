@@ -69,6 +69,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0034](0034-vault-plugin-bitwarden-first.md) | Vault plugin, Bitwarden first | Accepted (2026-11-19, approved by the owner's delegate: Q1-Q12 answered as decided, Q6 by the delegated #1668 contract; delivery 0, the RFC: #1655; no delivery merged) | none (ships outside the five milestones) |
 | [0036](0036-bot-management-from-pocket.md) | Bot management from Pocket | Accepted (2026-11-19, approved by the owner's delegate: Q1 by the approval, Q2-Q6 the most conservative option, D1-D6; amends RFC 0015; no delivery merged) | none (ships outside the five milestones) |
 | [0037](0037-roles-not-types.md) | One Bot; roles make the difference | Queued (the direction is decided: one Bot, roles make the difference; P1-P6 and Q1-Q10 await the owner's verdict; the role is the marketplace unit, Genie is the only crew kind it converts, and community roles wait for P5) | none (ships outside the five milestones) |
+| [0038](0038-cloud-multiuser-caller-principal.md) | Cloud multiuser safeguard: the caller principal, and no Bot can forge it | Queued (Q1-Q8 await the owner; no delivery) | none (ships outside the five milestones) |
 
 Milestones, in the owner's order:
 
