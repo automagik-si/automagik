@@ -2,17 +2,19 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (waiting for the owner's or the owner's delegate's approval; each question carries a recommended answer; amends RFC 0015) |
+| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q7 answered with this RFC's recommendations, see Decided; amends RFC 0015, which records the amendment; deliveries 1-3 under way, none merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-20 |
+
+> Approved by Guga's delegation while the owner is away (20/11); the owner may amend on return.
 
 ## Summary
 
 List the team's group chats in Pocket, open one, read it live, send text into it and answer its
 members' approvals from a paired phone, with the race the computer already has: the first answer
-wins. The phone always learns how its card closed. Whether the computer shows a receipt (Q7)
-and whether the phone may stop a group's work (Q3) are the owner's calls. Every part is
+wins. The phone always learns how its card closed; the computer shows no receipt (Q7). The phone
+may also stop a group's work, with the desktop's effects (Q3). Every part is
 negotiated under the existing `herdr-pocket/chat/1` route and the bots-dsh socket's protocol 1,
 as RFC 0015's DSH writes and RFC 0033's attachments were, so older phones, bridges and plugins
 keep working unchanged. This amends RFC 0015, whose limits keep a phone's send to "the Bot's
@@ -140,7 +142,7 @@ attachments (`docs/rfcs/0015-live-chat-projection.md:705-712`, `:838`). This RFC
 ### Which groups a phone may open (Q2)
 
 `groupEligible(room)` is one predicate, evaluated fresh from `rt.state` and the shown reader
-each time it is used (below). With the recommended answer to Q2 it holds when all of these do:
+each time it is used (below). Under Q2's decided answer it holds when all of these do:
 
 1. the group has at least one current member;
 2. every current member, and every Bot named by a record of its book (`botId` or `about`), is
@@ -475,8 +477,9 @@ group's line and the phone's name with an answer it won.
 
 ## Deliveries
 
-0. **Approval.** The owner or the owner's delegate answers Q1-Q7. RFC 0015 records the
-   amendment: its wire (group terminals, `approvals[]`, the `groups` hello), its reconnect rules
+0. **Approval.** Done: approved by the owner's delegate on 2026-11-20, Q1-Q7 answered with
+   this RFC's recommendations (Decided). RFC 0015 records the amendment (its section "RFC 0040
+   (group chats in Pocket)"): its wire (group terminals, `approvals[]`, the `groups` hello), its reconnect rules
    (room cursors), its send results (`retry`, `unknown`, Send as new), its receipt rules
    (several cards per chat, the receipt binding above), its limits bullet and its stolen-phone
    clause.
@@ -519,14 +522,18 @@ group's line and the phone's name with an answer it won.
    group listed, read live, a message that starts a round, two approvals open at once, one
    answered on the phone and one on the computer, and (Q3) a stop. This delivery closes #1180.
 
-## Open questions
+## Decided
 
-1. **Amend RFC 0015 for groups?** Recommended: yes, within this RFC's limits (Q2-Q7). Not taken:
+Approved by the owner's delegate on 2026-11-20 (the note under the table), with every
+recommendation below. The options not taken are listed with each answer; taking one needs a
+later amendment.
+
+1. **Amend RFC 0015 for groups?** Decided: yes, within this RFC's limits (Q2-Q7). Not taken:
    keep groups on the computer.
 2. **What consent lets a phone open a group?** The `shown[]` yes is per Bot. A group's book also
    holds former members' lines, members' replies quoting them and notices about them; its
    members may work in a folder the group sets (now or before), and a group permission replaces
-   each member's own level there. Recommended: `groupEligible` above (at least one member; every
+   each member's own level there. Decided: `groupEligible` above (at least one member; every
    current member and every Bot named in the book global or shown, a Bot no longer on the team
    counting as not shown; never a group folder, member folder or group permission, by a durable
    mark from delivery 1 on and by the best evidence before it; every live member Session now in
@@ -536,34 +543,38 @@ group's line and the phone's name with an answer it won.
    show. Not taken: (a) the current members alone authorize the whole room, its history
    and its folder (shows lines of Bots the person never showed, and project work under a global
    Bot); (b) any group with one shown member; (c) a per-group yes in the home file's `shown[]`
-   (the cleanest consent, but a Herdr and registry change; a later RFC if (recommended) proves
+   (the cleanest consent, but a Herdr and registry change; a later RFC if the decided rule proves
    too narrow); (c') that per-group yes only for groups from before delivery 1, closing the
    residual risk at the cost of hiding every existing group until the person says yes; (d) a history boundary that hides lines from before the group became eligible
    (no such mark exists today, and replies still quote what came before).
 3. **Stop from the phone?** Stop on the desktop also parks an active goal, even when nothing ran
-   or a step failed, and stops members' subagents. Recommended: yes, with exactly the desktop's
+   or a step failed, and stops members' subagents. Decided: yes, with exactly the desktop's
    effects (see Stop), so a phone stop never wakes the admin through the stop-notice round. Not
    taken: (a) send and answer only, no Stop in this delivery; (b) a Stop that leaves the goal
    alone (the admin would wake again, which the desktop's comment calls out,
    `apps/bots-dsh/src/host/channel.js:838`).
-4. **Attachments into a group?** Recommended: not now; group watches are text-only at every
+4. **Attachments into a group?** Decided: not now; group watches are text-only at every
    layer, and a later amendment can add them under RFC 0033's rules. Not taken: images in group
    sends from the start.
-5. **Which approvals?** Recommended: the members' own group-Session approvals only
+5. **Which approvals?** Decided: the members' own group-Session approvals only
    (`phoneAnswerable`). A subagent's or a task's approval, and a member's request to work in a
    wider folder (asked before the override that would hide the group is saved), stay on the
    computer; the group shows `blocked` with "Waiting on the computer". Not taken: every approval
    tied to a member; folder requests on the phone too.
-6. **How is it negotiated?** Recommended: a `groups` capability under `chat/1` and protocol 1, the
+6. **How is it negotiated?** Decided: a `groups` capability under `chat/1` and protocol 1, the
    precedent of RFC 0015's writes and RFC 0033. Not taken: a `chat/2` versioned handshake, the
    issue's idea taken literally, which would need every peer to speak both versions.
 7. **What does the computer show when the phone answers first?** Today the desktop's group card
    simply disappears when its entry settles (`apps/bots-dsh/src/client/member-status.js:134-147`);
    RFC 0015 lets the computer's dialog close without a receipt until a display path is proven
-   (`docs/rfcs/0015-live-chat-projection.md:636-643`). Recommended: the same here; the phone's
+   (`docs/rfcs/0015-live-chat-projection.md:636-643`). Decided: the same here; the phone's
    receipt and the settled entry are the record, and the Summary does not promise a computer
    receipt. Not taken: a line in the computer's group chat, "Answered on the phone (*name*):
    Allow, 14:02", which would add a desktop delivery and its test.
+
+## Open questions
+
+None. See Decided for questions 1 to 7.
 
 ## Links
 
