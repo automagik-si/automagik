@@ -79,10 +79,11 @@ export function install(rt) {
     await inflight.get(bot.id)?.catch(() => {})
     admit?.()
     if (advanceEmpty || bot.permissionAuto) movePermissionRev(bot)
-    if (!bot.permissionAuto) return
+    if (!bot.permissionAuto) return advanceEmpty
     delete bot.permissionAuto
     endAuto(bot)
     await rt.save({ required: true })
+    return true
   }
   function sweepAuto() {
     for (const bot of Object.values(state.bots)) {

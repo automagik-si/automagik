@@ -620,7 +620,7 @@ export function install(rt) {
     if (['permissionAuto', 'permissionRev', 'autoStamp'].some(key => Object.hasOwn(patch, key))) throw refusal('Only the person turns Auto on, from the Bot\'s permission choice.')
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
-    const commit = model => { if (admit !== undefined) admit({ bot, model }) }
+    const commit = (model, checkOnly = false) => admit?.({ bot, model, checkOnly })
     if (modelEntry !== undefined && typeof ctx.sessionController?.selectModel !== 'function') {
       throw new Error('Model selection is unavailable.')
     }
@@ -704,8 +704,15 @@ export function install(rt) {
     }
     const modelBeforeAccess = bot.model ?? bot.appliedModel
     if (modelRef != null) {
+      // ACP access can record an account observation. Recheck before starting it and
+      // after it settles, while the Bot settings are still untouched.
+      commit(modelRef, true)
       if (modelBeforeAccess === undefined || crossesHarness(modelBeforeAccess, modelRef)) rt.assertRouteAllowed(bot, modelRef, entry)
-      await rt.assertModelAccess(modelRef)
+      try {
+        await rt.assertModelAccess(modelRef)
+      } finally {
+        commit(modelRef, true)
+      }
     }
     // The shell and the model are one boundary: a Bot without a shell cannot run on an
     // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
@@ -770,9 +777,9 @@ export function install(rt) {
       if (problem !== undefined) throw refusal(problem)
     }
     if (patch.permission !== undefined) rt.checkPreset(patch.permission)
-    commit(modelRef)
+    if (modelEntry === undefined) commit(modelRef)
     // The model goes first: checked above, applied to the Session now, and only then part of
-    // the record. A selection DSH turns down refuses the whole update, with nothing written.
+    // the record. A model selection DSH turns down can still have cleared Auto.
     const markBefore = markOf(bot.model)
     const revBefore = bot.permissionRev
     let beforeClear = modelEntry === undefined ? undefined : modelFields(bot)
@@ -781,19 +788,24 @@ export function install(rt) {
     const clearsAuto = patch.permission !== undefined || (patch.model !== undefined && (bot.permissionAuto
       ? markOf(String(patch.model)) !== bot.permissionAuto
       : String(patch.model).split('/')[0] !== 'acp-codex'))
-    if (clearsAuto) {
-      await rt.clearAuto?.(bot, admit === undefined ? undefined : () => {
-        commit(modelRef)
-        if (modelEntry !== undefined) beforeClear = modelFields(bot)
-      }, !deferEmptyRev)
-    }
-    if (modelEntry !== undefined && (rt.botOf(id) !== bot || !ownsModelFields(bot, beforeClear))) {
-      throw new Error('The Bot changed while clearing Auto.')
+    const autoCleared = clearsAuto && await rt.clearAuto?.(bot, admit === undefined ? undefined : () => {
+      commit(modelRef)
+      if (modelEntry !== undefined) beforeClear = modelFields(bot)
+    }, !deferEmptyRev)
+    const advanceModelRev = () => {
+      if (!bot.permissionAuto && bot.permissionRev === revBefore
+        && (markOf(bot.model) !== markBefore || (clearsAuto && deferEmptyRev))) rt.movePermissionRev(bot)
     }
     if (patch.denyTools !== undefined && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
     const modelChanged = patch.model !== undefined || patch.effort !== undefined
     const modelBefore = modelChanged ? modelFields(bot) : undefined
-    if (modelChanged) await switchModel(bot, patch, modelRef, effortId, modelEntry)
+    if (modelEntry !== undefined) {
+      if (!autoCleared) commit(modelRef)
+      if (rt.botOf(id) !== bot || !ownsModelFields(bot, beforeClear)) {
+        throw new Error('The Bot changed while clearing Auto.')
+      }
+    }
+    if (modelChanged) await switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev)
     const roleBefore = bot.role
     const instructionsBefore = bot.instructions
     let unapplied
@@ -860,8 +872,7 @@ export function install(rt) {
       if (value === null) delete bot[key]
       else bot[key] = value
     }
-    if (!bot.permissionAuto && bot.permissionRev === revBefore
-      && (markOf(bot.model) !== markBefore || (clearsAuto && deferEmptyRev))) rt.movePermissionRev(bot)
+    if (modelEntry === undefined) advanceModelRev()
     try {
       await rt.save({ required: shell !== undefined || admit !== undefined })
     } catch (error) {
@@ -963,10 +974,10 @@ export function install(rt) {
     })
   }
 
-  async function switchModel(bot, patch, modelRef, effortId, modelEntry) {
+  async function switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev) {
     const before = modelFields(bot)
     const blockedBefore = bot.blocked
-    return whilePicking(bot, async () => {
+    const choose = () => {
       if (patch.model !== undefined) {
         rt.noteModelChoice?.(bot, modelRef ?? undefined)
         // A failure that blocked the Bot was its old model's (turns.js).
@@ -978,23 +989,34 @@ export function install(rt) {
         if (effortId === null) delete bot.effort
         else bot.effort = effortId
       }
-      const chosen = modelEntry === undefined ? undefined : modelFields(bot)
-      const chosenBlock = bot.blocked
-      let selected = false
-      try {
-        await rt.applyModel(bot, modelEntry === undefined ? { force: true }
-          : { force: true, modelEntry, selected: () => { selected = true } })
-      } catch (error) {
-        if (chosen !== undefined) {
-          // A successful Session selection can outlive a failed save. Keep its live fields.
-          if (selected) throw error
-          if (rt.botOf(bot.id) !== bot || !ownsModelFields(bot, chosen) || bot.blocked !== chosenBlock) {
-            throw new Error('The Bot changed during model rollback.')
+    }
+    return whilePicking(bot, async () => {
+      if (modelEntry !== undefined) {
+        let selected = false
+        const checkChoice = () => {
+          if (rt.botOf(bot.id) !== bot || (selected ? bot.model !== modelRef
+            : !ownsModelFields(bot, before) || bot.blocked !== blockedBefore)) {
+            throw new Error('The Bot changed during model selection.')
           }
-          putModelFields(bot, before)
-          if (blockedBefore !== undefined) bot.blocked = blockedBefore
+        }
+        try {
+          await rt.applyModel(bot, { force: true, modelEntry, checkChoice, selected: () => {
+            // The store saves the whole team. Publish the pick and its revision
+            // together once the own chat has accepted the route.
+            choose()
+            advanceModelRev()
+            selected = true
+          } })
+        } catch (error) {
+          if (!selected) checkChoice()
           throw error
         }
+        return
+      }
+      choose()
+      try {
+        await rt.applyModel(bot, { force: true })
+      } catch (error) {
         putModelFields(bot, before)
         if (blockedBefore !== undefined) bot.blocked = blockedBefore
         rt.warn('ds-bot: the model of %s was not changed: %s', bot.name, error?.message ?? error)

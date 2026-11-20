@@ -9,6 +9,7 @@ export { MODEL_REF_OK }
 
 const NOT_APPLIED = 'The computer could not switch the Bot to that model, so it stays on its current one.'
 const PENDING = { ok: false, state: 'unknown', reason: 'pending' }
+const MAX_MODEL_ENTRIES = 200
 const cut = (value, limit) => typeof value === 'string' ? value.slice(0, limit) : null
 
 export class SettingsRefusal extends Error {
@@ -46,6 +47,10 @@ export function modelChoiceOf(rt, bot, entry) {
     && !(bot.shell === false && commandCapableAgent(entry.ref))
 }
 
+const modelChoicesOf = (rt, bot, catalog) => catalog.filter(entry => modelChoiceOf(rt, bot, entry))
+const listsModel = (rt, bot, catalog, entry) => catalog !== undefined
+  && modelChoicesOf(rt, bot, catalog).slice(0, MAX_MODEL_ENTRIES).includes(entry)
+
 const levelKey = value => typeof value !== 'string' || value === '' ? null : LEVELS.has(value) ? value : CUSTOM
 
 function readField(read) {
@@ -61,7 +66,11 @@ export function settingsOf(rt, botId, bot, terminal) {
   const presets = readField(() => rt.permissionCatalog?.())
   const fallback = readField(() => rt.permissionFallbackOf?.('bot', bot))
   const autoView = readField(() => rt.autoViewOf?.(bot))
-  const runs = fallback?.permissionRuns ?? autoView?.permissionRuns
+  const runs = levelKey(readField(() => {
+    const chat = rt.chatOf(botId)
+    const session = rt.ctx.sessions?.list?.().find(session => session.id === chat)
+    return rt.permissionFactsOf?.(chat, session)?.effective
+  }))
   const nameBlock = blockOf(rt, bot, 'name')
   const modelBlock = readField(() => blockOf(rt, bot, 'model'))
   const reason = (nameBlock ?? modelBlock)?.editable
@@ -78,11 +87,11 @@ export function settingsOf(rt, botId, bot, terminal) {
       auto: bot.permission === MARK_LEVEL && typeof bot.permissionAuto === 'string',
       ...(fallback?.permissionFallback || autoView?.permissionFallback ? { fallback: MARK_LEVEL } : {}),
       ...(fallback?.permissionNotOffered || autoView?.permissionNotOffered ? { notOffered: true } : {}),
-      ...(runs === undefined ? {} : { runs: levelKey(runs) }),
+      ...(runs === null ? {} : { runs }),
     },
     editable,
   }
-  const entries = editable.model ? catalog.filter(entry => modelChoiceOf(rt, bot, entry)).map(entry => ({
+  const entries = editable.model ? modelChoicesOf(rt, bot, catalog).map(entry => ({
     id: entry.ref, label: cut(entry.name ?? entry.ref, 200), provider: cut(entry.providerName ?? entry.provider ?? '', 80),
   })) : []
   return { settings, entries }
@@ -93,7 +102,7 @@ export function fitReply(base, entries, overhead, limit = MAX_SCHEDULE_LINE) {
   const result = { ...base, models }
   let bytes = overhead + Buffer.byteLength(JSON.stringify(result))
   if (bytes > limit) return refusedWrite('too-large')
-  for (const entry of entries.slice(0, 200)) {
+  for (const entry of entries.slice(0, MAX_MODEL_ENTRIES)) {
     const extra = Buffer.byteLength(JSON.stringify(entry)) + (models.entries.length === 0 ? 0 : 1)
     // "true" takes one fewer byte than "false".
     if (bytes + extra - (models.entries.length + 1 < entries.length ? 1 : 0) > limit) break
@@ -125,9 +134,11 @@ export function pocketSettingsOf(rt) {
     })
     if (method === 'read') return withSettings({ ok: true, state: 'read' })
 
+    const readingName = method === 'name'
+    const snapshot = readingName ? undefined : snapshotOf(rt)
+    if (!readingName && snapshot === undefined) return refusedWrite('unavailable')
     const stale = target => target !== bot || rt.botOf(botId) !== bot || settingsRevOf(botId, bot) !== rev
     if (stale(bot)) return withSettings(refusedWrite('stale'))
-    const readingName = method === 'name'
     if (readingName ? name.trim().slice(0, 40) === bot.name : model === bot.model) {
       return withSettings({ ok: true, state: 'unchanged' })
     }
@@ -143,24 +154,22 @@ export function pocketSettingsOf(rt) {
       const invalid = nameRefusal()
       if (invalid) return withSettings(invalid)
     } else {
-      const snapshot = snapshotOf(rt)
-      if (snapshot === undefined) return refusedWrite('unavailable')
       modelEntry = snapshot.find(entry => entry.ref === model)
       if (!modelEntry) return withSettings(refusedWrite('unknown-model'))
-      if (!modelChoiceOf(rt, bot, modelEntry)) return withSettings(refusedWrite('model-not-allowed'))
+      if (!listsModel(rt, bot, snapshot, modelEntry)) return withSettings(refusedWrite('model-not-allowed'))
     }
 
     let admitted = false
-    const admit = ({ bot: target, model: ref }) => {
+    const admit = ({ bot: target, model: ref, checkOnly }) => {
       const reason = allowed()
       if (reason !== undefined) throw new SettingsRefusal(reason, false)
       if (stale(target)) throw new SettingsRefusal('stale', true)
       const block = blockOf(rt, target, method)
       if (block) throw new SettingsRefusal(block.reason, true)
-      if (modelEntry && (ref !== model || !snapshotOf(rt)?.includes(modelEntry) || !modelChoiceOf(rt, target, modelEntry))) {
+      if (modelEntry && (ref !== model || !listsModel(rt, target, snapshotOf(rt), modelEntry))) {
         throw new SettingsRefusal('model-not-allowed', true)
       }
-      admitted = true
+      if (!checkOnly) admitted = true
     }
     const patch = readingName ? { id: botId, name } : { id: botId, model }
     try {

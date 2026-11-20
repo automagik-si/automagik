@@ -144,9 +144,9 @@ async function setup(t, { bot = {}, warm = true, writable = true, config = {}, s
       if (!agents.has(id)) agents.set(id, { ...ctx.scopeAgent(id), session: { id, deriveMessages: () => [] }, followup() {} })
       return { agent: agents.get(id) }
     },
-    async selectModel({ sessionId, provider, model }) {
+    async selectModel({ sessionId, provider, model, reasoningEffort }) {
       calls.push(['select', sessionId, `${provider}/${model}`])
-      await behavior.select?.({ sessionId, provider, model })
+      await behavior.select?.({ sessionId, provider, model, reasoningEffort })
     },
     ...(writable ? {
       prompt: async () => { calls.push(['prompt']); return { accepted: true } },
@@ -879,7 +879,7 @@ test('addendum #5 holds the slot through Auto clearing, selection and rollback b
   assert.deepEqual(h.calls, [])
   clearing.release()
   await selecting.entered
-  assert.equal(h.rt.botOf(A).model, NEXT)
+  assert.equal(h.rt.botOf(A).model, NATIVE)
   assert.deepEqual(h.calls, [['select', 's-0', NEXT]])
   selecting.release()
   withReason(await phone, 'not-applied')
@@ -943,4 +943,225 @@ test('addendum #7 a desktop model round trip remains stale when permissionRev mo
   assert.equal(result.settings.model.saved, NATIVE)
   assert.notEqual(result.settings.rev, rev)
   assert.equal(h.disk().bots[A].name, h.row.name)
+})
+
+test('astra-code #1 a team save during a rejected selection persists the original Bot model', async t => {
+  const h = await setup(t, { bot: { effort: 'high', appliedEffort: 'high', blocked: BLOCK } })
+  const c = await h.connect()
+  const rev = await revision(c)
+  const before = h.disk().bots[A]
+  const gate = h.pause()
+  h.behavior.select = async () => { await gate.wait(); throw new Error('Fixture selection rejected') }
+  const pending = c.model(rev, NEXT)
+  await gate.entered
+  const name = 'PrivateFixtureName16'
+  assert.equal((await h.desktop('update-bot', { id: B, name })).ok, true)
+  gate.release()
+  assert.equal(withReason(await pending, 'not-applied').settings.rev, rev)
+  assert.equal(h.disk().bots[B].name, name)
+  assert.deepEqual(h.disk().bots[A], before)
+})
+
+test('astra-code #2 a failed save after selection invalidates an open desktop Auto confirmation', async t => {
+  const h = await setup(t)
+  const c = await h.connect()
+  const rev = await revision(c)
+  const permissionRev = h.rt.botOf(A).permissionRev ?? 0
+  const write = fsPromises.writeFile
+  const mock = t.mock.method(fsPromises, 'writeFile', async (path, ...args) => {
+    if (path === `${h.statePath}.${process.pid}.tmp`) throw new Error('Fixture save failure')
+    return write(path, ...args)
+  })
+  syncBuiltinESMExports()
+  const restore = () => { mock.mock.restore(); syncBuiltinESMExports() }
+  t.after(restore)
+  const result = await c.model(rev, NEXT)
+  restore()
+  assert.equal(result.state, 'unknown')
+  assert.equal(result.settings.model.applied, NEXT)
+  assert.equal(h.disk().bots[A].model, NATIVE)
+  await assert.rejects(h.rt.setBotAuto(A, permissionRev), /permissions changed meanwhile/)
+  assert.equal(h.rt.botOf(A).permissionRev, permissionRev + 1)
+  assert.equal(h.rt.botOf(A).permissionAuto, undefined)
+})
+
+test('astra-code #3 rechecks the revision after a no-op Auto clear', async t => {
+  const h = await setup(t)
+  const c = await h.connect()
+  const rev = await revision(c)
+  const clear = h.rt.clearAuto
+  h.rt.clearAuto = async (...args) => {
+    const changed = await clear(...args)
+    h.rt.movePermissionRev(h.rt.botOf(A))
+    return changed
+  }
+  const before = h.bytes()
+  const result = withReason(await c.model(rev, NEXT), 'stale')
+  assert.notEqual(result.settings.rev, rev)
+  assert.equal(result.settings.model.saved, NATIVE)
+  assert.deepEqual(h.calls, [])
+  assert.equal(h.bytes(), before)
+})
+
+test('astra-code #4 checks Pocket authority and revision on both sides of an ACP probe', async t => {
+  for (const reason of ['revoked', 'stale']) {
+    await t.test(`before inspect: ${reason}`, async t => {
+      const h = await setup(t, { bot: { model: CODEX, appliedModel: CODEX } })
+      const c = await h.connect()
+      const rev = await revision(c)
+      const gate = h.pause()
+      const check = h.rt.checkPrivacyChange
+      h.rt.checkPrivacyChange = async (...args) => { await gate.wait(); return check(...args) }
+      const observation = join(h.home, 'fixture-account-observation')
+      h.acp.inspect = async () => {
+        writeFileSync(observation, 'observed')
+        return { on: true, signedIn: true }
+      }
+      const pending = c.model(rev, CODEX_NEXT)
+      await gate.entered
+      if (reason === 'revoked') await c.closeGrant()
+      else h.rt.movePermissionRev(h.rt.botOf(A))
+      gate.release()
+      const result = await pending
+      if (reason === 'revoked') assert.deepEqual(result, REFUSED(reason))
+      else withReason(result, reason)
+      assert.equal(existsSync(observation), false)
+      assert.deepEqual(h.calls, [])
+    })
+  }
+  await t.test('after inspect: reject before continuing model validation', async t => {
+    const h = await setup(t, { bot: { model: CODEX, appliedModel: CODEX } })
+    const c = await h.connect()
+    const rev = await revision(c)
+    const gate = h.pause()
+    const observation = join(h.home, 'fixture-account-observation')
+    h.acp.inspect = async () => {
+      await gate.wait()
+      writeFileSync(observation, 'observed')
+      return { on: true, signedIn: true }
+    }
+    const before = h.bytes()
+    const pending = c.model(rev, CODEX_NEXT)
+    await gate.entered
+    await c.closeGrant()
+    let shellReads = 0
+    Object.defineProperty(h.rt.botOf(A), 'shell', { get: () => { shellReads += 1; return true } })
+    gate.release()
+    assert.deepEqual(await pending, REFUSED('revoked'))
+    assert.equal(shellReads, 0)
+    assert.equal(readFileSync(observation, 'utf8'), 'observed')
+    assert.equal(h.bytes(), before)
+    assert.deepEqual(h.calls, [])
+  })
+})
+
+test('astra-code #5 keeps the own chat on a carried Hermes route when picking attach', async t => {
+  for (const provider of ['hermes-remote', 'deepseek']) {
+    await t.test(provider, async t => {
+      const model = 'hermes-remote/nous:openai/gpt-6-astra'
+      const target = 'hermes-remote/attach'
+      const h = await setup(t, { bot: { model, appliedModel: model } })
+      h.providers['hermes-remote'] = [{ id: 'attach' }]
+      await h.prime()
+      h.ctx.sessions.get = () => ({ requestHeader: () => ({ config: { provider } }) })
+      const c = await h.connect()
+      const result = await c.model(await revision(c), target)
+      assert.equal(result.state, 'saved')
+      assert.equal(result.settings.model.saved, target)
+      assert.equal(h.disk().bots[A].model, target)
+      assert.deepEqual(h.calls, provider === 'hermes-remote' ? [] : [['select', 's-0', target]])
+    })
+  }
+})
+
+test('astra-code #6 a vanished ref leaves only the intended Auto clearing in the Bot record', async t => {
+  const h = await setup(t, { bot: { ...AUTO, effort: 'high', appliedEffort: 'high' } })
+  const c = await h.connect()
+  const rev = await revision(c)
+  const { permissionAuto, ...before } = h.disk().bots[A]
+  const apply = h.rt.applyModel
+  h.rt.applyModel = (bot, options) => {
+    h.providers.deepseek.pop()
+    return apply(bot, options)
+  }
+  h.behavior.select = async ({ provider, model }) => {
+    if (!(await h.ctx.llm.listModels(provider)).some(entry => entry.id === model)) throw new Error('Fixture ref disappeared')
+  }
+  const result = withReason(await c.model(rev, NEXT), 'not-applied')
+  assert.notEqual(result.settings.rev, rev)
+  assert.deepEqual(result.settings.level, { saved: 'workspace-write', inherited: false, auto: false })
+  assert.equal(result.settings.model.saved, NATIVE)
+  assert.equal(result.settings.model.applied, NATIVE)
+  assert.equal(result.settings.model.effort, 'high')
+  assert.equal(h.rt.botOf(A).permissionAuto, undefined)
+  assert.deepEqual(h.disk().bots[A], { ...before, permissionRev: before.permissionRev + 1 })
+  assert.deepEqual(h.calls, [['select', 's-0', NEXT], ['list', 'deepseek']])
+})
+
+test('astra-code #7 passes saved effort for unknown metadata and reports the observed effort', async t => {
+  const h = await setup(t, { bot: { effort: 'high' } })
+  const c = await h.connect()
+  let resolved = 0
+  h.ctx.llm.resolveModelInfo = async () => { resolved += 1; return {} }
+  const requested = []
+  h.behavior.select = ({ sessionId, provider, model, reasoningEffort }) => {
+    requested.push(reasoningEffort)
+    h.agents.set(sessionId, { model: { current: () => ({ provider, model, reasoningEffort: 'medium' }) } })
+  }
+  const result = await c.model(await revision(c), NEXT)
+  assert.equal(result.state, 'saved')
+  assert.deepEqual(requested, ['high'])
+  assert.equal(resolved, 0)
+  assert.deepEqual(h.calls, [['select', 's-0', NEXT]])
+  assert.equal(result.settings.model.effort, 'high')
+  assert.equal(result.settings.model.runningEffort, 'medium')
+})
+
+test('astra-code #8 admits only the first 200 eligible entries in picker order', async t => {
+  const h = await setup(t)
+  h.providers.deepseek.splice(1, 0, ...Array.from({ length: 199 }, (_, index) => ({ id: `fixture-${index}` })))
+  await h.prime()
+  const c = await h.connect()
+  const { models, settings: { rev } } = await c.read()
+  assert.equal(models.entries.length, 200)
+  assert.equal(models.truncated, true)
+  const last = models.entries.at(-1).id
+  assert.equal(last, 'deepseek/fixture-198')
+  const blocked = withReason(await c.model(rev, NEXT), 'model-not-allowed')
+  assert.deepEqual(blocked.models, models)
+  assert.deepEqual(h.calls, [])
+  assert.equal((await c.model(rev, last)).state, 'saved')
+  assert.deepEqual(h.calls, [['select', 's-0', last]])
+})
+
+test('astra-code #9 a cold catalog refuses equal, stale and blocked model writes without settings', async t => {
+  const h = await setup(t, { warm: false, bot: { kickoff: { text: 'Fixture held greeting' } } })
+  const c = await h.connect()
+  const rev = await revision(c)
+  const stale = rev === '0000000000000000' ? '1111111111111111' : '0000000000000000'
+  const before = h.bytes()
+  assert.deepEqual(await c.model(rev, NATIVE), REFUSED('unavailable'))
+  assert.deepEqual(await c.model(stale, NEXT), REFUSED('unavailable'))
+  assert.deepEqual(await c.model(rev, NEXT), REFUSED('unavailable'))
+  assert.deepEqual(h.calls, [])
+  assert.equal(h.bytes(), before)
+})
+
+test('astra-code #10 projects the current level of the loaded own chat', async t => {
+  const h = await setup(t)
+  const c = await h.connect()
+  const session = { id: 's-0' }
+  const other = { id: 's-1' }
+  h.ctx.sessions.list = () => [other, session]
+  const service = h.ctx.get('permissionPresets')
+  service.set(other, 'read-only')
+  service.set(session, 'danger-full-access')
+  const level = { saved: 'workspace-write', inherited: true, auto: false }
+  assert.deepEqual((await c.read()).settings.level, { ...level, runs: 'danger-full-access' })
+  h.rt.botOf(A).permission = 'workspace-write'
+  service.set(session, PRESET)
+  assert.deepEqual((await c.read()).settings.level, { ...level, inherited: false, runs: 'custom' })
+  h.ctx.sessions.list = () => [other]
+  assert.deepEqual((await c.read()).settings.level, { ...level, inherited: false })
+  assert.deepEqual(h.calls, [])
 })

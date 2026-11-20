@@ -592,12 +592,13 @@ export function install(rt) {
   }
 
   // The thinking level a Bot asked for, when the model it runs on serves it; else the
-  // model's own default applies. A level the model does not have is ignored, never
-  // sent: an explicit effort a provider does not know is a hard refusal there.
+  // model's own default applies. A pinned pick with no cached reasoning metadata
+  // lets DSH handle the saved effort without a plugin catalog lookup.
   async function desiredEffort(bot, ref, entry) {
     if (bot.effort === undefined || ref === undefined) return undefined
     const reasoning = entry === undefined ? await reasoningOf(ref)
       : entry.reasoning ?? reasoningCache.get(ref)?.value
+    if (entry !== undefined && reasoning === undefined) return bot.effort
     const efforts = reasoning?.efforts ?? []
     if (efforts.some(effort => effort.id === bot.effort)) return bot.effort
     // A model may name the same level with another id, as resolveEffort already reads.
@@ -741,15 +742,17 @@ export function install(rt) {
 
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
-  async function applyModel(bot, { force = false, modelEntry, selected } = {}) {
+  async function applyModel(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
     const pinned = modelEntry !== undefined
     const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
     const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
     const check = () => {
-      if (!live() || rt.hostOwned(bot) || bot.model !== modelEntry.ref || rt.chatOf(bot.id) !== expectedChat) {
+      if (!live() || rt.hostOwned(bot) || rt.chatOf(bot.id) !== expectedChat) {
         throw new Error('The Bot changed during model selection.')
       }
+      checkChoice()
     }
+    const accept = () => { check(); selected() }
     if (pinned) check()
     if (!live()) return undefined
     // The Bot's own part is in a route switch: selecting the new model there would move the
@@ -767,8 +770,12 @@ export function install(rt) {
     const effort = await desiredEffort(bot, ref, modelEntry)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    if (ownChanged && !staying.has(chat) && (pinned || !(await keepsCarriedRoute(chat, ref)))) {
-      await selectSessionModel(chat, route, pinned ? { check, selected } : undefined)
+    if (ownChanged && !staying.has(chat)) {
+      if (await keepsCarriedRoute(chat, ref)) {
+        if (pinned) accept()
+      } else {
+        await selectSessionModel(chat, route, pinned ? { check, selected: accept } : undefined)
+      }
     }
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
       if (staying.has(sessionId)) continue
