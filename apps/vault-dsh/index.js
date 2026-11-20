@@ -3,6 +3,8 @@ import { createVault } from './src/bw/adapter.js'
 import { createOnePassword } from './src/onepassword/adapter.js'
 import { cloudProfile, createHashicorpVault } from './src/hashicorp-vault/adapter.js'
 import { endpointOf, provider as hashicorp, validMount, validToken } from './src/hashicorp-vault/parse.js'
+import { createSecretService } from './src/secret-service/adapter.js'
+import { provider as secretService } from './src/secret-service/parse.js'
 
 export const name = 'vault-dsh'
 export const Config = Schema.object({
@@ -15,9 +17,11 @@ export function apply(ctx, config = {}) {
     ['bitwarden', createVault(config)],
     ['onepassword', createOnePassword(config)],
     [hashicorp, createHashicorpVault(config)],
+    [secretService, createSecretService(config)],
   ])
   let selection = Object.freeze({ provider: 'bitwarden', generation: 0 })
   let generation = 0
+  let secretServiceRevision = 0
   let retiring
   let disposed = false
   const refused = () => ({ ok: false, code: 'refused' })
@@ -31,19 +35,25 @@ export function apply(ctx, config = {}) {
     async unlock({ provider = 'bitwarden', ...options } = {}) {
       const adapter = adapters.get(provider)
       if (adapter === undefined || disposed) return refused()
+      if (provider === secretService) {
+        const code = adapter.availability()
+        if (code !== undefined) return { ok: false, code }
+      }
       if (options.signal?.aborted) return { ok: false, code: 'locked' }
       if (provider === hashicorp) {
         if (cloudProfile()) return { ok: false, code: 'cloud' }
         if (!validToken(options.token) || !endpointOf(options.address, options.namespace)
           || (options.mount !== undefined && !validMount(options.mount))) return refused()
       }
+      const revision = secretServiceRevision
       const switching = provider !== selection.provider
       const current = switching || retiring !== undefined ? ++generation : generation
       if (switching) {
         retiring ??= adapters.get(selection.provider).retire().catch(() => false).finally(() => { retiring = undefined })
       }
       const retired = await retiring
-      if (disposed || current !== generation || options.signal?.aborted) return { ok: false, code: 'locked' }
+      if (disposed || current !== generation || options.signal?.aborted
+        || (provider === secretService && revision !== secretServiceRevision)) return { ok: false, code: 'locked' }
       if (switching) {
         if (retired !== true) return { ok: false, code: 'unavailable' }
         selection = Object.freeze({ provider, generation: current })
@@ -51,7 +61,8 @@ export function apply(ctx, config = {}) {
       return adapter.unlock(options)
     },
     async lock({ provider } = {}) {
-      generation++
+      if (provider === secretService) secretServiceRevision++
+      else generation++
       if (provider !== undefined && !adapters.has(provider)) return false
       const targets = provider === undefined ? [...adapters.values()] : [adapters.get(provider)]
       const results = await Promise.allSettled(targets.map(adapter => adapter.retire()))
@@ -81,6 +92,9 @@ export function apply(ctx, config = {}) {
   Object.defineProperties(service, {
     connectionFor: { value: ({ provider, address, namespace }) =>
       provider === hashicorp ? endpointOf(address, namespace)?.connection : undefined },
+    providerBinding: { value: provider => provider === secretService ? adapters.get(provider).binding : undefined },
+    resolveHandle: { value: ({ provider, ...options }) => adapters.get(provider)?.resolveHandle?.(options) ?? refused() },
+    itemDetail: { value: ({ provider, ...options }) => adapters.get(provider)?.detail?.(options) ?? refused() },
     listFields: { value: ({ provider, ...options }) => adapters.get(provider)?.listFields?.(options) ?? refused() },
   })
   ctx.provide('secretSources', service)

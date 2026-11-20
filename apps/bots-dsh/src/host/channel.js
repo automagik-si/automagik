@@ -1420,8 +1420,9 @@ export function install(rt) {
         }
         return handle(endpoint, body?.payload, request.signal, desktopWindow)
       }
+      const keyringDetail = endpoint === 'secret-source-detail' && rt.secretServiceDetail?.(body?.payload?.requestId)
       const result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
-      const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint)
+      const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail
         || ['role-settings', 'role-settings-set'].includes(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)
       return new Response(JSON.stringify(result), { status: 200, headers: {

@@ -45,9 +45,8 @@ older host can read the mapping file. Delivery 2b covers shell delivery.
 Install a stable Vault CLI 2.0, 2.1 or 2.2 release. In local Settings › Secrets › Vault,
 select **HashiCorp Vault** and enter the server address, token and optional namespace.
 Use HTTPS. HTTP is available for loopback at `127.0.0.1`, `[::1]` or `localhost`.
-Automagik Cloud does not support this provider. Proton Pass and OS keychain
-providers are deferred. Secret Service support for Linux and KeePassXC needs a
-D-Bus client that can use one connection for the session and secret retrieval.
+Automagik Cloud does not support this provider. Proton Pass and other OS
+keychain providers are deferred.
 
 Enter a KV v1 or v2 mount to browse its folders and choose a field. The plugin checks
 the exact mount before each item read or listing. The token needs access to that
@@ -73,9 +72,52 @@ To check the transport against a local copy of the Vault CLI, set `VAULT_REAL_BI
 to the binary and run `hashicorp-vault-cli.test.js`. The test uses an in-process
 loopback responder.
 
+## Secret Service (GNOME Keyring)
+
+On Linux, select **Secret Service (GNOME Keyring)** in local Settings › Secrets › Vault
+and choose **Unlock**. This opens Automagik’s access without a password. Manage the actual
+keyring lock in GNOME. The picker shows locked collections without their items. Select an
+item from an unlocked collection and save the mapping. An item can still lock after the
+plugin gate opens. Automagik Cloud, KeePassXC and KWallet are outside this delivery.
+
+The gate monitors the session bus and its Secret Service owner. An owner change, a bus
+disconnect or change of identity, **Lock**, idle expiry, a provider switch, disable or quit
+closes the gate and invalidates approvals. A successful field read renews the same idle
+timer. Reference changes require a new mapping. Before rolling back to a Bot team version
+that predates this provider, remove all Secret Service mappings.
+
+### Product choices
+
+- The owner’s process name, executable basename and PID start time check compatibility
+  with GNOME Keyring. This trusts the person’s desktop bus and the backing store GNOME
+  opens. Same-user processes are inside that trust boundary.
+- The saved reference is the canonical item path, exact creation time and the first
+  32 hex characters of SHA-256 over the sorted attribute pairs. The path can contain a
+  collection name. It is stored in `vault-sources.json`. Picker handles expire with
+  the listing or gate. The plugin fetches attributes for a selection when saving it.
+  The unkeyed digest can confirm guesses about predictable attributes.
+- The reference detects changes before and after each read. Secret Service has no atomic
+  conditional read. A replacement may enter the adapter’s memory, then be erased and
+  refused if the post-check detects a change. A restored item with the same path,
+  creation time and attributes is treated as the same item.
+- Values use the DH-AES encrypted session. Labels and attributes are ordinary D-Bus
+  property replies outside that session. Access uses the explicitly supplied session
+  bus address, via one Unix endpoint. Closing the plugin gate leaves the desktop
+  keyring’s OS permissions and lock state as they were.
+- Reads accept `text/plain` in fatal UTF-8, preserving whitespace and a BOM and
+  refusing NUL. A wire byte array is limited to 64 KiB. The Bot team applies its
+  existing secret-value rules.
+
+The required private-keyring acceptance test is
+`VAULT_SS_REAL=1 node --import ./test/harness-resolve.mjs --test test/secret-service-real.test.js`.
+Run it with Node 24.9 and the extracted AppImage runtime with `ELECTRON_RUN_AS_NODE=1`.
+It requires a private Unix socket, `dbus-daemon`, `gnome-keyring-daemon` and
+`/usr/bin/python3` with the D-Bus and libsecret bindings.
+
 The host-only `secretSources` v1 service provides `status`, `unlock`, `lock`, `read`,
 `listItems` and `prepareQuit`. The `providers` property lists supported providers.
-HashiCorp Vault also exposes `listFields` for the host picker.
+HashiCorp Vault also exposes `listFields` for the host picker. Secret Service exposes
+`resolveHandle` and `itemDetail` for the host and `providerBinding` for gate generation checks.
 `status()` defaults to Bitwarden, and `status({ provider })` checks the named provider.
 Run `bun run harness` to install the pinned test harness and `bun run test` to run the
 fake-CLI tests.

@@ -17,6 +17,9 @@ import {
   hashicorp, hashicorpCloud, hashicorpItem, hashicorpItems, hashicorpMismatch,
   validHashicorpConnection, validHashicorpField, validHashicorpMount, validHashicorpPath,
 } from './vault-hashicorp.js'
+import {
+  GNOME_PROVIDER_ID, secretServiceItem, secretServiceHandle, secretServiceRows, secretServiceMessage,
+} from './vault-secret-service.js'
 
 export const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/
 export const ENV_PREFIX = 'DSH_SECRET_'
@@ -69,12 +72,13 @@ const secondConnection = "The first cut supports one vault connection. Remove th
 const legacyConnection = 'The first cut supports one Bitwarden connection.'
 const cloudVault = '1Password is unavailable in Automagik Cloud.'
 const validReference = value => typeof value === 'string' && value.length > 0 && value.length <= 512
-const vaultProviders = ['bitwarden', 'onepassword', hashicorp]
+const vaultProviders = ['bitwarden', 'onepassword', hashicorp, GNOME_PROVIDER_ID]
 const validProvider = provider => vaultProviders.includes(provider)
 const validVaultReference = ({ provider, connection, item, field }) =>
   validProvider(provider) && [connection, item, field].every(validReference)
   && (provider !== 'onepassword' || (OP_ITEM_ID.test(item) && OP_FIELD_ID.test(field)))
   && (provider !== hashicorp || (validHashicorpConnection(connection) && hashicorpItem(item) !== undefined && validHashicorpField(field)))
+  && (provider !== GNOME_PROVIDER_ID || (connection === GNOME_PROVIDER_ID && field === 'secret' && secretServiceItem(item) !== undefined))
 const sameConnection = (a, b) => a.provider === b.provider && a.connection === b.connection
 const matchesLiveConnection = (service, mapping) => {
   const active = service.activeConnection?.()
@@ -118,11 +122,22 @@ async function probeVault(service, provider, settings = false) {
       return { state: 'unavailable', reason: cloudVault }
     }
     if (settings && provider === hashicorp && error?.code === 'cloud') return { state: 'unavailable', reason: hashicorpCloud }
+    if (settings && provider === GNOME_PROVIDER_ID) {
+      return { state: 'unavailable', reason: secretServiceMessage(error?.code, 'The vault did not answer.') }
+    }
     // The adapter's error may name its account or a vault reference.
   } finally { clearTimeout(timer) }
 }
 const vaultStatus = async (service, mapping) => {
   if (matchesLiveConnection(service, mapping)) return (await probeVault(service, mapping.provider))?.state
+}
+const gateOf = service => {
+  const gate = service?.providerBinding?.(GNOME_PROVIDER_ID)
+  return gate?.provider === GNOME_PROVIDER_ID && Number.isSafeInteger(gate.generation) ? gate : undefined
+}
+const sameGate = (service, gate) => {
+  const current = gateOf(service)
+  return gate !== undefined && current === gate
 }
 const hashicorpConnection = service => {
   const active = service?.activeConnection?.()
@@ -1241,6 +1256,7 @@ export function install(rt) {
       if (service === undefined || service !== secretSources) throw refusal(`${name} is unavailable because the vault plugin is off.`)
       if (wrongHashicorpConnection(service, mapping)) throw refusal(hashicorpMismatch)
       if (mapping.provider === hashicorp && generation !== credentialGeneration) throw refusal(vaultLocked)
+      if (mapping.provider === GNOME_PROVIDER_ID && !sameGate(service, binding.gate)) throw refusal(vaultLocked)
       if (!canUse(mapping, botId)) throw refusal(outsideScope(name))
       if (!rt.holdsLock()) throw refusal(rt.readOnly() ?? 'This host cannot approve vault requests.')
       if (blocked !== undefined) throw blockedWrite(blocked)
@@ -1293,6 +1309,7 @@ export function install(rt) {
       const issuedAt = Date.now()
       grants.set(key, {
         name, botId, sessionId, commandDigest: binding.commandDigest, shell: request.shell, workdir: request.workdir,
+        ...(mapping.provider === GNOME_PROVIDER_ID ? { gate: binding.gate, service } : {}),
         fingerprint: binding.fingerprint, issuedAt, expiresAt: issuedAt + GRANT_MS,
       })
       forgetVaultRequest(request)
@@ -1432,9 +1449,27 @@ export function install(rt) {
       if (typed.entries.some(entry => entry?.name === name)) {
         throw refusal(`The name ${name} is already a typed secret. Delete it in Settings › Secrets first, or map the vault item under another name.`)
       }
-      const { connection, item, field } = body
+      let { connection, item, field } = body
       const legacy = !Array.isArray(secretSources.providers)
       const provider = legacy && !validProvider(body.provider) ? 'bitwarden' : body.provider ?? 'bitwarden'
+      if (provider === GNOME_PROVIDER_ID) {
+        const service = secretSources
+        matchingProvider(provider)
+        if (!supportedProvider(service, provider) || !secretServiceHandle(body.handle)) throw refusal('Choose a valid vault reference.')
+        const gate = gateOf(service)
+        let result
+        try { result = await service.resolveHandle({ provider, handle: body.handle }) } catch {}
+        if (result?.ok !== true) throw refusal(secretServiceMessage(result?.code, 'Choose a valid vault reference.'))
+        if (secretSources !== service || !sameGate(service, gate)) throw refusal(vaultLocked)
+        await loadSecrets()
+        checkSourceWrite()
+        if (secretSources !== service || !sameGate(service, gate)) throw refusal(vaultLocked)
+        if (blocked !== undefined) throw blockedWrite(blocked)
+        if (secrets.has(name)) throw refusal(mappedWrite(name))
+        item = result.item
+        connection = GNOME_PROVIDER_ID
+        field = 'secret'
+      }
       const reference = { provider, connection, item, field }
       if (!validVaultReference(reference) || !supportedProvider(secretSources, provider)) throw refusal('Choose a valid vault reference.')
       if (!matchesLiveConnection(secretSources, reference)) throw refusal(secondConnection)
@@ -1477,11 +1512,32 @@ export function install(rt) {
       await revokeVault(name)
       return true
     },
-    'secret-source-detail'(body) {
+    async 'secret-source-detail'(body) {
       const found = findRequest(String(body.requestId ?? ''))
       if (found === undefined) throw refusal('This request is gone')
       const { request, botId } = found
       const { binding, mapping: { provider, item, field } } = checkVaultBinding(botId, request, 'pending')
+      if (provider === GNOME_PROVIDER_ID) {
+        const service = secretSources
+        const check = () => {
+          const latest = checkVaultBinding(botId, request, 'pending')
+          if (latest.binding !== binding || !canUse(latest.mapping, botId)
+            || rt.chatOf(botId) !== request.sessionId) throw refusal(changedMapping(request.name))
+          if (service !== secretSources || !sameGate(service, binding.gate)) throw refusal(vaultLocked)
+        }
+        check()
+        let detail
+        try { detail = await service.itemDetail({ provider, item }) } catch {}
+        check()
+        const [, created] = secretServiceItem(item)
+        if (detail?.ok !== true || typeof detail.name !== 'string' || typeof detail.collection !== 'string'
+          || detail.created !== created) throw refusal(secretServiceMessage(detail?.code, 'The vault item details could not be loaded.'))
+        snapshots.delete(binding.snapshot)
+        binding.snapshot = randomUUID()
+        snapshots.set(binding.snapshot, binding)
+        return { provider, name: detail.name, collection: detail.collection, created, field,
+          snapshot: binding.snapshot, commandDigest: binding.commandDigest }
+      }
       if (binding.snapshot === undefined) {
         binding.snapshot = randomUUID()
         snapshots.set(binding.snapshot, binding)
@@ -1499,10 +1555,15 @@ export function install(rt) {
     mutations = settled
     return job
   }
-  const secretEndpoint = (endpoint, body) => mutate(async () => {
-    await loadSecrets()
-    return endpoints[endpoint](body ?? {})
-  })
+  const secretEndpoint = (endpoint, body) => {
+    const dispatch = async () => {
+      await loadSecrets()
+      return endpoints[endpoint](body ?? {})
+    }
+    // This lookup waits on the keyring. A cancel or mapping edit may proceed meanwhile.
+    return endpoint === 'secret-source-detail' && vaultRequests.get(String(body?.requestId ?? ''))?.gate !== undefined
+      ? dispatch() : mutate(dispatch)
+  }
 
   const connectionOf = (service, provider) => {
     const mapped = sources.values().next().value
@@ -1558,7 +1619,9 @@ export function install(rt) {
 
   const vaultRoutes = {
     async 'vault-status'(service, body) {
-      const provider = activeProvider(body.provider ?? (hashicorpConnection(service) === undefined ? 'bitwarden' : hashicorp))
+      const selected = service.providerSelection?.provider === GNOME_PROVIDER_ID ? GNOME_PROVIDER_ID
+        : hashicorpConnection(service) === undefined ? 'bitwarden' : hashicorp
+      const provider = activeProvider(body.provider ?? selected)
       const connection = connectionOf(service, provider)
       const answer = await probeVault(service, provider, true)
       const mismatch = answer?.state === 'unlocked' && wrongHashicorpConnection(service, sources.values().next().value)
@@ -1570,6 +1633,14 @@ export function install(rt) {
       }
     },
     async 'vault-unlock'(service, body, enter) {
+      if (body.provider === GNOME_PROVIDER_ID) {
+        matchingProvider(GNOME_PROVIDER_ID)
+        if (!supportedProvider(service, GNOME_PROVIDER_ID)) throw refusal('The vault did not answer.')
+        let answer
+        try { answer = await enter(GNOME_PROVIDER_ID, {}) } catch {}
+        if (answer?.ok !== true) throw refusal(secretServiceMessage(answer?.code, 'The vault could not be unlocked.'))
+        return true
+      }
       matchingProvider('bitwarden')
       if (body.provider !== undefined && body.provider !== 'bitwarden') throw refusal('Choose a vault provider.')
       if (typeof body.password !== 'string' || body.password.length === 0 || body.password.includes('\0')) {
@@ -1585,7 +1656,7 @@ export function install(rt) {
     async 'vault-lock'(service, body) {
       let locked
       try {
-        const provider = body.provider === hashicorp ? { provider: hashicorp } : undefined
+        const provider = body.provider === hashicorp || body.provider === GNOME_PROVIDER_ID ? { provider: body.provider } : undefined
         const result = provider === undefined ? await service.lock() : await service.lock(provider)
         locked = result === true || (!Array.isArray(service.providers) && result === undefined)
       } catch {}
@@ -1646,6 +1717,15 @@ export function install(rt) {
       if (provider === hashicorp) return hashicorpPicker(service, body, false)
       if (!supportedProvider(service, provider)) throw refusal('The vault did not answer.')
       const search = typeof body.search === 'string' ? body.search.trim().slice(0, 512) : ''
+      if (provider === GNOME_PROVIDER_ID) {
+        const gate = gateOf(service)
+        let result
+        try { result = await service.listItems({ provider, search }) } catch {}
+        if (result?.ok !== true || !Array.isArray(result.items)) throw refusal(secretServiceMessage(result?.code, 'The vault items could not be listed.'))
+        if (service !== secretSources || !sameGate(service, gate)) throw refusal(vaultLocked)
+        matchingProvider(provider)
+        return { items: secretServiceRows(result.items) }
+      }
       let result
       try { result = await service.listItems(providerArgs(service, provider, { connection: connectionOf(service, provider), search })) } catch {}
       if (result?.code === 'cloud' && provider === 'onepassword') throw refusal(cloudVault)
@@ -1670,19 +1750,27 @@ export function install(rt) {
   // Credential entry shares the mapping write queue. Lock and clear can still cancel
   // a credential check in progress.
   let tokenRevision = 0
+  let secretServiceEntry = new AbortController()
   function vaultEndpoint(endpoint, body = {}, refresh = false) {
     const entry = endpoint === 'vault-unlock' || endpoint === 'vault-token-set'
     const clear = endpoint === 'vault-token-clear'
     const admitted = secretSources
     const locking = endpoint === 'vault-lock' || (clear && (body.provider === 'onepassword' || body.provider === hashicorp)
       && supportedProvider(admitted, body.provider))
-    if (locking) advanceCredentialGeneration()
+    const secretServiceOnly = body.provider === GNOME_PROVIDER_ID
+    if (locking && secretServiceOnly) {
+      secretServiceEntry.abort()
+      secretServiceEntry = new AbortController()
+    } else if (locking) advanceCredentialGeneration()
+    const entrySignal = secretServiceEntry.signal
     // A HashiCorp clear also outdates a queued connection entry.
     if (locking && body.provider === hashicorp) tokenRevision++
     let generation = credentialGeneration
     const revision = endpoint === 'vault-token-set' ? ++tokenRevision : tokenRevision
     const checkEntry = () => {
-      if (generation !== credentialGeneration || admitted !== secretSources) throw refusal(vaultLocked)
+      if (generation !== credentialGeneration || admitted !== secretSources || (secretServiceOnly && entrySignal.aborted)) {
+        throw refusal(vaultLocked)
+      }
     }
     const dispatch = async () => {
       if (refresh) await rt.refresh()
@@ -1706,8 +1794,9 @@ export function install(rt) {
           tokenRevision++
         }
         try {
+          const signal = secretServiceOnly ? AbortSignal.any([entrySignal, generation.signal]) : generation.signal
           const pending = service.unlock(providerArgs(service, provider, Array.isArray(service.providers)
-            ? { ...options, signal: generation.signal } : options))
+            ? { ...options, signal } : options))
           if (!replacing) return await pending
           const [answer] = await Promise.all([pending, ...[...sources].filter(([, row]) => row.provider === hashicorp)
             .map(([name]) => revokeVault(name))])
@@ -1879,6 +1968,8 @@ export function install(rt) {
     const unsafe = 'That request cannot be shown on a card; ask again without secret material in it.'
     const mapping = sources.get(name)
     const generation = credentialGeneration
+    const gate = mapping.provider === GNOME_PROVIDER_ID ? gateOf(service) : undefined
+    if (mapping.provider === GNOME_PROVIDER_ID && gate === undefined) return refuse(vaultUnavailable)
     if (wrongHashicorpConnection(service, mapping)) return refuse(vaultUnavailable)
     if (hasSecretMaterial(mapping)) return refuse(unsafe)
     const fingerprint = fingerprintOf(mapping)
@@ -1889,7 +1980,8 @@ export function install(rt) {
     if (message !== undefined) return refuse(message)
     if (fingerprintOf(sources.get(name)) !== fingerprint) return refuse(changedMapping(name))
     if (wrongHashicorpConnection(service, mapping)) return refuse(vaultUnavailable)
-    if (mapping.provider === hashicorp && generation !== credentialGeneration) return refuse(vaultLocked)
+    if ((mapping.provider === hashicorp && generation !== credentialGeneration)
+      || (mapping.provider === GNOME_PROVIDER_ID && !sameGate(service, gate))) return refuse(vaultLocked)
     if (sessionFolder(session) !== workdir) return refuse('No working folder is set for this chat; nothing was asked.')
     if (hasSecretMaterial(sources.get(name))) return refuse(unsafe)
     if (status === undefined || !matchesLiveConnection(service, mapping)
@@ -1919,12 +2011,21 @@ export function install(rt) {
       askedAt: now, ...(!pending ? { settledAt: now } : {}),
     }
     list.push(request)
-    if (pending) vaultRequests.set(request.id, { botId, sessionId, name, fingerprint, commandDigest: entry.commandDigest })
+    if (pending) vaultRequests.set(request.id, { botId, sessionId, name, fingerprint, commandDigest: entry.commandDigest,
+      ...(gate === undefined ? {} : { gate }),
+    })
     trimRequests(list)
     audits.push(auditVault(entry, pending ? 'asked' : 'locked', pending ? 'ok' : 'locked'))
     await rt.save()
     await Promise.all(audits)
-    if (mapping.provider === hashicorp && generation !== credentialGeneration) return vaultLocked
+    if ((mapping.provider === hashicorp && generation !== credentialGeneration)
+      || (mapping.provider === GNOME_PROVIDER_ID && (service !== secretSources || !sameGate(service, gate)))) {
+      if (mapping.provider === GNOME_PROVIDER_ID && request.status === 'pending') {
+        cancelVaultRequest(request)
+        await rt.save()
+      }
+      return vaultLocked
+    }
     if (!pending) {
       await tell(botId, vaultLocked)
       return vaultLocked
@@ -2052,6 +2153,7 @@ export function install(rt) {
     const args = exec.arguments ?? {}
     let message
     if (Date.now() >= grant.expiresAt) message = `The approval for ${grant.name} expired; ask again.`
+    else if (grant.gate !== undefined && (grant.service !== secretSources || !sameGate(secretSources, grant.gate))) message = vaultLocked
     else if (exec.parent !== undefined || Object.hasOwn(args, 'workdir')
       || commandDigestOf(exec.name, sessionFolder(session), args.command) !== grant.commandDigest) {
       message = 'The approved command, shell or folder was different; ask again.'
@@ -2176,6 +2278,7 @@ export function install(rt) {
     secretHeldReason,
     secretSourceReason: sourceReason,
     secretEndpoint,
+    secretServiceDetail: requestId => vaultRequests.get(String(requestId ?? ''))?.gate !== undefined,
     vaultEndpoint,
     deleteSecretIfUnchanged,
     forgetBotSecrets,
