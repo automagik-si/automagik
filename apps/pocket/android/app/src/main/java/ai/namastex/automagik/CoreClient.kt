@@ -28,6 +28,7 @@ class CoreClient(
     private var earlyBytes = 0
     private val gate = Any()
     @Volatile private var closed = false
+    internal val isClosed get() = closed
     lateinit var hello: JSONObject
         private set
 
