@@ -293,6 +293,7 @@ const textOf = message => (Array.isArray(message?.content)
 export function install(rt, reservationDeps) {
   const { ctx } = rt
   const reservationStore = reservationDeps && createAccountReservations(rt, reservationDeps)
+  if (reservationDeps?.machine) rt.reservationWritesIdle = reservationStore.idle
   const acp = () => {
     try { return ctx.get?.('acpAgents') } catch { return undefined }
   }
@@ -445,6 +446,16 @@ export function install(rt, reservationDeps) {
     // which one this window is. A name, never a path; omitted when the host does not say.
     const name = installation()
     const view = accounts => ({ accounts, ...(name === undefined ? {} : { installation: name }) })
+    const withMachine = async () => {
+      const check = payload?.reservations === true && rt.machineReservations
+      if (check) {
+        for (const id of Object.keys(out)) {
+          await check.fresh(id, 'card')
+          out[id].machine = { ...check.status(id), claims: reservations?.machineClaims(id) ?? [] }
+        }
+      }
+      return view(out)
+    }
     if (typeof service?.account !== 'function') return view(out)
     if (service.authScope === 'isolated') {
       for (const id of PROVIDERS) {
@@ -467,7 +478,7 @@ export function install(rt, reservationDeps) {
           ...(reservation === undefined ? {} : { reservation }),
         }
       }
-      return view(out)
+      return withMachine()
     }
     let rows
     try { rows = (await service.status?.())?.agents } catch {}
@@ -508,7 +519,7 @@ export function install(rt, reservationDeps) {
         if (reservation && (reservation.state !== 'unsupported' || reservation.claims.length > 0)) out[id].reservation = reservation
       }
     }
-    return view(out)
+    return withMachine()
   }
 
   const noticed = async (payload) => {

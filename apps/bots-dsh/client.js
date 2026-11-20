@@ -63,6 +63,35 @@ function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) 
   });
 }
 
+// src/shared/machine-reservations.js
+var MACHINE_MESSAGES = {
+  absent: "Reservations are not checked across instances here: this machine has no reservations folder.",
+  unreadable: "Reservations are not checked across instances here: this OS user cannot read the reservations folder.",
+  "not-set-up": "Reservations are not checked across instances here: the reservations folder is not set up completely. Ask this machine's administrator.",
+  unsupported: "Reservations across instances are not offered on Windows yet.",
+  mine: "Reserved for {label} on this machine.",
+  other: "Also reserved on this machine: {label} (another {vendor} account).",
+  refused: "Reserved for {label} on another instance. Sign in with another account, or ask its owner to make it shared.",
+  "no-organisation": "This sign-in may be the account reserved for {label} on another instance: this Claude Code does not name the organisation. Update Claude Code, or ask the reservation's owner to make it shared.",
+  "unknown-plan": "This sign-in may be the account reserved for {label} on another instance: this Codex plan is not known to this version. Update Codex, or ask the reservation's owner to make it shared.",
+  "unreadable-file": "This account's reservation file on this machine cannot be read, so the account is not used here. Ask this machine's administrator to check the reservations folder.",
+  owner: "File owner: {owner}",
+  conflict: "This account is reserved for {label} on another instance.",
+  "not-own-file": "Only the OS user who made this reservation can make it shared. Ask this machine's administrator.",
+  privacy: "Members of this machine's reservations group could test a guessed email.",
+  failed: "The reservation could not be saved on this machine. Try again."
+};
+var fill = (template, values) => template.replace(/\{(\w+)\}/g, (m, k) => values[k] ?? m);
+function machineNotice(state2) {
+  if (state2 === "no-key" || state2 === "bad-key") return MACHINE_MESSAGES["not-set-up"];
+  if (state2 === "absent" || state2 === "unreadable" || state2 === "not-set-up" || state2 === "unsupported") return MACHINE_MESSAGES[state2];
+}
+function machineRefusal({ state: state2, why }) {
+  if (state2 === "refused") return MACHINE_MESSAGES.refused;
+  if (state2 === "ambiguous") return MACHINE_MESSAGES[why];
+  if (state2 === "unreadable") return MACHINE_MESSAGES["unreadable-file"];
+}
+
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
@@ -588,6 +617,21 @@ var ZH = {
   "Personal plan": "个人套餐",
   "Workspace plan: covers every ChatGPT workspace of this email": "工作区套餐：涵盖此邮箱的所有 ChatGPT 工作区",
   "The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.": "记录只保存带密钥的摘要，不保存邮箱。能读取此团队的文件和密钥的人可以验证猜测的邮箱。",
+  [MACHINE_MESSAGES.absent]: "此处不检查跨实例的账号预留：本机没有预留文件夹。",
+  [MACHINE_MESSAGES.unreadable]: "此处不检查跨实例的账号预留：此系统用户无法读取预留文件夹。",
+  [MACHINE_MESSAGES["not-set-up"]]: "此处不检查跨实例的账号预留：预留文件夹尚未完整设置。请联系本机管理员。",
+  [MACHINE_MESSAGES.unsupported]: "Windows 上暂不提供跨实例的账号预留。",
+  [MACHINE_MESSAGES.mine]: "已在本机预留给 {label}。",
+  [MACHINE_MESSAGES.other]: "本机也为 {label} 预留了一个账号（另一个 {vendor} 账号）。",
+  [MACHINE_MESSAGES.refused]: "已在另一个实例上预留给 {label}。请使用其他账号登录，或请其所有者将其设为共享。",
+  [MACHINE_MESSAGES["no-organisation"]]: "此登录可能是另一个实例上为 {label} 预留的账号：此版本的 Claude Code 不提供组织信息。请更新 Claude Code，或请预留的所有者将其设为共享。",
+  [MACHINE_MESSAGES["unknown-plan"]]: "此登录可能是另一个实例上为 {label} 预留的账号：此版本无法识别该 Codex 套餐。请更新 Codex，或请预留的所有者将其设为共享。",
+  [MACHINE_MESSAGES["unreadable-file"]]: "无法读取本机上此账号的预留文件，因此此处不使用该账号。请联系本机管理员检查预留文件夹。",
+  [MACHINE_MESSAGES.owner]: "文件所有者：{owner}",
+  [MACHINE_MESSAGES.conflict]: "此账号已在另一个实例上预留给 {label}。",
+  [MACHINE_MESSAGES["not-own-file"]]: "只有创建此预留的系统用户才能将其设为共享。请联系本机管理员。",
+  [MACHINE_MESSAGES.privacy]: "本机预留用户组的成员可以验证猜测的邮箱。",
+  [MACHINE_MESSAGES.failed]: "无法在本机保存预留。请重试。",
   "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
   "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "这台电脑上的其他 Automagik 安装可能使用同一个 Bot 登录。在此更改会同时更改它们的登录。",
@@ -3332,7 +3376,7 @@ Object.assign(ZH, {
   "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
 });
 Object.assign(ZH, HOST_ZH);
-var fill = (text2, params) => params ? text2.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text2;
+var fill2 = (text2, params) => params ? text2.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text2;
 var service = null;
 var bound = null;
 var unregister = null;
@@ -3368,7 +3412,7 @@ function addStrings(zh) {
   };
 }
 function t(key, params) {
-  return bound ? bound(key, params) : fill(key, params);
+  return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
   "Detach {name} first.",
@@ -3385,6 +3429,10 @@ var HOST_TEMPLATES = [
   "Could not continue this sign-in ({kind}). Try again.",
   "The account could not be confirmed ({kind}). Try again.",
   "This account is reserved for {label} by another installation that shares this team.",
+  MACHINE_MESSAGES.refused,
+  MACHINE_MESSAGES["no-organisation"],
+  MACHINE_MESSAGES["unknown-plan"],
+  MACHINE_MESSAGES.conflict,
   "{name} could not switch to {model}. It stays on {kept}.",
   { template: "{name} cannot use the {route} route.", host: ["route"] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
@@ -4627,7 +4675,7 @@ function lookOf(bot) {
 var SHAPES = {};
 for (const [id, character] of Object.entries(CHARACTERS)) {
   const layers = [
-    ...(character.paints ?? []).map(([d, fill2, opacity]) => `<path d="${d}" fill="${fill2}" fill-opacity="${opacity}"/>`),
+    ...(character.paints ?? []).map(([d, fill3, opacity]) => `<path d="${d}" fill="${fill3}" fill-opacity="${opacity}"/>`),
     `<path d="${character.shade}" fill="#000" fill-opacity=".14"/>`,
     `<path d="${character.light}" fill="#fff" fill-opacity=".16"/>`
   ].join("");
@@ -15504,6 +15552,13 @@ var RESERVATION_REASONS = {
 function reservationMessage({ state: state2, why }) {
   return state2 === "not-reservable" && Object.hasOwn(RESERVATION_REASONS, why) ? RESERVATION_REASONS[why] : RESERVATION_MESSAGES[state2];
 }
+var DIGEST = /^[A-Za-z0-9_-]{43}$/;
+var TOKEN = /^[A-Za-z0-9_-]{21}[AQgw]$/;
+var UTC_DATE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/;
+var validInstanceId = (value) => typeof value === "string" && value.length > 0 && value.length <= 4096 && !value.includes("\0") && value.isWellFormed();
+var cleanLabel = (value) => value.replace(/\p{Cc}/gu, "").replace(/\s+/gu, " ").trim();
+var validLabel = (value) => typeof value === "string" && value.length > 0 && value.length <= 120 && value.isWellFormed() && [...value].length <= 60 && value === cleanLabel(value);
+var validDate = (value) => typeof value === "string" && UTC_DATE.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === (value.length === 20 ? value.replace("Z", ".000Z") : value);
 
 // src/client/cli-accounts.js
 var import_react38 = require("react");
@@ -15515,7 +15570,7 @@ var button = (label, onClick, disabled) => (0, import_react38.createElement)("bu
   onClick,
   disabled
 }, t(label));
-function Reservation({ provider, reservation, actions, refresh, updated }) {
+function Reservation({ provider, reservation, machine, actions, refresh, updated }) {
   const [form, setForm] = (0, import_react38.useState)(null);
   const [busy, setBusy] = (0, import_react38.useState)(false);
   const [problem, setProblem] = (0, import_react38.useState)(null);
@@ -15529,7 +15584,7 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
     setForm({
       offerId,
       label: claim?.label ?? "",
-      ...claim ? { claimId: claim.claimId, rev: claim.rev } : {}
+      ...claim?.machineId ? { machineId: claim.machineId } : claim ? { claimId: claim.claimId, rev: claim.rev } : {}
     });
   };
   const change = async (action) => {
@@ -15550,12 +15605,21 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
   };
   function submit() {
     if (!active || busy) return;
-    const { offerId: offerId2, label, claimId, rev } = active;
-    void change(() => claimId === void 0 ? actions.cliLoginReserve(offerId2, label) : actions.cliLoginReserve(offerId2, label, { claimId, rev }));
+    const { offerId: offerId2, label, claimId, rev, machineId } = active;
+    const claim = machineId ? { machineId } : claimId === void 0 ? void 0 : { claimId, rev };
+    void change(() => claim ? actions.cliLoginReserve(offerId2, label, claim) : actions.cliLoginReserve(offerId2, label));
   }
   const { state: state2, claims } = reservation;
   const line = reservationMessage(reservation);
-  const hasCurrent = claims.some((claim) => claim.current);
+  const machineClaims = machine?.claims ?? [];
+  const blocked = machine && machineRefusal(machine);
+  const notice = machine?.notice === "unsupported-acp" ? reservationMessage({ state: "unsupported" }) : machineNotice(machine?.notice);
+  const hasCurrent = claims.some((claim) => claim.current) || machineClaims.some((claim) => claim.current) || machine?.state === "mine" || !!blocked;
+  const owner = (name) => name ? (0, import_react38.createElement)(
+    "p",
+    { className: "bt-set-hint" },
+    t(MACHINE_MESSAGES.owner, { owner: name })
+  ) : null;
   return (0, import_react38.createElement)(
     "div",
     null,
@@ -15570,6 +15634,30 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
         busy || active !== null
       ) : null
     )),
+    ...machineClaims.map((claim) => (0, import_react38.createElement)(
+      "div",
+      { key: claim.machineId },
+      (0, import_react38.createElement)("span", null, t(claim.current ? MACHINE_MESSAGES.mine : MACHINE_MESSAGES.other, {
+        label: claim.label,
+        vendor: CLI_NAMES[provider]
+      })),
+      claim.current && offerId ? button("Rename", () => edit(claim), busy || active !== null) : null,
+      button(
+        "Make shared",
+        () => void change(() => actions.cliLoginReleaseMachine(claim.machineId)),
+        busy || active !== null
+      ),
+      owner(claim.owner)
+    )),
+    machine?.state === "mine" && machineClaims.length === 0 ? (0, import_react38.createElement)("div", null, (0, import_react38.createElement)("span", null, t(MACHINE_MESSAGES.mine, { label: machine.label }))) : null,
+    blocked ? (0, import_react38.createElement)(
+      "div",
+      null,
+      (0, import_react38.createElement)("span", { className: "bt-set-hint" }, t(blocked, { label: machine.label })),
+      owner(machine.owner)
+    ) : null,
+    // Its own line: R3's reason line follows as another inline hint.
+    notice && notice !== line ? (0, import_react38.createElement)("div", null, (0, import_react38.createElement)("span", { className: "bt-set-hint" }, t(notice))) : null,
     line ? (0, import_react38.createElement)("span", { className: "bt-set-hint" }, t(line)) : null,
     !hasCurrent && offerId ? (0, import_react38.createElement)("span", null, t("Shared with other instances (default).")) : null,
     !hasCurrent && !active ? (0, import_react38.createElement)("div", null, button("Reserve for a project", () => edit(), busy || !offerId)) : null,
@@ -15600,6 +15688,7 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
         { className: "bt-set-hint" },
         t("The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.")
       ),
+      machine && !notice ? (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t(MACHINE_MESSAGES.privacy)) : null,
       button("Continue", submit, busy),
       button("Cancel", () => {
         setForm(null);
@@ -15713,9 +15802,10 @@ function CliAccounts({ bot, actions }) {
         { className: "bt-set-hint" },
         t("Workspace plan: covers every ChatGPT workspace of this email")
       ) : null,
-      entry.reservation || consented(entry) ? (0, import_react38.createElement)(Reservation, {
+      entry.reservation || entry.machine || consented(entry) ? (0, import_react38.createElement)(Reservation, {
         provider,
         reservation: entry.reservation ?? { state: "unsupported", claims: [] },
+        machine: entry.machine,
         actions,
         refresh,
         updated: (reservation) => updated(provider, reservation)
@@ -16654,7 +16744,7 @@ var openPage = (url) => reserveWindow().go(url);
 // src/client/connector-marks.js
 var import_react41 = require("react");
 var svg = (...kids) => (0, import_react41.createElement)("svg", { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", "aria-hidden": true }, ...kids);
-var path = (d, fill2) => (0, import_react41.createElement)("path", { d, fill: fill2 });
+var path = (d, fill3) => (0, import_react41.createElement)("path", { d, fill: fill3 });
 var mark = (...kids) => () => svg(...kids);
 var GITHUB_D = "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z";
 var GitHubMark = () => (0, import_react41.createElement)(
@@ -16695,7 +16785,7 @@ var SI = {
   discord: ["M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z", "#5865F2"],
   qq: ["M21.395 15.035a40 40 0 0 0-.803-2.264l-1.079-2.695c.001-.032.014-.562.014-.836C19.526 4.632 17.351 0 12 0S4.474 4.632 4.474 9.241c0 .274.013.804.014.836l-1.08 2.695a39 39 0 0 0-.802 2.264c-1.021 3.283-.69 4.643-.438 4.673.54.065 2.103-2.472 2.103-2.472 0 1.469.756 3.387 2.394 4.771-.612.188-1.363.479-1.845.835-.434.32-.379.646-.301.778.343.578 5.883.369 7.482.189 1.6.18 7.14.389 7.483-.189.078-.132.132-.458-.301-.778-.483-.356-1.233-.646-1.846-.836 1.637-1.384 2.393-3.302 2.393-4.771 0 0 1.563 2.537 2.103 2.472.251-.03.581-1.39-.438-4.673", "#1EBAFC"]
 };
-var siMarks = Object.fromEntries(Object.entries(SI).map(([id, [d, fill2]]) => [id, mark(path(d, fill2))]));
+var siMarks = Object.fromEntries(Object.entries(SI).map(([id, [d, fill3]]) => [id, mark(path(d, fill3))]));
 var AtlassianMark = mark(
   path("M7.12 11.084a.683.683 0 00-1.16.126L.075 22.974a.703.703 0 00.63 1.018h8.19a.678.678 0 00.63-.39c1.767-3.65.696-9.203-2.406-12.52z", "#2684FF"),
   path("M11.434.386a15.515 15.515 0 00-.906 15.317l3.95 7.9a.703.703 0 00.628.388h8.19a.703.703 0 00.63-1.017L12.63.38a.664.664 0 00-1.196.006z", "#0052CC")
@@ -16734,9 +16824,9 @@ var GmailMark = mark(
 );
 var SLACK_QUAD = [[0, "#36C5F0"], [90, "#2EB67D"], [180, "#ECB22E"], [270, "#E01E5A"]];
 var SlackMark = () => svg(
-  SLACK_QUAD.map(([a, fill2]) => (0, import_react41.createElement)(
+  SLACK_QUAD.map(([a, fill3]) => (0, import_react41.createElement)(
     "g",
-    { key: a, transform: `rotate(${a} 12 12)`, fill: fill2 },
+    { key: a, transform: `rotate(${a} 12 12)`, fill: fill3 },
     (0, import_react41.createElement)("path", { d: "M9.3 1.8a1.9 1.9 0 0 0 0 3.8h1.9V3.7a1.9 1.9 0 0 0-1.9-1.9Z" }),
     (0, import_react41.createElement)("rect", { x: 1.8, y: 7.4, width: 9.4, height: 3.8, rx: 1.9 })
   ))
@@ -16785,9 +16875,9 @@ var AmapMark = mark(
   path("M20.6 3.4L9.1 14.4l1.1 5.8 3.2-3.7 7.2-13.1Z", "#1565C0"),
   path("M20.6 3.4l-7.2 13.1 4.8 3.9 2.4-17Z", "#1E88E5")
 );
-var envelope = (fill2) => mark(
-  path("M3.2 5.2h17.6c.7 0 1.3.4 1.6 1L12 13.4 1.6 6.2c.3-.6.9-1 1.6-1Z", fill2),
-  path("M1.6 8.2l9.7 6.7a1.2 1.2 0 0 0 1.4 0l9.7-6.7v8.6a2 2 0 0 1-2 2H3.6a2 2 0 0 1-2-2V8.2Z", fill2)
+var envelope = (fill3) => mark(
+  path("M3.2 5.2h17.6c.7 0 1.3.4 1.6 1L12 13.4 1.6 6.2c.3-.6.9-1 1.6-1Z", fill3),
+  path("M1.6 8.2l9.7 6.7a1.2 1.2 0 0 0 1.4 0l9.7-6.7v8.6a2 2 0 0 1-2 2H3.6a2 2 0 0 1-2-2V8.2Z", fill3)
 );
 var EnvelopeBlue = envelope("#3B82F6");
 var EnvelopeRed = envelope("#E60012");
@@ -18367,11 +18457,11 @@ var CLAY_DARK = Object.freeze({ bg: "#1e1923", sidebar: "#18141c", bubble: "#244
 var FONT = '"DM Sans",ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
 var HEAD = 'Fredoka,"DM Sans",ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
 var DSH_TEXT = '"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Helvetica Neue",Helvetica,Arial,sans-serif';
-var raised = (fill2, depth = 3) => `background:${fill2};box-shadow:inset 2px 3px 4px color-mix(in srgb,${fill2} var(--clay-hi),var(--clay-shine)),inset -3px -4px 6px color-mix(in srgb,${fill2} var(--clay-lo),var(--clay-umber)),0 ${depth}px 0 color-mix(in srgb,${fill2} var(--clay-ledge),var(--clay-umber)),0 ${depth + 3}px ${depth + 5}px var(--clay-cast),0 ${depth * 3 + 4}px ${depth * 5 + 8}px var(--clay-cast-far)`;
-var lifted = (fill2, depth = 3) => `transform:translateY(-2px);${raised(fill2, depth + 2)}`;
-var pressed = (fill2, depth = 3) => `transform:translateY(${Math.max(1, depth - 1)}px);box-shadow:inset 3px 4px 6px color-mix(in srgb,${fill2} var(--clay-lo),var(--clay-umber)),inset -1px -2px 3px color-mix(in srgb,${fill2} var(--clay-hi),var(--clay-shine)),0 1px 0 color-mix(in srgb,${fill2} var(--clay-ledge),var(--clay-umber)),0 2px 3px var(--clay-cast)`;
-var recessed = (fill2) => `background:${fill2};box-shadow:inset 3px 4px 6px color-mix(in srgb,${fill2} var(--clay-lo),var(--clay-umber)),inset -2px -2px 3px color-mix(in srgb,${fill2} var(--clay-hi),var(--clay-shine)),0 1px 0 color-mix(in srgb,var(--bt-main) var(--clay-hi),var(--clay-shine))`;
-var slab = (fill2) => `background:${fill2};box-shadow:inset 3px 4px 7px color-mix(in srgb,${fill2} var(--clay-hi),var(--clay-shine)),inset -4px -5px 9px color-mix(in srgb,${fill2} var(--clay-lo),var(--clay-umber))`;
+var raised = (fill3, depth = 3) => `background:${fill3};box-shadow:inset 2px 3px 4px color-mix(in srgb,${fill3} var(--clay-hi),var(--clay-shine)),inset -3px -4px 6px color-mix(in srgb,${fill3} var(--clay-lo),var(--clay-umber)),0 ${depth}px 0 color-mix(in srgb,${fill3} var(--clay-ledge),var(--clay-umber)),0 ${depth + 3}px ${depth + 5}px var(--clay-cast),0 ${depth * 3 + 4}px ${depth * 5 + 8}px var(--clay-cast-far)`;
+var lifted = (fill3, depth = 3) => `transform:translateY(-2px);${raised(fill3, depth + 2)}`;
+var pressed = (fill3, depth = 3) => `transform:translateY(${Math.max(1, depth - 1)}px);box-shadow:inset 3px 4px 6px color-mix(in srgb,${fill3} var(--clay-lo),var(--clay-umber)),inset -1px -2px 3px color-mix(in srgb,${fill3} var(--clay-hi),var(--clay-shine)),0 1px 0 color-mix(in srgb,${fill3} var(--clay-ledge),var(--clay-umber)),0 2px 3px var(--clay-cast)`;
+var recessed = (fill3) => `background:${fill3};box-shadow:inset 3px 4px 6px color-mix(in srgb,${fill3} var(--clay-lo),var(--clay-umber)),inset -2px -2px 3px color-mix(in srgb,${fill3} var(--clay-hi),var(--clay-shine)),0 1px 0 color-mix(in srgb,var(--bt-main) var(--clay-hi),var(--clay-shine))`;
+var slab = (fill3) => `background:${fill3};box-shadow:inset 3px 4px 7px color-mix(in srgb,${fill3} var(--clay-hi),var(--clay-shine)),inset -4px -5px 9px color-mix(in srgb,${fill3} var(--clay-lo),var(--clay-umber))`;
 var important = (css) => css.split(";").map((rule) => `${rule}!important`).join(";");
 var move = "transition:transform .16s cubic-bezier(.3,1.4,.5,1),box-shadow .16s ease,background-color .16s ease";
 var TOKENS = `
@@ -20888,9 +20978,10 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     cliLoginReserve: (offerId, label, claim) => call2("cli-login-reserve", {
       offerId,
       label,
-      ...claim === void 0 ? {} : { claimId: claim.claimId, rev: claim.rev }
+      ...claim?.machineId ? { machineId: claim.machineId } : claim === void 0 ? {} : { claimId: claim.claimId, rev: claim.rev }
     }),
     cliLoginRelease: (claimId, rev) => call2("cli-login-release", { claimId, rev }),
+    cliLoginReleaseMachine: (machineId) => call2("cli-login-release", { machineId }),
     cliLoginSwitch: (botId, provider) => call2("cli-login-switch", loginPayload(botId, provider)),
     cliLoginReset: (botId, provider) => call2("cli-login-reset", loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call2(
@@ -31461,7 +31552,7 @@ function Chart({ range, columns: columns2, series, tipSeries, by, onBy, onPick }
     ) : null
   );
 }
-function Row2({ kind, glyph, name, sub, sum, whole, fill: fill2, index, onClick }) {
+function Row2({ kind, glyph, name, sub, sum, whole, fill: fill3, index, onClick }) {
   const width = whole > 0 ? Math.max(sum.total > 0 ? 2 : 0, sum.total / whole * 100) : 0;
   return (0, import_react82.createElement)(
     onClick ? "button" : "div",
@@ -31482,7 +31573,7 @@ function Row2({ kind, glyph, name, sub, sum, whole, fill: fill2, index, onClick 
         (0, import_react82.createElement)("span", { className: "bt-us-row-name" }, name),
         sub ? (0, import_react82.createElement)("span", { className: "bt-us-row-sub" }, sub) : null
       ),
-      (0, import_react82.createElement)("span", { className: "bt-us-track" }, (0, import_react82.createElement)("span", { style: { width: `${width}%`, background: fill2 } }))
+      (0, import_react82.createElement)("span", { className: "bt-us-track" }, (0, import_react82.createElement)("span", { style: { width: `${width}%`, background: fill3 } }))
     ),
     (0, import_react82.createElement)("span", { className: "bt-us-row-num" }, (0, import_react82.createElement)("b", null, compact(sum.total)), (0, import_react82.createElement)("small", null, `${percent2(sum.total, whole)}%`))
   );

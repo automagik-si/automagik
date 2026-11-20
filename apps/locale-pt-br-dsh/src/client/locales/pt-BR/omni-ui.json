@@ -71,6 +71,34 @@
   "Personal plan": "Plano pessoal",
   "Workspace plan: covers every ChatGPT workspace of this email": "Plano de workspace: abrange todos os workspaces do ChatGPT associados a este e-mail",
   "The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.": "O registro guarda apenas resumos criptográficos gerados com uma chave. O e-mail fica fora do registro. Quem puder ler os arquivos da equipe e a chave pode testar um endereço de e-mail que suspeite estar na reserva.",
+  "Reservations are not checked across instances here: this machine has no reservations folder.":
+    "As reservas entre instâncias não são verificadas aqui: esta máquina não tem a pasta de reservas.",
+  "Reservations are not checked across instances here: this OS user cannot read the reservations folder.":
+    "As reservas entre instâncias não são verificadas aqui: esta conta do sistema operacional não consegue ler a pasta de reservas.",
+  "Reservations are not checked across instances here: the reservations folder is not set up completely. Ask this machine's administrator.":
+    "As reservas entre instâncias não são verificadas aqui: a pasta de reservas não está configurada por completo. Fale com quem administra esta máquina.",
+  "Reservations across instances are not offered on Windows yet.":
+    "Reservas entre instâncias ainda não estão disponíveis no Windows.",
+  "Reserved for {label} on this machine.": "Reservada para {label} nesta máquina.",
+  "Also reserved on this machine: {label} (another {vendor} account).":
+    "Também reservada nesta máquina: {label} (outra conta do {vendor}).",
+  "Reserved for {label} on another instance. Sign in with another account, or ask its owner to make it shared.":
+    "Reservada para {label} em outra instância. Entre com outra conta ou peça a quem a reservou para torná-la compartilhada.",
+  "This sign-in may be the account reserved for {label} on another instance: this Claude Code does not name the organisation. Update Claude Code, or ask the reservation's owner to make it shared.":
+    "Este login pode ser a conta reservada para {label} em outra instância: este Claude Code não identifica a organização. Atualize o Claude Code ou peça a quem fez a reserva para torná-la compartilhada.",
+  "This sign-in may be the account reserved for {label} on another instance: this Codex plan is not known to this version. Update Codex, or ask the reservation's owner to make it shared.":
+    "Este login pode ser a conta reservada para {label} em outra instância: esta versão não reconhece este plano do Codex. Atualize o Codex ou peça a quem fez a reserva para torná-la compartilhada.",
+  "This account's reservation file on this machine cannot be read, so the account is not used here. Ask this machine's administrator to check the reservations folder.":
+    "Não foi possível ler o arquivo de reserva desta conta nesta máquina, então a conta não é usada aqui. Peça a quem administra esta máquina para verificar a pasta de reservas.",
+  "File owner: {owner}": "Arquivo criado por: {owner}",
+  "This account is reserved for {label} on another instance.":
+    "Esta conta está reservada para {label} em outra instância.",
+  "Only the OS user who made this reservation can make it shared. Ask this machine's administrator.":
+    "Só a conta do sistema operacional que criou esta reserva pode torná-la compartilhada. Fale com quem administra esta máquina.",
+  "Members of this machine's reservations group could test a guessed email.":
+    "Membros do grupo de reservas desta máquina podem testar um endereço de e-mail que suspeitem estar na reserva.",
+  "The reservation could not be saved on this machine. Try again.":
+    "Não foi possível salvar a reserva nesta máquina. Tente novamente.",
   "This installation: {installation}": "Esta instalação: {installation}",
   "Bots in this installation share these accounts.": "Os Bots desta instalação compartilham estas contas.",
   "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "Outras instalações do Automagik neste computador podem usar este mesmo login dos Bots. Mudar aqui muda o login para todas as instalações.",

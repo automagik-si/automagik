@@ -73,6 +73,9 @@ export function reservationOutcome(evidence) {
   return { outcome: 'complete', reservable: true }
 }
 
+export const validReservationDigest = value => typeof value === 'string'
+  && /^[A-Za-z0-9_-]{43}$/.test(value)
+
 export const validReservationKey = key => ArrayBuffer.isView(key) && key instanceof Uint8Array && key.byteLength === 32
 
 export function reservationDigests(evidence, key) {

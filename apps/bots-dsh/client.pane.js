@@ -8968,6 +8968,35 @@ __export(code_side_pane_exports, {
 });
 module.exports = __toCommonJS(code_side_pane_exports);
 
+// src/shared/machine-reservations.js
+var MACHINE_MESSAGES = {
+  absent: "Reservations are not checked across instances here: this machine has no reservations folder.",
+  unreadable: "Reservations are not checked across instances here: this OS user cannot read the reservations folder.",
+  "not-set-up": "Reservations are not checked across instances here: the reservations folder is not set up completely. Ask this machine's administrator.",
+  unsupported: "Reservations across instances are not offered on Windows yet.",
+  mine: "Reserved for {label} on this machine.",
+  other: "Also reserved on this machine: {label} (another {vendor} account).",
+  refused: "Reserved for {label} on another instance. Sign in with another account, or ask its owner to make it shared.",
+  "no-organisation": "This sign-in may be the account reserved for {label} on another instance: this Claude Code does not name the organisation. Update Claude Code, or ask the reservation's owner to make it shared.",
+  "unknown-plan": "This sign-in may be the account reserved for {label} on another instance: this Codex plan is not known to this version. Update Codex, or ask the reservation's owner to make it shared.",
+  "unreadable-file": "This account's reservation file on this machine cannot be read, so the account is not used here. Ask this machine's administrator to check the reservations folder.",
+  owner: "File owner: {owner}",
+  conflict: "This account is reserved for {label} on another instance.",
+  "not-own-file": "Only the OS user who made this reservation can make it shared. Ask this machine's administrator.",
+  privacy: "Members of this machine's reservations group could test a guessed email.",
+  failed: "The reservation could not be saved on this machine. Try again."
+};
+var fill = (template, values) => template.replace(/\{(\w+)\}/g, (m, k) => values[k] ?? m);
+function machineNotice(state) {
+  if (state === "no-key" || state === "bad-key") return MACHINE_MESSAGES["not-set-up"];
+  if (state === "absent" || state === "unreadable" || state === "not-set-up" || state === "unsupported") return MACHINE_MESSAGES[state];
+}
+function machineRefusal({ state, why }) {
+  if (state === "refused") return MACHINE_MESSAGES.refused;
+  if (state === "ambiguous") return MACHINE_MESSAGES[why];
+  if (state === "unreadable") return MACHINE_MESSAGES["unreadable-file"];
+}
+
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
@@ -9493,6 +9522,21 @@ var ZH = {
   "Personal plan": "个人套餐",
   "Workspace plan: covers every ChatGPT workspace of this email": "工作区套餐：涵盖此邮箱的所有 ChatGPT 工作区",
   "The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.": "记录只保存带密钥的摘要，不保存邮箱。能读取此团队的文件和密钥的人可以验证猜测的邮箱。",
+  [MACHINE_MESSAGES.absent]: "此处不检查跨实例的账号预留：本机没有预留文件夹。",
+  [MACHINE_MESSAGES.unreadable]: "此处不检查跨实例的账号预留：此系统用户无法读取预留文件夹。",
+  [MACHINE_MESSAGES["not-set-up"]]: "此处不检查跨实例的账号预留：预留文件夹尚未完整设置。请联系本机管理员。",
+  [MACHINE_MESSAGES.unsupported]: "Windows 上暂不提供跨实例的账号预留。",
+  [MACHINE_MESSAGES.mine]: "已在本机预留给 {label}。",
+  [MACHINE_MESSAGES.other]: "本机也为 {label} 预留了一个账号（另一个 {vendor} 账号）。",
+  [MACHINE_MESSAGES.refused]: "已在另一个实例上预留给 {label}。请使用其他账号登录，或请其所有者将其设为共享。",
+  [MACHINE_MESSAGES["no-organisation"]]: "此登录可能是另一个实例上为 {label} 预留的账号：此版本的 Claude Code 不提供组织信息。请更新 Claude Code，或请预留的所有者将其设为共享。",
+  [MACHINE_MESSAGES["unknown-plan"]]: "此登录可能是另一个实例上为 {label} 预留的账号：此版本无法识别该 Codex 套餐。请更新 Codex，或请预留的所有者将其设为共享。",
+  [MACHINE_MESSAGES["unreadable-file"]]: "无法读取本机上此账号的预留文件，因此此处不使用该账号。请联系本机管理员检查预留文件夹。",
+  [MACHINE_MESSAGES.owner]: "文件所有者：{owner}",
+  [MACHINE_MESSAGES.conflict]: "此账号已在另一个实例上预留给 {label}。",
+  [MACHINE_MESSAGES["not-own-file"]]: "只有创建此预留的系统用户才能将其设为共享。请联系本机管理员。",
+  [MACHINE_MESSAGES.privacy]: "本机预留用户组的成员可以验证猜测的邮箱。",
+  [MACHINE_MESSAGES.failed]: "无法在本机保存预留。请重试。",
   "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
   "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "这台电脑上的其他 Automagik 安装可能使用同一个 Bot 登录。在此更改会同时更改它们的登录。",
@@ -12237,7 +12281,7 @@ Object.assign(ZH, {
   "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
 });
 Object.assign(ZH, HOST_ZH);
-var fill = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
+var fill2 = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
 var service = null;
 var bound = null;
 var unregister = null;
@@ -12273,7 +12317,7 @@ function addStrings(zh2) {
   };
 }
 function t(key, params) {
-  return bound ? bound(key, params) : fill(key, params);
+  return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
   "Detach {name} first.",
@@ -12290,6 +12334,10 @@ var HOST_TEMPLATES = [
   "Could not continue this sign-in ({kind}). Try again.",
   "The account could not be confirmed ({kind}). Try again.",
   "This account is reserved for {label} by another installation that shares this team.",
+  MACHINE_MESSAGES.refused,
+  MACHINE_MESSAGES["no-organisation"],
+  MACHINE_MESSAGES["unknown-plan"],
+  MACHINE_MESSAGES.conflict,
   "{name} could not switch to {model}. It stays on {kept}.",
   { template: "{name} cannot use the {route} route.", host: ["route"] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
@@ -12443,7 +12491,7 @@ function lookOf(bot) {
 var SHAPES = {};
 for (const [id, character] of Object.entries(CHARACTERS)) {
   const layers = [
-    ...(character.paints ?? []).map(([d, fill2, opacity]) => `<path d="${d}" fill="${fill2}" fill-opacity="${opacity}"/>`),
+    ...(character.paints ?? []).map(([d, fill3, opacity]) => `<path d="${d}" fill="${fill3}" fill-opacity="${opacity}"/>`),
     `<path d="${character.shade}" fill="#000" fill-opacity=".14"/>`,
     `<path d="${character.light}" fill="#fff" fill-opacity=".16"/>`
   ].join("");

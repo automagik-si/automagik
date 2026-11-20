@@ -304,15 +304,18 @@ function reservationFs() {
   }
 }
 
-window.showReservationAccounts = ({ isolated = false, instance = 'test-instance' } = {}) => {
+window.showReservationAccounts = ({
+  isolated = false, instance = 'test-instance', machine,
+} = {}) => {
   const id = 'acp-codex'
   const seen = { id, signedIn: true, consent: 'given', ref: 'fixture-ref',
     account: { kind: 'account', email: 'owner@example.test', plan: 'team' } }
-  const fixture = { instance, state: 'complete', exact: 'a'.repeat(43) }
+  const fixture = { instance, state: 'complete', exact: 'a'.repeat(43), machine }
   const acp = {
     authScope: isolated ? 'isolated' : 'consent',
     status: async () => ({ agents: [seen] }),
-    account: async provider => provider === id ? seen : { id: provider, signedIn: false },
+    account: async provider => provider === id && !fixture.machine?.signedOut
+      ? seen : { id: provider, signedIn: false },
     accountEvidence: async provider => {
       if (provider !== id || fixture.state === 'signed-out') return { id: provider, signedIn: false }
       if (fixture.state === 'unknown') return { id }
@@ -333,7 +336,26 @@ window.showReservationAccounts = ({ isolated = false, instance = 'test-instance'
     },
     decodeKey: key => Uint8Array.from(atob(key.replaceAll('-', '+').replaceAll('_', '/')), char => char.charCodeAt(0)),
   })
-  window.reservationActions = rt.cliLoginActions
+  const host = rt.cliLoginActions
+  window.reservationActions = machine ? {
+    ...host,
+    async 'cli-login-accounts'(payload) {
+      const value = await host['cli-login-accounts'](payload)
+      value.accounts[id].machine = fixture.machine
+      return value
+    },
+    async 'cli-login-reserve'(payload) {
+      if (!payload.machineId) return host['cli-login-reserve'](payload)
+      fixture.machine.claims.find(claim => claim.machineId === payload.machineId).label =
+        payload.label
+      return { state: 'complete', claims: [] }
+    },
+    async 'cli-login-release'(payload) {
+      if (!payload.machineId) return host['cli-login-release'](payload)
+      fixture.machine = { state: 'shared', claims: [] }
+      return { state: 'unknown', claims: [] }
+    },
+  } : host
   let refresh
   window.refreshReservations = change => {
     Object.assign(fixture, change)

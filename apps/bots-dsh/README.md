@@ -538,12 +538,22 @@ enter team state, messages, tools, model calls or logs. The earlier confirm step
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
-**Account reservations (RFC 0024 R3)**: Bot settings let the owner reserve a signed-in Claude
-Code or Codex account for a named project, rename the reservation, or make the account shared
-again. Accounts are shared by default. A reservation holds in this installation only for now.
-A Codex workspace reservation covers every ChatGPT workspace of that email. The private record in
-the team home keeps the project label and keyed digests of the account. Anyone with access to
-the record and its key could test a guessed email.
+**Account reservations (RFC 0024 R4)**: Accounts are shared by default. In Bot settings the owner
+can reserve a signed-in Claude Code or Codex account for a project, rename it, or make it shared.
+The machine folder is `/var/lib/automagik/reservations` on Linux and
+`/Users/Shared/Automagik/reservations` on macOS. Set `AUTOMAGIK_RESERVATIONS_DIR` to override it.
+See the [administrator setup](../../docs/cloud/0024-reservations-setup.md). With a missing or
+unreadable folder, reservations hold only in this installation and the card says so.
+
+The check runs at sign-in, startup, a card read, and a new Bot Session or its first turn on that
+provider. An admitted turn can finish. When the check refuses an isolated Bot account, the app
+signs that account out once its work is idle. The terminal's sign-in stays untouched.
+
+A Codex workspace reservation covers every ChatGPT workspace of that email. The record identifies
+accounts by keyed digests. Group members can test a guessed email. Instances running as the same
+OS user can modify each other's files, and a group member can reserve an account they can name.
+The card shows the file owner. A copied home shares its instance id. Reservations cover one
+machine, and Windows support awaits an ACL design.
 
 **Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table). With it absent, both get the chat's history as a redacted replay. Claude Code gets the team's tools over the bridge. A team Bot on Codex gets DSH's extras in its current own chat and in group Sessions, including `message_bot` and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions on Codex keep only its own tools by default. An explicit `dshTools: true` gives Codex the whole DSH preset, including on a Genie.
 

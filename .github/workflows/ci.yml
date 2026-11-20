@@ -1685,6 +1685,31 @@ jobs:
           test -x "${bin}"
           echo "ELECTRON_BIN=${bin}" >> "$GITHUB_ENV"
 
+      - name: Two OS users for the machine reservation record
+        # RFC 0024 R4: exercise sticky-bit and group permissions with two distinct users.
+        if: matrix.app == 'bots-dsh'
+        run: |
+          set -euo pipefail
+          shellcheck -s sh scripts/reservations-setup.sh
+          root=/srv/automagik-ci
+          sudo groupadd automagik-ci
+          sudo useradd -M -N -g automagik-ci -s /usr/sbin/nologin amres-a
+          sudo useradd -M -N -g automagik-ci -s /usr/sbin/nologin amres-b
+          sudo sh scripts/reservations-setup.sh --group automagik-ci "${root}/reservations"
+          sudo install -d -m 0755 "${root}/bin" "${root}/plugin" \
+            "${root}/acp/src/host" "${root}/run"
+          sudo install -m 0755 "$(command -v node)" "${root}/bin/node"
+          sudo cp -R src "${root}/plugin/src"
+          sudo install -m 0644 test/fixtures/reservation-driver.mjs "${root}/plugin/"
+          sudo install -m 0644 ../acp-dsh/src/host/reservation-evidence.js "${root}/acp/src/host/"
+          sudo chmod -R a+rX "${root}/plugin" "${root}/acp"
+          for u in amres-a amres-b; do
+            (cd "${root}/run" && sudo -n -u "$u" -- "${root}/bin/node" \
+              "${root}/plugin/reservation-driver.mjs" probe "{\"dir\":\"${root}/reservations\"}")
+          done
+          printf 'RESERVATION_TWO_USERS={"root":"%s","dir":"%s","a":"%s","b":"%s"}\n' \
+            "$root" "${root}/reservations" amres-a amres-b >> "$GITHUB_ENV"
+
       - name: Generated files are current
         # A package with no browser half has no client to build.
         run: '[ ! -f scripts/build-client.mjs ] || node scripts/build-client.mjs --check'

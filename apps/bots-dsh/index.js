@@ -6,6 +6,7 @@
 // DSH's and from other plugins'.
 import { randomBytes } from 'node:crypto'
 import fs, { cpSync, existsSync } from 'node:fs'
+import os from 'node:os'
 import { join } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
 import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
@@ -18,6 +19,7 @@ import * as modelState from './src/host/model-state.js'
 import * as modelAccessHooks from './src/host/model-access-hooks.js'
 import * as cliLogin from './src/host/cli-login.js'
 import { RESERVATION_FILE } from './src/host/account-reservations.js'
+import { createMachineRecord, reservationsDir } from './src/host/machine-reservations.js'
 import * as acpAdoption from './src/host/acp-adoption.js'
 import * as subscriptionMove from './src/host/subscription-move.js'
 import * as providers from './src/host/providers.js'
@@ -89,6 +91,26 @@ export { COLORS } from './src/host/constants.js'
 export const name = 'omni-ui'
 export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'sessions', 'sessionTitle', 'workspaceRegistry', 'connection']
 
+const random = (size, encoding) => randomBytes(size).toString(encoding)
+const sleepWord = new Int32Array(new SharedArrayBuffer(4))
+const sleep = ms => Atomics.wait(sleepWord, 0, 0, ms)
+let passwd
+function userName(uid) {
+  try {
+    if (uid === process.getuid?.()) return os.userInfo().username
+    passwd ??= fs.readFileSync('/etc/passwd', 'utf8').split('\n').map(line => line.split(':'))
+    const entry = passwd.find(([, , id]) => id === String(uid))
+    if (entry?.[0]) return entry[0]
+  } catch {}
+  return `uid ${uid}`
+}
+
+const machineOf = rt => rt.machineRecord ??= createMachineRecord({
+  fs, platform: process.platform, pid: process.pid, dir: () => reservationsDir(),
+  uid: () => process.getuid?.(), random, now: Date.now, wait: sleep, userName,
+})
+const instanceId = () => process.env.AUTOMAGIK_INSTANCE_ID
+
 // Each module's install(rt) registers its listeners, tools, and effects, and puts on `rt`
 // the functions other modules call; they call them through `rt` at run time, never during
 // install. Listeners run and tools are listed in registration order, so this order holds:
@@ -98,12 +120,14 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
   turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
-  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory, parts, fallback, modelState, modelAccessHooks,
+  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
+  parts, fallback, modelState,
+  { install: rt => modelAccessHooks.install(rt, { machine: machineOf(rt), instanceId }) },
   { install: rt => cliLogin.install(rt, {
     path: join(rt.home, RESERVATION_FILE), fs, pid: process.pid,
-    random: (size, encoding) => randomBytes(size).toString(encoding),
+    random,
     decodeKey: key => Buffer.from(key, 'base64url'),
-    instanceId: () => process.env.AUTOMAGIK_INSTANCE_ID,
+    instanceId, machine: machineOf(rt),
   }) },
   sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,

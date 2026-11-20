@@ -10,6 +10,8 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { DICTIONARY, hostText, hostTemplateOf, installLocale } from '../src/client/i18n.js'
 
+import { fill, MACHINE_MESSAGES as machine } from '../src/shared/machine-reservations.js'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const ptBR = JSON.parse(readFileSync(join(here, '..', '..', 'locale-pt-br-dsh', 'src', 'client', 'locales', 'pt-BR', 'omni-ui.json'), 'utf8'))
 
@@ -144,4 +146,26 @@ test('reservation refusals and states have zh and pt-BR host copy', () => {
   } finally {
     off()
   }
+})
+
+
+test('machine refusal copy is translated and interpolates project labels only once', () => {
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    for (const sentence of [
+      machine.refused, machine['no-organisation'], machine['unknown-plan'],
+      machine['unreadable-file'], machine.conflict, machine['not-own-file'], machine.failed,
+    ]) {
+      for (const dictionary of [DICTIONARY.zh, ptBR]) {
+        assert.ok(dictionary[sentence]?.trim(), sentence)
+        assert.notEqual(dictionary[sentence], sentence)
+        const placeholders = text => (text.match(/\{\w+\}/g) ?? []).sort()
+        assert.deepEqual(placeholders(dictionary[sentence]), placeholders(sentence))
+      }
+      const values = { label: 'Example {project}' }
+      const message = fill(sentence, values)
+      if (message !== sentence) assert.equal(hostTemplateOf(message), sentence)
+      assert.equal(hostText(message), fill(DICTIONARY.zh[sentence], values))
+    }
+  } finally { off() }
 })

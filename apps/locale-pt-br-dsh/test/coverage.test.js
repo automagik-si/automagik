@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { omniKeys } from '../scripts/copy-check.mjs'
 import { loadDictionaries } from '../scripts/dictionaries.mjs'
+import { MACHINE_MESSAGES as machine } from '../../bots-dsh/src/shared/machine-reservations.js'
 
 // What the pack translates today: 2647 keys, 2581 translated and 66 left in English on purpose
 // (the brand and code-like strings the README lists). A release may not drop far below that.
@@ -44,6 +45,9 @@ test('the reservation card has pt-BR text and keeps its project and vendor place
     'Continue',
     'Cancel',
     "The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.",
+    machine.absent, machine.unreadable, machine['not-set-up'], machine.unsupported,
+    machine.mine, machine.other, machine.refused, machine['no-organisation'],
+    machine['unknown-plan'], machine['unreadable-file'], machine.owner, machine.privacy,
   ]) {
     assert.ok(keys.has(key), key)
     assert.ok(pack[key]?.trim(), key)

@@ -16,6 +16,7 @@ import { GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
 import { CliHomes, HOME_ENV, trackRun } from '../src/host/cli-homes.js'
 import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
 import { recordLogin } from '../src/host/login-ownership.js'
+import { reservationDigests } from '../src/host/reservation-evidence.js'
 import { MODEL_ACCESS_REQUIRED } from '../src/host/names.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
@@ -831,3 +832,126 @@ test('accountEvidence omits an unknown sign-in and skips reads without a consent
   assert.deepEqual(await noConsent.service.accountEvidence('acp-codex', { key }), { id: 'acp-codex', supported: false })
   assert.deepEqual(noConsent.calls, [])
 })
+
+const r4Key = Buffer.alloc(32, 123)
+const r4Identity = spec => spec.key === 'codex'
+  ? { person: true, vendor: 'codex', email: 'personal@example.test', class: 'personal' }
+  : { person: true, vendor: 'claude', email: 'personal@example.test', org: 'fake-org' }
+const r4Evidence = spec => ({
+  evidence: r4Identity(spec), account: who('personal@example.test'),
+})
+
+test('reservationEvidence 2 derives both keys from a single direct observation', async t => {
+  let reads = 0
+  const h = fixture(t, { deps: { evidenceOf(spec) { reads++; return r4Evidence(spec) } } })
+  const id = 'acp-claude'
+  await h.login(id)
+  assert.equal(h.service.reservationEvidence, 2)
+  const other = Buffer.alloc(32, 32)
+  const plain = await h.service.accountEvidence(id, { key: r4Key })
+  const two = await h.service.accountEvidence(id, { key: r4Key, keys: [other] })
+  assert.equal(reads, 2)
+  const { digests, ...answer } = two
+  assert.deepEqual(answer, plain)
+  assert.deepEqual(digests, [reservationDigests(r4Identity({ key: 'claude' }), other)])
+  for (const keys of [{}, [], Array(5).fill(other), [Buffer.alloc(31)], Array(1)]) {
+    await assert.rejects(h.service.accountEvidence(id, { key: r4Key, keys }), {
+      code: 'acp-account/invalid', message: 'Reservation keys must be 32 bytes each.',
+    })
+  }
+  assert.equal(reads, 2)
+})
+
+for (const vendor of ['claude', 'codex']) {
+  test(`guarded ${vendor} sign-out matches evidence and preserves terminal auth`, async t => {
+    const h = fixture(t, { deps: { evidenceOf: r4Evidence } })
+    const id = `acp-${vendor}`
+    await h.login(id)
+    const end = t.mock.method(h.adapter, 'endProvider')
+    const { exact, loose } = await h.service.accountEvidence(id, { key: r4Key })
+    const expect = { key: r4Key, exact, loose }
+    const terminal = join(h.root, 'terminal', `.${vendor}`, 'account')
+    const saved = readFileSync(terminal)
+    const botHome = h.adapter.agents.get(id).catalog.spec.spawn().env[HOME_ENV]
+    await assert.rejects(h.service.accountSignOut(id, {
+      expect: { ...expect, exact: 'x'.repeat(43) },
+    }), { code: 'acp-account/changed' })
+    assert.equal(end.mock.callCount(), 0)
+    assert.equal(h.calls.filter(call => call.kind === 'logout').length, 0)
+    assert.notEqual((await h.service.accountEvidence(id, { key: r4Key })).outcome, 'changed')
+    for (const recheck of [() => false, () => undefined, () => { throw new Error('fixture') }]) {
+      await assert.rejects(h.service.accountSignOut(id, { expect: { ...expect, recheck } }), {
+        code: 'acp-account/changed',
+      })
+    }
+    assert.equal(end.mock.callCount(), 0)
+    assert.equal(h.calls.filter(call => call.kind === 'logout').length, 0)
+    assert.deepEqual(readFileSync(terminal), saved)
+    await h.service.accountSignOut(id, { expect: { ...expect, recheck: () => true } })
+    assert.equal(end.mock.callCount(), 1)
+    assert.deepEqual(h.calls.filter(call => call.kind === 'logout').map(call => call.cwd),
+      [botHome])
+    assert.deepEqual(readFileSync(terminal), saved)
+  })
+}
+
+test('G1 a homes.begin failure after the digest match leaves the account guard free', async t => {
+  const h = fixture(t, { deps: { evidenceOf: r4Evidence } })
+  const id = 'acp-claude'
+  await h.login(id)
+  const { exact, loose } = await h.service.accountEvidence(id, { key: r4Key })
+  const error = new Error('begin fault')
+  const begin = t.mock.method(CliHomes.prototype, 'begin', () => { throw error })
+  try {
+    await assert.rejects(h.service.accountSignOut(id, { expect: { key: r4Key, exact, loose } }),
+      error)
+  } finally { begin.mock.restore() }
+  assert.equal(h.calls.filter(call => call.kind === 'logout').length, 0)
+  await h.waitForLogin(id, await h.service.accountSwitch(id))
+})
+
+test('guarded sign-out refuses if login already owns the vendor mutation', async t => {
+  const h = fixture(t, { deps: { evidenceOf: r4Evidence } })
+  const id = 'acp-codex'
+  await h.login(id)
+  const { exact, loose } = await h.service.accountEvidence(id, { key: r4Key })
+  const begin = t.mock.method(CliHomes.prototype, 'changing', () => true)
+  try {
+    await assert.rejects(h.service.accountSignOut(id, { expect: { key: r4Key, exact, loose } }),
+      { code: 'acp-account/busy' })
+  } finally { begin.mock.restore() }
+  assert.equal(h.calls.filter(call => call.kind === 'logout').length, 0)
+})
+
+for (const action of ['dispose', 'login']) {
+  test(`G3/G4 ${action} during the guarded account evidence read`, async t => {
+    const entered = Promise.withResolvers()
+    const release = Promise.withResolvers()
+    let guard = false
+    const h = fixture(t, { deps: {
+      async evidenceOf(spec) {
+        if (guard) { entered.resolve(); await release.promise }
+        return r4Evidence(spec)
+      },
+    } })
+    const id = 'acp-claude'
+    await h.login(id)
+    const { exact, loose } = await h.service.accountEvidence(id, { key: r4Key })
+    guard = true
+    const pending = h.service.accountSignOut(id, { expect: {
+      key: r4Key, exact, loose,
+      recheck: action === 'login' ? () => false : undefined,
+    } })
+    await entered.promise
+    if (action === 'dispose') await h.stop()
+    else await assert.rejects(h.service.loginStart(id), { code: 'acp-account/busy' })
+    release.resolve()
+    await assert.rejects(pending, {
+      code: action === 'dispose' ? 'acp-account/unavailable' : 'acp-account/changed',
+    })
+    assert.equal(h.calls.filter(call => call.kind === 'logout').length, 0)
+    if (action === 'login') {
+      assert.notEqual((await h.service.accountEvidence(id, { key: r4Key })).outcome, 'changed')
+    }
+  })
+}

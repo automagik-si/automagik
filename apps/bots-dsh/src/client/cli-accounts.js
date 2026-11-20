@@ -5,6 +5,7 @@ import {
   ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT, ACCOUNT_SHARING_HINT, accountChangeFailure,
 } from '../shared/cli-account.js'
 import { reservationMessage } from '../shared/account-reservations.js'
+import { machineNotice, machineRefusal, MACHINE_MESSAGES } from '../shared/machine-reservations.js'
 import { t } from './i18n.js'
 
 const botAccountName = account => account?.email ?? account?.org ?? t('Account not shown by the CLI')
@@ -13,7 +14,7 @@ const button = (label, onClick, disabled) => h('button', {
   type: 'button', className: 'bt-soft bt-soft-sm', onClick, disabled,
 }, t(label))
 
-function Reservation({ provider, reservation, actions, refresh, updated }) {
+function Reservation({ provider, reservation, machine, actions, refresh, updated }) {
   const [form, setForm] = useState(null)
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState(null)
@@ -25,7 +26,8 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
   const edit = claim => {
     setProblem(null)
     setForm({ offerId, label: claim?.label ?? '',
-      ...(claim ? { claimId: claim.claimId, rev: claim.rev } : {}) })
+      ...(claim?.machineId ? { machineId: claim.machineId }
+        : claim ? { claimId: claim.claimId, rev: claim.rev } : {}) })
   }
   const change = async action => {
     setBusy(true)
@@ -41,14 +43,22 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
   }
   function submit() {
     if (!active || busy) return
-    const { offerId, label, claimId, rev } = active
-    void change(() => claimId === undefined ? actions.cliLoginReserve(offerId, label)
-      : actions.cliLoginReserve(offerId, label, { claimId, rev }))
+    const { offerId, label, claimId, rev, machineId } = active
+    const claim = machineId ? { machineId } : claimId === undefined ? undefined : { claimId, rev }
+    void change(() => claim ? actions.cliLoginReserve(offerId, label, claim)
+      : actions.cliLoginReserve(offerId, label))
   }
 
   const { state, claims } = reservation
   const line = reservationMessage(reservation)
+  const machineClaims = machine?.claims ?? []
+  const blocked = machine && machineRefusal(machine)
+  const notice = machine?.notice === 'unsupported-acp'
+    ? reservationMessage({ state: 'unsupported' }) : machineNotice(machine?.notice)
   const hasCurrent = claims.some(claim => claim.current)
+    || machineClaims.some(claim => claim.current) || machine?.state === 'mine' || !!blocked
+  const owner = name => name ? h('p', { className: 'bt-set-hint' },
+    t(MACHINE_MESSAGES.owner, { owner: name })) : null
   return h('div', null,
     ...claims.map(claim => h('div', { key: claim.claimId },
       h('span', null, t(!claim.mine ? 'Reserved by another installation: {label}.'
@@ -59,6 +69,24 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
         ? button('Rename', () => edit(claim), busy || active !== null) : null,
       claim.mine ? button('Make shared',
         () => void change(() => actions.cliLoginRelease(claim.claimId, claim.rev)), busy || active !== null) : null)),
+    ...machineClaims.map(claim => h('div', { key: claim.machineId },
+      h('span', null, t(claim.current ? MACHINE_MESSAGES.mine : MACHINE_MESSAGES.other, {
+        label: claim.label, vendor: CLI_NAMES[provider],
+      })),
+      claim.current && offerId
+        ? button('Rename', () => edit(claim), busy || active !== null) : null,
+      button('Make shared',
+        () => void change(() => actions.cliLoginReleaseMachine(claim.machineId)),
+        busy || active !== null),
+      owner(claim.owner))),
+    machine?.state === 'mine' && machineClaims.length === 0
+      ? h('div', null, h('span', null, t(MACHINE_MESSAGES.mine, { label: machine.label }))) : null,
+    blocked ? h('div', null,
+      h('span', { className: 'bt-set-hint' }, t(blocked, { label: machine.label })),
+      owner(machine.owner)) : null,
+    // Its own line: R3's reason line follows as another inline hint.
+    notice && notice !== line
+      ? h('div', null, h('span', { className: 'bt-set-hint' }, t(notice))) : null,
     line ? h('span', { className: 'bt-set-hint' }, t(line)) : null,
     !hasCurrent && offerId
       ? h('span', null, t('Shared with other instances (default).')) : null,
@@ -79,6 +107,8 @@ function Reservation({ provider, reservation, actions, refresh, updated }) {
         })),
       h('p', { className: 'bt-set-hint' },
         t("The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.")),
+      machine && !notice
+        ? h('p', { className: 'bt-set-hint' }, t(MACHINE_MESSAGES.privacy)) : null,
       button('Continue', submit, busy),
       button('Cancel', () => { setForm(null); setProblem(null) }, busy)) : null,
     problem ? h('p', { role: 'alert' }, problem) : null)
@@ -169,8 +199,9 @@ export function CliAccounts({ bot, actions }) {
     entry.reservation?.scope === 'personal' ? h('span', { className: 'bt-set-hint' }, t('Personal plan'))
       : entry.reservation?.scope === 'workspace' ? h('span', { className: 'bt-set-hint' },
         t('Workspace plan: covers every ChatGPT workspace of this email')) : null,
-    entry.reservation || consented(entry) ? h(Reservation, {
-      provider, reservation: entry.reservation ?? { state: 'unsupported', claims: [] }, actions, refresh,
+    entry.reservation || entry.machine || consented(entry) ? h(Reservation, {
+      provider, reservation: entry.reservation ?? { state: 'unsupported', claims: [] },
+      machine: entry.machine, actions, refresh,
       updated: reservation => updated(provider, reservation),
     }) : null,
     entry.authScope === 'isolated' ? h('span', { className: 'bt-set-hint' }, t('Terminal: {account}', {
