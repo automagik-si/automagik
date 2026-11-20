@@ -3024,7 +3024,11 @@ var HOST_ZH = {
   "View only · click to type": "只读 · 点击输入",
   "Typing · Esc to stop": "输入中 · 按 Esc 停止",
   "Taking the pane…": "正在接管终端…",
-  "Typing is open in another window · view only": "另一个窗口正在输入 · 只读",
+  "Typing elsewhere · view only": "正在别处输入 · 只读",
+  "Ctrl-click to show beside": "按住 Ctrl 点击以并排显示",
+  "⌘-click to show beside": "按住 ⌘ 点击以并排显示",
+  "Four terminals are shown: {names}. Ctrl-click one of them to close it, then add another.": "已显示四个终端：{names}。按住 Ctrl 点击其中一个将其关闭，再添加另一个。",
+  "Four terminals are shown: {names}. ⌘-click one of them to close it, then add another.": "已显示四个终端：{names}。按住 ⌘ 点击其中一个将其关闭，再添加另一个。",
   "Your session ended · view only": "你的会话已结束 · 只读",
   "Line breaks were removed from the paste": "已移除粘贴内容中的换行",
   "Control characters were removed from the paste": "已从粘贴内容中移除控制字符",
@@ -21939,6 +21943,7 @@ function TwoPartSwitch({ current, onSelect, label, parts, unavailable = {} }) {
 }
 
 // src/client/code-side-model.js
+var MAX_PANES = 4;
 function botRowOf(tree, botId) {
   for (const project of tree?.projects ?? []) {
     const bot = project.bots.find((candidate) => candidate.id === botId);
@@ -21964,6 +21969,36 @@ function stillThere(selected, tree) {
   if (selected.worker === null || selected.worker === void 0) return bot.terminal ? { botId: bot.id, worker: null } : null;
   return bot.workers.some((worker) => worker.terminal === selected.worker) ? { botId: bot.id, worker: selected.worker } : null;
 }
+function paneDetails(pane, tree) {
+  const bot = pane && botRowOf(tree, pane.botId);
+  if (!bot) return null;
+  if (pane.worker == null) return bot.terminal ? { terminal: bot.terminal.id, title: bot.name } : null;
+  const worker = bot.workers.find((candidate) => candidate.terminal === pane.worker);
+  return worker ? { terminal: worker.terminal, title: `${bot.name} · ${worker.role ?? worker.agent ?? worker.terminal}` } : null;
+}
+function togglePane(list, pane, tree, max = MAX_PANES) {
+  const selected = stillThere(pane, tree);
+  if (!selected) return { list };
+  const terminal = paneDetails(selected, tree).terminal;
+  const index = list.findIndex((candidate) => candidate.botId === selected.botId && (candidate.worker ?? null) === selected.worker || terminal && paneDetails(candidate, tree)?.terminal === terminal);
+  if (index !== -1) return { list: list.filter((_, at) => at !== index) };
+  if (list.length >= max) return { list, refused: list.map((candidate) => paneDetails(candidate, tree)?.title).filter(Boolean) };
+  return { list: [...list, selected] };
+}
+function prunePanes(list, tree) {
+  const unique = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const pane of list) {
+    const selected = stillThere(pane, tree);
+    if (!selected) continue;
+    const terminal = paneDetails(selected, tree).terminal;
+    const key = terminal ?? `${selected.botId}:${selected.worker ?? "seat"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(selected);
+  }
+  return unique;
+}
 var STATUS_WORDS = Object.freeze(["working", "needs-you", "idle", "not-running"]);
 var statusKey = (status) => STATUS_WORDS.includes(status) ? status : "idle";
 
@@ -21983,7 +22018,22 @@ function loadPane() {
 // src/client/code-side.js
 var import_react51 = require("react");
 var CODE_PANEL = "automagik-code";
-var NO_STATE = { side: "team", barSelected: null, face: "chat", botId: null, seat: false, tree: null, loading: false, error: null, selected: null, loadedAt: 0 };
+var NO_STATE = {
+  side: "team",
+  face: "chat",
+  botId: null,
+  seat: false,
+  tree: null,
+  loading: false,
+  error: null,
+  loadedAt: 0,
+  selected: null,
+  beside: [],
+  refused: null,
+  barSelected: null,
+  barBeside: [],
+  barRefused: null
+};
 var listeners2 = /* @__PURE__ */ new Set();
 var state = NO_STATE;
 var set = (patch) => {
@@ -21997,15 +22047,26 @@ var storeSubscribe = (listener) => {
 };
 var TREE_FRESH_MS = 2e4;
 var reading = null;
+var panesOf = (selected, beside) => [selected, ...beside].filter(Boolean);
+var seatPanes = (list, refused = null) => ({ selected: list[0] ?? null, beside: list.slice(1), refused });
+var barPanes = (list, refused = null) => ({ barSelected: list[0] ?? null, barBeside: list.slice(1), barRefused: refused });
+var prune = (tree) => {
+  const seat = prunePanes(panesOf(state.selected, state.beside), tree);
+  const bar = prunePanes(panesOf(state.barSelected, state.barBeside), tree);
+  return {
+    ...seatPanes(seat, seat.length === 1 + state.beside.length ? state.refused : null),
+    ...barPanes(bar, bar.length === 1 + state.barBeside.length ? state.barRefused : null)
+  };
+};
 async function loadTree({ fresh = false } = {}) {
   if (!fresh && state.tree && Date.now() - state.loadedAt < TREE_FRESH_MS) return state.tree;
   if (reading) return reading;
   set({ loading: true, error: null });
   reading = Promise.resolve().then(() => call("code-tree")).then((tree) => {
-    set({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), selected: stillThere(state.selected, tree) });
+    set({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), ...prune(tree) });
     return tree;
   }, (error) => {
-    set({ loading: false, error: error?.code ?? "unavailable", tree: null, loadedAt: Date.now() });
+    set({ loading: false, error: error?.code ?? "unavailable", tree: null, loadedAt: Date.now(), ...prune(null) });
     return null;
   }).finally(() => {
     reading = null;
@@ -22013,17 +22074,23 @@ async function loadTree({ fresh = false } = {}) {
   return reading;
 }
 async function openTerminal(botId, { seat = false } = {}) {
-  set({ face: "terminal", botId, seat, selected: state.selected?.botId === botId ? state.selected : null });
+  set({ face: "terminal", botId, seat, ...state.selected?.botId === botId ? {} : seatPanes([]) });
   const tree = await loadTree({ fresh: true });
   if (!tree || state.botId !== botId || state.face !== "terminal" || state.seat !== seat) return;
   const pane = paneFor(tree, botId);
-  if (pane) set({ selected: pane });
+  if (pane) selectPane(pane);
 }
 function closeTerminal() {
-  set({ face: "chat", botId: null, seat: false, selected: null });
+  set({ face: "chat", botId: null, seat: false, ...seatPanes([]) });
 }
-function selectPane(selected) {
-  set({ selected });
+function selectPane(selected, { beside = false } = {}) {
+  if (!beside) {
+    set(seatPanes([selected]));
+    return;
+  }
+  const previous = panesOf(state.selected, state.beside);
+  const { list, refused } = togglePane(previous, selected, state.tree);
+  if (list !== previous || refused) set(seatPanes(list, refused));
 }
 function useCodeFace(botId, { seat = false } = {}) {
   const current = (0, import_react51.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
@@ -22045,7 +22112,7 @@ function useCodeSide() {
   return (0, import_react51.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
 }
 function setCodeSide(side) {
-  set({ side });
+  set({ side, ...side === "team" ? barPanes([]) : {} });
   if (side === "code") void loadTree({ fresh: true });
 }
 function CodeSideSwitch({ current, onSelect }) {
@@ -22065,21 +22132,29 @@ function codePanelNavigation(layout) {
   let previous = null;
   const active = () => layout.panelInfo.getSnapshot().activePanelId;
   return {
-    open(selected) {
+    open(selected, { beside = false } = {}) {
+      let next = barPanes([selected]);
+      if (beside) {
+        const previous2 = panesOf(state.barSelected, state.barBeside);
+        const { list, refused } = togglePane(previous2, selected, state.tree);
+        if (list === previous2 && !refused) return;
+        next = barPanes(list, refused);
+      }
       if (active() !== CODE_PANEL) {
         previous = active();
         layout.selectPanel(CODE_PANEL);
       }
-      set({ barSelected: selected });
+      set(next);
     },
     close() {
-      if (active() !== CODE_PANEL) return;
-      try {
-        layout.selectPanel(previous);
-      } catch {
-        layout.selectPanel(null);
+      if (active() === CODE_PANEL) {
+        try {
+          layout.selectPanel(previous);
+        } catch {
+          layout.selectPanel(null);
+        }
       }
-      set({ barSelected: null });
+      set(barPanes([]));
     }
   };
 }
@@ -22091,7 +22166,7 @@ function CodeBarList({ current, onSelect }) {
   return (0, import_react51.createElement)(CodeRenderer, {
     current,
     showLoading: true,
-    render: (pane) => (0, import_react51.createElement)(pane.CodeTree, { current: { ...current, selected: current.barSelected }, onSelect, sidebar: true })
+    render: (pane) => (0, import_react51.createElement)(pane.CodeTree, { current: { ...current, selected: current.barSelected, beside: current.barBeside }, onSelect, sidebar: true })
   });
 }
 function CodeMainPanel({ onBack }) {
@@ -22110,7 +22185,7 @@ function CodeMainPanel({ onBack }) {
       (0, import_react51.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react51.createElement)(
         "section",
         { className: "cs-host" },
-        (0, import_react51.createElement)(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, loading: current.loading })
+        (0, import_react51.createElement)(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, beside: current.barBeside, refused: current.barRefused, loading: current.loading })
       ) })
     )
   );
@@ -22178,7 +22253,7 @@ function installCodeSide(ctx) {
     listOff = null;
     off?.();
     off = null;
-    if (state.face === "terminal") set({ face: "chat", botId: null, seat: false, selected: null });
+    if (state.face === "terminal") closeTerminal();
   };
 }
 var codeStore = { subscribe: storeSubscribe, snapshot, loadTree, openTerminal, closeTerminal, selectPane, reset: () => set({ ...NO_STATE }) };
@@ -24459,8 +24534,8 @@ function TeamSidebar(props) {
   const main = roster.byId[roster.mainBotId];
   useListGlide(listRef, wide, order.map((entry) => entry.item.id).join(","));
   useLandOnMainBot(roster, useSessions, actions);
-  const navigate = (open, id) => {
-    const result = open(id);
+  const navigate = (open, ...args) => {
+    const result = open(...args);
     if (wide && window.innerWidth < 1024 && !closing.current) {
       closing.current = true;
       expandSidebar?.();
@@ -24541,7 +24616,7 @@ function TeamSidebar(props) {
       notice,
       onKeyDown: typeToSearch,
       sideSwitch: (0, import_react61.createElement)(CodeSideSwitch, { current: code, onSelect: (side) => side === "team" ? team() : setCodeSide(side) }),
-      codeList: code.side === "code" ? (0, import_react61.createElement)(CodeBarList, { current: code, onSelect: (selected) => navigate(actions.openCodePane, selected) }) : null,
+      codeList: code.side === "code" ? (0, import_react61.createElement)(CodeBarList, { current: code, onSelect: (selected, options) => navigate(actions.openCodePane, selected, options) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {
         const bot = row.bot.dsh ? void 0 : roster.byId[row.id];
@@ -40935,9 +41010,9 @@ function apply(ctx) {
         noteClientError("seat-chat", error);
       }
     },
-    openCodePane: (selected) => {
+    openCodePane: (selected, options) => {
       try {
-        codePanel.open(selected);
+        codePanel.open(selected, options);
       } catch (error) {
         noteClientError("code-side", error);
       }

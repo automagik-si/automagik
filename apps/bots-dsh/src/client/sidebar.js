@@ -442,8 +442,8 @@ export function TeamSidebar(props) {
   // The shell keeps wide content during its collapse fade. Normalize through its
   // public expansion action before toggling; coalesce synchronous activations
   // until React commits the result.
-  const navigate = (open, id) => {
-    const result = open(id)
+  const navigate = (open, ...args) => {
+    const result = open(...args)
     if (wide && window.innerWidth < 1024 && !closing.current) {
       closing.current = true
       expandSidebar?.()
@@ -506,7 +506,7 @@ export function TeamSidebar(props) {
       roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
       open, menu, renderAfter, notice, onKeyDown: typeToSearch,
       sideSwitch: h(CodeSideSwitch, { current: code, onSelect: side => (side === 'team' ? team() : setCodeSide(side)) }),
-      codeList: code.side === 'code' ? h(CodeBarList, { current: code, onSelect: selected => navigate(actions.openCodePane, selected) }) : null,
+      codeList: code.side === 'code' ? h(CodeBarList, { current: code, onSelect: (selected, options) => navigate(actions.openCodePane, selected, options) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {
         const bot = row.bot.dsh ? undefined : roster.byId[row.id]
