@@ -186,7 +186,8 @@ Each instance keeps its persistent homes on its own `/data` volume, including
 `XDG_RUNTIME_DIR=/run/automagik` with owner `1000:1000` and mode `0700`. The entrypoint uses
 `HC_RUNTIME=/run/automagik/herdr-core` and `HC_SESSION=automagik-server` by default. It sets
 `HC_SOCKET` and `HC_TERMINAL_SOCKET` to `$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock`.
-The gate mounts the DSH volume read-only and the core socket stays outside that mount.
+The gate mounts only the volume's `dsh/` folder, read-only, and the core socket is never on the
+volume.
 
 The entrypoint starts `herdr-core serve` before DSH. It prints `herdr-core: serving on <path>`
 once the expected endpoint is a Unix socket. On failure it prints the directory listing, the
@@ -215,7 +216,8 @@ The builder fetches am from that release's pinned tarball and verifies it before
 runs `hc --version` there. The in-image smoke checks the bundled versions of am, hc,
 herdr-core, pnpm and Node, and runs the shipped CLI store with a recording runner. It checks
 the briefing link and runs a scratch Bot with a fake agent. It also checks that the private
-socket answers `hc server status` and `hc ls`, and that `/data` holds no sockets. The main smoke
+socket answers `hc server status` and `hc ls`, and that the only socket on `/data` is
+bots-dsh's owner-only Pocket chat socket, which the gate cannot reach. The main smoke
 starts the container with networking and automatic CLI installation disabled.
 
 The context is the repository root because the builder reuses
@@ -281,8 +283,8 @@ described below; a profile whose `package.json` the owner changed stays owner-ma
 A DSH container mounts **one volume, at `/data`** (the `--volume` in Run). `/data/workspace` is a
 directory inside it, not a second mount, and the vendor homes and the meter's state default into
 it too: the image sets `HOME=/data`. The optional gate container has its own `/data`
-(`gate-data`) and reads the DSH volume at `/dsh:ro`; that read-only DSH view is the gate's, not
-the workspace's measurement view.
+(`gate-data`) and reads only the DSH volume's `dsh/` folder (`DSH_HOME`), read-only at `/dsh/dsh`;
+that view is the gate's, not the workspace's measurement view.
 
 The image bakes no host path. Resolve the workspace volume's host path per runtime:
 
@@ -747,8 +749,11 @@ legitimate traffic. Point the tunnel at the gate on port 3082 and keep DSH's pub
 untrusted.
 
 Only the network namespace is shared. The gate has its own `gate-data` volume at `/data`,
-never mounted into DSH; it reads `dsh-data` at `/dsh:ro` for the launch credential. It has no
-model key. With Access unset it connects only to the fixed loopback DSH listener and never
+never mounted into DSH; it reads only `dsh-data`'s `dsh/` folder, read-only at `/dsh/dsh`, for the
+launch credential and the profile (Compose `volume.subpath`: Docker Engine 26 and Compose 2.26 or
+later). The gate runs as the same uid 1000 as DSH, so the rest of the volume (the model key, the
+agents' logins, the team and Pocket's owner-only chat socket) stays out of its mount: a read-only
+mount would still let it read those files and connect to that socket. It has no model key. With Access unset it connects only to the fixed loopback DSH listener and never
 follows a launch file's destination or any upstream redirect. Tests use temporary stores and
 listeners; they do not touch a running installation.
 

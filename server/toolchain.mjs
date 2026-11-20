@@ -58,7 +58,7 @@ export function toolchainChildEnv(env) {
     && (CHILD_ENV.has(name) || name.startsWith('LC_') || name.startsWith('AUTOMAGIK_PNPM'))))
 }
 
-/** The shared volume the gate mounts read-only; the core runtime must never be on it. */
+/** The DSH volume (the gate mounts only its dsh/ folder); the core runtime is never on it. */
 export const SHARED_VOLUME = '/data'
 
 /**
