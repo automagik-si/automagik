@@ -9,7 +9,8 @@
 import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { t } from './i18n.js'
 import { installStyles } from './styles.js'
-import { botRowOf, statusKey } from './code-side-model.js'
+import { ChevronRightIcon } from './icons.js'
+import { botRowOf, paneFor, statusKey } from './code-side-model.js'
 import { pasteBytes } from './code-side-paste.js'
 import XTERM_CSS from '@xterm/xterm/css/xterm.css'
 
@@ -160,7 +161,11 @@ export function TerminalPane({ botId, worker, title }) {
       setModeNow('taking')
       const answer = await post('take', { bot: botId, worker: worker ?? null, viewer: VIEWER }).catch(() => ({ status: 0 }))
       takingRef.current = false
-      if (disposed) return
+      if (disposed) {
+        // The watch may have closed before the host finished taking the typing attach.
+        if (answer.status === 200 && answer.body?.session) void post('release', { session: answer.body.session }).catch(() => {})
+        return
+      }
       if (answer.status === 200 && answer.body?.session) {
         sessionRef.current = answer.body.session
         setModeNow('typing')
@@ -293,78 +298,92 @@ export function TerminalPane({ botId, worker, title }) {
     h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere' || modeRef.current === 'ended') void takeRef.current?.() } }))
 }
 
-const TreeRow = ({ label, status, depth = 0, current, note, title, onClick }) => h('button', {
+export const TreeRow = ({ label, status, depth = 0, current, note, title, onClick }) => h('button', {
   type: 'button', className: 'cs-row', 'data-depth': depth, 'aria-current': current ? 'true' : undefined, title, onClick,
 },
   h('span', { className: 'cs-row-label' }, label),
   note ? h('span', { className: 'cs-row-note' }, note) : null,
   h('span', { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, h('span', { className: 'cs-mark-word' }, statusLabel(status))))
 
-/**
- * The Code body: the team tree on the left (projects, their Bots, the workers under them) and
- * the chosen terminal on the right. Every row and every click reads what the host sent; no
- * row starts, stops or types into anything.
- * `code` is the main client's store surface: { subscribe, snapshot, loadTree, selectPane }.
- */
+const TreeFold = ({ label, title, open, onClick }) => h('button', {
+  type: 'button', className: 'lb-row', title, 'aria-expanded': open, onClick,
+},
+  h('span', { className: 'lb-name' }, label),
+  h('span', { className: open ? 'lb-chev lb-chev-open' : 'lb-chev' }, h(ChevronRightIcon)))
+
+export function CodeTree({ current, onSelect, sidebar = false }) {
+  const { tree, loading, error, selected } = current
+  const [folded, setFolded] = useState(() => new Set())
+  const toggle = key => setFolded((before) => {
+    const next = new Set(before)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    return next
+  })
+  const machine = tree?.machine?.name || t('This computer')
+  const projects = tree?.projects ?? []
+  const machineOpen = !folded.has(null)
+  const treeRows = machineOpen ? projects.map((project) => {
+    const label = project.global === true ? t('Global Bots') : project.name ?? project.folder
+    const key = project.global === true ? 'global' : project.folder
+    const title = project.global === true ? label : project.folder
+    const open = !folded.has(key)
+    return h('section', { key, className: 'cs-project' },
+      sidebar ? h(TreeFold, { label, title, open, onClick: () => toggle(key) })
+        : h('div', { className: 'cs-project-name', title }, label),
+      open ? project.bots.map(bot => h('div', { key: bot.id, className: 'cs-bot' },
+        h(TreeRow, {
+          label: bot.name,
+          status: bot.status,
+          current: selected?.botId === bot.id && !selected?.worker,
+          note: sidebar ? bot.agent ?? (bot.main ? t('lead') : null) : bot.main ? t('lead') : null,
+          onClick: () => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }),
+        }),
+        bot.workers.map(worker => h(TreeRow, {
+          key: worker.terminal,
+          label: worker.role ?? worker.agent ?? worker.terminal,
+          status: worker.status,
+          depth: 1,
+          current: selected?.botId === bot.id && selected?.worker === worker.terminal,
+          title: [worker.role, worker.branch?.replace(/^refs\/heads\//, '')].filter(Boolean).join(' · '),
+          onClick: () => onSelect({ botId: bot.id, worker: worker.terminal }),
+        })))) : null)
+  }) : null
+  return h('nav', { className: sidebar ? 'lb-rows' : 'cs-tree', 'aria-label': t('Code team') },
+    sidebar && tree?.machine ? h(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }) : null,
+    error || (sidebar && tree?.reason === 'no-core') ? h('p', { className: 'cs-empty' }, t('The Code side could not read this computer’s team.')) : null,
+    !error && projects.length === 0 && !loading && (!sidebar || tree?.reason !== 'no-core') ? h('p', { className: 'cs-empty' }, t('No project has a Bot on this computer yet.')) : null,
+    loading && !tree ? h('p', { className: 'cs-empty' }, t('Reading this computer’s team…')) : null,
+    treeRows)
+}
+
+/** The chosen terminal, shared by the seat face and the bar's main Code panel. */
+export function CodeTerminal({ tree, selected, loading }) {
+  const chosen = selecting(tree, selected)
+  if (!chosen) return h('div', { className: 'cs-empty cs-empty-view' },
+    loading ? t('Reading this computer’s team…') : t('No terminal for this Bot yet'))
+  const title = chosen.worker
+    ? `${chosen.bot.name} · ${chosen.worker.role ?? chosen.worker.agent ?? chosen.worker.terminal}`
+    : chosen.bot.name
+  return h(TerminalPane, { key: `${chosen.bot.id}:${chosen.worker?.terminal ?? 'seat'}`, botId: chosen.bot.id, worker: chosen.worker?.terminal ?? null, title })
+}
+
+/** The seat's Terminal face: keep its own tree next to its terminal. */
 export function CodeBody({ code }) {
   const current = useSyncExternalStore(code.subscribe, code.snapshot, code.snapshot)
-  const tree = current.tree
+  const { tree, loading, error } = current
   useEffect(() => {
-    if (!tree && !current.loading && !current.error) void code.loadTree()
-  }, [code, tree, current.loading, current.error])
-  const chosen = selecting(tree, current.selected)
-  const title = chosen
-    ? (chosen.worker ? `${chosen.bot.name} · ${chosen.worker.role ?? chosen.worker.agent ?? chosen.worker.terminal}` : chosen.bot.name)
-    : t('No terminal chosen')
-  const choose = (botId, worker = null) => {
-    const bot = botRowOf(tree, botId)
-    if (!bot) return
-    if (worker) code.selectPane({ botId, worker })
-    else if (bot.terminal) code.selectPane({ botId, worker: null })
-    else if (bot.workers.length > 0) code.selectPane({ botId, worker: bot.workers[0].terminal })
-    else code.selectPane({ botId, worker: null })
-  }
-  const projects = tree?.projects ?? []
-  // A project-less group is RFC 0014's global Bots: they are seats and carry their own label.
-  const realProjects = projects.filter(project => project.global !== true)
+    if (!tree && !loading && !error) void code.loadTree()
+  }, [code, tree, loading, error])
+  const realProjects = (tree?.projects ?? []).filter(project => project.global !== true)
   const projectCount = realProjects.length === 1 ? t('1 project') : t('{n} projects', { n: realProjects.length })
-  const treeRows = projects.map((project) => {
-    const label = project.global === true ? t('Global Bots') : project.name ?? project.folder
-    return h('section', { key: project.global === true ? 'global' : project.folder, className: 'cs-project' },
-      h('div', { className: 'cs-project-name', title: project.global === true ? label : project.folder }, label),
-      project.bots.map(bot => h('div', { key: bot.id, className: 'cs-bot' },
-      h(TreeRow, {
-        label: bot.name,
-        status: bot.status,
-        current: current.selected?.botId === bot.id && !current.selected?.worker,
-        note: bot.main ? t('lead') : null,
-        onClick: () => choose(bot.id),
-      }),
-      bot.workers.map(worker => h(TreeRow, {
-        key: worker.terminal,
-        label: worker.role ?? worker.agent ?? worker.terminal,
-        status: worker.status,
-        depth: 1,
-        current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
-        title: [worker.role, worker.branch?.replace(/^refs\/heads\//, '')].filter(Boolean).join(' · '),
-        onClick: () => choose(bot.id, worker.terminal),
-      })))))
-  })
   return h('div', { className: 'cs-host' },
     h('div', { className: 'cs-top' },
       h('span', { className: 'cs-machine' }, tree?.machine?.name ?? t('This computer')),
       h('span', { className: 'cs-count' }, projectCount)),
     h('div', { className: 'cs-body' },
-      h('nav', { className: 'cs-tree', 'aria-label': t('Code team') },
-        current.error ? h('p', { className: 'cs-empty' }, t('The Code side could not read this computer’s team.')) : null,
-        !current.error && projects.length === 0 && !current.loading ? h('p', { className: 'cs-empty' }, t('No project has a Bot on this computer yet.')) : null,
-        current.loading && !tree ? h('p', { className: 'cs-empty' }, t('Reading this computer’s team…')) : null,
-        treeRows),
-      h('section', { className: 'cs-view' },
-        chosen
-          ? h(TerminalPane, { key: `${chosen.bot.id}:${chosen.worker?.terminal ?? 'seat'}`, botId: chosen.bot.id, worker: chosen.worker?.terminal ?? null, title })
-          : h('div', { className: 'cs-empty cs-empty-view' },
-              current.loading ? t('Reading this computer’s team…') : t('No terminal for this Bot yet')))))
+      h(CodeTree, { current, onSelect: code.selectPane }),
+      h('section', { className: 'cs-view' }, h(CodeTerminal, { tree, selected: current.selected, loading }))))
 }
 
 /** The selected row, with its Bot and worker: from the store, or from the row just pressed. */

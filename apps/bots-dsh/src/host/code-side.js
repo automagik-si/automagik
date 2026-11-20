@@ -15,6 +15,7 @@ import { connectCore } from './code-core.js'
 import { readCodeTree, resolvePane } from './code-tree.js'
 import { createTypingService, typingRecordPath, typingRoutes } from './code-typing.js'
 import { appBrowserBridge } from './constants.js'
+import { verifiedWindow } from './desktop-window.js'
 
 /** The one terminal stream: exact GET under the shared API channel, so only the owner Peer reaches it. */
 export const CODE_STREAM_ROUTE = '/api/omni-ui/code/stream'
@@ -183,9 +184,9 @@ export function openPaneStream({ url, signal, env = process.env, warn = () => {}
  */
 export function install(rt, { env = process.env, connect = connectCore, readFile, desktop = appBrowserBridge() } = {}) {
   const warn = (...args) => rt.warn?.(`omni-ui: ${args.map(value => (typeof value === 'string' ? value : String(value))).join(' ')}`)
-  const offTree = rt.hooks.endpoint(CODE_TREE_ENDPOINT, async () => {
+  const offTree = rt.hooks.endpoint(CODE_TREE_ENDPOINT, async (_body, _signal, desktopWindow = false) => {
     // RFC 0030 delivery 1 keeps standalone hosts from serving terminals (lines 129–130, 439–440).
-    if (!desktop) return { v: 1, machine: null, projects: [], reason: 'desktop-only' }
+    if (!desktop || desktopWindow !== true) return { v: 1, machine: null, projects: [], reason: 'desktop-only' }
     const answer = await readCodeTree({ env, warn, connect, readFile })
     if (answer.tree) return answer.tree
     return { v: 1, machine: null, projects: [], reason: answer.reason ?? 'unavailable' }
@@ -210,7 +211,7 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
     admit: request => rt.ctx.connection.admit(request),
   })
   const offEffects = [rt.ctx.effect(() => () => { void typing.dispose() }, 'omni-ui: code typing releases')]
-  for (const [path, handler] of typingRoutes(typing)) {
+  for (const [path, handler] of typingRoutes(typing, request => verifiedWindow(request, env))) {
     const off = rt.ctx.effect(() => fetchRoutes.register({
       path,
       methods: ['POST'],
@@ -224,6 +225,7 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: async (request) => {
+      if (!verifiedWindow(request, env)) return jsonError(403, 'desktop-only')
       const refusal = streamAdmission(request)
       if (refusal) return jsonError(refusal.status, refusal.error)
       const target = streamTarget(request.url)

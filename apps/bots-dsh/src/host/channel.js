@@ -15,6 +15,7 @@ import { handoffReply, questionReply, viewReply } from './parts.js'
 import { validateViewAnswer } from 'deep-view/core'
 import { previewText } from '../shared/plain-text.js'
 import { normalizeAddressList } from './browser/address-policy.js'
+import { verifiedWindow } from './desktop-window.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 
@@ -467,7 +468,7 @@ export function install(rt) {
     'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
-  const handle = async (endpoint, payload, signal) => {
+  const handle = async (endpoint, payload, signal, desktopWindow = false) => {
     try {
       const body = payload ?? {}
       // The permission section of the diagnostics page (permission-diagnostics.js): answered
@@ -1193,7 +1194,7 @@ export function install(rt) {
           await rt.diagnostics.clear()
           return ok(true)
         default:
-          if (added !== undefined) return ok(await added.fn(body, signal))
+          if (added !== undefined) return ok(await added.fn(body, signal, desktopWindow))
           if (endpoint.startsWith('computer-')) {
             await rt.load()
             return ok(await rt.computerEndpoint(endpoint.slice('computer-'.length), body))
@@ -1333,7 +1334,8 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
-      const dispatch = () => handle(endpoint, body?.payload, request.signal)
+      const desktopWindow = appBrowserBridge() && verifiedWindow(request)
+      const dispatch = () => handle(endpoint, body?.payload, request.signal, desktopWindow)
       const result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
       const noStore = CLI_LOGIN.has(body?.endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)

@@ -250,15 +250,16 @@ export function install(rt, { engine: injected } = {}) {
     if (engine) chat = new SeatChat({ engine, registryPath: path, warn: (...args) => rt.warn?.(...args) })
     return chat
   }
-  const answer = (fn) => async (body) => {
+  const answer = (fn, { screen = false } = {}) => async (body, _signal, desktopWindow = false) => {
+    if (screen && desktopWindow !== true) throw refused('desktop-only')
     const seat = seatChat()
     if (!seat) throw refused('Seat chat is not available on this computer.')
     return fn(seat, body ?? {})
   }
   const offs = [
     rt.hooks.endpoint('seat-chat-list', answer(async (seat) => ({ seats: await seat.list() })), { read: true }),
-    rt.hooks.endpoint('seat-chat-open', answer((seat, body) => seat.open(String(body.client ?? ''), body.terminal)), { read: true }),
-    rt.hooks.endpoint('seat-chat-read', answer((seat, body) => seat.read(String(body.client ?? ''), body.terminal, body.after ?? null)), { read: true }),
+    rt.hooks.endpoint('seat-chat-open', answer((seat, body) => seat.open(String(body.client ?? ''), body.terminal), { screen: true }), { read: true }),
+    rt.hooks.endpoint('seat-chat-read', answer((seat, body) => seat.read(String(body.client ?? ''), body.terminal, body.after ?? null), { screen: true }), { read: true }),
     rt.hooks.endpoint('seat-chat-close', answer((seat, body) => ({ closed: seat.close(String(body.client ?? ''), body.terminal) })), { read: true }),
   ]
   if (typeof rt.ctx?.effect === 'function') {

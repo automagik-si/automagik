@@ -2562,6 +2562,8 @@ var ZH = {
   "Work": "工作",
   "Work, in this window": "工作，就在这个窗口",
   "Code: open this Bot’s folder in Herdr": "代码：在 Herdr 中打开这个 Bot 的文件夹",
+  "Open Herdr": "打开 Herdr",
+  "Team or Code": "团队或代码",
   "Code: open Herdr": "代码：打开 Herdr",
   "Opening Herdr…": "正在打开 Herdr…",
   "Herdr {version} is out": "Herdr {version} 已发布",
@@ -3211,6 +3213,7 @@ function hostTemplate(message) {
   return t(template, Object.fromEntries(names.map((name, index) => [name, host.includes(name) ? hostText(found[index + 1]) : found[index + 1]])));
 }
 function hostText(message) {
+  if (message === "desktop-only") return t("Terminals show in the Automagik desktop app.");
   if (typeof message === "string" && (bound || language().startsWith("zh"))) {
     const worded = hostTemplate(message);
     if (worded !== void 0) return worded;
@@ -21639,6 +21642,363 @@ var RETURN_TOKENS = `
 body{--bt-return-fill:rgba(127,127,127,.08);--bt-return-fill-hover:rgba(127,127,127,.14)}
 `;
 
+// src/client/left-bar-status.js
+var import_react49 = require("react");
+var STATUSES = Object.freeze(["working", "needs", "idle", "error", "off"]);
+var statusOr = (status) => STATUSES.includes(status) ? status : "idle";
+var SAID = {
+  working: () => t("Working"),
+  needs: () => t("Needs you"),
+  error: () => t("Error"),
+  idle: () => t("Idle"),
+  off: () => t("Not running"),
+  team: () => t("Team"),
+  projects: () => t("Spaces"),
+  add: () => t("Create or join a space"),
+  faces: () => t("This Bot as")
+};
+var WORDS = Object.freeze(Object.keys(SAID));
+var word = (name) => SAID[name]();
+var WORDED = Object.freeze(["needs", "off"]);
+var QUIET = Object.freeze(["idle"]);
+var FIRST = ["needs", "error", "working"];
+var worstStatus = (statuses) => FIRST.find((status) => statuses.includes(status)) ?? "idle";
+var OF_STATE = Object.freeze({
+  alert: "needs",
+  failed: "error",
+  thinking: "working",
+  searching: "working",
+  working: "working",
+  sending: "working",
+  orbit: "working",
+  waiting: "working"
+});
+var statusOfState = (state2) => OF_STATE[state2] ?? "idle";
+var STATE_OF = Object.freeze({ working: "working", needs: "alert", error: "failed" });
+var stateOfStatus = (status) => STATE_OF[status] ?? "idle";
+var ring = () => [(0, import_react49.createElement)("circle", { key: "ring", cx: 6, cy: 6, r: 3.75, fill: "none", stroke: "currentColor", strokeWidth: 1.5 })];
+var SHAPES2 = {
+  working: () => [
+    (0, import_react49.createElement)("circle", { key: "track", cx: 6, cy: 6, r: 4.5, fill: "none", stroke: "currentColor", strokeOpacity: 0.3, strokeWidth: 2 }),
+    (0, import_react49.createElement)("path", { key: "arc", className: "lb-mark-arc", d: "M6 1.5a4.5 4.5 0 0 1 0 9", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" })
+  ],
+  needs: () => [
+    (0, import_react49.createElement)("circle", { key: "disc", cx: 6, cy: 6, r: 6, fill: "currentColor" }),
+    (0, import_react49.createElement)("path", { key: "glyph", className: "lb-mark-glyph", d: "M6 3.4v2.6M6 9h.01", fill: "none", strokeWidth: 2, strokeLinecap: "round" })
+  ],
+  error: () => [
+    (0, import_react49.createElement)("rect", { key: "tile", x: 0.5, y: 0.5, width: 11, height: 11, rx: 3.4, fill: "currentColor" }),
+    (0, import_react49.createElement)("path", { key: "glyph", className: "lb-mark-glyph", d: "M4 4l4 4M8 4l-4 4", fill: "none", strokeWidth: 1.7, strokeLinecap: "round" })
+  ],
+  idle: ring,
+  off: ring
+};
+function StatusMark({ status, named = true }) {
+  const kind = statusOr(status);
+  const says = word(kind);
+  return (0, import_react49.createElement)("span", {
+    className: `lb-mark lb-mark-${kind}`,
+    "data-status": kind,
+    ...named ? { role: "img", "aria-label": says, title: says } : { "aria-hidden": true }
+  }, (0, import_react49.createElement)("svg", { viewBox: "0 0 12 12", "aria-hidden": true, focusable: "false" }, ...SHAPES2[kind]()));
+}
+function Status({ status, worded = WORDED, quiet: quiet2 = QUIET }) {
+  const kind = statusOr(status);
+  if (quiet2.includes(kind)) return null;
+  if (!worded.includes(kind)) return (0, import_react49.createElement)(StatusMark, { status: kind });
+  return (0, import_react49.createElement)("span", { className: `lb-st lb-st-${kind}`, "data-status": kind }, (0, import_react49.createElement)(StatusMark, { status: kind, named: false }), word(kind));
+}
+
+// src/client/left-bar-faces.js
+var import_react50 = require("react");
+var FACES2 = Object.freeze(["chat", "terminal"]);
+var faceOr = (face) => FACES2.includes(face) ? face : "chat";
+var SAID2 = { chat: () => t("Chat"), terminal: () => t("Terminal") };
+var faceWord = (face) => SAID2[faceOr(face)]();
+var PATHS = {
+  chat: ["M4.5 4.5h11A1.5 1.5 0 0 1 17 6v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 2.8V14h-1A1.5 1.5 0 0 1 3 12.5V6a1.5 1.5 0 0 1 1.5-1.5z"],
+  terminal: ["M5 6.5 9 10l-4 3.5", "M10.5 14H15"]
+};
+var Glyph = ({ face }) => (0, import_react50.createElement)(
+  "svg",
+  { className: "lb-face-glyph", viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, focusable: "false" },
+  ...PATHS[face].map((d) => (0, import_react50.createElement)("path", { key: d, d }))
+);
+function FaceSwitch({ face, onFace, label, unavailable = {} }) {
+  return TwoPartSwitch({
+    current: faceOr(face),
+    onSelect: onFace,
+    label: label ?? word("faces"),
+    unavailable,
+    parts: FACES2.map((name) => ({ name, content: [(0, import_react50.createElement)(Glyph, { face: name }), faceWord(name)] }))
+  });
+}
+function TwoPartSwitch({ current, onSelect, label, parts, unavailable = {} }) {
+  return (0, import_react50.createElement)(
+    "div",
+    { className: "lb-face", role: "group", "aria-label": label },
+    ...parts.map(({ name, content }) => {
+      const why = name === current ? void 0 : unavailable[name];
+      return (0, import_react50.createElement)("button", {
+        key: name,
+        type: "button",
+        className: "lb-face-part",
+        "data-face": name,
+        "aria-pressed": name === current,
+        "aria-disabled": why ? "true" : void 0,
+        title: why,
+        "aria-description": why,
+        onClick: onSelect && name !== current && !why ? () => onSelect(name) : void 0
+      }, ...content);
+    })
+  );
+}
+
+// src/client/code-side-model.js
+function botRowOf(tree, botId) {
+  for (const project of tree?.projects ?? []) {
+    const bot = project.bots.find((candidate) => candidate.id === botId);
+    if (bot) return bot;
+  }
+  return null;
+}
+function codeHasPane(tree, botId) {
+  const bot = botRowOf(tree, botId);
+  return Boolean(bot && (bot.terminal || bot.workers.length > 0));
+}
+function paneFor(tree, botId) {
+  const bot = botRowOf(tree, botId);
+  if (!bot) return null;
+  if (bot.terminal) return { botId: bot.id, worker: null };
+  if (bot.workers.length > 0) return { botId: bot.id, worker: bot.workers[0].terminal };
+  return null;
+}
+function stillThere(selected, tree) {
+  if (!selected || !tree?.projects) return null;
+  const bot = botRowOf(tree, selected.botId);
+  if (!bot) return null;
+  if (selected.worker === null || selected.worker === void 0) return bot.terminal ? { botId: bot.id, worker: null } : null;
+  return bot.workers.some((worker) => worker.terminal === selected.worker) ? { botId: bot.id, worker: selected.worker } : null;
+}
+var STATUS_WORDS = Object.freeze(["working", "needs-you", "idle", "not-running"]);
+var statusKey = (status) => STATUS_WORDS.includes(status) ? status : "idle";
+
+// src/client/code-side-lazy.js
+var PANE_CHUNK = "./client.pane.js";
+var paneLoading = null;
+function loadPane() {
+  const load = globalThis.__dshChunk;
+  if (typeof load !== "function") return Promise.reject(new Error("the client chunk loader is missing"));
+  paneLoading ??= Promise.resolve(load(PANE_CHUNK)).catch((error) => {
+    paneLoading = null;
+    throw error;
+  });
+  return paneLoading;
+}
+
+// src/client/code-side.js
+var import_react51 = require("react");
+var CODE_PANEL = "automagik-code";
+var NO_STATE = { side: "team", barSelected: null, face: "chat", botId: null, seat: false, tree: null, loading: false, error: null, selected: null, loadedAt: 0 };
+var listeners2 = /* @__PURE__ */ new Set();
+var state = NO_STATE;
+var set = (patch) => {
+  state = { ...state, ...patch };
+  for (const listener of listeners2) listener();
+};
+var snapshot = () => state;
+var storeSubscribe = (listener) => {
+  listeners2.add(listener);
+  return () => listeners2.delete(listener);
+};
+var TREE_FRESH_MS = 2e4;
+var reading = null;
+async function loadTree({ fresh = false } = {}) {
+  if (!fresh && state.tree && Date.now() - state.loadedAt < TREE_FRESH_MS) return state.tree;
+  if (reading) return reading;
+  set({ loading: true, error: null });
+  reading = Promise.resolve().then(() => call("code-tree")).then((tree) => {
+    set({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), selected: stillThere(state.selected, tree) });
+    return tree;
+  }, (error) => {
+    set({ loading: false, error: error?.code ?? "unavailable", tree: null, loadedAt: Date.now() });
+    return null;
+  }).finally(() => {
+    reading = null;
+  });
+  return reading;
+}
+async function openTerminal(botId, { seat = false } = {}) {
+  set({ face: "terminal", botId, seat, selected: state.selected?.botId === botId ? state.selected : null });
+  const tree = await loadTree({ fresh: true });
+  if (!tree || state.botId !== botId || state.face !== "terminal" || state.seat !== seat) return;
+  const pane = paneFor(tree, botId);
+  if (pane) set({ selected: pane });
+}
+function closeTerminal() {
+  set({ face: "chat", botId: null, seat: false, selected: null });
+}
+function selectPane(selected) {
+  set({ selected });
+}
+function useCodeFace(botId, { seat = false } = {}) {
+  const current = (0, import_react51.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
+  return {
+    face: current.face === "terminal" && current.botId === botId && current.seat === seat ? "terminal" : "chat",
+    // Whether a Bot has a pane is the renderer's own answer, read when Terminal is pressed:
+    // the switch never fetches the tree or the chunk on its own.
+    onFace: (face) => {
+      if (face === "terminal") void openTerminal(botId, { seat });
+      else closeTerminal();
+    }
+  };
+}
+function BotFaceSwitch({ bot }) {
+  const code = useCodeFace(bot?.id, { seat: true });
+  return bot?.seat === true ? (0, import_react51.createElement)(FaceSwitch, { face: code.face, onFace: code.onFace }) : null;
+}
+function useCodeSide() {
+  return (0, import_react51.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
+}
+function setCodeSide(side) {
+  set({ side });
+  if (side === "code") void loadTree({ fresh: true });
+}
+function CodeSideSwitch({ current, onSelect }) {
+  const needs = (current.tree?.projects ?? []).reduce((count, project) => count + project.bots.reduce(
+    (sum, bot) => sum + Number(bot.status === "needs-you") + bot.workers.filter((worker) => worker.status === "needs-you").length,
+    0
+  ), 0);
+  const badge = needs > 0 ? (0, import_react51.createElement)("span", { className: "lb-count", title: t("Needs you") }, needs > 99 ? "99+" : String(needs)) : null;
+  return (0, import_react51.createElement)(TwoPartSwitch, {
+    current: current.side,
+    onSelect,
+    label: t("Team or Code"),
+    parts: [{ name: "team", content: [t("Team")] }, { name: "code", content: [t("Code"), badge] }]
+  });
+}
+function codePanelNavigation(layout) {
+  let previous = null;
+  const active = () => layout.panelInfo.getSnapshot().activePanelId;
+  return {
+    open(selected) {
+      if (active() !== CODE_PANEL) {
+        previous = active();
+        layout.selectPanel(CODE_PANEL);
+      }
+      set({ barSelected: selected });
+    },
+    close() {
+      if (active() !== CODE_PANEL) return;
+      try {
+        layout.selectPanel(previous);
+      } catch {
+        layout.selectPanel(null);
+      }
+      set({ barSelected: null });
+    }
+  };
+}
+function CodeBody() {
+  const current = useCodeSide();
+  return (0, import_react51.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react51.createElement)(pane.CodeBody, { code: codeApi }) });
+}
+function CodeBarList({ current, onSelect }) {
+  return (0, import_react51.createElement)(CodeRenderer, {
+    current,
+    showLoading: true,
+    render: (pane) => (0, import_react51.createElement)(pane.CodeTree, { current: { ...current, selected: current.barSelected }, onSelect, sidebar: true })
+  });
+}
+function CodeMainPanel({ onBack }) {
+  const current = useCodeSide();
+  return (0, import_react51.createElement)(
+    "div",
+    { className: "bt-seat", "data-code-panel": "" },
+    (0, import_react51.createElement)(
+      "header",
+      { className: "bt-seat-head" },
+      (0, import_react51.createElement)("button", { type: "button", className: "bt-seat-back", "aria-label": t("Back"), title: t("Back"), onClick: onBack }, "←")
+    ),
+    (0, import_react51.createElement)(
+      "div",
+      { className: "bt-seat-body" },
+      (0, import_react51.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react51.createElement)(
+        "section",
+        { className: "cs-host" },
+        (0, import_react51.createElement)(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, loading: current.loading })
+      ) })
+    )
+  );
+}
+function CodeRenderer({ current, render, showLoading }) {
+  const desktopOnly = current.tree?.reason === "desktop-only";
+  const shouldLoadPane = current.loadedAt !== 0 && !desktopOnly;
+  const [pane, setPane] = (0, import_react51.useState)(null);
+  const [failed, setFailed] = (0, import_react51.useState)(false);
+  (0, import_react51.useEffect)(() => {
+    if (!shouldLoadPane) return;
+    let live = true;
+    loadPane().then((module2) => {
+      if (live) setPane(module2);
+    }, () => {
+      if (live) setFailed(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [shouldLoadPane]);
+  if (desktopOnly) return (0, import_react51.createElement)("div", { className: "cs-host" }, (0, import_react51.createElement)("p", { className: "cs-empty" }, t("Terminals show in the Automagik desktop app.")));
+  if (shouldLoadPane && pane) return render(pane);
+  if (failed) return (0, import_react51.createElement)("div", { className: "cs-host" }, (0, import_react51.createElement)("p", { className: "cs-empty" }, t("The Code side could not load here.")));
+  return showLoading ? (0, import_react51.createElement)("p", { className: "bt-hint", role: "status" }, t("Reading this computer’s team…")) : null;
+}
+function mainViewId(sessions) {
+  const list = sessions?.list?.getSnapshot?.();
+  return Object.values(list?.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? null;
+}
+var codeApi = { subscribe: storeSubscribe, snapshot, loadTree, selectPane };
+function installCodeSide(ctx) {
+  let off = null;
+  let openedFor = null;
+  let listOff = null;
+  const watchView = () => {
+    if (listOff) {
+      listOff();
+      listOff = null;
+    }
+    openedFor = mainViewId(ctx.sessions);
+    listOff = ctx.sessions?.list?.subscribe?.(() => {
+      if (state.face !== "terminal" || openedFor === null) return;
+      if (mainViewId(ctx.sessions) !== openedFor) closeTerminal();
+    }) ?? null;
+  };
+  const sync = () => {
+    const wanted = state.face === "terminal" && !state.seat;
+    if (wanted && !off) {
+      watchView();
+      off = ctx.slots.inject("conversation.session", () => ctx.slots.register({ name: "conversation.session", priority: -100 }, CodeBody));
+    } else if (!wanted && off) {
+      off();
+      off = null;
+      listOff?.();
+      listOff = null;
+      openedFor = null;
+    }
+  };
+  const unsubscribe = storeSubscribe(sync);
+  sync();
+  return () => {
+    unsubscribe();
+    listOff?.();
+    listOff = null;
+    off?.();
+    off = null;
+    if (state.face === "terminal") set({ face: "chat", botId: null, seat: false, selected: null });
+  };
+}
+var codeStore = { subscribe: storeSubscribe, snapshot, loadTree, openTerminal, closeTerminal, selectPane, reset: () => set({ ...NO_STATE }) };
+
 // src/client/agent-logos.js
 var AGENT_LOGOS = {
   "claude-code": {
@@ -21730,25 +22090,25 @@ function agentAvatar(engine) {
 }
 
 // src/client/agent-badge.js
-var import_react49 = require("react");
+var import_react52 = require("react");
 function AgentBadge({ engine, size = 15 }) {
   const logo = logoOf(engine);
   const style = { flexShrink: 0, marginLeft: 4, verticalAlign: -2 };
   if (logo?.kind === "image") {
-    return (0, import_react49.createElement)("img", { src: logo.src, width: size, height: size, alt: "", title: logo.title, className: "bt-agent-badge", style: { ...style, borderRadius: 4 } });
+    return (0, import_react52.createElement)("img", { src: logo.src, width: size, height: size, alt: "", title: logo.title, className: "bt-agent-badge", style: { ...style, borderRadius: 4 } });
   }
   if (logo?.kind === "path") {
-    return (0, import_react49.createElement)(
+    return (0, import_react52.createElement)(
       "svg",
       { width: size, height: size, viewBox: "0 0 24 24", className: "bt-agent-badge", role: "img", "aria-label": logo.title, style: { ...style, color: `#${logo.hex}` } },
-      (0, import_react49.createElement)("title", null, logo.title),
-      (0, import_react49.createElement)("path", { d: logo.d, fill: "currentColor" })
+      (0, import_react52.createElement)("title", null, logo.title),
+      (0, import_react52.createElement)("path", { d: logo.d, fill: "currentColor" })
     );
   }
   const badge = badgeOf(engine);
   if (badge === void 0) return null;
   const [glyph, ink] = badge;
-  return (0, import_react49.createElement)(
+  return (0, import_react52.createElement)(
     "svg",
     {
       width: size,
@@ -21758,13 +22118,13 @@ function AgentBadge({ engine, size = 15 }) {
       "aria-hidden": true,
       style: { ...style, color: inkFill(ink) }
     },
-    (0, import_react49.createElement)("rect", { x: 1, y: 1, width: 18, height: 18, rx: 5, fill: "currentColor", fillOpacity: 0.16, stroke: "currentColor", strokeWidth: 1.4 }),
-    (0, import_react49.createElement)("text", { x: 10, y: 13.6, textAnchor: "middle", fontSize: 7.5, fontWeight: 700, fill: "currentColor" }, glyph)
+    (0, import_react52.createElement)("rect", { x: 1, y: 1, width: 18, height: 18, rx: 5, fill: "currentColor", fillOpacity: 0.16, stroke: "currentColor", strokeWidth: 1.4 }),
+    (0, import_react52.createElement)("text", { x: 10, y: 13.6, textAnchor: "middle", fontSize: 7.5, fontWeight: 700, fill: "currentColor" }, glyph)
   );
 }
 
 // src/client/activity-row.js
-var import_react50 = require("react");
+var import_react53 = require("react");
 var import_react_dom8 = require("react-dom");
 var PHRASE_HOLD_MS = 800;
 var drawPhrase = (pool) => t(pool[Math.min(pool.length - 1, Math.floor(Math.random() * pool.length))]);
@@ -21784,8 +22144,8 @@ function findHost() {
   return node;
 }
 function useRunningHost(active) {
-  const [host, setHost] = (0, import_react50.useState)(null);
-  (0, import_react50.useEffect)(() => {
+  const [host, setHost] = (0, import_react53.useState)(null);
+  (0, import_react53.useEffect)(() => {
     if (!active) {
       setHost(null);
       return void 0;
@@ -21811,9 +22171,9 @@ function useRunningHost(active) {
   return host;
 }
 function useRowEntrances(replacing) {
-  const check = (0, import_react50.useRef)(replacing);
+  const check = (0, import_react53.useRef)(replacing);
   check.current = replacing;
-  (0, import_react50.useEffect)(() => {
+  (0, import_react53.useEffect)(() => {
     const seen = /* @__PURE__ */ new WeakSet();
     const started = Date.now();
     let column = null;
@@ -21861,7 +22221,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const roster = useRoster((value) => value);
   const running2 = useSessionStatus((map) => map.get(sessionId)?.running === true);
   const turnAt = useWork?.((work) => work.turns?.[sessionId]);
-  const runAt = (0, import_react50.useRef)(0);
+  const runAt = (0, import_react53.useRef)(0);
   if (!running2) runAt.current = 0;
   else if (runAt.current === 0) runAt.current = Date.now();
   const liveKey = useLive((state2) => JSON.stringify(state2[sessionId] ?? {}));
@@ -21873,21 +22233,21 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     const entry = bot !== void 0 ? work.bots?.[bot.id] : room2 !== void 0 ? work.rooms?.[room2.id]?.find((item) => item.self === true) : void 0;
     return entry?.switching === true && entry.folder === true && entry.roomId === void 0 ? entry.since : 0;
   }) ?? 0;
-  const entries2 = (0, import_react50.useMemo)(() => Object.values(JSON.parse(liveKey)), [liveKey]);
+  const entries2 = (0, import_react53.useMemo)(() => Object.values(JSON.parse(liveKey)), [liveKey]);
   const streaming = entries2.some((entry) => entry.text);
   const tools = entries2.filter((entry) => !entry.text).sort((a, b) => a.at - b.at);
   const relaying = tools.some((entry) => entry.relay);
   const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2 });
   const tool = tools.at(-1);
-  const inputRef = (0, import_react50.useRef)(0);
+  const inputRef = (0, import_react53.useRef)(0);
   const inputAt = Math.max(inputRef.current, pendingInput);
   inputRef.current = inputAt;
   const want = !visible ? null : moveAt !== 0 ? { key: "move", label: t("Switching working folder"), state: "thinking" } : inputAt > (tool?.at ?? 0) ? { key: `input:${inputAt}`, pool: PHRASES.thinking, state: "thinking" } : tool ? { key: tool.label ? `tool:${tool.label}` : "working", label: tool.label, pool: PHRASES.working, state: tool.state ?? "working" } : { key: "thinking", pool: PHRASES.thinking, state: "thinking" };
-  const [shown2, setShown] = (0, import_react50.useState)(null);
+  const [shown2, setShown] = (0, import_react53.useState)(null);
   const wantKey = want?.key ?? null;
-  const markState = (0, import_react50.useRef)("thinking");
+  const markState = (0, import_react53.useRef)("thinking");
   if (want) markState.current = want.state;
-  (0, import_react50.useEffect)(() => {
+  (0, import_react53.useEffect)(() => {
     if (wantKey === null || shown2?.key === wantKey) return void 0;
     const make = () => setShown({ key: wantKey, text: want.label ?? drawPhrase(want.pool), at: Date.now() });
     const wait = shown2 ? shown2.at + PHRASE_HOLD_MS - Date.now() : 0;
@@ -21898,12 +22258,12 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     const timer = setTimeout(make, wait);
     return () => clearTimeout(timer);
   }, [wantKey, shown2]);
-  const [phase, setPhase] = (0, import_react50.useState)(null);
-  const endedAt = (0, import_react50.useRef)(0);
-  const shift = (0, import_react50.useRef)(null);
-  const leaving = (0, import_react50.useRef)(false);
+  const [phase, setPhase] = (0, import_react53.useState)(null);
+  const endedAt = (0, import_react53.useRef)(0);
+  const shift = (0, import_react53.useRef)(null);
+  const leaving = (0, import_react53.useRef)(false);
   leaving.current = phase !== null && !visible;
-  (0, import_react50.useEffect)(() => {
+  (0, import_react53.useEffect)(() => {
     if (visible) {
       setPhase("in");
       return void 0;
@@ -21915,7 +22275,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     }, 140);
     return () => clearTimeout(timer);
   }, [visible]);
-  (0, import_react50.useLayoutEffect)(() => {
+  (0, import_react53.useLayoutEffect)(() => {
     if (phase !== null) return;
     endedAt.current = Date.now();
     setShown(null);
@@ -21926,21 +22286,21 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     const delta = before - scroller.scrollTop;
     if (delta > 0) scroller.querySelector("[data-chat-flow]")?.animate([{ transform: `translateY(${-delta}px)` }, { transform: "none" }], { duration: 140, easing: "cubic-bezier(.23,1,.32,1)" });
   }, [phase]);
-  (0, import_react50.useEffect)(() => {
+  (0, import_react53.useEffect)(() => {
     if (!running2) actions.clearLive(sessionId);
   }, [running2, sessionId]);
   useRowEntrances(() => leaving.current || Date.now() - endedAt.current < 300);
   const host = useRunningHost(running2 || moveAt !== 0);
   if (!host || phase === null || !shown2) return null;
-  return (0, import_react_dom8.createPortal)((0, import_react50.createElement)(
+  return (0, import_react_dom8.createPortal)((0, import_react53.createElement)(
     "div",
     { className: "bt-typing", "data-exiting": phase === "out" ? "" : void 0, "aria-hidden": true },
-    bot ? (0, import_react50.createElement)(BotMark, { bot, size: 28, state: markState.current, live: true, pokeable: true }) : (0, import_react50.createElement)(RoomAvatar, { room: room2, roster, size: 28 }),
-    (0, import_react50.createElement)(
+    bot ? (0, import_react53.createElement)(BotMark, { bot, size: 28, state: markState.current, live: true, pokeable: true }) : (0, import_react53.createElement)(RoomAvatar, { room: room2, roster, size: 28 }),
+    (0, import_react53.createElement)(
       "span",
       { className: "bt-typing-text" },
-      (0, import_react50.createElement)("span", { key: `${shown2.key}:${shown2.at}`, className: "bt-typing-label" }, (0, import_react50.createElement)(Shimmer, null, `${shown2.text}…`)),
-      (0, import_react50.createElement)(Elapsed, { at: moveAt !== 0 ? moveAt : Math.max(turnAt ?? runAt.current, inputAt), className: "bt-typing-time" })
+      (0, import_react53.createElement)("span", { key: `${shown2.key}:${shown2.at}`, className: "bt-typing-label" }, (0, import_react53.createElement)(Shimmer, null, `${shown2.text}…`)),
+      (0, import_react53.createElement)(Elapsed, { at: moveAt !== 0 ? moveAt : Math.max(turnAt ?? runAt.current, inputAt), className: "bt-typing-time" })
     )
   ), host);
 }
@@ -21956,7 +22316,7 @@ function showsDshRow(dsh, app) {
 }
 
 // src/client/work-code-switch.js
-var import_react51 = require("react");
+var import_react54 = require("react");
 var NOTE_PATTERNS = [
   ["offline", /^Herdr couldn't check for updates \(no connection\)/],
   ["check-failed", /^Herdr couldn't check for updates /],
@@ -22063,44 +22423,44 @@ function shownBotId(roster, sessionId) {
   const from = roster?.tasks?.[sessionId]?.from;
   return typeof from === "string" && roster?.byId?.[from] ? from : null;
 }
-var mainViewId = (list) => Object.values(list.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? "";
-var NO_STATE = { status: null, busy: false, result: null, front: true };
+var mainViewId2 = (list) => Object.values(list.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? "";
+var NO_STATE2 = { status: null, busy: false, result: null, front: true };
 var noSubscribe2 = () => () => {
 };
-var noState = () => NO_STATE;
+var noState = () => NO_STATE2;
 function Notice({ notice, onAnswer, onRetry, onDismiss, busy }) {
   if (notice.kind === "offer") {
-    return (0, import_react51.createElement)(
+    return (0, import_react54.createElement)(
       "div",
       { className: "bt-code-note", role: "status" },
-      (0, import_react51.createElement)("span", { className: "bt-code-note-text" }, notice.label),
-      (0, import_react51.createElement)(
+      (0, import_react54.createElement)("span", { className: "bt-code-note-text" }, notice.label),
+      (0, import_react54.createElement)(
         "span",
         { className: "bt-code-note-row" },
-        (0, import_react51.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: () => onAnswer(true) }, t("Update and open")),
-        (0, import_react51.createElement)("button", { type: "button", className: "bt-code-note-btn", disabled: busy, onClick: () => onAnswer(false) }, t("Open this version")),
-        (0, import_react51.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
+        (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: () => onAnswer(true) }, t("Update and open")),
+        (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-btn", disabled: busy, onClick: () => onAnswer(false) }, t("Open this version")),
+        (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
       )
     );
   }
-  return (0, import_react51.createElement)(
+  return (0, import_react54.createElement)(
     "div",
     { className: `bt-code-note bt-code-note-${notice.kind}`, role: "status", title: notice.title },
-    (0, import_react51.createElement)("span", { className: "bt-code-note-text" }, notice.label),
-    (0, import_react51.createElement)(
+    (0, import_react54.createElement)("span", { className: "bt-code-note-text" }, notice.label),
+    (0, import_react54.createElement)(
       "span",
       { className: "bt-code-note-row" },
-      notice.retry ? (0, import_react51.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: onRetry }, t("Retry")) : null,
-      (0, import_react51.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
+      notice.retry ? (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: onRetry }, t("Retry")) : null,
+      (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
     )
   );
 }
 function WorkCodeSwitch({ roster, useSessions }) {
   const bridge = globalThis.omniDesktop?.herdr;
-  const control2 = (0, import_react51.useMemo)(() => switchFor(bridge), [bridge]);
-  const state2 = (0, import_react51.useSyncExternalStore)(control2?.subscribe ?? noSubscribe2, control2?.snapshot ?? noState);
-  const sessionId = useSessions(mainViewId);
-  (0, import_react51.useEffect)(() => {
+  const control2 = (0, import_react54.useMemo)(() => switchFor(bridge), [bridge]);
+  const state2 = (0, import_react54.useSyncExternalStore)(control2?.subscribe ?? noSubscribe2, control2?.snapshot ?? noState);
+  const sessionId = useSessions(mainViewId2);
+  (0, import_react54.useEffect)(() => {
     if (!control2) return void 0;
     void control2.refresh();
     const onFocus = () => {
@@ -22124,17 +22484,15 @@ function WorkCodeSwitch({ roster, useSessions }) {
     void control2.open({ botId, update });
   };
   const notices = state2.result ? codeNotices(state2.result) : [];
-  return (0, import_react51.createElement)(
+  return (0, import_react54.createElement)(
     "div",
     { className: "bt-code-switch-wrap" },
-    (0, import_react51.createElement)(
+    (0, import_react54.createElement)(
       "div",
-      { className: "bt-code-switch", role: "group", "aria-label": t("Work or code"), onPointerEnter: () => {
+      { className: "bt-code-switch", role: "group", "aria-label": t("Open Herdr"), onPointerEnter: () => {
         void control2.refresh();
       } },
-      // Work is this window: a mark of where the person is, not a control.
-      (0, import_react51.createElement)("span", { className: "bt-code-seg", "aria-current": state2.front ? "true" : void 0, title: t("Work, in this window") }, t("Work")),
-      (0, import_react51.createElement)("button", {
+      (0, import_react54.createElement)("button", {
         type: "button",
         className: "bt-code-seg",
         "aria-current": state2.front ? void 0 : "true",
@@ -22144,7 +22502,7 @@ function WorkCodeSwitch({ roster, useSessions }) {
         onClick: code
       }, t("Code"))
     ),
-    notices.length > 0 ? (0, import_react51.createElement)("div", { className: "bt-code-notes" }, notices.map((notice) => (0, import_react51.createElement)(Notice, { key: notice.kind, notice, busy: state2.busy, onAnswer: answer, onRetry: code, onDismiss: () => control2.dismiss() }))) : null
+    notices.length > 0 ? (0, import_react54.createElement)("div", { className: "bt-code-notes" }, notices.map((notice) => (0, import_react54.createElement)(Notice, { key: notice.kind, notice, busy: state2.busy, onAnswer: answer, onRetry: code, onDismiss: () => control2.dismiss() }))) : null
   );
 }
 var WORK_CODE_SWITCH_CSS = `
@@ -22169,7 +22527,7 @@ button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-
 `;
 
 // src/client/capability-pills.js
-var import_react52 = require("react");
+var import_react55 = require("react");
 function pillsOf(roster, bot) {
   if (bot === void 0 || bot === null) return [];
   const leads = isMainOf(roster, bot.id);
@@ -22181,102 +22539,35 @@ var pillLabels = (roster, bot) => pillsOf(roster, bot).map((key) => pillText(key
 function BotPills({ roster, bot, className = "" }) {
   const keys = pillsOf(roster, bot);
   if (keys.length === 0) return null;
-  return (0, import_react52.createElement)("span", { className: `bt-caps ${className}`.trim() }, keys.map((key) => {
+  return (0, import_react55.createElement)("span", { className: `bt-caps ${className}`.trim() }, keys.map((key) => {
     const [label, tip] = pillText(key);
-    return (0, import_react52.createElement)("span", { key, className: "bt-tag bt-cap", "data-pill": key, title: tip }, label);
+    return (0, import_react55.createElement)("span", { key, className: "bt-tag bt-cap", "data-pill": key, title: tip }, label);
   }));
 }
 
-// src/client/left-bar-status.js
-var import_react53 = require("react");
-var STATUSES = Object.freeze(["working", "needs", "idle", "error", "off"]);
-var statusOr = (status) => STATUSES.includes(status) ? status : "idle";
-var SAID = {
-  working: () => t("Working"),
-  needs: () => t("Needs you"),
-  error: () => t("Error"),
-  idle: () => t("Idle"),
-  off: () => t("Not running"),
-  team: () => t("Team"),
-  projects: () => t("Spaces"),
-  add: () => t("Create or join a space"),
-  faces: () => t("This Bot as")
-};
-var WORDS = Object.freeze(Object.keys(SAID));
-var word = (name) => SAID[name]();
-var WORDED = Object.freeze(["needs", "off"]);
-var QUIET = Object.freeze(["idle"]);
-var FIRST = ["needs", "error", "working"];
-var worstStatus = (statuses) => FIRST.find((status) => statuses.includes(status)) ?? "idle";
-var OF_STATE = Object.freeze({
-  alert: "needs",
-  failed: "error",
-  thinking: "working",
-  searching: "working",
-  working: "working",
-  sending: "working",
-  orbit: "working",
-  waiting: "working"
-});
-var statusOfState = (state2) => OF_STATE[state2] ?? "idle";
-var STATE_OF = Object.freeze({ working: "working", needs: "alert", error: "failed" });
-var stateOfStatus = (status) => STATE_OF[status] ?? "idle";
-var ring = () => [(0, import_react53.createElement)("circle", { key: "ring", cx: 6, cy: 6, r: 3.75, fill: "none", stroke: "currentColor", strokeWidth: 1.5 })];
-var SHAPES2 = {
-  working: () => [
-    (0, import_react53.createElement)("circle", { key: "track", cx: 6, cy: 6, r: 4.5, fill: "none", stroke: "currentColor", strokeOpacity: 0.3, strokeWidth: 2 }),
-    (0, import_react53.createElement)("path", { key: "arc", className: "lb-mark-arc", d: "M6 1.5a4.5 4.5 0 0 1 0 9", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" })
-  ],
-  needs: () => [
-    (0, import_react53.createElement)("circle", { key: "disc", cx: 6, cy: 6, r: 6, fill: "currentColor" }),
-    (0, import_react53.createElement)("path", { key: "glyph", className: "lb-mark-glyph", d: "M6 3.4v2.6M6 9h.01", fill: "none", strokeWidth: 2, strokeLinecap: "round" })
-  ],
-  error: () => [
-    (0, import_react53.createElement)("rect", { key: "tile", x: 0.5, y: 0.5, width: 11, height: 11, rx: 3.4, fill: "currentColor" }),
-    (0, import_react53.createElement)("path", { key: "glyph", className: "lb-mark-glyph", d: "M4 4l4 4M8 4l-4 4", fill: "none", strokeWidth: 1.7, strokeLinecap: "round" })
-  ],
-  idle: ring,
-  off: ring
-};
-function StatusMark({ status, named = true }) {
-  const kind = statusOr(status);
-  const says = word(kind);
-  return (0, import_react53.createElement)("span", {
-    className: `lb-mark lb-mark-${kind}`,
-    "data-status": kind,
-    ...named ? { role: "img", "aria-label": says, title: says } : { "aria-hidden": true }
-  }, (0, import_react53.createElement)("svg", { viewBox: "0 0 12 12", "aria-hidden": true, focusable: "false" }, ...SHAPES2[kind]()));
-}
-function Status({ status, worded = WORDED, quiet: quiet2 = QUIET }) {
-  const kind = statusOr(status);
-  if (quiet2.includes(kind)) return null;
-  if (!worded.includes(kind)) return (0, import_react53.createElement)(StatusMark, { status: kind });
-  return (0, import_react53.createElement)("span", { className: `lb-st lb-st-${kind}`, "data-status": kind }, (0, import_react53.createElement)(StatusMark, { status: kind, named: false }), word(kind));
-}
-
 // src/client/left-bar-rail.js
-var import_react54 = require("react");
+var import_react56 = require("react");
 var projectLetter = (name) => ([...String(name ?? "").trim()][0] ?? "?").toUpperCase();
 var projectBadge = (project, currentId) => project.id !== currentId && statusOr(project.status) === "needs" ? "needs" : null;
 var paired = (project) => typeof project.icon?.light === "string" && typeof project.icon?.dark === "string";
-var drawn = (project) => (0, import_react54.isValidElement)(project.icon);
+var drawn = (project) => (0, import_react56.isValidElement)(project.icon);
 var pictured = (project) => typeof project.icon === "string" || paired(project) || drawn(project);
 function icon(project) {
   const sized = Number.isFinite(project.iconSize) && project.iconSize > 0 ? { style: { width: project.iconSize, height: project.iconSize } } : null;
-  const picture = (src, className) => (0, import_react54.createElement)("img", { key: className ?? "icon", className, src, alt: "", draggable: false, ...sized });
+  const picture = (src, className) => (0, import_react56.createElement)("img", { key: className ?? "icon", className, src, alt: "", draggable: false, ...sized });
   if (drawn(project)) return project.icon;
   if (typeof project.icon === "string") return picture(project.icon);
   if (paired(project)) return [picture(project.icon.light, "lb-on-light"), picture(project.icon.dark, "lb-on-dark")];
   return projectLetter(project.name);
 }
-var Plus = () => (0, import_react54.createElement)("svg", { width: 18, height: 18, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", "aria-hidden": true }, (0, import_react54.createElement)("path", { d: "M10 4.5v11M4.5 10h11" }));
+var Plus = () => (0, import_react56.createElement)("svg", { width: 18, height: 18, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", "aria-hidden": true }, (0, import_react56.createElement)("path", { d: "M10 4.5v11M4.5 10h11" }));
 function ProjectRail({ projects = [], currentId, onOpen, onAdd, label, addLabel, addExpanded }) {
-  return (0, import_react54.createElement)(
+  return (0, import_react56.createElement)(
     "nav",
     { className: "lb-rail", "aria-label": label ?? word("projects") },
     projects.map((project) => {
       const badge = projectBadge(project, currentId);
-      return (0, import_react54.createElement)("button", {
+      return (0, import_react56.createElement)("button", {
         key: project.id,
         type: "button",
         className: ["lb-tile", onOpen ? "" : "lb-tile-still", pictured(project) ? "" : "lb-tile-letter", badge ? "lb-tile-badged" : ""].filter(Boolean).join(" "),
@@ -22285,14 +22576,14 @@ function ProjectRail({ projects = [], currentId, onOpen, onAdd, label, addLabel,
         "aria-label": badge ? `${project.name}, ${word(badge)}` : project.name,
         title: project.name,
         onClick: onOpen ? () => onOpen(project) : void 0
-      }, (0, import_react54.createElement)("span", { className: "lb-tile-face" }, icon(project)), badge ? (0, import_react54.createElement)("span", { className: "lb-pip" }, (0, import_react54.createElement)(StatusMark, { status: badge, named: false })) : null);
+      }, (0, import_react56.createElement)("span", { className: "lb-tile-face" }, icon(project)), badge ? (0, import_react56.createElement)("span", { className: "lb-pip" }, (0, import_react56.createElement)(StatusMark, { status: badge, named: false })) : null);
     }),
-    (0, import_react54.createElement)("button", { type: "button", className: "lb-tile lb-tile-add", "aria-label": addLabel ?? word("add"), title: addLabel ?? word("add"), "aria-expanded": addExpanded, onClick: onAdd }, (0, import_react54.createElement)("span", { className: "lb-tile-face" }, (0, import_react54.createElement)(Plus)))
+    (0, import_react56.createElement)("button", { type: "button", className: "lb-tile lb-tile-add", "aria-label": addLabel ?? word("add"), title: addLabel ?? word("add"), "aria-expanded": addExpanded, onClick: onAdd }, (0, import_react56.createElement)("span", { className: "lb-tile-face" }, (0, import_react56.createElement)(Plus)))
   );
 }
 
 // src/client/left-bar-team.js
-var import_react55 = require("react");
+var import_react57 = require("react");
 var CHANNEL_STATUS = Object.freeze({ connected: "idle", "needs-pairing": "needs", disconnected: "off", error: "error" });
 var CHAT_STATUS = Object.freeze({ answering: "working", paused: "idle", "needs-someone": "needs", idle: "idle" });
 var channelStatusOf = (channel) => statusOr(CHANNEL_STATUS[channel?.status] ?? channel?.status);
@@ -22373,8 +22664,8 @@ function teamRows(team) {
 }
 var ART = { art: 28, duo: 19 };
 function useArtSizes(ref, skin, count) {
-  const [sizes, setSizes] = (0, import_react55.useState)(ART);
-  (0, import_react55.useLayoutEffect)(() => {
+  const [sizes, setSizes] = (0, import_react57.useState)(ART);
+  (0, import_react57.useLayoutEffect)(() => {
     const width = (selector) => Math.round(ref.current?.querySelector(selector)?.getBoundingClientRect().width ?? 0);
     const art = width(".lb-art") || ART.art;
     const duo = width(".lb-duo-a") || ART.duo;
@@ -22383,8 +22674,8 @@ function useArtSizes(ref, skin, count) {
   return sizes;
 }
 function useScrollEdges(ref, count) {
-  const [edges, setEdges] = (0, import_react55.useState)({ above: false, more: false });
-  (0, import_react55.useEffect)(() => {
+  const [edges, setEdges] = (0, import_react57.useState)({ above: false, more: false });
+  (0, import_react57.useEffect)(() => {
     const node = ref.current;
     if (!node) return void 0;
     const read = () => {
@@ -22417,23 +22708,23 @@ function bakedFit(bake) {
 function BotArt({ bot, size, state: state2 }) {
   const wants = petOf(bot, lookOf(bot), { live: true, size });
   const baked2 = useBaked(wants?.bake);
-  if (!wants?.bake) return (0, import_react55.createElement)(BotMark, { bot, size, state: state2, live: true });
-  if (!baked2) return (0, import_react55.createElement)(BotMark, { bot, size, state: state2 });
+  if (!wants?.bake) return (0, import_react57.createElement)(BotMark, { bot, size, state: state2, live: true });
+  if (!baked2) return (0, import_react57.createElement)(BotMark, { bot, size, state: state2 });
   const { fit: fit2, lift } = bakedFit(wants.bake);
   const margin2 = Math.round((size * fit2 - size) / 2);
   const drawn2 = size + 2 * margin2;
-  return (0, import_react55.createElement)(
+  return (0, import_react57.createElement)(
     "span",
     { className: "lb-art-pet", style: { left: -margin2, top: -margin2 - Math.round(drawn2 * lift) } },
-    (0, import_react55.createElement)(
+    (0, import_react57.createElement)(
       "span",
       { className: "bt-mark", "data-shape": "pet", "data-state": state2, "data-live": "", "aria-hidden": true, style: { width: drawn2, height: drawn2 } },
-      (0, import_react55.createElement)(PetSprite, { pet: baked2, size: drawn2, state: state2, live: true })
+      (0, import_react57.createElement)(PetSprite, { pet: baked2, size: drawn2, state: state2, live: true })
     )
   );
 }
-var drawBot = (bot, size, state2) => (0, import_react55.createElement)(BotArt, { bot, size, state: state2 });
-var Chevron = ({ open = false }) => (0, import_react55.createElement)("svg", { className: open ? "lb-chev lb-chev-open" : "lb-chev", width: 13, height: 13, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, (0, import_react55.createElement)("path", { d: "M7.5 4.5L13 10l-5.5 5.5" }));
+var drawBot = (bot, size, state2) => (0, import_react57.createElement)(BotArt, { bot, size, state: state2 });
+var Chevron = ({ open = false }) => (0, import_react57.createElement)("svg", { className: open ? "lb-chev lb-chev-open" : "lb-chev", width: 13, height: 13, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, (0, import_react57.createElement)("path", { d: "M7.5 4.5L13 10l-5.5 5.5" }));
 var classes = (...names) => names.filter(Boolean).join(" ");
 var nameIfCut = (event) => {
   const row = event.currentTarget;
@@ -22443,22 +22734,22 @@ var nameIfCut = (event) => {
 };
 var initialsOf = (name) => String(name ?? "?").replace(/[^\p{L}\p{N} ]/gu, "").trim().split(/\s+/).slice(0, 2).map((word2) => word2[0] ?? "").join("").toUpperCase() || "?";
 function ChatFace({ who }) {
-  return (0, import_react55.createElement)(
+  return (0, import_react57.createElement)(
     "span",
     { className: "lb-chat-face", "data-self": who?.self === true ? "" : void 0, "aria-hidden": true },
-    who?.photo ? (0, import_react55.createElement)("img", { src: who.photo, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: (event) => {
+    who?.photo ? (0, import_react57.createElement)("img", { src: who.photo, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: (event) => {
       event.currentTarget.remove();
     } }) : null,
-    (0, import_react55.createElement)("span", { className: "lb-chat-face-initials" }, initialsOf(who?.name))
+    (0, import_react57.createElement)("span", { className: "lb-chat-face-initials" }, initialsOf(who?.name))
   );
 }
 function BotBlock({ row, renderRow, folded, loads }) {
   const source = row.bot.channelSource ?? botChannelSource(row.bot);
-  return source ? (0, import_react55.createElement)(BotChannels, { key: source.id, row, source, renderRow, folded, loads }) : (0, import_react55.createElement)(BotRows, { row, channels: row.bot.channels ?? [], source: row.bot.channelSource, renderRow, folded });
+  return source ? (0, import_react57.createElement)(BotChannels, { key: source.id, row, source, renderRow, folded, loads }) : (0, import_react57.createElement)(BotRows, { row, channels: row.bot.channels ?? [], source: row.bot.channelSource, renderRow, folded });
 }
 function BotChannels({ row, source, renderRow, folded, loads }) {
   const channels = source.useChannels(row.id, { open: loads ? loads(row.id) === true : false }) ?? [];
-  return (0, import_react55.createElement)(BotRows, { row, channels, source, renderRow, folded });
+  return (0, import_react57.createElement)(BotRows, { row, channels, source, renderRow, folded });
 }
 function BotRows({ row, channels, source, renderRow, folded = NO_FOLDS }) {
   const bot = { ...row.bot, channels };
@@ -22466,13 +22757,13 @@ function BotRows({ row, channels, source, renderRow, folded = NO_FOLDS }) {
   return [renderRow(head), ...channelRows(bot, channels, folded).map(renderRow)];
 }
 function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label, skin, renderArt: renderArt2 = drawBot, renderGlyph, worded = WORDED, quiet: quiet2 = QUIET, folded = NO_FOLDS, loads }) {
-  const ref = (0, import_react55.useRef)(null);
+  const ref = (0, import_react57.useRef)(null);
   const rows2 = teamRows(team);
   const { art, duo } = useArtSizes(ref, skin, rows2.length);
   const edges = useScrollEdges(ref, rows2.length);
   const press = (row) => onOpen ? () => onOpen(row) : void 0;
-  const status = (row) => (0, import_react55.createElement)(Status, { status: row.status, worded, quiet: quiet2 });
-  const button = (row, className, extra, ...children) => (0, import_react55.createElement)("button", {
+  const status = (row) => (0, import_react57.createElement)(Status, { status: row.status, worded, quiet: quiet2 });
+  const button = (row, className, extra, ...children) => (0, import_react57.createElement)("button", {
     key: row.key,
     type: "button",
     className: classes("lb-row", className),
@@ -22488,16 +22779,16 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
     ...extra
   }, ...children);
   const draw = (row) => {
-    if (row.kind === "section") return (0, import_react55.createElement)("div", { key: row.key, className: classes("lb-sec", row.first && "lb-sec-first") }, row.label);
+    if (row.kind === "section") return (0, import_react57.createElement)("div", { key: row.key, className: classes("lb-sec", row.first && "lb-sec-first") }, row.label);
     if (row.kind === "bot") {
       const state2 = row.bot.state ?? stateOfStatus(statusOr(row.bot.status));
       return button(
         row,
         classes(row.unread && "lb-row-unread", row.status === "off" && "lb-row-off"),
         null,
-        (0, import_react55.createElement)("span", { className: "lb-art" }, renderArt2(row.bot, art, state2)),
-        (0, import_react55.createElement)("span", { className: "lb-name" }, row.name),
-        row.unread ? (0, import_react55.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
+        (0, import_react57.createElement)("span", { className: "lb-art" }, renderArt2(row.bot, art, state2)),
+        (0, import_react57.createElement)("span", { className: "lb-name" }, row.name),
+        row.unread ? (0, import_react57.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         renderEnd ? renderEnd(row) : null,
         status(row)
       );
@@ -22507,11 +22798,11 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
         row,
         classes("lb-row-channel", row.unread && "lb-row-unread"),
         { "aria-expanded": !row.folded },
-        (0, import_react55.createElement)("span", { className: "lb-glyph", "aria-hidden": true }, renderGlyph ? renderGlyph(row.channel) : null),
-        (0, import_react55.createElement)("span", { className: "lb-name" }, row.name),
-        row.unread ? (0, import_react55.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
+        (0, import_react57.createElement)("span", { className: "lb-glyph", "aria-hidden": true }, renderGlyph ? renderGlyph(row.channel) : null),
+        (0, import_react57.createElement)("span", { className: "lb-name" }, row.name),
+        row.unread ? (0, import_react57.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         status(row),
-        (0, import_react55.createElement)(Chevron, { open: !row.folded })
+        (0, import_react57.createElement)(Chevron, { open: !row.folded })
       );
     }
     if (row.kind === "chat") {
@@ -22519,10 +22810,10 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
         row,
         classes("lb-row-chat", row.status !== "idle" && "lb-row-hot", row.unread && "lb-row-unread"),
         null,
-        (0, import_react55.createElement)(ChatFace, { who: row.who }),
-        (0, import_react55.createElement)("span", { className: "lb-name" }, row.name),
-        row.unread ? (0, import_react55.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
-        row.unreadCount > 0 ? (0, import_react55.createElement)("span", { className: "lb-count", "aria-hidden": true }, row.unreadCount > 99 ? "99+" : String(row.unreadCount)) : null,
+        (0, import_react57.createElement)(ChatFace, { who: row.who }),
+        (0, import_react57.createElement)("span", { className: "lb-name" }, row.name),
+        row.unread ? (0, import_react57.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
+        row.unreadCount > 0 ? (0, import_react57.createElement)("span", { className: "lb-count", "aria-hidden": true }, row.unreadCount > 99 ? "99+" : String(row.unreadCount)) : null,
         status(row)
       );
     }
@@ -22531,26 +22822,26 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
       row,
       classes(row.lead && "lb-row-lead", row.unread && "lb-row-unread"),
       null,
-      second ? (0, import_react55.createElement)(
+      second ? (0, import_react57.createElement)(
         "span",
         { className: "lb-art lb-duo" },
-        (0, import_react55.createElement)("span", { className: "lb-duo-a" }, renderArt2(first, duo, "idle")),
-        (0, import_react55.createElement)("span", { className: "lb-duo-b" }, renderArt2(second, duo, "idle"))
-      ) : (0, import_react55.createElement)("span", { className: "lb-art" }, first ? renderArt2(first, art, "idle") : null),
-      (0, import_react55.createElement)("span", { className: "lb-name" }, row.name),
-      row.unread ? (0, import_react55.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
+        (0, import_react57.createElement)("span", { className: "lb-duo-a" }, renderArt2(first, duo, "idle")),
+        (0, import_react57.createElement)("span", { className: "lb-duo-b" }, renderArt2(second, duo, "idle"))
+      ) : (0, import_react57.createElement)("span", { className: "lb-art" }, first ? renderArt2(first, art, "idle") : null),
+      (0, import_react57.createElement)("span", { className: "lb-name" }, row.name),
+      row.unread ? (0, import_react57.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
       status(row)
     );
   };
   const renderRow = (row) => {
     const after = renderAfter ? renderAfter(row) : null;
-    return after ? (0, import_react55.createElement)(import_react55.Fragment, { key: row.key }, draw(row), after) : draw(row);
+    return after ? (0, import_react57.createElement)(import_react57.Fragment, { key: row.key }, draw(row), after) : draw(row);
   };
   const served = (row) => row.bot.channelSource ?? botChannelSource(row.bot) ?? (row.bot.channels?.length ? true : void 0);
-  return (0, import_react55.createElement)(
+  return (0, import_react57.createElement)(
     "div",
     { className: "lb-scroll", "data-above": edges.above ? "" : void 0, "data-more": edges.more ? "" : void 0 },
-    (0, import_react55.createElement)("div", { ref, className: "lb-rows", role: "group", "aria-label": label ?? word("team") }, rows2.map((row) => row.kind === "bot" && served(row) ? (0, import_react55.createElement)(BotBlock, { key: row.key, row, renderRow, folded, loads }) : renderRow(row)))
+    (0, import_react57.createElement)("div", { ref, className: "lb-rows", role: "group", "aria-label": label ?? word("team") }, rows2.map((row) => row.kind === "bot" && served(row) ? (0, import_react57.createElement)(BotBlock, { key: row.key, row, renderRow, folded, loads }) : renderRow(row)))
   );
 }
 
@@ -22714,7 +23005,7 @@ var MARKS2 = `
 body[data-bt-motion=quiet] .lb-mark-arc{animation:none}
 @media (prefers-reduced-motion:reduce){.lb-mark-arc{animation:none}}
 `;
-var FACES2 = `
+var FACES3 = `
 .lb-face{flex:none;display:inline-flex;align-items:stretch;gap:2px;height:var(--lb-face-h);padding:3px;box-sizing:border-box;border-radius:var(--lb-face-r);background:var(--bt-hover)}
 .lb-face-part{flex:none;display:inline-flex;align-items:center;gap:6px;margin:0;padding:0 12px 0 10px;border:0;border-radius:var(--st-r-seg,8px);background:none;color:color-mix(in srgb,var(--bt-ink) 72%,transparent);font:var(--bt-weight-label,500) 13px/1 var(--bt-head-font,var(--bt-font));white-space:nowrap;cursor:pointer}
 .lb-face-part:hover{color:var(--bt-ink)}
@@ -22793,7 +23084,7 @@ html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[a
 var LEFT_BAR_CSS = `
 ${tokenCss("body", LEFT_BAR_TOKENS)}
 ${tokenCss("[data-lb-skin=flat]", LEFT_BAR_SKINS.flat)}
-${tokenCss("[data-lb-skin=stage]", LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS2}${MARKS2}${FACES2}${HOST}`;
+${tokenCss("[data-lb-skin=stage]", LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS2}${MARKS2}${FACES3}${HOST}`;
 
 // src/client/self-update-flag.js
 var MOCK_FLAG = "mock-1540";
@@ -22804,29 +23095,29 @@ function mock1540On(location2 = globalThis.location) {
 }
 
 // src/client/left-bar.js
-var import_react56 = require("react");
+var import_react58 = require("react");
 var import_react_dom9 = require("react-dom");
 var CHANNEL_GLYPHS = {
   whatsapp: () => [
-    (0, import_react56.createElement)("path", { key: "bubble", d: "M12 3.8a8.2 8.2 0 0 0-7 12.5L3.8 20.2l4-1.1A8.2 8.2 0 1 0 12 3.8z" }),
-    (0, import_react56.createElement)("path", { key: "phone", d: "M9.3 8.4c-.3 0-.6.1-.8.4-.3.5-.5 1.1-.2 1.9.5 1.7 2.1 3.2 3.8 3.8.8.2 1.5.1 1.9-.2.3-.2.4-.5.4-.8l-.1-.4-1.4-.7-.8.9c-.9-.4-1.7-1.1-2.1-2l.9-.8-.7-1.5z" })
+    (0, import_react58.createElement)("path", { key: "bubble", d: "M12 3.8a8.2 8.2 0 0 0-7 12.5L3.8 20.2l4-1.1A8.2 8.2 0 1 0 12 3.8z" }),
+    (0, import_react58.createElement)("path", { key: "phone", d: "M9.3 8.4c-.3 0-.6.1-.8.4-.3.5-.5 1.1-.2 1.9.5 1.7 2.1 3.2 3.8 3.8.8.2 1.5.1 1.9-.2.3-.2.4-.5.4-.8l-.1-.4-1.4-.7-.8.9c-.9-.4-1.7-1.1-2.1-2l.9-.8-.7-1.5z" })
   ],
   telegram: () => [
-    (0, import_react56.createElement)("path", { key: "plane", d: "M20.5 4.5 3.5 11.2l5.2 1.9 2 6.1 3-3.3 4.4 3.3z" }),
-    (0, import_react56.createElement)("path", { key: "fold", d: "M8.7 13.1 16.8 8" })
+    (0, import_react58.createElement)("path", { key: "plane", d: "M20.5 4.5 3.5 11.2l5.2 1.9 2 6.1 3-3.3 4.4 3.3z" }),
+    (0, import_react58.createElement)("path", { key: "fold", d: "M8.7 13.1 16.8 8" })
   ],
-  slack: () => [(0, import_react56.createElement)("path", { key: "hash", d: "M9 4.5 7.5 19.5M16.5 4.5 15 19.5M4.5 9h15M3.5 15h15" })],
+  slack: () => [(0, import_react58.createElement)("path", { key: "hash", d: "M9 4.5 7.5 19.5M16.5 4.5 15 19.5M4.5 9h15M3.5 15h15" })],
   discord: () => [
-    (0, import_react56.createElement)("path", { key: "face", d: "M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 16V8A1.5 1.5 0 0 1 5 6.5z" }),
-    (0, import_react56.createElement)("path", { key: "eyes", d: "M9.5 10.5v1.5M14.5 10.5v1.5" }),
-    (0, import_react56.createElement)("path", { key: "smile", d: "M9.5 14.5c1.5 1 3.5 1 5 0" })
+    (0, import_react58.createElement)("path", { key: "face", d: "M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 16V8A1.5 1.5 0 0 1 5 6.5z" }),
+    (0, import_react58.createElement)("path", { key: "eyes", d: "M9.5 10.5v1.5M14.5 10.5v1.5" }),
+    (0, import_react58.createElement)("path", { key: "smile", d: "M9.5 14.5c1.5 1 3.5 1 5 0" })
   ],
-  chat: () => [(0, import_react56.createElement)("path", { key: "bubble", d: "M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8.5A1.5 1.5 0 0 1 19 17h-9l-4.5 3.5V17H5A1.5 1.5 0 0 1 3.5 15.5V7A1.5 1.5 0 0 1 5 5.5z" })]
+  chat: () => [(0, import_react58.createElement)("path", { key: "bubble", d: "M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8.5A1.5 1.5 0 0 1 19 17h-9l-4.5 3.5V17H5A1.5 1.5 0 0 1 3.5 15.5V7A1.5 1.5 0 0 1 5 5.5z" })]
 };
 function channelGlyph(channel) {
   const kind = String(channel?.kind ?? "");
   const shape = kind.startsWith("whatsapp") ? "whatsapp" : Object.hasOwn(CHANNEL_GLYPHS, kind) ? kind : "chat";
-  return (0, import_react56.createElement)("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, CHANNEL_GLYPHS[shape]());
+  return (0, import_react58.createElement)("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, CHANNEL_GLYPHS[shape]());
 }
 var LOCAL_SPACE = "local";
 var pack = (value) => JSON.stringify(value);
@@ -22839,8 +23130,8 @@ function botStatus({ question, pending, approval, failed, running: running2, awa
 var NARROW = 620;
 var NO_WORDS = Object.freeze([]);
 function useNarrow() {
-  const [narrow, setNarrow] = (0, import_react56.useState)(() => typeof window !== "undefined" && window.innerWidth < NARROW);
-  (0, import_react56.useEffect)(() => {
+  const [narrow, setNarrow] = (0, import_react58.useState)(() => typeof window !== "undefined" && window.innerWidth < NARROW);
+  (0, import_react58.useEffect)(() => {
     if (typeof window === "undefined" || typeof window.addEventListener !== "function") return void 0;
     const read = () => setNarrow(window.innerWidth < NARROW);
     read();
@@ -22934,27 +23225,27 @@ function teamOf({ roster, order, status, marked = {}, current, now = Date.now(),
   return { frontId: main?.id, bots, groups };
 }
 function SeatGlyph({ size }) {
-  return (0, import_react56.createElement)(
+  return (0, import_react58.createElement)(
     "svg",
     { width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": true, style: { color: "inherit", opacity: 0.62 } },
-    (0, import_react56.createElement)("rect", { x: 3, y: 4.5, width: 18, height: 15, rx: 4, fill: "none", stroke: "currentColor", strokeWidth: 1.6 }),
-    (0, import_react56.createElement)("path", { d: "M7.5 9.5l3 2.7-3 2.7M13 15h3.5", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" })
+    (0, import_react58.createElement)("rect", { x: 3, y: 4.5, width: 18, height: 15, rx: 4, fill: "none", stroke: "currentColor", strokeWidth: 1.6 }),
+    (0, import_react58.createElement)("path", { d: "M7.5 9.5l3 2.7-3 2.7M13 15h3.5", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" })
   );
 }
 var renderArt = (bot, size, state2) => {
-  if (bot.seat) return bot.artId ? drawBot({ id: bot.artId, name: bot.name }, size, state2) : (0, import_react56.createElement)(SeatGlyph, { size: Math.round(size * 0.8) });
-  if (bot.dsh === "tasks") return (0, import_react56.createElement)(TasksIcon, { size: Math.round(size * 0.72) });
-  if (bot.dsh === "agent") return (0, import_react56.createElement)(BotMark, { bot: { id: bot.id }, look: DSH_LOOK, size });
+  if (bot.seat) return bot.artId ? drawBot({ id: bot.artId, name: bot.name }, size, state2) : (0, import_react58.createElement)(SeatGlyph, { size: Math.round(size * 0.8) });
+  if (bot.dsh === "tasks") return (0, import_react58.createElement)(TasksIcon, { size: Math.round(size * 0.72) });
+  if (bot.dsh === "agent") return (0, import_react58.createElement)(BotMark, { bot: { id: bot.id }, look: DSH_LOOK, size });
   return drawBot(bot, size, state2);
 };
 function SpaceNote({ anchor, onClose }) {
-  const ref = (0, import_react56.useRef)(null);
-  const [place, setPlace] = (0, import_react56.useState)(null);
-  (0, import_react56.useLayoutEffect)(() => {
+  const ref = (0, import_react58.useRef)(null);
+  const [place, setPlace] = (0, import_react58.useState)(null);
+  (0, import_react58.useLayoutEffect)(() => {
     const box = anchor.getBoundingClientRect();
     setPlace({ left: Math.max(8, box.left), top: box.bottom + 8 });
   }, [anchor]);
-  (0, import_react56.useEffect)(() => {
+  (0, import_react58.useEffect)(() => {
     const away = (event) => {
       if (ref.current?.contains(event.target) || anchor.contains(event.target)) return;
       onClose();
@@ -22969,27 +23260,27 @@ function SpaceNote({ anchor, onClose }) {
       document.removeEventListener("keydown", key, true);
     };
   }, [anchor, onClose]);
-  return (0, import_react_dom9.createPortal)((0, import_react56.createElement)(
+  return (0, import_react_dom9.createPortal)((0, import_react58.createElement)(
     "div",
     { ref, className: "lb-note", role: "status", style: place ?? { visibility: "hidden" } },
     t("Creating or joining a space comes with Automagik Cloud. Nothing is made from here yet.")
   ), document.body);
 }
-function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
+function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown, sideSwitch, codeList }) {
   const mock = mock1540On();
   const shownId = useSessions((list) => list.ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const current = currentKey2(roster, shownId);
   const status = useTeamStatus({ roster, useSessionStatus, useWork });
   const team = teamOf({ roster, order, status, marked, current, seats });
   const currentId = current?.slice(current.indexOf(":") + 1);
-  (0, import_react56.useEffect)(() => {
+  (0, import_react58.useEffect)(() => {
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId);
   }, [currentId, marked?.[currentId]]);
   const narrow = useNarrow();
-  const [note, setNote] = (0, import_react56.useState)(null);
+  const [note, setNote] = (0, import_react58.useState)(null);
   useEntries(botChannels);
-  const [folded, setFolded] = (0, import_react56.useState)(() => /* @__PURE__ */ new Set());
-  const [wanted, setWanted] = (0, import_react56.useState)(() => /* @__PURE__ */ new Set());
+  const [folded, setFolded] = (0, import_react58.useState)(() => /* @__PURE__ */ new Set());
+  const [wanted, setWanted] = (0, import_react58.useState)(() => /* @__PURE__ */ new Set());
   const loads = (id) => current === `bot:${id}` || wanted.has(id);
   const fold = (row, next) => {
     const key = `${row.botId}/${row.id}`;
@@ -23002,19 +23293,19 @@ function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionSta
     if (!next) setWanted((before) => before.has(row.botId) ? before : new Set(before).add(row.botId));
   };
   const press = (row) => row.kind === "channel" ? fold(row, !row.folded) : open(row);
-  const spaces = [{ id: LOCAL_SPACE, name: t("This computer"), icon: (0, import_react56.createElement)(OmniMark, { size: 26 }) }];
-  return (0, import_react56.createElement)(
+  const spaces = [{ id: LOCAL_SPACE, name: t("This computer"), icon: (0, import_react58.createElement)(OmniMark, { size: 26 }) }];
+  return (0, import_react58.createElement)(
     "div",
     { className: "bt-side lb-host", onKeyDown },
-    (0, import_react56.createElement)(
+    (0, import_react58.createElement)(
       "div",
       { className: "lb-bar", "data-lb-host": "", "data-lb-skin": LEFT_BAR_SKIN },
       // The rail's column: the spaces, and at its foot the button that folds the bar (where the
       // shell shows no toggle of its own, as on the web: sidebar.js's rules decide).
-      (0, import_react56.createElement)(
+      (0, import_react58.createElement)(
         "div",
         { className: "lb-railcol" },
-        (0, import_react56.createElement)(ProjectRail, {
+        (0, import_react58.createElement)(ProjectRail, {
           projects: spaces,
           currentId: LOCAL_SPACE,
           addLabel: t("Create or join a space"),
@@ -23023,235 +23314,28 @@ function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionSta
         }),
         collapse ?? null
       ),
-      (0, import_react56.createElement)(
+      (0, import_react58.createElement)(
         "div",
         { className: "lb-list" },
-        (0, import_react56.createElement)(
+        (0, import_react58.createElement)(
           "div",
           { className: "lb-head" },
           // Without the flag: the wordmark and the tools, exactly where dev draws them. With it:
           // Search and New only, and the tools move to the foot below.
-          mock ? null : (0, import_react56.createElement)("span", { className: "lb-brand" }, (0, import_react56.createElement)(Wordmark, { height: 22 })),
+          mock ? null : (0, import_react58.createElement)("span", { className: "lb-brand" }, (0, import_react58.createElement)(Wordmark, { height: 22 })),
           mock ? null : tools,
-          (0, import_react56.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("Search"), title: t("Search"), onClick: () => actions.openPalette() }, (0, import_react56.createElement)(SearchIcon)),
-          (0, import_react56.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react56.createElement)(PlusIcon))
+          (0, import_react58.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("Search"), title: t("Search"), onClick: () => actions.openPalette() }, (0, import_react58.createElement)(SearchIcon)),
+          (0, import_react58.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react58.createElement)(PlusIcon))
         ),
+        sideSwitch ?? null,
         notice,
-        team.bots.length === 0 && empty ? empty : (0, import_react56.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : void 0, label: t("Bot list") }),
-        mock ? (0, import_react56.createElement)("div", { className: "lb-foot" }, tools, foot ?? null) : foot ? (0, import_react56.createElement)("div", { className: "lb-foot" }, foot) : null
+        codeList ?? (team.bots.length === 0 && empty ? empty : (0, import_react58.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : void 0, label: t("Bot list") })),
+        mock ? (0, import_react58.createElement)("div", { className: "lb-foot" }, tools, foot ?? null) : foot ? (0, import_react58.createElement)("div", { className: "lb-foot" }, foot) : null
       )
     ),
-    note ? (0, import_react56.createElement)(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null
+    note ? (0, import_react58.createElement)(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null
   );
 }
-
-// src/client/left-bar-faces.js
-var import_react57 = require("react");
-var FACES3 = Object.freeze(["chat", "terminal"]);
-var faceOr = (face) => FACES3.includes(face) ? face : "chat";
-var SAID2 = { chat: () => t("Chat"), terminal: () => t("Terminal") };
-var faceWord = (face) => SAID2[faceOr(face)]();
-var PATHS = {
-  chat: ["M4.5 4.5h11A1.5 1.5 0 0 1 17 6v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 2.8V14h-1A1.5 1.5 0 0 1 3 12.5V6a1.5 1.5 0 0 1 1.5-1.5z"],
-  terminal: ["M5 6.5 9 10l-4 3.5", "M10.5 14H15"]
-};
-var Glyph = ({ face }) => (0, import_react57.createElement)(
-  "svg",
-  { className: "lb-face-glyph", viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, focusable: "false" },
-  ...PATHS[face].map((d) => (0, import_react57.createElement)("path", { key: d, d }))
-);
-function FaceSwitch({ face, onFace, label, unavailable = {} }) {
-  const open = faceOr(face);
-  return (0, import_react57.createElement)(
-    "div",
-    { className: "lb-face", role: "group", "aria-label": label ?? word("faces") },
-    ...FACES3.map((name) => {
-      const why = name === open ? void 0 : unavailable[name];
-      return (0, import_react57.createElement)("button", {
-        key: name,
-        type: "button",
-        className: "lb-face-part",
-        "data-face": name,
-        "aria-pressed": name === open,
-        "aria-disabled": why ? "true" : void 0,
-        title: why,
-        "aria-description": why,
-        onClick: onFace && name !== open && !why ? () => onFace(name) : void 0
-      }, (0, import_react57.createElement)(Glyph, { face: name }), faceWord(name));
-    })
-  );
-}
-
-// src/client/code-side-model.js
-function botRowOf(tree, botId) {
-  for (const project of tree?.projects ?? []) {
-    const bot = project.bots.find((candidate) => candidate.id === botId);
-    if (bot) return bot;
-  }
-  return null;
-}
-function codeHasPane(tree, botId) {
-  const bot = botRowOf(tree, botId);
-  return Boolean(bot && (bot.terminal || bot.workers.length > 0));
-}
-function paneFor(tree, botId) {
-  const bot = botRowOf(tree, botId);
-  if (!bot) return null;
-  if (bot.terminal) return { botId: bot.id, worker: null };
-  if (bot.workers.length > 0) return { botId: bot.id, worker: bot.workers[0].terminal };
-  return null;
-}
-function stillThere(selected, tree) {
-  if (!selected || !tree?.projects) return null;
-  const bot = botRowOf(tree, selected.botId);
-  if (!bot) return null;
-  if (selected.worker === null || selected.worker === void 0) return bot.terminal ? { botId: bot.id, worker: null } : null;
-  return bot.workers.some((worker) => worker.terminal === selected.worker) ? { botId: bot.id, worker: selected.worker } : null;
-}
-var STATUS_WORDS = Object.freeze(["working", "needs-you", "idle", "not-running"]);
-var statusKey = (status) => STATUS_WORDS.includes(status) ? status : "idle";
-
-// src/client/code-side-lazy.js
-var PANE_CHUNK = "./client.pane.js";
-var paneLoading = null;
-function loadPane() {
-  const load = globalThis.__dshChunk;
-  if (typeof load !== "function") return Promise.reject(new Error("the client chunk loader is missing"));
-  paneLoading ??= Promise.resolve(load(PANE_CHUNK)).catch((error) => {
-    paneLoading = null;
-    throw error;
-  });
-  return paneLoading;
-}
-
-// src/client/code-side.js
-var import_react58 = require("react");
-var NO_STATE2 = { face: "chat", botId: null, seat: false, tree: null, loading: false, error: null, selected: null, loadedAt: 0 };
-var listeners2 = /* @__PURE__ */ new Set();
-var state = NO_STATE2;
-var set = (patch) => {
-  state = { ...state, ...patch };
-  for (const listener of listeners2) listener();
-};
-var snapshot = () => state;
-var storeSubscribe = (listener) => {
-  listeners2.add(listener);
-  return () => listeners2.delete(listener);
-};
-var TREE_FRESH_MS = 2e4;
-var reading = null;
-async function loadTree({ fresh = false } = {}) {
-  if (!fresh && state.tree && Date.now() - state.loadedAt < TREE_FRESH_MS) return state.tree;
-  if (reading) return reading;
-  set({ loading: true, error: null });
-  reading = Promise.resolve().then(() => call("code-tree")).then((tree) => {
-    set({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), selected: stillThere(state.selected, tree) });
-    return tree;
-  }, (error) => {
-    set({ loading: false, error: error?.code ?? "unavailable", tree: null, loadedAt: Date.now() });
-    return null;
-  }).finally(() => {
-    reading = null;
-  });
-  return reading;
-}
-async function openTerminal(botId, { seat = false } = {}) {
-  set({ face: "terminal", botId, seat, selected: state.selected?.botId === botId ? state.selected : null });
-  const tree = await loadTree({ fresh: true });
-  if (!tree || state.botId !== botId || state.face !== "terminal" || state.seat !== seat) return;
-  const pane = paneFor(tree, botId);
-  if (pane) set({ selected: pane });
-}
-function closeTerminal() {
-  set({ face: "chat", botId: null, seat: false, selected: null });
-}
-function selectPane(selected) {
-  set({ selected });
-}
-function useCodeFace(botId, { seat = false } = {}) {
-  const current = (0, import_react58.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
-  return {
-    face: current.face === "terminal" && current.botId === botId && current.seat === seat ? "terminal" : "chat",
-    // Whether a Bot has a pane is the renderer's own answer, read when Terminal is pressed:
-    // the switch never fetches the tree or the chunk on its own.
-    onFace: (face) => {
-      if (face === "terminal") void openTerminal(botId, { seat });
-      else closeTerminal();
-    }
-  };
-}
-function BotFaceSwitch({ bot }) {
-  const code = useCodeFace(bot?.id);
-  return (0, import_react58.createElement)(FaceSwitch, { face: code.face, onFace: code.onFace });
-}
-function CodeBody() {
-  const current = (0, import_react58.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
-  const desktopOnly = current.tree?.reason === "desktop-only";
-  const shouldLoadPane = current.loadedAt !== 0 && !desktopOnly;
-  const [pane, setPane] = (0, import_react58.useState)(null);
-  const [failed, setFailed] = (0, import_react58.useState)(false);
-  (0, import_react58.useEffect)(() => {
-    if (!shouldLoadPane) return;
-    let live = true;
-    loadPane().then((module2) => {
-      if (live) setPane(module2);
-    }, () => {
-      if (live) setFailed(true);
-    });
-    return () => {
-      live = false;
-    };
-  }, [shouldLoadPane]);
-  if (desktopOnly) return (0, import_react58.createElement)("div", { className: "cs-host" }, (0, import_react58.createElement)("p", { className: "cs-empty" }, t("Terminals show in the Automagik desktop app.")));
-  if (!shouldLoadPane) return null;
-  if (pane) return (0, import_react58.createElement)(pane.CodeBody, { code: codeApi });
-  return failed ? (0, import_react58.createElement)("div", { className: "cs-host" }, (0, import_react58.createElement)("p", { className: "cs-empty" }, t("The Code side could not load here."))) : null;
-}
-function mainViewId2(sessions) {
-  const list = sessions?.list?.getSnapshot?.();
-  return Object.values(list?.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? null;
-}
-var codeApi = { subscribe: storeSubscribe, snapshot, loadTree, selectPane };
-function installCodeSide(ctx) {
-  let off = null;
-  let openedFor = null;
-  let listOff = null;
-  const watchView = () => {
-    if (listOff) {
-      listOff();
-      listOff = null;
-    }
-    openedFor = mainViewId2(ctx.sessions);
-    listOff = ctx.sessions?.list?.subscribe?.(() => {
-      if (state.face !== "terminal" || openedFor === null) return;
-      if (mainViewId2(ctx.sessions) !== openedFor) closeTerminal();
-    }) ?? null;
-  };
-  const sync = () => {
-    const wanted = state.face === "terminal" && !state.seat;
-    if (wanted && !off) {
-      watchView();
-      off = ctx.slots.inject("conversation.session", () => ctx.slots.register({ name: "conversation.session", priority: -100 }, CodeBody));
-    } else if (!wanted && off) {
-      off();
-      off = null;
-      listOff?.();
-      listOff = null;
-      openedFor = null;
-    }
-  };
-  const unsubscribe = storeSubscribe(sync);
-  sync();
-  return () => {
-    unsubscribe();
-    listOff?.();
-    listOff = null;
-    off?.();
-    off = null;
-    if (state.face === "terminal") set({ face: "chat", botId: null, seat: false, selected: null });
-  };
-}
-var codeStore = { subscribe: storeSubscribe, snapshot, loadTree, openTerminal, closeTerminal, selectPane, reset: () => set({ ...NO_STATE2 }) };
 
 // src/client/seat-chat.js
 var import_react59 = require("react");
@@ -24160,6 +24244,7 @@ function TeamSidebar(props) {
     closing.current = false;
   });
   const roster = useRoster((value) => value);
+  const code = useCodeSide();
   const openSeat = (0, import_react61.useSyncExternalStore)(seatChatView.subscribe, seatChatView.getSnapshot).seat;
   const seats = useSeats(actions.seatList, wide || openSeat !== null);
   (0, import_react61.useEffect)(() => {
@@ -24199,12 +24284,29 @@ function TeamSidebar(props) {
     }
     return result;
   };
+  const team = () => {
+    if (code.side === "team") return;
+    actions.closeCodePane?.();
+    setCodeSide("team");
+  };
   const rowActions = {
     ...actions,
-    openSession: (id) => navigate(actions.openSession, id),
-    openAgent: (id) => navigate(actions.openAgent, id),
-    openAgentSession: (id) => navigate(actions.openAgentSession, id),
-    newAgentSession: (id) => navigate(actions.newAgentSession, id)
+    openSession: (id) => {
+      team();
+      return navigate(actions.openSession, id);
+    },
+    openAgent: (id) => {
+      team();
+      return navigate(actions.openAgent, id);
+    },
+    openAgentSession: (id) => {
+      team();
+      return navigate(actions.openAgentSession, id);
+    },
+    newAgentSession: (id) => {
+      team();
+      return navigate(actions.newAgentSession, id);
+    }
   };
   const rowProps = { roster, actions: rowActions, useSessions, useUi, useSessionStatus: props.useSessionStatus, useSessionRetainInfo: props.useSessionRetainInfo, useActivity: props.useActivity, useWork: props.useWork, wide };
   const typeToSearch = (event) => {
@@ -24217,7 +24319,14 @@ function TeamSidebar(props) {
   const notice = roster.readOnly ? (0, import_react61.createElement)("div", { className: "bt-hint bt-read-only", role: "status" }, hostText(roster.readOnly)) : null;
   if (wide) {
     const byId = (id) => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find((agent) => agent.id === id);
-    const open = (row) => row.bot?.seat ? rowActions.openSeat(row.bot) : row.kind === "chat" ? row.source?.open?.(row.id) : row.kind === "group" ? rowActions.openSession(row.id) : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === "bot" ? rowActions.openSession(row.id) : void 0;
+    const open = (row) => {
+      team();
+      if (row.bot?.seat) return rowActions.openSeat(row.bot);
+      if (row.kind === "chat") return row.source?.open?.(row.id);
+      if (row.kind === "group") return rowActions.openSession(row.id);
+      if (row.bot?.dsh) return rowActions.openAgent(row.id);
+      if (row.kind === "bot") return rowActions.openSession(row.id);
+    };
     const menu = (row, event) => {
       if (row.bot?.seat) return;
       const kind = row.kind === "group" ? "room" : row.bot?.dsh ? "agent" : "bot";
@@ -24247,6 +24356,8 @@ function TeamSidebar(props) {
       renderAfter,
       notice,
       onKeyDown: typeToSearch,
+      sideSwitch: (0, import_react61.createElement)(CodeSideSwitch, { current: code, onSelect: (side) => side === "team" ? team() : setCodeSide(side) }),
+      codeList: code.side === "code" ? (0, import_react61.createElement)(CodeBarList, { current: code, onSelect: (selected) => navigate(actions.openCodePane, selected) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {
         const bot = row.bot.dsh ? void 0 : roster.byId[row.id];
@@ -25253,9 +25364,7 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
     { className: native ? "bt-native-head" : "bt-head" },
     showGoal ? (0, import_react63.createElement)(GoalIsland, { room: room2, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     (0, import_react63.createElement)("span", { className: "bt-sr", role: "status" }, memoryNotice ? t("Memory updated") : ""),
-    // The open Bot's two faces (left-bar-faces.js): Chat, and the herdr-core terminal the Code
-    // side watches (code-side.js). A Bot without a pane keeps Terminal on screen, says why it
-    // cannot open yet, and opens nothing; no shell is started.
+    // A seat can have a Terminal face. A DSH conversation stays in Chat.
     bot && !away && !native ? (0, import_react63.createElement)(BotFaceSwitch, { bot }) : null,
     narrow ? more : (0, import_react63.createElement)(import_react63.Fragment, null, headButtons, liveButtons, details),
     native && bot ? (0, import_react63.createElement)("button", { type: "button", className: "bt-head-details", "aria-label": t("Bot settings"), title: t("Bot settings"), onClick: () => actions.openSettings("bots", bot.id) }, (0, import_react63.createElement)(InfoIcon)) : null,
@@ -40424,6 +40533,7 @@ function apply(ctx) {
     }
   };
   let cliLogin;
+  const codePanel = codePanelNavigation(ctx.layout);
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession: (id) => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
     learningAnswer: (id, approve) => after(call("learning-answer", { id, approve })),
@@ -40535,6 +40645,14 @@ function apply(ctx) {
         noteClientError("seat-chat", error);
       }
     },
+    openCodePane: (selected) => {
+      try {
+        codePanel.open(selected);
+      } catch (error) {
+        noteClientError("code-side", error);
+      }
+    },
+    closeCodePane: codePanel.close,
     seatList: () => call("seat-chat-list"),
     selectPanel: (id) => {
       ctx.layout.selectPanel(id);
@@ -41073,6 +41191,11 @@ function apply(ctx) {
       key: SEAT_CHAT_PANEL,
       inject: () => ({ onBack: () => ctx.layout.selectPanel(null) })
     }, SeatChatPanel)),
+    () => ctx.slots.inject("main", () => ctx.slots.register({
+      name: "main",
+      key: CODE_PANEL,
+      inject: () => ({ onBack: codePanel.close })
+    }, CodeMainPanel)),
     () => shadow("sidebar.brand.mark", { priority: BOT_PRIORITY }, BrandMark),
     () => shadow("sidebar.brand.name", { priority: BOT_PRIORITY }, BrandName),
     // The desktop app's own update, above the account and Channels (desktop-update.js).
