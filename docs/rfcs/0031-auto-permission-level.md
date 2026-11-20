@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; owed: question 5's capture of Claude Code's `auto` mode, and the amendment's unmet dependency on Codex; a proposed amendment (2026-11-19, #870), Auto on Codex under the Workspace profile, awaits the owner; amends RFC 0003 with its delivery 2) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; owed: question 5's capture of Claude Code's `auto` mode, and the amendment's unmet dependency on Codex; the 2026-11-19 amendment (#870, Auto on Codex under the Workspace profile) approved by the owner's delegate on 2026-11-20, A1 and A2 answered with its recommendations, owes delivery 3 (the wording) and delivery 4 (waits for codex-acp); amends RFC 0003 with its delivery 2) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-11 |
@@ -395,13 +395,14 @@ answer, the answer says so.
 6. **Question 6:** keep both names, "Auto" and DSH's "Auto review"; they are different levels and
    the second is marked Experimental.
 
-## Proposed amendment (2026-11-19), awaiting the owner
+## Amendment (2026-11-19, #870): Auto under Codex's profile modes
 
-Proposed for #870; not accepted. Nothing in this section is in force, and nothing merged changes
-with it, until the owner accepts it. It replaces, once accepted, delivery 2's "a Codex Bot at Auto
-sends its prompt in `agent`" and the Summary's "Automagik asks Codex for its `agent` mode": Auto on
-Codex would run under the same narrow permission profile as Workspace, with Codex's reviewer
-deciding at the steps that leave it. It does not touch the unmet dependency above (a list of ours
+Proposed for #870 on 2026-11-19 and approved by the owner's delegate on 2026-11-20, with the
+recommended answer to each of its questions (see its Answers). It replaces delivery 2's "a Codex
+Bot at Auto sends its prompt in `agent`" and the Summary's "Automagik asks Codex for its `agent`
+mode": Auto on Codex runs under the same narrow permission profile as Workspace, with Codex's
+reviewer deciding at the steps that leave it, once delivery 4 lands. Until then Auto on Codex
+keeps `agent`, and delivery 3 says so in the question before saving. It does not touch the unmet dependency above (a list of ours
 before Codex's reviewer): that stays owed either way.
 
 ### The gap
@@ -474,7 +475,17 @@ Alternatives:
   today on those computers, removes no level anyone has, and says the gap plainly; (b) is safer
   but turns Auto off for every Windows Bot.
 
-### Deliveries (once accepted)
+### Answers (2026-11-20)
+
+The owner's delegate approved this amendment on 2026-11-20 and answered both questions with its
+recommendations; the questions above stay as they were asked.
+
+- **A1:** A, a reviewer per mode from codex-acp, with B's wording shipped now (delivery 3) so the
+  question before saving states today's gap until delivery 4 lands.
+- **A2:** (a). Where the auto-reviewed profile mode is not offered, Auto keeps `agent`, and the
+  question and the diagnostics say reads are not narrowed on that computer.
+
+### Deliveries
 
 3. **The wording now (B's part of A1).** Lane: plugin. The question before saving and the acp-dsh
    README say that under Auto, Codex reads files outside the Bot's folder without asking, until
