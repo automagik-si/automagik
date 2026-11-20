@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; merged: delivery 4's selector (#1025, issue #1016), delivery 1's desktop half (#1391), delivery 2's typing (#1394); delivery 0 waits only on the owner's approval of RFC 0022's revision; owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; merged: delivery 4's selector (#1025, issue #1016), delivery 1's desktop half (#1391), delivery 2's typing (#1394); delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) only if the preload must change; the server image; herdr (3.N.P) for the pack's fix-only period, the `am mailbox send` verb (the pack's CLI is its source; `am/` gets it as a byte copy) and the retirement notice; am (3.N.P) for those copies |
 | Created | 2026-11-10 |
 | Replaces | [RFC 0013](0013-work-code-switch.md)'s D27 ("Code is the real herdr-app window, glue only") |
-| Builds on | [RFC 0022](0022-desktop-chat-view.md)'s 2026-11-10 revision (merged in #1009, still Proposed there: Team and Code, the left bar, humanized bots); [RFC 0028](0028-code-workers.md) (merged in #1008: Code workers); [RFC 0023](0023-dsh-upstream-agent-context-and-chat-rows.md) (the session terminal field) |
+| Builds on | [RFC 0022](0022-desktop-chat-view.md)'s 2026-11-10 revision (merged in #1009, approved 2026-11-19: Team and Code, the left bar, humanized bots); [RFC 0028](0028-code-workers.md) (merged in #1008: Code workers); [RFC 0023](0023-dsh-upstream-agent-context-and-chat-rows.md) (the session terminal field) |
 
 ## Summary
 
@@ -425,9 +425,9 @@ Herdr install.
 0. **Owner's answers** to Q1-Q3 (the conflicts with #1009) and RFC 0022's revision approved.
    *Acceptance:* this RFC's Status records them; no build on the Code track before. Delivery 4
    is not held by it.
-   *Status, 2026-11-19:* Q1-Q3 are answered (Answers). RFC 0022's revision is merged (#1009) but
-   its own Status still says the owner has not read it, so this delivery stays open until the
-   owner approves it. Deliveries 1 and 2 shipped parts before it (#1391, #1394).
+   *Status, 2026-11-19:* met. Q1-Q3 are answered (Answers), and the owner's delegate approved
+   RFC 0022's revision the same day (its Answers). Deliveries 1 and 2 shipped parts before it
+   (#1391, #1394).
 1. **The flip, end to end, on this computer** (plugin; after RFC 0022's delivery B, the bar). The
    first slice. In Code mode the tree lists this computer's projects, bots and workers from the
    registry and the two ledgers; a click renders that terminal live in the right pane, view-only;
