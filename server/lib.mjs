@@ -5,6 +5,7 @@ import {
   accessSync,
   constants,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -176,7 +177,11 @@ function readVersion(source) {
 export function pinStore(profileDir, dshHome) {
   const store = join(dshHome, 'pnpm-store')
   const workspace = join(profileDir, 'pnpm-workspace.yaml')
-  const text = existsSync(workspace) ? readFileSync(workspace, 'utf8') : ''
+  const stat = lstatSync(workspace, { throwIfNoEntry: false })
+  if (stat && !stat.isFile()) {
+    throw Object.assign(new Error('Image profile pnpm-workspace.yaml must be a regular file'), { code: 'UNSUPPORTED_PROFILE_WORKSPACE' })
+  }
+  const text = stat ? readFileSync(workspace, 'utf8') : ''
   const line = `storeDir: ${JSON.stringify(store)}`
   const next = /^storeDir:.*$/m.test(text) ? text.replace(/^storeDir:.*$/m, line) : `${text.replace(/\s*$/, '')}${text.trim() ? '\n' : ''}${line}\n`
   if (next !== text) writeFileSync(workspace, next)

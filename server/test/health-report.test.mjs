@@ -104,3 +104,160 @@ test('missing or mixed plugins in a canonical legacy seed never receive an owner
     assert.equal(state.healthy,false,broken)
   }
 })
+
+import { EventEmitter } from 'node:events'
+import { createCarrier } from '../../apps/multiuser-dsh/src/carrier.js'
+import { reservationOf } from '../../apps/multiuser-dsh/src/reservation.js'
+import { followImage } from '../profile-follow.mjs'
+import { readProfileState } from '../gate-view.mjs'
+
+function mockHealthHttp(t, replies) {
+  t.mock.method(http, 'get', (options, callback) => {
+    const request = new EventEmitter()
+    Promise.resolve(replies(options)).then(([statusCode, body]) => {
+      const response = Object.assign(new EventEmitter(), { statusCode })
+      callback(response)
+      if (body) response.emit('data', Buffer.from(body))
+      response.emit('end')
+    }, error => request.emit('error', error))
+    return request
+  })
+}
+
+test('mode on requires all four empty probe responses and leaves the off-mode report unchanged', async t => {
+  const f = fixture(t)
+  const caller = '/_automagik/caller/api/__automagik_probe', reservation = '/_automagik/__automagik_probe'
+  const paths = [], replies = {
+    '/': [401],
+    [caller]: [401],
+    [reservation]: [404],
+  }
+  let watermarkStatus = 401, originReply = [403]
+  mockHealthHttp(t, options => {
+    paths.push(options.path)
+    assert.equal(options.host, '127.0.0.1')
+    assert.equal(options.agent, false)
+    assert.equal(options.headers.host, `127.0.0.1:${options.port}`)
+    assert.equal(options.headers.connection, 'keep-alive')
+    if (Object.hasOwn(options.headers, 'x-automagik-caller')) {
+      assert.equal(options.path, caller)
+      assert.equal(options.headers['x-automagik-caller'], 'invalid-probe')
+      return [watermarkStatus]
+    }
+    if (Object.hasOwn(options.headers, 'origin')) {
+      assert.equal(options.path, caller)
+      assert.equal(options.headers.origin, 'http://automagik-probe.invalid')
+      return originReply
+    }
+    return replies[options.path]
+  })
+  const off = await report(f, 3081)
+  assert.equal(off.healthy, true)
+  assert.equal(Object.hasOwn(off, 'multiuser'), false)
+  assert.deepEqual(paths, ['/'])
+  const on = () => report(f, 3081, { AUTOMAGIK_MULTIUSER: '1' })
+  const good = await on()
+  assert.equal(good.healthy, true)
+  assert.deepEqual(good.multiuser, { caller: true, reservation: true, healthy: true })
+  assert.deepEqual(paths.slice(1), ['/', caller, caller, reservation, caller])
+  replies[caller] = [401, 'ordinary fallback']
+  assert.deepEqual((await on()).multiuser, { caller: false, reservation: true, healthy: false })
+  replies[caller] = [401]
+  watermarkStatus = 503
+  assert.deepEqual((await on()).multiuser, { caller: false, reservation: true, healthy: false })
+  watermarkStatus = 401
+  originReply = [403, 'ordinary fallback']
+  assert.deepEqual((await on()).multiuser, { caller: false, reservation: true, healthy: false })
+  originReply = [403]
+  replies[reservation] = [404, 'ordinary fallback']
+  assert.deepEqual((await on()).multiuser, { caller: true, reservation: false, healthy: false })
+  replies[reservation] = [503]
+  const missing = await on()
+  assert.deepEqual(missing.multiuser, { caller: true, reservation: false, healthy: false })
+  assert.equal(missing.fence.healthy, true)
+  assert.equal(missing.healthy, false)
+})
+
+test('gate multiuser health probes the DSH reservation despite two healthy root fences', async t => {
+  const f = fixture(t)
+  mockHealthHttp(t, ({ path, port, headers }) => {
+    if (path === '/') return [401]
+    assert.equal(port, 3081)
+    if (headers.origin) return [403]
+    return path.startsWith('/_automagik/caller/') ? [401] : [503]
+  })
+  await report(f, 3081)
+  const result = await report(f, 3081, { AUTOMAGIK_GATE_ENABLED: '1', AUTOMAGIK_GATE_MULTIUSER: '1' })
+  assert.equal(result.dsh.status, 401)
+  assert.equal(result.gate.status, 401)
+  assert.equal(result.fence.healthy, true)
+  assert.deepEqual(result.multiuser, { caller: true, reservation: false, healthy: false })
+  assert.equal(result.healthy, false)
+})
+
+test('gate mode-on health distinguishes DSH mode with the real carrier and reservation handlers', async t => {
+  const f = fixture(t), port = 3081
+  const env = { AUTOMAGIK_GATE_ENABLED: '1', AUTOMAGIK_GATE_MULTIUSER: '1', AUTOMAGIK_CALLER_KEYS: '/caller-keys/caller-keys.json' }
+  let webserver, watermarkChecks = 0
+  const setDshMode = multiuser => {
+    webserver = { match: () => undefined, upgrades: new Map() }
+    const owner = reservationOf(webserver).claim({})
+    owner.register({ kind: 'prefix', path: '/_automagik/caller', handler: createCarrier({
+      connection: { createSharedFetchHandler() {} }, multiuser, keysConfigured: Boolean(env.AUTOMAGIK_CALLER_KEYS),
+      expectedAuthority: () => `127.0.0.1:${port}`,
+      nonces: { verificationSecond(second) { watermarkChecks++; return second } },
+    }) })
+  }
+  const results = []
+  mockHealthHttp(t, async ({ path, headers }) => {
+    if (path === '/') return [401]
+    let status, body
+    const req = { method: 'GET', url: path, rawHeaders: Object.entries(headers).flat() }
+    const res = { writeHead(code) { status = code; return this }, end(bytes) { body = bytes } }
+    await webserver.match(path).handler(req, res)
+    results.push([status, body])
+    return [status, body]
+  })
+  await report(f, port)
+  setDshMode(false)
+  const off = await report(f, port, env)
+  assert.equal(off.fence.healthy, true)
+  assert.deepEqual(off.multiuser, { caller: false, reservation: true, healthy: false })
+  assert.equal(off.healthy, false)
+  assert.deepEqual(results.splice(0), [[401, undefined], [401, undefined], [404, undefined], [401, undefined]])
+  assert.equal(watermarkChecks, 0)
+
+  setDshMode(true)
+  const on = await report(f, port, env)
+  assert.deepEqual(on.multiuser, { caller: true, reservation: true, healthy: true })
+  assert.equal(on.healthy, true)
+  assert.deepEqual(results, [[401, undefined], [401, undefined], [404, undefined], [403, undefined]])
+  assert.equal(watermarkChecks, 1)
+})
+
+test('a newer seed marker keeps follower, published state and health aligned after restoring installed files', async t => {
+  const f = fixture(t), release = '3.94.0'
+  const file = join(f.profile, 'package.json'), manifest = JSON.parse(readFileSync(file, 'utf8'))
+  for (const name of PLUGINS) manifest.dependencies[name] = manifest.dependencies[name].replace(f.build.automagik, release)
+  writeFileSync(file, JSON.stringify(manifest, null, 2) + '\n')
+  markSeed(f.profile, release)
+  const followed = await followImage({ dshHome: f.home, source: f.source, build: f.build,
+    install: () => assert.fail('newer managed profile reached install') })
+  assert.equal(followed.result, 'newer-than-image')
+  assert.equal(followed.reason, 'newer-than-image')
+  assert.equal(followed.matchesImage, false)
+  assert.deepEqual(followed.plugins, f.build.plugins)
+
+  mockHealthHttp(t, () => [401])
+  const dsh = await report(f, 3081)
+  const published = readProfileState(f.viewDir, f.build)
+  const gate = await report(f, 3081, { AUTOMAGIK_GATE_ENABLED: '1' })
+  for (const state of [published, dsh, gate]) {
+    assert.equal(state.reason, 'newer-than-image')
+    assert.equal(state.followsImage, false)
+  }
+  for (const health of [dsh, gate]) {
+    assert.equal(health.fence.healthy, true)
+    assert.equal(health.healthy, false)
+  }
+})

@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process'
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
 } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -23,7 +24,7 @@ import {
   redactTokens,
 } from './lib.mjs'
 import { LAUNCH_FILE, prepareGateView, writePrivateFile, writeProfileState } from './gate-view.mjs'
-import { multiuserMode, startupDecision } from './profile-multiuser.mjs'
+import { multiuserConfigChecks, multiuserMode, multiuserReadiness, startupDecision } from './profile-multiuser.mjs'
 import { followImage } from './profile-follow.mjs'
 import { nativeWorkerEnv, panelCliHomes } from './native-worker-login.mjs'
 import { installVendorClis, runFirstBoot } from './first-boot.mjs'
@@ -31,6 +32,7 @@ import { HC_SESSION, XDG_RUNTIME_DIR, herdrCoreSocket, onSharedVolume, toolchain
 
 const ROOT = '/opt/automagik'
 const DSH_BIN = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+const INSTALL_ANCHOR = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
 const SEED = join(ROOT, 'profile')
 const KEY_DEFAULT = '/data/secrets/deepseek-api-key'
 const CORE_BIN = '/usr/local/bin/herdr-core'
@@ -113,20 +115,30 @@ export function pipeRedacted(stream, into, onLine, onRawLine, maxPending = Infin
   })
 }
 
-// RFC 0038 delivery 1: this image does not carry the multiuser adapter yet, so multiuser mode on
-// (or an invalid value) stops startup before the core or DSH is launched (fail closed).
-export function refuseStartup({ env, warn, exit }) {
-  const { ok, reason } = startupDecision(multiuserMode(env.AUTOMAGIK_MULTIUSER))
+export function refuseStartup({ env, readiness, warn, exit }) {
+  const { ok, reason } = startupDecision(multiuserMode(env.AUTOMAGIK_MULTIUSER), readiness)
   if (ok) return false
   warn(reason)
   exit(1)
   return true
 }
 
-export async function runStartup({ env, launchCore, launchDsh, exit, warn }) {
-  if (refuseStartup({ env, warn, exit })) return
+export async function runStartup({ env, readiness, launchCore, launchDsh, exit, warn }) {
+  const mode = multiuserMode(env.AUTOMAGIK_MULTIUSER)
+  let result
+  if (mode === 'on' && readiness !== undefined) {
+    try { result = typeof readiness === 'function' ? await readiness() : readiness }
+    catch { result = { ready: false, checks: [{ code: 'readiness-error', ok: false }] } }
+  }
+  if (refuseStartup({ env, readiness: result, warn, exit })) return
+  for (const code of result?.warnings ?? []) warn(code)
+  env.AUTOMAGIK_MULTIUSER = mode === 'on' ? '1' : '0'
   await launchCore()
   await launchDsh()
+}
+
+export function dshArgs(publicArgs = []) {
+  return [DSH_BIN, '--profile', PROFILE, '--no-open', '--host', '127.0.0.1', '--port', String(PORT), ...publicArgs]
 }
 
 async function main() {
@@ -199,153 +211,164 @@ async function main() {
   writeProfileState(gateView, seeded)
   log(seeded.seeded ? `seeded ${seeded.target}` : `profile present at ${seeded.target}`)
   log(`image follow: ${seeded.result}; ${seeded.reason}`)
-  if (refuseStartup({ env, warn, exit: process.exit })) return
 
-  let key
-  try {
-    key = modelKey(env)
-  } catch (error) {
-    warn(error.message)
-    process.exit(1)
-  }
-  if (key.source === 'none') warn(`no model key: set DEEPSEEK_API_KEY or a 0400 file at ${KEY_DEFAULT}`)
-  else {
-    env.DEEPSEEK_API_KEY = key.key
-    log(`model key from ${key.source}`)
+  const readiness = async () => {
+    const checks = multiuserConfigChecks(env, { cwd: workspace, dshHome })
+    if (checks.some(check => !check.ok)) return { ready: false, checks, warnings: [] }
+    const boot = createRequire(INSTALL_ANCHOR).resolve('@deepseek-ai/dsh-app-boot')
+    const appBoot = await import(pathToFileURL(boot))
+    return multiuserReadiness({ env, dshHome, profile: seeded.target, imageProfile: SEED, build, installAnchor: INSTALL_ANCHOR, appBoot })
   }
 
-  // Supervise the core on its private socket. If either child exits, stop the other so the
-  // container restart policy applies to both.
-  let core
-  try {
-    core = spawn(CORE_BIN, ['serve'], {
-      env: toolchainChildEnv(env), stdio: ['ignore', 'pipe', 'pipe'],
-    })
-  } catch (error) {
-    warn(`herdr-core did not start: ${error.message}`)
-    process.exit(1)
-  }
-  let stopping = false
-  let coreExit = null
-  let child = null
+  // If either supervised child exits, stop the other.
+  let core, child = null, coreExit = null, stopping = false
   const stopCore = (signal = 'SIGTERM') => {
     if (core.exitCode === null && core.signalCode === null) core.kill(signal)
   }
-  core.on('error', (error) => {
-    warn(`herdr-core did not start: ${error.message}`)
-    stopping = true
-    child?.kill('SIGTERM')
-    process.exit(1)
-  })
-  core.on('exit', (code, signal) => {
-    if (stopping) return
-    stopping = true
-    coreExit = code ?? 1
-    warn(`herdr-core exited (${signal ?? code}); stopping dsh so the container restart policy applies`)
-    child?.kill('SIGTERM')
-    setTimeout(() => process.exit(coreExit ?? 1), 10_000).unref?.()
-  })
-  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
-    process.on(signal, () => {
-      stopping = true
-      stopCore(signal)
-      child?.kill(signal)
-    })
-  }
-  pipeRedacted(core.stdout, process.stdout)
-  let coreStderr = ''
-  pipeRedacted(core.stderr, process.stderr, (line) => {
-    coreStderr = `${coreStderr}${line}\n`.slice(-CORE_STDERR_TAIL)
-  }, undefined, CORE_STDERR_TAIL)
-  try {
-    const started = Date.now()
-    while (true) {
-      if (coreExit !== null) {
-        throw new Error(`herdr-core exited before its socket ${socketPath} appeared`)
-      }
-      if (lstatSync(socketPath, { throwIfNoEntry: false })?.isSocket()) break
-      if (Date.now() - started > 15_000) {
-        throw new Error(`herdr-core did not create a Unix socket at ${socketPath} within 15s`)
-      }
-      await new Promise((done) => setTimeout(done, 50))
-    }
-  } catch (error) {
-    stopping = true
-    warn(error.message)
-    // List while the core is still alive: its own socket (if it used a different name) is
-    // visible here, and SIGTERM cannot erase it before the diagnostic is printed.
-    for (const dir of [coreRuntime, runtimeDir]) {
-      try { warn(`${dir}: ${readdirSync(dir).join(', ') || '(empty)'}`) } catch { /* missing */ }
-    }
-    warn(`herdr-core exitCode=${core.exitCode ?? 'null'} signal=${core.signalCode ?? 'none'}`)
-    warn(`herdr-core stderr:\n${coreStderr || '(empty)'}`)
-    stopCore()
-    process.exit(1)
-  }
-  log(`herdr-core: serving on ${socketPath}`)
-
-  try {
-    runFirstBoot({ home, version: build.am?.version, env, log, warn })
-  } catch (error) {
-    warn(`first boot: ${error?.message ?? error}; the server starts and am retries on restart`)
-  }
-  if (coreExit !== null) {
-    stopping = true
-    throw new Error('herdr-core exited during the first boot')
-  }
-
-  const dshVendorFailures = new Map()
-  const noteDsh = (line) => {
-    if (!/(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) return
-    const vendor = /claude/i.test(line) ? 'claude' : /codex/i.test(line) ? 'codex' : null
-    if (!vendor || dshVendorFailures.has(vendor)) return
-    dshVendorFailures.set(vendor, line)
-    warn(`vendor CLIs: DSH reported (${vendor}): ${line}`)
-  }
-  child = spawn(process.execPath, [DSH_BIN, '--profile', PROFILE, '--no-open', '--host', '127.0.0.1', '--port', String(PORT), ...publicArgs], {
-    env,
-    stdio: ['inherit', 'pipe', 'pipe'],
-  })
-  child.on('error', (error) => {
-    warn(`dsh did not start: ${error.message}`)
-    stopCore()
-    process.exit(1)
-  })
-  if (installClis) {
-    log('vendor CLIs: observing the ACP store and refreshing the launch bridge in the background')
-    void installVendorClis({
-      home, profile: seeded.target, env, log, warn,
-      failureFor: (spec) => dshVendorFailures.get(spec.key),
-    })
-      .then((result) => {
-        if (result.state !== 'ready') warn(`vendor CLIs: ${result.state}; the ACP plugin will retry`)
-      })
-      .catch((error) => warn(`vendor CLIs: ${error?.message ?? error}`))
-  }
-
-  let announced = false
-  const onLaunchLine = (line) => {
-    const url = launchUrlOf(line)
-    if (!url || announced) return
-    announced = true
+  const launchCore = async () => {
+    let key
     try {
-      const file = recordLaunch(dshHome, gateView, url)
-      log(`startup: http://127.0.0.1:${PORT}/ (token in ${file})`)
+      key = modelKey(env)
     } catch (error) {
-      warn(`startup: dsh is up, but the launch URL could not be written: ${error.message}`)
+      warn(error.message)
+      process.exit(1)
+    }
+    if (key.source === 'none') warn(`no model key: set DEEPSEEK_API_KEY or a 0400 file at ${KEY_DEFAULT}`)
+    else {
+      env.DEEPSEEK_API_KEY = key.key
+      log(`model key from ${key.source}`)
+    }
+
+    try {
+      core = spawn(CORE_BIN, ['serve'], {
+        env: toolchainChildEnv(env), stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      warn(`herdr-core did not start: ${error.message}`)
+      process.exit(1)
+    }
+    core.on('error', (error) => {
+      warn(`herdr-core did not start: ${error.message}`)
+      stopping = true
+      child?.kill('SIGTERM')
+      process.exit(1)
+    })
+    core.on('exit', (code, signal) => {
+      if (stopping) return
+      stopping = true
+      coreExit = code ?? 1
+      warn(`herdr-core exited (${signal ?? code}); stopping dsh so the container restart policy applies`)
+      child?.kill('SIGTERM')
+      setTimeout(() => process.exit(coreExit ?? 1), 10_000).unref?.()
+    })
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+      process.on(signal, () => {
+        stopping = true
+        stopCore(signal)
+        child?.kill(signal)
+      })
+    }
+    pipeRedacted(core.stdout, process.stdout)
+    let coreStderr = ''
+    pipeRedacted(core.stderr, process.stderr, (line) => {
+      coreStderr = `${coreStderr}${line}\n`.slice(-CORE_STDERR_TAIL)
+    }, undefined, CORE_STDERR_TAIL)
+    try {
+      const started = Date.now()
+      while (true) {
+        if (coreExit !== null) {
+          throw new Error(`herdr-core exited before its socket ${socketPath} appeared`)
+        }
+        if (lstatSync(socketPath, { throwIfNoEntry: false })?.isSocket()) break
+        if (Date.now() - started > 15_000) {
+          throw new Error(`herdr-core did not create a Unix socket at ${socketPath} within 15s`)
+        }
+        await new Promise((done) => setTimeout(done, 50))
+      }
+    } catch (error) {
+      stopping = true
+      warn(error.message)
+      // List while the core is still alive: its own socket (if it used a different name) is
+      // visible here, and SIGTERM cannot erase it before the diagnostic is printed.
+      for (const dir of [coreRuntime, runtimeDir]) {
+        try { warn(`${dir}: ${readdirSync(dir).join(', ') || '(empty)'}`) } catch { /* missing */ }
+      }
+      warn(`herdr-core exitCode=${core.exitCode ?? 'null'} signal=${core.signalCode ?? 'none'}`)
+      warn(`herdr-core stderr:\n${coreStderr || '(empty)'}`)
+      stopCore()
+      process.exit(1)
+    }
+    log(`herdr-core: serving on ${socketPath}`)
+
+    try {
+      runFirstBoot({ home, version: build.am?.version, env, log, warn })
+    } catch (error) {
+      warn(`first boot: ${error?.message ?? error}; the server starts and am retries on restart`)
+    }
+    if (coreExit !== null) {
+      stopping = true
+      throw new Error('herdr-core exited during the first boot')
     }
   }
-  const onSafeLine = installClis ? noteDsh : undefined
-  pipeRedacted(child.stdout, process.stdout, onSafeLine, onLaunchLine)
-  pipeRedacted(child.stderr, process.stderr, onSafeLine, onLaunchLine)
 
-  child.on('exit', (code, signal) => {
-    const exitCode = coreExit ?? code ?? (signal ? 0 : 1)
-    if (core.exitCode !== null || core.signalCode !== null) process.exit(exitCode)
-    core.once('exit', () => process.exit(exitCode))
-    stopCore()
-    setTimeout(() => { core.kill('SIGKILL'); process.exit(exitCode) }, 10_000).unref?.()
-  })
+  const launchDsh = () => {
+    const dshVendorFailures = new Map()
+    const noteDsh = (line) => {
+      if (!/(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) return
+      const vendor = /claude/i.test(line) ? 'claude' : /codex/i.test(line) ? 'codex' : null
+      if (!vendor || dshVendorFailures.has(vendor)) return
+      dshVendorFailures.set(vendor, line)
+      warn(`vendor CLIs: DSH reported (${vendor}): ${line}`)
+    }
+    child = spawn(process.execPath, dshArgs(publicArgs), {
+      env,
+      stdio: ['inherit', 'pipe', 'pipe'],
+    })
+    child.on('error', (error) => {
+      warn(`dsh did not start: ${error.message}`)
+      stopCore()
+      process.exit(1)
+    })
+    if (installClis) {
+      log('vendor CLIs: observing the ACP store and refreshing the launch bridge in the background')
+      void installVendorClis({
+        home, profile: seeded.target, env, log, warn,
+        failureFor: (spec) => dshVendorFailures.get(spec.key),
+      })
+        .then((result) => {
+          if (result.state !== 'ready') warn(`vendor CLIs: ${result.state}; the ACP plugin will retry`)
+        })
+        .catch((error) => warn(`vendor CLIs: ${error?.message ?? error}`))
+    }
+
+    let announced = false
+    const onLaunchLine = (line) => {
+      const url = launchUrlOf(line)
+      if (!url || announced) return
+      announced = true
+      try {
+        const file = recordLaunch(dshHome, gateView, url)
+        log(`startup: http://127.0.0.1:${PORT}/ (token in ${file})`)
+      } catch (error) {
+        warn(`startup: dsh is up, but the launch URL could not be written: ${error.message}`)
+      }
+    }
+    const onSafeLine = installClis ? noteDsh : undefined
+    pipeRedacted(child.stdout, process.stdout, onSafeLine, onLaunchLine)
+    pipeRedacted(child.stderr, process.stderr, onSafeLine, onLaunchLine)
+
+    child.on('exit', (code, signal) => {
+      const exitCode = coreExit ?? code ?? (signal ? 0 : 1)
+      if (core.exitCode !== null || core.signalCode !== null) process.exit(exitCode)
+      core.once('exit', () => process.exit(exitCode))
+      stopCore()
+      setTimeout(() => {
+        core.kill('SIGKILL')
+        process.exit(exitCode)
+      }, 10_000).unref?.()
+    })
+  }
+  await runStartup({ env, readiness, launchCore, launchDsh, exit: process.exit, warn })
 }
 
 const launchedFromCli = (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url)

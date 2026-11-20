@@ -1,33 +1,34 @@
 # The Automagik server image
 
 The `automagik-web` DeepSeek Harness profile on a host: dsh's base and web app, the Bot team
-(`@automagik/bots-dsh`), the welcome (`@automagik/welcome-dsh`) and ACP agents
-(`@automagik/acp-dsh`), from one chosen release (or the committed checkout in PR tests). Built by CI only
+(`@automagik/bots-dsh`), the welcome (`@automagik/welcome-dsh`), ACP agents
+(`@automagik/acp-dsh`) and the multiuser adapter (`@automagik/multiuser-dsh`), from one chosen
+release or the committed checkout in PR tests. Built by CI only
 (`.github/workflows/server-image.yml`): every change builds, smokes and scans it, and a dispatch
 or a published release pushes it to `ghcr.io/automagik-si/automagik-server` as
 `:<content>-<short sha>` and, when allowed, `:latest`. There is no laptop push. Tracked in #620.
 
 Pins: dsh `0.2.2-rc.2` (the desktop runtime's own lock) and the plugins at one release, the
 content. A dispatch takes `-f content=<tag>`, a release whose assets include `plugins.json`
-(e.g. `v3.93.0`); empty picks the newest stable release that carries it, within the last 30
+(e.g. `v3.160.6`); empty picks the newest stable release that carries it, within the last 30
 releases. A release event uses its own version as the content. A herdr, Pocket or am patch
 carries no plugin tarballs: a dispatch whose content has none is refused, naming the tag, and a
 release event for such a version builds and pushes nothing. The `Dockerfile`'s
-`AUTOMAGIK_VERSION` is that plugin release (default `3.90.1` for a manual build); CI passes it as
+`AUTOMAGIK_VERSION` is that plugin release (default `3.160.6` for a manual build); CI passes it as
 both `--version` and `--image-version`. The identity names the content and the tree: the tag
-`:<content>-<short sha>` (e.g. `3.93.0-91cf4862`), `org.opencontainers.image.version` = the
+`:<content>-<short sha>` (e.g. `3.160.6-91cf4862`), `org.opencontainers.image.version` = the
 content version, and `org.opencontainers.image.revision` = the full workflow commit. A
 `versions.json` inside the image names the plugin release it installed. Each tarball is checked
 against the release's `plugins.json` (sha512 integrity, size) and `PLUGINS.SHA256SUMS` (sha256)
-before dsh installs it.
+before DSH installs it. Every build needs content version 3.160.6 or later.
 
 Pull requests use a separate, nonpublishing checkout input. The runner installs only the
-frozen root tooling, then normally packs all four owned plugins with `bun pm pack
---ignore-scripts`; it neither installs plugin dependencies nor regenerates bundles. Every
+frozen root tooling, then packs the four profile plugins, locale and vault with
+`bun pm pack --ignore-scripts`. Every
 packed file must match a regular file at the actual checkout HEAD (normally GitHub's merge
 commit); packable untracked/ignored files and dirty source fail. The fixed package set, normal
 `plugins.json`, size/SRI/SHA chain and independently passed checkout SHA and manifest digest
-are checked again before assembly. DSH installs the same three profile plugins normally.
+are checked again before assembly. DSH installs the four profile plugins from those inputs.
 There is no release fallback, arbitrary source directory or URL in checkout mode.
 
 The PR tag and OCI version are `checkout-<full SHA>`; `versions.json.automagik` and plugin
@@ -66,7 +67,7 @@ on a dispatch alike. Pin a workspace by that digest, never by `:latest` or anoth
 (g)):
 
 ```sh
-gh release download v3.93.0 --pattern server-image.json --output - | jq -r .ref
+gh release download v3.160.6 --pattern server-image.json --output - | jq -r .ref
 ```
 
 The record holds `image`, `digest`, `ref` (`image@digest`), `version` (the content release),
@@ -123,7 +124,7 @@ release on its tag with `content=v<version>`. This independent job only warns on
 To retry manually after merge:
 
 ```sh
-gh workflow run server-image.yml --ref dev -f content=v3.93.0
+gh workflow run server-image.yml --ref dev -f content=v3.160.6
 ```
 
 `content` is the release tag whose plugin tarballs are installed; empty means the newest stable
@@ -201,7 +202,7 @@ The optional am hc proxy requires core 0.1.14. It refuses this image's core 0.1.
 ## Build and smoke
 
 ```sh
-node server/build.mjs --tag automagik-server:local --version 3.93.0 --image-version 3.93.0 \
+node server/build.mjs --tag automagik-server:local --version 3.160.6 --image-version 3.160.6 \
   --revision "$(git rev-parse HEAD)"
 node server/smoke.mjs automagik-server:local
 node server/follow-smoke.mjs automagik-server:local
@@ -209,7 +210,7 @@ node server/follow-smoke.mjs automagik-server:local
 
 `--version` is the release whose plugin tarballs are installed; `--image-version` is the content
 version label (normally the same release, without its `v`); `--revision` is the commit label. With
-no arguments the release is `3.90.1` and the revision label `unknown`.
+no arguments the release is `3.160.6` and the revision label `unknown`.
 
 The builder fetches am from that release's pinned tarball and verifies it before unpacking
 (`fetch-am.mjs`); the tools stage fetches herdr-core at its own pinned version and sha256 and
@@ -224,13 +225,15 @@ The context is the repository root because the builder reuses
 `apps/desktop/runtime/package-lock.json`; `server/Dockerfile.dockerignore` keeps the context
 small. The smoke runs the image with a named volume (no published port), waits for `401`, checks
 the log has no token (it reads the real token from `/data/dsh/launch-url`), the profile and its
-three plugins are in `/data`, `launch-url` is `0600`, the process is uid 1000, Docker's health
+four plugins are in `/data`, `launch-url` is `0600`, the process is uid 1000, Docker's health
 check turns healthy, the composed tree still has its 200 entries (bots, welcome, ACP, web app,
-office), no composed plugin failed to import, koffi and node-pty load and a PTY spawns, and a
+office, multiuser adapter), no composed plugin failed to import, koffi and node-pty load and a PTY spawns, and a
 restart does not reseed. No coreutils are assumed: the checks use node and bash.
-The follow smoke builds a companion release, seeds a volume with the real older plugins, then
-starts the newer image on that same volume with networking disabled. It verifies all three
-versions moved, a backup exists, user settings survived, and a second restart keeps the update.
+The follow smoke builds the pinned 3.160.4 companion from its own source revision. It installs
+Omni through the welcome, then updates the same volume offline. It checks the four versions,
+the enabled adapter row, preserved owner settings and the three-plugin backup. It restarts the
+candidate and then starts the older companion with mode off to check `newer-than-image` and the
+adapter's loopback 401.
 
 ## Run
 
@@ -411,18 +414,20 @@ docker exec automagik /nodejs/bin/node /opt/automagik/healthcheck.mjs --json
 At seeding, `automagik-server-profile` records the image release, the image's own manifest and a
 SHA-256 of the exact `package.json`. Plugins added later through the welcome (Power Omni on) or
 DSH's Plugins page keep the profile following the image: their dependencies and bundles are the
-workspace's, and a newer image still updates the Bot team, welcome and ACP. An update keeps each
-added plugin's locked resolution and installed version, with its peer references moved to the
+workspace's, and a newer image updates the four base plugins. An update keeps each added
+plugin's locked resolution and installed version, with its peer references moved to the
 new Bot team. If one cannot be reinstalled from the volume's cache, or comes out at another
 version, the update rolls back. A restart on the same image keeps the workspace's lock.
 
-Markers written before this held only the hash: their base is the image's manifest with the
-recorded release's three tarball names. Volumes without a structured marker are adopted only when
-the entire canonical package manifest matches the known image seed shape. Missing or mixed
-installed plugins never become an owner-managed exception. Changing one of the image's three
-dependencies, removing or reordering a base bundle, or editing any other manifest field opts out.
-Owner-managed profiles are left alone and identified in startup logs and the report. Settings
-such as `cordis.patch.yml` survive an automatic update.
+Hash-only markers recognize both the four-plugin seed and the historical three-plugin seed at
+their recorded release. Without a structured marker, adoption requires a byte-exact canonical
+manifest for either shape. Missing or mixed base plugins keep the profile unhealthy. Editing a
+base dependency, removing or reordering a base bundle, or editing other manifest fields opts
+out. A three-plugin seed with an owner-installed adapter also opts out.
+
+Updates insert the shipped adapter row while preserving the owner's profile settings, including
+a later disable override. A matching-image restart leaves a deleted adapter row alone. A patch
+that cannot be merged, or a patch or lock edit during staging, cancels the update.
 
 Image preparation holds a kernel file lock on the DSH volume across recovery, first seeding
 and the complete update. Concurrent starts sharing that volume wait up to 180 seconds, then
@@ -437,30 +442,43 @@ in a separate staging profile through `dsh plugin install --offline --frozen-loc
 --ignore-scripts`. Its local tarballs are materialized from the image's inspected, unpacked
 plugin files; their dependencies come from its pruned offline store, and added plugins from the
 volume's own pnpm store, where DSH put them when it installed them. The frozen lock is the
-workspace's with the image's three resolutions swapped in: it never picks new versions of added
+workspace's with the image's base resolutions swapped in: it never picks new versions of added
 plugins. pnpm indexes a git-hosted plugin (Omni's) by whether its scripts ran, so the update
 reuses the index of the files DSH installed instead of fetching them again. No runtime release
 download or registry access is needed; the image still ships no archive that bypasses the
-secrecy scan. All three installed versions, and every added plugin's, must verify before the
+secrecy scan. All four installed versions, and every added plugin's, must verify before the
 staged profile replaces the old one. A failed attempt leaves the old profile running and reports
 `update-rolled-back` with an unhealthy result, so a keeper can distinguish rollback from a
 successful update.
 
-Fresh seeds also materialize those three tarballs on the data volume. Both seeds and upgrades
+Fresh seeds also materialize those four tarballs on the data volume. Both seeds and upgrades
 retain them in the profile's `vendor/`, with matching lockfile integrity: any later
 `dsh plugin install` re-resolves the profile's direct dependencies. Once an update's install has
-verified, the previous image's three archives leave `vendor/` (the backup keeps them); any other
+verified, the previous image's plugin archives leave `vendor/` (the backup keeps them); any other
 file there stays. A matching image repairs an older image-managed seed whose tarballs are
-missing, in the workspace's own lock (a lock it cannot read is replaced by the image's).
+missing, in the workspace's own lock. It falls back to the image lock when it cannot read
+the workspace lock. If repair fails with a readable lock, the workspace lock is kept and
+the image reports `update-rolled-back`.
 Owner-managed profiles are left alone.
+The desktop patch merger can place a new adapter row between a comment and the owner
+override it describes during migration. The override remains in effect.
 The image itself stays archive-free and carries no Omni installation. Omni's plugin downloads
 and verifies its own Bun runtime using Node; its sandbox installer uses the image's `tar`,
 `gzip` and `find` to unpack its verified Postgres and NATS downloads.
 
-Equal or older releases never downgrade installed plugins. **Going back requires restoring the
-host snapshot**, including matching image/data state: plugin migrations are forward only.
-Changing to an older digest alone leaves newer plugins in place and reports `newer-than-image`.
-The profile backup is an install recovery copy, not a substitute for the host's data snapshot.
+### Restore
+
+Equal or older releases never downgrade installed plugins. Expanding a coherent three-plugin
+base to four at the same release uses the same staged update and backup as a version change.
+
+A failed migration keeps the old profile and reports `update-rolled-back`. Start it with
+`AUTOMAGIK_MULTIUSER=0` while resolving the failure. Mode on requires the enabled adapter and
+its minimum version. Returning to an image with an older content version on a migrated volume
+with mode off keeps the newer plugins, reports `newer-than-image`, and marks the image
+unhealthy. A three-plugin image from the same content release can report `matching-image` when
+its three plugin versions match. DSH can still load the adapter from the migrated volume and
+answer 401 on its private route. To restore the old image and data together, restore the matching
+host snapshot. The staged update's backup covers the profile install only.
 
 The first launch URL, token included, is written to `/data/dsh/launch-url` (`0600`) and printed
 redacted in the log:
@@ -594,10 +612,11 @@ that is up cannot conceal a stopped DSH. The check uses Node's `http`, not curl.
 |---|---|
 | `schemaVersion` | Report format, currently `1` |
 | `image.version`, `image.revision` | The image's plugin release and build commit |
-| `plugins` | Actual installed version of each of the three plugins; `null` when unavailable |
+| `plugins` | Actual installed version of each of the four plugins; `null` when unavailable |
 | `followsImage`, `ownerManaged`, `reason` | Whether the seed matches the image, whether the owner opted out, and a fixed reason such as `matching-image`, `owner-managed`, `update-rolled-back`, `newer-than-image` or `missing-plugins` |
 | `dsh`, `gate` | Listener availability and HTTP status; `gate.enabled` says whether it is required |
-| `fence`, `healthy` | Fence status and overall result; exit `0` only for healthy fences plus matching or owner-managed plugins |
+| `fence`, `healthy` | Fence status and overall result. Exit `0` requires healthy fences and matching or owner-managed plugins |
+| `multiuser` | Present in mode on. Both the unauthorized caller endpoint and the reserved missing route must give the expected responses for health |
 
 No launch URL, token, model key, raw installer diagnostics or home path is included. The startup
 log still names the redacted fence: `startup: http://127.0.0.1:3081/ (token in /data/dsh/launch-url)`.
@@ -1096,15 +1115,55 @@ plugin's [MCP setup and tool reference](../apps/bots-dsh/README.md#agent-access-
 ### RFC 0038 caller assertions
 
 The gated Compose file passes `AUTOMAGIK_MULTIUSER` to DSH and maps it to
-`AUTOMAGIK_GATE_MULTIUSER` in the gate. The default is `0`. This image refuses DSH
-startup with `AUTOMAGIK_MULTIUSER=1` until the image follow-up installs the adapter
-and verifies the effective profile, including its matching DSH body limit.
+`AUTOMAGIK_GATE_MULTIUSER` in the gate. The default is `0`. The adapter answers 401 on its
+private route in mode off. To disable the adapter itself, keep its insert row in the profile
+and add this later override to `cordis.patch.yml`.
+
+```yaml
+- id: multiuser-dsh
+  disabled: true
+```
+
+Mode on checks the effective DSH profile before starting the core or DSH. It reads the bundle,
+profile and DSH-home patches in boot order. Before turning it on, verify that the image's
+`/opt/automagik/versions.json` inventory lists all four plugins and that its `revision` matches the
+pinned digest's `server-image.json` record. An image built from the `v3.160.6` tree carries
+three plugins and refuses mode on. Set `AUTOMAGIK_CALLER_KEYS` in the container
+environment to the absolute path of `caller-keys.json` on its own read-only mount. An empty
+verified mount can wait for the gate's first publication. If set, `AUTOMAGIK_INSTANCE_ID`
+must be nonempty and match the published key set. Supply both settings through the container
+environment if used. Startup refuses either setting in the workspace or DSH-home `.env`
+when the corresponding variable is unset. Cloud workspace naming still uses
+`AUTOMAGIK_GATE_CLOUD_WORKSPACE` on the gate and `AUTOMAGIK_INSTANCE_ID` for DSH key validation.
+
+Readiness refusals report fixed codes.
+
+| Code | Check |
+|---|---|
+| `composition`, `readiness-error` | DSH profile composition and startup preflight |
+| `adapter-enabled`, `adapter-collision` | One enabled adapter with the shipped id and name, under enabled groups |
+| `ambiguous-ancestry` | Adapter, connection and webserver entries may be nested only under Cordis group implementations |
+| `provider-collision`, `connection-missing`, `webserver-missing` | One enabled DSH `connection` and one enabled `webserver`, with the shipped provider names and no second active webserver module |
+| `body-limit` | Equal, literal positive body limits. An absent limit defaults to 314572800 bytes |
+| `adapter-version`, `bots-guard` | Adapter 3.160.6 or later and Bots 3.160.5 or later |
+| `image-integrity` | Valid four-plugin image metadata. The installed adapter and Bots must each match the image version and package bytes, excluding nested `node_modules` |
+| `caller-keys-config`, `instance-config`, `env-file-override`, `caller-keys-mount` | Container key-path and instance settings, separate read-only mount and public key set |
+
+`app-manifest` warns when the Bots entry has `appManifest: false`. After startup, the mode-on DSH
+and gate health reports require an empty 401 for the unsigned caller probe, an empty 401 for a
+deliberately invalid assertion that exercises the replay watermark, an empty 404 for the reserved
+missing route, and an empty 403 for a caller probe with a mismatched Origin. The last probe
+verifies that the carrier reached its origin check with multiuser on and its key source configured.
+DSH enforces attachment capacity at activation.
+The live probe detects when the connection fails to activate and leaves the carrier unavailable.
 
 The gate stores the signing key in `gate-data` and publishes only the public keys
 to the named `caller-keys` volume. DSH has a read-only mount of that volume and never
 mounts `gate-data`. The gate publishes at startup when it knows the instance and
 on the next signature when the instance changes. First claim issues an owner
-session, which never signs an assertion.
+session, which never signs an assertion. The private caller store rejects directory aliases,
+symlinked or hard-linked key files, and files accessible to group or other. It lives in the
+gate-owned volume. Node's path APIs do not fully anchor every operation to a directory descriptor.
 
 Caller assertions allow targets up to 4,096 bytes and assertion headers up to 8,192 bytes because DSH partitions startup combos at 3,072 bytes.
 
@@ -1121,5 +1180,5 @@ In an emergency, `retire --now` skips the wait. In-flight assertions signed by t
 retired key receive 401 once the adapter reloads the key set.
 
 To roll back, first stop member and guest admission, revoke their sessions and
-close their sockets. Then disable the reroute. See the adapter's README for the
+close their sockets. Then disable the reroute and set mode off. See the adapter's README for the
 [remote stream WebSocket dependency](../apps/multiuser-dsh/README.md#remote-stream-websocket-upstream-dependency).
