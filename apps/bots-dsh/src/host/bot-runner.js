@@ -12,8 +12,9 @@ import { isEnforcingMemberWall, wallFileSystemOf } from './read-scope-provider.j
 import { reachesShell, shellCall } from './tool-deny.js'
 import { attestToolRegistration, isTrustedToolRegistration } from './tool-registrations.js'
 
-export const NO_BOT_RUNNER = 'bot/no-runner'
-const reason = 'ds-bot: this workspace has no Bot runner yet, so a Bot runs no commands, terminals, coding CLIs, browsers or extensions in multiuser mode (RFC 0038)'
+import { NO_BOT_RUNNER, NO_BOT_RUNNER_REASON as reason } from './no-runner.js'
+
+export { NO_BOT_RUNNER }
 
 const FILE_TOOLS = new Set(['read', 'write', 'edit', 'apply_patch'])
 const TEAM_TOOLS = new Set([

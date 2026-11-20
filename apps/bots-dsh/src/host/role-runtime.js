@@ -3,7 +3,7 @@ import { packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
 import { routeOf } from '../shared/routes.js'
 import { createRoleSettings } from './role-settings.js'
 import { createRoleVoice } from './role-voice.js'
-import { noBotRunner } from './bot-runner.js'
+import { NO_BOT_RUNNER_REASON } from './no-runner.js'
 import { refusal } from './refusal.js'
 import { output } from './tools.js'
 
@@ -167,7 +167,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       if (!record || record.version !== pin.version || packages.damaged(record)) continue
       if (rt.botRunnerRequired !== undefined && !warnedRunner) {
         warnedRunner = true
-        rt.warn('ds-bot: Bot role modules skipped: %s', noBotRunner().message)
+        rt.warn('ds-bot: Bot role modules skipped: %s', NO_BOT_RUNNER_REASON)
       }
       const held = { pin, record, bot }
       attachments.set(id, held)
