@@ -243,6 +243,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
     val teams = rememberTeams(state, vm)
     // The Bots' `dsh:` chats, for Team's bubbles and Home's rows: a main bot's pane opens its DSH chat (RFC 0015 D29).
     val dsh = rememberDshChats(state, vm, reading = selected == null && state.screen in setOf(Nav.TEAM, Nav.HOME_TAB))
+    val groupChats = remember(dsh) { ChatGroups.rows(dsh) }
     val paneChats = remember(teams, dsh) { Teams.paneChats(Teams.bubbles(teams, dsh)) }
     // Home counts the Bots' chats with the terminals: a chat that needs the person is a row, a Bot with a pane one row (#732).
     val watched by vm.chatWatch.collectAsStateWithLifecycle()
@@ -351,7 +352,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
                 state.screen == Nav.CODE && project != null -> ProjectScreen(state, vm, project, pulse, remember(rows, project) { Projects.tree(rows, project) })
                 state.screen == Nav.CODE -> CodeScreen(state, vm, pulse, rows, codeView, { codeView = it }, tasksOnly) { tasksOnly = it }
                 // Team opens from the cache while no machine is connected; with nothing cached, the welcome shows instead.
-                state.screen == Nav.TEAM && !(disconnected && teams.isEmpty()) -> TeamsScreen(state, vm, teams, dsh) { opens ->
+                state.screen == Nav.TEAM && !(disconnected && teams.isEmpty()) -> TeamsScreen(state, vm, teams, dsh, groupChats, onOpenGroup = { vm.selectTerminal(it) }) { opens ->
                     when (opens) {
                         is Teams.Opens.DshChat -> vm.selectTerminal(opens.ref)
                         is Teams.Opens.TerminalChat -> vm.selectTerminal(opens.ref, chat = true)
@@ -359,7 +360,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
                     }
                 }
                 disconnected -> WelcomeScreen(state, onPair = { pairDesktop = true }, onRepair = ::repair, onConnect = { vm.connect(it) }, onPreview = vm::enterDemo)
-                else -> OverviewScreen(state, null, vm, pulse, paneChats, onAll = vm::showAll, onReviewNeedsYou = openDeck)
+                else -> OverviewScreen(state, null, vm, pulse, paneChats, onAll = vm::showAll, onReviewNeedsYou = openDeck, groupChats = groupChats)
             }
         } }
     }
@@ -466,7 +467,8 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun OverviewScreen(state: PocketState, space: PocketSpace?, vm: PocketViewModel, pulse: Projects.Pulse,
-                               paneChats: Map<TerminalRef, TerminalRef>, onAll: () -> Unit, onReviewNeedsYou: () -> Unit = {}) {
+                               paneChats: Map<TerminalRef, TerminalRef>, onAll: () -> Unit, onReviewNeedsYou: () -> Unit = {},
+                               groupChats: List<Pair<TerminalRef, Chat.Terminal>> = emptyList()) {
     // A main bot's pane opens the bot's DSH chat, as its Team bubble does ([Teams.paneChats]); any other agent its terminal.
     val open: (TerminalRef) -> Unit = { ref -> vm.selectTerminal(paneChats[ref] ?: ref, row = ref) }
     var search by remember { mutableStateOf("") }
@@ -590,6 +592,12 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
                     Text("Agents that need you or finish show up here.", color = Muted, fontSize = 13.sp)
                 }
             }
+            if (groupChats.isNotEmpty()) {
+                item(key = "section:groups") { SectionHeader(ChatGroups.HEADING, groupChats.size) }
+                items(groupChats, key = { "g:${it.first.hostId}:${it.first.address}" }) { (ref, g) ->
+                    GroupCard(g, vm.hostName(ref.hostId)) { vm.selectTerminal(ref) }
+                }
+            }
             // Working and idle agents, then terminals without a status: Projects has them too, by space.
             val listed = sections.values.flatMap { it.entries.map { e -> e.ref } }.toSet()
             val plain = all.filter { it.first !in listed }
@@ -677,7 +685,7 @@ fun statusLabel(word: String, kind: String) = stateName(word).let { if (word == 
 }
 
 @Composable fun TerminalCard(t: CoreTerminal, location: String, address: String, status: String = t.status,
-                             waiting: String? = null, onClick: () -> Unit) {
+                             waiting: String? = null, messageLines: Int = 2, onClick: () -> Unit) {
     val color = stateColor(status)
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Surface).border(1.dp, if (status == "blocked" || status == "error") Blocked.copy(alpha = .32f) else Border, RoundedCornerShape(12.dp))
         .clickable(onClick = onClick).padding(16.dp), verticalAlignment = Alignment.Top) {
@@ -692,7 +700,7 @@ fun statusLabel(word: String, kind: String) = stateName(word).let { if (word == 
                 Dot(color, 6); Spacer(Modifier.width(6.dp)); Text(waiting ?: stateName(status), color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.height(6.dp)); Text(t.title, fontWeight = FontWeight.Medium, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (t.message.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(t.message, color = Muted, fontSize = 13.sp, lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            if (t.message.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(t.message, color = Muted, fontSize = 13.sp, lineHeight = 19.sp, maxLines = messageLines, overflow = TextOverflow.Ellipsis) }
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.FolderOpen, null, Modifier.size(12.dp), tint = Muted); Spacer(Modifier.width(5.dp))
@@ -702,4 +710,9 @@ fun statusLabel(word: String, kind: String) = stateName(word).let { if (word == 
             }
         }
     }
+}
+
+@Composable internal fun GroupCard(g: Chat.Terminal, host: String, onClick: () -> Unit) {
+    TerminalCard(ChatGroups.card(g), host, ChatGroups.ADDRESS, waiting = ChatGroups.waiting(g),
+        messageLines = Int.MAX_VALUE, onClick = onClick)
 }

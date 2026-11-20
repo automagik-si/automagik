@@ -88,7 +88,7 @@ object Cockpit {
         val agents = mutableListOf<Pair<TerminalRef, CoreTerminal>>()
         val panes = mutableMapOf<TerminalRef, Join>()
         for ((hostId, rows) in dsh) for (c in rows) {
-            if (!c.dsh || !c.shown) continue
+            if (!c.dsh || !c.shown || c.group) continue
             val w = watched[ChatWatch.key(hostId, c.terminal)]
             val word = w?.status ?: c.status.takeIf { it == "blocked" || it == "working" } ?: "idle"
             val message = when (word) {

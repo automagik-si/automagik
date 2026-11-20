@@ -82,7 +82,7 @@ object Attach {
     }
 
     fun usable(peer: Peer, dshWrite: Boolean, terminal: String, subscribed: Boolean) =
-        peer is Peer.Offered && dshWrite && Chat.isDsh(terminal) && subscribed
+        peer is Peer.Offered && dshWrite && Chat.isDsh(terminal) && !Chat.isGroup(terminal) && subscribed
 
     internal fun refusedLocal(): JSONObject =
         JSONObject().put("ok", false).put("state", "refused").put("reason", "read-only")
