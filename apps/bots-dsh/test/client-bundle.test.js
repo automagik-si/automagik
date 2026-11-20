@@ -42,7 +42,12 @@ test('client.js registers a factory that exports apply and inject', () => {
   // this one through dsh.client.external).
   assert.deepEqual(Object.keys(exports), ['apply', 'inject', 'omni'])
   assert.equal(typeof exports.apply, 'function')
-  assert.deepEqual(Object.keys(exports.omni).sort(), ['addStrings', 'badges', 'botChannels', 'botChildren', 'botSettings', 'call', 'chatSuggestions', 'dateLocale', 'face', 'genui', 'headerButtons', 'hostText', 'language', 'nav', 'onShell', 'registerComposerPack', 'setCanvasRenderer', 'sidebarTools', 't', 'toolCards', 'ui'])
+  assert.deepEqual(Object.keys(exports.omni).sort(), [
+    'addStrings', 'badges', 'botChannels', 'botChildren', 'botSettings', 'call', 'chatSuggestions',
+    'dateLocale', 'face', 'genui', 'headerButtons', 'hostText', 'language', 'nav',
+    'officialInstall', 'onShell', 'registerComposerPack', 'setCanvasRenderer', 'sidebarTools',
+    't', 'toolCards', 'ui',
+  ])
   assert.deepEqual(Object.keys(exports.omni.ui).sort(), ['BotMark', 'CHARACTERS', 'MAIN_LOOK', 'OmniMark', 'createSource', 'icons', 'relativeShort'])
   // The shared gen-UI kit (#1326) is a plugin's to draw with: the rows, the person card,
   // the slice reader and the endpoint it reads.

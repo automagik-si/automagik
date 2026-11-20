@@ -67,7 +67,7 @@ The Automagik desktop app passes the product it was opened for (`omni desktop` �
 `unfold` is none). That card comes first and starts chosen: Omni's powers on by itself, through the
 same box and steps as a press, and Remove still sends it back to sleep; Genie's starts on
 the team. The other card stays to add, then or later. Without a preload Omni comes first
-and nothing is chosen.
+and nothing is chosen. Opening the team step on purpose skips the preload power-on.
 
 Unfold's card is shown only in Unfold's own Automagik instance. Anywhere else the team step has
 no Unfold card and `unfold-plugin-install` is refused, so the welcome installs no `unfold-*`
@@ -93,10 +93,15 @@ team's own `Card`, `Row` and `SwitchRow`, the team step's state words (`On · Co
 team gets the state line only. The card is registered for the Bot kinds `omni`, `genie` and
 `unfold`; a Bot of any other kind gets no card.
 
-A built-in Bot that is not installed has no settings page, so install does not move with the
-power. It stays where onboarding already offers it: the team step (`omni-team`) still has
-Omni's and Genie's cards, whose power buttons install the plugins and make the Bot, and a DSH's
-Plugins page installs the plugin directly. The old sidebar button was a second way into them; it is gone.
+A built-in Bot that is not installed has no settings page, so install does not move with
+the power. The Bot team's Apps page (Settings → Apps, Automagik official) installs it in
+one click: the Omni and Genie rows' Install runs the team step's own power-on
+(`omni-plugins-install`, `genie-plugin-install`) in place, through the Bot team's
+`officialInstall` registry, and the row shows the install's step and place. Opening the
+page reads `omni-plugins` and `genie-plugin` once and picks up an install the host is
+already running (a reload, another window); it never starts one. Nothing installs
+without a click. The team step (`omni-team`) keeps Omni's and Genie's cards, and a DSH's
+Plugins page installs the plugin directly. The old sidebar button is gone.
 
 The team step follows the DSH language. Its copy is the `welcome.team` namespace
 (`src/client/i18n.js`): the keys are the English text, registered in English and in Brazilian

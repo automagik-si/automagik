@@ -11614,22 +11614,37 @@ function TeamStep(props) {
     if (state) glitch();
   }, [state, glitch]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return;
+    if (explicit || !state) return;
+    if (!powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return;
     autoPowered.current = true;
     power.toggle();
-  }, [state]);
+  }, [state, explicit]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, geniePower.phase, geniePower.detail, genieAutoPowered.current, "genie")) return;
+    if (explicit || !state) return;
+    if (!powersOnByItself(
+      state.preload,
+      geniePower.phase,
+      geniePower.detail,
+      genieAutoPowered.current,
+      "genie"
+    )) return;
     genieAutoPowered.current = true;
     setLastPressed("genie");
     geniePower.toggle();
-  }, [state]);
+  }, [state, explicit]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, unfoldPower.phase, unfoldPower.detail, unfoldAutoPowered.current, "unfold")) return;
+    if (explicit || !state) return;
+    if (!powersOnByItself(
+      state.preload,
+      unfoldPower.phase,
+      unfoldPower.detail,
+      unfoldAutoPowered.current,
+      "unfold"
+    )) return;
     unfoldAutoPowered.current = true;
     setLastPressed("unfold");
     unfoldPower.toggle();
-  }, [state]);
+  }, [state, explicit]);
   if (!state) return null;
   const name = state.companionName ?? t("Your companion");
   const omni = phase !== "asleep" && phase !== "failed";
@@ -13805,6 +13820,50 @@ var actionLabel = (row) => row.action ? ACTION_LABEL[row.action](row.name) : nul
 var secondaryLabel = (row) => row.secondary ? ACTION_LABEL[row.secondary](row.name) : null;
 var POWER_KINDS = /* @__PURE__ */ new Set(["omni", "genie", "unfold"]);
 var POWER_ON = { omni: powerOn, genie: geniePowerOn, unfold: unfoldPowerOn };
+var installRunning = (status) => status?.install?.phase === "installing";
+function resumeInstall(kind, status, start = startPower) {
+  if (!installRunning(status) || kind !== "omni" && kind !== "genie") return null;
+  const on2 = kind === "omni" ? powerOn : geniePowerOn;
+  return start(kind, (options) => on2({ ...options, resume: status }));
+}
+var readPlugins = (ask = call) => Promise.all(
+  [ask("omni-plugins"), ask("genie-plugin")].map((request2) => Promise.resolve(request2).catch(() => null))
+);
+function officialRow(kind, power, { roster, read, actions }) {
+  const asleep = (power?.phase ?? "asleep") === "asleep";
+  if (!read.checked && asleep) {
+    return { text: null, label: null, alert: null, action: null };
+  }
+  const status = asleep ? read.status : null;
+  const row = powerRow(kind, power, { roster, status });
+  if (row.state === "on" && row.action === "off" && notInstalled(kind, status)) {
+    const action2 = "install";
+    const label = actionLabel({ ...row, action: action2 });
+    return { text: null, label, alert: null, action: action2 };
+  }
+  let action = null;
+  if (row.action === "install" || row.action === "power" || row.action === "retry") {
+    action = row.action;
+  } else if (row.action === "choose" && typeof actions?.openHarnessOnboarding === "function") {
+    action = row.action;
+  } else if (row.action === "plugins" && actions?.hasPlugins?.() === true) {
+    action = row.action;
+  }
+  const text = row.state === "off" && action === "install" ? null : row.text;
+  return { text, label: actionLabel({ ...row, action }), alert: row.alert, action };
+}
+function actOfficial(kind, row, { actions, start = startPower }) {
+  if (row.action === "install" || row.action === "power" || row.action === "retry") {
+    return start(kind, POWER_ON[kind]);
+  }
+  if (row.action === "choose") {
+    actions.closeSettings?.();
+    actions.openHarnessOnboarding("omni-team");
+  } else if (row.action === "plugins") {
+    actions.closeSettings?.();
+    actions.openPlugins?.();
+  }
+}
 function togglePowerSettings(kind, next, { start = startPower, stop = powerOff } = {}) {
   if (next) start(kind, POWER_ON[kind]);
   else stop(kind);
@@ -13844,6 +13903,66 @@ function installPowerSettings(load = () => require("@automagik/bots-dsh/client")
   };
   return settings.register({ id: "welcome-power", order: 0, Component: PowerSettingsCard });
 }
+function installOfficialInstall(load = () => require("@automagik/bots-dsh/client"), { ask = call, start = startPower } = {}) {
+  let bots = null;
+  try {
+    bots = load();
+  } catch {
+    bots = null;
+  }
+  const registry = bots?.omni?.officialInstall;
+  if (typeof registry?.register !== "function") return () => {
+  };
+  const empty = { checked: false, status: null };
+  const reads = { omni: empty, genie: empty };
+  const listeners2 = /* @__PURE__ */ new Set();
+  let version = 0;
+  let inFlight = null;
+  let disposed = false;
+  const changed = () => {
+    version += 1;
+    for (const listener of Array.from(listeners2)) listener();
+  };
+  const unsubscribePower = subscribePower(changed);
+  const row = (kind, { roster, actions }) => officialRow(kind, powerOf(kind), { roster, read: reads[kind], actions });
+  const unregister = registry.register({
+    id: "welcome-install",
+    order: 0,
+    kinds: ["omni", "genie"],
+    subscribe(listener) {
+      listeners2.add(listener);
+      return () => listeners2.delete(listener);
+    },
+    version: () => version,
+    pending(kind) {
+      const { phase } = powerOf(kind);
+      const missing = phase === "asleep" && notInstalled(kind, reads[kind].status);
+      const needsAttention = phase === "failed" || phase === "restart" || phase === "pairing";
+      return missing || WORKING.has(phase) || needsAttention || CHOOSE.has(phase);
+    },
+    row,
+    act: (kind, ctx) => actOfficial(kind, row(kind, ctx), { actions: ctx.actions, start }),
+    refresh() {
+      if (inFlight !== null) return inFlight;
+      inFlight = readPlugins(ask).then(([omni, genie]) => {
+        if (disposed) return;
+        reads.omni = { checked: true, status: omni };
+        reads.genie = { checked: true, status: genie };
+        changed();
+        resumeInstall("omni", omni, start);
+        resumeInstall("genie", genie, start);
+      }).finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
+    }
+  });
+  return () => {
+    disposed = true;
+    unsubscribePower();
+    unregister();
+  };
+}
 
 // src/client/index.js
 var STEPS = [
@@ -13870,6 +13989,7 @@ function apply(ctx) {
   }
   ctx.effect(() => installAcpSection(ctx), "omni-ai: Claude Code and Codex in Settings");
   ctx.effect(() => installPowerSettings(), "omni-ai: power in each Bot's settings");
+  ctx.effect(() => installOfficialInstall(), "omni-ai: Omni and Genie install on the Apps page");
 }
 /*! Bundled license information:
 
