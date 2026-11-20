@@ -104,6 +104,16 @@ const mutations = [
     edits: [['scripts/configure.ts', '!hostUnderSiteName(origin.hostname, PASSKEY_SITE_NAME)', 'false']],
   },
   {
+    name: 'drop the Custom Domain from the generated config',
+    test: 'the origin host is the one Custom Domain',
+    edits: [['scripts/configure.ts', '\\ncustom_domain = true\\n', '\\ncustom_domain = false\\n']],
+  },
+  {
+    name: 'let configure accept an origin with a port',
+    test: 'an invalid origin writes no route',
+    edits: [['scripts/configure.ts', '    origin.port) {', '    false) {']],
+  },
+  {
     name: 'let cleanup ignore the passkey condition',
     test: 'cleanup keeps young passkeyless users',
     edits: [['src/cleanup.ts', 'AND NOT EXISTS (SELECT 1 FROM passkey p WHERE p.userId = u.id)', '']],
