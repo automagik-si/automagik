@@ -915,7 +915,7 @@ fake-acp tests cover the inheritance contract, and opened work runs as Workspace
 
 ## Amendment: Auto on every route (RFC 0031, 2026-11-11)
 
-Auto runs at Workspace. Codex uses its own reviewer; Claude Code uses its `auto` mode. Both can take their own mode while bridged. API Bots decide sandbox escalations through their own model in a separate, tool-free compaction request. Hermes, Antigravity and omp use the team's background model and require one to offer Auto. A bridged call keeps its dialog or the background model decides it; a CLI permission question sends the remaining bridge calls of that prompt to the person.
+Auto runs at Workspace. Codex uses its own reviewer, including while bridged. Claude Code is withheld from Auto until its `auto` mode is captured; a saved Claude Code Auto mark is cleared and the Bot runs as Workspace. API Bots decide sandbox escalations through their own model in a separate, tool-free compaction request. Hermes, Antigravity and omp use the team's background model and require one to offer Auto. A bridged call keeps its dialog or the background model decides it; a CLI permission question sends the remaining bridge calls of that prompt to the person.
 
 API marks bind the exact provider/model; own-mode and team marks bind the agent route. Only the person enables Auto. Current chat ownership or explicit inherited task records, revision, Workspace, and route must still match when a decision returns. Grants bind one call, tool and escalation reason and are consumed once. A failure or missing model asks the person. Model decisions never widen saved permissions or answer as the person.
 
@@ -923,7 +923,7 @@ Automagik's judge asks the person for hard-to-undo steps and after three consecu
 
 Codex's reviewer is a single CLI switch; global rules or reviewer policy would also change other Bots. No CLI home is written. Codex review counts can produce a refusal-stop notice, but the actual denial-limit ending and Claude Code auto mode still need captures. The host notice and tool result remain English like their neighbors. The permission questions explain that an allowed API escalation and native-agent tools may change files outside the Bot's folder. Existing Codex wording remains unchanged.
 
-RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Questions 4 and 5 are answered by the own model/background model split and explicit failure-to-person behavior. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
+RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Question 4 is answered by the own model/background model split and explicit failure-to-person behavior. For question 5, Claude Code is withheld from Auto until its `auto` mode is captured from a signed-in CLI. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
 
 ### Bot identity on ACP (amended 2026-11-14, #1269)
 
