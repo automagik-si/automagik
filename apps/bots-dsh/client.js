@@ -1975,6 +1975,15 @@ var ZH = {
   "Defined twice": "重复定义",
   "Defined twice: this name is also mapped to a vault item, so no Bot can use it. Delete one of them.": "重复定义：此名称也映射到了保管库中的一项，因此所有 Bot 均无法使用它。请删除其中一项。",
   "From a vault": "来自保管库",
+  "Allowed once": "已批准一次",
+  "The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.": "保管库已锁定。请在设置 › 保管库中解锁后重试。未读取任何内容。",
+  "The vault item details could not be loaded.": "无法加载保管库条目的详情。",
+  "Shell: {shell}": "Shell：{shell}",
+  "Folder: {folder}": "文件夹：{folder}",
+  "Provider: {provider}": "提供方：{provider}",
+  "Item: {item}": "条目：{item}",
+  "Field: {field}": "字段：{field}",
+  "Each use asks you first, in the Bot's chat.": "每次使用前，Bot 都会在自己的聊天中征求你的批准。",
   "Unavailable: the vault plugin cannot serve it yet": "不可用：保管库插件暂无法提供此密钥",
   "Remove the vault mapping": "移除保管库映射",
   "Remove the mapping": "移除映射",
@@ -5526,15 +5535,49 @@ function GitHubSteps({ bot, work }) {
     )
   );
 }
+var vaultLocked = "The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.";
+var vaultDetailUnavailable = "The vault item details could not be loaded.";
+function VaultRequestContext({ request }) {
+  return (0, import_react10.createElement)(
+    "div",
+    { className: "bt-secret-body" },
+    (0, import_react10.createElement)("div", { className: "bt-secret-saved" }, (0, import_react10.createElement)(KeyIcon), t("From a vault")),
+    (0, import_react10.createElement)("div", { className: "bt-secret-note" }, t("Shell: {shell}", { shell: request.shell })),
+    (0, import_react10.createElement)("div", { className: "bt-secret-note" }, t("Folder: {folder}", { folder: request.workdir })),
+    (0, import_react10.createElement)("pre", { className: "bt-aa-pre", tabIndex: 0, "aria-label": t("Command") }, (0, import_react10.createElement)("code", null, request.command))
+  );
+}
 function SecretCard({ sessionId, bot, request, roster, actions, inline = false }) {
   const [value, setValue] = (0, import_react10.useState)("");
   const [scope, setScope] = (0, import_react10.useState)("all");
   const [replacing, setReplacing] = (0, import_react10.useState)(false);
   const [busy, setBusy] = (0, import_react10.useState)(false);
   const [error, setError] = (0, import_react10.useState)("");
+  const [vaultDetail, setVaultDetail] = (0, import_react10.useState)(null);
   const busyRef = (0, import_react10.useRef)(false);
   const hold = useDockHold(sessionId, "secret", request.id, actions, inline);
   const noteId = (0, import_react10.useId)();
+  const vault = request.source === "vault";
+  const detailKey = vault ? JSON.stringify([request.id, request.name, request.sessionId, request.commandDigest, request.shell, request.workdir, request.command]) : null;
+  const detail = vaultDetail?.key === detailKey ? vaultDetail : null;
+  const displayed = (0, import_react10.useRef)({ id: request.id, key: detailKey, digest: request.commandDigest });
+  const fetchDetail = actions.secretSourceDetail;
+  (0, import_react10.useEffect)(() => {
+    const { id, key, digest } = displayed.current;
+    if (key === null) return;
+    let active = true;
+    Promise.resolve().then(() => fetchDetail(id)).then((value2) => {
+      if (!active) return;
+      const { commandDigest, snapshot: snapshot2, provider, item, field } = value2 ?? {};
+      const verified = commandDigest === digest && [commandDigest, snapshot2, provider, item, field].every((part) => typeof part === "string");
+      setVaultDetail(verified ? { key, value: { commandDigest, snapshot: snapshot2, provider, item, field } } : { key, error: vaultDetailUnavailable });
+    }, () => {
+      if (active) setVaultDetail({ key, error: vaultDetailUnavailable });
+    });
+    return () => {
+      active = false;
+    };
+  }, [fetchDetail]);
   const secret = (roster.secrets ?? []).find((entry) => entry.name === request.name);
   const run3 = (make) => {
     if (busyRef.current) return void 0;
@@ -5548,6 +5591,38 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
     });
   };
   const cancel = () => run3(() => actions.secretCancel(request.id));
+  if (vault) {
+    const item = detail?.value;
+    const allow2 = () => {
+      if (item && !busy) void run3(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }));
+    };
+    return (0, import_react10.createElement)(
+      "div",
+      { className: "bt-q bt-secret", role: "group", onFocusCapture: hold, onPointerDownCapture: hold },
+      (0, import_react10.createElement)(SecretHead, {
+        bot,
+        title: t("Let {bot} use {name}?", { bot: bot.name, name: request.name }),
+        name: request.name,
+        detail: request.purpose,
+        onClose: busy ? void 0 : cancel
+      }),
+      (0, import_react10.createElement)(VaultRequestContext, { request }),
+      item ? (0, import_react10.createElement)(
+        "div",
+        { className: "bt-secret-note" },
+        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: item.provider })),
+        (0, import_react10.createElement)("div", null, t("Item: {item}", { item: item.item })),
+        (0, import_react10.createElement)("div", null, t("Field: {field}", { field: item.field }))
+      ) : null,
+      error || detail?.error ? (0, import_react10.createElement)("div", { className: "bt-secret-error", role: "alert" }, error || t(detail.error)) : null,
+      (0, import_react10.createElement)(
+        "div",
+        { className: "bt-q-actions" },
+        (0, import_react10.createElement)("button", { type: "button", className: "bt-q-btn", disabled: busy, onClick: cancel }, t("Cancel")),
+        (0, import_react10.createElement)("button", { type: "button", className: "bt-q-submit", disabled: busy || !item, onClick: allow2 }, busy ? t("Allowing…") : t("Allow"))
+      )
+    );
+  }
   const long = value.trim().length >= MIN_VALUE;
   const save = () => {
     if (long && !busy) void run3(() => actions.secretSet({ requestId: request.id, value, scope }));
@@ -5604,6 +5679,15 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
   );
 }
 function SettledSecret({ bot, request, roster }) {
+  if (request.source === "vault") {
+    const title = request.status === "allowed" ? t("Allowed once") : request.status === "locked" ? t(vaultLocked) : t("Canceled");
+    return (0, import_react10.createElement)(
+      "div",
+      { className: "bt-q bt-q-settled bt-secret bt-secret-done", role: "group", "data-status": request.status },
+      (0, import_react10.createElement)(SecretHead, { bot, title, name: request.name, detail: request.purpose }),
+      (0, import_react10.createElement)(VaultRequestContext, { request })
+    );
+  }
   const canceled = request.status === "canceled";
   const text2 = canceled ? t("{bot} asked for {name}", { bot: bot.name, name: request.name }) : request.status === "allowed" ? t("Allowed {bot} to use {name}", { bot: bot.name, name: request.name }) : t("Saved {name}", { name: request.name });
   return (0, import_react10.createElement)(
@@ -5792,7 +5876,7 @@ function SecretRow({ secret, roster, actions, run: run3, open, onToggle }) {
     ) : null
   );
 }
-function VaultSourceRow({ source, actions, run: run3, open, onToggle }) {
+function VaultSourceRow({ source, present, actions, run: run3, open, onToggle }) {
   const [confirm, setConfirm] = (0, import_react10.useState)(null);
   const { name, purpose, definedTwice } = source;
   (0, import_react10.useEffect)(() => {
@@ -5817,7 +5901,7 @@ function VaultSourceRow({ source, actions, run: run3, open, onToggle }) {
           (0, import_react10.createElement)("code", { className: "bt-secret-name" }, name),
           purpose ? (0, import_react10.createElement)("span", { className: "bt-secret-purpose" }, purpose) : null
         ),
-        (0, import_react10.createElement)("span", { className: "bt-set-hint" }, definedTwice ? t("Defined twice") : t("Unavailable: the vault plugin cannot serve it yet"))
+        (0, import_react10.createElement)("span", { className: "bt-set-hint" }, definedTwice ? t("Defined twice") : present ? t("Each use asks you first, in the Bot's chat.") : t("Unavailable: the vault plugin cannot serve it yet"))
       ),
       (0, import_react10.createElement)("span", { className: "bt-set-control" }, (0, import_react10.createElement)("span", { className: "bt-tag" }, t("From a vault")))
     ),
@@ -5916,7 +6000,7 @@ function SecretsPage({ roster, actions, run: run3, Section: Section3 }) {
       ) : null,
       count === 0 && !adding ? (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t("No keys yet. When a Bot needs one, it shows a card in its chat."))) : null,
       secrets.map((secret) => (0, import_react10.createElement)(SecretRow, { key: secret.name, secret, roster, actions, run: run3, open: open === secret.name, onToggle: toggle(secret.name) })),
-      sources.map((source) => (0, import_react10.createElement)(VaultSourceRow, { key: source.name, source, actions, run: run3, open: open === source.name, onToggle: toggle(source.name) })),
+      sources.map((source) => (0, import_react10.createElement)(VaultSourceRow, { key: source.name, source, present: roster.secretSourcesPresent, actions, run: run3, open: open === source.name, onToggle: toggle(source.name) })),
       adding ? (0, import_react10.createElement)(AddSecret, { actions, run: run3, onDone: () => setAdding(false) }) : null
     ),
     adding ? null : (0, import_react10.createElement)("div", { key: "add", className: "bt-actions" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setAdding(true) }, t("Add a key")))
@@ -20109,7 +20193,8 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     closeGoal: () => ui2.set((state2) => state2.goalOpen ? { ...state2, goalOpen: null } : state2),
     // Values go out in these requests and never come back in a response.
     secretSet: (payload) => after(call2("secret-set", payload)),
-    secretAllow: (requestId) => after(call2("secret-allow", { requestId })),
+    secretAllow: (requestId, approval) => after(call2("secret-allow", { ...approval, requestId })),
+    secretSourceDetail: (requestId) => call2("secret-source-detail", { requestId }),
     secretCancel: (requestId) => after(call2("secret-cancel", { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call2("secret-update", { name, scope, purpose })),
     secretDelete: (name) => after(call2("secret-delete", { name })),
@@ -40451,6 +40536,7 @@ function apply(ctx) {
     const live2 = {};
     if (value.connectors !== void 0 && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live2.connectors = value.connectors;
     if (value.secretSources !== void 0 && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live2.secretSources = value.secretSources;
+    if (value.secretSourcesPresent !== void 0 && value.secretSourcesPresent !== current.secretSourcesPresent) live2.secretSourcesPresent = value.secretSourcesPresent;
     if (value.capabilityStatuses !== void 0 && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live2.capabilityStatuses = value.capabilityStatuses;
     if (value.learning !== void 0 && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live2.learning = value.learning;
     if (value.learningSettled !== void 0 && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live2.learningSettled = value.learningSettled;

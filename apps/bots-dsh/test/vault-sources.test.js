@@ -21,7 +21,6 @@ const dual = name => `${name} is defined both in secrets.json and in vault-sourc
 const mappedWrite = name => `The name ${name} is mapped to a vault item. A typed value cannot share it; delete the mapping first or use another name.`
 const typedWrite = name => `The name ${name} is already a typed secret. Delete it in Settings › Secrets first, or map the vault item under another name.`
 const off = name => `${name} is unavailable because the vault plugin is off.`
-const on = name => `${name} comes from a vault, and this version of the Bot team cannot use vault secrets yet.`
 const fresh = () => `fixture-${randomBytes(12).toString('hex')}`
 
 const team = {
@@ -54,7 +53,7 @@ async function start(t, home, { service = false, inject = false, services = {} }
     contribution = entry
     return () => { contribution = undefined }
   } }
-  const secretSources = new Proxy({}, { get() { assert.fail('the vault service was called') } })
+  const secretSources = { reads: 0, async status() { return { state: 'unlocked' } }, read() { this.reads++; assert.fail('the vault service read a value') } }
   const ctx = fakeContext({ services: { ...services, shellEnv, ...(service ? { secretSources } : {}) } })
   let stopService = () => {}
   if (inject) ctx.inject = (names, attach) => {
@@ -175,8 +174,8 @@ test('mapped-only names explain service availability and never create cards', as
   await absent.ctx.dispose()
 
   const present = await start(t, home, { service: true, inject: true })
-  assert.deepEqual(await present.tool('request_secret', { name: NAME }), { text: on(NAME), concluded: false })
-  assert.match((await present.tool('list_secrets', {})).text, /unavailable: it comes from a vault, and this version cannot use vault secrets yet/)
+  assert.deepEqual(await present.tool('request_secret', { name: NAME }, MEMBER), { text: `Name the exact command and shell you will run: ${NAME} comes from a vault and is approved per command.`, concluded: false })
+  assert.match((await present.tool('list_secrets', {})).text, /available: ask with request_secret/)
   present.stopService()
   assert.equal((await present.tool('request_secret', { name: NAME })).text, off(NAME))
 })

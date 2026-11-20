@@ -232,7 +232,8 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     closeGoal: () => ui.set(state => (state.goalOpen ? { ...state, goalOpen: null } : state)),
     // Values go out in these requests and never come back in a response.
     secretSet: payload => after(call('secret-set', payload)),
-    secretAllow: requestId => after(call('secret-allow', { requestId })),
+    secretAllow: (requestId, approval) => after(call('secret-allow', { ...approval, requestId })),
+    secretSourceDetail: requestId => call('secret-source-detail', { requestId }),
     secretCancel: requestId => after(call('secret-cancel', { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call('secret-update', { name, scope, purpose })),
     secretDelete: name => after(call('secret-delete', { name })),
