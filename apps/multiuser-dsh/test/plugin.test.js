@@ -44,3 +44,54 @@ test('the release tarball contains only the public package, source and declarati
   assert.ok(paths.includes('package/src/carrier.js'))
   assert.ok(paths.every(path => !/^package\/(test|dev|scripts)\//.test(path)))
 })
+
+test('the private reservation survives a profile without the optional gateway peer', () => {
+  execFileSync(process.execPath, ['--import', './test/harness-resolve.mjs', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict'
+    import { registerHooks } from 'node:module'
+    import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
+    import { invoke, prefix, runtime } from './test/runtime.mjs'
+
+    const target = prefix + '/api/fixture'
+    let attempts = 0
+    let webServer
+    let reservedAtLoad = false
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier.startsWith('@deepseek-ai/dsh-api-gateway')) {
+          attempts++
+          const marker = Symbol.for('automagik.multiuser-dsh.reservation')
+          reservedAtLoad = Object.hasOwn(webServer, marker) && webServer.match(target) !== intruder
+          throw Object.assign(new Error('gateway not installed in this profile'), { code: 'ERR_MODULE_NOT_FOUND' })
+        }
+        return nextResolve(specifier, context)
+      },
+    })
+    const intruder = { kind: 'exact', path: target, handler() { assert.fail('private route escaped the reservation') } }
+    const adapter = await import('./index.js')
+    assert.equal(attempts, 0, 'loading the plugin does not require the peer')
+    for (const enabled of ['0', '1']) {
+      const { ctx, webServer: web } = runtime({ after() {} })
+      webServer = web
+      new RemoteAccessService(ctx)
+      process.env.AUTOMAGIK_MULTIUSER = enabled
+      process.env.AUTOMAGIK_CALLER_KEYS = '/missing-fixture-caller-keys.json'
+      const activation = ctx.plugin(adapter)
+      await activation
+      const retained = web.match(target)
+      const ready = await invoke(web.match(prefix + '/_ready').handler, {
+        url: prefix + '/_ready', method: 'GET', headers: {},
+      })
+      assert.equal(ready.status, 503)
+      await activation.dispose()
+      web.register(intruder)
+      for (const { handler } of [retained, web.match(target)]) {
+        assert.equal((await invoke(handler, { url: target, method: 'POST', headers: {} })).status, 503)
+      }
+      if (enabled === '0') assert.equal(attempts, 0)
+      await ctx.fiber.dispose()
+    }
+    assert.ok(attempts > 0)
+    assert.ok(reservedAtLoad, 'reserve before loading the optional peer')
+  `], { cwd: new URL('..', import.meta.url), stdio: 'inherit' })
+})

@@ -87,12 +87,60 @@ operations can evade these checks.
 
 ## Remote stream WebSocket upstream dependency
 
-DSH 0.2.2-rc.2's `dsh-api-gateway` provides the stream protocol and
-`wireStream.open(..., peer, signal)`. Its `RemoteStreamMuxServer` is only accessible as
-TypeScript under `src/` and an unexported compiled module.
+DSH 0.2.2-rc.2's `dsh-api-gateway` exports the stream protocol (`./stream-protocol`) and
+`wireStream.open(endpoint, payload, uplink, peer, signal)`, but not its mux server
+(`RemoteStreamMuxServer` exists only as TypeScript under `src/` and in an unexported compiled
+module). So the adapter carries a member's or guest's `/api/remote.mux` itself
+(RFC 0038 delivery 5b):
 
-Request an exported mux server or `handleUpgrade(req, socket, head, peer)` on the
-gateway service. The upstream API must bind a fixed caller Peer for the socket lifetime,
-propagate cancellation, enforce stream limits and release streams and the Peer on disconnect.
-After verifying those behaviors, the gate can add `/api/remote.mux` to the member upgrade
-allowlist and route it to an adapter-owned upgrade. This delivery refuses member and guest upgrades.
+- **Carrier.** The gate forwards a member's or guest's `GET /api/remote.mux`, and nothing else,
+  to the private upgrade `/_automagik/caller/api/remote.mux` with a signed assertion for
+  `GET /api/remote.mux`, the WebSocket handshake fields and no DSH credential. The adapter
+  refuses any other raw target, a non-GET or a request body with 400, admits the assertion
+  as it admits HTTP (one nonce store), and makes one Peer for the socket's life with
+  `interactions: 'answer'`. Every logical stream (open, iteration and cleanup) runs as that
+  caller, with `automagikCaller` reporting the principal and the gate session family.
+  `src/mux.js` rebuilds DSH's mux from `packages/api/gateway/src/stream-server.ts` (MIT; see
+  NOTICE) on `ws` 8.18.3, the version the Bot team pins.
+- **Limits.** 4 sockets per person and 64 in total (429 and 503 before the handshake); 64 open
+  streams per socket (the 65th gets `gateway/protocol`). IDs longer than 256 UTF-8 bytes
+  get `gateway/protocol`. Limits also include 1 MiB per message, fragments
+  included (1009), and at most 1024 frames per message (the socket is destroyed); a 256 KiB
+  uplink inbox per stream; a ping every 2 seconds, closed after 2 missed; a malformed frame
+  or a duplicate stream id is 1008 and a binary message 1003. The downlink drains DSH's
+  iterators into one queue per socket. The 8 MiB budget per person covers queued and unsent
+  bytes, including Ping, Pong and Close, and the wire size of stream opens awaiting the
+  source. A socket may hold up to 32,768 outstanding writes, with 131,072 across a person's
+  sockets. When a person exceeds a write limit, the socket with the largest backlog for
+  that limit closes first. Every write has a 10-second deadline. The carrier drops the
+  connection if a Close frame cannot fit or flush by that deadline. A stream ID stays
+  reserved until its output is sent or discarded, including a refused open's error.
+- **The `automagik` policy.** The adapter registers the only policy for the `automagik`
+  principal kind, empty, before it admits any caller: every business call and every
+  policy-filtered notification of a member or guest is denied. The access snapshot
+  (`remoteAccess/follow`) and the `$events` ready frame are the exceptions; a member's
+  `$events` never gets a pending event and cannot answer one. A policy another plugin
+  registered first, or the loss of ours, closes admission and cancels every caller at once:
+  sockets close and both pending uploads and dispatched HTTP are cancelled. Items of any
+  other stream pass through a caller projection before they are queued; in this delivery there is none, so
+  such a stream ends with no item.
+- **Readiness probe.** `GET /_automagik/caller/_ready` answers `204` with
+  `x-automagik-ready: 1` (no body, the connection kept open) while the adapter admits
+  callers, else 503. The gate asks it on a fresh loopback connection and sends the member's
+  request on that same connection, so a DSH restart in between breaks the connection instead
+  of reaching a route registered before the adapter's reservation. HTTP and streams require
+  application readiness and the live Typert gateway on the adapter's connection, using the
+  same remote-access service and policy registration. Member RPC uses the bound gateway's
+  dispatcher. Losing the gateway registration closes sockets bound to it and drops their
+  queued frames. The private reservation remains in place in profiles without the
+  optional gateway package.
+- **Unload.** New member requests get 503 at once and carried sockets start a 1011 close.
+  Pending uploads are cancelled and dispatched HTTP drains for up to 30 seconds.
+  `automagikCaller` stays available until the dispatched requests and stream pumps settle.
+
+The upstream ask, in RFC 0023's form: one export from `dsh-api-gateway`, either its mux server
+as a public entry point (a `./stream-server` export of `RemoteStreamMuxServer` with
+`handleUpgrade(req, socket, head, peer)` and its options) or a
+`wireStream.serve(req, socket, head, peer)` that runs DSH's own mux on a plugin's upgrade
+route. When it lands, the rebuilt carrier and its parity test go; the limits above stay as
+options.
