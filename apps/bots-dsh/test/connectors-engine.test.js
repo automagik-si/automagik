@@ -711,16 +711,30 @@ test('a send without a card goes only to allowed addresses, read as the mail lib
     assert.deepEqual([row.card, row.sent], [true, 0], JSON.stringify(fields))
     assert.match(row.answer, /send card/)
   }
-  // Every recipient is allowed: sent with no card, to the addresses the rule read.
-  for (const [fields, to, cc] of [
-    [{ to: 'known@allowed.example' }, ['known@allowed.example'], undefined],
-    [{ to: 'Known Person <KNOWN@allowed.example>', cc: 'second@allowed.example' }, ['known@allowed.example'], ['second@allowed.example']],
-    [{ to: '"A \\"quoted\\" name" <known@allowed.example>; second@allowed.example' }, ['known@allowed.example', 'second@allowed.example'], undefined],
-    [{ to: 'team: known@allowed.example, second@allowed.example;' }, ['known@allowed.example', 'second@allowed.example'], undefined],
+  // Every recipient is allowed: sent with no card, to the addresses the rule read, in the spelling the
+  // rule stores (lower case), each with its display name; the record keeps that list, not the Bot's text.
+  const known = { name: '', address: 'known@allowed.example' }
+  const second = { name: '', address: 'second@allowed.example' }
+  for (const [fields, [to, cc, bcc], saved] of [
+    [{ to: 'known@allowed.example' }, [[known]], ['known@allowed.example', '', '']],
+    [{ to: 'Known Person <KNOWN@allowed.example>', cc: 'second@allowed.example' },
+      [[{ name: 'Known Person', address: 'known@allowed.example' }], [second]],
+      ['Known Person <known@allowed.example>', 'second@allowed.example', '']],
+    [{ to: '"A \\"quoted\\" name" <known@allowed.example>; second@allowed.example' },
+      [[{ name: 'A "quoted" name', address: 'known@allowed.example' }, second]],
+      ['"A \\"quoted\\" name" <known@allowed.example>, second@allowed.example', '', '']],
+    [{ to: 'team: known@allowed.example, second@allowed.example;' }, [[known, second]],
+      ['known@allowed.example, second@allowed.example', '', '']],
+    [{ to: 'team: Known Person <KnOwN@allowed.example>, known@allowed.example;',
+        cc: 'team: second@allowed.example;', bcc: '"Second, Person" <SECOND@allowed.example>; second@allowed.example' },
+      [[{ name: 'Known Person', address: 'known@allowed.example' }], [second], [{ name: 'Second, Person', address: 'second@allowed.example' }]],
+      ['Known Person <known@allowed.example>', 'second@allowed.example', '"Second, Person" <second@allowed.example>']],
   ]) {
     const row = await run(fields)
-    assert.deepEqual([row.card, row.sent, row.last.to, row.last.cc, row.last.bcc], [false, 1, to, cc, undefined], JSON.stringify(fields))
-    assert.match(row.answer, /^Sent "S" to known@allowed\.example/)
+    assert.deepEqual([row.card, row.sent, row.last.to, row.last.cc, row.last.bcc], [false, 1, to, cc, bcc], JSON.stringify(fields))
+    const request = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).mailRequests.m1.at(-1)
+    assert.deepEqual([request.to, request.cc, request.bcc], saved, JSON.stringify(fields))
+    assert.equal(row.answer, `Sent "S" to ${saved.filter(Boolean).join(', ')} from ${addressAt('163.com')}.`)
   }
   // "Allow recipient" on a card adds the addresses the mail goes to, not text inside a name.
   await rt.connectorEndpoint('mail-rule-set', { addRecipient: '"<inside@name.example>" real@added.example' })
@@ -1086,9 +1100,11 @@ test('gmail transport: search, read, draft, send, modify, trash, and one refresh
   const calls = []
   let refreshes = 0
   let authed = false
-  const fakeFetch = async (url) => {
+  const bodies = []
+  const fakeFetch = async (url, init) => {
     const u = String(url?.url ?? url)
     calls.push(u)
+    if (u.includes('/messages/send')) bodies.push(String(init?.body ?? url?.body ?? ''))
     if (!authed && u.includes('/messages/1?format=full')) {
       authed = true
       return new Response('unauth', { status: 401 })
@@ -1109,6 +1125,11 @@ test('gmail transport: search, read, draft, send, modify, trash, and one refresh
   assert.equal((await gmail.read({ uid: '1' })).messages[0].text, 'hi')
   assert.ok((await gmail.draft({ to: 'a@b', subject: 'd', text: 'x' })).folder)
   await gmail.send({ to: 'a@b', subject: 's', text: 'x' })
+  // A Bcc reaches Gmail in the raw message (Gmail delivers to it and removes it): the composer drops it by default.
+  await gmail.send({ to: [{ name: 'To Person', address: 'to@x.example' }], bcc: [{ name: '', address: 'hidden@x.example' }], subject: 'b', text: 'x' })
+  const raw = Buffer.from(JSON.parse(bodies.at(-1)).raw, 'base64url').toString('utf8')
+  assert.match(raw, /^To: To Person <to@x\.example>$/m)
+  assert.match(raw, /^Bcc: hidden@x\.example$/m)
   await gmail.update({ uid: '1', seen: true })
   await gmail.update({ uid: '1', move: 'trash' })
   // The 401 on the first read was refreshed exactly once, then retried.

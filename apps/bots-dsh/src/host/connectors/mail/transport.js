@@ -292,7 +292,11 @@ export function connectGmail(account, deps = {}) {
 
 const gmailRaw = async (from, { to, cc, bcc, subject, text, inReplyTo, references }) => {
   const MailComposer = (await import('nodemailer/lib/mail-composer')).default
-  const raw = await new MailComposer({ from, to, cc, bcc, subject, text, ...(inReplyTo ? { inReplyTo, references: references ?? [inReplyTo] } : {}) }).compile().build()
+  const node = new MailComposer({ from, to, cc, bcc, subject, text, ...(inReplyTo ? { inReplyTo, references: references ?? [inReplyTo] } : {}) }).compile()
+  // Gmail delivers to the Bcc header of the raw message and removes it itself; the composer
+  // drops it by default, which would leave every Bcc recipient out.
+  node.keepBcc = true
+  const raw = await node.build()
   return raw.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 const gmailDraft = async (send, from, args) => {
