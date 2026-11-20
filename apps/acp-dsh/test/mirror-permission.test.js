@@ -168,6 +168,75 @@ const refusedExec = (c, one = c.call) => ({ name: TOOL_NAME, callId: one.callId,
 // A gate of another plugin on `tools/pre-execute`, denying the DSH call ids it is given.
 const denyGate = (ctx, callIds, reason = 'not here') => ctx.on('tools/pre-execute', (exec, next) => (callIds.includes(exec.callId) ? { kind: 'deny', reason } : next()))
 
+const parentStamp = parent => ({ _meta: { claudeCode: { parentToolUseId: parent } } })
+
+for (const [label, prepare] of [
+  ['the question names a different parent from the row and live call', (c) => {
+    const { tool } = c.call
+    c.run.changeTool(tool, parentStamp('A'))
+    const args = callArguments(tool)
+    const asking = c.call.ask()
+    // Isolate the three-way comparison from the live call's overwrite guard.
+    tool.permission.call.parent = 'B'
+    return { args, asking }
+  }],
+  ['an A-to-B overwrite stays latched even when A comes back', (c) => {
+    const { tool } = c.call
+    c.run.changeTool(tool, parentStamp('A'))
+    const args = callArguments(tool)
+    const asking = c.call.ask()
+    c.run.seeTool({ toolCallId: tool.id, ...parentStamp('B') })
+    assert.equal(tool.parent, 'B')
+    assert.equal(tool.parentConflict, true)
+    c.run.changeTool(tool, parentStamp('A'))
+    assert.equal(tool.parent, 'A')
+    assert.equal(tool.parentConflict, true)
+    return { args, asking }
+  }],
+  ['a late stamp accompanies a change to input.parent', (c) => {
+    const { tool } = c.call
+    c.run.changeTool(tool, { rawInput: { path: 'README.md', parent: 'input-A' } })
+    const args = callArguments(tool)
+    const asking = c.call.ask()
+    c.run.changeTool(tool, { ...parentStamp('A'), rawInput: { path: 'README.md', parent: 'input-B' } })
+    return { args, asking }
+  }],
+  ['the reviewed row has a non-string parent', (c) => ({
+    args: { ...callArguments(c.call.tool), parent: null },
+    asking: c.call.ask(),
+  })],
+]) {
+  test(`Auto asks the person when ${label}`, async (t) => {
+    const w = await world(t, { answer: 'rejected' })
+    const c = w.chat('s1', [{ question: false }])
+    const { args, asking } = prepare(c)
+    const exec = { name: TOOL_NAME, agent: c.agent, callId: c.call.callId, signal: new AbortController().signal }
+    c.session.append('tool/call', { turn: 1, step: 0, name: TOOL_NAME, callId: exec.callId, arguments: JSON.stringify(args) })
+    // Supply the review record directly, including for a malformed row the pipeline would reject.
+    w.adapter.reviewedGate(exec, () => {})
+    const running = w.adapter.tool.execute(callArguments(c.call.tool), exec)
+    const answer = await soon(asking)
+    assert.deepEqual(answer, picked('no'))
+    assert.equal(w.asked.length, 1)
+    c.call.close(answer)
+    await running
+  })
+}
+
+test('Auto answers once when an otherwise identical call gets a parent during review', async (t) => {
+  const w = await world(t, { decision: () => {
+    assert.equal(c.call.tool.permission.call.parent, undefined)
+    c.run.changeTool(c.call.tool, parentStamp('A'))
+    return ALLOW
+  }, answer: 'rejected' })
+  const c = w.chat('s1')
+  const results = await c.execute()
+  assert.equal(w.reviews.length, 1)
+  assert.equal(w.asked.length, 0)
+  assert.deepEqual(c.call.answers, [picked('yes')])
+  assert.equal(results[0].isError, false)
+})
+
 // --- the harness itself ------------------------------------------------------------------
 
 test('the harness runs the mirror from the agent scope, on a row the pipeline wrote', async (t) => {

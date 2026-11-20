@@ -804,7 +804,10 @@ export class AgentRun {
     }
     // The link can come on a later update only (a streamed refinement or the result).
     const parent = parentToolOf(update)
-    if (parent !== undefined && parent !== tool.id) tool.parent = parent
+    if (parent !== undefined && parent !== tool.id) {
+      if (typeof tool.parent === 'string' && tool.parent !== parent) tool.parentConflict = true
+      tool.parent = parent
+    }
     const status = tool.rawOutput?.review?.status
     if (this.reviews && tool.id.startsWith('guardian_assessment:') && typeof status === 'string' && !tool.reviewed) {
       tool.reviewed = true
