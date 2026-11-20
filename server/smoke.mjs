@@ -8,7 +8,8 @@
 //   node server/smoke.mjs [automagik-server:local]
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { GATE_VIEW, GATE_VIEW_MOUNT } from './lib.mjs'
+import { GATE_VIEW, GATE_VIEW_MOUNT, MEASUREMENT_MARKER, RUN_SECRETS_DIR } from './lib.mjs'
+import { BOTS_GUARD_SINCE, compareRelease } from './profile-state.mjs'
 import { herdrCoreSocket, SMOKE_HC_SESSION } from './toolchain.mjs'
 
 const run = promisify(execFile)
@@ -21,6 +22,8 @@ const memberName = `${name}-member`
 const memberData = `${name}-member-data`
 const publicKeys = `${name}-caller-keys`
 const signerData = `${name}-signer-data`
+const runnerData = `${name}-runner`
+const botFiles = `${name}-bot-files`
 const START_TIMEOUT_MS = 240_000
 
 const docker = async (args, options = {}) => {
@@ -73,22 +76,90 @@ async function waitForHealthy() {
   throw new Error(`Docker's health check did not turn healthy\n${await logsOf()}`)
 }
 
-async function smokeMultiuser() {
-  const flags = ['--env', 'AUTOMAGIK_MULTIUSER=1', '--env', 'AUTOMAGIK_CLI_INSTALL=off',
-    '--env', 'AUTOMAGIK_CALLER_KEYS=/caller-keys/caller-keys.json',
-    '--env', 'AUTOMAGIK_INSTANCE_ID=member-smoke']
-  await docker(['volume', 'create', memberData])
-  await docker(['run', '--detach', '--name', memberName, '--network', 'none',
-    '--volume', `${memberData}:/data`, ...flags, image])
-  const refused = await docker(['wait', memberName], { timeout: 30_000 })
-  check(refused.stdout.trim() === '1', 'multiuser without the caller keys mount did not exit 1')
-  const logs = await docker(['logs', memberName])
-  check(logs.stderr.includes('caller-keys-mount') && !/herdr-core/.test(logs.stdout + logs.stderr),
-    'multiuser without the caller keys mount did not refuse before the core')
-  await docker(['rm', memberName])
-
-  await docker(['volume', 'create', publicKeys])
-  await docker(['volume', 'create', signerData])
+async function smokeMultiuser(content) {
+  const runnerUid = 2200, runnerGid = 2201
+  const env = {
+    AUTOMAGIK_MULTIUSER: '1', AUTOMAGIK_CLI_INSTALL: 'off',
+    AUTOMAGIK_CALLER_KEYS: '/caller-keys/caller-keys.json', AUTOMAGIK_INSTANCE_ID: 'member-smoke',
+    AUTOMAGIK_BOT_RUNNER_SOCKET: '/bot-runner/socket/runner.sock', AUTOMAGIK_BOT_RUNNER_PROOFS: '/bot-runner/proofs',
+    AUTOMAGIK_BOT_RUNNER_UID: String(runnerUid), AUTOMAGIK_BOT_RUNNER_GID: String(runnerGid),
+    AUTOMAGIK_BOT_RUNNER_WORK_ROOT: '/bot-runner/work',
+  }
+  for (const volume of [memberData, publicKeys, signerData, runnerData, botFiles]) await docker(['volume', 'create', volume])
+  await docker(['run', '--rm', '--network', 'none', '--user', '0:0',
+    '--volume', `${runnerData}:/bot-runner`, '--volume', `${botFiles}:/bot-files`,
+    '--entrypoint', '/nodejs/bin/node', image, '--input-type=module', '-e', `
+      import fs from 'node:fs'
+      import net from 'node:net'
+      import { once } from 'node:events'
+      const own = (path, uid, gid, mode) => { fs.chownSync(path, uid, gid); fs.chmodSync(path, mode) }
+      own('/bot-runner', 0, 0, 0o755)
+      for (const [dir, mode] of [['socket', 0o750], ['proofs', 0o1730], ['work', 0o711]]) {
+        const path = '/bot-runner/' + dir
+        fs.mkdirSync(path)
+        own(path, ${runnerUid}, ${runnerGid}, mode)
+      }
+      own('/bot-files', 1000, 1000, 0o700)
+      fs.mkdirSync('/bot-runner/work/nested')
+      own('/bot-runner/work/nested', 1000, 1000, 0o700)
+      // Leave an inert socket inode. Readiness only checks metadata and effective access.
+      const socket = ${JSON.stringify(env.AUTOMAGIK_BOT_RUNNER_SOCKET)}
+      const listener = net.createServer()
+      listener.listen(socket + '.fixture')
+      await once(listener, 'listening')
+      fs.renameSync(socket + '.fixture', socket)
+      own(socket, ${runnerUid}, ${runnerGid}, 0o660)
+      await new Promise(resolve => listener.close(resolve))
+    `])
+  const wallPatch = `
+- id: fs-sandbox
+  disabled: true
+- insert:
+    - id: member-wall-fs
+      name: '@automagik/bots-dsh/member-wall/fs'
+      config:
+        members: true
+        bots: true
+        membersRoot: /data/members
+        principalsFile: /data/dsh/multiuser-dsh/principals.json
+        botsRoot: /bot-files
+        sharedReadRoots: [/data]
+        denyReadRoots: [/data/dsh, /data/secrets, /data/gate-view, ${RUN_SECRETS_DIR}]
+`
+  const probePatch = `
+- insert:
+    - id: smoke-file-probe
+      name: /data/dsh/smoke-file-probe.mjs
+`
+  const probe = `
+    import { strict as assert } from 'node:assert'
+    import { writeFileSync } from 'node:fs'
+    import { createRequire } from 'node:module'
+    import { dirname, join } from 'node:path'
+    import { pathToFileURL } from 'node:url'
+    export const inject = ['fs']
+    export async function apply(ctx) {
+      const fs = ctx.fs
+      const file = await fs.resolve('/data/dsh/smoke-file-canary')
+      const read = () => fs.readText(file)
+      assert.equal(await read(), 'owner canary')
+      const require = createRequire('/data/dsh/profiles/automagik-web/package.json')
+      const wall = require.resolve('@automagik/bots-dsh/member-wall/fs')
+      const { sessionScope } = await import(pathToFileURL(join(dirname(wall), 'principals.js')).href)
+      const scoped = () => sessionScope.run({ sessionId: 'smoke-scoped' }, read)
+      const mode = process.env.AUTOMAGIK_MULTIUSER
+      if (mode === '1') await assert.rejects(scoped, { code: 'FS_NOT_FOUND' })
+      else assert.equal(await scoped(), 'owner canary')
+      writeFileSync('/data/dsh/smoke-file-result', mode)
+    }
+  `
+  const writePatch = patch => docker(['run', '--rm', '--network', 'none', '--volume', `${memberData}:/data`,
+    '--entrypoint', '/nodejs/bin/node', image, '-e',
+    `const fs = require('node:fs')
+    fs.writeFileSync('/data/dsh/cordis.patch.yml', ${JSON.stringify(patch)})
+    fs.writeFileSync('/data/dsh/smoke-file-probe.mjs', ${JSON.stringify(probe)})
+    if (!fs.existsSync('/data/dsh/smoke-file-canary')) fs.writeFileSync('/data/dsh/smoke-file-canary', 'owner canary')
+    fs.rmSync('/data/dsh/smoke-file-result', { force: true })`])
   const signer = `
     import { createSigner } from '/opt/automagik/gate-caller.mjs'
     const workspace = 'member-smoke'
@@ -98,16 +169,51 @@ async function smokeMultiuser() {
     '--volume', `${signerData}:/data`, '--volume', `${publicKeys}:/caller-keys`,
     '--entrypoint', '/nodejs/bin/node', image, '--input-type=module', '-e', signer + code], { timeout: 30_000 })
   await helper('none', 'signer.publish()')
-  await docker(['run', '--detach', '--name', memberName, '--network', 'none',
-    '--volume', `${memberData}:/data`, '--volume', `${publicKeys}:/caller-keys:ro`, ...flags,
-    '--health-interval', '2s', image])
-  const started = Date.now()
-  while (true) {
-    const status = (await docker(['inspect', memberName, '--format', '{{.State.Status}} {{.State.Health.Status}}'])).stdout.trim()
-    if (status === 'running healthy') break
-    check(status.startsWith('running ') && Date.now() - started < START_TIMEOUT_MS, 'multiuser carrier did not become healthy')
-    await sleep(500)
+  const start = ({ omit, settings = {}, keys = true, nestedBind = false, group = true } = {}) => docker([
+    'run', '--detach', '--name', memberName, '--network', 'none', '--volume', `${memberData}:/data`,
+    ...(nestedBind ? ['--mount', `type=volume,source=${runnerData},target=/bot-files,volume-subpath=work/nested`] :
+      ['--volume', `${botFiles}:/bot-files`]),
+    ...(keys ? ['--volume', `${publicKeys}:/caller-keys:ro`] : []),
+    '--volume', `${runnerData}:/bot-runner`,
+    ...(group ? ['--group-add', String(runnerGid)] : []),
+    ...Object.entries({ ...env, ...settings }).filter(([key]) => key !== omit).flatMap(([key, value]) => ['--env', `${key}=${value}`]),
+    '--health-interval', '2s', '--health-timeout', '2s', '--health-retries', '60', '--health-start-period', '0s', image,
+  ])
+  const refuse = async (code, options, extraCode) => {
+    await start(options)
+    const result = await docker(['wait', memberName], { timeout: 30_000 })
+    const { stdout, stderr } = await docker(['logs', memberName])
+    const lines = stderr.split('\n').filter(line => line.includes('startup readiness failed'))
+    const reasons = [code, ...(extraCode ? [`${extraCode}, ${code}`] : [])]
+    check(result.stdout.trim() === '1' && lines.length === 1 &&
+      reasons.some(reason => lines[0] === `automagik-web: multiuser is on, but startup readiness failed: ${reason}`) &&
+      !/herdr-core|dsh web:|model key/.test(stdout + stderr),
+    `multiuser did not refuse with ${code} before either child started\n${stdout}${stderr}`)
+    await docker(['rm', memberName])
   }
+  const waitForMemberHealth = async () => {
+    const started = Date.now()
+    while (true) {
+      const status = (await docker(['inspect', memberName, '--format', '{{.State.Status}} {{.State.Health.Status}}'])).stdout.trim()
+      if (status === 'running healthy') return
+      check(status.startsWith('running ') && Date.now() - started < START_TIMEOUT_MS, 'member fixture did not become healthy')
+      await sleep(500)
+    }
+  }
+  const checkFileProbe = mode => docker(['exec', memberName, '/nodejs/bin/node', '-e', `
+    const fs = require('node:fs')
+    if (fs.readFileSync('/data/dsh/smoke-file-result', 'utf8') !== ${JSON.stringify(mode)}) process.exit(1)
+  `])
+  if (compareRelease(content, BOTS_GUARD_SINCE) < 0) {
+    await writePatch(wallPatch)
+    await refuse('bots-guard', undefined, 'member-wall-row')
+    say(`multiuser: content ${content} refused before launch by the Bots command guard floor`)
+    return
+  }
+  await writePatch(wallPatch + probePatch)
+  await start()
+  await waitForMemberHealth()
+  await checkFileProbe('1')
   const report = JSON.parse((await docker(['exec', memberName, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs', '--json'])).stdout)
   check(report.healthy && report.multiuser?.healthy, 'multiuser report lacks the live carrier')
   await helper(`container:${memberName}`, `
@@ -126,7 +232,36 @@ async function smokeMultiuser() {
     if (replay.status !== 401) throw new Error('member-replay')
     await replay.body.cancel()
   `)
-  say('multiuser: mount refusal, healthy carrier, member index cache policy, replay refused')
+  await docker(['rm', '--force', memberName])
+  // Apply the documented rollback patch to the same populated volume.
+  await writePatch(wallPatch + `
+- id: member-wall-fs
+  disabled: true
+- id: fs-sandbox
+  disabled: false
+` + probePatch)
+  await start({ settings: { AUTOMAGIK_MULTIUSER: '0' } })
+  await waitForMemberHealth()
+  await checkFileProbe('0')
+  await docker(['rm', '--force', memberName])
+  await writePatch(wallPatch)
+  await refuse('caller-keys-config', { omit: 'AUTOMAGIK_CALLER_KEYS' })
+  await refuse('caller-keys-mount', { keys: false })
+  await refuse('instance-config', { settings: { AUTOMAGIK_INSTANCE_ID: ' ' } })
+  await refuse('bot-runner-config', { omit: 'AUTOMAGIK_BOT_RUNNER_SOCKET' })
+  const moveSocket = (from, to) => docker(['run', '--rm', '--network', 'none', '--user', '0:0',
+    '--volume', `${runnerData}:/bot-runner`, '--entrypoint', '/nodejs/bin/node', image, '-e',
+    `require('node:fs').renameSync(${JSON.stringify(from)}, ${JSON.stringify(to)})`])
+  const socket = env.AUTOMAGIK_BOT_RUNNER_SOCKET
+  await moveSocket(socket, socket + '.saved')
+  await refuse('bot-runner-socket')
+  await moveSocket(socket + '.saved', socket)
+  await refuse('bot-runner-socket', { group: false })
+  await refuse('bot-trees-disjoint', { settings: { AUTOMAGIK_BOT_RUNNER_WORK_ROOT: '/bot-files' } })
+  await refuse('bot-trees-disjoint', { nestedBind: true })
+  await writePatch('[]\n')
+  await refuse('member-wall-row')
+  say('multiuser: prerequisite refusals, scoped file denied, healthy carrier, member index cache policy, replay refused, owner file read after rollback')
 }
 
 async function main() {
@@ -138,6 +273,8 @@ async function main() {
   await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c',
     'test ! -e /data/acp'])
   await docker(['run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e', 'process.exit(process.getuid() === 1000 ? 0 : 1)'])
+  await docker(['run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e',
+    'process.exit((require("node:fs").lstatSync("/data/dsh").mode & 0o7777) === 0o700 ? 0 : 1)'])
   // The gate view is not baked into /data either: DSH creates it at start (checked below).
   await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c', `test ! -e /data/${GATE_VIEW}`])
 
@@ -239,11 +376,20 @@ async function main() {
   say('installer tools: tar, gzip and find extract the expected payload')
 
   // A restart keeps the user's profile: the seed runs only where nothing is.
+  await docker(['exec', name, '/nodejs/bin/node', '-e', 'require("node:fs").chmodSync("/data/dsh", 0o755)'])
   await docker(['restart', name])
   const restarted401 = await waitForFence()
   const after = await logsOf()
   check((after.match(/automagik-web: seeded /g) ?? []).length === 1, 'a restart reseeded the profile')
   check(/automagik-web: profile present at \/data\/dsh\/profiles\/automagik-web/.test(after), 'a restart did not find the profile')
+  await docker(['exec', '--user', '2200:2200', name, '/nodejs/bin/node', '-e', `
+    const assert = require('node:assert/strict'), fs = require('node:fs')
+    assert.equal(fs.lstatSync('/data/dsh').mode & 0o7777, 0o700)
+    assert.throws(() => fs.accessSync('/data/dsh/launch-url'), { code: 'EACCES' })
+    const marker = JSON.parse(fs.readFileSync('/data/${MEASUREMENT_MARKER}', 'utf8'))
+    assert.deepEqual(Object.keys(marker).sort(), ['packageSha256', 'release', 'version'])
+    assert.match(marker.packageSha256, /^[a-f0-9]{64}$/)
+  `])
   say(`restart: 401 after ${restarted401} ms, profile kept`)
 
   // Plant a saved model credential in DSH before starting the gate as the same uid.
@@ -375,7 +521,7 @@ async function main() {
   check(/the key file must be 0400 or 0600/.test(await logsOf()), 'no explanation for the refused key file')
   say('key file: 0400 used, 0644 refused')
 
-  await smokeMultiuser()
+  await smokeMultiuser(report.image.version)
   console.log(`SMOKE OK image=${image} health=401 start_to_401_ms=${startTo401} uid=1000`)
 }
 
@@ -389,7 +535,7 @@ try {
   process.exitCode = 1
 } finally {
   await docker(['rm', '--force', memberName]).catch(() => {})
-  for (const temp of [memberData, publicKeys, signerData]) await docker(['volume', 'rm', '--force', temp]).catch(() => {})
+  for (const temp of [memberData, publicKeys, signerData, runnerData, botFiles]) await docker(['volume', 'rm', '--force', temp]).catch(() => {})
   await docker(['rm', '--force', gateName]).catch(() => {})
   await docker(['volume', 'rm', '--force', gateVolume]).catch(() => {})
   await docker(['rm', '--force', name]).catch(() => {})

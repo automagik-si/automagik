@@ -124,7 +124,7 @@ RUN set -eux; \
     /out/bin/hc --version | grep -qx "hc ${HERDR_CORE_VERSION}"; \
     install -d -o 1000 -g 1000 -m 0700 /out/rootfs/run/automagik; \
     install -d -m 0755 /out/caller-keys; \
-    chmod 0700 /out/data/secrets; \
+    chmod 0700 /out/data/dsh /out/data/secrets; \
     chown -R 1000:1000 /out/data
 
 # Exact WebAuthn library and transitive lock, installed with the repository's Bun version.
@@ -192,6 +192,7 @@ COPY server/entrypoint.mjs server/native-worker-login.mjs server/healthcheck.mjs
      server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs \
      /opt/automagik/
 COPY apps/desktop/src/profile-patch.mjs /opt/apps/desktop/src/
+COPY am/runner/locks.mjs am/runner/proto.mjs /opt/am/runner/
 # No /home/<user> in the image's account record: the distroless nonroot home is replaced with
 # the uid the image actually runs as. The scanner's home check then has nothing to excuse.
 COPY server/passwd /etc/passwd

@@ -13,15 +13,19 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
+  DEFAULT_MODEL_KEY_FILE,
   ensureDataDirs,
   gateViewDir,
   launchUrlOf,
   PORT,
+  prepareDshHome,
   prepareWorkspace,
   privateMode,
   PROFILE,
   publicUrlArgs,
   redactTokens,
+  RUN_SECRETS_MODEL_KEY_FILE,
+  writeMeasurementMarker,
 } from './lib.mjs'
 import { LAUNCH_FILE, prepareGateView, writePrivateFile, writeProfileState } from './gate-view.mjs'
 import { multiuserConfigChecks, multiuserMode, multiuserReadiness, startupDecision } from './profile-multiuser.mjs'
@@ -34,7 +38,6 @@ const ROOT = '/opt/automagik'
 const DSH_BIN = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const INSTALL_ANCHOR = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
 const SEED = join(ROOT, 'profile')
-const KEY_DEFAULT = '/data/secrets/deepseek-api-key'
 const CORE_BIN = '/usr/local/bin/herdr-core'
 
 const log = (message) => process.stdout.write(`automagik-web: ${message}\n`)
@@ -51,7 +54,7 @@ function versions() {
 /** The key from DEEPSEEK_API_KEY, else a 0400/0600 file; never log the value. */
 function modelKey(env) {
   if (env.DEEPSEEK_API_KEY?.trim()) return { source: 'environment', key: env.DEEPSEEK_API_KEY.trim() }
-  const candidates = [env.DEEPSEEK_API_KEY_FILE, KEY_DEFAULT, '/run/secrets/deepseek_api_key'].filter(Boolean)
+  const candidates = [env.DEEPSEEK_API_KEY_FILE, DEFAULT_MODEL_KEY_FILE, RUN_SECRETS_MODEL_KEY_FILE].filter(Boolean)
   const file = candidates.find((candidate) => existsSync(candidate))
   if (!file) return { source: 'none' }
   const mode = statSync(file).mode & 0o777
@@ -165,7 +168,7 @@ async function main() {
     throw new Error('XDG_RUNTIME_DIR must be outside the shared /data volume')
   }
   const secrets = join(home, 'secrets')
-  const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), secrets]
+  const dirs = [botsHome, workspace, secrets, appHome]
   try {
     prepareGateView(gateView, dirname(gateView), {
       AUTOMAGIK_HOME: home, DSH_HOME: dshHome, AUTOMAGIK_BOTS_HOME: botsHome,
@@ -173,8 +176,9 @@ async function main() {
       // ACP's store and the agents' sign-in homes (acp-dsh: <AUTOMAGIK_HOME>/acp, cli-homes).
       acp: join(home, 'acp'), 'acp cli-homes': panelCliHomes(join(home, 'acp'), dshHome),
     })
+    prepareDshHome(dshHome, { prepareStore: true })
     prepareWorkspace(workspace, { uid: 1000 })
-    ensureDataDirs([...dirs, appHome], { uid: 1000 })
+    ensureDataDirs(dirs, { uid: 1000 })
     // Clear the previous launch before starting a new one.
     rmSync(join(gateView, LAUNCH_FILE), { force: true })
     for (const dir of [runtimeDir, coreRuntime]) {
@@ -209,6 +213,8 @@ async function main() {
 
   const seeded = await followImage({ dshHome, source: SEED, store: join(ROOT, 'offline-store'), build, dshBin: DSH_BIN })
   writeProfileState(gateView, seeded)
+  try { writeMeasurementMarker(dirname(gateView), seeded.target) }
+  catch (error) { warn(`could not publish the measurement marker: ${error.message}`) }
   log(seeded.seeded ? `seeded ${seeded.target}` : `profile present at ${seeded.target}`)
   log(`image follow: ${seeded.result}; ${seeded.reason}`)
 
@@ -233,7 +239,7 @@ async function main() {
       warn(error.message)
       process.exit(1)
     }
-    if (key.source === 'none') warn(`no model key: set DEEPSEEK_API_KEY or a 0400 file at ${KEY_DEFAULT}`)
+    if (key.source === 'none') warn(`no model key: set DEEPSEEK_API_KEY or a 0400 file at ${DEFAULT_MODEL_KEY_FILE}`)
     else {
       env.DEEPSEEK_API_KEY = key.key
       log(`model key from ${key.source}`)

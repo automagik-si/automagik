@@ -4,9 +4,11 @@
 import {
   accessSync,
   closeSync,
+  chmodSync,
   constants,
   existsSync,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -14,15 +16,17 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   renameSync,
   rmdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { cp } from 'node:fs/promises'
-import { markSeed } from './profile-state.mjs'
+import { markSeed, readJson, releaseVersion, SEED_MARKER } from './profile-state.mjs'
 
 export const PROFILE = 'automagik-web'
 export const PORT = 3081
@@ -30,6 +34,11 @@ export const GATE_VIEW = 'gate-view'
 export const GATE_VIEW_MOUNT = '/dsh-view'
 /** The DSH volume's mount point in the image; compose.gate.yml mounts its gate-view subpath. */
 export const DSH_VOLUME = '/data'
+export const DEFAULT_MODEL_KEY_FILE = '/data/secrets/deepseek-api-key'
+export const RUN_SECRETS_DIR = '/run/secrets'
+export const RUN_SECRETS_MODEL_KEY_FILE = `${RUN_SECRETS_DIR}/deepseek_api_key`
+export const MEASUREMENT_DIR = '.automagik-measurement'
+export const MEASUREMENT_MARKER = `${MEASUREMENT_DIR}/.automagik-server-profile`
 
 /**
  * The folder DSH publishes the gate's view into: always the volume's own gate-view, the exact
@@ -63,6 +72,114 @@ export function publicUrlArgs(value) {
 // itself a mount point fails that way.
 const UNWRITABLE = ['EACCES', 'EPERM', 'EROFS', 'EBUSY']
 const unwritable = (error) => UNWRITABLE.includes(error?.code)
+const fdPath = fd => `/proc/self/fd/${fd}`
+// Linux's O_PATH pins a directory without needing read permission on ancestors.
+const O_PATH = 0o10000000
+const DIRECTORY = constants.O_DIRECTORY | constants.O_NOFOLLOW
+
+/** Create or tighten DSH's own home before any write probe or profile work. */
+export function prepareDshHome(dir, { uid = process.geteuid?.() ?? 1000, prepareStore = false } = {}) {
+  const invalid = () => new Error(`${JSON.stringify(dir)} must be a real DSH home directory with no symbolic links in its path`)
+  const foreign = () => new Error(`${JSON.stringify(dir)} is not owned by DSH uid ${uid}. Chown the DSH home to ${uid} on the host.`)
+  if (dir === sep || resolve(dir) !== dir) throw invalid()
+  const parts = dir.slice(1).split(sep)
+  let fd = openSync(sep, O_PATH | DIRECTORY)
+  try {
+    for (const [index, part] of parts.entries()) {
+      const child = join(fdPath(fd), part)
+      let next
+      try { next = openSync(child, O_PATH | DIRECTORY) }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        try { mkdirSync(child, { mode: index === parts.length - 1 ? 0o700 : 0o777 }) }
+        catch (error) { if (error.code !== 'EEXIST') throw error }
+        next = openSync(child, O_PATH | DIRECTORY)
+      }
+      closeSync(fd)
+      fd = next
+    }
+    const info = fstatSync(fd)
+    if (info.uid !== uid) throw foreign()
+    if (readlinkSync(fdPath(fd)) !== dir) throw invalid()
+    // fchmod cannot use an O_PATH descriptor. The procfs link addresses that pinned inode.
+    if ((info.mode & 0o7777) !== 0o700) chmodSync(fdPath(fd), 0o700)
+    if ((fstatSync(fd).mode & 0o7777) !== 0o700) throw new Error(`${JSON.stringify(dir)} must have mode 0700`)
+    if (prepareStore) {
+      const pinned = fdPath(fd)
+      const verifyPath = () => {
+        const current = statSync(dir, { throwIfNoEntry: false })
+        if (readlinkSync(pinned) !== dir || current?.dev !== info.dev || current?.ino !== info.ino) throw invalid()
+      }
+      verifyPath()
+      checkWritable(dir, uid, () => probeWrite(pinned))
+      const store = join(pinned, 'pnpm-store')
+      checkWritable(join(dir, 'pnpm-store'), uid, () => {
+        mkdirSync(store, { recursive: true })
+        probeWrite(store)
+      })
+      verifyPath()
+    }
+  } catch (error) {
+    if (error.code === 'ELOOP' || error.code === 'ENOTDIR') throw invalid()
+    throw error
+  } finally { closeSync(fd) }
+}
+
+/** Publish just the freshness fields of the private seed record on the measurement volume. */
+export function writeMeasurementMarker(volume, profile) {
+  const dir = join(volume, MEASUREMENT_DIR)
+  let created = false
+  try { mkdirSync(dir, { mode: 0o755 }); created = true }
+  catch (error) { if (error.code !== 'EEXIST') throw error }
+  const folder = openSync(dir, O_PATH | DIRECTORY)
+  try {
+    const info = fstatSync(folder)
+    if (info.uid !== (process.geteuid?.() ?? 1000) || (info.mode & 0o022) !== 0) {
+      throw new Error('the measurement directory must be owned by DSH and writable only by its owner')
+    }
+    // Preserve an operator's access and default ACLs on later publications.
+    if (created) chmodSync(fdPath(folder), 0o755)
+    publishMeasurementMarker(join(fdPath(folder), basename(MEASUREMENT_MARKER)), profile)
+  } finally { closeSync(folder) }
+}
+
+function publishMeasurementMarker(target, profile) {
+  const seed = readJson(join(profile, SEED_MARKER))
+  if (seed?.version !== 1 || !releaseVersion(seed.release) || typeof seed.packageSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(seed.packageSha256)) {
+    rmSync(target, { force: true })
+    return
+  }
+  const { version, release, packageSha256 } = seed
+  const fresh = `${target}.${randomUUID()}.tmp`
+  const fd = openSync(fresh, 'wx', 0o600)
+  try {
+    try {
+      writeFileSync(fd, `${JSON.stringify({ version, release, packageSha256 })}\n`)
+      fchmodSync(fd, 0o644)
+    } finally { closeSync(fd) }
+    renameSync(fresh, target)
+  } finally { rmSync(fresh, { force: true }) }
+}
+
+function probeWrite(dir) {
+  const probe = join(dir, `.automagik-write-probe-${randomUUID()}`)
+  const fd = openSync(probe, 'wx', 0o600)
+  try { closeSync(fd) }
+  finally { rmSync(probe) }
+}
+
+function checkWritable(dir, uid, check) {
+  try { check() }
+  catch (error) {
+    if (!unwritable(error)) throw error
+    throw new Error(
+      `${dir} is not writable by uid ${uid}: create the /data volume with ` +
+        `initial.uid=${uid} initial.gid=${uid}, or chown the volume to ${uid}:${uid} ` +
+        'on the host; the image cannot chown',
+    )
+  }
+}
 
 /**
  * Make each data directory and prove this process can write it. A mkdir on an existing
@@ -71,24 +188,10 @@ const unwritable = (error) => UNWRITABLE.includes(error?.code)
  */
 export function ensureDataDirs(dirs, { uid = process.getuid?.() ?? 1000 } = {}) {
   for (const dir of dirs) {
-    try {
+    checkWritable(dir, uid, () => {
       mkdirSync(dir, { recursive: true })
-      const probe = join(dir, `.automagik-write-probe-${process.pid}`)
-      try {
-        writeFileSync(probe, '')
-      } finally {
-        rmSync(probe, { force: true })
-      }
-    } catch (error) {
-      if (unwritable(error)) {
-        throw new Error(
-          `${dir} is not writable by uid ${uid}: create the /data volume with ` +
-            `initial.uid=${uid} initial.gid=${uid}, or chown the volume to ${uid}:${uid} ` +
-            'on the host; the image cannot chown',
-        )
-      }
-      throw error
-    }
+      probeWrite(dir)
+    })
   }
   return dirs
 }

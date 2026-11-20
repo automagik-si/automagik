@@ -38,23 +38,25 @@ function contains(parent, path) {
 }
 
 export function prepareGateView(view, volumeRoot, privateDirs, { uid = process.getuid?.() ?? 1000 } = {}) {
-  if (!lstatSync(view, { throwIfNoEntry: false })) {
-    mkdirSync(view, { recursive: true, mode: 0o700 })
-  }
-  const info = lstatSync(view)
+  const current = lstatSync(view, { throwIfNoEntry: false })
   // Owned by the uid DSH runs as (1000 in the image), never another account's folder.
-  if (!info.isDirectory() || info.uid !== uid) {
+  if (current && (!current.isDirectory() || current.uid !== uid)) {
     throw new Error(`gate-view must be a real directory owned by uid ${uid}`)
   }
 
-  const location = realpathSync.native(view)
+  const location = realLocation(view)
   // A custom home that does not exist yet resolves like any other missing path.
   const volume = realLocation(volumeRoot)
   for (const [name, dir] of Object.entries(privateDirs)) {
     const home = realLocation(dir)
-    if (contains(location, home) || (home !== volume && contains(home, location))) {
+    if (contains(location, home) || ((name === 'DSH_HOME' || home !== volume) && contains(home, location))) {
       throw new Error(`gate-view overlaps ${name}`)
     }
+  }
+  if (!current) mkdirSync(view, { recursive: true, mode: 0o700 })
+  const info = lstatSync(view)
+  if (!info.isDirectory() || info.uid !== uid || realpathSync.native(view) !== location) {
+    throw new Error(`gate-view must be a real directory owned by uid ${uid}`)
   }
   if ((info.mode & 0o7777) !== 0o700) chmodSync(view, 0o700)
 

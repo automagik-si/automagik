@@ -591,12 +591,18 @@ rotation. Across workspaces, the VM boundary must stop the copied secret; that i
 
 ### U12. File modes and the shared uid (medium)
 
-The gate store is private; the workspace's Bots are the same uid as the workspace and read the
-launch URL and model key (section 2.8). `ensureDataDirs` does not set modes
-(`server/lib.mjs:53-75`), and the image's `0700` on `/data/secrets` is not tested on an Incus
-volume. **What would prove it:** a file-mode test on a fresh Incus volume, a secrets directory that
-is `0700` after first start, and a statement of which secrets are expected to be readable by the
-workspace's own Bots. Cross-workspace still needs the volume boundary.
+The gate store is private. In a workspace where Bots share DSH's uid, they can read the launch
+URL and model key (section 2.8). The image now creates DSH's home with mode `0700` and tightens
+an existing DSH-owned home before its first write. A foreign owner or a symbolic link in the
+path causes startup to refuse. Measurement reads its freshness marker from
+`.automagik-measurement/` on the volume. A default ACL on that directory carries the
+measurement account's read grant to replacement markers.
+These checks are image prerequisites for RFC 0038's distinct-uid Bot boundary.
+
+The `/data/secrets` finding is open. **What would prove it:** a file-mode test on a fresh Incus
+volume, a secrets directory that is `0700` after first start, and a statement of which secrets
+are expected to be readable by the workspace's own Bots. Cross-workspace still needs the
+volume boundary.
 
 ### U13. Distinct origins and browser storage (medium)
 

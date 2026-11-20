@@ -116,7 +116,7 @@ const harness = `
 
 function run(value, dir, followResult = 'owner-managed', extra = {}) {
   const env = {
-    PATH: process.env.PATH, HOME: dir, DSH_HOME: dir, AUTOMAGIK_HOME: dir,
+    PATH: process.env.PATH, HOME: dir, DSH_HOME: join(dir, 'dsh'), AUTOMAGIK_HOME: dir,
     AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'),
     HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'),
     XDG_RUNTIME_DIR: join(dir, 'run'), HC_RUNTIME: join(dir, 'unused-core-runtime'),
@@ -255,7 +255,21 @@ test('the real entrypoint still starts DSH after the updater reports rollback', 
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /image follow: update-rolled-back/)
   assert.match(result.stdout, /SPAWN /)
-  assert.equal(existsSync(join(dir, 'launch-url')), true)
+  assert.equal(existsSync(join(dir, 'dsh', 'launch-url')), true)
+})
+
+test('mode off refuses a legacy DSH home at the shared volume root', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-legacy-data-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  // The fixture maps the image's /data to dir.
+  const manifest = join(dir, 'existing-profile')
+  writeFileSync(manifest, 'original profile')
+  const result = run(undefined, dir, 'owner-managed', { DSH_HOME: dir, AUTOMAGIK_MULTIUSER: '0' })
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, 'automagik-web: gate-view overlaps DSH_HOME\n')
+  assert.equal(readFileSync(manifest, 'utf8'), 'original profile')
+  assert.equal(existsSync(join(dir, 'gate-view')), false)
 })
 
 for (const value of [undefined, 'https://example.invalid/', 'https://example.invalid:8443/ui']) {
@@ -270,7 +284,7 @@ for (const value of [undefined, 'https://example.invalid/', 'https://example.inv
     const extra = value === undefined ? [] : ['--public-url', value, '--trusted-host', new URL(value).host]
     assert.deepEqual(call.args.slice(1), [...BASE, ...extra])
     assert.match(call.args[0], /\/dsh\/lib\/bin\.js$/)
-    const launchFile = join(dir, 'launch-url')
+    const launchFile = join(dir, 'dsh', 'launch-url')
     const launch = new URL(value ?? 'http://127.0.0.1:3081/')
     if (!launch.pathname.endsWith('/')) launch.pathname += '/'
     launch.searchParams.set('token', 'test-launch-value')
@@ -336,7 +350,7 @@ test('real entrypoint refuses invalid mode or missing caller keys and fixes the 
     t.after(() => rmSync(dir, { recursive: true, force: true }))
     const program = harness.replace('modelKey: env.DEEPSEEK_API_KEY,', 'multiuser: env.AUTOMAGIK_MULTIUSER,')
     const env = {
-      PATH: process.env.PATH, HOME: dir, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir,
+      PATH: process.env.PATH, HOME: dir, DSH_HOME: join(dir, 'dsh'), AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir,
       XDG_RUNTIME_DIR: join(dir, 'run'), HC_SESSION: 'test-multiuser-entrypoint',
       AUTOMAGIK_CLI_INSTALL: 'off', DEEPSEEK_API_KEY: 'test-only',
     }
