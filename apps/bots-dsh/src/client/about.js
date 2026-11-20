@@ -167,6 +167,7 @@ function selfUpdateReason(reason) {
     case 'sequence-lower': return t('the published release is older than one already accepted.')
     case 'engines-dsh': return t('the published release needs a different DeepSeek Harness version.')
     case 'hash-mismatch': return t('a downloaded plugin package did not match the signed release.')
+    case 'listener-unknown': return t('the local DSH listener could not be determined. Use a fixed port with --public-url.')
     case 'registry-unreachable': return t('the package registry could not be reached.')
     case 'profile-npmrc': return t('the profile .npmrc contains settings besides the registry.')
     case 'bot/read-only': return t('this window does not hold the team lock.')

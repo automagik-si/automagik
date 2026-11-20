@@ -10,7 +10,7 @@ export const TERMINAL = new Set(['healthy', 'rolledBack', 'notUpdated', 'manualR
 const ID = /^[A-Za-z0-9_-]{8,64}$/
 export const REASON_CODES = Object.freeze([
   'download-failed', 'signature-invalid', 'hash-mismatch', 'not-newer', 'sequence-lower',
-  'engines-dsh', 'registry-unreachable', 'stage-failed', 'switch-refused', 'health-failed',
+  'engines-dsh', 'registry-unreachable', 'listener-unknown', 'stage-failed', 'switch-refused', 'health-failed',
   'rollback-failed', 'supervisor-restarted', 'no-writable-home', 'health-check-finished',
   'profile-npmrc', 'desktop-app', 'no-store', 'store-invalid', 'profile-invalid', 'lane-invalid',
 ])

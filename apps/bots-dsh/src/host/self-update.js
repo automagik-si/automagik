@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { LISTENER_UNKNOWN } from './supervisor/child.js'
 import { inDesktopApp } from './constants.js'
 import { currentOf, hasBootId, isId, publicVersion, runOf, supervisorStateOf } from './supervisor/records.js'
 import { readJson, usableStore } from './supervisor/store.js'
@@ -82,6 +83,7 @@ export function selfUpdateDetails(profileDir, env, readMountInfo) {
 function statusOf(profileDir, env, inDesktop, readMountInfo) {
   const { storeDir, currentInvalid, ...status } = selfUpdateDetails(profileDir, env, readMountInfo)
   const reason = inDesktop ? 'desktop-app' : status.supervisor === null ? 'no-supervisor'
+    : env?.[LISTENER_UNKNOWN] === '1' ? 'listener-unknown'
     : storeDir === undefined ? 'no-store' : currentInvalid ? 'store-invalid' : null
   return { available: reason === null, reason, ...status }
 }
@@ -92,6 +94,7 @@ export function selfUpdateStatus({ profileDir, env = process.env, inDesktop = in
 
 export function install(rt) {
   const env = {
+    [LISTENER_UNKNOWN]: process.env[LISTENER_UNKNOWN],
     AUTOMAGIK_SUPERVISOR_BOOT: process.env.AUTOMAGIK_SUPERVISOR_BOOT,
     AUTOMAGIK_SUPERVISOR_VERSION: process.env.AUTOMAGIK_SUPERVISOR_VERSION,
   }

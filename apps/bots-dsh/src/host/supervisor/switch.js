@@ -132,6 +132,12 @@ export function validJournal(run) {
     && (j.undoReason === undefined || ['stage-failed', 'supervisor-restarted'].includes(j.undoReason))
 }
 
+export function validTerminalJournal(run) {
+  if (!validJournal(run) || run.journal.pending !== null) return false
+  const { undo, done, steps } = run.journal
+  return run.phase === 'healthy' ? !undo && done.length === steps.length : undo === true && done.length === 0
+}
+
 function pathsFor(config, staging, journal) {
   const kept = join(config.store, journal.keep)
   const live = config.profileDir
@@ -221,5 +227,9 @@ export function candidateMatches(config, staging, run) {
   verifyRecoveryInputs(staging, run.journal)
   const manifest = regularBytes(join(config.profileDir, MANIFEST))
   const lock = regularBytes(join(config.profileDir, LOCKFILE))
-  return manifest.equals(regularBytes(join(staging.source, 'candidate.json'))) && digest(lock) === run.journal.lockHash
+  const workspace = regularBytes(join(config.profileDir, 'pnpm-workspace.yaml'), { optional: true })
+  const originalWorkspace = regularBytes(join(staging.source, 'pnpm-workspace.yaml'), { optional: true })
+  const workspaceMatches = workspace === undefined ? originalWorkspace === undefined
+    : originalWorkspace !== undefined && workspace.equals(originalWorkspace)
+  return workspaceMatches && manifest.equals(regularBytes(join(staging.source, 'candidate.json'))) && digest(lock) === run.journal.lockHash
 }

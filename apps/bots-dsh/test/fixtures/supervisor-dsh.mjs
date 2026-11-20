@@ -61,6 +61,14 @@ if (action === 'plugin') {
     if (live) {
       assert.ok(flags.includes('--prod'))
       assert.equal(fs.existsSync(join(profile, 'package.json.lock')), false)
+      if (mode === 'compatibility-repair') {
+        // DSH starts this repair after restoring the saved manifests, with fresh pnpm args.
+        const repair = spawnSync('pnpm', ['install', '--frozen-lockfile'], {
+          env: { ...process.env, SUPERVISOR_PNPM_REPAIR: '1' }, stdio: 'inherit',
+        })
+        assert.equal(repair.status, 0)
+        process.exitCode = 1
+      }
       if (mode === 'relink-fails' || mode === 'restored-unhealthy') process.exitCode = 3
       if (mode === 'relink-staged-symlink') {
         const [stage] = fs.readdirSync(join(home, 'update/web')).filter(name => name.startsWith('stage-'))
@@ -79,10 +87,19 @@ if (action === 'plugin') {
     ?? (args.includes(name) ? args[args.indexOf(name) + 1] : undefined)
   const bootsAlready = fs.existsSync(join(root, 'events.jsonl'))
     ? fs.readFileSync(join(root, 'events.jsonl'), 'utf8').split('\n').filter(line => line.includes('"event":"boot"')).length : 0
-  record({ event: 'boot', args, home, boot: process.env.AUTOMAGIK_SUPERVISOR_BOOT, version: process.env.AUTOMAGIK_SUPERVISOR_VERSION })
+  record({ event: 'boot', args, home, boot: process.env.AUTOMAGIK_SUPERVISOR_BOOT, version: process.env.AUTOMAGIK_SUPERVISOR_VERSION,
+    listenerUnknown: process.env.AUTOMAGIK_SUPERVISOR_LISTENER_UNKNOWN === '1' ? '1' : undefined })
   const installed = read(join(profile, 'node_modules/@automagik/bots-dsh/package.json')).version
   if (mode === 'trial-exit' && installed === '3.160.3') {
     process.exitCode = 19
+  } else if (mode === 'bare-announces') {
+    fs.writeSync(1, 'dsh web: https://example.invalid/?to')
+    fs.writeSync(2, 'diagnostic token=stderr-')
+    setImmediate(() => {
+      fs.writeSync(1, 'ken=stdout-secret&next=ok\n')
+      fs.writeSync(2, 'secret\n')
+    })
+    process.exitCode = 23
   } else if (mode === 'exit') {
     process.exitCode = 23
   } else if (mode === 'signal-death') {
@@ -95,6 +112,15 @@ if (action === 'plugin') {
       process.exitCode = 55
     })
     record({ event: 'waiting-for-signal' })
+  } else if (process.env.SUPERVISOR_ANNOUNCE_ONLY) {
+    const keepAlive = setInterval(() => {}, 1000)
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => {
+      record({ event: 'stop', signal })
+      clearInterval(keepAlive)
+    })
+    fs.writeFileSync(join(root, 'dsh-child-pid'), String(process.pid))
+    const url = arg('--public-url') ?? 'http://127.0.0.1:' + arg('--port') + '/'
+    fs.writeSync(1, 'dsh web: ' + url + '?token=fixture-token\n')
   } else {
     const unhealthy = mode === 'pre-switch-unhealthy' || (mode === 'restored-unhealthy' && bootsAlready > 0)
     const server = createServer((req, res) => {
@@ -105,14 +131,14 @@ if (action === 'plugin') {
     const announce = bound => {
       const advertised = arg('--public-url') ?? bound
       // Split keys and values across writes on both streams.
-      process.stdout.write('dsh web: ' + advertised + '?to')
-      process.stderr.write('diagnostic token=stderr-')
+      fs.writeSync(1, 'dsh web: ' + advertised + '?to')
+      fs.writeSync(2, 'diagnostic token=stderr-')
       setImmediate(() => {
-        process.stdout.write('ken=stdout-')
-        process.stderr.write('secret https://example.invalid/?api_key=query-')
+        fs.writeSync(1, 'ken=stdout-')
+        fs.writeSync(2, 'secret https://example.invalid/?api_key=query-')
         setImmediate(() => {
-          console.log('secret&access_token=access-secret')
-          console.error('secret')
+          fs.writeSync(1, 'secret&access_token=access-secret\n')
+          fs.writeSync(2, 'secret\n')
         })
       })
     }

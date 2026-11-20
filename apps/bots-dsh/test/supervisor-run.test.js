@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
-import { hostname } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { selfUpdateStatus } from '../src/host/self-update.js'
+import { LISTENER_UNKNOWN } from '../src/host/supervisor/child.js'
 import { selfUpdateCheck } from '../src/host/self-update-check.js'
 import { refreshCopy, runningCopy, SELF_CHECK_OK, SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
 import { stageInstall, takeProfileLock, VENDOR } from '../src/host/supervisor/stage.js'
@@ -20,23 +22,31 @@ const supervisorOf = f => read(join(f.store, 'supervisor.json'))
 const opts = f => ['--dsh-home', f.home, '--profile', f.profile]
 
 function launch(t, bin, args, env) {
-  const child = spawn(bin, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
-  let stdout = '', stderr = ''
-  child.stdout.on('data', bytes => { stdout += bytes })
-  child.stderr.on('data', bytes => { stderr += bytes })
+  const logs = fs.mkdtempSync(join(tmpdir(), 'supervisor-logs-'))
+  const stdout = join(logs, 'stdout')
+  const stderr = join(logs, 'stderr')
+  const out = fs.openSync(stdout, 'w')
+  const err = fs.openSync(stderr, 'w')
+  let child
+  try {
+    child = spawn(bin, args, { env, stdio: ['ignore', out, err] })
+  } finally {
+    fs.closeSync(out)
+    fs.closeSync(err)
+  }
   let closed = false
   const exit = new Promise((resolve, reject) => {
     child.once('error', reject)
     child.once('close', (code, signal) => {
       closed = true
-      resolve({ code, signal, stdout, stderr })
+      resolve({ code, signal, stdout: fs.readFileSync(stdout, 'utf8'), stderr: fs.readFileSync(stderr, 'utf8') })
     })
   })
   t.after(async () => {
     if (!closed) child.kill('SIGTERM')
-    await exit
+    try { await exit } finally { fs.rmSync(logs, { recursive: true, force: true }) }
   })
-  return { child, exit, stdout: () => stdout, stderr: () => stderr }
+  return { child, exit, stdout: () => fs.readFileSync(stdout, 'utf8'), stderr: () => fs.readFileSync(stderr, 'utf8') }
 }
 
 async function until(get, message) {
@@ -122,8 +132,11 @@ test('the fixed launcher checks each copy, falls back to bare DSH, and preserves
   assert.equal(fs.existsSync(join(f.store, 'update.lock')), false)
 
   fs.writeFileSync(join(kept, 'supervisor/main.js'), 'broken {')
-  const bare = launch(t, 'sh', [launcher, ...opts(f), '--', ...f.command], f.env)
-  assert.equal((await bare.exit).code, 23)
+  const bare = launch(t, 'sh', [launcher, ...opts(f), '--', ...f.command], { ...f.env, SUPERVISOR_MODE: 'bare-announces' })
+  const bareResult = await bare.exit
+  assert.equal(bareResult.code, 23)
+  assert.equal(bareResult.stdout, 'dsh web: https://example.invalid/?token=REDACTED&next=ok\n')
+  assert.equal(bareResult.stderr, 'diagnostic token=REDACTED\n')
   assert.deepEqual(boots(f).at(-1), { event: 'boot', args: f.command.slice(3), home: f.home })
 })
 
@@ -194,6 +207,7 @@ test('a boot-bound request updates once, keeps the old version and rotates the s
 for (const [mode, phase, reason] of [
   ['lock-edit-while-staging', 'notUpdated', 'switch-refused'],
   ['relink-fails', 'notUpdated', 'stage-failed'],
+  ['compatibility-repair', 'notUpdated', 'stage-failed'],
   ['relink-staged-symlink', 'notUpdated', 'stage-failed'],
   ['trial-exit', 'manualRecovery', 'health-failed'],
 ]) {
@@ -220,7 +234,10 @@ for (const [mode, phase, reason] of [
     } else {
       assert.equal(fs.existsSync(join(f.store, `stage-${stateOf(f).runId}`)), false, 'staging still exists after notUpdated')
       if (mode === 'lock-edit-while-staging') assert.match(fs.readFileSync(lockfile, 'utf8'), /owner: edited/)
-      if (mode.startsWith('relink-')) {
+      if (mode === 'compatibility-repair') {
+        assert.equal(fs.readFileSync(join(f.root, 'repair-inherited-restrictions'), 'utf8'), 'yes')
+      }
+      if (mode.startsWith('relink-') || mode === 'compatibility-repair') {
         assert.deepEqual(fs.readFileSync(lockfile), originalLockfile)
         assert.deepEqual(fs.readFileSync(manifest), originalManifest)
         assert.deepEqual(fs.readFileSync(f.archive), originalArchive)
@@ -293,12 +310,19 @@ test('bare launcher fallback refuses unsafe or unreadable state and permits comp
     })
     return { code, stderr: fs.readFileSync(output, 'utf8') }
   }
-  const completed = { op: 'switch', pending: null, steps: ['keep-modules'], done: ['keep-modules'] }
+  const steps = ['keep-modules', 'keep-archive:' + 'a'.repeat(64) + '.tgz',
+    'keep-lockfile', 'install-lockfile', 'install-entries', 'install-modules']
+  const completed = { op: 'switch', pending: null, steps, done: steps }
+  const undone = { ...completed, undo: true, done: [] }
   for (const raw of [
     '{malformed', JSON.stringify({ version: 1, phase: 'switching' }),
     JSON.stringify({ version: 1, phase: 'manualRecovery' }),
     JSON.stringify({ version: 1, phase: 'healthy', journal: { ...completed, pending: 'keep-modules' } }),
     JSON.stringify({ version: 1, phase: 'notUpdated', journal: { ...completed, done: [] } }),
+    JSON.stringify({ version: 1, phase: 'notUpdated', journal: completed }),
+    JSON.stringify({ version: 1, phase: 'rolledBack', journal: completed }),
+    JSON.stringify({ version: 1, phase: 'healthy', journal: undone }),
+    JSON.stringify({ version: 1, phase: 'healthy', journal: { ...completed, steps: ['keep-modules'], done: ['keep-modules'] } }),
   ]) {
     fs.writeFileSync(state, raw)
     const result = await bare()
@@ -314,6 +338,9 @@ test('bare launcher fallback refuses unsafe or unreadable state and permits comp
   write(state, { version: 1, phase: 'healthy', journal: completed })
   assert.equal((await bare()).code, 23)
   assert.equal(boots(f).length, 1)
+  write(state, { version: 1, phase: 'rolledBack', journal: undone })
+  assert.equal((await bare()).code, 23)
+  assert.equal(boots(f).length, 2)
 })
 
 test('a public launch URL stays separate from the credential-free local HTTP probe', async t => {
@@ -483,18 +510,31 @@ test('the supervised dry check and installer use the same private pnpm registry 
   const running = driver(t, f)
   await until(() => announced(running), 'DSH did not start')
   const pings = []
-  const check = await selfUpdateCheck({
+  let resolved = privateRegistry
+  const checkOptions = {
     profileDir: f.profileDir, ...f.signed, inDesktop: false, getDshVersion: () => '0.2.2-rc.2',
     env: { AUTOMAGIK_SUPERVISOR_BOOT: supervisorOf(f).bootId, AUTOMAGIK_SUPERVISOR_VERSION: FROM },
-    ctx: { get: name => name === 'pluginManager' ? { registries: async () => ({ resolved: privateRegistry }) } : undefined },
+    ctx: { get: name => name === 'profileContext' ? { installAnchor: f.command[1] } : name === 'pluginManager' ? {
+      profile: { dir: f.profileDir },
+      async registries() {
+        assert.ok(this.profile.dir.startsWith(f.store + '/check-'))
+        return { resolved }
+      },
+    } : undefined },
     fetch: async url => {
       if (f.tarballs.has(url)) return new Response(f.tarballs.get(url))
       pings.push(url)
       assert.equal(url, privateRegistry + '-/ping')
       return new Response('{}')
     },
-  })
+  }
+  const check = await selfUpdateCheck(checkOptions)
   assert.equal(check.state, 'available')
+  assert.deepEqual(pings, [privateRegistry + '-/ping'])
+  resolved = 'https://other.example.invalid/'
+  const mismatch = await selfUpdateCheck(checkOptions)
+  assert.equal(mismatch.state, 'refused')
+  assert.equal(mismatch.reason, 'registry-unreachable')
   assert.deepEqual(pings, [privateRegistry + '-/ping'])
   request(f)
   await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'update did not use the private registry')
@@ -502,3 +542,107 @@ test('the supervised dry check and installer use the same private pnpm registry 
   running.child.kill('SIGTERM')
   assert.equal((await running.exit).code, 0)
 })
+
+test('the dry check compares resolved-only registry answers from staging and refuses config dependencies before pnpm', async t => {
+  const f = fixture(t)
+  const signed = lane(f)
+  for (const key of ['PATH', 'NPM_CONFIG_USERCONFIG', 'SUPERVISOR_FIXTURE']) {
+    const before = process.env[key]
+    process.env[key] = f.env[key]
+    t.after(() => { if (before === undefined) delete process.env[key]; else process.env[key] = before })
+  }
+  let resolved = 'https://other.example.invalid/'
+  let managerCwd
+  const pings = []
+  const opts = { ...signed, profileDir: f.profileDir, inDesktop: false, getDshVersion: () => '0.2.2-rc.2',
+    env: { AUTOMAGIK_SUPERVISOR_BOOT: 'sup_fixture', AUTOMAGIK_SUPERVISOR_VERSION: FROM },
+    ctx: { get: name => name === 'profileContext' ? { installAnchor: f.command[1] } : name === 'pluginManager' ? {
+      profile: { dir: f.profileDir },
+      async registries() {
+        managerCwd = this.profile.dir
+        return { resolved }
+      },
+    } : undefined },
+    fetch: async url => {
+      if (f.tarballs.has(url)) return new Response(f.tarballs.get(url))
+      pings.push(url)
+      return new Response('{}')
+    },
+  }
+  assert.equal((await selfUpdateCheck(opts)).reason, 'registry-unreachable')
+  assert.deepEqual(pings, [])
+  assert.ok(managerCwd.startsWith(f.store + '/check-'))
+  const probes = join(f.root, 'pnpm-probes')
+  assert.ok(fs.readFileSync(probes, 'utf8').trim().split('\n').every(path => path.startsWith(f.store + '/check-')))
+  resolved = 'https://registry.example.invalid/npm/'
+  assert.equal((await selfUpdateCheck(opts)).state, 'available')
+  assert.deepEqual(pings, [resolved + '-/ping'])
+
+  fs.unlinkSync(probes)
+  managerCwd = undefined
+  fs.appendFileSync(join(f.profileDir, 'pnpm-workspace.yaml'), 'configDependencies: { example: 1 }\n')
+  assert.equal((await selfUpdateCheck(opts)).reason, 'registry-unreachable')
+  assert.equal(fs.existsSync(probes), false)
+  assert.equal(managerCwd, undefined)
+  assert.deepEqual(pings, [resolved + '-/ping'])
+})
+
+test('refuses an ephemeral port with a public URL in the check and before switching', async t => {
+  const f = fixture(t)
+  f.command.push('--public-url', 'https://example.invalid/')
+  f.env.SUPERVISOR_ANNOUNCE_ONLY = '1'
+  const running = driver(t, f)
+  await until(() => announced(running), 'DSH did not announce its public URL')
+  const env = {
+    [LISTENER_UNKNOWN]: boots(f)[0].listenerUnknown,
+    AUTOMAGIK_SUPERVISOR_BOOT: supervisorOf(f).bootId, AUTOMAGIK_SUPERVISOR_VERSION: FROM,
+  }
+  assert.equal(env[LISTENER_UNKNOWN], '1')
+  assert.equal(selfUpdateStatus({ profileDir: f.profileDir, env, inDesktop: false }).reason, 'listener-unknown')
+  const check = await selfUpdateCheck({ ...f.signed, profileDir: f.profileDir, env, inDesktop: false,
+    fetch: () => assert.fail('a listener refusal must precede any network operation'),
+  })
+  assert.equal(check.reason, 'listener-unknown')
+  assert.equal(check.state, 'refused')
+  assert.equal(read(join(f.store, 'check.json')).reason, 'listener-unknown')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'notUpdated', 'request was not refused')
+  assert.equal(stateOf(f).reason, 'listener-unknown')
+  assert.deepEqual(eventsOf(f).map(event => event.event), ['boot'])
+  assert.equal(fs.existsSync(join(f.store, 'current.json')), false)
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
+})
+
+for (const [verdict, lastPhase, mode] of [['healthy', 'health', ''], ['notUpdated', 'staging', 'frozen-fails']]) {
+  test('stops for recovery without signaling DSH if publishing ' + verdict + ' fails', async t => {
+    const f = fixture(t, { mode })
+    f.command[f.command.indexOf('--port') + 1] = '3080'
+    f.env.SUPERVISOR_ANNOUNCE_ONLY = '1'
+    f.env.SUPERVISOR_VERDICT_FAILURE = verdict
+    const running = driver(t, f)
+    const pidPath = join(f.root, 'dsh-child-pid')
+    try {
+      await until(() => announced(running), 'DSH did not start')
+      request(f)
+      await until(() => running.stderr().includes('could not record the update verdict'), 'missing recovery diagnostic')
+      const result = await running.exit
+      assert.equal(result.code, 1)
+      assert.equal(stateOf(f).phase, lastPhase)
+      if (verdict === 'healthy') assert.equal(stateOf(f).journal.commitCurrent, true)
+      assert.equal(read(join(f.store, 'request.json')).requestId, 'during-verdict-failure')
+      assert.doesNotThrow(() => process.kill(Number(fs.readFileSync(pidPath, 'utf8')), 0))
+      assert.equal(eventsOf(f).filter(event => event.event === 'stop').length, verdict === 'healthy' ? 1 : 0)
+    } finally {
+      if (fs.existsSync(pidPath)) {
+        try {
+          const stopped = eventsOf(f).filter(event => event.event === 'stop').length
+          process.kill(Number(fs.readFileSync(pidPath, 'utf8')), 'SIGTERM')
+          await until(() => eventsOf(f).filter(event => event.event === 'stop').length > stopped, 'fixture DSH did not stop')
+        } catch (error) {
+          if (error.code !== 'ESRCH') throw error
+        }
+      }
+    }
+  })
+}

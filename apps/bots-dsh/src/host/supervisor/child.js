@@ -1,13 +1,15 @@
 import { execFile, spawn } from 'node:child_process'
 import { isIP } from 'node:net'
 import { constants } from 'node:os'
-import { createInterface } from 'node:readline'
+import { once } from 'node:events'
 import { setTimeout as wait } from 'node:timers/promises'
 import { promisify } from 'node:util'
 
 const CHILD_STOP_MS = 30_000
 const LAUNCH_URL = /dsh web: (https?:\/\/\S*token=\S+)/
 const HEALTH_MS = 60_000
+export const LISTENER_UNKNOWN = 'AUTOMAGIK_SUPERVISOR_LISTENER_UNKNOWN'
+const MAX_LINE = 64 * 1024
 
 function webOption(args, option) {
   let value
@@ -24,11 +26,12 @@ export function localListener(args) {
   const protocol = webOption(args, '--tls-cert') ? 'https:' : 'http:'
   const publicUrl = webOption(args, '--public-url')
   const ip = isIP(host)
-  if ((!ip && host !== 'localhost') || !/^\d+$/.test(port) || Number(port) > 65535) return () => null
+  if ((!ip && host !== 'localhost') || !/^\d+$/.test(port) || Number(port) > 65535
+    || (Number(port) === 0 && publicUrl !== undefined)) return null
   const address = ip === 6 ? '[' + host + ']' : host
   return announcement => {
     let boundPort = Number(port)
-    if (boundPort === 0 && publicUrl === undefined) {
+    if (boundPort === 0) {
       // With --port 0, only an announcement of the listener itself supplies its port.
       const bound = URL.parse(announcement)
       if (bound?.protocol === protocol) boundPort = Number(bound.port || (protocol === 'https:' ? 443 : 80))
@@ -49,15 +52,36 @@ function redactCredentials(line) {
       return equal === -1 ? (field ? '<redacted>' : '') : field.slice(0, equal + 1) + '<redacted>'
     })
     return url.slice(0, query + 1) + values.join('&') + url.slice(end)
-  }).replace(/token=(?!<redacted>)(?:"[^"]*"|'[^']*'|[^\s&"'<>]*)/gi, 'token=<redacted>')
+  }).replace(/token=(?!<redacted>)(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s&"'<>]*)/gi, 'token=<redacted>')
 }
 
-export function forwardChildOutput(input, output, onLaunchUrl) {
-  createInterface({ input }).on('line', line => {
+export async function forwardChildOutput(input, output, onLaunchUrl) {
+  const forward = line => {
     const match = LAUNCH_URL.exec(line)
     if (match) onLaunchUrl(match[1])
-    output.write(redactCredentials(line) + '\n')
-  })
+    return output.write(redactCredentials(line) + '\n')
+  }
+  input.setEncoding('utf8')
+  let line = ''
+  let discard = false
+  for await (const chunk of input) {
+    let start = 0
+    while (start < chunk.length) {
+      const newline = chunk.indexOf('\n', start)
+      const end = newline === -1 ? chunk.length : newline
+      if (line.length + end - start > MAX_LINE) {
+        line = ''
+        discard = true
+      }
+      if (!discard) line += chunk.slice(start, end)
+      if (newline === -1) break
+      if (!discard && !forward(line.replace(/\r$/, ''))) await once(output, 'drain')
+      line = ''
+      discard = false
+      start = end + 1
+    }
+  }
+  if (line && !forward(line)) await once(output, 'drain')
 }
 
 export function startChild([node, ...args], env, onExit) {
@@ -65,7 +89,8 @@ export function startChild([node, ...args], env, onExit) {
   const child = { launchUrl: null, listener: localListener(args.slice(1)), result: null, expectedExit: false }
   let stopping
   for (const [stream, output] of [[processChild.stdout, process.stdout], [processChild.stderr, process.stderr]]) {
-    forwardChildOutput(stream, output, url => { child.launchUrl ??= url })
+    // A closed log sink must not leave an unhandled rejection or stall DSH.
+    void forwardChildOutput(stream, output, url => { child.launchUrl ??= url }).catch(() => stream.resume())
   }
   child.exited = new Promise(resolve => {
     const finish = (code, signal) => {
@@ -77,6 +102,11 @@ export function startChild([node, ...args], env, onExit) {
     processChild.once('exit', finish)
     processChild.once('error', () => finish(1, null))
   })
+  child.detach = () => {
+    processChild.unref()
+    processChild.stdout.unref()
+    processChild.stderr.unref()
+  }
   child.stop = (signal = 'SIGTERM') => {
     if (child.result) return child.exited
     child.expectedExit = true
@@ -93,7 +123,7 @@ export function startChild([node, ...args], env, onExit) {
 export async function answers(child, { signal, fetch = globalThis.fetch, timeout = HEALTH_MS } = {}) {
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeout)].filter(Boolean))
   while (!deadline.aborted && !child.result) {
-    const listener = child.launchUrl && child.listener(child.launchUrl)
+    const listener = child.launchUrl && child.listener?.(child.launchUrl)
     if (listener) {
       try {
         // Only the socket's HTTP response is needed in delivery 5a. Keep the token in memory.

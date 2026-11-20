@@ -69,10 +69,20 @@ test('refuses to replace an archive whose existing bytes do not match its name',
 })
 
 
-test('reclaims abandoned empty and partial DSH locks and publishes complete PID records', async t => {
+test('DSH compatibility repair inherits all offline relink restrictions', async t => {
+  const f = fixture(t, { mode: 'compatibility-repair' })
+  Object.assign(f.env, { NPM_CONFIG_IGNORE_SCRIPTS: 'false', NPM_CONFIG_IGNORE_PNPMFILE: 'false', NPM_CONFIG_OFFLINE: 'false' })
+  await assert.rejects(relink(f.config), /Supervisor subprocess failed/)
+  assert.equal(fs.readFileSync(join(f.root, 'repair-inherited-restrictions'), 'utf8'), 'yes')
+  assert.deepEqual(eventsOf(f), [{ event: 'install', live: true,
+    args: ['--offline', '--frozen-lockfile', '--prod', '--ignore-scripts', '--ignore-pnpmfile'],
+  }])
+})
+
+test('reclaims only old empty or proven dead PID locks and publishes complete PID records', async t => {
   const f = fixture(t)
   const path = join(f.profileDir, 'package.json.lock')
-  for (const record of ['', '2147483647']) {
+  for (const record of ['', '2147483647\n']) {
     fs.writeFileSync(path, record)
     fs.utimesSync(path, new Date(0), new Date(0))
     const release = await takeProfileLock(f.profileDir, AbortSignal.timeout(1500))
@@ -86,9 +96,62 @@ test('reclaims abandoned empty and partial DSH locks and publishes complete PID 
   }
 })
 
+test('preserves an incomplete DSH lock and explains ambiguous ownership on timeout', async t => {
+  const f = fixture(t)
+  const path = join(f.profileDir, 'package.json.lock')
+  for (const record of ['', '2147483647', String(process.pid)]) {
+    fs.writeFileSync(path, record)
+    const age = Date.now() - (record ? 180_000 : 5000)
+    fs.utimesSync(path, new Date(age), new Date(age))
+    await assert.rejects(takeProfileLock(f.profileDir, AbortSignal.timeout(150)), { name: 'AbortError' })
+    assert.equal(fs.readFileSync(path, 'utf8'), record)
+  }
+  const now = Date.now()
+  const clock = t.mock.method(Date, 'now', () => now + 120_001)
+  clock.mock.mockImplementationOnce(() => now, 0)
+  await assert.rejects(takeProfileLock(f.profileDir), /package.json.lock.*confirm its writer has exited/)
+  assert.equal(fs.readFileSync(path, 'utf8'), String(process.pid))
+})
+
+for (const [name, file, text] of [
+  ['workspace configuration dependencies', 'pnpm-workspace.yaml', '"configDependencies": { example: 1 }\n'],
+  ['workspace pnpmfile', 'pnpm-workspace.yaml', 'pnpmfile: ./hooks.cjs\n'],
+  ['workspace hooks', 'pnpm-workspace.yaml', 'hooks: {}\n'],
+  ['workspace string-valued global virtual store', 'pnpm-workspace.yaml', 'enableGlobalVirtualStore: "false"\n'],
+  ['workspace global virtual store', 'pnpm-workspace.yaml', 'enableGlobalVirtualStore: true\n'],
+  ['profile npmrc configuration dependencies', '.npmrc', 'config-dependencies=example\n'],
+]) {
+  test('rejects ' + name + ' before calling pnpm', async t => {
+    const f = fixture(t)
+    fs.appendFileSync(join(f.profileDir, file), text)
+    await assert.rejects(stageInstall(f.config, f.staging, putDownloads(f), f.versions), /Unsafe pnpm setting|Only registry=/)
+    assert.equal(fs.existsSync(join(f.root, 'pnpm-probes')), false)
+    assert.deepEqual(eventsOf(f), [])
+  })
+}
+
+test('refuses conflicting spellings of a pnpm write setting before calling pnpm', async t => {
+  const f = fixture(t)
+  fs.appendFileSync(join(f.profileDir, 'pnpm-workspace.yaml'),
+    'enableGlobalVirtualStore: true\nenable-global-virtual-store: false\n')
+  await assert.rejects(stageInstall(f.config, f.staging, putDownloads(f), f.versions), /Ambiguous pnpm setting: enableglobalvirtualstore/)
+  assert.equal(fs.existsSync(join(f.root, 'pnpm-probes')), false)
+})
+
+test('rejects array pnpmfile settings in the user npmrc before calling pnpm', async t => {
+  const f = fixture(t)
+  fs.writeFileSync(f.env.NPM_CONFIG_USERCONFIG, 'pnpmfile[]=./hooks.cjs\n')
+  await assert.rejects(stageInstall(f.config, f.staging, putDownloads(f), f.versions), /Unsafe pnpm setting: pnpmfile/)
+  assert.equal(fs.existsSync(join(f.root, 'pnpm-probes')), false)
+})
+
 for (const [label, configure] of [
   ['workspace lockfileDir in the live profile', f => fs.appendFileSync(join(f.profileDir, 'pnpm-workspace.yaml'), 'lockfileDir: ' + f.profileDir + '\n')],
   ['workspace modulesDir outside staging', f => fs.appendFileSync(join(f.profileDir, 'pnpm-workspace.yaml'), 'modulesDir: ../../../../external-modules\n')],
+  ['workspace relative storeDir outside staging', f => {
+    const path = join(f.profileDir, 'pnpm-workspace.yaml')
+    fs.writeFileSync(path, fs.readFileSync(path, 'utf8').replace('/shared/pnpm-store', '../../../../external-store'))
+  }],
   ['workspace storeDir in the live profile', f => {
     const path = join(f.profileDir, 'pnpm-workspace.yaml')
     fs.writeFileSync(path, fs.readFileSync(path, 'utf8').replace('/shared/pnpm-store', join(f.profileDir, 'store')))
@@ -99,6 +162,11 @@ for (const [label, configure] of [
   }],
   ['environment lockfile-dir in the live profile', f => { f.env.npm_config_lockfile_dir = f.profileDir }],
   ['workspace override in the live profile', f => { f.env.NPM_CONFIG_WORKSPACE_DIR = f.profileDir }],
+  ['workspace virtual store through a staged symlink', f => {
+    f.manifest.dependencies['custom-plugin'] = 'file:vendor/owner.tgz'
+    write(join(f.profileDir, 'package.json'), f.manifest)
+    fs.appendFileSync(join(f.profileDir, 'pnpm-workspace.yaml'), 'virtualStoreDir: vendor/owner.tgz\n')
+  }],
   ['workspace modulesDir through a staged symlink', f => {
     f.manifest.dependencies['custom-plugin'] = 'file:vendor/owner.tgz'
     write(join(f.profileDir, 'package.json'), f.manifest)
@@ -114,6 +182,7 @@ for (const [label, configure] of [
     await assert.rejects(stageInstall(f.config, f.staging, putDownloads(f), f.versions), /Unsafe staged pnpm write destination/)
     assert.deepEqual(eventsOf(f), [])
     assert.deepEqual(fs.readFileSync(lock), bytes)
+    assert.equal(fs.existsSync(join(f.root, 'pnpm-probes')), false)
     assert.deepEqual(fs.readdirSync(join(f.profileDir, VENDOR)), [f.archive.split('/').at(-1)])
   })
 }

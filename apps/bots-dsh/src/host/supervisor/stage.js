@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { runCommand } from './child.js'
-import { checkWriteDestinations } from './pnpm.js'
+import { checkWriteDestinations, pnpmSafetyEnv } from './pnpm.js'
 import { installedPlugins, registryOnlyNpmrc } from './release.js'
 import { directory, identity, regularBytes, sameEntry, syncDirectory, writeBytesAtomic } from './store.js'
 
@@ -18,11 +18,10 @@ const ARCHIVE_RECORD = 'created-archives.json'
 const archiveName = plugin => `${plugin.sha256.toLowerCase()}.tgz`
 
 function abandonedLock(record, entry) {
-  // Older DSH writers create the file before writing the PID. Give an empty
-  // record time to settle, then reclaim it only if its identity and bytes agree.
-  if (record === undefined || !/^\d*\n?$/.test(record)) return false
-  if (!record.endsWith('\n') && Date.now() - Number(entry.mtimeNs / 1_000_000n) < 2000) return false
-  if (record === '') return true
+  if (record === '') return Date.now() - Number(entry.mtimeNs / 1_000_000n) > LOCK_WAIT_MS
+  // In the legacy protocol a complete PID ends in a newline. A prefix
+  // could name a different process while the writer is still publishing it.
+  if (record === undefined || !/^\d+\n$/.test(record)) return false
   const pid = Number(record)
   if (pid <= 0 || pid > 0x7fffffff || pid === process.pid) return false
   try { process.kill(pid, 0) } catch (error) { return error.code === 'ESRCH' }
@@ -62,7 +61,12 @@ export async function takeProfileLock(profileDir, signal) {
     try { writeBytesAtomic(path, `${process.pid}\n`, { exclusive: true }) } catch (error) {
       if (error.code !== 'EEXIST') throw error
       reapProfileLock(path, identity(path))
-      if (Date.now() >= deadline) throw new Error('Timed out waiting for the DSH profile lock')
+      if (Date.now() >= deadline) {
+        throw Object.assign(
+          new Error('Timed out waiting for the DSH profile lock (package.json.lock); confirm its writer has exited before removing it'),
+          { code: 'DSH_PROFILE_LOCK_TIMEOUT' },
+        )
+      }
       if (identity(path)) await wait(100, undefined, { signal })
       continue
     }
@@ -119,7 +123,7 @@ function assertVersions(profileDir, versions) {
 
 export function runDsh(config, home, cwd, args, signal) {
   return runCommand(config.command[0], [config.command[1], 'plugin', '--profile', config.profile, ...args], {
-    cwd, env: { ...config.env, DSH_HOME: home }, signal,
+    cwd, env: pnpmSafetyEnv({ ...config.env, DSH_HOME: home }), signal,
   })
 }
 
@@ -275,7 +279,9 @@ export async function stageInstall(config, staging, { plugins, registry }, versi
   try {
     const options = [`--registry=${registry}`, '--ignore-pnpmfile']
     await runDsh(config, staging.root, staging.profileDir, [
-      'add', '--prefer-offline', '--ignore-scripts', ...options, ...Object.values(expectedEntries),
+      // The staged add may fetch missing packages. DSH's separate repair install
+      // inherits offline mode from the environment.
+      'add', '--prefer-offline', '--no-offline', '--ignore-scripts', ...options, ...Object.values(expectedEntries),
     ], signal)
     verifyCandidate(profileDir, staging, plugins, expectedEntries)
     const lock = regularBytes(join(staging.profileDir, 'pnpm-lock.yaml'))

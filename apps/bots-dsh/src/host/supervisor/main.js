@@ -6,15 +6,15 @@ import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { compareVersions } from '../lane-verify.js'
-import { answers, startChild } from './child.js'
+import { answers, LISTENER_UNKNOWN, localListener, startChild } from './child.js'
 import { copyVersion, installCopy, refreshCopy, runningCopy, SELF_CHECK_OK, supervisorVersion } from './copy.js'
-import { installRegistry } from './pnpm.js'
-import { currentOf, isId, isVersion, RUNNING, runOf } from './records.js'
+import { checkRelinkConfig, installRegistry } from './pnpm.js'
+import { currentOf, isId, isVersion, RUNNING, runOf, TERMINAL } from './records.js'
 import { inspectRelease, installedPlugins, releaseSource } from './release.js'
 import { takeRequest } from './request.js'
 import { assertRelinked, discardArchives, downloadPath, relink, stageInstall, stagePaths, takeProfileLock } from './stage.js'
 import { identity, prepareStore, readJson, regularBytes, takeLifetimeLock, usableStore, writeJsonAtomic } from './store.js'
-import { candidateMatches, completeSwitch, didSwitch, planSwitch, undoSwitch, validJournal } from './switch.js'
+import { candidateMatches, completeSwitch, didSwitch, planSwitch, undoSwitch, validJournal, validTerminalJournal } from './switch.js'
 
 const IDLE_POLL_MS = 1000
 const stamp = () => new Date().toISOString()
@@ -57,9 +57,12 @@ export async function runSupervisor({
   const controller = new AbortController()
   const { signal } = controller
   const bootEnv = { ...env, DSH_HOME: config.home, AUTOMAGIK_SUPERVISOR_BOOT: bootId, AUTOMAGIK_SUPERVISOR_VERSION: version }
+  const listener = localListener(command.slice(2))
+  bootEnv[LISTENER_UNKNOWN] = listener ? '0' : '1'
   const seen = new Set()
   let child, run, active, exitCode, recoveredAt
   let trial = false
+  let verdictFailed = false
   let executingCopy
 
   function requireLock() {
@@ -76,8 +79,20 @@ export async function runSupervisor({
   }
   const announce = () => write('supervisor.json', { version: 1, bootId, runId: run?.runId ?? null })
   const save = (changes = {}) => {
-    Object.assign(run, changes, { updatedAt: stamp() })
-    write('state.json', run)
+    const proposed = { ...run, ...changes, updatedAt: stamp() }
+    try {
+      write('state.json', proposed)
+    } catch (error) {
+      if (TERMINAL.has(proposed.phase)) {
+        verdictFailed = true
+        exitCode = 1
+        shutdown(1)
+        child?.detach()
+        warn('could not record the update verdict; recovery is required, see state.json')
+      }
+      throw error
+    }
+    Object.assign(run, proposed)
   }
   const phase = (next, reason = null) => save({ phase: next, reason })
 
@@ -97,6 +112,7 @@ export async function runSupervisor({
   }
   // The signal the service sent goes to DSH first; the shutdown that follows never sends a second one.
   const forward = Object.fromEntries(['SIGTERM', 'SIGINT', 'SIGHUP'].map(sig => [sig, () => {
+    if (verdictFailed) return
     void stop(sig)
     shutdown(0)
   }]))
@@ -123,7 +139,6 @@ export async function runSupervisor({
       signal.throwIfAborted()
       return manualRecovery(unchanged.result?.code)
     }
-    // Clean up first: whoever reads the verdict finds no staging left behind.
     finishNotUpdated(staging)
     phase('notUpdated', reason)
     trial = false
@@ -140,8 +155,8 @@ export async function runSupervisor({
     let released = false
     try {
       if (!candidateMatches(config, staging, run)) throw new Error('The switched inputs changed before relink')
-      run.journal.relinking = true
-      save()
+      checkRelinkConfig(config, staging)
+      save({ journal: { ...run.journal, relinking: true } })
       releaseLock()
       released = true
       await relink(config, signal)
@@ -180,8 +195,7 @@ export async function runSupervisor({
       } catch {}
     }
     if (!versionsMatch || candidate.result) return manualRecovery(candidate.result?.code)
-    run.journal.commitCurrent = true
-    save()
+    save({ journal: { ...run.journal, commitCurrent: true } })
     write('current.json', nextCurrent())
     phase('healthy', 'health-check-finished')
     trial = false
@@ -231,8 +245,7 @@ export async function runSupervisor({
       if (run.journal.commitCurrent || legacyCommit) {
         if (!candidateMatches(config, staging, run)) throw new Error('The committed inputs changed')
         assertRelinked(profileDir, staging)
-        run.journal.commitCurrent = true
-        save()
+        save({ journal: { ...run.journal, commitCurrent: true } })
         write('current.json', nextCurrent())
         release()
         release = null
@@ -258,6 +271,7 @@ export async function runSupervisor({
     const staging = stagePaths(store, run.runId, profile)
     let release, restart = false
     try {
+      if (!listener) return phase('notUpdated', 'listener-unknown')
       const raw = read('current.json')
       const current = currentOf(raw, [bootId])
       if (raw !== undefined && !current) return await giveBack(staging, 'store-invalid', false)
@@ -265,7 +279,7 @@ export async function runSupervisor({
       const view = {}
       const result = await inspectRelease({
         profileDir, current, view, source, fetch, signal, requireAccess: requireLock,
-        registry: dir => installRegistry(dir, bootEnv, signal), getDshVersion: () => dshVersion(command),
+        registry: () => installRegistry(config, staging.root, { signal }), getDshVersion: () => dshVersion(command),
         saveTarball: (plugin, bytes) => fs.writeFileSync(downloadPath(staging, plugin), bytes, { flag: 'wx', mode: 0o600 }),
         onPhase: next => {
           const previous = view.plugins.map(plugin => plugin.from).sort(compareVersions)[0]
@@ -295,8 +309,9 @@ export async function runSupervisor({
       const held = release
       release = null
       await relinkAndRestart(staging, held)
-    } catch {
+    } catch (error) {
       if (signal.aborted) return
+      if (error.code === 'DSH_PROFILE_LOCK_TIMEOUT') warn(error.message)
       if (run.phase === 'healthy' || run.phase === 'notUpdated') {
         warn('update cleanup did not finish')
         return
@@ -311,7 +326,8 @@ export async function runSupervisor({
         release?.()
         release = null
         await giveBack(staging, 'stage-failed', restart)
-      } catch {
+      } catch (error) {
+        if (error.code === 'DSH_PROFILE_LOCK_TIMEOUT') warn(error.message)
         if (!signal.aborted) await manualRecovery(1, 'rollback-failed')
       }
     } finally {
@@ -328,15 +344,15 @@ export async function runSupervisor({
     if (raw !== undefined && prior === null) throw new Error('Invalid state.json in the update store')
     announce()
     if (prior && (RUNNING.has(prior.phase) || prior.phase === 'manualRecovery')) {
-      try { await recover(raw) } catch {
+      try { await recover(raw) } catch (error) {
+        if (error.code === 'DSH_PROFILE_LOCK_TIMEOUT') warn(error.message)
         if (!signal.aborted) await manualRecovery(1, 'rollback-failed')
       } finally {
         recoveredAt = Date.now()
-        takeRequest(store, read, bootId, true, seen)
+        if (!verdictFailed) takeRequest(store, read, bootId, true, seen)
       }
     } else {
-      if (raw?.journal != null && (!validJournal(raw) || raw.journal.pending !== null
-        || raw.journal.done.length !== (raw.journal.undo ? 0 : raw.journal.steps.length))) {
+      if (raw?.journal != null && !validTerminalJournal(raw)) {
         throw new Error('Invalid terminal journal in the update store')
       }
       start()
@@ -357,7 +373,9 @@ export async function runSupervisor({
         save()
         announce()
         active = update().finally(() => {
-          try { takeRequest(store, read, bootId, true, seen) } finally { active = null }
+          try {
+            if (!verdictFailed) takeRequest(store, read, bootId, true, seen)
+          } finally { active = null }
         }).catch(() => shutdown(1))
       }
       await wait(IDLE_POLL_MS, undefined, { signal }).catch(() => {})
@@ -365,7 +383,7 @@ export async function runSupervisor({
   } finally {
     controller.abort()
     try {
-      await stop()
+      if (!verdictFailed) await stop()
       await active
     } finally {
       for (const [sig, handler] of Object.entries(forward)) process.off(sig, handler)
@@ -378,7 +396,7 @@ export async function runSupervisor({
 async function main(args) {
   if (args.length === 1 && args[0] === '--self-check') {
     supervisorVersion()
-    console.log(SELF_CHECK_OK)
+    fs.writeSync(1, SELF_CHECK_OK + '\n')
     return 0
   }
   const [verb, homeFlag, home, profileFlag, profile, separator, ...command] = args

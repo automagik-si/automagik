@@ -7,6 +7,14 @@ const [command, verb, ...options] = process.argv.slice(2)
 const profile = process.cwd()
 const { SUPERVISOR_FIXTURE: root, SUPERVISOR_TEST_PNPM: realPnpm } = process.env
 assert.ok(root && profile.startsWith(root + '/'), 'fixture must use its own pnpm cwd')
+if (process.env.SUPERVISOR_PNPM_REPAIR === '1') {
+  assert.deepEqual(process.argv.slice(2), ['install', '--frozen-lockfile'])
+  for (const key of ['ignore_scripts', 'ignore_pnpmfile', 'offline']) assert.equal(process.env['npm_config_' + key], 'true')
+  fs.writeFileSync(join(root, 'repair-inherited-restrictions'), 'yes')
+  process.exit(0)
+}
+assert.ok(!profile.startsWith(join(root, 'dsh/profiles') + '/'), 'preflight must never run pnpm in the live profile')
+fs.appendFileSync(join(root, 'pnpm-probes'), profile + '\n')
 assert.ok((command === 'config' && verb === 'list') || (command === 'store' && verb === 'path'))
 if (realPnpm && process.env.SUPERVISOR_CONFIG_REAL === '1') {
   const result = spawnSync(process.execPath, [realPnpm, command, verb, ...options], { stdio: 'inherit' })
@@ -24,7 +32,7 @@ for (const [key, value] of Object.entries(process.env)) {
 for (const [, key, value] of read(join(profile, 'pnpm-workspace.yaml')).matchAll(/^([\w-]+):\s+(.+)$/gm)) settings[key] = value
 if (command === 'config') {
   assert.deepEqual(options, ['--json'])
-  console.log(JSON.stringify(settings))
+  fs.writeSync(1, JSON.stringify(settings) + '\n')
 } else {
-  console.log(resolve(profile, settings.storeDir ?? settings['store-dir'] ?? join(root, 'offline-store'), 'v10'))
+  fs.writeSync(1, resolve(profile, settings.storeDir ?? settings['store-dir'] ?? join(root, 'offline-store'), 'v10') + '\n')
 }

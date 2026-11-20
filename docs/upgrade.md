@@ -231,7 +231,8 @@ ExecStart=/home/automagik/.automagik/web/dsh/update/web/supervisor/launcher.sh -
 
 The launcher runs the original DSH command under the first copy that passes its self-check,
 trying `current` before `kept`. If both checks fail, it can start DSH directly when the store has
-no `state.json` or the state records a completed verdict with no pending journal step.
+no `state.json` or the state records a completed verdict with a valid journal in the expected direction.
+The launcher redacts launch tokens from both output streams during direct startup.
 An unreadable state, unfinished update or `manualRecovery` verdict stops startup and points to
 `state.json`. Direct startup runs without the update capability.
 
@@ -240,11 +241,13 @@ An unreadable state, unfinished update or `manualRecovery` verdict stops startup
 The store is `$DSH_HOME/update/web/`, beside the live profile at `$DSH_HOME/profiles/web/`.
 Both directories need to be on the same filesystem. A profile `.npmrc` can name the package
 registry with `registry=`. Additional settings in that file make the update check refuse the
-profile. On a supervised profile, the check and install use the registry resolved by pnpm.
-The check refuses a different registry configured in the DSH plugin manager. The staging
-install checks pnpm's effective write paths. The lockfile, modules and virtual store must stay
-inside staging, and a shared store must be outside the live profile. Staging and offline
-relinking skip pnpm hooks and lifecycle scripts.
+profile. The supervisor reads the pnpm configuration before any package-manager probe and
+runs the registry and write-path probes in staging. The check refuses a different effective
+registry reported by the DSH plugin manager. The lockfile, modules and virtual store must stay
+inside staging, and a shared store must be outside the live profile. The check rejects pnpm
+configuration dependencies, configured hooks and a global virtual store. Staging and relinking
+skip pnpm hooks and lifecycle scripts, and relinking and its compatibility repair run offline.
+If the DSH profile lock times out, confirm its writer has exited before removing `package.json.lock`.
 
 | Path in the store | Contents |
 |---|---|
@@ -262,9 +265,13 @@ Read `state.json` with `jq . "$DSH_HOME/update/web/state.json"` or a text viewer
 interrupted. `journal.commitCurrent` records that the candidate passed health and recovery can
 finish committing `current.json`. `healthy` means the new child's local HTTP listener responded
 and the installed versions matched. The probe uses the host and port from the DSH command,
-with defaults of `127.0.0.1` and `3080`. When using `--public-url`, use a fixed local port so the
-probe can still find the listener. `notUpdated` means the previous installation answered its
-own local health check.
+with defaults of `127.0.0.1` and `3080`. Using `--public-url` requires a fixed local port.
+With `--port 0 --public-url` the check refuses the update with `listener-unknown` before stopping
+work. If a request reaches the supervisor with those flags, it records `notUpdated` with
+`listener-unknown` before changing the installation. For other `notUpdated` verdicts, the
+previous installation answered its own local health check. If a verdict cannot be written
+durably, the supervisor exits with an error and leaves the DSH child running for recovery.
+The last durable state guides recovery on the next supervised start.
 
 ### Recover an unchanged or restored profile after `manualRecovery`
 

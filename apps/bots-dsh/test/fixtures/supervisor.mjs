@@ -1,5 +1,6 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -33,6 +34,8 @@ export function fixture(t, { plugins = [BOTS], mode } = {}) {
   const fakePnpm = fileURLToPath(new URL('./supervisor-pnpm.mjs', import.meta.url))
   fs.writeFileSync(join(bin, 'pnpm'), '#!/bin/sh\nexec "' + process.execPath + '" "' + fakePnpm + '" "$@"\n', { mode: 0o700 })
   fs.mkdirSync(dirname(dshBin), { recursive: true })
+  const yaml = createRequire(new URL('../../dev/harness/package.json', import.meta.url)).resolve('js-yaml/package.json')
+  fs.symlinkSync(dirname(yaml), join(dshPackage, '../../js-yaml'))
   write(join(dshPackage, 'package.json'), { type: 'module', version: '0.2.2-rc.2' })
   fs.copyFileSync(fileURLToPath(new URL('./supervisor-dsh.mjs', import.meta.url)), dshBin)
   fs.copyFileSync(fileURLToPath(new URL('./supervisor-lock.mjs', import.meta.url)), join(dirname(dshBin), 'supervisor-lock.mjs'))
