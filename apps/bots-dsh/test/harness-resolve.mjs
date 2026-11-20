@@ -64,6 +64,9 @@ const pluginUrl = `${pathToFileURL(plugin).href}/`
 // this same pinned harness; that test checks both plugins pin one release.
 const parents = [pluginUrl, `${pathToFileURL(resolve(plugin, '../acp-dsh')).href}/`]
 
+// member-wall-adapter.test.js mounts the multiuser adapter on the same Cordis root.
+parents.push(`${pathToFileURL(resolve(plugin, '../multiuser-dsh')).href}/`)
+
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier.startsWith('@deepseek-ai/')
