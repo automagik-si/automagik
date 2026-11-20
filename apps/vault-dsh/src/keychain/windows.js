@@ -1,7 +1,10 @@
 import { win32 } from 'node:path'
 
 // The script is constant. Credential data enters only through the redirected pipe.
+// Progress stays silent: with stderr redirected, Windows PowerShell writes progress records
+// ("Preparing modules for first use.") to stderr as CLIXML, and any stderr fails the call.
 const script = String.raw`
+$ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 try {
   Add-Type -TypeDefinition @'

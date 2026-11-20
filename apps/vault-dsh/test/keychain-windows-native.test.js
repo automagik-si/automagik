@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
 import { test } from 'node:test'
+import { runSensitive } from '../src/bw/run.js'
 import { createKeychain } from '../src/keychain/index.js'
+import { resolvePowerShell, windowsCommand } from '../src/keychain/windows.js'
 
 const digest = value => typeof value === 'string' && createHash('sha256').update(value).digest('hex')
 
@@ -11,6 +13,10 @@ test('Windows Credential Manager stores, reads, replaces and deletes a generic c
   const id = 'automagik-vault:v1:' + randomBytes(16).toString('hex')
   const blob = () => Buffer.from(JSON.stringify({ v: 1, fixture: randomBytes(24).toString('hex'), encoding: 'ação' })).toString('base64')
   const keychain = createKeychain()
+  // A missing item carries no secret, so its raw outcome may be shown when the helper misbehaves.
+  const probe = windowsCommand('lookup', id)
+  const missing = await runSensitive(probe.args, { stdin: probe.stdin, timeout: 30000 }, resolvePowerShell)
+  assert.deepEqual(missing, { code: 10, stdout: '', stderr: '' })
   try {
     for (const value of [blob(), blob()]) {
       assert.equal((await keychain.store(id, value)).ok, true)
