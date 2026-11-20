@@ -21470,7 +21470,7 @@ var MOCK_FLAG = "mock-1540";
 function mock1540On(location2 = globalThis.location) {
   const search = typeof location2?.search === "string" ? location2.search : "";
   const hash = typeof location2?.hash === "string" ? location2.hash : "";
-  return new RegExp(`(?:[?&])${MOCK_FLAG}(?:=|&|$)`).test(search) || new RegExp(`(?:^#|&)${MOCK_FLAG}(?:=|&|$)`).test(hash);
+  return search.replace(/^\?/, "").split("&").some((part) => part.split("=")[0] === MOCK_FLAG) || new RegExp(`(?:^#|&)${MOCK_FLAG}(?:=|&|$)`).test(hash);
 }
 
 // src/client/self-update-mock.js

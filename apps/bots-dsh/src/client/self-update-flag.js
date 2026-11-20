@@ -8,6 +8,7 @@ export const MOCK_FLAG = 'mock-1540'
 export function mock1540On(location = globalThis.location) {
   const search = typeof location?.search === 'string' ? location.search : ''
   const hash = typeof location?.hash === 'string' ? location.hash : ''
-  return new RegExp(`(?:[?&])${MOCK_FLAG}(?:=|&|$)`).test(search)
+  // A query parameter of its own: `?next=/x?mock-1540` names only `next`, so it does not count.
+  return search.replace(/^\?/, '').split('&').some(part => part.split('=')[0] === MOCK_FLAG)
     || new RegExp(`(?:^#|&)${MOCK_FLAG}(?:=|&|$)`).test(hash)
 }

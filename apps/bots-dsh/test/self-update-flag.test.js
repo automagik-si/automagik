@@ -10,3 +10,12 @@ test('the preview flag matches a whole fragment parameter', () => {
     assert.equal(mock1540On({ hash }), false, hash)
   }
 })
+
+test('the preview flag matches a whole query parameter, not text inside another value', () => {
+  for (const search of ['?mock-1540', '?mock-1540=1', '?a=1&mock-1540', '?a=1&mock-1540&b=2']) {
+    assert.equal(mock1540On({ search }), true, search)
+  }
+  for (const search of ['', '?next=/preview?mock-1540', '?mock-1540-old', '?a=mock-1540']) {
+    assert.equal(mock1540On({ search }), false, search)
+  }
+})
