@@ -91,7 +91,7 @@ async function writeResponse(response, req, res, signal, unread) {
 
 // The shared admission of a caller request (HTTP and the stream upgrade): the gate's signed
 // assertion for this exact method and target, consumed once. Returns `{ status }` on refusal.
-export function admitCaller(req, { keys, nonces, multiuser, keysConfigured, expectedAuthority, now = () => Date.now() }) {
+export function admitCaller(req, { keys, nonces, multiuser, keysConfigured, expectedAuthority, now = () => Date.now(), seen }) {
   if (!multiuser) return { status: 401 }
   if (!keysConfigured) {
     if (!warned) {
@@ -124,12 +124,13 @@ export function admitCaller(req, { keys, nonces, multiuser, keysConfigured, expe
   if (consumed !== 'ok') return { status: consumed === 'full' ? 503 : 401 }
   const person = Object.freeze({ ...verified.principal, roles: Object.freeze(verified.principal.roles) })
   const principal = Object.freeze({ kind: 'automagik', instance: verified.aud, person })
+  seen?.(person)
   return { authority, url, principal, session: verified.session, exp: verified.exp, nonce: verified.nonce }
 }
 
 export function createCarrier({ connection, staticResource, clientModules, appResource, keys, nonces, scope, multiuser, keysConfigured,
   expectedAuthority, maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES, now = () => Date.now(), active = () => true,
-  ready = active, apiFor, registry = createPeerRegistry(),
+  ready = active, apiFor, seen, registry = createPeerRegistry(),
 }) {
   if (!apiFor) {
     const api = connection.createSharedFetchHandler('/api')
@@ -138,7 +139,7 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
   const inFlight = new Set()
   const pending = new Set()
   let onIdle
-  const admission = { keys, nonces, multiuser, keysConfigured, expectedAuthority, now }
+  const admission = { keys, nonces, multiuser, keysConfigured, expectedAuthority, now, seen }
   const handler = async (req, res) => {
     const refuse = status => res.writeHead(status).end()
     // The gate's readiness probe: an exact raw target that reads no body and needs no assertion.

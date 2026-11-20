@@ -1,6 +1,8 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
+import { roleOf, visibleBotIds } from './src/access.js'
+import { createSeen } from './src/seen.js'
 import { createCarrier, DEFAULT_MAX_REQUEST_BODY_BYTES } from './src/carrier.js'
 import { createStaticFrontend } from './src/frontend-static.js'
 import { createKeySource } from './src/keys.js'
@@ -155,6 +157,23 @@ export async function apply(ctx, config) {
   let epoch = 0
   const gatewaySetups = new WeakMap()
   const rules = EMPTY_RULES
+  const seen = createSeen()
+  let callerProvider
+  const warnedProviders = new WeakSet()
+  const warnProvider = provider => {
+    if (warnedProviders.has(provider)) return
+    warnedProviders.add(provider)
+    ctx.logger.warn('multiuser-dsh: caller visibility provider failed')
+  }
+  const provide = provider => {
+    if (callerProvider) throw new Error('multiuser-dsh: a caller provider is already registered')
+    if (typeof provider?.bots !== 'function') throw new TypeError('multiuser-dsh: a caller provider needs bots()')
+    const registration = { provider }
+    callerProvider = registration
+    return () => {
+      if (callerProvider === registration) callerProvider = undefined
+    }
+  }
   const registry = createPeerRegistry({ epoch: () => epoch })
   // A foreign or lost policy closes admission and every caller Peer at once, HTTP included.
   const lost = () => {
@@ -268,7 +287,7 @@ export async function apply(ctx, config) {
         appResource: request => c.get('automagikAppResource')?.(request),
         staticResource: multiuser ? createStaticFrontend(webServer) : undefined,
         keys, nonces, scope, multiuser, keysConfigured,
-        expectedAuthority,
+        expectedAuthority, seen: seen.record,
         maxRequestBodyBytes: config.maxRequestBodyBytes,
       })
       cleanups.push(owner.register({ kind: 'prefix', path: namespace + '/caller', handler: carrier }))
@@ -288,7 +307,7 @@ export async function apply(ctx, config) {
           if (name === 'typertGateway' || name === 'connection' || name === 'remoteAccess') closeLostBinding()
         }))
         upgrade = createMuxCarrier({
-          admission: { keys, nonces, multiuser, keysConfigured, expectedAuthority }, connection: c.connection, registry, ready, mux,
+          admission: { keys, nonces, multiuser, keysConfigured, expectedAuthority, seen: seen.record }, connection: c.connection, registry, ready, mux,
         })
         transport = loaded
       }
@@ -303,7 +322,17 @@ export async function apply(ctx, config) {
       // Keep c's service scope with an independent fiber that stays active during teardown.
       const Context = c.root.constructor
       const provider = c.extend({ fiber: new Context().fiber })
-      const removeCaller = provider.provide('automagikCaller', Object.freeze({ version: 1, multiuser, current: scope.current }))
+      const removeCaller = provider.provide('automagikCaller', Object.freeze({
+        version: 2, multiuser, current: scope.current, roleOf, provide,
+        visibleBotIds: principal => visibleBotIds(principal, multiuser ? callerProvider?.provider : undefined, warnProvider),
+        invalidate() {
+          try { policyCtx?.remoteAccess?.invalidate?.() } catch {}
+        },
+        seen() {
+          if (scope.current() !== undefined) throw new Error("multiuser-dsh: the admitted-person list is the owner's")
+          return seen.list()
+        },
+      }))
       // automagikCaller outlives every admitted HTTP request and every stream pump.
       return async () => {
         release()
