@@ -24,7 +24,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { acceptOne, slots, throttle, rotateLog, routesFor, endRemoved, sessionName, ALPN } from './guard.mjs'
-import { ChatConnection, ChatEngines } from './chat.mjs'
+import { ChatConnection, ChatEngines, chatWriter } from './chat.mjs'
 import { DshSource, withDsh } from './dsh-source.mjs'
 import { createEngine } from '../chat/engine.js'
 import { judgeCode, cancelCode, shortenCode, fingerprint, desktopFingerprint } from './pairing.mjs'
@@ -98,7 +98,7 @@ const live = new Set()
 let serving = false
 const publishPublic = () => { try { writePublic(STATE, publicStatus({ running: serving, phones: phones.phones() })) } catch (e) { log('public status:', e.message) } }
 const phones = presence({ changed: () => { if (serving) publishPublic() } })
-// Terminal sessions and chats alike: a removed phone's are ended within 2 s (guard.mjs endRemoved).
+// End a removed phone's terminal sessions and chats (guard.mjs endRemoved).
 function revoke() { endRemoved(live, new Set(devices().map(d => d.id)), log) }
 
 // Admitted (a paired key) and its header read, by guard.mjs.
@@ -139,26 +139,32 @@ async function chatRoute({ conn, bi, value, rest, peer: phone }) {
   if (!device) { conn.close(1n, [...Buffer.from('not paired')]); return } // removed since it was admitted
   const name = sessionName(value)
   log('chat:', device.name, 'session', name)
-  let writing = Promise.resolve()
+  let revoked = false
   let chat = null
-  const open = { phone, conn, end: () => { chat?.close('not paired'); try { conn.close(1n, [...Buffer.from('not paired')]) } catch {} } }
+  const open = { phone, conn, end: () => { revoked = true; chat?.close('not paired'); try { conn.close(1n, [...Buffer.from('not paired')]) } catch {} } }
   const engine = engines.acquire(name, open, phone)
   if (!engine) { conn.close(3n, [...Buffer.from('too many chat sessions')]); return }
   live.add(open)
   const close = phones.open(phone, device.name)
+  const write = chatWriter({
+    send: bytes => bi.send.writeAll([...bytes]),
+    isClosed: () => chat.closed,
+    isRevoked: () => revoked,
+    onFail: () => chat.close('write failed'),
+  })
   chat = new ChatConnection({
     // by: the phone's name, which the socket records with an answer (who answered on the phone).
     engine: withDsh(engine, dsh, { by: device.name }),
     // The paired key guard.mjs admitted: a Retry after a reconnect is the same message, typed once.
     device: phone,
     // The promise lets chat.mjs count bytes not yet taken (MAX_UNSENT).
-    write: bytes => (writing = writing.then(() => bi.send.writeAll([...bytes])).catch(() => chat.close('write failed'))),
-    end: () => { writing.then(() => bi.send.finish()).catch(() => {}) },
+    write,
+    end: () => { write.done().then(() => bi.send.finish()).catch(() => {}) },
     log,
   })
   try {
     // The hello answer says dshWrite only for a socket that answered write: 1: greet it first
-    // (absent resolves at once; a socket that does not answer waits at most REQUEST_MS).
+    // (absent resolves at once; each socket hello waits at most REQUEST_MS).
     await dsh.open().catch(() => null)
     if (rest.length) chat.feed(Buffer.from(rest))
     while (!chat.closed) {
@@ -268,16 +274,15 @@ async function serve() {
   const logs = [...new Set([files.log, join(STATE_HOME, 'bridge.log')])]
   const rotate = () => { for (const l of logs) try { rotateLog(l) } catch (e) { log('log:', e.message) } }
   rotate(); setInterval(rotate, 60_000).unref()
-  const stop = async () => { serving = false; engines.closeAll(); publishPublic(); try { const s = readJson(files.status, {}); if (s.pid === process.pid) unlinkSync(files.status) } catch {}; await keys.current().close().catch(() => {}); process.exit(0) }
+  const stop = async () => { serving = false; engines.closeAll(); dsh.close(); publishPublic(); try { const s = readJson(files.status, {}); if (s.pid === process.pid) unlinkSync(files.status) } catch {}; await keys.current().close().catch(() => {}); process.exit(0) }
   process.on('SIGTERM', stop); process.on('SIGINT', stop)
   // public-status.json: running from here (a stop now writes running: false), then `updated` every
   // HEARTBEAT and on each session open and close.
   serving = true; publishPublic()
   setInterval(publishPublic, HEARTBEAT).unref()
-  setInterval(() => {
-    revoke()
-    keys.ensure().then(repairAddress).catch(e => refused('key:', e.message))
-  }, 2000).unref()
+  // Revocation every second (RFC 0036: management ends within 2 s); the key check every 2 s.
+  setInterval(revoke, 1000).unref()
+  setInterval(() => { keys.ensure().then(repairAddress).catch(e => refused('key:', e.message)) }, 2000).unref()
   // Pairing: only while a code is live, and all of it within the handshake deadline; anyone with
   // the address may try then. Sessions: only paired keys. Others are closed before anything is read.
   const endpointRoutes = (ep) => {
