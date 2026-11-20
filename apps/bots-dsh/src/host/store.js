@@ -561,6 +561,7 @@ export function install(rt) {
     return warnReadOnly()
   }
 
+  rt.canWriteTeam = () => stuck === undefined && (lockBroken || (holder === undefined && lock.owns()))
   rt.holdsLock = () => !stopped && !lockBroken && stuck === undefined && holder === undefined && lock.owns()
   // RFC 0039 delivery 3: the team an ending operation began in. An adopt replaces the team in memory (`epoch`);
   // a lost and re-claimed lock ends this host's term (`term`, claimLock). Only a host that holds the team now,
