@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Draft): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); amends RFC 0024 (f)) |
+| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); amends RFC 0024 (f)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) for the shell; herdr (3.N.P) for the chat engine |
 | Created | 2026-11-09 |

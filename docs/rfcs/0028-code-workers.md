@@ -2,12 +2,14 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (owner not yet read) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; no delivery merged; delivery 1 waits for delivery 0, the grant, upstream) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr-core (the scoped grant), plugin (3.N.P) for each Automagik delivery |
 | Created | 2026-11-10 |
 | Replaces | RFC 0006's Workers section |
 | Amends | RFC 0022 (a second, host-side path beside delivery H; its rejection stands) |
+
+> Approved by the owner's delegate on 2026-11-19, while the owner is away; the owner may amend on return.
 
 ## Summary
 
@@ -216,7 +218,23 @@ Each is one PR on one lane. The order is 0, 1, 2, 3, 4, 5.
 5. **Workers on linked machines** (plugin and herdr-core, after #206 and delivery H's link
    scoping). *Check:* `--on` works only for machines the owner allowed for that Bot.
 
+## Answers (2026-11-19)
+
+Approved by the owner's delegate on 2026-11-19. Every open question had a recommendation, and
+each is answered with it, restated; the questions below stay as they were asked.
+
+1. **Q1, the Main Bot's default:** off, like every Bot, with a one-time offer in the Main Bot's
+   chat the first time the owner asks for coding work.
+2. **Q2, the worker's agent:** Herdr templates from an owner-kept allowlist, Claude Code first.
+   Not the Bot's own model route, because the worker is a full coding agent.
+3. **Q3, the card:** our own chat row first, through RFC 0023's chat tail slot; a subagents
+   provider hook is asked of DSH later.
+4. **Q4, default caps:** 3 running workers per Bot and 6 per team, settable by the owner (Caps
+   and cleanup).
+
 ## Open questions
+
+Answered on 2026-11-19 (Answers, above); kept as asked.
 
 1. **The Main Bot's default.** Recommended: off like every Bot, with a one-time offer in the Main
    Bot's chat the first time the owner asks for coding work.
