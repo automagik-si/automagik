@@ -92,6 +92,7 @@ import * as feed from './src/host/feed.js'
 import * as genui from './src/host/genui.js'
 import * as appManifest from './src/host/app-manifest.js'
 import * as pocketChat from './src/host/pocket-chat.js'
+import * as grants from './src/host/grants.js'
 import * as seatChat from './src/host/seat-chat.js'
 import * as hermesRemote from './src/host/hermes-remote.js'
 import * as officeSkills from './src/host/office-skills.js'
@@ -133,7 +134,7 @@ const MODULES = [
   sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
   update, selfUpdate, selfUpdateCheck, selfUpdateHold, dshUpdate, thinking, agentSpace, feed, codeSide, codeStart, automations, accounts, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
-  officeSkills, goalSkills,
+  officeSkills, goalSkills, grants,
 ]
 
 // Other Omni plugins inject the runtime as `omniTeam` and add to it through rt.hooks
@@ -190,8 +191,7 @@ export function createRuntime(ctx, config = {}) {
       try { dispose() } catch (error) { rt.warn?.('omni-ui: a module did not stop cleanly: %s', error?.message ?? error) }
     }
   }
-  // After every module: cordis runs prepended listeners newest first, so Auto's judge decides an approval before Pocket
-  // (pocket-chat.js) or approvals.js could show it as the person's to answer (auto-judge.js installAhead).
+  // Cordis runs prepended listeners newest first: Auto, person grants, Pocket, then the team card.
   autoJudge.installAhead(rt)
   const disposeHold = botSessions.installAhead(rt)
   if (disposeHold !== undefined) disposers.push(disposeHold)

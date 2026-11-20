@@ -100,7 +100,11 @@ async function start({ platform = 'telegram', adapter, seed, prepare } = {}) {
   const rt = createRuntime(ctx, { home })
   // The chat-app layer is carried but not installed (index.js: channels are Omni's).
   // This file installs it itself, so the carried code stays tested until it is.
+  const onApproval = rt.onApproval
+  let imApproval
+  rt.onApproval = listener => { imApproval = listener; return onApproval(listener) }
   installIm(rt)
+  rt.onApproval = onApproval
   const emitEvent = (sessionId, type, data) => {
     for (const listener of ctx.listeners.get('session/event') ?? []) {
       if (listener.length >= 2) listener({ id: sessionId }, { type, data, time: Date.now() })
@@ -120,7 +124,8 @@ async function start({ platform = 'telegram', adapter, seed, prepare } = {}) {
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
   const flush = async () => { await delay(10) }
-  return { ctx, rt, home, fake, prompts, agents, agentOf, emitEvent, fireApprovals, stop, flush, platform }
+  return { ctx, rt, home, fake, prompts, agents, agentOf, emitEvent, fireApprovals,
+    stop, flush, platform, imApproval }
 }
 
 const FIELDS = { telegram: { token: 'tok-1234' }, dingtalk: { clientId: 'cli-1', clientSecret: 'sec-1234' } }
@@ -1001,3 +1006,30 @@ test('rfc0039 D3b [P] IM8 a late id from a replaced runner is never edited throu
     assert.equal(runtimeFile(s, conn)[key], undefined)
   } finally { sending.release() }
 })
+
+test('rfc0039 D4 I1 grant events neither edit a held IM card nor send a replay card [P]',
+  async t => {
+    const s = await start()
+    t.after(s.stop)
+    const conn = await add(s)
+    s.rt.state.im.connections[conn.id].paired.push({ id: 'u1', name: 'U1', at: 1 })
+    await s.rt.save()
+    await dm(s, 'u1', 'hi')
+    s.fake.sent.length = 0
+    const abort = new AbortController()
+    const ask = s.fireApprovals({
+      agent: { id: 'a' }, toolName: 'bash', reason: 'fixture', signal: abort.signal,
+    }, () => new Promise(() => {}))
+    t.after(() => abort.abort())
+    await s.flush()
+    const id = s.fake.sent.at(-1).buttons[0].data.split(':')[1]
+    s.imApproval('grant', { id, outcome: 'allowed-once', decidedBy: 'web' })
+    s.imApproval('grant', { id: 'dsh:replay', outcome: 'allowed-once', decidedBy: 'grant' })
+    await s.flush()
+    assert.equal(s.fake.sent.length, 1)
+    assert.equal(s.fake.edited.length, 0)
+    s.rt.answerApproval(id, 'allow')
+    assert.deepEqual(await ask, ['allowed-once'])
+    await s.flush()
+    assert.equal(s.fake.edited.length, 1)
+  })

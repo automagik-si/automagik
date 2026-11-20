@@ -53,6 +53,7 @@ export function install(rt) {
         if (bot.shellHeld !== undefined) {
           delete bot.shellHeld
           changed = true
+          if (bots === state.bots) rt.dropGrantsForBot?.(bot.id)
         }
         continue
       }
@@ -60,6 +61,7 @@ export function install(rt) {
       if (bot.shellHeld?.model === model && bot.shellHeld.cli === cli) continue
       bot.shellHeld = { cli, model }
       changed = true
+      if (bots === state.bots) rt.dropGrantsForBot?.(bot.id)
       if (log) warn('ds-bot: %s loads with its shell off on %s, a coding CLI that brings its own shell: '
         + 'it is held until the shell is turned on or it runs on a model that uses DeepSeek Harness\'s tools.',
       diagnosticLabel(bot.name ?? 'This Bot'), diagnosticLabel(cli))
@@ -91,8 +93,17 @@ export function install(rt) {
       return ''
     }
   }
-  const lock = homeLock(join(home, 'state.lock'))
   let lockTerm = 0
+  // A failed read ends the term even if the lock comes back before the next heartbeat. Before
+  // the first claim there is no term to end (an unusable lock keeps term 0 for resume's notes).
+  let observedLoss = false
+  const onLockLost = () => {
+    if (observedLoss || lockTerm === 0) return
+    observedLoss = true
+    lockTerm++
+    rt.dropAllGrants?.()
+  }
+  const lock = homeLock(join(home, 'state.lock'), { onLost: onLockLost })
   const gainedListeners = new Set()
   const onLockGained = (fn) => {
     gainedListeners.add(fn)
@@ -109,11 +120,15 @@ export function install(rt) {
       const held = holder === undefined && lock.owns()
       mkdirSync(home, { recursive: true })
       holder = lock.claim()
-      if (!held && holder === undefined && lock.owns()) lockTerm += 1
+      if (!held && holder === undefined && lock.owns()) {
+        lockTerm += 1
+        observedLoss = false
+      }
     } catch (error) {
       // An unusable lock (a read-only or odd file system) must not stop the team; a
       // save that then cannot write still rejects.
       lockBroken = true
+      rt.dropAllGrants?.()
       holder = undefined
       warn('omni-ui: cannot lock %s, so another dsh on the same data could undo changes: %s', home, error)
     }
@@ -526,6 +541,7 @@ export function install(rt) {
         return
       }
     } else if (!lockBroken && !lock.owns()) {
+      rt.dropAllGrants?.()
       // A cached "writer" is stale once the lock file no longer names this host:
       // another dsh may have taken it over, or the file may just be gone. Re-claim
       // and re-check instead of trusting the flag.
@@ -560,6 +576,7 @@ export function install(rt) {
     if (lockBroken) return true
     if (holder === undefined && lock.owns()) return true
     rt.dropAutoMarks()
+    rt.dropAllGrants?.()
     // Lost the lock: retake it when nobody else holds it (its file was deleted), else
     // another host took it over and this one stops writing.
     if (holder === undefined) {
@@ -576,7 +593,16 @@ export function install(rt) {
   }
 
   rt.canWriteTeam = () => stuck === undefined && (lockBroken || (holder === undefined && lock.owns()))
-  rt.holdsLock = () => !stopped && !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  rt.lockBeating = () => lock.beating?.() !== false
+  rt.holdsLock = () => {
+    if (stopped || lockBroken || stuck !== undefined || holder !== undefined) return false
+    if (!lock.owns()) {
+      onLockLost()
+      return false
+    }
+    observedLoss = false
+    return true
+  }
   // A write that was already on its way when the plugin stopped may still land: the lock is
   // released only after the writes registered here end (holdLockUntil), so it is still ours.
   rt.ownsLockForPendingWrite = () => !lockBroken && stuck === undefined && holder === undefined && lock.owns()
@@ -685,6 +711,7 @@ export function install(rt) {
           if (!owned || changed || lockEpoch !== epoch) {
             const error = new Error(changed ? 'ds-bot: the Bot team file changed under this host\'s lock' : 'ds-bot lost the state lock to another dsh')
             error.code = 'ELOCKLOST'
+            rt.dropAllGrants?.()
             throw error
           }
         }
@@ -894,6 +921,7 @@ export function install(rt) {
     // A plain archive refuses a running Session, which would go on working for a group
     // that no longer has it.
     void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true }).catch(() => {})
+    rt.endGrants?.(sessionId, 'group')
   }
   // A group Session DSH can no longer open is set aside; the member's earlier parts in
   // the group stay, and its next turn there starts a new Session.
@@ -905,6 +933,7 @@ export function install(rt) {
     groupOwners.delete(sessionId)
     rt.cancelApprovals?.(sessionId, readLabels)
     void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true }).catch(() => {})
+    rt.endGrants?.(sessionId, 'group')
   }
   const findBot = (ref) => {
     if (ref === undefined) return undefined

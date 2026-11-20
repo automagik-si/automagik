@@ -1,3 +1,4 @@
+import { grantModelFields, withGrantHold } from './grants.js'
 // Parts: making room in a long conversation (a checkpoint in place, or a switch to a
 // fresh Session), the handoff note and package, and earlier pages for the chat view.
 //
@@ -1311,11 +1312,12 @@ export function install(rt) {
       }
       job.noCommands = rt.botRunnerRequired?.(agentId, agent) === true
       switches.set(agentId, job)
+      const release = folder ? rt.holdGrants?.({ sessionIds: [agentId] }) : undefined
       const running = runSwitch(agent, job)
       // Settles once the move is over, either way: a fresh part's first answer or failure
       // that comes while it runs waits for it.
       job.done = running.then(() => {}, () => {})
-      void running
+      job.finished = running
         .catch(error => {
           if (job.isShare) rt.spoilShare?.(job.botId, job.shareId)
           job.runnerRefused = error?.code === NO_BOT_RUNNER
@@ -1375,6 +1377,7 @@ export function install(rt) {
         // A state write that fails here (full disk, a file another program holds, a lost lock)
         // must not end up as an unhandled rejection, which stops the whole host.
         .catch(error => rt.warn('ds-bot: the switch of %s did not finish: %s', agent.id, error))
+        .finally(() => release?.())
       handedOff = true
       return job
     } finally { if (!handedOff) leave() }
@@ -1492,7 +1495,13 @@ export function install(rt) {
   // `failure`: how the first call ended. A switch onto a new model goes back to the model the old
   // part ran on too (model-state.js, plan A-3), so the old part is not re-selected onto the
   // model that just failed.
-  async function revertSwitch(freshId, entry, failure) {
+  function revertSwitch(freshId, entry, failure) {
+    return withGrantHold(rt, { botId: entry.botId },
+      () => grantModelFields(rt.botOf(entry.botId)),
+      () => revertSwitchHeld(freshId, entry, failure))
+  }
+
+  async function revertSwitchHeld(freshId, entry, failure) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     try {
       if (awaiting.get(freshId) !== entry) return
@@ -1509,6 +1518,7 @@ export function install(rt) {
       const current = room !== undefined ? room.sessions?.[bot.id] : rt.chatOf(bot.id)
       const segments = segmentsOf(entry) ?? []
       if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return
+      rt.endGrants?.([freshId, entry.oldId], 'part')
       segments.pop()
       if (room === undefined && (entry.expected === undefined || bot.model === entry.expected)) {
         rt.revertModel?.(bot, failure)
@@ -1755,6 +1765,7 @@ export function install(rt) {
       return
     }
     const segment = { sessionId: agent.id, endedAt: Date.now(), ...(tokens !== undefined ? { tokens } : {}), ...noted, ...(job.noNote !== undefined ? { archivePending: true } : {}) }
+    rt.endGrants?.(agent.id, 'part')
     if (bot === undefined) {
       ;(room.parts ??= []).push(segment)
       room.sessionId = freshId
@@ -2023,17 +2034,31 @@ export function install(rt) {
   // moves at its next step, and each group conversation at its next turn there. The
   // group's own Session follows the same way when the group's folder changes.
   async function followFolder(owner) {
+    // RFC 0039: no grant is offered for the moving owner until the switch it starts settles;
+    // the ownership count (D3b) is held only while the switch starts, as before.
+    let release
+    let moving = false
+    let job
     const leave = rt.enterOwnership?.() ?? (() => {})
     try {
       const sessionId = currentOf(owner)
       if (sessionId === undefined || switches.has(sessionId) || readOnly()) return
+      release = rt.holdGrants?.({
+        botId: owner.roomId === undefined ? owner.botId : undefined,
+        roomId: owner.roomId,
+        sessionIds: [sessionId],
+      }, () => moving)
       try {
         const agent = await rt.resolveAgent(sessionId)
-        if (agent.status === 'idle' && await folderMove(agent) !== undefined) startSwitch(agent, { folder: true })
+        if (agent.status === 'idle' && await folderMove(agent) !== undefined) {
+          job = startSwitch(agent, { folder: true })
+          moving = Boolean(job)
+        }
       } catch (error) {
         rt.warn('omni-ui: %s did not move to its working folder: %s', owner.botId === undefined ? rt.roomOf(owner.roomId)?.name ?? owner.roomId : rt.botOf(owner.botId)?.name ?? owner.botId, error)
       }
     } finally { leave() }
+    try { await job?.finished } finally { release?.() }
   }
 
   ctx.on('agent/request-error', async (payload, next) => {
@@ -2613,7 +2638,13 @@ export function install(rt) {
 
   // A held route is never asked to generate a handoff. Keep the hold published until
   // the replacement state is on disk, and retain the earlier parts for reading.
-  async function leaveShellHold(bot, model, effort, entry = 'switch-route') {
+  function leaveShellHold(bot, model, effort, entry) {
+    return withGrantHold(rt, { botId: bot.id },
+      () => [...grantModelFields(bot), bot.shellHeld, rt.chatOf(bot.id)],
+      () => leaveShellHoldHeld(bot, model, effort, entry))
+  }
+
+  async function leaveShellHoldHeld(bot, model, effort, entry = 'switch-route') {
     const leave = rt.enterOwnership?.() ?? (() => {})
     try {
       if (rt.pickingModel?.(bot.id)) throw refused('busy', `${bot.name} is already changing models.`)
@@ -2686,7 +2717,11 @@ export function install(rt) {
           }
           await rt.saveCopy(copy => { validate(); apply(copy) }, {
             beforeCommit: validate,
-            afterWrite: () => { apply(state); rt.indexSessions() },
+            afterWrite: () => {
+              apply(state)
+              rt.dropGrantsForBot?.(bot.id)
+              rt.indexSessions()
+            },
           })
           obsolete = [...(previousPart === undefined ? [] : [oldId]), ...groups.map(group => group.sessionId),
             ...workers.map(([id]) => id), ...runs.map(run => run.sessionId)]
@@ -2774,7 +2809,12 @@ export function install(rt) {
 
   // An own chat can change harness in place before anyone has said anything (RFC 0030 Q7a).
   // A chat with history needs a separate New conversation action before the pick.
-  async function switchRoute(botId, model, effort, { entry = 'switch-route' } = {}) {
+  function switchRoute(botId, model, effort, options) {
+    return withGrantHold(rt, { botId }, () => grantModelFields(rt.botOf(botId)),
+      () => switchRouteHeld(botId, model, effort, options))
+  }
+
+  async function switchRouteHeld(botId, model, effort, { entry = 'switch-route' } = {}) {
     const bot = rt.botOf(botId)
     if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
@@ -2931,6 +2971,7 @@ export function install(rt) {
       const parts = moved ? [current, ...segments.slice(1).map(segment => segment.sessionId)] : []
       bot.sessionPinned = true
       if (moved) {
+        rt.endGrants?.([current, bot.id, ...segments.map(part => part.sessionId)], 'part')
         delete bot.sessionId
         delete bot.segments
         // A switch marker left on the first Session would hand its kept input on later.
@@ -3125,6 +3166,7 @@ export function install(rt) {
       segments.splice(at, 1)
       segments.splice(at, 0, { sessionId: current, endedAt: Date.now() })
       bot.sessionId = partId
+      rt.endGrants?.([current, partId], 'part')
       rt.chatOwners.delete(current)
       rt.chatOwners.set(partId, botId)
       rt.pastOwners.delete(partId)

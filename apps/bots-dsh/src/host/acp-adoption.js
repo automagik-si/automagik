@@ -1,3 +1,4 @@
+import { grantTeamModels, withGrantHold } from './grants.js'
 // Claude on ACP (RFC 0003, delivery 4). The Claude Code plugin left Automagik and its Bots
 // moved once to pi-ai's `anthropic` route (store.js, `claudeCodeMoved`). With dshTools on,
 // those Bots move on to `acp-claude`, once per team (`claudeAcpMoved`), when the route can
@@ -148,7 +149,10 @@ export function install(rt) {
 
   // A moved Bot goes back to exactly the model and thinking level it had. One the person
   // changed since keeps their pick: the record is dropped, never applied over it.
-  const restore = async (removed = false) => {
+  const restore = removed => withGrantHold(rt, { all: true }, () => grantTeamModels(rt),
+    () => restoreHeld(removed))
+
+  const restoreHeld = async (removed = false) => {
     const restored = []
     let changed = false
     // Asked once per pass, and only when a record would go back to `anthropic`.
@@ -197,7 +201,9 @@ export function install(rt) {
     }
   }
 
-  const move = async () => {
+  const move = () => withGrantHold(rt, { all: true }, () => grantTeamModels(rt), moveHeld)
+
+  const moveHeld = async () => {
     await rt.load()
     // Nothing is written by a host that only reads the team; the writer moves or restores them.
     if (rt.readOnly?.() !== undefined) return

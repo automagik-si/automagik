@@ -472,7 +472,13 @@ export function hardContext(rt, sessionId, step, session) {
   try { sendsOutside = rt.sendsOutside?.(step, sessionId) === true } catch { sendsOutside = true }
   return { root, sendsOutside }
 }
-const cleanArgs = args => JSON.parse(JSON.stringify(args ?? {}, (key, value) => key === 'diffs' ? undefined : value))
+export const cleanArgs = args => JSON.parse(JSON.stringify(
+  args ?? {}, (key, value) => key === 'diffs' ? undefined : value,
+))
+export function effectiveRoute(session) {
+  const config = session?.requestHeader?.()?.config
+  return config?.provider && config?.model ? `${config.provider}/${config.model}` : undefined
+}
 const eventsOf = session => Array.from(session?.snapshotEvents?.() ?? []).slice(-2000).map(row => row.event ?? row)
 function argumentValue(value, fallback = value) {
   if (typeof value !== 'string' || value.length > COMMAND_MAX) return value
@@ -587,8 +593,7 @@ export function install(rt) {
     const sessionId = session?.id
     const bot = rt.botOf(rt.chatOwners.get(sessionId) ?? rt.state.tasks?.[sessionId]?.from)
     if (!bot) return undefined
-    const config = session?.requestHeader?.()?.config
-    const route = config?.provider && config?.model ? `${config.provider}/${config.model}` : undefined
+    const route = effectiveRoute(session)
     const args = { sessionId, session, route }
     if (rt.autoWhy(bot, args) !== undefined) return undefined
     return { bot, args, mark: bot.permissionAuto, rev: bot.permissionRev ?? 0 }
@@ -698,7 +703,12 @@ export function install(rt) {
     if (event.type === 'user/message' && source?.kind === 'acp-session' && source.stop === 'refusals') rt.noteStop?.(session.id, { why: 'review', text: source.summary })
   })
   rt.privateApprovalNote = request => privateApprovals.has(request) ? { tool: credentialPlaceholder, reason: '' } : undefined
-  Object.assign(rt, { autoJudge, autoDecide, autoAuditRows, dropAutoGrants, autoCounts: session => { try { return ownerOf(session) !== undefined } catch { return false } } })
+  Object.assign(rt, {
+    autoJudge, autoDecide, autoAuditRows, dropAutoGrants, appendAutoAudit: appendAudit,
+    autoCounts: session => {
+      try { return ownerOf(session) !== undefined } catch { return false }
+    },
+  })
 }
 
 /**

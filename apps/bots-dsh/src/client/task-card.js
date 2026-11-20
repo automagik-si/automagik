@@ -2,6 +2,7 @@ import { approvalDetail } from './approvals.js'
 import { openStops, stopLine } from './stops.js'
 import { createElement as h, Fragment, useEffect, useState } from 'react'
 import { t, hostText } from './i18n.js'
+import { GrantAction } from './grants.js'
 
 // A task a Bot handed on (start_task, agents.js): it shows itself working, where the user
 // can watch, then what it found.
@@ -76,7 +77,9 @@ export const endLabel = (task) => {
   return task?.status === 'stopped' ? t('Stopped') : t('Task finished')
 }
 
-export function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, useWork }) {
+export function TaskCard({
+  sessionId, title, task, onOpen, useSessionStatus, useWork, actions, readOnly,
+}) {
   // The start_task call has no Session id until its result names one, and the card is drawn
   // again when it arrives. The hooks are read every render, with a null id before then, so
   // that second render keeps the hook order the first one set.
@@ -92,11 +95,17 @@ export function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, use
   // without one, the task's single waiting ask. Two at once and none named: the card cannot say
   // which the person would be answering.
   const askCall = ask?.callId
-  const detail = useWork ? useWork(work => {
+  const teamAsk = useWork?.(work => {
     const mine = (work.approvals ?? []).filter(entry => entry.taskId === taskId)
-    const entry = askCall !== undefined ? mine.find(item => item.sessionId === taskId && item.callId === askCall) : ask === undefined && mine.length === 1 ? mine[0] : undefined
-    return entry ? approvalDetail(entry) : ''
-  }) : ''
+    if (askCall !== undefined) {
+      return mine.find(item => item.sessionId === taskId && item.callId === askCall)
+    }
+    if (ask === undefined && mine.length === 1) return mine[0]
+  })
+  const detail = teamAsk ? approvalDetail(teamAsk) : ''
+  const grantAsk = teamAsk?.sessionId === taskId && !teamAsk.child
+    && (ask === undefined || (teamAsk.tool === ask.toolName && teamAsk.reason === ask.reason))
+    ? teamAsk : undefined
   const stop = useWork ? useWork(work => {
     const entry = taskId === null ? undefined : openStops(work).filter(item => item.taskId === taskId).sort((a, b) => b.at - a.at)[0]
     return entry ? stopLine(entry) : ''
@@ -141,6 +150,11 @@ export function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, use
             task?.steps ? h('span', { className: 'op-task-steps' }, t('step {count}', { count: task.steps })) : null),
           h('div', { className: 'op-task-bar', 'aria-hidden': true }, h('i')))
           : task?.summary ? h('p', { className: 'op-task-summary' }, task.summary) : null,
+      status === 'waiting' && grantAsk ? h(GrantAction, {
+        key: grantAsk.id, approval: grantAsk, place: task?.title ?? title, actions,
+        disabled: answering || readOnly || ask?.answerable === false,
+        className: 'op-task-ask-btn',
+      }) : null,
       status === 'waiting' && detail ? h('span', { className: 'op-task-said' }, detail) : null,
       !working && unanswered ? h('span', { className: 'op-task-said' }, t('The task ended with an approval unanswered')) : null,
       sessionId ? h('button', { type: 'button', className: 'op-task-open', onClick: onOpen }, ask ? t('Open task') : status === 'waiting' ? t('Answer it') : working ? t('Watch it work') : t('Open task'), ' →') : null))

@@ -72,7 +72,9 @@
       "vault-unlock"
     ],
     "approvals": [
-      "approval-answer"
+      "approval-answer",
+      "grant-approval",
+      "grant-revoke"
     ],
     "stop": [
       "abandon-work",

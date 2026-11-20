@@ -1087,6 +1087,7 @@ export function install(rt) {
 
   const groupAsks = new Map()
   rt.onApproval((kind, data) => {
+    if (kind === 'grant') return
     if (kind === 'open') {
       const ask = data.roomId !== undefined ? { withdrawn: false } : undefined
       if (ask !== undefined) groupAsks.set(data.id, ask)

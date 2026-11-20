@@ -152,3 +152,126 @@ test('rfc0039 [C] M4 no subagent wait replies at once', { timeout: 5000 }, async
   assert.ok(performance.now() - started < 1000)
   assert.equal(reply.text, '好了。')
 })
+
+// One Anthropic-shaped request, its SSE reply folded into { text, tools }.
+async function callRepeat(send, messages) {
+  const res = await send({
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'mock', stream: true, tools: [{ name: 'bash' }], messages }),
+  })
+  assert.equal(res.status, 200)
+  const events = (await res.text()).split('\n\n')
+    .map(chunk => /^data: (.+)$/m.exec(chunk)?.[1]).filter(Boolean).map(line => JSON.parse(line))
+  let text = ''
+  const tools = []
+  const byIndex = new Map()
+  for (const event of events) {
+    if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+      const { id, name, input } = event.content_block
+      const used = { id, name, input }
+      tools.push(used)
+      byIndex.set(event.index, { used, json: '' })
+    }
+    if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+      byIndex.get(event.index).json += event.delta.partial_json
+    }
+    if (event.type === 'content_block_stop') {
+      const block = byIndex.get(event.index)
+      if (block?.json) block.used.input = JSON.parse(block.json)
+    }
+    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+      text += event.delta.text
+    }
+  }
+  return { text, tools }
+}
+
+// Append the reply and its tool results, as the next model request would carry them.
+function foldRepeat(messages, out) {
+  messages.push(
+    { role: 'assistant', content: [
+      ...(out.text ? [{ type: 'text', text: out.text }] : []),
+      ...out.tools.map(used =>
+        ({ type: 'tool_use', id: used.id, name: used.name, input: used.input })),
+    ] },
+    { role: 'user', content: out.tools.map(used =>
+      ({ type: 'tool_result', tool_use_id: used.id, content: '[]' })) },
+  )
+}
+
+// A sandbox can prohibit even loopback listeners. This drives the same mock HTTP adapter
+// and stream without opening a socket or starting DSH.
+async function startMockInProcess(env) {
+  const [{ default: http }, { syncBuiltinESMExports }, { Readable }] = await Promise.all([
+    import('node:http'), import('node:module'), import('node:stream'),
+  ])
+  const createServer = http.createServer
+  let listener
+  http.createServer = callback => { listener = callback; return { listen() {} } }
+  syncBuiltinESMExports()
+  const values = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]))
+  const assign = values => {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+  try {
+    assign(env)
+    const url = new URL('../dev/mock-llm.mjs', import.meta.url)
+    url.searchParams.set('fixture', env.HC_SESSION)
+    await import(url)
+    assert.equal(typeof listener, 'function')
+  } finally {
+    assign(values)
+    http.createServer = createServer
+    syncBuiltinESMExports()
+  }
+  return ({ body, headers, method }) => new Promise(resolve => {
+    const request = Object.assign(Readable.from([body]), { headers, method, url: '/v1/messages' })
+    let status
+    let responseHeaders
+    const chunks = []
+    listener(request, {
+      writeHead(code, headers) { status = code; responseHeaders = headers },
+      write(chunk) { chunks.push(chunk) },
+      end(chunk = '') {
+        resolve(new Response(chunks.join('') + chunk, { status, headers: responseHeaders }))
+      },
+    })
+  })
+}
+
+function repeatMock(t) {
+  const home = mkdtempSync(join(tmpdir(), 'dsb-repeat-mock-'))
+  const runtime = mkdtempSync(join(home, 'runtime-'))
+  t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5 }))
+  return startMockInProcess({
+    MOCK_PORT: '0', MOCK_LOG: join(home, 'mock.jsonl'), MOCK_DELAY_MS: '5', MOCK_JITTER_MS: '0',
+    HC_SESSION: home, XDG_RUNTIME_DIR: runtime,
+  })
+}
+
+for (const [name, prefix] of [['own chat', ''], ['delegated task', '[Task from Ada]\n']]) {
+  test('rfc0039 D4 mock repeats identical arguments in ' + name + ' [P]', async t => {
+    const send = await repeatMock(t)
+    const args = { command: 'echo ok', description: 'rfc39', justification: 'rfc39',
+      sandbox_permissions: 'danger-full-access' }
+    const messages = [{ role: 'user', content: prefix + '重复调用 3 0: bash '
+      + JSON.stringify(args) }]
+    const ids = new Set()
+    for (let n = 0; n < 3; n++) {
+      const out = await callRepeat(send, messages)
+      assert.equal(out.tools.length, 1)
+      assert.equal(out.tools[0].name, 'bash')
+      assert.deepEqual(out.tools[0].input, args)
+      ids.add(out.tools[0].id)
+      foldRepeat(messages, out)
+    }
+    assert.equal(ids.size, 3)
+    const finished = await callRepeat(send, messages)
+    assert.equal(finished.tools.length, 0)
+    assert.equal(finished.text, '重复调用完成。')
+  })
+}

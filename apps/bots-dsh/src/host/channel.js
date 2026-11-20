@@ -25,6 +25,8 @@ import { readUpdateRecovery } from './self-update-recovery.js'
 import { callerService, multiuserMode } from './multiuser.js'
 import { callerJson } from './caller-routes.js'
 import { peopleOf } from './people.js'
+import { claimGrant } from './approvals.js'
+import { bindTicketDesk, createTicketDesk } from './grant-ticket.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -69,6 +71,8 @@ const exposition = error => (typeof error?.code === 'string' && /^(?:bot|memory)
 const errorKind = error => [error?.code, error?.name].find(value => typeof value === 'string' && /^[\w./-]{1,40}$/.test(value)) ?? 'error'
 
 export function install(rt) {
+  const { mint, desk } = createTicketDesk(rt.ctx.connection)
+  bindTicketDesk(rt, desk)
   installBtw(rt)
   installSide(rt)
   const { ctx, state } = rt
@@ -267,7 +271,7 @@ export function install(rt) {
     activity: rt.activityView(),
     // The web self-update holds new work (update-hold.js): the composer says so.
     updateHold: rt.updateHoldView?.() === true,
-    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
+    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), grants: rt.grantsView?.() ?? [], withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
     memoryNews: rt.memoryNews(),
     memoryReviews: rt.memoryReviews(),
     learning: rt.learningView(),
@@ -517,7 +521,7 @@ export function install(rt) {
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach',
     'role-install', 'role-uninstall', 'role-grant', 'role-settings', 'role-settings-set'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
-  const handle = async (endpoint, payload, signal, windowSeen = false) => {
+  const handle = async (endpoint, payload, signal, windowSeen = false, ticket) => {
     try {
       const body = payload ?? {}
       if ((endpoint === 'create-bot' || endpoint === 'duplicate-bot') && Object.hasOwn(body, 'people')) {
@@ -926,6 +930,29 @@ export function install(rt) {
         case 'approval-answer':
           rt.answerApproval(body.id, body.choice, body.client)
           return ok(true)
+        case 'grant-approval': {
+          if (typeof body.id !== 'string' || typeof body.offer !== 'string'
+            || Object.keys(body).some(key => key !== 'id' && key !== 'offer')) {
+            return fail('Choose one approval', 'bot/invalid')
+          }
+          const result = await claimGrant(rt, ticket)
+          if (result.allowed === 'unknown') {
+            return fail('The answer was not confirmed. Look again.', 'bot/unconfirmed')
+          }
+          if (result.allowed !== true) {
+            return fail('This approval is no longer open', 'bot/stale')
+          }
+          return ok(result.live ? { grantId: result.grantId } : { allowedOnce: true })
+        }
+        case 'grant-revoke':
+          if (typeof body.id !== 'string' || Object.keys(body).length !== 1) {
+            return fail('Choose one grant', 'bot/invalid')
+          }
+          if (rt.holdsLock?.() !== true) {
+            return fail(rt.readOnly?.() ?? 'This host cannot save the Bot team.', 'bot/read-only')
+          }
+          return rt.revokeGrant?.(body.id) === true
+            ? ok(true) : fail('This grant has ended', 'bot/stale')
         // A stop that fails partway still parks the goal, or it wakes the admin again.
         case 'stop-member-work':
           try {
@@ -1532,6 +1559,7 @@ export function install(rt) {
       // The proof goes only to endpoints; this route's own checks read it as a boolean.
       const proof = appBrowserBridge() ? windowProof(request) : false
       const desktopWindow = proof !== false
+      const ticket = endpoint === 'grant-approval' ? mint(request, body?.payload) : undefined
       const dispatch = () => {
         if (VAULT_LOCAL.has(endpoint)) {
           // DSH rebuilds the request on an internal URL (http://dsh.internal), so the page's own
@@ -1555,7 +1583,7 @@ export function install(rt) {
             return fail('Bitwarden Secrets Manager is unavailable in Automagik Cloud.', 'bot/refused')
           }
         }
-        return handle(endpoint, body?.payload, request.signal, proof)
+        return handle(endpoint, body?.payload, request.signal, proof, ticket)
       }
       // Read before the dispatch, as #1845 does: the dispatch can settle the request it names.
       const keyringDetail = endpoint === 'secret-source-detail' && rt.secretServiceDetail?.(body?.payload?.requestId)
@@ -1565,6 +1593,7 @@ export function install(rt) {
         result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
       } finally {
         leave?.()
+        desk.voidTicket(ticket)
         revokeWindowProof(proof)
       }
       const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail

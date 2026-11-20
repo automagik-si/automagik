@@ -22,7 +22,10 @@ export function pidAlive(pid) {
   }
 }
 
-export function homeLock(path, { staleMs = 60_000, beatMs = 15_000, host = hostname(), pid = process.pid, isAlive = pidAlive, now = Date.now } = {}) {
+export function homeLock(path, {
+  staleMs = 60_000, beatMs = 15_000, host = hostname(), pid = process.pid, isAlive = pidAlive,
+  now = Date.now, onLost,
+} = {}) {
   const token = randomUUID()
   let timer
 
@@ -48,6 +51,7 @@ export function homeLock(path, { staleMs = 60_000, beatMs = 15_000, host = hostn
   const beat = () => {
     if (!owns()) {
       stop()
+      onLost?.()
       return
     }
     const time = new Date(now())
@@ -94,5 +98,7 @@ export function homeLock(path, { staleMs = 60_000, beatMs = 15_000, host = hostn
     }
   }
 
-  return { claim, owns, release, read }
+  // Whether the heartbeat still watches the lock (it stops once it saw the lock go).
+  const beating = () => timer !== undefined
+  return { claim, owns, release, read, beating }
 }

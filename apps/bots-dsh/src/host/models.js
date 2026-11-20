@@ -1,3 +1,4 @@
+import { grantModelFields, grantTeamModels, withGrantHold } from './grants.js'
 // Models. Every Bot runs on one model of its own, fixed when it is created and changed
 // only in its settings or by a Main Bot. The team's first Main Bot has none until the
 // user picks one in its chat. The Session keeps the selection durably.
@@ -653,6 +654,11 @@ export function install(rt) {
   // prove that an older group Session received the member's thinking level.
   const sessionSelections = new Map()
   function selectSessionModel(sessionId, { provider, model, reasoningEffort }, pocket) {
+    const release = rt.holdGrants?.({ sessionIds: [sessionId] }, () => {
+      const selected = sessionSelections.get(sessionId)
+        ?? ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config
+      return [selected?.provider, selected?.model]
+    })
     const run = selecting.then(async () => {
       pocket?.check()
       rt.assertShellChoice?.(sessionId)
@@ -682,6 +688,7 @@ export function install(rt) {
       return result
     })
     selecting = run.catch(() => {})
+    if (release) void run.then(() => release(false), () => release(true))
     return run
   }
 
@@ -755,7 +762,12 @@ export function install(rt) {
 
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
-  async function applyModel(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
+  function applyModel(bot, options) {
+    return withGrantHold(rt, { botId: bot.id }, () => grantModelFields(bot),
+      () => applyModelHeld(bot, options))
+  }
+
+  async function applyModelHeld(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
     const pinned = modelEntry !== undefined
     const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
     const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
@@ -861,7 +873,12 @@ export function install(rt) {
   // the catalog from now on, the Bots pinned to it move to what they would be given
   // today, and each of them re-selects even when its record looks applied (`force`):
   // its Session may still be on the route, or on another Bot's route in a group.
-  async function routeRefused(ref, bot) {
+  function routeRefused(ref, bot) {
+    return withGrantHold(rt, { all: true }, () => grantTeamModels(rt),
+      () => routeRefusedHeld(ref, bot))
+  }
+
+  async function routeRefusedHeld(ref, bot) {
     const served = await servedModels(ref)
     if (!refused.has(ref)) {
       refused.set(ref, served)

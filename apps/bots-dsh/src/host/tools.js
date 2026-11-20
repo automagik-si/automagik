@@ -607,13 +607,20 @@ export function install(rt) {
       // writes widen; the private-Bot check is the one updateBot would run.
       await rt.checkPrivacyChange(bot, { moving: true, workDir })
       await rt.approveFolder(exec, { path: workDir, sessions: [exec.agent.id], who: { en: bot.name, zh: ` ${bot.name} ` } })
-      const result = await next()
-      if (result?.isError !== true) {
-        ;(room.memberDirs ??= {})[bot.id] = workDir ?? null
-        room.scoped = true
-        await rt.save()
+      const sessionId = exec.agent.id
+      const release = rt.holdGrants?.({ sessionIds: [sessionId] })
+      try {
+        const result = await next()
+        if (result?.isError !== true) {
+          ;(room.memberDirs ??= {})[bot.id] = workDir ?? null
+          room.scoped = true
+          rt.endGrants?.(sessionId, 'group')
+          await rt.save()
+        }
+        return result
+      } finally {
+        release?.()
       }
-      return result
     }
     await rt.approveFolder(exec, { path: workDir, sessions: rt.sessionsOfBot(bot.id), who: { en: bot.name, zh: ` ${bot.name} ` } })
     const result = await next()

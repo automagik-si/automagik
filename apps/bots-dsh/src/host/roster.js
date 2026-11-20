@@ -1,3 +1,4 @@
+import { grantModelFields, withGrantHold } from './grants.js'
 import { markOf } from '../shared/permission-levels.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
 // Roster: creating, changing, and deleting Bots and group chats, the Main Bot role, and
@@ -102,6 +103,7 @@ export function install(rt) {
     await rt.checkFolderAccess?.(path, blocked, { cached: true })
     const workspace = await ctx.workspaceRegistry.resolveByPath(path) ?? await ctx.workspaceRegistry.create(path, 'Omni')
     state.workspaceId = workspace.id
+    rt.dropAllShellGrants?.()
     await rt.save()
     return workspace.id
   }
@@ -213,6 +215,8 @@ export function install(rt) {
   // on their Sessions first). A group change counts them as gone, whichever call goes on
   // first, so it never adds one back or reports it added (#366).
   const deleting = new Set()
+  const restoring = new Set()
+  rt.botDeleting = id => deleting.has(id) || restoring.has(id)
   const isLive = id => rt.botOf(id) !== undefined && !deleting.has(id)
   // Each deleteBot still running, by Bot. A second call for the same Bot gets that one,
   // so it ends with it (#376): see deleteBot.
@@ -475,6 +479,8 @@ export function install(rt) {
     } catch (error) {
       // The Bot's Session was already made: archive it instead of leaving an orphan.
       delete state.bots[id]
+      rt.dropGrantsForBot?.(id)
+      rt.dropGrantsForSession?.(id)
       state.mainBotIds = state.mainBotIds.filter(other => other !== id)
       rt.chatOwners.delete(id)
       // A save that another change queued meanwhile still carries this Bot; a later
@@ -621,7 +627,20 @@ export function install(rt) {
     return patch.model !== undefined || patch.effort !== undefined ? withModelChange(id, run, options?.admit !== undefined) : run()
   }
 
-  async function updateBotRecord(id, patch, actorId, fromSessionId, { admit, modelEntry } = {}) {
+  function updateBotRecord(id, patch, actorId, fromSessionId, options) {
+    const policyFields = Object.keys(contextPatch(patch))
+    const fields = ['model', 'effort', 'permission', 'denyTools', 'shell', 'browserGrants',
+      'workDir', ...policyFields]
+    const run = () => updateBotHeld(id, patch, actorId, fromSessionId, options)
+    if (!fields.some(key => patch[key] !== undefined)) return run()
+    return withGrantHold(rt, { botId: id }, () => {
+      const bot = rt.botOf(id)
+      return bot && [...grantModelFields(bot), bot.permissionRev, bot.shellHeld,
+        ...fields.map(key => bot[key])]
+    }, run)
+  }
+
+  async function updateBotHeld(id, patch, actorId, fromSessionId, { admit, modelEntry } = {}) {
     if (['permissionAuto', 'permissionRev', 'autoStamp'].some(key => Object.hasOwn(patch, key))) throw refusal('Only the person turns Auto on, from the Bot\'s permission choice.')
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
@@ -873,6 +892,7 @@ export function install(rt) {
       if (workDir === undefined) delete bot.workDir
       else bot.workDir = workDir
     }
+    if (moving) rt.dropGrantsForBot?.(bot.id)
     for (const [key, value] of Object.entries(policyPatch)) {
       if (value === null) delete bot[key]
       else bot[key] = value
@@ -1219,6 +1239,10 @@ export function install(rt) {
       return room
     } catch (error) {
       // The group's Session was already made: archive it instead of leaving an orphan.
+      for (const seat of Object.values(state.rooms[id]?.sessions ?? {})) {
+        rt.endGrants?.(seat, 'group')
+      }
+      rt.dropGrantsForSession?.(id)
       delete state.rooms[id]
       void rt.save().catch(() => {})
       await ctx.workspaceRegistry.archiveSession(id)
@@ -1328,6 +1352,7 @@ export function install(rt) {
           room.workDir = workDir
           room.scoped = true
         }
+        rt.endGrants?.([rt.sessionOfRoom(room), ...Object.values(room.sessions ?? {})], 'group')
         // A member's own pick for this group gives way to the group's folder, and a
         // cleared one does not bring it back.
         delete room.memberDirs
@@ -1348,32 +1373,39 @@ export function install(rt) {
       // that was kept but did not reach every Session: the update goes on, and the person is
       // told last.
       let unapplied
-      const releveled = permission !== undefined && await rt.setRoomPermission(room, permission).catch((error) => {
-        if (error?.levelNotApplied !== true) throw error
-        unapplied = error
-        return true
-      })
-      if (releveled) {
-        changes.push(permission ? `every member now works with the ${permission} permissions here` : 'every member uses its own permissions again')
-      }
-      if (room.name !== before) {
-        changes.push(`renamed it "${room.name}"`)
-        await retitleRoom(room)
-      }
-      if (patch.section !== undefined || patch.sectionId !== undefined) {
-        const nextSecId = resolveSectionInput({ section: patch.section, sectionId: patch.sectionId })
-        if ((nextSecId ?? undefined) !== room.sectionId) {
-          if (nextSecId === null || nextSecId === undefined) {
-            delete room.sectionId
-            changes.push('removed it from its sidebar section')
-          } else {
-            room.sectionId = nextSecId
-            const secName = (state.sections ?? []).find(sec => sec.id === nextSecId)?.name ?? nextSecId
-            changes.push(`moved it to section "${secName}"`)
+      // RFC 0039: no grant is offered in this room until its new level is saved, or fails to be.
+      const releaseRoom = permission === undefined ? undefined
+        : rt.holdGrants?.({ roomId: room.id }, () => room.permission)
+      let roomThrew = true
+      try {
+        const releveled = permission !== undefined && await rt.setRoomPermission(room, permission).catch((error) => {
+          if (error?.levelNotApplied !== true) throw error
+          unapplied = error
+          return true
+        })
+        if (releveled) {
+          changes.push(permission ? `every member now works with the ${permission} permissions here` : 'every member uses its own permissions again')
+        }
+        if (room.name !== before) {
+          changes.push(`renamed it "${room.name}"`)
+          await retitleRoom(room)
+        }
+        if (patch.section !== undefined || patch.sectionId !== undefined) {
+          const nextSecId = resolveSectionInput({ section: patch.section, sectionId: patch.sectionId })
+          if ((nextSecId ?? undefined) !== room.sectionId) {
+            if (nextSecId === null || nextSecId === undefined) {
+              delete room.sectionId
+              changes.push('removed it from its sidebar section')
+            } else {
+              room.sectionId = nextSecId
+              const secName = (state.sections ?? []).find(sec => sec.id === nextSecId)?.name ?? nextSecId
+              changes.push(`moved it to section "${secName}"`)
+            }
           }
         }
-      }
-      await rt.save()
+        await rt.save()
+        roomThrew = false
+      } finally { releaseRoom?.(roomThrew) }
       // The words say what the group holds now: a Bot whose deletion began during the
       // awaits above has left it again, so it is not reported as added.
       const kept = added.filter(member => room.members.includes(member) && isLive(member))
@@ -1383,7 +1415,11 @@ export function install(rt) {
     } finally { leave() }
   }
 
-  async function deleteRoom(id) {
+  function deleteRoom(id) {
+    return withGrantHold(rt, { roomId: id }, undefined, () => deleteRoomHeld(id))
+  }
+
+  async function deleteRoomHeld(id) {
     const room = rt.roomOf(id)
     if (room === undefined) throw refusal('Unknown group chat')
     // Before the group's Sessions leave the state, which the archive reads.
@@ -1506,6 +1542,11 @@ export function install(rt) {
     // record stays until releaseBot is done: the archive and releaseBot read it (the Bots
     // told of the deletion hear its name), and a failure up to there leaves it in the
     // team, where putBack puts it back in the groups in `left`.
+    return withGrantHold(rt, { botId: id }, undefined,
+      () => deleteHeld(id, bot, parts, sessions))
+  }
+
+  async function deleteHeld(id, bot, parts, sessions) {
     deleting.add(id)
     const left = []
     for (const room of Object.values(state.rooms)) {
@@ -1540,8 +1581,12 @@ export function install(rt) {
       // Before the Bot and its group Sessions leave the state, which the archive reads.
       archived = rt.archiveBotMemory(id)
     } catch (error) {
+      restoring.add(id)
       deleting.delete(id)
-      await putBack(id, left)
+      try { await putBack(id, left) } finally {
+        restoring.delete(id)
+        rt.dropGrantsForBot?.(id)
+      }
       throw error
     }
     // #376: only once its Sessions are released, so a failed release keeps the Bot's btw
@@ -1563,6 +1608,7 @@ export function install(rt) {
     try { removed = rt.botOf(id) } catch {}
     delete state.bots[id]
     rt.forgetShare?.(id)
+    rt.dropGrantsForBot?.(id)
     rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
     // The shared capability list is the user's and keeps its items; only a

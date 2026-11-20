@@ -1,3 +1,4 @@
+import { grantModelFields, withGrantHold } from './grants.js'
 // What a Bot's model really did, as opposed to what was picked (plan v3, 2.2 and A-3).
 //
 // Each signal proves one thing and no more: `bot.model` is the choice; a `request/header` in the
@@ -95,7 +96,12 @@ export function install(rt) {
     return `${failed ?? 'The model'} did not answer (${code}${message}).${stays}`
   }
 
-  async function restore(bot, failure) {
+  function restore(bot, failure) {
+    return withGrantHold(rt, { botId: bot.id }, () => grantModelFields(bot),
+      () => restoreHeld(bot, failure))
+  }
+
+  async function restoreHeld(bot, failure) {
     if (!revertModel(bot, failure)) return
     try {
       await rt.save()
