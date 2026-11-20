@@ -1204,37 +1204,50 @@ export function install(rt) {
     await work.get(sessionId)
   }
   async function handOnHeld(plan, term) {
-    await rt.load()
-    const work = new Map()
-    const canRecover = () => rt.lockTerm?.() === term && rt.readOnly() === undefined
-    if (!canRecover()) return
-    const targets = new Map()
-    for (const [sessionId, owner] of Object.entries(state.switching ?? {})) {
-      if (switches.has(sessionId)) continue
-      const target = currentOf(owner) ?? sessionId
-      const done = (targets.get(target) ?? Promise.resolve()).then(() => handOnPart(sessionId, owner, canRecover))
-      targets.set(target, done)
-      work.set(sessionId, done)
-    }
-    for (const [target, done] of targets) work.set(target, done)
-    plan(work)
-    await Promise.all(targets.values())
-    if (!canRecover()) return
-    // Earlier parts left for a fresh part's first answer by a run that is gone: nothing
-    // watches that answer any more, so they are archived as a switch always did.
-    const owners = [
-      ...Object.values(state.bots ?? {}).map(bot => ({ botId: bot.id })),
-      ...Object.values(state.rooms ?? {}).flatMap(room => Object.keys(room.segments ?? {}).map(botId => ({ botId, roomId: room.id }))),
-    ]
-    for (const owner of owners) {
-      for (const segment of segmentsOf(owner) ?? []) {
-        if (segment.archivePending === undefined || switches.has(segment.sessionId) || [...awaiting.values()].some(entry => entry.oldId === segment.sessionId)) continue
-        delete segment.archivePending
-        await rt.save().catch(error => rt.warn('ds-bot: %s could not be saved: %s', segment.sessionId, error))
-        await ctx.workspaceRegistry.archiveSession(segment.sessionId, { stopActivity: true })
-          .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', segment.sessionId, error))
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      await rt.load()
+      const work = new Map()
+      const canRecover = () => rt.lockTerm?.() === term && rt.readOnly() === undefined
+      if (!canRecover()) return
+      const targets = new Map()
+      try {
+        for (const [sessionId, owner] of Object.entries(state.switching ?? {})) {
+          if (switches.has(sessionId) || owner === null || typeof owner !== 'object' || Array.isArray(owner)) continue
+          const { botId, roomId } = owner
+          if ((botId === undefined && roomId === undefined) || (botId !== undefined && typeof botId !== 'string')
+            || (roomId !== undefined && typeof roomId !== 'string')) continue
+          const target = currentOf(owner) ?? sessionId
+          const done = (targets.get(target) ?? Promise.resolve()).then(() => handOnPart(sessionId, owner, canRecover))
+          targets.set(target, done)
+          work.set(sessionId, done)
+        }
+        for (const [target, done] of targets) work.set(target, done)
+        plan(work)
+      } catch (error) {
+        // Publish the fallback before waiting for any chains already scheduled.
+        plan(new Map())
+        throw error
+      } finally {
+        await Promise.all(targets.values())
       }
-    }
+      if (!canRecover()) return
+      // Earlier parts left for a fresh part's first answer by a run that is gone: nothing
+      // watches that answer any more, so they are archived as a switch always did.
+      const owners = [
+        ...Object.values(state.bots ?? {}).map(bot => ({ botId: bot.id })),
+        ...Object.values(state.rooms ?? {}).flatMap(room => Object.keys(room.segments ?? {}).map(botId => ({ botId, roomId: room.id }))),
+      ]
+      for (const owner of owners) {
+        for (const segment of segmentsOf(owner) ?? []) {
+          if (segment.archivePending === undefined || switches.has(segment.sessionId) || [...awaiting.values()].some(entry => entry.oldId === segment.sessionId)) continue
+          delete segment.archivePending
+          await rt.save().catch(error => rt.warn('ds-bot: %s could not be saved: %s', segment.sessionId, error))
+          await ctx.workspaceRegistry.archiveSession(segment.sessionId, { stopActivity: true })
+            .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', segment.sessionId, error))
+        }
+      }
+    } finally { leave() }
   }
 
   async function handOnPart(sessionId, owner, canRecover) {
@@ -1272,67 +1285,74 @@ export function install(rt) {
   // part carries the latest messages that fit, and the old part is archived only once the
   // fresh part's first answer comes from its route.
   function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, hard = overflow || folder || fresh || cutoff || manual } = {}) {
-    // DSH agents carry `id`; a host agent (a test double, an adopted session) may only carry
-    // the Session it runs. The Session id is the key either way.
-    const agentId = agent.id ?? agent.session?.id
-    try { rt.assertShellChoice?.(agentId) } catch { return false }
-    const place = placeOf(agentId)
-    if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
-    const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
-    switches.set(agentId, job)
-    const running = runSwitch(agent, job)
-    // Settles once the move is over, either way: a fresh part's first answer or failure
-    // that comes while it runs waits for it.
-    job.done = running.then(() => {}, () => {})
-    void running
-      .catch(error => {
-        const name = rt.botOf(job.botId)?.name ?? rt.roomOf(job.roomId)?.name ?? agent.id
-        if (unloaded(error)) return noteInfo('omni-ui: plugin unloaded while %s switched parts; input kept in part %s', name, agent.id)
-        rt.warn('omni-ui: %s did not move on to a fresh part: %s', name, error)
-      })
-      .finally(async () => {
-        switches.delete(agentId)
-        if (job.moved) {
-          // A move that had to put input back keeps the part marked for the restart pass.
-          if (job.kept !== true) {
-            delete state.switching[agent.id]
-            await rt.save()
-          }
-          noteFailures.delete(agent.id)
-          folderRetry.delete(agent.id)
-          // The folder may have changed again while the switch ran.
-          void followFolder(job)
-          return
-        }
-        if (folder) folderRetry.set(agent.id, Date.now() + FOLDER_RETRY_MS)
-        if (!job.noteFailed) partBase.set(agent.id, tokensOf(agent.session) ?? 0)
-        // The stopped turn goes on where it was. A retry finds the note among the
-        // input this part kept, so it is added once.
-        const back = job.carry.splice(0)
-        const noted = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => textOf(message.content) === PAUSE_NOTE)
-        if (resume && !back.some(message => textOf(message.content) === PAUSE_NOTE) && !noted) {
-          const carried = job.joined?.length ? { joined: job.joined } : {}
-          back.unshift(createUserMessage({
-            content: [{ type: 'text', text: PAUSE_NOTE }],
-            source: job.info ? { ...job.info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
-          }))
-        }
-        await forward(job, back, agent.session.id).then(() => {
-          delete state.switching[agent.id]
-        }).catch((error) => {
-          job.kept = true
-          try { restore(agent, back) } catch {}
-          if (unloaded(error)) return noteInfo('omni-ui: plugin unloaded during the switch of %s; input kept in part %s', agent.id, agent.id)
-          rt.warn('omni-ui: input for %s was not handed on: %s', agent.id, error)
-          // The input is back where it was; the turn that owns it goes on at once.
-          try { wake(agent) } catch {}
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    let handedOff = false
+    try {
+      // DSH agents carry `id`; a host agent (a test double, an adopted session) may only carry
+      // the Session it runs. The Session id is the key either way.
+      const agentId = agent.id ?? agent.session?.id
+      try { rt.assertShellChoice?.(agentId) } catch { return false }
+      const place = placeOf(agentId)
+      if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
+      const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
+      switches.set(agentId, job)
+      const running = runSwitch(agent, job)
+      // Settles once the move is over, either way: a fresh part's first answer or failure
+      // that comes while it runs waits for it.
+      job.done = running.then(() => {}, () => {})
+      void running
+        .catch(error => {
+          const name = rt.botOf(job.botId)?.name ?? rt.roomOf(job.roomId)?.name ?? agent.id
+          if (unloaded(error)) return noteInfo('omni-ui: plugin unloaded while %s switched parts; input kept in part %s', name, agent.id)
+          rt.warn('omni-ui: %s did not move on to a fresh part: %s', name, error)
         })
-        await rt.save()
-      })
-      // A state write that fails here (full disk, a file another program holds, a lost lock)
-      // must not end up as an unhandled rejection, which stops the whole host.
-      .catch(error => rt.warn('ds-bot: the switch of %s did not finish: %s', agent.id, error))
-    return job
+        .finally(async () => {
+          try {
+            switches.delete(agentId)
+            if (job.moved) {
+              // A move that had to put input back keeps the part marked for the restart pass.
+              if (job.kept !== true) {
+                delete state.switching[agent.id]
+                await rt.save()
+              }
+              noteFailures.delete(agent.id)
+              folderRetry.delete(agent.id)
+              // The folder may have changed again while the switch ran.
+              void followFolder(job)
+              return
+            }
+            if (folder) folderRetry.set(agent.id, Date.now() + FOLDER_RETRY_MS)
+            if (!job.noteFailed) partBase.set(agent.id, tokensOf(agent.session) ?? 0)
+            // The stopped turn goes on where it was. A retry finds the note among the
+            // input this part kept, so it is added once.
+            const back = job.carry.splice(0)
+            const noted = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => textOf(message.content) === PAUSE_NOTE)
+            if (resume && !back.some(message => textOf(message.content) === PAUSE_NOTE) && !noted) {
+              const carried = job.joined?.length ? { joined: job.joined } : {}
+              back.unshift(createUserMessage({
+                content: [{ type: 'text', text: PAUSE_NOTE }],
+                source: job.info ? { ...job.info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
+              }))
+            }
+            await forward(job, back, agent.session.id).then(() => {
+              delete state.switching[agent.id]
+            }).catch((error) => {
+              job.kept = true
+              try { restore(agent, back) } catch {}
+              if (unloaded(error)) return noteInfo('omni-ui: plugin unloaded during the switch of %s; input kept in part %s', agent.id, agent.id)
+              rt.warn('omni-ui: input for %s was not handed on: %s', agent.id, error)
+              // The input is back where it was; the turn that owns it goes on at once.
+              try { wake(agent) } catch {}
+            })
+            await rt.save()
+          } finally { leave() }
+        })
+        // A state write that fails here (full disk, a file another program holds, a lost lock)
+        // must not end up as an unhandled rejection, which stops the whole host.
+        .catch(error => rt.warn('ds-bot: the switch of %s did not finish: %s', agent.id, error))
+      handedOff = true
+      return job
+    } finally { if (!handedOff) leave() }
   }
 
   // A goal belongs to the Session, so the part that takes over starts with none. An active
@@ -1420,19 +1440,22 @@ export function install(rt) {
   const segmentsOf = entry => (entry.roomId === undefined ? rt.botOf(entry.botId)?.segments : rt.roomOf(entry.roomId)?.segments?.[entry.botId])
 
   async function settleSwitch(freshId, entry) {
-    if (awaiting.get(freshId) !== entry) return
-    // The move goes on to its end (input forwarded, tasks moved) before its earlier part stops.
-    await entry.job?.done
-    if (awaiting.get(freshId) !== entry) return
-    awaiting.delete(freshId)
-    acked.delete(freshId)
-    const segment = segmentsOf(entry)?.find(item => item.sessionId === entry.oldId)
-    if (segment?.archivePending !== undefined) {
-      delete segment.archivePending
-      await rt.save().catch(error => rt.warn('ds-bot: %s could not be saved: %s', entry.oldId, error))
-    }
-    await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
-      .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      if (awaiting.get(freshId) !== entry) return
+      // The move goes on to its end (input forwarded, tasks moved) before its earlier part stops.
+      await entry.job?.done
+      if (awaiting.get(freshId) !== entry) return
+      awaiting.delete(freshId)
+      acked.delete(freshId)
+      const segment = segmentsOf(entry)?.find(item => item.sessionId === entry.oldId)
+      if (segment?.archivePending !== undefined) {
+        delete segment.archivePending
+        await rt.save().catch(error => rt.warn('ds-bot: %s could not be saved: %s', entry.oldId, error))
+      }
+      await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
+        .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+    } finally { leave() }
   }
 
   // The fresh part's first call failed before any answer: the Bot goes back to the part it
@@ -1443,56 +1466,59 @@ export function install(rt) {
   // part ran on too (model-state.js, plan A-3), so the old part is not re-selected onto the
   // model that just failed.
   async function revertSwitch(freshId, entry, failure) {
-    if (awaiting.get(freshId) !== entry) return
-    // A first call that failed while the move still ran: everything the move hands on
-    // lands in the fresh part first, so all of it is taken back.
-    await entry.job?.done
-    if (awaiting.get(freshId) !== entry) return
-    awaiting.delete(freshId)
-    acked.delete(freshId)
-    await rt.load()
-    const bot = rt.botOf(entry.botId)
-    const room = entry.roomId === undefined ? undefined : rt.roomOf(entry.roomId)
-    if (bot === undefined || (entry.roomId !== undefined && room === undefined) || readOnly()) return
-    const current = room !== undefined ? room.sessions?.[bot.id] : rt.chatOf(bot.id)
-    const segments = segmentsOf(entry) ?? []
-    if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return
-    segments.pop()
-    if (room === undefined && (entry.expected === undefined || bot.model === entry.expected)) {
-      rt.revertModel?.(bot, failure)
-    }
-    if (room !== undefined) room.sessions[bot.id] = entry.oldId
-    else {
-      bot.sessionId = entry.oldId
-      if (state.questions?.[freshId] !== undefined && state.questions[entry.oldId] === undefined) {
-        state.questions[entry.oldId] = state.questions[freshId]
-        delete state.questions[freshId]
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      if (awaiting.get(freshId) !== entry) return
+      // A first call that failed while the move still ran: everything the move hands on
+      // lands in the fresh part first, so all of it is taken back.
+      await entry.job?.done
+      if (awaiting.get(freshId) !== entry) return
+      awaiting.delete(freshId)
+      acked.delete(freshId)
+      await rt.load()
+      const bot = rt.botOf(entry.botId)
+      const room = entry.roomId === undefined ? undefined : rt.roomOf(entry.roomId)
+      if (bot === undefined || (entry.roomId !== undefined && room === undefined) || readOnly()) return
+      const current = room !== undefined ? room.sessions?.[bot.id] : rt.chatOf(bot.id)
+      const segments = segmentsOf(entry) ?? []
+      if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return
+      segments.pop()
+      if (room === undefined && (entry.expected === undefined || bot.model === entry.expected)) {
+        rt.revertModel?.(bot, failure)
       }
-      if (state.views?.[freshId] !== undefined && state.views[entry.oldId] === undefined) {
-        state.views[entry.oldId] = state.views[freshId]
-        delete state.views[freshId]
+      if (room !== undefined) room.sessions[bot.id] = entry.oldId
+      else {
+        bot.sessionId = entry.oldId
+        if (state.questions?.[freshId] !== undefined && state.questions[entry.oldId] === undefined) {
+          state.questions[entry.oldId] = state.questions[freshId]
+          delete state.questions[freshId]
+        }
+        if (state.views?.[freshId] !== undefined && state.views[entry.oldId] === undefined) {
+          state.views[entry.oldId] = state.views[freshId]
+          delete state.views[freshId]
+        }
       }
-    }
-    await rt.save()
-    await rt.moveSchedules?.(freshId, entry.oldId)
-      ?.catch?.(error => rt.warn('ds-bot: tasks of the fresh part of %s not moved back: %s', bot.name, error))
-    const old = await rt.resolveAgent(entry.oldId).catch(() => undefined)
-    if (old !== undefined) {
-      try { await takeBack(freshId, old) } catch (error) { rt.warn('ds-bot: input of the fresh part of %s not taken back: %s', bot.name, error) }
-    } else rt.warn('ds-bot: the part %s came from could not be loaded; its input stays in the fresh part', bot.name)
-    const picked = await freshRoute(bot, old?.session)
-    if (picked !== undefined && await rt.keepsCarriedRoute?.(entry.oldId, picked.ref) === true) {
-      // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
-      bot.appliedModel = picked.ref
-      if (picked.effort === undefined) delete bot.appliedEffort
-      else bot.appliedEffort = picked.effort
       await rt.save()
-    } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
-    if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
-    rt.renewMemory(entry.oldId)
-    rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
-    await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
-      .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', bot.name, error))
+      await rt.moveSchedules?.(freshId, entry.oldId)
+        ?.catch?.(error => rt.warn('ds-bot: tasks of the fresh part of %s not moved back: %s', bot.name, error))
+      const old = await rt.resolveAgent(entry.oldId).catch(() => undefined)
+      if (old !== undefined) {
+        try { await takeBack(freshId, old) } catch (error) { rt.warn('ds-bot: input of the fresh part of %s not taken back: %s', bot.name, error) }
+      } else rt.warn('ds-bot: the part %s came from could not be loaded; its input stays in the fresh part', bot.name)
+      const picked = await freshRoute(bot, old?.session)
+      if (picked !== undefined && await rt.keepsCarriedRoute?.(entry.oldId, picked.ref) === true) {
+        // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
+        bot.appliedModel = picked.ref
+        if (picked.effort === undefined) delete bot.appliedEffort
+        else bot.appliedEffort = picked.effort
+        await rt.save()
+      } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
+      if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
+      rt.renewMemory(entry.oldId)
+      rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
+      await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
+        .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', bot.name, error))
+    } finally { leave() }
   }
 
   // What a fresh part holds of the user's input goes back to the part it came from, in
@@ -1776,65 +1802,69 @@ export function install(rt) {
   // room before the step (condensed in place, or it stops and goes on in a fresh
   // part), and the backend's own pre-step listener sees the wrapper.
   ctx.on('agent/pre-step', async (payload, next) => {
-    // A message carrying a shown sign-in code never reaches a model, a note or a fresh part
-    // (cli-login.js).
-    rt.dropLoginCodes?.(payload)
-    await (rt.refreshShellChoice?.() ?? rt.load())
-    const { agent } = payload
-    // An attached Agent can wake from its inbox without a controller prompt.
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      rt.assertShellChoice?.(agent.session?.id ?? agent.id)
-      rt.assertShellChoice?.(agent.session?.header?.parentSession)
-    } catch { return { kind: 'reject' } }
-    agents.set(agent.id, agent)
-    const checkpoint = checkpoints.get(agent.id)
-    if (checkpoint !== undefined) {
-      checkpoint.carry.push(...payload.messages)
-      return { kind: 'reject' }
-    }
-    const past = rt.pastOwners.get(agent.id)
-    if (past !== undefined && !rt.isBotSession(agent.id)) {
-      await forward(past, payload.messages, agent.session.id).catch(error => rt.warn('omni-ui: input for %s was not handed on: %s', agent.id, error))
-      return takeOverStep(agent, payload)
-    }
-    const place = placeOf(agent.id)
-    if (place === undefined) return next()
-    adoptCompaction(agent)
-    const job = switches.get(agent.id)
-    if (job !== undefined) {
-      job.carry.push(...payload.messages)
-      return takeOverStep(agent, payload)
-    }
-    const fresh = freshParts.get(agent.id)
-    if (fresh !== undefined) {
-      freshParts.delete(agent.id)
-      partBase.set(agent.id, (tokensOf(agent.session) ?? 0) + fresh)
-    }
-    if (!readOnly() && await folderMove(agent, { midTurn: payload.step > 1 }) !== undefined) return switchBeforeStep(agent, payload, { folder: true })
-    if (nativeDshSession(agent.id) || pinned(agent.id)) return next()
-    // The group's own Session moves only for its folder, never for its size: its turns
-    // are synthesized relay calls, so the steward's lines do not apply to it.
-    if (place.botId === undefined) return next()
-    // A-2: a switch from an agent onto an API model makes room before DSH's guard prices it.
-    if (!readOnly()) {
-      const outgrown = await makeRoomForSwitch(agent, payload)
-      if (outgrown !== undefined) {
-        ctx.logger.info('ds-bot: %s is at %d tokens for %s, over its switch threshold %d; it moves on to a fresh part without a model call', agent.id, outgrown.tokens, outgrown.ref, outgrown.threshold)
-        return switchBeforeStep(agent, payload, { hard: true, noNote: 'switch', target: outgrown.ref, threshold: outgrown.threshold })
+      // A message carrying a shown sign-in code never reaches a model, a note or a fresh part
+      // (cli-login.js).
+      rt.dropLoginCodes?.(payload)
+      const pass = () => { leave(); return next() }
+      await (rt.refreshShellChoice?.() ?? rt.load())
+      const { agent } = payload
+      // An attached Agent can wake from its inbox without a controller prompt.
+      try {
+        rt.assertShellChoice?.(agent.session?.id ?? agent.id)
+        rt.assertShellChoice?.(agent.session?.header?.parentSession)
+      } catch { return { kind: 'reject' } }
+      agents.set(agent.id, agent)
+      const checkpoint = checkpoints.get(agent.id)
+      if (checkpoint !== undefined) {
+        checkpoint.carry.push(...payload.messages)
+        return { kind: 'reject' }
       }
-    }
-    const lines = await contextLines(agent.session).catch(() => undefined)
-    const tokens = tokensOf(agent.session)
-    if (lines === undefined || tokens === undefined || tokens < lines.hard || !grown(agent.id, tokens, lines) || readOnly()) return next()
-    // A-2': nothing answers beside the agent, so the hard line moves on without a note.
-    if (!await asideReady(agent.session, 'context steward')) {
-      if (!await canMakeRoom(agent, payload.messages)) return next()
-      return switchBeforeStep(agent, payload, { hard: true, noNote: 'aside' })
-    }
-    if (await decide(agent, { midTurn: payload.step > 1 }) === 'compact' && await condense(agent, lines, { inTurn: true, signal: payload.signal })) return next()
-    // A carried note may not fit another handoff even when compaction can shrink it.
-    if (!await canMakeRoom(agent, payload.messages)) return next()
-    return switchBeforeStep(agent, payload, { hard: true })
+      const past = rt.pastOwners.get(agent.id)
+      if (past !== undefined && !rt.isBotSession(agent.id)) {
+        await forward(past, payload.messages, agent.session.id).catch(error => rt.warn('omni-ui: input for %s was not handed on: %s', agent.id, error))
+        return takeOverStep(agent, payload)
+      }
+      const place = placeOf(agent.id)
+      if (place === undefined) return pass()
+      adoptCompaction(agent)
+      const job = switches.get(agent.id)
+      if (job !== undefined) {
+        job.carry.push(...payload.messages)
+        return takeOverStep(agent, payload)
+      }
+      const fresh = freshParts.get(agent.id)
+      if (fresh !== undefined) {
+        freshParts.delete(agent.id)
+        partBase.set(agent.id, (tokensOf(agent.session) ?? 0) + fresh)
+      }
+      if (!readOnly() && await folderMove(agent, { midTurn: payload.step > 1 }) !== undefined) return switchBeforeStep(agent, payload, { folder: true })
+      if (nativeDshSession(agent.id) || pinned(agent.id)) return pass()
+      // The group's own Session moves only for its folder, never for its size: its turns
+      // are synthesized relay calls, so the steward's lines do not apply to it.
+      if (place.botId === undefined) return pass()
+      // A-2: a switch from an agent onto an API model makes room before DSH's guard prices it.
+      if (!readOnly()) {
+        const outgrown = await makeRoomForSwitch(agent, payload)
+        if (outgrown !== undefined) {
+          ctx.logger.info('ds-bot: %s is at %d tokens for %s, over its switch threshold %d; it moves on to a fresh part without a model call', agent.id, outgrown.tokens, outgrown.ref, outgrown.threshold)
+          return switchBeforeStep(agent, payload, { hard: true, noNote: 'switch', target: outgrown.ref, threshold: outgrown.threshold })
+        }
+      }
+      const lines = await contextLines(agent.session).catch(() => undefined)
+      const tokens = tokensOf(agent.session)
+      if (lines === undefined || tokens === undefined || tokens < lines.hard || !grown(agent.id, tokens, lines) || readOnly()) return pass()
+      // A-2': nothing answers beside the agent, so the hard line moves on without a note.
+      if (!await asideReady(agent.session, 'context steward')) {
+        if (!await canMakeRoom(agent, payload.messages)) return pass()
+        return switchBeforeStep(agent, payload, { hard: true, noNote: 'aside' })
+      }
+      if (await decide(agent, { midTurn: payload.step > 1 }) === 'compact' && await condense(agent, lines, { inTurn: true, signal: payload.signal })) return pass()
+      // A carried note may not fit another handoff even when compaction can shrink it.
+      if (!await canMakeRoom(agent, payload.messages)) return pass()
+      return switchBeforeStep(agent, payload, { hard: true })
+    } finally { leave() }
   }, { prepend: true })
 
   // `messages` left the inbox for this step, so the switch carries them along.
@@ -1926,14 +1956,17 @@ export function install(rt) {
   // moves at its next step, and each group conversation at its next turn there. The
   // group's own Session follows the same way when the group's folder changes.
   async function followFolder(owner) {
-    const sessionId = currentOf(owner)
-    if (sessionId === undefined || switches.has(sessionId) || readOnly()) return
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      const agent = await rt.resolveAgent(sessionId)
-      if (agent.status === 'idle' && await folderMove(agent) !== undefined) startSwitch(agent, { folder: true })
-    } catch (error) {
-      rt.warn('omni-ui: %s did not move to its working folder: %s', owner.botId === undefined ? rt.roomOf(owner.roomId)?.name ?? owner.roomId : rt.botOf(owner.botId)?.name ?? owner.botId, error)
-    }
+      const sessionId = currentOf(owner)
+      if (sessionId === undefined || switches.has(sessionId) || readOnly()) return
+      try {
+        const agent = await rt.resolveAgent(sessionId)
+        if (agent.status === 'idle' && await folderMove(agent) !== undefined) startSwitch(agent, { folder: true })
+      } catch (error) {
+        rt.warn('omni-ui: %s did not move to its working folder: %s', owner.botId === undefined ? rt.roomOf(owner.roomId)?.name ?? owner.roomId : rt.botOf(owner.botId)?.name ?? owner.botId, error)
+      }
+    } finally { leave() }
   }
 
   ctx.on('agent/request-error', async (payload, next) => {
@@ -1941,73 +1974,83 @@ export function install(rt) {
     if (!STUCK_CODES.includes(failure?.code)) return next()
     const decided = await next()
     if (decided !== undefined || payload.signal?.aborted) return decided
-    await rt.load()
-    const { agent } = payload
-    if (nativeDshSession(agent.id) || pinned(agent.id) || !rt.isBotSession(agent.id) || switches.has(agent.id) || readOnly() || rescued.get(agent.id) === 'bare') return decided
-    const entry = rt.liveOf(agent.id)
-    entry.switched = true
-    // The latest messages carried into a rescued part may be what breaks the request.
-    startSwitch(agent, { resume: true, info: entry.info, joined: [...(entry.joined ?? [])], overflow: true, failed: failure.code, bare: rescued.has(agent.id) })
-    return undefined
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      await rt.load()
+      const { agent } = payload
+      if (nativeDshSession(agent.id) || pinned(agent.id) || !rt.isBotSession(agent.id) || switches.has(agent.id) || readOnly() || rescued.get(agent.id) === 'bare') return decided
+      const entry = rt.liveOf(agent.id)
+      entry.switched = true
+      // The latest messages carried into a rescued part may be what breaks the request.
+      startSwitch(agent, { resume: true, info: entry.info, joined: [...(entry.joined ?? [])], overflow: true, failed: failure.code, bare: rescued.has(agent.id) })
+      return undefined
+    } finally { leave() }
   }, { prepend: true })
 
   ctx.on('agent/request-error', async (payload, next) => {
     if (payload.signal?.aborted) return next()
-    const { agent } = payload
-    // DSH may retry inside a step without calling pre-step again.
-    await (rt.refreshShellChoice?.() ?? rt.load())
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      rt.assertShellChoice?.(agent.session?.id ?? agent.id)
-      rt.assertShellChoice?.(agent.session?.header?.parentSession)
-    } catch { return undefined }
-    if (payload.failure?.code !== OVERFLOW) return next()
-    if (nativeDshSession(agent.id) || pinned(agent.id) || !rt.isBotSession(agent.id) || switches.has(agent.id) || readOnly() || !await canMakeRoom(agent)) return next()
-    const entry = rt.liveOf(agent.id)
-    entry.switched = true
-    startSwitch(agent, { resume: true, info: entry.info, joined: [...(entry.joined ?? [])], overflow: true })
-    return undefined
+      const pass = () => { leave(); return next() }
+      const { agent } = payload
+      // DSH may retry inside a step without calling pre-step again.
+      await (rt.refreshShellChoice?.() ?? rt.load())
+      try {
+        rt.assertShellChoice?.(agent.session?.id ?? agent.id)
+        rt.assertShellChoice?.(agent.session?.header?.parentSession)
+      } catch { return undefined }
+      if (payload.failure?.code !== OVERFLOW) return pass()
+      if (nativeDshSession(agent.id) || pinned(agent.id) || !rt.isBotSession(agent.id) || switches.has(agent.id) || readOnly() || !await canMakeRoom(agent)) return pass()
+      const entry = rt.liveOf(agent.id)
+      entry.switched = true
+      startSwitch(agent, { resume: true, info: entry.info, joined: [...(entry.joined ?? [])], overflow: true })
+      return undefined
+    } finally { leave() }
   }, { prepend: true })
 
   // At the end of a turn past the check line, the steward decides once. Either way
   // the part ends up below the line, and nothing is decided again until it grows
   // past it.
   async function checkContext(agent) {
-    try { rt.assertShellChoice?.(agent.id) } catch { return }
-    if (lastTurnEnd(agent)?.data?.reason?.kind === 'error') return
-    if (switches.has(agent.id) || checkpoints.has(agent.id) || freshParts.has(agent.id) || checking.has(agent.id) || readOnly() || pinned(agent.id)) return
-    // Twice in a row cut off at the output limit with nothing written: the request is
-    // over the window the route really has, so the same size is not sent again. The
-    // part moves on the way an overflow moves it, without a note at that size.
-    if ((cutOffs.get(agent.id) ?? 0) >= 2) {
-      if (await canMakeRoom(agent)) {
-        cutOffs.delete(agent.id)
-        startSwitch(agent, { cutoff: true })
-      }
-      return
-    }
-    const lines = await contextLines(agent.session)
-    const tokens = tokensOf(agent.session)
-    if (lines === undefined || tokens === undefined || tokens < lines.check || !grown(agent.id, tokens, lines)) return
-    const hard = tokens >= lines.hard
-    if (!hard && Date.now() < (noteFailures.get(agent.id)?.until ?? 0)) return
-    if (checkpoints.has(agent.id) || checking.has(agent.id) || switches.has(agent.id) || readOnly()) return
-    checking.add(agent.id)
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      // A-2': no steward, note or checkpoint beside an agent; past the hard line the part
-      // moves on with its latest messages, below it the part stays as it is.
-      if (!await asideReady(agent.session, 'context steward')) {
-        if (hard && !switches.has(agent.id) && await canMakeRoom(agent)) startSwitch(agent, { hard: true, noNote: 'aside' })
+      try { rt.assertShellChoice?.(agent.id) } catch { return }
+      if (lastTurnEnd(agent)?.data?.reason?.kind === 'error') return
+      if (switches.has(agent.id) || checkpoints.has(agent.id) || freshParts.has(agent.id) || checking.has(agent.id) || readOnly() || pinned(agent.id)) return
+      // Twice in a row cut off at the output limit with nothing written: the request is
+      // over the window the route really has, so the same size is not sent again. The
+      // part moves on the way an overflow moves it, without a note at that size.
+      if ((cutOffs.get(agent.id) ?? 0) >= 2) {
+        if (await canMakeRoom(agent)) {
+          cutOffs.delete(agent.id)
+          startSwitch(agent, { cutoff: true })
+        }
         return
       }
-      if (await decide(agent, { midTurn: false }) === 'compact') {
-        const condensed = await condense(agent, lines, { inTurn: false })
-        if (condensed !== false) return
+      const lines = await contextLines(agent.session)
+      const tokens = tokensOf(agent.session)
+      if (lines === undefined || tokens === undefined || tokens < lines.check || !grown(agent.id, tokens, lines)) return
+      const hard = tokens >= lines.hard
+      if (!hard && Date.now() < (noteFailures.get(agent.id)?.until ?? 0)) return
+      if (checkpoints.has(agent.id) || checking.has(agent.id) || switches.has(agent.id) || readOnly()) return
+      checking.add(agent.id)
+      try {
+        // A-2': no steward, note or checkpoint beside an agent; past the hard line the part
+        // moves on with its latest messages, below it the part stays as it is.
+        if (!await asideReady(agent.session, 'context steward')) {
+          if (hard && !switches.has(agent.id) && await canMakeRoom(agent)) startSwitch(agent, { hard: true, noNote: 'aside' })
+          return
+        }
+        if (await decide(agent, { midTurn: false }) === 'compact') {
+          const condensed = await condense(agent, lines, { inTurn: false })
+          if (condensed !== false) return
+        }
+        if (switches.has(agent.id) || !await canMakeRoom(agent)) return
+        startSwitch(agent, { hard: (tokensOf(agent.session) ?? tokens) >= lines.hard })
+      } finally {
+        checking.delete(agent.id)
       }
-      if (switches.has(agent.id) || !await canMakeRoom(agent)) return
-      startSwitch(agent, { hard: (tokensOf(agent.session) ?? tokens) >= lines.hard })
-    } finally {
-      checking.delete(agent.id)
-    }
+    } finally { leave() }
   }
 
   // The newest turn/end among the Session's last events in memory.
@@ -2040,15 +2083,18 @@ export function install(rt) {
   // Session's activity (plain archive) or stops it (stopActivity) inside the archive,
   // so an unarchive started here queues behind that archive and undoes it. The team's
   // own archives drop the Session from its owner first.
-  const keepCurrent = ({ sessionId }) => {
-    try { rt.assertShellChoice?.(sessionId) } catch { return }
-    if (readOnly() || !(rt.chatOwners.has(sessionId) || rt.groupOwners.has(sessionId) || rt.roomOwners.has(sessionId))) return
-    void ctx.workspaceRegistry.unarchiveSession(sessionId)
-      .catch(error => rt.warn('omni-ui: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
+  const keepCurrent = async ({ sessionId }) => {
+    const leave = rt.enterOwnership?.()
+    try {
+      try { rt.assertShellChoice?.(sessionId) } catch { return }
+      if (readOnly() || !(rt.chatOwners.has(sessionId) || rt.groupOwners.has(sessionId) || rt.roomOwners.has(sessionId))) return
+      await ctx.workspaceRegistry.unarchiveSession(sessionId)
+        .catch(error => rt.warn('omni-ui: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
+    } finally { leave?.() }
   }
-  ctx.on('workspace/session-stop', keepCurrent)
+  ctx.on('workspace/session-stop', request => { void keepCurrent(request) })
   ctx.on('workspace/session-activity', (request, next) => {
-    keepCurrent(request)
+    void keepCurrent(request)
     return next()
   })
 
@@ -2501,109 +2547,112 @@ export function install(rt) {
   // A held route is never asked to generate a handoff. Keep the hold published until
   // the replacement state is on disk, and retain the earlier parts for reading.
   async function leaveShellHold(bot, model, effort, entry = 'switch-route') {
-    if (rt.pickingModel?.(bot.id)) throw refused('busy', `${bot.name} is already changing models.`)
-    if (rt.hostOwned?.(bot) || ![undefined, 'omni', 'genie', 'dsh'].includes(bot.kind)) {
-      throw refused('shell', 'Turn on this Bot’s shell to continue using its host’s model.')
-    }
-    return rt.whilePicking(bot, async () => {
-      const oldId = rt.chatOf(bot.id)
-      const pinned = bot.sessionPinned === true
-      const { shellHeld, model: previousModel, appliedModel: previousApplied, workDir } = bot
-      const check = () => {
-        if (rt.botOf(bot.id) !== bot || bot.shellHeld !== shellHeld || bot.shell !== false || rt.chatOf(bot.id) !== oldId
-          || bot.model !== previousModel || bot.appliedModel !== previousApplied || bot.workDir !== workDir || (bot.sessionPinned === true) !== pinned
-          || rt.chatOwners.get(oldId) !== bot.id || rt.groupOwners.has(oldId) || rt.taskOwners.has(oldId) || readOnly()) {
-          throw refused('busy', 'The Bot changed while recovering its model. Try again.')
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      if (rt.pickingModel?.(bot.id)) throw refused('busy', `${bot.name} is already changing models.`)
+      if (rt.hostOwned?.(bot) || ![undefined, 'omni', 'genie', 'dsh'].includes(bot.kind)) {
+        throw refused('shell', 'Turn on this Bot’s shell to continue using its host’s model.')
+      }
+      return await rt.whilePicking(bot, async () => {
+        const oldId = rt.chatOf(bot.id)
+        const pinned = bot.sessionPinned === true
+        const { shellHeld, model: previousModel, appliedModel: previousApplied, workDir } = bot
+        const check = () => {
+          if (rt.botOf(bot.id) !== bot || bot.shellHeld !== shellHeld || bot.shell !== false || rt.chatOf(bot.id) !== oldId
+            || bot.model !== previousModel || bot.appliedModel !== previousApplied || bot.workDir !== workDir || (bot.sessionPinned === true) !== pinned
+            || rt.chatOwners.get(oldId) !== bot.id || rt.groupOwners.has(oldId) || rt.taskOwners.has(oldId) || readOnly()) {
+            throw refused('busy', 'The Bot changed while recovering its model. Try again.')
+          }
         }
-      }
-      check()
-      let target
-      try {
-        target = await rt.resolveModel(model, { remember: false, keep: bot.model })
-      } catch (error) {
-        routeUnavailable(bot, model, entry, error)
-        throw error
-      }
-      assertRouteAllowed(bot, target, entry)
-      const route = splitRef(target)
-      if (route === undefined || commandCapableAgent(target)) throw refused('shell', shellHoldText(bot))
-      await rt.assertModelAccess?.(target)
-      const selectedEffort = effort == null || effort === '' ? undefined : await rt.resolveEffort(target, effort)
-      check()
-      const selected = { ...route, ...(selectedEffort === undefined ? {} : { reasoningEffort: selectedEffort }) }
-      const archive = id => ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-        .catch(error => rt.warn('ds-bot: Session %s not archived: %s', id, error))
-      let obsolete = []
-      const commit = async (freshId, validate = check) => {
-        await rt.refreshShellChoice?.()
-        validate()
-        const earlier = sessionId => ({ sessionId, endedAt: Date.now(), shellOffCli: true })
-        const groups = Object.values(state.rooms).filter(room => room.sessions?.[bot.id] !== undefined)
-          .map(room => ({ id: room.id, sessionId: room.sessions[bot.id], segment: earlier(room.sessions[bot.id]) }))
-        const workers = Object.entries(state.tasks ?? {}).filter(([, task]) => task.from === bot.id)
-        const runs = (state.subscriptionRuns ?? []).filter(run => run.botId === bot.id && run.sessionId !== undefined && run.task)
-        const previousPart = freshId !== oldId ? earlier(oldId) : undefined
-        const apply = data => {
-          const record = data.bots[bot.id]
-          for (const { id, sessionId, segment } of groups) {
-            const room = data.rooms[id]
-            if (room?.sessions?.[bot.id] !== sessionId) continue
-            ;(room.segments ??= {})[bot.id] = [...(room.segments[bot.id] ?? []), segment]
-            delete room.sessions[bot.id]
-          }
-          for (const [id] of workers) if (data.tasks?.[id]) data.tasks[id].shellOffCli = true
-          for (const run of data.subscriptionRuns ?? []) {
-            if (run.botId === bot.id && run.task && runs.some(saved => saved.sessionId === run.sessionId)) run.shellOffCli = true
-          }
-          if (previousPart !== undefined) {
-            record.segments = [...(record.segments ?? []), previousPart]
-            record.sessionId = freshId
-          }
-          record.model = record.appliedModel = target
-          delete record.shellHeld
-          delete record.blocked
-          delete record.previousModel
-          delete record.permissionAuto
-          if (selectedEffort === undefined) {
-            delete record.effort
-            delete record.appliedEffort
-          } else record.effort = record.appliedEffort = selectedEffort
-        }
-        await rt.saveCopy(copy => { validate(); apply(copy) }, {
-          beforeCommit: validate,
-          afterWrite: () => { apply(state); rt.indexSessions() },
-        })
-        obsolete = [...(previousPart === undefined ? [] : [oldId]), ...groups.map(group => group.sessionId),
-          ...workers.map(([id]) => id), ...runs.map(run => run.sessionId)]
-      }
-      let freshId = oldId
-      if (pinned) {
-        await ctx.llm.resolveCallConfig(selected)
         check()
-        await recoverPinnedShellSession(bot, oldId, selected, check, validate => commit(oldId, validate))
-      } else {
-        freshId = await rt.createSession(bot.name, {
-          dir: rt.workDirOf({ botId: bot.id }), ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
-          readScopeSource: oldId, continueReadScope: true,
-        })
+        let target
         try {
-          check()
-          await rt.selectSessionModel(freshId, selected)
-          check()
-          const fresh = await rt.resolveAgent(freshId)
-          await rt.applyPermission(bot, freshId, undefined, fresh.session)
-          await rt.applyToolDenyToAgent?.(freshId, fresh, bot)
-          if (await ctx.sessions.flush(fresh.session) === false) throw refused('refused', 'This DSH host could not save the new conversation.')
-          await commit(freshId)
+          target = await rt.resolveModel(model, { remember: false, keep: bot.model })
         } catch (error) {
-          if (rt.chatOf(bot.id) !== freshId) await archive(freshId)
+          routeUnavailable(bot, model, entry, error)
           throw error
         }
-      }
-      rt.noteModelChoice?.(bot, target)
-      await Promise.all(obsolete.map(archive))
-      return { id: bot.id, model: target, ...(selectedEffort === undefined ? {} : { effort: selectedEffort }), status: 'switched' }
-    })
+        assertRouteAllowed(bot, target, entry)
+        const route = splitRef(target)
+        if (route === undefined || commandCapableAgent(target)) throw refused('shell', shellHoldText(bot))
+        await rt.assertModelAccess?.(target)
+        const selectedEffort = effort == null || effort === '' ? undefined : await rt.resolveEffort(target, effort)
+        check()
+        const selected = { ...route, ...(selectedEffort === undefined ? {} : { reasoningEffort: selectedEffort }) }
+        const archive = id => ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+          .catch(error => rt.warn('ds-bot: Session %s not archived: %s', id, error))
+        let obsolete = []
+        const commit = async (freshId, validate = check) => {
+          await rt.refreshShellChoice?.()
+          validate()
+          const earlier = sessionId => ({ sessionId, endedAt: Date.now(), shellOffCli: true })
+          const groups = Object.values(state.rooms).filter(room => room.sessions?.[bot.id] !== undefined)
+            .map(room => ({ id: room.id, sessionId: room.sessions[bot.id], segment: earlier(room.sessions[bot.id]) }))
+          const workers = Object.entries(state.tasks ?? {}).filter(([, task]) => task.from === bot.id)
+          const runs = (state.subscriptionRuns ?? []).filter(run => run.botId === bot.id && run.sessionId !== undefined && run.task)
+          const previousPart = freshId !== oldId ? earlier(oldId) : undefined
+          const apply = data => {
+            const record = data.bots[bot.id]
+            for (const { id, sessionId, segment } of groups) {
+              const room = data.rooms[id]
+              if (room?.sessions?.[bot.id] !== sessionId) continue
+              ;(room.segments ??= {})[bot.id] = [...(room.segments[bot.id] ?? []), segment]
+              delete room.sessions[bot.id]
+            }
+            for (const [id] of workers) if (data.tasks?.[id]) data.tasks[id].shellOffCli = true
+            for (const run of data.subscriptionRuns ?? []) {
+              if (run.botId === bot.id && run.task && runs.some(saved => saved.sessionId === run.sessionId)) run.shellOffCli = true
+            }
+            if (previousPart !== undefined) {
+              record.segments = [...(record.segments ?? []), previousPart]
+              record.sessionId = freshId
+            }
+            record.model = record.appliedModel = target
+            delete record.shellHeld
+            delete record.blocked
+            delete record.previousModel
+            delete record.permissionAuto
+            if (selectedEffort === undefined) {
+              delete record.effort
+              delete record.appliedEffort
+            } else record.effort = record.appliedEffort = selectedEffort
+          }
+          await rt.saveCopy(copy => { validate(); apply(copy) }, {
+            beforeCommit: validate,
+            afterWrite: () => { apply(state); rt.indexSessions() },
+          })
+          obsolete = [...(previousPart === undefined ? [] : [oldId]), ...groups.map(group => group.sessionId),
+            ...workers.map(([id]) => id), ...runs.map(run => run.sessionId)]
+        }
+        let freshId = oldId
+        if (pinned) {
+          await ctx.llm.resolveCallConfig(selected)
+          check()
+          await recoverPinnedShellSession(bot, oldId, selected, check, validate => commit(oldId, validate))
+        } else {
+          freshId = await rt.createSession(bot.name, {
+            dir: rt.workDirOf({ botId: bot.id }), ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+            readScopeSource: oldId, continueReadScope: true,
+          })
+          try {
+            check()
+            await rt.selectSessionModel(freshId, selected)
+            check()
+            const fresh = await rt.resolveAgent(freshId)
+            await rt.applyPermission(bot, freshId, undefined, fresh.session)
+            await rt.applyToolDenyToAgent?.(freshId, fresh, bot)
+            if (await ctx.sessions.flush(fresh.session) === false) throw refused('refused', 'This DSH host could not save the new conversation.')
+            await commit(freshId)
+          } catch (error) {
+            if (rt.chatOf(bot.id) !== freshId) await archive(freshId)
+            throw error
+          }
+        }
+        rt.noteModelChoice?.(bot, target)
+        await Promise.all(obsolete.map(archive))
+        return { id: bot.id, model: target, ...(selectedEffort === undefined ? {} : { effort: selectedEffort }), status: 'switched' }
+      })
+    } finally { leave() }
   }
 
   // A refusal must not open a host or refresh its catalog. Log only bounded refs from the
@@ -2778,64 +2827,70 @@ export function install(rt) {
   // The user's "New conversation" for a Bot's own chat: once the Bot is idle, it goes on in
   // a fresh part.
   async function startFresh(botId) {
-    const bot = rt.botOf(botId)
-    if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
-    if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
-    if (bot.sessionPinned === true) throw refused('refused', pinnedText(bot, 'fresh'))
-    const agent = await rt.resolveAgent(rt.chatOf(botId))
-    if (!startSwitch(agent, { fresh: true })) throw Object.assign(new Error(`${bot.name} is already moving to a new conversation.`), { code: 'bot/refused' })
-    return { id: botId }
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      const bot = rt.botOf(botId)
+      if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
+      if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
+      if (bot.sessionPinned === true) throw refused('refused', pinnedText(bot, 'fresh'))
+      const agent = await rt.resolveAgent(rt.chatOf(botId))
+      if (!startSwitch(agent, { fresh: true })) throw Object.assign(new Error(`${bot.name} is already moving to a new conversation.`), { code: 'bot/refused' })
+      return { id: botId }
+    } finally { leave() }
   }
 
   // A Bot a host made on a Session it owns stays on that Session. A team saved before the
   // pin may have moved it to a fresh part, where the host turns every message away: it
   // goes back to the Session it was made on, and the parts made since are archived.
   async function keepAdoptedSession(botId) {
-    await rt.load()
-    const bot = rt.botOf(botId)
-    if (bot === undefined || readOnly()) return false
-    const current = rt.chatOf(botId)
-    if ([...switches.values()].some(job => job.botId === botId && job.roomId === undefined)) return false
-    const segments = bot.segments ?? []
-    const moved = current !== bot.id && segments[0]?.sessionId === bot.id
-    if (bot.sessionPinned === true && !moved) return false
-    if (moved) {
-      try {
-        await ctx.workspaceRegistry.unarchiveSession(bot.id)
-      } catch (error) {
-        rt.warn('ds-bot: %s stays on part %s; its first Session was not restored: %s', bot.name, current, error)
-        return false
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      await rt.load()
+      const bot = rt.botOf(botId)
+      if (bot === undefined || readOnly()) return false
+      const current = rt.chatOf(botId)
+      if ([...switches.values()].some(job => job.botId === botId && job.roomId === undefined)) return false
+      const segments = bot.segments ?? []
+      const moved = current !== bot.id && segments[0]?.sessionId === bot.id
+      if (bot.sessionPinned === true && !moved) return false
+      if (moved) {
+        try {
+          await ctx.workspaceRegistry.unarchiveSession(bot.id)
+        } catch (error) {
+          rt.warn('ds-bot: %s stays on part %s; its first Session was not restored: %s', bot.name, current, error)
+          return false
+        }
       }
-    }
-    const parts = moved ? [current, ...segments.slice(1).map(segment => segment.sessionId)] : []
-    bot.sessionPinned = true
-    if (moved) {
-      delete bot.sessionId
-      delete bot.segments
-      // A switch marker left on the first Session would hand its kept input on later.
-      delete state.switching[bot.id]
+      const parts = moved ? [current, ...segments.slice(1).map(segment => segment.sessionId)] : []
+      bot.sessionPinned = true
+      if (moved) {
+        delete bot.sessionId
+        delete bot.segments
+        // A switch marker left on the first Session would hand its kept input on later.
+        delete state.switching[bot.id]
+        for (const part of parts) {
+          delete state.switching[part]
+          if (state.questions[part] !== undefined && state.questions[bot.id] === undefined) state.questions[bot.id] = state.questions[part]
+          delete state.questions[part]
+          if (state.views?.[part] !== undefined && state.views[bot.id] === undefined) state.views[bot.id] = state.views[part]
+          if (state.views !== undefined) delete state.views[part]
+        }
+      }
+      await rt.save()
       for (const part of parts) {
-        delete state.switching[part]
-        if (state.questions[part] !== undefined && state.questions[bot.id] === undefined) state.questions[bot.id] = state.questions[part]
-        delete state.questions[part]
-        if (state.views?.[part] !== undefined && state.views[bot.id] === undefined) state.views[bot.id] = state.views[part]
-        if (state.views !== undefined) delete state.views[part]
+        // Archiving stops a part's tasks, so a part whose tasks did not move stays as it is.
+        try {
+          await rt.moveSchedules?.(part, bot.id)
+        } catch (error) {
+          rt.warn('ds-bot: tasks of part %s not moved back, so it is not archived: %s', part, error)
+          continue
+        }
+        await ctx.workspaceRegistry.archiveSession(part, { stopActivity: true })
+          .catch(error => rt.warn('ds-bot: part %s not archived: %s', part, error))
       }
-    }
-    await rt.save()
-    for (const part of parts) {
-      // Archiving stops a part's tasks, so a part whose tasks did not move stays as it is.
-      try {
-        await rt.moveSchedules?.(part, bot.id)
-      } catch (error) {
-        rt.warn('ds-bot: tasks of part %s not moved back, so it is not archived: %s', part, error)
-        continue
-      }
-      await ctx.workspaceRegistry.archiveSession(part, { stopActivity: true })
-        .catch(error => rt.warn('ds-bot: part %s not archived: %s', part, error))
-    }
-    if (moved) ctx.logger?.info?.('ds-bot: %s is back on its first Session; %d later part(s) archived', bot.name, parts.length)
-    return moved
+      if (moved) ctx.logger?.info?.('ds-bot: %s is back on its first Session; %d later part(s) archived', bot.name, parts.length)
+      return moved
+    } finally { leave() }
   }
 
   async function earlierPage(sessionId, cursor) {
@@ -2969,59 +3024,67 @@ export function install(rt) {
   // "New session" in a Bot's chat: a manual move to a fresh part with the
   // deterministic handoff package, no model call.
   async function newPart(sessionId) {
-    await rt.load()
-    const agent = await rt.resolveAgent(sessionId)
-    const place = placeOf(sessionId)
-    if (place?.botId === undefined || place.roomId !== undefined) throw Object.assign(new Error('Only a Bot\'s own chat can start a fresh part'), { code: 'bot/invalid' })
-    if (agent.status !== 'idle') throw Object.assign(new Error('The Bot is working; wait for it to finish or stop it first'), { code: 'bot/busy' })
-    startSwitch(agent, { manual: true })
-    return true
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      await rt.load()
+      const agent = await rt.resolveAgent(sessionId)
+      const place = placeOf(sessionId)
+      if (place?.botId === undefined || place.roomId !== undefined) throw Object.assign(new Error('Only a Bot\'s own chat can start a fresh part'), { code: 'bot/invalid' })
+      if (agent.status !== 'idle') throw Object.assign(new Error('The Bot is working; wait for it to finish or stop it first'), { code: 'bot/busy' })
+      startSwitch(agent, { manual: true })
+      return true
+    } finally { leave() }
   }
 
   // Opening an earlier part again: it becomes the current one and the part that
   // was current joins the earlier ones where it sat.
   async function switchPart(botId, partId) {
-    await rt.load()
-    const bot = rt.botOf(botId)
-    if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
-    const current = rt.chatOf(botId)
-    if (partId === current) return false
-    const segments = bot.segments ?? []
-    const at = segments.findIndex(segment => segment.sessionId === partId)
-    if (at === -1) throw Object.assign(new Error('Unknown part'), { code: 'bot/not-found' })
-    const live = rt.live.get(current)
-    if (live?.turn !== undefined) throw Object.assign(new Error('The Bot is working; wait for it to finish or stop it first'), { code: 'bot/busy' })
-    // DSH turns away every step of an archived Session and every task aimed at it, so
-    // the part leaves the archive before it becomes current.
-    rt.assertShellChoice?.(partId, botId)
-    await ctx.workspaceRegistry.unarchiveSession(partId)
-    segments.splice(at, 1)
-    segments.splice(at, 0, { sessionId: current, endedAt: Date.now() })
-    bot.sessionId = partId
-    rt.chatOwners.delete(current)
-    rt.chatOwners.set(partId, botId)
-    rt.pastOwners.delete(partId)
-    rt.pastOwners.set(current, { botId })
-    // Marked as a switch until its tasks sit on the opened part and it is archived, so
-    // the restart pass (handOnHeld) finishes a move that fails here.
-    state.switching[current] = { botId }
-    await rt.applyModel(bot, { force: true }).catch(error => rt.warn('omni-ui: model for %s not applied: %s', bot.name, error))
-    const room = undefined
-    await rt.applyPermission(bot, partId, room).catch(() => {})
-    await rt.save()
-    // The stop that archiving runs removes the tasks still on the part, so they move first.
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      await rt.moveSchedules?.(current, partId)
-      await ctx.workspaceRegistry.archiveSession(current, { stopActivity: true })
-      delete state.switching[current]
+      await rt.load()
+      const bot = rt.botOf(botId)
+      if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
+      const current = rt.chatOf(botId)
+      if (partId === current) return false
+      const segments = bot.segments ?? []
+      const at = segments.findIndex(segment => segment.sessionId === partId)
+      if (at === -1) throw Object.assign(new Error('Unknown part'), { code: 'bot/not-found' })
+      const live = rt.live.get(current)
+      if (live?.turn !== undefined) throw Object.assign(new Error('The Bot is working; wait for it to finish or stop it first'), { code: 'bot/busy' })
+      // DSH turns away every step of an archived Session and every task aimed at it, so
+      // the part leaves the archive before it becomes current.
+      rt.assertShellChoice?.(partId, botId)
+      await ctx.workspaceRegistry.unarchiveSession(partId)
+      segments.splice(at, 1)
+      segments.splice(at, 0, { sessionId: current, endedAt: Date.now() })
+      bot.sessionId = partId
+      rt.chatOwners.delete(current)
+      rt.chatOwners.set(partId, botId)
+      rt.pastOwners.delete(partId)
+      rt.pastOwners.set(current, { botId })
+      // Marked as a switch until its tasks sit on the opened part and it is archived, so
+      // the restart pass (handOnHeld) finishes a move that fails here.
+      state.switching[current] = { botId }
+      await rt.applyModel(bot, { force: true }).catch(error => rt.warn('omni-ui: model for %s not applied: %s', bot.name, error))
+      const room = undefined
+      await rt.applyPermission(bot, partId, room).catch(() => {})
       await rt.save()
-    } catch (error) {
-      rt.warn('omni-ui: earlier part %s not archived: %s', current, error)
-    }
-    return true
+      // The stop that archiving runs removes the tasks still on the part, so they move first.
+      try {
+        await rt.moveSchedules?.(current, partId)
+        await ctx.workspaceRegistry.archiveSession(current, { stopActivity: true })
+        delete state.switching[current]
+        await rt.save()
+      } catch (error) {
+        rt.warn('omni-ui: earlier part %s not archived: %s', current, error)
+      }
+      return true
+    } finally { leave() }
   }
 
   Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
     // A fresh part still waiting for its first answer: its failure goes back with the part.
+    // A no-note move may still have to go back to the part it left.
+    returnsTo: id => [...awaiting.values()].some(entry => entry.oldId === id),
     awaitingFirstAnswer: id => awaiting.has(id) })
 }

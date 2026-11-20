@@ -345,3 +345,27 @@ test('rfc0039 [C] L3 withdrawn rows are never counted', () => {
   const withdrawn = [{ id: 'gone', botName: 'Genie', why: 'task', tool: 'bash', at: now }]
   assert.equal(liveSummary(liveOf({ ...work, withdrawn }, roster, now)), liveSummary(liveOf(work, roster, now)))
 })
+
+test('rfc0039 D3b [P] L4 a group row shows its Bot and group names as a note', () => {
+  const now = Date.now()
+  const team = { byId: { e: { id: 'e', name: 'Other' } }, roomsById: { r: { id: 'r', name: 'Renamed' } } }
+  const work = { withdrawn: [{
+    id: 'g1', botId: 'e', botName: 'Echo', roomId: 'r', roomName: 'Ops', sessionId: 'gs', why: 'group', tool: 'bash', at: now - 1,
+  }] }
+  const body = LiveRail({ roster: team, actions: {}, useWork: select => select(work) })
+  const section = body.children.find(node => node?.props?.label === 'Just finished')
+  assert.ok(section, 'D3B-L4')
+  assert.equal(section.children.length, 1)
+  const [row] = section.children
+  const card = row.type(row.props)
+  assert.equal(card.props.role, 'note')
+  const descendants = node => [node, ...(node?.children ?? []).flatMap(descendants)]
+  const nodes = descendants(card)
+  const text = nodes.filter(node => typeof node === 'string').join(' ')
+  assert.match(text, /Echo/)
+  assert.match(text, / · Ops/)
+  assert.match(text, /This step was withdrawn: its group Session ended · bash/)
+  assert.doesNotMatch(text, /Other|Renamed|Open/)
+  assert.equal(nodes.some(node => node?.props?.onClick || node?.props?.className === 'bt-live-face'), false)
+  assert.deepEqual(plain(module.exports.withdrawnOf?.(work, now).map(({ key, name, place }) => [key, name, place])), [['gone:g1', 'Echo', 'Ops']])
+})

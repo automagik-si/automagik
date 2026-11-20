@@ -283,22 +283,25 @@ export function install(rt) {
   // greeting waits until a model is chosen. So does a Bot made when no model it can
   // run on is served.
   async function createBot(options, { readScopeSource = rt.callerSessionId?.() } = {}) {
-    const cleanName = String(options.name ?? '').trim().slice(0, 40)
-    const problem = nameProblem(cleanName)
-    if (problem !== undefined) throw refusal(problem)
-    if (botNameTaken(cleanName)) throw refusal(`A Bot named ${cleanName} already exists`)
-    const existing = options.existingSessionId
-    if (existing === undefined) return holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource))
-    if (typeof existing !== 'string' || !existing.trim()) throw refusal('An existing Session needs its id')
-    const readOnly = rt.readOnly()
-    if (readOnly !== undefined) throw refusal(readOnly)
-    if (heldSessions.has(existing) || rt.botOf(existing) || rt.roomOf(existing) || rt.selfOf(existing) || rt.agentOf?.(existing)) throw refusal('Session already belongs to the team')
-    heldSessions.add(existing)
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      return await holdName('bot', cleanName, () => buildBot(cleanName, options))
-    } finally {
-      heldSessions.delete(existing)
-    }
+      const cleanName = String(options.name ?? '').trim().slice(0, 40)
+      const problem = nameProblem(cleanName)
+      if (problem !== undefined) throw refusal(problem)
+      if (botNameTaken(cleanName)) throw refusal(`A Bot named ${cleanName} already exists`)
+      const existing = options.existingSessionId
+      if (existing === undefined) return await holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource))
+      if (typeof existing !== 'string' || !existing.trim()) throw refusal('An existing Session needs its id')
+      const readOnly = rt.readOnly()
+      if (readOnly !== undefined) throw refusal(readOnly)
+      if (heldSessions.has(existing) || rt.botOf(existing) || rt.roomOf(existing) || rt.selfOf(existing) || rt.agentOf?.(existing)) throw refusal('Session already belongs to the team')
+      heldSessions.add(existing)
+      try {
+        return await holdName('bot', cleanName, () => buildBot(cleanName, options))
+      } finally {
+        heldSessions.delete(existing)
+      }
+    } finally { leave() }
   }
 
   async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
@@ -1266,113 +1269,116 @@ export function install(rt) {
 
   // `actorId` is the Bot asking, or undefined for the user. Returns what changed, in words.
   async function updateRoom(id, patch, actorId) {
-    const asked = rt.roomOf(id)
-    if (asked === undefined) throw refusal('Unknown group chat')
-    planRoomChange(asked, patch, actorId)
-    const moving = patch.workDir !== undefined
-    const workDir = moving ? await rt.cleanWorkDir(patch.workDir ?? '') : undefined
-    const clash = workDir === undefined ? undefined : await rt.privateClash(workDir)
-    if (clash) throw refusal(`${workDir} is in or around the folder of ${clash.name}, a private Bot, so a group cannot work there`)
-    // No await from here until every change is written.
-    const room = rt.roomOf(id)
-    if (room === undefined) throw refusal('Unknown group chat')
-    const { members, admin, name, notice, permission } = planRoomChange(room, patch, actorId)
+    const leave = patch.workDir !== undefined ? rt.enterOwnership?.() ?? (() => {}) : () => {}
+    try {
+      const asked = rt.roomOf(id)
+      if (asked === undefined) throw refusal('Unknown group chat')
+      planRoomChange(asked, patch, actorId)
+      const moving = patch.workDir !== undefined
+      const workDir = moving ? await rt.cleanWorkDir(patch.workDir ?? '') : undefined
+      const clash = workDir === undefined ? undefined : await rt.privateClash(workDir)
+      if (clash) throw refusal(`${workDir} is in or around the folder of ${clash.name}, a private Bot, so a group cannot work there`)
+      // No await from here until every change is written.
+      const room = rt.roomOf(id)
+      if (room === undefined) throw refusal('Unknown group chat')
+      const { members, admin, name, notice, permission } = planRoomChange(room, patch, actorId)
 
-    const changes = []
-    const names = ids => ids.map(member => rt.botOf(member)?.name).filter(Boolean).join(', ')
-    const added = members.filter(member => !room.members.includes(member))
-    const removed = room.members.filter(member => !members.includes(member))
-    const addedAt = changes.length
-    if (added.length > 0) changes.push(`added ${names(added)}`)
-    // A deleted Bot still listed goes without a word.
-    if (names(removed) !== '') changes.push(`removed ${names(removed)}`)
-    // A member who leaves and comes back starts from a fresh look at the log.
-    for (const member of removed) {
-      if (room.seen) delete room.seen[member]
-      // Its group Session leaves the team's maps here, and that Session is the only lineage
-      // a fresh-Session task armed there has (#584, L5): capture the ids now and let the
-      // pause finish on its own, so this change stays written without an await.
-      const parts = (room.segments?.[member] ?? []).map(part => part.sessionId)
-      const lost = [room.sessions?.[member], ...parts].filter(Boolean)
-      if (lost.length > 0) {
-        void rt.revokeNewSchedules?.(member, lost)
-          .catch(error => rt.warn('ds-bot: the fresh-Session tasks of %s were not paused: %s',
-            member, error))
+      const changes = []
+      const names = ids => ids.map(member => rt.botOf(member)?.name).filter(Boolean).join(', ')
+      const added = members.filter(member => !room.members.includes(member))
+      const removed = room.members.filter(member => !members.includes(member))
+      const addedAt = changes.length
+      if (added.length > 0) changes.push(`added ${names(added)}`)
+      // A deleted Bot still listed goes without a word.
+      if (names(removed) !== '') changes.push(`removed ${names(removed)}`)
+      // A member who leaves and comes back starts from a fresh look at the log.
+      for (const member of removed) {
+        if (room.seen) delete room.seen[member]
+        // Its group Session leaves the team's maps here, and that Session is the only lineage
+        // a fresh-Session task armed there has (#584, L5): capture the ids now and let the
+        // pause finish on its own, so this change stays written without an await.
+        const parts = (room.segments?.[member] ?? []).map(part => part.sessionId)
+        const lost = [room.sessions?.[member], ...parts].filter(Boolean)
+        if (lost.length > 0) {
+          void rt.revokeNewSchedules?.(member, lost)
+            .catch(error => rt.warn('ds-bot: the fresh-Session tasks of %s were not paused: %s',
+              member, error))
+        }
+        rt.dropGroupSession(room, member)
       }
-      rt.dropGroupSession(room, member)
-    }
-    room.members = members
-    if (admin !== (room.admin ?? null)) changes.push(admin ? `made ${rt.botOf(admin).name} the admin` : 'removed the admin')
-    room.admin = admin
-    if (patch.mode !== undefined && patch.mode !== room.mode) {
-      room.mode = patch.mode
-      changes.push(patch.mode === 'admin' ? 'plain messages now go to the admin first' : 'every member now replies in turn')
-    }
-    if (notice !== undefined && notice !== (room.notice ?? '')) {
-      room.notice = notice
-      changes.push(notice ? 'updated the notice' : 'cleared the notice')
-    }
-    // Members' group conversations move on to the folder at their next turn there;
-    // the group's own Session moves the same way, now when it is idle.
-    if (moving && workDir !== room.workDir) {
-      delete room.folderNotice
-      if (workDir === undefined) delete room.workDir
-      else {
-        room.workDir = workDir
-        room.scoped = true
+      room.members = members
+      if (admin !== (room.admin ?? null)) changes.push(admin ? `made ${rt.botOf(admin).name} the admin` : 'removed the admin')
+      room.admin = admin
+      if (patch.mode !== undefined && patch.mode !== room.mode) {
+        room.mode = patch.mode
+        changes.push(patch.mode === 'admin' ? 'plain messages now go to the admin first' : 'every member now replies in turn')
       }
-      // A member's own pick for this group gives way to the group's folder, and a
-      // cleared one does not bring it back.
-      delete room.memberDirs
-      changes.push(workDir ? `every member now works in ${workDir} here` : 'every member works in its own folder again')
-      void rt.followFolder({ roomId: room.id })
-    }
-    const before = room.name
-    if (name !== undefined) {
-      if (name !== '') {
-        room.named = true
-        room.name = name
-      } else {
-        delete room.named
+      if (notice !== undefined && notice !== (room.notice ?? '')) {
+        room.notice = notice
+        changes.push(notice ? 'updated the notice' : 'cleared the notice')
       }
-    }
-    if (!room.named) room.name = autoRoomName(room.members)
-    // The preset is written before its first await; the members' Sessions follow it. One
-    // that was kept but did not reach every Session: the update goes on, and the person is
-    // told last.
-    let unapplied
-    const releveled = permission !== undefined && await rt.setRoomPermission(room, permission).catch((error) => {
-      if (error?.levelNotApplied !== true) throw error
-      unapplied = error
-      return true
-    })
-    if (releveled) {
-      changes.push(permission ? `every member now works with the ${permission} permissions here` : 'every member uses its own permissions again')
-    }
-    if (room.name !== before) {
-      changes.push(`renamed it "${room.name}"`)
-      await retitleRoom(room)
-    }
-    if (patch.section !== undefined || patch.sectionId !== undefined) {
-      const nextSecId = resolveSectionInput({ section: patch.section, sectionId: patch.sectionId })
-      if ((nextSecId ?? undefined) !== room.sectionId) {
-        if (nextSecId === null || nextSecId === undefined) {
-          delete room.sectionId
-          changes.push('removed it from its sidebar section')
+      // Members' group conversations move on to the folder at their next turn there;
+      // the group's own Session moves the same way, now when it is idle.
+      if (moving && workDir !== room.workDir) {
+        delete room.folderNotice
+        if (workDir === undefined) delete room.workDir
+        else {
+          room.workDir = workDir
+          room.scoped = true
+        }
+        // A member's own pick for this group gives way to the group's folder, and a
+        // cleared one does not bring it back.
+        delete room.memberDirs
+        changes.push(workDir ? `every member now works in ${workDir} here` : 'every member works in its own folder again')
+        void rt.followFolder({ roomId: room.id })
+      }
+      const before = room.name
+      if (name !== undefined) {
+        if (name !== '') {
+          room.named = true
+          room.name = name
         } else {
-          room.sectionId = nextSecId
-          const secName = (state.sections ?? []).find(sec => sec.id === nextSecId)?.name ?? nextSecId
-          changes.push(`moved it to section "${secName}"`)
+          delete room.named
         }
       }
-    }
-    await rt.save()
-    // The words say what the group holds now: a Bot whose deletion began during the
-    // awaits above has left it again, so it is not reported as added.
-    const kept = added.filter(member => room.members.includes(member) && isLive(member))
-    if (kept.length < added.length) changes.splice(addedAt, 1, ...(kept.length > 0 ? [`added ${names(kept)}`] : []))
-    if (unapplied !== undefined) throw unapplied
-    return { room, changes }
+      if (!room.named) room.name = autoRoomName(room.members)
+      // The preset is written before its first await; the members' Sessions follow it. One
+      // that was kept but did not reach every Session: the update goes on, and the person is
+      // told last.
+      let unapplied
+      const releveled = permission !== undefined && await rt.setRoomPermission(room, permission).catch((error) => {
+        if (error?.levelNotApplied !== true) throw error
+        unapplied = error
+        return true
+      })
+      if (releveled) {
+        changes.push(permission ? `every member now works with the ${permission} permissions here` : 'every member uses its own permissions again')
+      }
+      if (room.name !== before) {
+        changes.push(`renamed it "${room.name}"`)
+        await retitleRoom(room)
+      }
+      if (patch.section !== undefined || patch.sectionId !== undefined) {
+        const nextSecId = resolveSectionInput({ section: patch.section, sectionId: patch.sectionId })
+        if ((nextSecId ?? undefined) !== room.sectionId) {
+          if (nextSecId === null || nextSecId === undefined) {
+            delete room.sectionId
+            changes.push('removed it from its sidebar section')
+          } else {
+            room.sectionId = nextSecId
+            const secName = (state.sections ?? []).find(sec => sec.id === nextSecId)?.name ?? nextSecId
+            changes.push(`moved it to section "${secName}"`)
+          }
+        }
+      }
+      await rt.save()
+      // The words say what the group holds now: a Bot whose deletion began during the
+      // awaits above has left it again, so it is not reported as added.
+      const kept = added.filter(member => room.members.includes(member) && isLive(member))
+      if (kept.length < added.length) changes.splice(addedAt, 1, ...(kept.length > 0 ? [`added ${names(kept)}`] : []))
+      if (unapplied !== undefined) throw unapplied
+      return { room, changes }
+    } finally { leave() }
   }
 
   async function deleteRoom(id) {
@@ -1536,6 +1542,9 @@ export function install(rt) {
     // Its tasks keep the level they run at as a cap, so the default cannot raise them.
     rt.capTasks(task => task.from === id)
     if (bot.permissionAuto) rt.endAuto?.(bot)
+    // Only certify the seats of the Bot this deletion began with.
+    let removed
+    try { removed = rt.botOf(id) } catch {}
     delete state.bots[id]
     rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
@@ -1555,7 +1564,7 @@ export function install(rt) {
       if (!room.members.includes(id) && !left.some(entry => entry.room === room)) continue
       room.members = room.members.filter(member => member !== id)
       if (room.admin === id) room.admin = null
-      rt.dropGroupSession(room, id)
+      rt.dropGroupSession(room, id, { bot: removed === bot ? bot : undefined })
       touched.push(room)
     }
     await followMemberNames(touched)
