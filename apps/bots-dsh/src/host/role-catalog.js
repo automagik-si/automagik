@@ -12,6 +12,7 @@ const CDN = 'https://release-assets.githubusercontent.com'
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
 const MAX_PACKAGE = 16 * 1024 * 1024
+export const ROLE_EVIDENCE_LIMITS = [MAX_PACKAGE, 256 * 1024, 1024]
 const UNCHECKED = Object.freeze({ available: false, roles: Object.freeze([]) })
 const READ_ONLY = Object.freeze({ ...UNCHECKED, reason: 'read-only' })
 
@@ -85,7 +86,7 @@ async function boundedGet(fetch, url, { limit, signal, label, missing = false })
   }
 }
 
-function verifiedIndex(bytes, signature, keys) {
+function verifiedIndex(bytes, signature, keys, releaseVersion) {
   let index
   try { index = parseRoleJson(bytes) } catch { throw refusal('roles.json is not valid JSON.') }
   const key = keys.find(entry => entry.keyId === index?.keyId)
@@ -99,11 +100,12 @@ function verifiedIndex(bytes, signature, keys) {
     } catch {}
   }
   if (!verified) throw refusal('roles.json signature does not match.')
-  if (!plainObject(index) || index.schemaVersion !== 1 || index.publisher !== 'automagik' || index.version !== PKG.version
+  if (!plainObject(index) || index.schemaVersion !== 1 || index.publisher !== 'automagik' || !isRoleVersion(index.version)
+    || (releaseVersion !== undefined && index.version !== releaseVersion)
     || index.repository !== REPOSITORY || !Array.isArray(index.roles) || index.roles.length > 200) {
     throw refusal('roles.json does not match the running release or catalog schema.')
   }
-  return index.roles
+  return index
 }
 
 function catalogEntries(raw, release, warn) {
@@ -154,9 +156,9 @@ export function createRoleCatalog({ fetch = globalThis.fetch, keys = ROLE_KEYS, 
       const bytes = await boundedGet(fetch, `${release}roles.json`, { label: 'roles.json', limit: 256 * 1024, signal, missing: true })
       if (bytes === undefined) return { view: Object.freeze({ ...UNCHECKED, reason: 'none' }) }
       const signature = await boundedGet(fetch, `${release}roles.json.sig`, { label: 'roles.json.sig', limit: 1024, signal })
-      const entries = catalogEntries(verifiedIndex(bytes, signature, keys), release, warn)
+      const entries = catalogEntries(verifiedIndex(bytes, signature, keys, PKG.version).roles, release, warn)
       const roles = Object.freeze([...entries.values()].map(entry => entry.display))
-      return { view: Object.freeze({ available: true, roles }), entries }
+      return { view: Object.freeze({ available: true, roles }), entries, bytes, signature }
     } catch (error) {
       const message = error?.code === 'bot/refused' ? error.message : 'Role catalog verification failed.'
       warn('%s', message)
@@ -185,6 +187,10 @@ export function createRoleCatalog({ fetch = globalThis.fetch, keys = ROLE_KEYS, 
   return {
     view: () => canFetch() ? cached.view : READ_ONLY,
     entries: () => canFetch() ? cached.entries : undefined,
+    retained: (bytes, signature, id) => {
+      const index = verifiedIndex(bytes, signature, keys)
+      return catalogEntries(index.roles, `${base}v${index.version}/`, warn).get(id)
+    },
     snapshot,
     async download(entry) {
       try {
