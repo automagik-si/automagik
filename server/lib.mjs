@@ -14,12 +14,25 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { cp } from 'node:fs/promises'
 import { markSeed } from './profile-state.mjs'
 
 export const PROFILE = 'automagik-web'
 export const PORT = 3081
+export const GATE_VIEW = 'gate-view'
+export const GATE_VIEW_MOUNT = '/dsh-view'
+/** The DSH volume's mount point in the image; compose.gate.yml mounts its gate-view subpath. */
+export const DSH_VOLUME = '/data'
+
+/**
+ * The folder DSH publishes the gate's view into: always the volume's own gate-view, the exact
+ * subpath compose.gate.yml mounts, whatever AUTOMAGIK_HOME says. Only where no /data exists (a
+ * test on a developer host) does it follow the home.
+ */
+export function gateViewDir(home, { volume = DSH_VOLUME, exists = existsSync } = {}) {
+  return exists(volume) ? join(volume, GATE_VIEW) : join(resolve(home), GATE_VIEW)
+}
 /** The store pnpm uses for its major version, as the desktop app records it (`v10` for pnpm 10). */
 export const STORE_LAYOUT = 'v10'
 

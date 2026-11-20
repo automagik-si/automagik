@@ -8,6 +8,7 @@
 //   node server/smoke.mjs [automagik-server:local]
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { GATE_VIEW, GATE_VIEW_MOUNT } from './lib.mjs'
 import { herdrCoreSocket, SMOKE_HC_SESSION } from './toolchain.mjs'
 
 const run = promisify(execFile)
@@ -77,6 +78,8 @@ async function main() {
   await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c',
     'test ! -e /data/acp'])
   await docker(['run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e', 'process.exit(process.getuid() === 1000 ? 0 : 1)'])
+  // The gate view is not baked into /data either: DSH creates it at start (checked below).
+  await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c', `test ! -e /data/${GATE_VIEW}`])
 
   await docker(['volume', 'create', volume])
   // First boot must prepare the profile and am without network access.
@@ -88,6 +91,11 @@ async function main() {
   const startTo401 = await waitForFence()
   await waitForHealthy()
   say(`401 after ${startTo401} ms; Docker health: healthy`)
+  // DSH created the gate view before its first healthy check: its own 0700 folder.
+  await docker(['exec', name, '/nodejs/bin/node', '-e', `
+    const { mode, uid, gid } = require('node:fs').lstatSync('/data/${GATE_VIEW}')
+    if ((mode & 0o7777) !== 0o700 || uid !== 1000 || gid !== 1000) process.exit(1)
+  `])
 
   const logs = await logsOf()
   check(/automagik-web: startup: http:\/\/127\.0\.0\.1:3081\//.test(logs), 'no startup line')
@@ -177,12 +185,21 @@ async function main() {
   check(/automagik-web: profile present at \/data\/dsh\/profiles\/automagik-web/.test(after), 'a restart did not find the profile')
   say(`restart: 401 after ${restarted401} ms, profile kept`)
 
+  // Plant a saved model credential in DSH before starting the gate as the same uid.
+  await docker(['exec', name, '/nodejs/bin/node', '-e', `
+    const fs = require('node:fs')
+    const path = require('node:path').join(process.env.DSH_HOME, '.credentials.yaml')
+    if (fs.existsSync(path)) fs.renameSync(path, path + '.smoke-backup')
+    fs.writeFileSync(path, 'deepseek: { apiKey: smoke-only }\\n', { mode: 0o600 })
+    fs.accessSync(path, fs.constants.R_OK)
+  `])
+
   // The opt-in gate shares the namespace, never its writable state. No public port.
   await docker(['volume', 'create', gateVolume])
+  const viewMount = `type=volume,source=${volume},target=${GATE_VIEW_MOUNT},readonly`
   await docker(['run', '--detach', '--name', gateName, '--network', `container:${name}`,
     '--volume', `${gateVolume}:/data`,
-    // DSH_HOME only, as compose.gate.yml mounts it (volume.subpath; Docker Engine 26+).
-    '--mount', `type=volume,source=${volume},target=/dsh/dsh,readonly,volume-subpath=dsh`,
+    '--mount', `${viewMount},volume-subpath=${GATE_VIEW}`,
     '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
     '--env', 'AUTOMAGIK_GATE_ENABLED=1', '--env', 'AUTOMAGIK_GATE_ORIGIN=http://localhost:3082',
     '--health-interval', '2s', '--health-start-period', '0s',
@@ -199,19 +216,65 @@ async function main() {
   const gateConfig = JSON.parse((await docker(['inspect', gateName])).stdout)[0]
   const dshConfig = JSON.parse((await docker(['inspect', name])).stdout)[0]
   check(gateConfig.HostConfig.NetworkMode === `container:${dshConfig.Id}`, 'gate does not share only the DSH network namespace')
-  check(gateConfig.Mounts.some(m => m.Name === volume && m.Destination === '/dsh/dsh' && !m.RW), 'gate DSH mount is not read-only')
-  check(!gateConfig.Mounts.some(m => m.Name === volume && m.Destination !== '/dsh/dsh'), 'gate mounts more of the DSH volume than DSH_HOME')
+  const dshMounts = gateConfig.Mounts.filter(m => m.Name === volume)
+  check(dshMounts.length === 1, 'gate must mount the DSH volume exactly once')
+  check(dshMounts[0].Destination === GATE_VIEW_MOUNT && !dshMounts[0].RW,
+    'gate DSH view must be mounted read-only at /dsh-view')
   // The rest of the DSH volume stays out of the gate's reach: Pocket's chat socket exists in
   // DSH, and the gate (the same uid 1000) can neither see nor connect to it, nor read the key.
   await docker(['exec', name, '/bin/bash', '-c', 'test -S /data/bots/pocket/chat.sock'])
-  await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs"),net=require("net");for(const root of ["/dsh","/dsh/dsh"])for(const p of ["bots","secrets","acp","workspace"])if(fs.existsSync(root+"/"+p))process.exit(2);let left=2;for(const p of ["/dsh/bots/pocket/chat.sock","/dsh/dsh/bots/pocket/chat.sock"]){const c=net.connect(p);c.on("connect",()=>process.exit(3));c.on("error",e=>{if(e.code!=="ENOENT")process.exit(4);if(--left===0)process.exit(0)})}'])
+  await docker(['exec', gateName, '/nodejs/bin/node', '--input-type=module', '-e', String.raw`
+    import assert from 'node:assert/strict'
+    import fs from 'node:fs'
+    import net from 'node:net'
+    assert.throws(() => fs.lstatSync('/dsh/dsh'), { code: 'ENOENT' })
+    if (fs.existsSync('/dsh')) assert.deepEqual(fs.readdirSync('/dsh'), [])
+    // DSH's health check rewrites profile-state.json through a temp file and a rename, so one
+    // listing can catch that temp file: retry a few times; a lasting extra entry still fails.
+    let files = []
+    for (let tries = 0; tries < 10; tries += 1) {
+      files = fs.readdirSync('${GATE_VIEW_MOUNT}').sort()
+      if (files.length === 2) break
+      await new Promise(resolve => setTimeout(resolve, 300))
+    }
+    assert.deepEqual(files, ['launch-url', 'profile-state.json'])
+    for (const file of files) {
+      const info = fs.lstatSync('${GATE_VIEW_MOUNT}/' + file)
+      assert.ok(info.isFile())
+      assert.equal(info.mode & 0o7777, 0o600)
+    }
+    for (const root of ['/dsh', '/dsh/dsh', '${GATE_VIEW_MOUNT}', '/data', '/data/dsh']) {
+      assert.throws(() => fs.readFileSync(root + '/.credentials.yaml'), { code: 'ENOENT' })
+      await new Promise((resolve, reject) => {
+        const socket = net.connect(root + '/bots/pocket/chat.sock')
+        socket.on('connect', () => {
+          socket.destroy()
+          reject(new Error('gate reached the Pocket chat socket'))
+        })
+        socket.on('error', error => error.code === 'ENOENT' ? resolve() : reject(error))
+      })
+    }
+  `])
   check(gateConfig.Mounts.some(m => m.Name === gateVolume && m.Destination === '/data' && m.RW), 'gate has no separate writable store')
   check(!dshConfig.Mounts.some(m => m.Name === gateVolume), 'DSH mounts the gate store')
-  await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs");fs.accessSync("/dsh/dsh/launch-url");fs.writeFileSync("/data/gate-only", "private");try{fs.writeFileSync("/dsh/dsh/gate-write-probe", "bad");process.exit(1)}catch(e){if(e.code!=="EROFS")throw e}'])
+  await docker(['exec', gateName, '/nodejs/bin/node', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict'
+    import fs from 'node:fs'
+    import { DshCredentials } from '/opt/automagik/gate-upstream.mjs'
+    fs.accessSync('${GATE_VIEW_MOUNT}/launch-url')
+    fs.writeFileSync('/data/gate-only', 'private')
+    assert.throws(() => fs.writeFileSync('${GATE_VIEW_MOUNT}/gate-write-probe', 'bad'),
+      { code: 'EROFS' })
+    const credentials = new DshCredentials()
+    const cookie = await credentials.cookie()
+    assert.equal((await credentials.request('/', { cookie })).statusCode, 200)
+  `])
   await docker(['exec', name, '/nodejs/bin/node', '-e', 'const fs=require("fs");try{fs.readFileSync("/data/gate-only");process.exit(1)}catch(e){if(e.code!=="ENOENT")throw e}'])
   await docker(['exec', gateName, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs'])
   const gateReport = JSON.parse((await docker(['exec', gateName, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs', '--json'])).stdout)
-  check(gateReport.healthy && gateReport.gate.enabled && gateReport.gate.status === 401 && gateReport.dsh.status === 401 && gateReport.followsImage, 'gate report did not inspect both fences and the read-only DSH profile')
+  check(gateReport.healthy && gateReport.gate.enabled && gateReport.gate.status === 401 &&
+    gateReport.dsh.status === 401 && gateReport.followsImage,
+    'gate report did not inspect both fences and the read-only profile state')
   const claimCode = (await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs");for(const p of ["/data/claim-code","/data/claim-state.json","/data/control.sock"]){if((fs.statSync(p).mode&0o777)!==0o600)process.exit(1)}process.stdout.write(fs.readFileSync("/data/claim-code","utf8").trim())'])).stdout.trim()
   check(/^[a-f0-9]{32}$/.test(claimCode), 'image claim code is not 128 bits')
   const gateLogs = await docker(['logs', gateName])
@@ -226,6 +289,13 @@ async function main() {
   say('gate: 401 healthy, separate store invisible to DSH, DSH mount read-only')
   say('claim: private 0600 files/socket, no code in logs or HTTP, local reset works in the image')
   await docker(['rm', '--force', gateName])
+  await docker(['exec', name, '/nodejs/bin/node', '-e', `
+    const fs = require('node:fs')
+    const path = require('node:path').join(process.env.DSH_HOME, '.credentials.yaml')
+    const backup = path + '.smoke-backup'
+    if (fs.existsSync(backup)) fs.renameSync(backup, path)
+    else fs.rmSync(path, { force: true })
+  `])
 
   // The key file: 0400 is taken, anything group- or other-readable stops the start.
   await docker(['exec', name, '/nodejs/bin/node', '-e', 'const fs=require("fs"); fs.writeFileSync("/data/secrets/deepseek-api-key", "sk-smoke\\n", { mode: 0o400 }); fs.chmodSync("/data/secrets/deepseek-api-key", 0o400)'])
