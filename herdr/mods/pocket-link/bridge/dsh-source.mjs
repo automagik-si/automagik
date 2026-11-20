@@ -18,9 +18,10 @@
 // interrupt per chat every INTERRUPT_MS (`rate`). A closed subscription (the phone hung up, or was
 // removed and revoke ended it) writes nothing. Plain Node only (no dependency, the bridge's Node floor).
 //
-// A writable socket gets a second hello asking for memory and schedules (RFC 0036). A phone
+// A writable socket gets a second hello asking for memory, schedules and settings (RFC 0036). A phone
 // opts in at chat hello and gets one grant, tied to its connection and team home. Closing
 // the grant needs an ack in 500 ms; otherwise the socket is dropped.
+// Settings writes are offered only with settings.read.
 //
 // RFC 0033 adds an opt-in on both socket hellos, at phone hello, and on each DSH watch.
 // An upload belongs to that phone, connection and watch until it settles. The socket grants
@@ -52,6 +53,8 @@ export const PREFIX = 'dsh:'
 export const ANSWER_ON_COMPUTER = 'Answer on the computer'
 /** One answer at most, in milliseconds. */
 export const REQUEST_MS = 5000
+/** Allow time for admission and model selection within the phone's 30 s deadline. */
+export const SETTINGS_WRITE_MS = 25_000
 /** One line from the socket at most (a snapshot page is about 1 MiB); past it, the socket is dropped. */
 export const MAX_LINE = 8 * 1024 * 1024
 /** Writes one paired phone may make in a minute, across its connections and chats (RFC 0015, Limits). */
@@ -67,6 +70,14 @@ const MEMORY_ID = /^[A-Za-z0-9_-]{1,32}$/
 const MANAGE_REV = /^[0-9a-f]{16}$/
 const SCHEDULE_ID = /^schedule-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SCHEDULE_ALIAS = /^x[0-9a-f]{16}$/
+const SETTINGS_WRITES = ['settings.name', 'settings.model']
+// Match the host's MODEL_REF_OK field check.
+const modelRef = (model) => {
+  if (typeof model !== 'string' || /[\u0000-\u001f\u007f]/.test(model)) return false
+  const bytes = Buffer.byteLength(model)
+  const slash = model.indexOf('/')
+  return bytes >= 3 && bytes <= 512 && slash > 0 && slash < model.length - 1
+}
 const socketMethod = (method) => method.replace('.', '-')
 const writableHello = (hello) => hello?.readOnly === false && hello?.write === 1
 const validHello = (hello) => hello?.protocol === 1 && (hello.readOnly === true || writableHello(hello))
@@ -223,8 +234,8 @@ export class DshSource {
    * The clock and attachment deadlines can be replaced by the wire tests.
    */
   constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, realpath = realpathSync, log = () => {}, requestMs = REQUEST_MS, now = Date.now,
-    attachments = false, timers = realTimers, attachmentMs = {} } = {}) {
-    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now, attachments, timers })
+    attachments = false, timers = realTimers, attachmentMs = {}, settingsWriteMs = SETTINGS_WRITE_MS } = {}) {
+    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now, attachments, timers, settingsWriteMs })
     this.attachmentMs = { ...ATTACH_MS, ...attachmentMs }
     /** The socket in use: the first of `paths` that passed the check. */
     this.path = null
@@ -308,7 +319,8 @@ export class DshSource {
           const methods = Array.isArray(hello.methods) ? hello.methods : []
           const manageMethods = Array.isArray(hello.manageMethods) ? hello.manageMethods : []
           this.writes = new Set(writableHello(hello) ? Object.values(WRITE_METHODS).filter((m) => methods.includes(m)) : [])
-          this.manages = new Set(writableHello(hello) && hello.manage === 1 ? MANAGE_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : [])
+          const offered = writableHello(hello) && hello.manage === 1 ? MANAGE_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : []
+          this.manages = new Set(this.#settingsFamily(offered))
           this.attachOffer = this.attachments ? attachmentOffer(hello) : null
           this.path = path
           if (this.team?.path !== path || this.team.real !== real) this.team = { path, real }
@@ -429,11 +441,15 @@ export class DshSource {
     return !client.closed && !this.stopped && socket === this.socket && Boolean(socket && !socket.destroyed)
   }
 
+  #settingsFamily(methods) {
+    return methods.includes('settings.read') ? methods : methods.filter((method) => !SETTINGS_WRITES.includes(method))
+  }
+
   /** Open a grant before answering the phone's hello, when there is a method to negotiate. */
   openManage(client, requested) {
     const { socket, team } = this
     if (typeof client.device !== 'string' || !client.device || !this.liveClient(client, socket)) return null
-    const methods = requested.filter((method) => this.manages.has(method))
+    const methods = this.#settingsFamily(requested.filter((method) => this.manages.has(method)))
     if (!methods.length) return null
     return this.openGrant(client, socket).then((grant) => {
       if (grant?.state !== 'open' || !this.liveClient(client, socket)) return
@@ -524,7 +540,25 @@ export class DshSource {
     })
   }
 
-  async #manageRequest(grant, method, reading, terminal, fields) {
+  async settings(client, method, params) {
+    const grant = await this.#manageGrant(client, method)
+    if (!grant) return memoryRefused('read-only')
+    const { terminal, rev, name, model } = params
+    const reading = method === 'settings.read'
+    const renaming = method === 'settings.name'
+    const changingModel = method === 'settings.model'
+    if (!manageTerminal(terminal) ||
+      (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev))) ||
+      (renaming && (typeof name !== 'string' || Buffer.byteLength(name) > MANAGE_TEXT_MAX)) ||
+      (changingModel && !modelRef(model))) {
+      return memoryRefused('invalid')
+    }
+    return this.#manageRequest(grant, method, reading, terminal, {
+      ...(reading ? {} : { rev }), ...(renaming ? { name } : {}), ...(changingModel ? { model } : {}),
+    }, { timeout: reading ? undefined : this.settingsWriteMs })
+  }
+
+  async #manageRequest(grant, method, reading, terminal, fields, { timeout } = {}) {
     const { client, socket } = grant
     const key = client.device
     const now = this.now()
@@ -536,7 +570,7 @@ export class DshSource {
     times.push(now)
     phone.manageBusy.add(terminal)
     try {
-      const result = await this.ask(socket, socketMethod(method), { grant: grant.id, terminal, ...fields })
+      const result = await this.ask(socket, socketMethod(method), { grant: grant.id, terminal, ...fields }, { timeout })
       if (client.closed) return memoryRefused('read-only')
       return this.liveClient(client, socket) ? result : manageOffline(reading, true)
     } catch (error) {
@@ -1025,6 +1059,7 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
     openManage: (client, methods) => dsh.openManage(client, methods),
     memory: (client, method, params) => dsh.memory(client, method, params),
     schedule: (client, method, params) => dsh.schedule(client, method, params),
+    settings: (client, method, params) => dsh.settings(client, method, params),
     closeClient: (client) => {
       try { dsh.closeClient(client) } finally { engine.closeClient?.(client) }
     },
