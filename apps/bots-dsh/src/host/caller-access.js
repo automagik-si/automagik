@@ -15,6 +15,7 @@ export function install(rt) {
   let queue = Promise.resolve()
   let service, removeProvider, removeEvent, ready, disposed
   let adopted = rt.teamLoaded()
+  let adoption
   let resetDirty = false
 
   const peopleQueue = fn => {
@@ -23,7 +24,7 @@ export function install(rt) {
     return run
   }
   const active = () => !disposed && service !== undefined && service === callerService(ctx)
-  const enabled = () => active() && ready === service
+  const enabled = () => active() && ready === service && !adoption && rt.teamLoaded()
   const accessChanged = (withdrawn = false) => {
     rt.accessGeneration++
     const caller = callerService(ctx)
@@ -45,6 +46,7 @@ export function install(rt) {
       if (run?.sessionId === sessionId) found.push('run:' + id)
     }
     if (Object.hasOwn(state.tasks ?? {}, sessionId)) found.push('task:' + sessionId)
+    for (const id of rt.agentClaims(sessionId)) found.push('agent:' + id)
     for (const [id, bot] of Object.entries(state.bots)) {
       if (id !== botId && (rt.chatOf(id) === sessionId || inSegments(bot.segments, sessionId))) found.push('bot:' + id)
     }
@@ -57,8 +59,13 @@ export function install(rt) {
     if (!enabled() || share?.state !== 'open' || !bot || rt.readOnly() !== undefined ||
         !rt.canWriteTeam() || peopleOf(bot).mode === 'owners') return []
     const published = new Set(share.parts)
-    return rt.partsOf(botId).filter(({ sessionId }) => published.has(sessionId) && !closed.has(sessionId) &&
-      (rt.chatOf(botId) === sessionId || inSegments(bot.segments, sessionId)) && claims(botId, sessionId).length === 0)
+    return rt.partsOf(botId).filter(({ sessionId }) => {
+      if (!published.has(sessionId) || closed.has(sessionId) ||
+          (rt.chatOf(botId) !== sessionId && !inSegments(bot.segments, sessionId))) return false
+      if (claims(botId, sessionId).length === 0) return true
+      closePart(sessionId, 'ownership conflict')
+      return false
+    })
   }
 
   function commit(botId, bot, people, afterCommit) {
@@ -71,18 +78,18 @@ export function install(rt) {
     })
   }
 
-  function checkOpening(bot, current) {
+  function checkOpening(bot, current, agent) {
     if ([...rt.switchJobs()].some(job => job.botId === bot.id)) {
       throw refusal(bot.name + ' is already moving to a new conversation.')
     }
     if (bot.sessionPinned === true) throw refusal(rt.freshPinnedText(bot))
-    if (Object.values(state.switching).some(entry => entry?.botId === bot.id)) {
+    if (rt.hasHeldInput(bot.id) || Object.values(state.switching).some(entry => entry?.botId === bot.id)) {
       throw refusal(bot.name + ' is still handing on earlier messages; try again shortly.')
     }
     if (Object.hasOwn(state.questions, current) || Object.hasOwn(state.views, current)) {
       throw refusal("Answer or dismiss " + bot.name + "'s open card first.")
     }
-    if (ctx.get('goals')?.get?.(current)?.phase === 'active') {
+    if (agent && ctx.get('goals')?.get?.(agent)?.phase === 'active') {
       throw refusal("Pause " + bot.name + "'s goal first.")
     }
   }
@@ -111,7 +118,7 @@ export function install(rt) {
       if (rt.botOf(botId) !== bot || rt.chatOf(botId) !== current) {
         throw refusal(bot.name + ' is already moving to a new conversation.')
       }
-      checkOpening(bot, current)
+      checkOpening(bot, current, agent)
       if (agent?.status !== 'idle') throw refusal('Wait for ' + bot.name + ' to finish, then share it.')
       if (agent.inbox.nextStep.length + agent.inbox.nextTurn.length > 0) {
         throw refusal(bot.name + ' has messages waiting; let them run or remove them, then share it.')
@@ -144,13 +151,13 @@ export function install(rt) {
       const share = shares.get(botId)
       const bot = rt.botOf(botId)
       if (!enabled() || !rt.canWriteTeam() || rt.readOnly() !== undefined || !bot || rt.chatOf(botId) !== freshId ||
-          peopleOf(bot).mode === 'owners' || !share || share.id !== shareId || closed.has(freshId)) {
+          peopleOf(bot).mode === 'owners' || !share || share.id !== shareId || closed.has(freshId) || claims(botId, freshId).length > 0) {
         if (kind === 'share') spoilShare(botId, shareId)
         return
       }
       if (kind === 'share') {
         if (share.state !== 'opening') return
-        if (carried) return spoilShare(botId, shareId)
+        if (carried || rt.hasHeldInput(botId)) return spoilShare(botId, shareId)
         share.parts = [freshId]
         share.state = 'open'
       } else {
@@ -181,25 +188,6 @@ export function install(rt) {
     accessChanged()
   }
 
-  async function mainChanged(botId) {
-    const bot = rt.botOf(botId)
-    const people = peopleOf(bot)
-    if (bot && rt.isMain(botId) && people.mode === 'workspace') {
-      const next = { ...people, mode: 'allowlist' }
-      try {
-        await commit(botId, bot, next)
-      } catch (error) {
-        // Promotion already took effect. A failed follow-up write must not let later
-        // demotion restore workspace visibility to this share.
-        if (rt.botOf(botId) === bot) bot.people = next
-        accessChanged()
-        throw error
-      }
-      return
-    }
-    accessChanged()
-  }
-
   function fingerprint(botId, share) {
     return JSON.stringify({
       main: rt.isMain(botId),
@@ -211,15 +199,23 @@ export function install(rt) {
 
   const hostAuthority = {
     capture() {
-      if (!adopted) return
-      return {
-        people: new Map(Object.entries(state.bots).map(([id, bot]) => [id, bot.people])),
-        fingerprints: new Map([...shares].map(([id, share]) => [id, fingerprint(id, share)])),
+      // A failed migration leaves a partially adopted team in memory. Keep its
+      // callers closed and preserve the last trusted snapshot for the next adopt.
+      if (adoption) return
+      adoption = {}
+      if (adopted) {
+        adoption.people = new Map(Object.entries(state.bots).map(([id, bot]) => [id, bot.people]))
+        adoption.fingerprints = new Map([...shares].map(([id, share]) => [id, fingerprint(id, share)]))
       }
+      accessChanged()
     },
-    restore(kept) {
+    restore() {
+      const kept = adoption
       adopted = true
-      if (!kept) return
+      if (!kept?.people) {
+        adoption = undefined
+        return
+      }
       const withdrawn = []
       for (const [id, bot] of Object.entries(state.bots)) {
         if (!kept.people.has(id)) bot.people = ownersOnly()
@@ -251,6 +247,7 @@ export function install(rt) {
           })
         }).catch(() => ctx.logger.warn('omni-ui: saving withdrawn sharing after a team edit failed'))
       }
+      adoption = undefined
       accessChanged()
     },
   }
@@ -276,6 +273,9 @@ export function install(rt) {
     service = next
     rt.hostAuthority = next ? hostAuthority : undefined
     shares.clear()
+    // A new activation cannot inherit grants from before an interrupted adoption.
+    adoption?.people?.clear()
+    adoption?.fingerprints?.clear()
     accessChanged(withdrawn)
     if (!next) {
       removeEvent?.()
@@ -309,7 +309,7 @@ export function install(rt) {
 
   Object.assign(rt, {
     peopleQueue, setPeople, publishPart, unpublishPart, closePart, readableParts, accessChanged,
-    forgetShare, mainChanged, spoilShare, accessGeneration: 0,
+    forgetShare, spoilShare, accessGeneration: 0,
     shareIdOf: botId => enabled() ? shares.get(botId)?.id : undefined,
     shareState: botId => enabled() ? shares.get(botId)?.state : undefined,
     onAccessLoss(listener) {

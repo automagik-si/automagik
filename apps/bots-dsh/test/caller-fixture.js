@@ -34,7 +34,7 @@ export function serviceStub({ multiuser = true, onProvide } = {}) {
   }
 }
 
-export function fixture(t, { service = serviceStub(), seed, beforeLoad } = {}) {
+export function fixture(t, { service = serviceStub(), seed, inflight, beforeLoad } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'caller-bots-'))
   const statePath = join(home, 'state.json')
   const saved = () => JSON.parse(readFileSync(statePath, 'utf8'))
@@ -46,15 +46,23 @@ export function fixture(t, { service = serviceStub(), seed, beforeLoad } = {}) {
   }
   seed?.(team)
   writeFileSync(statePath, JSON.stringify(team))
+  if (inflight) writeFileSync(join(home, 'inflight.json'), JSON.stringify(inflight))
   const logs = new Map()
   const agents = new Map()
   const warnings = []
   const archived = []
   const created = []
   const reads = []
+  const verificationReads = []
   const routes = new Map()
   const goals = new Map()
-  const services = { automagikCaller: service, goals }
+  const goalService = {
+    get(agent) {
+      if (!agent || agents.get(agent.id) !== agent) throw new Error('Expected the live goal Agent')
+      return goals.get(agent.id)
+    },
+  }
+  const services = { automagikCaller: service, get goals() { return goals.size ? goalService : undefined } }
   const ctx = fakeContext({ services })
   ctx.logger.warn = (...args) => warnings.push(args.join(' '))
   ctx.connection.fetch.register = route => { routes.set(route.path, route); return () => routes.delete(route.path) }
@@ -66,9 +74,11 @@ export function fixture(t, { service = serviceStub(), seed, beforeLoad } = {}) {
     if (notify) for (const listener of ctx.listeners.get('session/event') ?? []) listener({ id }, value)
     return value
   }
-  const events = async ({ address, beforeSeq, maxMessages }) => {
-    reads.push(address.sessionId)
-    const items = (logs.get(address.sessionId) ?? []).filter(item => beforeSeq === undefined || item.seq < beforeSeq)
+  const events = async ({ address, beforeSeq, throughSeq, maxMessages }) => {
+    const observed = throughSeq === undefined ? reads : verificationReads
+    observed.push(address.sessionId)
+    const items = (logs.get(address.sessionId) ?? []).filter(item => (beforeSeq === undefined || item.seq < beforeSeq) &&
+      (throughSeq === undefined || item.seq <= throughSeq))
     return { records: items.slice(-maxMessages).map(event => ({ event })), hasMore: items.length > maxMessages }
   }
   function agentOf(id) {
@@ -108,7 +118,7 @@ export function fixture(t, { service = serviceStub(), seed, beforeLoad } = {}) {
       create: async path => ({ id: 'w1', path }), archiveSession: async id => { archived.push(id) },
       unarchiveSession: async () => {},
     },
-    agents: { resume: async id => agentOf(id) },
+    agents: { get: id => agents.get(id), resume: async id => agentOf(id) },
     sessionController: {
       create: async () => {
         const sessionId = 'fresh-' + (created.length + 1)
@@ -160,6 +170,6 @@ export function fixture(t, { service = serviceStub(), seed, beforeLoad } = {}) {
     await rt.refresh()
     await rt.peopleQueue(() => {})
   }
-  return { rt, ctx, service, statePath, saved, team, logs, agents, created, archived, warnings, goals, reads, routes,
+  return { rt, ctx, service, statePath, saved, team, logs, agents, created, archived, warnings, goals, reads, verificationReads, routes,
     agentOf, event, start, call, emitService, finishSwitch, open, readable, edit }
 }

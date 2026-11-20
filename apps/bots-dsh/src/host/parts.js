@@ -1769,11 +1769,13 @@ export function install(rt) {
       // The card's call stays in the old part: the fresh part raises it in the
       // composer dock while pending, and closing it records at the part that asked it.
       if (state.questions[agent.id] !== undefined) {
+        if (job.isShare) job.cardMoved = true
         const pending = state.questions[agent.id]
         state.questions[freshId] = pending.callId && !pending.callSessionId ? { ...pending, callSessionId: agent.id } : pending
         delete state.questions[agent.id]
       }
       if (state.views?.[agent.id] !== undefined) {
+        if (job.isShare) job.cardMoved = true
         const pending = state.views[agent.id]
         state.views[freshId] = pending.callId && !pending.callSessionId ? { ...pending, callSessionId: agent.id } : pending
         delete state.views[agent.id]
@@ -1815,7 +1817,7 @@ export function install(rt) {
       freshParts.set(freshId, estimateTokens(text))
       fresh.followup(createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
       // Before the flush, so the goal's own record is written with the part it belongs to.
-      if (job.isShare) job.goalMoved = ctx.get('goals')?.get?.(agent.id)?.phase === 'active'
+      if (job.isShare) job.goalMoved = ctx.get('goals')?.get?.(agent)?.phase === 'active'
       carryGoal(agent, fresh, room, name)
       await ctx.sessions.flush(fresh.session)
       carry.push(...job.carry.splice(0))
@@ -1840,7 +1842,7 @@ export function install(rt) {
       void rt.publishPart?.({
         botId: job.botId, fromPart: agent.id, freshId, shareId: job.shareId,
         kind: job.isShare ? 'share' : job.fresh ? 'fresh' : 'move',
-        carried: (job.movedIn ?? 0) > 0 || job.goalMoved === true,
+        carried: (job.movedIn ?? 0) > 0 || job.goalMoved === true || job.cardMoved === true,
       })?.catch(() => rt.warn('omni-ui: publishing a fresh part for caller sharing failed'))
     }
     ctx.logger.info('ds-bot: %s%s moved on to part %d at %d tokens (check line %d, hard line %d); %s; %d latest and %d earlier messages carried%s', name, bot !== undefined && room !== undefined ? ` in ${room.name}` : '', number + 1, tokens ?? -1, lines?.check ?? -1, lines?.hard ?? -1,

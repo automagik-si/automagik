@@ -123,6 +123,7 @@ export function install(rt) {
   // What channel.js and prompt.js read.
   rt.extended = {
     endpointOf: name => (endpoints.has(name) ? endpoints.get(name) : undefined),
+    endpointNames: () => [...endpoints.keys()],
     sessionOwner(sessionId) {
       for (const fn of sessionOwners) {
         try {

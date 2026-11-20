@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
 import { test } from 'node:test'
+import { setImmediate as immediate } from 'node:timers/promises'
+import { Service } from '@deepseek-ai/cordis'
+import { GoalService } from '@deepseek-ai/dsh-goal'
 import { cleanPeople, peopleOf, personKey } from '../src/host/people.js'
 import { until } from './until.js'
 import { SOURCE_KIND } from '../src/host/constants.js'
-import { allowlist, code, fixture, guest, identity, member, owners, serviceStub, workspace } from './caller-fixture.js'
+import { RESUME_DELAY_MS } from '../src/host/resume.js'
+import { allowlist, code, fixture, guest, identity, member, owners, serviceStub, stranger, workspace } from './caller-fixture.js'
 
 test('P1 validates a bounded, recently admitted allowlist', () => {
   const options = { seen: [member.person] }
@@ -91,6 +96,71 @@ test('P4 refuses pending switches, pins, cards, goals, work and both inboxes bef
   }
 })
 
+test('P4 a cold Bot without a goal shares with the pinned DSH GoalService', async t => {
+  const f = fixture(t)
+  await f.start()
+  assert.equal(f.ctx.agents.get('b'), undefined)
+  f.ctx.reflect.provide = f.ctx.provide
+  f.ctx.sessionProjections = { register: async () => ({ stateOf: () => ({ failure: null, current: null }) }) }
+  const goals = new GoalService(f.ctx)
+  await goals[Service.init]()
+  const get = t.mock.method(goals, 'get')
+  const service = f.ctx.get
+  t.mock.method(f.ctx, 'get', name => name === 'goals' ? goals : service(name))
+  const part = await f.open()
+  assert.deepEqual(f.readable(), [part])
+  assert.ok(get.mock.callCount() >= 2)
+  assert.ok(get.mock.calls.every(call => call.arguments[0] === f.ctx.agents.get('b')))
+})
+
+test('P4 restart-held owner input is recovered before a clean share can open', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const message = { id: 'held-at-restart', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'private before share' }] }
+  const f = fixture(t, { inflight: { held: { b: [{ at: Date.now(), message }] } } })
+  await f.start()
+  await immediate()
+  f.ctx.sessions.flush = async () => true
+  f.event('b', 'turn/start', { turn: 1 })
+  await assert.rejects(f.rt.setPeople('b', workspace), { ...code('refused'), message: /earlier messages/ })
+  assert.deepEqual(f.readable(), [])
+  assert.deepEqual(f.rt.callerBots(member), [])
+  t.mock.timers.tick(RESUME_DELAY_MS)
+  assert.equal((await f.rt.resumesDone).failed, undefined)
+  t.mock.timers.reset()
+  assert.equal(f.logs.get('b').at(-1).data.id, message.id)
+  const part = await f.open()
+  assert.deepEqual(f.readable(), [part])
+  assert.deepEqual(await f.rt.callerChat(member, 'b'), { items: [], cursor: null })
+})
+
+test('P4 recovery closes an already published destination before delivering held owner input', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fixture(t)
+  await f.start()
+  await immediate()
+  await f.rt.setPeople('b', workspace)
+  await Promise.all([...f.rt.switchJobs()].map(job => job.done))
+  await f.rt.peopleQueue(() => {})
+  const part = f.rt.chatOf('b')
+  assert.deepEqual(f.readable(), [part])
+  f.ctx.sessions.flush = async () => true
+  const message = { id: 'late-held-note', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'old owner input' }] }
+  // Model a held note becoming known after the opening checks.
+  assert.equal(await f.rt.noteHeldInput('b', [message]), true)
+  f.event(part, 'turn/start', { turn: 1 })
+  const agent = f.agentOf(part)
+  const send = agent.followup
+  t.mock.method(agent, 'followup', input => {
+    assert.deepEqual(f.readable(), [])
+    return send(input)
+  })
+  t.mock.timers.tick(RESUME_DELAY_MS)
+  assert.equal((await f.rt.resumesDone).failed, undefined)
+  t.mock.timers.reset()
+  assert.equal(f.logs.get(part).at(-1).data.id, message.id)
+  assert.deepEqual(await f.rt.callerChat(member, 'b'), { items: [], cursor: null })
+})
+
 test('P5 a newly held message, a late claim and an active goal each spoil the real share switch', async t => {
   for (const carried of ['held', 'late-claim', 'goal']) {
     const f = fixture(t)
@@ -122,6 +192,25 @@ test('P5 a newly held message, a late claim and an active goal each spoil the re
     await f.rt.setPeople('b', owners)
     const reopened = await f.open()
     assert.deepEqual(f.readable(), [reopened])
+  }
+})
+
+test('P5 a question or view raised during the grant save spoils the share', async t => {
+  for (const cards of ['questions', 'views']) {
+    await t.test(cards, async sub => {
+      const f = fixture(sub)
+      await f.start()
+      const save = f.rt.saveCopy
+      sub.mock.method(f.rt, 'saveCopy', async (...args) => {
+        const result = await save(...args)
+        f.rt.state[cards].b = { callId: 'owner-card' }
+        return result
+      })
+      const part = await f.open()
+      assert.equal(f.rt.state[cards][part].callSessionId, 'b', cards)
+      assert.equal(f.rt.shareState('b'), 'spoiled', cards)
+      assert.deepEqual(f.readable(), [])
+    })
   }
 })
 
@@ -272,6 +361,24 @@ test('P8 Bot relays close an entire part synchronously, including missed events 
   assert.deepEqual(f.readable(), [])
 })
 
+test('P8 a missed relay outside the latest page and its turn lookup closes the part', async t => {
+  const f = fixture(t)
+  await f.start()
+  const part = await f.open()
+  f.event(part, 'turn/start', { turn: 1 })
+  f.event(part, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'before relay' }] })
+  const before = await f.rt.callerChat(member, 'b')
+  assert.equal(before.items[0].text, 'before relay')
+  f.event(part, 'user/message', { source: { kind: SOURCE_KIND, role: 'reply' } }, { notify: false })
+  for (let turn = 2; turn <= 65; turn++) {
+    f.event(part, 'turn/start', { turn })
+    f.event(part, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'after relay ' + turn }] })
+    f.event(part, 'assistant/message', { message: { content: [{ type: 'text', text: 'answer ' + turn }] } })
+  }
+  await assert.rejects(f.rt.callerChat(member, 'b'), code('not-found'))
+  assert.deepEqual(f.readable(), [])
+})
+
 test('P9 reset persists once before providing visibility and reload never restores old parts', async t => {
   let f
   const service = serviceStub({ onProvide() { assert.deepEqual(f.saved().bots.b.people, owners) } })
@@ -344,5 +451,77 @@ test('P10 outside edits preserve grants in memory and withdraw on ownership chan
   const part = await f.open('b', allowlist)
   await f.edit(next => { next.bots.b.people = workspace })
   assert.deepEqual(f.rt.botOf('b').people, allowlist)
+  assert.deepEqual(f.readable(), [part])
+})
+
+test('P10 failed migration keeps a named-only share closed even after a later save', async t => {
+  const f = fixture(t)
+  await f.start()
+  const part = await f.open('b', allowlist)
+  const otherMember = { ...member, person: { ...member.person, subject: stranger.person.subject } }
+  assert.deepEqual(f.rt.callerBots(member).map(bot => bot.id), ['b'])
+  assert.deepEqual(f.rt.callerBots(otherMember), [])
+  const next = f.saved()
+  next.bots.b.people = workspace
+  next.exchanges = [null]
+  writeFileSync(f.statePath, JSON.stringify(next))
+  await assert.rejects(f.rt.save(), { code: 'ELOCKLOST' })
+  await assert.rejects(f.rt.refresh(), TypeError)
+  assert.equal(f.rt.teamLoaded(), false)
+  assert.deepEqual(f.readable(), [])
+  for (const principal of [member, otherMember]) {
+    assert.deepEqual(f.rt.callerBots(principal), [])
+    await assert.rejects(f.rt.callerChat(principal, 'b'), code('not-found'))
+  }
+
+  // A successful save of some other field cannot authorize the parsed grants.
+  f.rt.state.exchanges = []
+  await f.rt.save()
+  assert.deepEqual(f.rt.callerBots(otherMember), [])
+  assert.deepEqual(f.readable(), [])
+  await f.edit(team => { team.prefs.accent = 'outside edit' })
+  assert.deepEqual(f.rt.botOf('b').people, allowlist)
+  assert.deepEqual(f.rt.callerBots(otherMember), [])
+  assert.deepEqual(f.readable(), [part])
+})
+
+test('P10 adding or removing any unadopted DSH Bot or Tasks claim withdraws the share', async t => {
+  for (const kind of ['dsh', 'tasks']) {
+    for (const remove of [false, true]) {
+      const f = fixture(t)
+      await f.start()
+      const part = await f.open()
+      const agent = { id: 'native', name: 'Native', kind, sessions: [part] }
+      if (remove) {
+        f.rt.state.agents.native = agent
+        await f.rt.save()
+        assert.deepEqual(f.readable(), [], kind)
+      }
+      await f.edit(next => {
+        if (remove) delete next.agents.native
+        else next.agents.native = agent
+      })
+      assert.equal(f.rt.shareState('b'), undefined, kind)
+      assert.deepEqual(f.readable(), [], kind)
+      assert.deepEqual(f.saved().bots.b.people, owners)
+    }
+  }
+})
+
+test('P11 a failed Main save cannot leave workspace sharing latent for demotion', async t => {
+  const f = fixture(t)
+  await f.start()
+  const part = await f.open('b', { ...workspace, allow: allowlist.allow })
+  const otherMember = { ...member, person: { ...member.person, subject: stranger.person.subject } }
+  const failure = () => Promise.reject(new Error('first Main write failed'))
+  const save = t.mock.method(f.rt, 'save', failure)
+  const saveCopy = t.mock.method(f.rt, 'saveCopy', failure)
+  await assert.rejects(f.rt.setMain('b', true), /first Main write failed/)
+  save.mock.restore()
+  saveCopy.mock.restore()
+  assert.equal(f.rt.isMain('b'), f.saved().mainBotIds.includes('b'))
+  const visibleBeforeDemotion = f.rt.callerBots(otherMember)
+  await f.rt.setMain('b', false)
+  assert.deepEqual(f.rt.callerBots(otherMember), visibleBeforeDemotion)
   assert.deepEqual(f.readable(), [part])
 })

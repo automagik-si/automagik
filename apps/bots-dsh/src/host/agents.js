@@ -68,13 +68,19 @@ export function install(rt) {
   // Told when the DSH bots change (rt.dshBots.onChange), with the new list.
   const listeners = new Set()
   let listedKey = ''
+  function* agentSessions() {
+    for (const [key, agent] of Object.entries(state.agents)) {
+      if (agent.adoptedBotId !== undefined) continue
+      for (const sessionId of agent.sessions ?? []) yield { key, agent, sessionId }
+    }
+  }
+  rt.agentClaims = function* (id) {
+    for (const { key, sessionId } of agentSessions()) if (sessionId === id) yield key
+  }
   // store.js calls this from indexSessions after every adopt and save.
   rt.indexAgents = () => {
     sessionIndex.clear()
-    for (const agent of Object.values(state.agents)) {
-      if (agent.adoptedBotId !== undefined) continue
-      for (const sessionId of agent.sessions ?? []) sessionIndex.set(sessionId, agent.id)
-    }
+    for (const { agent, sessionId } of agentSessions()) sessionIndex.set(sessionId, agent.id)
     const list = dshBots().map(listed)
     const key = JSON.stringify(list)
     if (key === listedKey) return

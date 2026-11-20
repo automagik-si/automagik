@@ -74,6 +74,7 @@ function decodeCursor(cursor) {
 
 export function install(rt) {
   const { ctx, state } = rt
+  const checkedThrough = new Map()
   function visible(principal) {
     const service = callerService(ctx)
     if (!service) throw unknown()
@@ -115,10 +116,14 @@ export function install(rt) {
   async function callerPage(parts, index, decoded) {
     const { sessionId, startedAt } = parts[index]
     const signal = AbortSignal.timeout(HISTORY_TIMEOUT_MS)
-    const pageAt = async beforeSeq => {
+    const pages = new Map()
+    const bounds = ({ events, hasMore }) => ({ first: events[0]?.seq, last: events.at(-1)?.seq, hasMore })
+    const readPage = async (beforeSeq, throughSeq) => {
+      signal.throwIfAborted()
       const page = await ctx.sessionController.events({
         address: { kind: 'session', sessionId },
         ...(beforeSeq !== undefined ? { beforeSeq } : {}),
+        ...(throughSeq !== undefined ? { throughSeq } : {}),
         maxMessages: 60,
       }, signal)
       const events = page.records.map(record => record.event)
@@ -127,6 +132,11 @@ export function install(rt) {
         throw unknown()
       }
       return { events, hasMore: page.hasMore }
+    }
+    const pageAt = async beforeSeq => {
+      const result = await readPage(beforeSeq)
+      pages.set(beforeSeq, bounds(result))
+      return result
     }
     const { events, hasMore } = await pageAt(decoded.beforeSeq)
     let seedTurn
@@ -142,6 +152,25 @@ export function install(rt) {
         if (!back.hasMore || !(back.events[0]?.seq < before)) break
         before = back.events[0].seq
       }
+    }
+    // Check from the latest log cut back to the verified prefix, regardless of
+    // which page the caller asked for. A relay can taint any turn in the part.
+    const previouslyChecked = checkedThrough.get(sessionId) ?? -1
+    const latest = pages.get(undefined) ?? bounds(await readPage())
+    const through = latest.last
+    let scan = latest
+    let beforeSeq = Infinity
+    while (scan.hasMore) {
+      const first = scan.first
+      if (!Number.isSafeInteger(first) || first >= beforeSeq) throw unknown()
+      if (first <= previouslyChecked) break
+      beforeSeq = first
+      scan = pages.get(beforeSeq) ?? bounds(await readPage(beforeSeq, through))
+    }
+    if (through > (checkedThrough.get(sessionId) ?? -1)) {
+      checkedThrough.delete(sessionId)
+      checkedThrough.set(sessionId, through)
+      if (checkedThrough.size > 256) checkedThrough.delete(checkedThrough.keys().next().value)
     }
     const items = callerItems(sessionId, events, seedTurn, state.exchangeTurns)
     const more = hasMore && events.length > 0 && Number.isSafeInteger(events[0].seq)

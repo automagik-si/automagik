@@ -149,4 +149,5 @@ test('V8 no turn is inferred farther back than twenty pages', async t => {
   }
   assert.deepEqual((await f.rt.callerChat(member, 'b')).items, [])
   assert.equal(f.reads.length, 21)
+  assert.deepEqual(f.verificationReads, [part])
 })

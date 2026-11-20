@@ -41,4 +41,5 @@ test('B-routes the real exact Fetch dispatch refuses both carried roles on every
     }
   }
   assert.equal(ctx.get('automagikCallerRoutes'), undefined)
+  assert.equal(f.ctx.get('automagikCallerRoutes'), undefined)
 })

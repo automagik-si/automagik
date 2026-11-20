@@ -277,6 +277,7 @@ export function install(rt) {
   // Session: DSH's shutdown would drop it, so it is noted until its user/message is written.
   /** @type {Record<string, {at:number, message:any}[]>} */
   let held = interrupted.held
+  rt.hasHeldInput = botId => Object.entries(held).some(([sessionId, list]) => list.length > 0 && rt.selfOf(sessionId) === botId)
   // A claim can precede both admission and the click while DSH assembles the step.
   const claims = new Map()
   const localHeld = new Map()
@@ -1344,6 +1345,9 @@ export function install(rt) {
             continue
           }
           if (heldReceipts.has(message.id) || waiting.has(message.id) || claims.get(target)?.has(message.id)) continue
+          // A restart can target the current part instead of the one that took
+          // this input. Close that destination to callers before sending it.
+          rt.closePart?.(target, 'held input')
           agent.followup(message)
           // A flush can include a claim before its user/message. Keep the note until that event.
           if (await ctx.sessions.flush(agent.session) !== true) break
