@@ -68,7 +68,7 @@ const MANAGER_READS = new Map([
   ['vault', ['read', 'kv get', 'kv list', 'list', 'token lookup', 'token create', 'print token']],
   ['pass-cli', ['item view', 'item get', 'item run', 'run']],
   ['keepassxc-cli', ['show', 'export']],
-  ['secret-tool', ['lookup']],
+  ['secret-tool', ['lookup', 'search']],
 ])
 const MANAGER_OPTIONS = new Map([
   ['bw', ['--session']],
@@ -78,10 +78,18 @@ const MANAGER_OPTIONS = new Map([
 // Read past global options first, then also ask when an unfamiliar option may have shifted the verbs.
 function managerRead(words) {
   const executable = words[0]?.split(/[/\\]/).at(-1).toLowerCase().replace(/\.(exe|cmd)$/, '')
+  const args = words.slice(1)
+  if (executable === 'dbus-monitor') return true
+  if (['gdbus', 'busctl', 'dbus-send'].includes(executable)) {
+    if (args.some(word => /(?:^|[^\w.])org\.freedesktop\.secrets(?![\w.])|\bGetSecret\b/.test(word))) return true
+    if (executable !== 'dbus-send' && args.includes('monitor')) return true
+    if (executable === 'busctl' && args.includes('capture')) return true
+  }
+  if (/^python(?:[23](?:\.\d+)?)?$/.test(executable) && /\b(?:secretstorage|keyring)\b/.test(args.join(' '))) return true
+  if (executable === 'keyring' && args.includes('get')) return true
   const verbs = MANAGER_READS.get(executable)
   if (!verbs) return false
   const options = MANAGER_OPTIONS.get(executable) ?? []
-  const args = words.slice(1)
   const operands = []
   for (let at = 0; at < args.length && operands.length < 2; at++) {
     const word = args[at]

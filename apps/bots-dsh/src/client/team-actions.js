@@ -253,6 +253,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     secretSourceDetail: requestId => call('secret-source-detail', { requestId }),
     vaultStatus: (signal, provider) => call('vault-status', provider === undefined ? undefined : { provider }, signal),
     vaultUnlock: (password, connection) => call('vault-unlock', { provider: 'bitwarden', password, connection }),
+    vaultUnlockSecretService: () => call('vault-unlock', { provider: 'secret-service' }),
     vaultLock: provider => provider === undefined ? call('vault-lock') : call('vault-lock', { provider }),
     vaultItems: (search, provider) => call('vault-items', provider === 'hashicorp-vault'
       ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }) }),

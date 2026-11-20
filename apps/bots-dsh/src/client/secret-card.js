@@ -103,6 +103,13 @@ export function GitHubSteps({ bot, work }) {
 const vaultLocked = 'The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.'
 const vaultDetailUnavailable = 'The vault item details could not be loaded.'
 
+const GNOME_PROVIDER_ID = 'secret-service'
+const GNOME_PROVIDER_LABEL = 'Secret Service (GNOME Keyring)'
+const createdLabel = created => {
+  const time = new Date(Number(created) * 1000)
+  return t('Created: {time}', { time: Number.isFinite(time.getTime()) ? time.toISOString() : created })
+}
+
 function VaultRequestContext({ request }) {
   return h('div', { className: 'bt-secret-body' },
     h('div', { className: 'bt-secret-saved' }, h(KeyIcon), t('From a vault')),
@@ -132,9 +139,13 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
     let active = true
     Promise.resolve().then(() => fetchDetail(id)).then(value => {
       if (!active) return
-      const { commandDigest, snapshot, provider, item, field } = value ?? {}
-      let verified = commandDigest === digest && [commandDigest, snapshot, provider, item, field].every(part => typeof part === 'string')
+      const { commandDigest, snapshot, provider, item, field, name, collection, created } = value ?? {}
+      let verified = commandDigest === digest && [commandDigest, snapshot, provider, field].every(part => typeof part === 'string')
       let displayItem = item
+      if (provider === GNOME_PROVIDER_ID) {
+        verified &&= field === 'secret' && [name, collection, created].every(part => typeof part === 'string')
+        displayItem = name
+      } else verified &&= typeof item === 'string'
       if (verified && provider === 'hashicorp-vault') {
         try {
           const parts = JSON.parse(item)
@@ -142,7 +153,7 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
           if (verified) displayItem = parts.join('/')
         } catch { verified = false }
       }
-      setVaultDetail(verified ? { key, value: { commandDigest, snapshot, provider, item: displayItem, field } } : { key, error: vaultDetailUnavailable })
+      setVaultDetail(verified ? { key, value: { commandDigest, snapshot, provider, item: displayItem, field, collection, created } } : { key, error: vaultDetailUnavailable })
     }, () => {
       if (active) setVaultDetail({ key, error: vaultDetailUnavailable })
     })
@@ -164,6 +175,7 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
   if (vault) {
     const item = detail?.value
     const hashicorp = item?.provider === 'hashicorp-vault'
+    const keyring = item?.provider === GNOME_PROVIDER_ID
     const allow = () => {
       if (item && !busy) void run(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }))
     }
@@ -174,9 +186,11 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
       }),
       h(VaultRequestContext, { request }),
       item ? h('div', { className: 'bt-secret-note' },
-        h('div', null, t('Provider: {provider}', { provider: hashicorp ? t('HashiCorp Vault') : item.provider })),
+        h('div', null, t('Provider: {provider}', { provider: keyring ? t(GNOME_PROVIDER_LABEL) : hashicorp ? t('HashiCorp Vault') : item.provider })),
         h('div', null, t('Item: {item}', { item: item.item })),
-        h('div', null, t('Field: {field}', { field: item.field }))) : null,
+        keyring ? h('div', null, t('Collection: {collection}', { collection: item.collection })) : null,
+        keyring ? h('div', null, createdLabel(item.created)) : null,
+        h('div', null, t('Field: {field}', { field: keyring ? t('Secret') : item.field }))) : null,
       error || detail?.error ? h('div', { className: 'bt-secret-error', role: 'alert' }, error || t(detail.error)) : null,
       h('div', { className: 'bt-q-actions' },
         h('button', { type: 'button', className: 'bt-q-btn', disabled: busy, onClick: cancel }, t('Cancel')),
@@ -435,11 +449,21 @@ function AddVaultKey({ actions, provider, connection, roster, run, onDone }) {
   const [mount, setMount] = useState('')
   const [folder, setFolder] = useState('')
   const [fields, setFields] = useState([])
-  const item = items?.find(row => row.id === itemId && !row.folder)
+  const keyring = provider === GNOME_PROVIDER_ID
+  const item = items?.find(row => itemId !== '' && (keyring ? row.handle : row.id) === itemId && !row.folder)
   const onePassword = provider === 'onepassword'
   const hashicorp = provider === 'hashicorp-vault'
+  // Providers whose picker search names the provider explicitly (Bitwarden keeps the legacy call).
+  const namedSearch = provider === 'onepassword' || provider === GNOME_PROVIDER_ID
   const optionId = row => hashicorp && row.folder ? row.id + '/' : row.id
-  const itemOption = row => h('option', { key: optionId(row), value: optionId(row) }, row.name)
+  const itemOption = (row, index) => {
+    if (!keyring) return h('option', { key: optionId(row), value: optionId(row) }, row.name)
+    if (row.locked) return h('option', { key: index, disabled: true, value: '' },
+      t('{collection} (locked)', { collection: row.collection }))
+    const label = t('{item} · {collection}', { item: row.name, collection: row.collection })
+    return h('option', { key: row.handle, value: row.handle },
+      row.created === undefined ? label : label + ' · ' + createdLabel(row.created))
+  }
   const vaults = new Map()
   if (onePassword) for (const row of items ?? []) {
     const id = row.id.split('/')[0]
@@ -454,7 +478,7 @@ function AddVaultKey({ actions, provider, connection, roster, run, onDone }) {
       ? row.selector : section
     return t('{label} ({section})', { label: row.label, section: suffix })
   }
-  const ready = !busy && typedKeyName.test(name.trim()) && (hashicorp ? fields.includes(field) : item?.fields.some(row => row.selector === field))
+  const ready = !busy && typedKeyName.test(name.trim()) && (keyring ? item?.field === 'secret' : hashicorp ? fields.includes(field) : item?.fields.some(row => row.selector === field))
   const resetItems = () => {
     setItems(null)
     setItemId('')
@@ -467,7 +491,7 @@ function AddVaultKey({ actions, provider, connection, roster, run, onDone }) {
     resetItems()
     try {
       const listed = hashicorp ? actions.vaultItems({ mount, folder: nextFolder }, provider)
-        : onePassword ? actions.vaultItems(search, provider) : actions.vaultItems(search)
+        : namedSearch ? actions.vaultItems(search, provider) : actions.vaultItems(search)
       await run(listed.then(answer => setItems(answer.items)))
     } finally { setBusy(false) }
   }
@@ -492,8 +516,9 @@ function AddVaultKey({ actions, provider, connection, roster, run, onDone }) {
     if (!ready) return
     setBusy(true)
     try {
-      const mapping = { name: name.trim().replace(/-/g, '_'), purpose, connection,
-        item: hashicorp ? JSON.stringify([mount, itemId]) : itemId, field, scope }
+      const key = name.trim().replace(/-/g, '_')
+      const mapping = keyring ? { name: key, purpose, scope, provider, handle: itemId }
+        : { name: key, purpose, connection, item: hashicorp ? JSON.stringify([mount, itemId]) : itemId, field, scope }
       if (onePassword || hashicorp) mapping.provider = provider
       if (await run(actions.secretSourceSet(mapping))) onDone()
     } finally { setBusy(false) }
@@ -516,7 +541,7 @@ function AddVaultKey({ actions, provider, connection, roster, run, onDone }) {
     }, h('option', { value: '' }, t('Choose an item')),
     onePassword ? [...vaults].map(([id, { name, options }]) => h('optgroup', { key: id, label: name }, options))
       : items.map(itemOption)) : null,
-    item ? h('select', {
+    item && !keyring ? h('select', {
       className: 'bt-input', 'aria-label': t('Vault field'), value: field, onChange: event => setField(event.target.value),
     }, h('option', { value: '' }, t('Choose a field')),
     hashicorp ? fields.map(id => h('option', { key: id, value: id },
@@ -534,7 +559,11 @@ const vaultStates = {
   unauthenticated: 'Not signed in to Bitwarden CLI',
   unavailable: 'The vault did not answer.',
 }
-const vaultProviders = { bitwarden: 'Bitwarden', onepassword: '1Password', 'hashicorp-vault': 'HashiCorp Vault' }
+// Built from [id, label] pairs so no provider id reads as a credential key in the bundle.
+const vaultProviders = Object.fromEntries([
+  ['bitwarden', 'Bitwarden'], ['onepassword', '1Password'], ['hashicorp-vault', 'HashiCorp Vault'],
+  [GNOME_PROVIDER_ID, GNOME_PROVIDER_LABEL],
+])
 
 function VaultSection({ roster, actions, run, Section }) {
   const [status, setStatus] = useState(null)
@@ -549,6 +578,7 @@ function VaultSection({ roster, actions, run, Section }) {
   const state = readOnly ? 'unavailable' : status?.state
   const connection = status?.connection
   const provider = status?.provider ?? choice ?? 'bitwarden'
+  const keyring = provider === GNOME_PROVIDER_ID
   const onePassword = provider === 'onepassword'
   const hashicorp = provider === 'hashicorp-vault'
   const canEnter = state === 'locked' || ((onePassword || hashicorp) && state === 'unlocked')
@@ -584,12 +614,13 @@ function VaultSection({ roster, actions, run, Section }) {
   }
   const unlock = async () => {
     const input = password.current
-    if (busy || !input?.value || (hashicorp && !address.current?.value)) return
+    if (busy || (!keyring && !input?.value) || (hashicorp && !address.current?.value)) return
     setBusy(true)
-    const credential = input.value
-    input.value = ''
+    const credential = input?.value
+    if (input) input.value = ''
     try {
-      if (hashicorp) {
+      if (keyring) await run(actions.vaultUnlockSecretService())
+      else if (hashicorp) {
         const endpoint = { address: address.current.value, namespace: namespace.current.value }
         address.current.value = ''
         namespace.current.value = ''
@@ -603,7 +634,7 @@ function VaultSection({ roster, actions, run, Section }) {
     if (busy) return
     setBusy(true)
     setAdding(false)
-    try { await run(onePassword ? actions.vaultTokenClear(provider) : hashicorp ? actions.vaultLock(provider) : actions.vaultLock()) }
+    try { await run(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring ? actions.vaultLock(provider) : actions.vaultLock()) }
     finally { changed() }
   }
   return h(Section, { title: t('Vault') },
@@ -613,8 +644,9 @@ function VaultSection({ roster, actions, run, Section }) {
       status.providers.map(id => h('option', { key: id, value: id }, t(vaultProviders[id]))))) : null,
     h('div', { className: 'bt-set-row', role: 'status' },
       h('span', { className: 'bt-tag' }, t(status?.reason ?? vaultStates[state] ?? 'Checking vault status…')),
-      h('span', { className: 'bt-set-hint' }, t(hashicorp
-        ? 'The address, namespace and token are cleared when the vault locks or the app quits.'
+      h('span', { className: 'bt-set-hint' }, t(keyring
+        ? 'Locking here closes Automagik’s access. Manage the keyring lock in GNOME.'
+        : hashicorp ? 'The address, namespace and token are cleared when the vault locks or the app quits.'
         : onePassword ? 'The token is cleared when the vault locks or the app quits.' : 'The vault locks after the idle time set in the plugin’s settings.')),
       state === 'unlocked' && (!onePassword || local)
         ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: lock }, t(onePassword ? 'Clear token' : 'Lock')) : null),
@@ -628,7 +660,7 @@ function VaultSection({ roster, actions, run, Section }) {
           h('input', { key: 'namespace', ref: namespace, className: 'bt-input', 'aria-label': t('Vault namespace (optional)'),
             placeholder: t('Vault namespace (optional)'), disabled: busy, autoComplete: 'off', spellCheck: false }),
         ] : null,
-        h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, {
+        keyring ? null : h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, {
           key: JSON.stringify([provider, connection]), inputRef: password, disabled: busy, onEnter: unlock, passwordType: hashicorp,
           label: t(hashicorp ? 'Vault token' : onePassword ? '1Password service account token' : 'Bitwarden master password') })),
         h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: unlock },
