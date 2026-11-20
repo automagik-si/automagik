@@ -2,10 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (blocked by the owner's gate: nothing in #424 or #438 starts before the owner answers Q1 and Q2; Codex copying waits for the trial) |
+| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; deliveries 0a, 1 and 2 under way, none merged; 3a held until the trial's result has been reviewed) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr patches (the pack: am-quota and the sidebar's CLI), each carrying am's generated copies of the CLI |
 | Created | 2026-11-20 |
+
+> Approved by the owner's delegate on 2026-11-20, with every recommendation (Q1-Q11). The
+> owner may amend on return.
 
 ## Summary
 
@@ -153,7 +156,8 @@ renewals?**
   Codex CLI version, the proxy version, where the homes lived and the number of holders; no
   email, machine name or token.
 
-The owner writes the outcome into this RFC (Decided). Only then is Q4 answered.
+The outcome is reviewed by the coordinator and written into this RFC (Decided) before 3a starts
+(Q4).
 
 ### The plan
 
@@ -519,9 +523,38 @@ am-quota ships switched off; none of this reaches an install that has not turned
    unknown origin, a changed file and an unreachable machine. Rollback: each machine keeps its last `auth.json` and
    backup.
 
-Deliveries 1 and 2 copy no credential; whether they may start before the trial is Q2.
+Deliveries 1 and 2 copy no credential; they start before the trial (Q2).
+
+## Decided
+
+Approved by the owner's delegate on 2026-11-20 (the note under the table), with every
+recommendation. The options not taken stay listed with each question below; taking one needs a
+later amendment.
+
+1. **Q1.** The RFC's shape stands: one approved plan, read-back before "on", Claude per machine
+   without copies, Codex copying only after a qualified route and a pass.
+2. **Q2.** Deliveries 0a, 1 and 2 may start before the trial.
+3. **Q3.** The trial runs with one test home on this computer and one on a linked machine, seeded
+   through 0a's route; a single-host run would only be preliminary.
+4. **Q4.** A pass opens 3a, limited to what was tested; a fail or an inconclusive result keeps
+   Codex on this computer only. In addition, the delegate holds 3a: the trial is prepared with a
+   test home, and its result goes to the coordinator for review before any real credential is
+   copied. No delivery reads or copies a real Codex or Claude home.
+5. **Q5.** This computer is `local` in the plan, first in order; its switch stays the panel's.
+6. **Q6.** A Codex credential goes only to machines the person adds to the list; none by default.
+7. **Q7.** A pin change in `spread` moves that machine only; the rest waits for **Spread again**.
+8. **Q8.** A host with no login of the account is an accepted exception under `one`; the sign-in
+   hint appears only where the owner allows a second login (today the Mac).
+9. **Q9.** One Codex backup on a linked machine: the original file, put back by **Remove from
+   machine**.
+10. **Q10.** A switch made on a managed machine suspends its assignment until a press adopts it
+    or re-applies the plan.
+11. **Q11.** An existing Codex file is replaced only while no Codex process of that user runs
+    there; the residual is accepted.
 
 ## Open questions
+
+None open. The questions as put to the owner, with the options not taken:
 
 1. **Q1. Does this RFC's shape stand?** (a, recommended) Yes: one approved plan, read-back before
    "on", Claude per machine without copies, Codex copying only after a qualified route and a
