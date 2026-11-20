@@ -156,6 +156,47 @@ weight. On a build of the current tree with content 3.157.2, the strip alone too
 compressed (4.0 MiB); `USER 1000:1000`, the digest-pinned bases and the health check are
 unchanged.
 
+### The toolchain
+
+| Tool | Source and pin | Path in the image |
+|---|---|---|
+| `am` | the content release's `automagik-am-<content>.tgz`, checked against its release `.sha256`; unpacked, never an archive | `/opt/automagik/am`, command `/usr/local/bin/am` |
+| `herdr-core`, `hc` | `releases.herdr.dev/core/0.1.18/herdr-core-linux-x86_64.tar.gz`, sha256 `5b2f97cb…`; verified and run in the tools stage | `/usr/local/bin/herdr-core`, `/usr/local/bin/hc` |
+| pnpm | the desktop runtime's pinned pnpm 10.34.6 (`apps/desktop/runtime/package.json`), through the image's shim; `AUTOMAGIK_PNPM` names it | `/usr/local/bin/pnpm` |
+| node | the distroless nodejs24 runtime, on `PATH` | `/nodejs/bin/node` |
+| tini | 0.19.0, with SHA-256 pins for the binary and license | `/usr/local/bin/tini` |
+
+The image pins an exact am version and checks its tarball against that release's immutable
+`.sha256`. This uses the same release trust as the plugin tarballs. The signed rolling
+`am-lane` pointer names only the newest am and cannot vouch for an older pinned build. Following
+it would make the image's am version change independently of the content release.
+
+On a fresh data volume or an image upgrade, the entrypoint runs `am self install` to link the
+bundled briefing under `/data/herdr-app`. A missing link or an unsuccessful install retries on
+the next boot. An install failure is logged and DSH still starts.
+
+DSH's shipped ACP CLI store installs npm's current Claude Code and Codex in the background
+under `$AUTOMAGIK_HOME/acp/clis` using pnpm integrity checks. It checks each binary's version
+and retries failed installs on its own schedule. The entrypoint observes the store and points
+am at the ready store-managed binaries. The image pins am, herdr-core/hc, tini and pnpm.
+Set `AUTOMAGIK_CLI_INSTALL=off` to withhold `AUTOMAGIK_PNPM` from DSH and skip the observer.
+
+Each instance keeps its persistent homes on its own `/data` volume, including
+`HERDR_APP_HOME=/data/herdr-app`. The image creates the private runtime directory
+`XDG_RUNTIME_DIR=/run/automagik` with owner `1000:1000` and mode `0700`. The entrypoint uses
+`HC_RUNTIME=/run/automagik/herdr-core` and `HC_SESSION=automagik-server` by default. It sets
+`HC_SOCKET` and `HC_TERMINAL_SOCKET` to `$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock`.
+The gate mounts the DSH volume read-only and the core socket stays outside that mount.
+
+The entrypoint starts `herdr-core serve` before DSH. It prints `herdr-core: serving on <path>`
+once the expected endpoint is a Unix socket. On failure it prints the directory listing, the
+tail of the core's stderr and its exit code. The core and am installer receive an allowlist
+of runtime settings. DSH receives the model key. If either supervised child exits, the
+entrypoint stops the other so the container's restart policy applies to both. `SIGTERM`,
+`SIGINT` and `SIGHUP` stop both.
+
+The optional am hc proxy requires core 0.1.14. It refuses this image's core 0.1.18.
+
 ## Build and smoke
 
 ```sh
@@ -168,6 +209,14 @@ node server/follow-smoke.mjs automagik-server:local
 `--version` is the release whose plugin tarballs are installed; `--image-version` is the content
 version label (normally the same release, without its `v`); `--revision` is the commit label. With
 no arguments the release is `3.90.1` and the revision label `unknown`.
+
+The builder fetches am from that release's pinned tarball and verifies it before unpacking
+(`fetch-am.mjs`); the tools stage fetches herdr-core at its own pinned version and sha256 and
+runs `hc --version` there. The in-image smoke checks the bundled versions of am, hc,
+herdr-core, pnpm and Node, and runs the shipped CLI store with a recording runner. It checks
+the briefing link and runs a scratch Bot with a fake agent. It also checks that the private
+socket answers `hc server status` and `hc ls`, and that `/data` holds no sockets. The main smoke
+starts the container with networking and automatic CLI installation disabled.
 
 The context is the repository root because the builder reuses
 `apps/desktop/runtime/package-lock.json`; `server/Dockerfile.dockerignore` keeps the context
@@ -635,16 +684,19 @@ node server/secrecy.mjs --rootfs /tmp/rootfs --inventory secrecy
 | File | Role |
 |---|---|
 | `Dockerfile`, `Dockerfile.dockerignore` | the builder, tools and distroless runtime stages |
-| `assemble.mjs` | builder stage: runtime, release tarballs, profile, prune |
-| `fetch-plugins.mjs` | downloads and verifies the pinned release's tarballs |
-| `entrypoint.mjs`, `native-worker-login.mjs`, `lib.mjs` | seed `/data`, key file, pnpm store, dsh, redacted log; the one pointer export and the required marker |
+| `assemble.mjs` | builder stage: runtime, release tarballs, am, profile, prune, versions |
+| `fetch-plugins.mjs`, `fetch-am.mjs` | download and verify the pinned release's plugin tarballs and am |
+| `toolchain.mjs` | tool paths, pins and the child environment allowlist |
+| `first-boot.mjs`, `cli-store.mjs` | am self install, ACP CLI observer and store dry run |
+| `in-image-smoke.mjs` | the checks that run inside the built image |
+| `entrypoint.mjs`, `native-worker-login.mjs`, `lib.mjs` | seed `/data`, first boot, key file, pnpm store, dsh, redacted log; the one pointer export and the required marker |
 | `profile-follow.mjs`, `profile-state.mjs` | ownership, staged offline update, backup and live version state |
 | `plugin-payload.mjs`, `offline-store.mjs` | local install inputs from scanned files; build-only dependency-cache preparation |
 | `healthcheck.mjs` | compact Docker health check and keeper JSON report |
 | `secrecy.mjs`, `secrecy-allowlist.json` | pre-push scan: rootfs extraction, inventory, rules (billing included) and the exact reviewed exceptions; `--repo` for the tracked files |
 | `image-record.mjs` | the release's record of the pushed image digest (`server-image.json`) |
 | `passwd` | the image's account record (no `/home/<user>`; `automagik` is uid 1000) |
-| `bin/dsh`, `bin/pnpm` | the image's pinned commands for `docker exec` |
+| `bin/dsh`, `bin/pnpm`, `bin/am` | the image's pinned commands for `docker exec` |
 | `profile/` | the seed profile: `package.json`, `cordis.patch.yml`, `pnpm-workspace.yaml` |
 | `build.mjs`, `smoke.mjs`, `follow-smoke.mjs`, `test/` | build, fresh/restart and older-volume smokes, unit tests |
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -21,5 +21,20 @@ test('the image lane names the canonical org, automagik-si', () => {
   assert.match(dockerfile, /org\.opencontainers\.image\.source="https:\/\/github\.com\/automagik-si\/automagik"/)
   assert.match(read('server/build.mjs'), /'https:\/\/github\.com\/automagik-si\/automagik'/)
   assert.match(read('server/fetch-plugins.mjs'), /DEFAULT_REPOSITORY = 'https:\/\/github\.com\/automagik-si\/automagik'/)
+})
+
+test('am and all shipped server sources use the canonical org', () => {
+  const repository = "DEFAULT_REPOSITORY = 'https://github.com/automagik-si/automagik'"
+  assert.ok(read('server/fetch-am.mjs').includes(repository))
+  const check = (file) => assert.doesNotMatch(read(file), /automagik-dev/, file)
+  const checkDir = (dir) => {
+    for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+      const file = join(dir, entry.name)
+      if (entry.isDirectory() && !['test', 'node_modules'].includes(entry.name)) checkDir(file)
+      else if (entry.isFile() && !entry.name.endsWith('.test.mjs')) check(file)
+    }
+  }
+  checkDir('server')
+  check('.github/workflows/server-image.yml')
 })
 
