@@ -563,3 +563,94 @@ test('an unrelated query value is the real page, not the preview', () => {
   assert.match(pageText(), /Not installed/)
   assert.doesNotMatch(pageText(), /SAMPLE DATA/)
 })
+
+test('Apps puts the Roles chip and search results between official apps and the upstream catalog', () => {
+  slots.length = 0
+  const page = officialPage({ bots: [{ id: 'genie-fixture', kind: 'genie' }] })
+  page.roster.roles = { genie: { version: '1.0.0', status: 'broken' }, 'installed-fixture': { version: '2.0.0', status: 'ok' } }
+  page.roster.roleCatalog = { available: true, roles: [
+    { id: 'community', name: 'Community fixture', publisher: 'Fixture', version: '1.0.0', installable: false },
+    { id: 'mail', name: 'Role fixture', publisher: 'automagik', version: '1.0.0', installable: true },
+  ] }
+  renderPage(page)
+  const chip = label => collect(node => node.type === 'button' && node.props['aria-pressed'] !== undefined && flatten(node).join('') === label)[0]
+  const titles = () => collect(node => node.type === 'h3').map(node => flatten(node).join(''))
+  const search = value => collect(node => node.type === 'input' && node.props.type === 'search')[0].props.onChange({ target: { value } })
+  assert.deepEqual(titles().slice(0, 3), ['Automagik official', 'Roles', 'Developer'])
+  assert.ok(pageText().indexOf('Role fixture') < pageText().indexOf('Community fixture'))
+  chip('Roles').props.onClick()
+  assert.deepEqual(titles(), ['Roles'])
+  assert.doesNotMatch(pageText(), /Mailbox|Automagik official/)
+  assert.match(pageText(), /installed-fixture/)
+  assert.ok(mainButton('genie'), 'a legacy installed package has its own row')
+  assert.ok(mainButton('Genie'), 'the built-in has its own row')
+  mainButton('Genie').props.onClick()
+  assert.match(pageText(), /Attach it from a Genie Bot's settings/)
+  assert.doesNotMatch(pageText(), /SHA-256/)
+  collect(node => node.props?.['aria-label'] === 'Back')[0].props.onClick()
+  mainButton('genie').props.onClick()
+  assert.match(pageText(), /Uninstall/)
+  collect(node => node.props?.['aria-label'] === 'Back')[0].props.onClick()
+  search('unmatched text')
+  assert.match(pageText(), /Nothing matches/)
+  assert.ok(chip('Roles'), 'the chip uses unfiltered rows')
+  search('automagik')
+  assert.ok(mainButton('Role fixture'))
+  assert.equal(mainButton('Community fixture'), undefined)
+  mainButton('Role fixture').props.onClick()
+  assert.deepEqual(titles(), ['Role fixture'], 'a role named mail has its own subview')
+  page.roster.prefs = { roles: false }
+  renderPage(page)
+  assert.equal(chip('All').props['aria-pressed'], true)
+  assert.equal(chip('Roles'), undefined)
+})
+
+test('package cards distinguish installed and catalog digests and keep declarations literal', () => {
+  slots.length = 0
+  const page = officialPage()
+  const id = 'sample-role'
+  const installed = { version: '2.9.0', sha256: 'a'.repeat(64), name: '<b>Fixture</b>', description: '<img> sample',
+    verified: true, attachable: true, tools: ['sample_tool'], capabilities: ['audio-out'] }
+  page.roster.roles = { [id]: { id, version: installed.version, status: 'ok', publisher: 'automagik' } }
+  page.roster.roleCatalog = { available: true, roles: [{ id, name: 'Latest fixture', version: '2.10.0', installable: true, publisher: 'automagik' }] }
+  page.roster.roleDetails = { [id]: { installed, catalog: { version: '2.10.0', sha256: 'b'.repeat(64), tools: ['unrelated_tool'] } } }
+  renderPage(page)
+  mainButton(installed.name).props.onClick()
+  assert.deepEqual(collect(node => node.type === 'code').map(node => flatten(node).join('')), [installed.sha256, 'b'.repeat(64)])
+  for (const text of [installed.name, installed.description, '2.9.0', '2.10.0',
+    'Update available', 'sample_tool', 'audio-out', 'Runs in the Bot team', 'What it may not change']) assert.ok(pageText().includes(text), text)
+  assert.doesNotMatch(pageText(), /unrelated_tool/)
+  assert.equal(collect(node => node.props?.dangerouslySetInnerHTML !== undefined).length, 0)
+  delete page.roster.roleDetails[id].installed.verified
+  renderPage(page)
+  assert.match(pageText(), /Details unavailable/)
+  assert.doesNotMatch(pageText(), /sample_tool|unrelated_tool/)
+  page.roster.roleCatalog.roles[0] = { id, name: 'Matching fixture', version: installed.version, installable: true, publisher: 'automagik', capabilities: ['audio-out'] }
+  page.roster.roleDetails[id].catalog = { version: installed.version, sha256: installed.sha256, tools: ['catalog_tool'] }
+  renderPage(page)
+  assert.match(pageText(), /catalog_tool/)
+  assert.match(pageText(), /From the catalog/)
+  page.roster.roleCatalog.roles = []
+  page.roster.roles = {}
+  renderPage(page)
+  assert.doesNotMatch(pageText(), /Matching fixture/)
+  assert.match(pageText(), /Automagik official/)
+})
+
+test('the active Roles chip falls back to All when its last role row disappears', () => {
+  slots.length = 0
+  const page = officialPage()
+  page.roster.roleCatalog = { available: true, roles: [
+    { id: 'fixture-role', name: 'Fixture role', publisher: 'automagik', version: '1.0.0', installable: true },
+  ] }
+  const chip = label => collect(node => node.type === 'button' && node.props['aria-pressed'] !== undefined
+    && flatten(node).join('') === label)[0]
+  renderPage(page)
+  chip('Roles').props.onClick()
+  assert.equal(chip('Roles').props['aria-pressed'], true)
+  page.roster.roleCatalog.roles = []
+  renderPage(page)
+  assert.equal(chip('Roles'), undefined)
+  assert.equal(chip('All').props['aria-pressed'], true)
+  assert.match(pageText(), /Automagik official/)
+})

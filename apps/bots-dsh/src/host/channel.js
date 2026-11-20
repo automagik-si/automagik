@@ -279,6 +279,7 @@ export function install(rt) {
     // same object and would wipe its `enabled` and `provider` fields.
     computerLive: rt.computerLive?.() ?? {},
     roleCatalog: rt.roleCatalogView(),
+    roleDetails: rt.roleDetailsView(),
     // File checks may change a record's status without a state write.
     roles,
   })

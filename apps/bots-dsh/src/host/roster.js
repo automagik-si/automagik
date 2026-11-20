@@ -1463,6 +1463,7 @@ export function install(rt) {
       delete closedArchive.archiving
     }
     const failed = await saveForDelete()
+    if (failed === undefined) rt.wakeLog?.botGone(id)
     // Same as deleteRoom: stopActivity removes the Session's armed scheduled tasks.
     // Past parts are archived too: a part move can leave tasks on the old Session,
     // which otherwise stays armed and invisible. Already-archived ids are a no-op.

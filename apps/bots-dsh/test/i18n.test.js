@@ -111,3 +111,23 @@ test('only whole held replies translate, with Chinese and Portuguese entries for
     assert.equal(heldText('x'), 'x')
   } finally { off() }
 })
+
+test('package role refusals localize the template and preserve the supplied name literally', () => {
+  const template = 'Detach {name} first.'
+  const name = '<Fixture>'
+  const message = template.replace('{name}', name)
+  assert.equal(hostTemplateOf(message), template)
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(hostText(message), `请先移除 ${name}。`)
+  } finally {
+    off()
+  }
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(pt[template].replace('{name}', name), `Remova ${name} primeiro.`)
+  for (const key of ['Choose None first.', "This role's source cannot be confirmed right now."]) {
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+    assert.ok(DICTIONARY.zh[key] && pt[key])
+  }
+})

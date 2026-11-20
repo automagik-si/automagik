@@ -1079,7 +1079,7 @@ export function install(rt) {
 
   // Input for an earlier part goes on in the current one: a browser may still show the
   // old part, and a turn stopped for a switch hands on what it claimed.
-  async function forward(owner, messages) {
+  async function forward(owner, messages, from) {
     const target = currentOf(owner)
     if (target === undefined || messages.length === 0) return
     await rt.ensureCapabilities(target)
@@ -1092,10 +1092,15 @@ export function install(rt) {
       // that goes on has its own folder, which its handoff names.
       if (kind === 'working-directory') continue
       const exchangeId = message.source?.exchangeId
-      if (exchangeId !== undefined && pending.some(queued => queued.source?.exchangeId === exchangeId)) continue
+      if (exchangeId !== undefined && pending.some(queued => queued.source?.exchangeId === exchangeId)) {
+        rt.wakeLog?.retireClaim(from, message)
+        continue
+      }
+      if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
       const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
       if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) agent.followup(copy)
       else agent.inject(copy)
+      rt.wakeLog?.retireClaim(from, message)
       pending.push(copy)
     }
     await ctx.sessions.flush(agent.session)
@@ -1114,12 +1119,18 @@ export function install(rt) {
   // order: input followup would deliver waits for the next turn, the rest waits for
   // the next step. agent.inbox writes do not touch this plugin's context, so they
   // still work while it is being unloaded.
-  const restore = (agent, messages) => {
+  const quietly = fn => (rt.wakeLog ? rt.wakeLog.quiet(fn) : fn())
+  const restore = (agent, messages, from = agent.session.id) => {
     for (const message of [...messages].reverse()) {
       const exchangeId = message.source?.exchangeId
       const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-      if (pending.some(queued => queued.id === message.id || (exchangeId !== undefined && queued.source?.exchangeId === exchangeId))) continue
+      if (pending.some(queued => queued.id === message.id || (exchangeId !== undefined && queued.source?.exchangeId === exchangeId))) {
+        rt.wakeLog?.retireClaim(from, message)
+        continue
+      }
+      if (message.source?.kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, agent.session.id)
       agent.inbox.prepend(inboxTargetOf(message), message)
+      rt.wakeLog?.retireClaim(from, message)
     }
   }
 
@@ -1129,7 +1140,7 @@ export function install(rt) {
   // a turn that starts during unload would run without Omni's hooks.
   const wake = (agent) => {
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-    for (const message of pending) agent.inbox.remove(message.id)
+    quietly(() => { for (const message of pending) agent.inbox.remove(message.id) })
     pending.forEach((message, index) => agent.send(message, inboxTargetOf(message), index === 0))
   }
 
@@ -1140,34 +1151,53 @@ export function install(rt) {
   // The start timer and a direct call can overlap on a slow start; both share one pass,
   // so kept input is handed on once.
   let heldBackRun
+  let heldBackWork
+  let heldBackTerm
   function heldBack() {
-    heldBackRun ??= handOnHeld().finally(() => { heldBackRun = undefined })
+    const term = rt.lockTerm?.()
+    if (heldBackRun === undefined || heldBackTerm !== term) {
+      const planned = Promise.withResolvers()
+      heldBackTerm = term
+      heldBackWork = planned.promise
+      const run = handOnHeld(planned.resolve, term).finally(() => {
+        planned.resolve(new Map())
+        if (heldBackRun === run) heldBackRun = undefined
+      })
+      heldBackRun = run
+    }
     return heldBackRun
   }
-  async function handOnHeld() {
+  // Wake replay only waits on the startup or takeover plan for this lock term.
+  // A late destination must not start another sweep of the live switch markers.
+  let recovery
+  function recoverHeld() {
+    const term = rt.lockTerm?.()
+    if (recovery !== undefined && recovery.term === term) return
+    void heldBack().catch(error => rt.warn('omni-ui: handing on input kept in earlier parts failed: %s', error))
+    recovery = { term, work: heldBackWork }
+  }
+  const heldBackFor = async (sessionId) => {
+    if (recovery === undefined || recovery.term !== rt.lockTerm?.()) return
+    const work = await recovery.work
+    await work.get(sessionId)
+  }
+  async function handOnHeld(plan, term) {
     await rt.load()
-    if (rt.readOnly() !== undefined) return
+    const work = new Map()
+    const canRecover = () => rt.lockTerm?.() === term && rt.readOnly() === undefined
+    if (!canRecover()) return
+    const targets = new Map()
     for (const [sessionId, owner] of Object.entries(state.switching ?? {})) {
-      try {
-        const agent = await rt.resolveAgent(sessionId)
-        const held = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-        if (currentOf(owner) !== sessionId) {
-          await forward(owner, held)
-          for (const message of held) agent.inbox.remove(message.id)
-          // An interrupted switch may not have finished moving the tasks over; stop
-          // the earlier part only after they sit on the part that replaced it.
-          await rt.moveSchedules?.(sessionId, currentOf(owner))
-          await ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true })
-            .catch(error => rt.warn('omni-ui: earlier part %s not archived: %s', sessionId, error))
-        } else {
-          try { wake(agent) } catch (error) { rt.warn('omni-ui: part %s could not be woken for its kept input: %s', sessionId, error) }
-        }
-        delete state.switching[sessionId]
-        await rt.save()
-      } catch (error) {
-        rt.warn('omni-ui: input kept in part %s was not handed on: %s', sessionId, error)
-      }
+      if (switches.has(sessionId)) continue
+      const target = currentOf(owner) ?? sessionId
+      const done = (targets.get(target) ?? Promise.resolve()).then(() => handOnPart(sessionId, owner, canRecover))
+      targets.set(target, done)
+      work.set(sessionId, done)
     }
+    for (const [target, done] of targets) work.set(target, done)
+    plan(work)
+    await Promise.all(targets.values())
+    if (!canRecover()) return
     // Earlier parts left for a fresh part's first answer by a run that is gone: nothing
     // watches that answer any more, so they are archived as a switch always did.
     const owners = [
@@ -1182,6 +1212,30 @@ export function install(rt) {
         await ctx.workspaceRegistry.archiveSession(segment.sessionId, { stopActivity: true })
           .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', segment.sessionId, error))
       }
+    }
+  }
+
+  async function handOnPart(sessionId, owner, canRecover) {
+    try {
+      if (!canRecover() || switches.has(sessionId)) return
+      const agent = await rt.resolveAgent(sessionId)
+      if (!canRecover() || switches.has(sessionId) || state.switching?.[sessionId] !== owner) return
+      const held = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+      if (currentOf(owner) !== sessionId) {
+        await forward(owner, held, sessionId)
+        quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
+        // An interrupted switch may not have finished moving the tasks over; stop
+        // the earlier part only after they sit on the part that replaced it.
+        await rt.moveSchedules?.(sessionId, currentOf(owner))
+        await ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true })
+          .catch(error => rt.warn('omni-ui: earlier part %s not archived: %s', sessionId, error))
+      } else {
+        try { wake(agent) } catch (error) { rt.warn('omni-ui: part %s could not be woken for its kept input: %s', sessionId, error) }
+      }
+      delete state.switching[sessionId]
+      await rt.save()
+    } catch (error) {
+      rt.warn('omni-ui: input kept in part %s was not handed on: %s', sessionId, error)
     }
   }
 
@@ -1252,7 +1306,7 @@ export function install(rt) {
             source: job.info ? { ...job.info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
           }))
         }
-        await forward(job, back).then(() => {
+        await forward(job, back, agent.session.id).then(() => {
           delete state.switching[agent.id]
         }).catch((error) => {
           job.kept = true
@@ -1447,8 +1501,8 @@ export function install(rt) {
     // Recorded messages are the log's own frozen objects; the inbox gets copies.
     const back = [...recorded.map(message => createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })), ...queued]
     if (back.length === 0) return
-    restore(old, back)
-    for (const message of queued) fresh.inbox.remove(message.id)
+    restore(old, back, freshId)
+    quietly(() => { for (const message of queued) fresh.inbox.remove(message.id) })
   }
 
   // The fresh part's answers decide its switch. One on the route it opened on settles it at
@@ -1734,16 +1788,16 @@ export function install(rt) {
       carryGoal(agent, fresh, room, name)
       await ctx.sessions.flush(fresh.session)
       carry.push(...job.carry.splice(0))
-      await forward(job, [...carry, ...held])
+      await forward(job, [...carry, ...held], agent.session.id)
     } catch (error) {
       job.kept = true
       try { restore(agent, [...carry, ...job.carry.splice(0)]) } catch {}
       throw error
     }
-    for (const message of held) agent.inbox.remove(message.id)
+    quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
     // Input the old part claimed while the rest moved goes on after it.
     for (let late = job.carry.splice(0); late.length > 0; late = job.carry.splice(0)) {
-      await forward(job, late).catch((error) => {
+      await forward(job, late, agent.session.id).catch((error) => {
         job.kept = true
         try { restore(agent, late) } catch {}
         throw error
@@ -1784,7 +1838,7 @@ export function install(rt) {
     }
     const past = rt.pastOwners.get(agent.id)
     if (past !== undefined && !rt.isBotSession(agent.id)) {
-      await forward(past, payload.messages).catch(error => rt.warn('omni-ui: input for %s was not handed on: %s', agent.id, error))
+      await forward(past, payload.messages, agent.session.id).catch(error => rt.warn('omni-ui: input for %s was not handed on: %s', agent.id, error))
       return takeOverStep(agent, payload)
     }
     const place = placeOf(agent.id)
@@ -2017,9 +2071,13 @@ export function install(rt) {
   }
 
   ctx.effect(() => {
-    const timer = setTimeout(() => void heldBack().catch(error => rt.warn('omni-ui: handing on input kept in earlier parts failed: %s', error)), RESUME_DELAY_MS)
+    const timer = setTimeout(recoverHeld, RESUME_DELAY_MS)
+    const offGained = rt.onLockGained?.(recoverHeld)
     timer.unref?.()
-    return () => clearTimeout(timer)
+    return () => {
+      clearTimeout(timer)
+      offGained?.()
+    }
   }, 'omni-ui: hand on input kept in earlier parts')
 
   // An archive from DSH's own Session list while the team runs: DSH asks for the
@@ -3013,7 +3071,7 @@ export function install(rt) {
     return true
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
     // A fresh part still waiting for its first answer: its failure goes back with the part.
     awaitingFirstAnswer: id => awaiting.has(id) })
 }

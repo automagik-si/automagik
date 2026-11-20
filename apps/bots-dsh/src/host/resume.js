@@ -127,12 +127,15 @@ const triggerOf = info => ({
   ...(Array.isArray(info.joined) && info.joined.length > 0 ? { joined: info.joined } : {}),
 })
 
-const readNotes = (file) => {
+export const readNotes = (file, { strict = false } = {}) => {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'))
-    const object = value => (value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {})
-    return { turns: object(parsed?.turns), queued: object(parsed?.queued) }
-  } catch {
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+    if (strict && (!object(parsed?.turns) || !object(parsed?.queued)
+      || !Object.values(parsed.queued).every(Array.isArray))) throw new Error('Invalid inflight notes')
+    return { turns: object(parsed?.turns) ? parsed.turns : {}, queued: object(parsed?.queued) ? parsed.queued : {} }
+  } catch (error) {
+    if (strict && error?.code !== 'ENOENT') throw error
     return { turns: {}, queued: {} }
   }
 }
@@ -162,12 +165,19 @@ export function install(rt) {
   // One per start, and it never rejects: { resumed, resent } after the pass,
   // { readOnly, resumed: [], resent: [] } when this host only reads the team, and
   // { failed, resumed, resent } with what was done before the pass threw or stopped.
+  const destinationPlan = Promise.withResolvers()
+  const destinationWork = new Map()
+  rt.resumeDestination = async (sessionId) => {
+    await destinationPlan.promise
+    await destinationWork.get(sessionId)
+  }
   let settle
   rt.resumesDone = new Promise((resolve) => { settle = resolve })
   // Every Session the pass posted a resume to, and every one it sent dropped messages again.
   const resumed = []
   const resent = new Set()
   const finish = (outcome) => {
+    destinationPlan.resolve()
     settle?.({ ...outcome, resumed: [...resumed], resent: [...resent] })
     settle = undefined
   }
@@ -213,9 +223,17 @@ export function install(rt) {
   let stopped = false
   let latest
   let due = false
+  let reloading
+  let noteTerm
+  let needsAdoption = false
+  const localNotes = new Map()
+  const localTurns = new Map()
+  const notesFenced = () => needsAdoption || rt.readOnly() !== undefined || (noteTerm !== undefined && noteTerm !== rt.lockTerm())
   const persist = () => {
     // Only the host that saves the team runs its work again.
-    if (stopped || rt.readOnly() !== undefined) return
+    if (stopped || notesFenced()) return
+    const term = rt.lockTerm()
+    noteTerm ??= term
     latest = JSON.stringify({ turns, queued })
     // One write waits at a time and takes the latest notes, so a busy round does not
     // write the file once per change.
@@ -227,21 +245,68 @@ export function install(rt) {
       due = false
       const snapshot = latest
       await mkdir(home, { recursive: true })
+      if (needsAdoption || rt.lockTerm() !== term || (term > 0 && !rt.holdsLock())) return
       await writeFile(file, snapshot, 'utf8')
     }).catch(error => rt.warn('omni-ui: noting running turns failed: %s', error))
   }
-  const update = (id, change) => {
-    const next = change(turns[id])
-    if (next === turns[id]) return
+  rt.reloadDeliveryNotes = (onAdopted) => {
+    const term = rt.lockTerm()
+    needsAdoption = true
+    // Wait out any write already issued. Queued snapshots see the adoption fence and skip.
+    const reload = writing.then(() => {
+      if (stopped || !rt.holdsLock() || rt.lockTerm() !== term) return
+      interrupted = readNotes(file, { strict: true })
+      // Startup can still replay the disk snapshot. Local deliveries already have a sender.
+      queued = { ...interrupted.queued }
+      turns = { ...interrupted.turns }
+      for (const [id, record] of localTurns) {
+        delete interrupted.turns[id]
+        if (record === undefined) delete turns[id]
+        else turns[id] = record
+      }
+      const adopted = new Set(Object.values(queued).flatMap(list => list.map(item => item?.args?.exchangeId)))
+      let merged = localTurns.size > 0
+      for (const [id, { sessionId, item }] of localNotes) {
+        if (adopted.has(id)) continue
+        queued[sessionId] = [...queued[sessionId] ?? [], item]
+        merged = true
+      }
+      localNotes.clear()
+      localTurns.clear()
+      noteTerm = term
+      needsAdoption = false
+      if (merged) persist()
+      onAdopted(interrupted)
+      return interrupted
+    }).catch(error => {
+      rt.warn('omni-ui: adopting inflight notes failed: %s', error)
+    }).finally(() => {
+      if (reloading === reload) reloading = undefined
+    })
+    reloading = reload
+    return reload
+  }
+
+  // One strict read per delivery while adoption is fenced. Deliveries arriving
+  // together share the read and can still go through if it fails.
+  const adoptIfNeeded = () => reloading ?? (needsAdoption && rt.holdsLock() ? rt.wakeLog.retryTakeover() : undefined)
+
+  const update = (id, change, ended = false) => {
+    const current = turns[id]
+    const next = change(current)
+    if ((next !== current || ended) && notesFenced()) localTurns.set(id, next)
+    if (next === current) return
     turns = { ...turns }
     if (next === undefined) delete turns[id]
     else turns[id] = next
     persist()
   }
   const forgetQueued = (exchangeId) => {
+    localNotes.delete(exchangeId)
     let next = queued
     for (const [sessionId, list] of Object.entries(queued)) {
-      const rest = list.filter(item => item.args.exchangeId !== exchangeId)
+      if (!Array.isArray(list)) continue
+      const rest = list.filter(item => item?.args?.exchangeId !== exchangeId)
       if (rest.length === list.length) continue
       if (next === queued) next = { ...queued }
       if (rest.length === 0) delete next[sessionId]
@@ -256,16 +321,22 @@ export function install(rt) {
     const list = queued[sessionId] ?? []
     if (list.some(item => item.args.exchangeId === args.exchangeId)) return
     // Note it before sending: a turn may take it up before the send returns.
-    queued = { ...queued, [sessionId]: [...list, { at: Date.now(), args }] }
+    const item = { at: Date.now(), args }
+    if (notesFenced()) {
+      localNotes.set(args.exchangeId, { sessionId, item })
+    }
+    queued = { ...queued, [sessionId]: [...list, item] }
     persist()
   }
   const deliver = rt.deliver
-  rt.deliver = async (args) => {
+  rt.deliver = async (args, options) => {
+    const adoption = adoptIfNeeded()
+    if (adoption !== undefined) await adoption
     const noted = { ...args, exchangeId: args.exchangeId ?? randomUUID() }
     const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
     noteDelivery(sessionId, noted)
     try {
-      return await deliver(noted)
+      return await deliver(noted, options)
     } catch (error) {
       // A delivery that never reached the inbox stays noted: the next start sends
       // it again. One whose Bot is gone is dropped, since it can never be sent.
@@ -277,6 +348,19 @@ export function install(rt) {
   // What a Session was sent and no turn has read yet.
   rt.unreadOf = sessionId => (queued[sessionId] ?? []).map(item => item.args)
   rt.forgetDelivery = forgetQueued
+  rt.deliveryNote = (id) => {
+    let marked
+    for (const [sessionId, list] of Object.entries(queued)) {
+      if (!Array.isArray(list)) continue
+      for (const item of list) {
+        const args = item?.args
+        if (args?.exchangeId !== id) continue
+        if (args.wake !== true) return { marked: false, sessionId }
+        marked ??= { marked: true, sessionId }
+      }
+    }
+    return marked
+  }
 
   // A message is done with once a turn takes it up, or once it leaves the inbox untaken
   // while Omni runs: the user stopped the Bot, or Omni moved or withdrew it.
@@ -329,7 +413,7 @@ export function install(rt) {
       case 'turn/end': {
         // DSH stops every turn as it shuts down; that one is picked up at the next start.
         if (cutByRestart(event.data?.reason)) break
-        update(id, () => undefined)
+        update(id, () => undefined, true)
         break
       }
     }
@@ -649,6 +733,12 @@ export function install(rt) {
       finish({ readOnly })
       return
     }
+    const adoption = adoptIfNeeded()
+    if (adoption !== undefined) await adoption
+    if (needsAdoption) {
+      finish({ failed: 'Could not adopt inflight notes before the restart pass' })
+      return
+    }
     const { turns: noted, queued: dropped } = interrupted
     interrupted = { turns: {}, queued: {} }
     // What the last run still had on the way is noted again first, under the
@@ -688,6 +778,7 @@ export function install(rt) {
     const seen = new Set()
     for (const item of notes) {
       const { args, oldId } = item
+      if (args.wake === true && rt.wakeLog?.accountsFor(args.exchangeId)) continue
       if (rt.botOf(args.toId) === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
       const target = sessionFor(oldId, args)
       if (target === undefined) continue
@@ -716,12 +807,17 @@ export function install(rt) {
       const args = await resumeDelivery(recordId, record)
       return args?.sessionId === target ? { ...item, args } : undefined
     }
-    const resending = Promise.all([...destinations].map(async ([target, items]) => {
-      const ready = await Promise.all(items.map(item => prepare(target, item).catch(error => {
-        rt.warn('omni-ui: picking up an interrupted turn for %s failed: %s', target, error)
-      })))
-      await resendTo(target, ready.filter(Boolean))
-    })).then(async () => {
+    for (const [target, items] of destinations) {
+      const work = (async () => {
+        const ready = await Promise.all(items.map(item => prepare(target, item).catch(error => {
+          rt.warn('omni-ui: picking up an interrupted turn for %s failed: %s', target, error)
+        })))
+        await resendTo(target, ready.filter(Boolean))
+      })()
+      destinationWork.set(target, work)
+    }
+    destinationPlan.resolve()
+    const resending = Promise.all(destinationWork.values()).then(async () => {
       firstTurn = undefined
       startedTurns = undefined
       taken = undefined

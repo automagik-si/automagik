@@ -146,6 +146,8 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     val app by vm.state.collectAsStateWithLifecycle()
     val memory = vm.memory.collectAsStateWithLifecycle().value
     val botManage = vm.botManage.collectAsStateWithLifecycle().value[ref.hostId]
+    val schedules = vm.schedules.collectAsStateWithLifecycle().value
+    val botSchedules = vm.botSchedules.collectAsStateWithLifecycle().value[ref.hostId]
     val botWrites = vm.botWrites.collectAsStateWithLifecycle().value[ref.hostId]
     val chat = vm.botChats.collectAsStateWithLifecycle().value[ref.hostId]?.getOrNull()?.find { it.terminal == ref.address }
     val terminal = app.machines[ref.hostId]?.terminals?.find { it.address == ref.address }
@@ -182,8 +184,10 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
         val cardMax = (maxHeight - 200.dp).coerceIn(240.dp, ChatStyle.PENDING_MAX_HEIGHT)
         Column(Modifier.fillMaxSize()) {
             val showMemory = s.dsh && !app.demo && botManage != false && (s.dshWrite || botWrites == true)
+            val showSchedules = s.dsh && !app.demo && botSchedules != false && (s.dshWrite || botWrites == true)
             ChatBar(s, identity, pinned, onBack, onShowTerminal?.takeIf { ChatActions.canShowTerminal(s) }, vm::chatInterrupt, vm::reconnectChat,
-                onMemory = if (showMemory) ({ vm.openMemory(ref) }) else null)
+                onMemory = if (showMemory) ({ vm.openMemory(ref) }) else null,
+                onSchedules = if (showSchedules) ({ vm.openSchedules(ref) }) else null)
             Box(Modifier.fillMaxWidth().weight(1f)) {
                 LazyColumn(Modifier.fillMaxSize().alpha(if (s.offline || s.gone) .55f else 1f), state = list,
                     contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -230,10 +234,11 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
             dismissButton = { TextButton(onClick = { confirmDraft = null }) { Text("Cancel") } })
     }
     if (memory != null && memory.hostId == ref.hostId && memory.terminal == ref.address) ChatMemoryDialog(vm, memory)
+    if (schedules != null && schedules.hostId == ref.hostId && schedules.terminal == ref.address) ChatSchedulesDialog(vm, schedules)
 }
 
 @Composable private fun ChatBar(s: Chat.State, identity: ChatIdentity, card: Chat.Row?, onBack: () -> Unit, onShowTerminal: (() -> Unit)?,
-                               onInterrupt: () -> Unit, onReconnect: () -> Unit, onMemory: (() -> Unit)?) {
+                               onInterrupt: () -> Unit, onReconnect: () -> Unit, onMemory: (() -> Unit)?, onSchedules: (() -> Unit)?) {
     Column(Modifier.fillMaxWidth().background(Chrome)) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to agents") }
@@ -254,6 +259,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                 }
             }
             if (onMemory != null) IconButton(onClick = onMemory) { Icon(Icons.Outlined.Psychology, "Bot memory", tint = Ink) }
+            if (onSchedules != null) IconButton(onClick = onSchedules) { Icon(Icons.Outlined.Schedule, "Bot schedules", tint = Ink) }
             if (ChatActions.canInterrupt(s)) IconButton(onClick = onInterrupt) { Icon(Icons.Outlined.StopCircle, "Interrupt", tint = Blocked) }
             if (onShowTerminal != null) IconButton(onClick = onShowTerminal) { Icon(Icons.Outlined.Terminal, "Show terminal", tint = Ink) }
         }

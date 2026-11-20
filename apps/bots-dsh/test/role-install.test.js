@@ -654,3 +654,475 @@ test('a restarted host catches a same-size package file edit on reinstall', asyn
   refused(await reload.call('role-install', { id: ID }), /damaged. Uninstall it first/)
   assert.equal((await reload.call('state')).value.roles[ID].status, 'damaged')
 })
+
+const attachTo = (f, id = BOT.id, role = ID) => f.call('role-attach', { id, role })
+const detachFrom = (f, id = BOT.id) => f.call('role-detach', { id })
+const pinOf = (id = ID, version = VERSION) => ({ id, version, attachedAt: new Date(clock).toISOString(), grants: [] })
+const fixtureBot = (id, extra = {}) => ({ ...BOT, id, sessionId: id, ...extra })
+
+test('attaches an inert, pinned role to the ordinary Main Bot and preserves the unrelated disk record', async t => {
+  const other = fixtureBot('other-fixture', { instructions: 'Unrelated fixture.' })
+  const f = await fixture(t, { extra: { bots: { [BOT.id]: BOT, [other.id]: other } } })
+  const otherBytes = async () => JSON.stringify((await f.disk()).bots[other.id])
+  const before = await otherBytes()
+  refused(await attachTo(f), /^Unknown role$/)
+  assert.equal((await f.install()).ok, true)
+  const behavior = await f.botBehavior()
+  assert.deepEqual(await attachTo(f), { ok: true, value: [ID] })
+  assert.equal(await otherBytes(), before)
+  const disk = await f.disk()
+  assert.deepEqual(disk.bots[BOT.id].roles, [pinOf()])
+  assert.deepEqual(f.rt.state.bots[BOT.id].roles, disk.bots[BOT.id].roles)
+  const attached = await f.botBehavior()
+  assert.deepEqual(attached.prompt, behavior.prompt)
+  assert.deepEqual(attached.identity, behavior.identity)
+  assert.deepEqual(attached.tools, behavior.tools)
+  await missing(f.marker)
+  f.rt.state.bots[BOT.id].roles[0].grants.push('fixture-existing-grant')
+  await f.rt.save()
+  const prior = await fs.readFile(f.statePath, 'utf8')
+  assert.deepEqual(await attachTo(f), { ok: true, value: [ID] })
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), prior)
+  assert.equal(f.rt.state.bots[BOT.id].roles[0].attachedAt, pinOf().attachedAt)
+  assert.deepEqual(f.rt.state.bots[BOT.id].roles[0].grants, ['fixture-existing-grant'])
+  refused(await f.uninstall(), /Detach this role/)
+  assert.deepEqual(await detachFrom(f), { ok: true, value: [] })
+  assert.deepEqual((await f.uninstall()).value, { removed: true })
+})
+
+test('checks authority, raw slot and write success in the serialized attach edit', async t => {
+  const genie = fixtureBot('genie-fixture', { kind: 'genie' })
+  const occupied = fixtureBot('occupied-fixture', { roles: [{ id: 'other-role' }] })
+  const f = await fixture(t, { extra: { bots: { [BOT.id]: BOT, [genie.id]: genie, [occupied.id]: occupied } } })
+  assert.equal((await f.install()).ok, true)
+  refused(await attachTo(f, genie.id), /Choose None first/)
+  refused(await attachTo(f, occupied.id), /Detach other-role first/)
+  refused(await attachTo(f, 'seat:fixture'), /No such Bot/)
+  refused(await detachFrom(f, 'seat:fixture'), /No such Bot/)
+  const readOnly = f.rt.readOnly
+  f.rt.readOnly = () => 'fixture read-only'
+  assert.equal((await attachTo(f)).error.code, 'bot/read-only')
+  f.rt.readOnly = readOnly
+  const holdsLock = f.rt.holdsLock
+  f.rt.holdsLock = () => false
+  refused(await attachTo(f), /does not hold the Bot team/)
+  f.rt.holdsLock = holdsLock
+  const before = await fs.readFile(f.statePath, 'utf8')
+  const temp = `${f.statePath}.${process.pid}.tmp`
+  await fs.mkdir(temp)
+  assert.equal((await attachTo(f)).ok, false)
+  assert.equal(Object.hasOwn(f.rt.state.bots[BOT.id], 'roles'), false)
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), before)
+  await fs.rm(temp, { recursive: true })
+  await detachFrom(f, genie.id)
+  assert.equal((await attachTo(f, genie.id)).ok, true)
+  refused(await attachTo(f, genie.id, 'genie'), /Detach Sample role first/)
+  refused(await attachTo(f, genie.id, 'another'), /Detach Sample role first/)
+  assert.equal((await f.call('set-prefs', { roles: false })).ok, true)
+  refused(await attachTo(f), /turned off/)
+  assert.deepEqual((await f.disk()).bots[genie.id].roles, [pinOf()])
+  assert.equal((await f.call('set-prefs', { roles: true })).ok, true)
+  assert.deepEqual((await f.disk()).bots[genie.id].roles, [pinOf()])
+})
+
+test('rechecks record identity, writer ownership and the Bot slot at commit', async t => {
+  const f = await fixture(t)
+  assert.equal((await f.install()).ok, true)
+  const original = f.rt.saveCopy
+  for (const [mutate, reason] of [
+    [() => {
+      const record = f.rt.state.roles[ID]
+      f.rt.state.roles[ID] = { ...record }
+      return () => { f.rt.state.roles[ID] = record }
+    }, /record changed/],
+    [() => {
+      const original = f.rt.holdsLock
+      f.rt.holdsLock = () => false
+      return () => { f.rt.holdsLock = original }
+    }, /does not hold the Bot team/],
+    [() => {
+      f.rt.state.bots[BOT.id].roles = [{ id: 'other-role' }]
+      return () => { delete f.rt.state.bots[BOT.id].roles }
+    }, /Bot's role changed/],
+  ]) {
+    const before = await fs.readFile(f.statePath, 'utf8')
+    f.rt.saveCopy = (apply, { beforeCommit, afterWrite }) => original(apply, {
+      beforeCommit: () => {
+        const restore = mutate()
+        try { beforeCommit() } finally { restore() }
+      },
+      afterWrite,
+    })
+    refused(await attachTo(f), reason)
+    assert.equal(await fs.readFile(f.statePath, 'utf8'), before)
+    assert.equal(Object.hasOwn(f.rt.state.bots[BOT.id], 'roles'), false)
+  }
+})
+
+test('serializes attach and uninstall in both admission orders', async t => {
+  for (const first of ['attach', 'uninstall']) await t.test(first, async t => {
+    const f = await fixture(t)
+    assert.equal((await f.install()).ok, true)
+    const saving = Promise.withResolvers()
+    const release = Promise.withResolvers()
+    const save = f.rt.saveCopy
+    f.rt.saveCopy = async (...args) => {
+      saving.resolve()
+      await release.promise
+      return save(...args)
+    }
+    const attach = () => attachTo(f)
+    const remove = () => f.uninstall()
+    const [one, two] = first === 'attach' ? [attach, remove] : [remove, attach]
+    const leading = one()
+    await saving.promise
+    const following = two()
+    release.resolve()
+    assert.equal((await leading).ok, true)
+    refused(await following, first === 'attach' ? /Detach this role/ : /Unknown role/)
+    const disk = await f.disk()
+    assert.equal(Object.hasOwn(disk.roles, ID), first === 'attach')
+    assert.equal(disk.bots[BOT.id].roles?.[0]?.id, first === 'attach' ? ID : undefined)
+  })
+})
+
+test('clears missing, mismatched, damaged and ID-only attachments without depending on package health', async t => {
+  const cases = [
+    ['missing', pinOf(), false, false],
+    ['version-mismatch', pinOf(ID, '2.0.0'), true, false],
+    ['damaged', pinOf(), true, true],
+    ['off and ID-only', { id: ID }, false, false],
+  ]
+  for (const [name, pin, install, damage] of cases) await t.test(name, async t => {
+    const f = await fixture(t, { extra: { bots: { [BOT.id]: { ...BOT, roles: [pin] } } } })
+    if (install) assert.equal((await f.install()).ok, true)
+    if (damage) await fs.unlink(join(f.verDir, 'prompt.md'))
+    if (!pin.version) await f.call('set-prefs', { roles: false })
+    assert.deepEqual(await detachFrom(f), { ok: true, value: [] })
+    assert.deepEqual((await f.disk()).bots[BOT.id].roles, [])
+    if (install) assert.equal((await f.uninstall()).ok, true)
+  })
+  const genie = fixtureBot('genie-fixture', { kind: 'genie' })
+  const mixed = fixtureBot('mixed-fixture', { roles: [{ id: ID }, { id: 'genie' }] })
+  const f = await fixture(t, { extra: { prefs: { roles: false }, bots: {
+    [BOT.id]: BOT, [genie.id]: genie, [mixed.id]: mixed,
+  } } })
+  for (const id of [BOT.id, genie.id, mixed.id]) refused(await detachFrom(f, id), /turned off/)
+})
+
+test('rejects broken and damaged installs at new attachment admission', async t => {
+  for (const status of ['broken', 'damaged']) await t.test(status, async t => {
+    const f = await fixture(t)
+    assert.equal((await f.install()).ok, true)
+    if (status === 'broken') await fs.rm(f.verDir, { recursive: true })
+    else await fs.unlink(join(f.verDir, 'prompt.md'))
+    refused(await attachTo(f), new RegExp(`is ${status}`))
+    assert.equal(Object.hasOwn((await f.disk()).bots[BOT.id], 'roles'), false)
+  })
+})
+
+test('new admission refuses the Genie package and legacy uninstall still removes its files', async t => {
+  const entry = entryOf(undefined, { id: 'genie' })
+  const f = await fixture(t, { entry })
+  await f.materialize()
+  await fs.writeFile(join(f.verDir, 'role.json'), JSON.stringify(manifestOf({ id: 'genie' })))
+  await f.close()
+  await fs.writeFile(f.statePath, JSON.stringify({ ...await f.disk(), roles: { genie: f.record() } }))
+  const reload = await f.start()
+  assert.deepEqual((await reload.call('role-catalog')).value.roles, [])
+  refused(await reload.call('role-install', { id: 'genie' }), /Unknown role/)
+  refused(await attachTo(reload, BOT.id, 'genie'), /Genie can be given/)
+  const roster = (await reload.call('state')).value
+  assert.equal(roster.roles.genie.status, 'ok')
+  assert.equal(roster.roleDetails.genie.installed.attachable, false)
+  assert.deepEqual((await reload.call('role-uninstall', { id: 'genie' })).value, { removed: true })
+  await missing(f.verDir)
+})
+
+test('uses exact signed eligibility after restart and never credits the publisher alone', async t => {
+  for (const official of [true, false]) await t.test(`official=${official}`, async t => {
+    const f = await fixture(t, { entry: entryOf(undefined, { official, description: 'Signed description', tools: ['signed_tool'] }) })
+    await f.materialize()
+    await f.close()
+    await fs.writeFile(f.statePath, JSON.stringify({ ...await f.disk(), roles: { [ID]: f.record() } }))
+    const reload = await f.start()
+    refused(await attachTo(reload), /source cannot be confirmed/)
+    const initial = (await reload.call('state')).value
+    assert.equal(initial.roles[ID].status, 'ok')
+    assert.equal(initial.roleDetails[ID].installed.verified, undefined)
+    assert.equal(initial.roleDetails[ID].installed.attachable, false)
+    const io = f.fsCalls.length
+    await reload.call('role-catalog')
+    const changed = (await reload.call('state', { since: initial.revision, live: initial.liveKey })).value
+    assert.equal(changed.unchanged, true)
+    assert.notEqual(changed.liveKey, initial.liveKey)
+    assert.equal(changed.roleDetails[ID].installed.attachable, official)
+    assert.deepEqual(changed.roleDetails[ID].catalog, {
+      version: VERSION, sha256: f.entry.sha256, description: 'Signed description', tools: ['signed_tool'],
+    })
+    assert.deepEqual((await reload.call('state', { since: initial.revision, live: changed.liveKey })).value, {
+      revision: initial.revision, unchanged: true, liveKey: changed.liveKey,
+    })
+    assert.equal(f.fsCalls.length, io)
+    assert.deepEqual(f.fetches, [INDEX, SIGNATURE])
+    if (official) assert.equal((await attachTo(reload)).ok, true)
+    else refused(await attachTo(reload), /source cannot be confirmed/)
+    assert.deepEqual(f.fetches, [INDEX, SIGNATURE])
+  })
+})
+
+test('a verified install of constructor supplies bounded details for that exact record only', async t => {
+  const id = 'constructor'
+  const declarations = {
+    id, name: 'Fixture role', description: 'x'.repeat(201),
+    tools: [{ name: 'fixture_tool', description: 'An inert declaration.', parameters: {} }],
+  }
+  const bytes = packageOf(manifestOf(declarations))
+  const f = await fixture(t, { bytes, entry: entryOf(bytes, { id }) })
+  assert.equal((await f.install({ id })).ok, true)
+  assert.deepEqual(await attachTo(f, BOT.id, id), { ok: true, value: [id] })
+  const first = (await f.call('state')).value
+  assert.deepEqual(first.roleDetails[id].installed, {
+    version: VERSION, sha256: f.entry.sha256, attachable: true, name: declarations.name,
+    tools: ['fixture_tool'], capabilities: ['audio-out'], verified: true,
+  })
+  f.rt.state.roles[id] = { ...f.rt.state.roles[id], sha256: 'b'.repeat(64) }
+  const changed = (await f.call('state', { since: first.revision, live: first.liveKey })).value
+  assert.notEqual(changed.liveKey, first.liveKey)
+  assert.deepEqual(changed.roleDetails[id].installed, { version: VERSION, sha256: 'b'.repeat(64), attachable: false })
+  assert.deepEqual((await f.call('state', { since: first.revision, live: changed.liveKey })).value, {
+    revision: first.revision, unchanged: true, liveKey: changed.liveKey,
+  })
+  await detachFrom(f)
+  refused(await attachTo(f, BOT.id, id), /source cannot be confirmed/)
+})
+
+async function mountRoleSurfaces() {
+  const { outputFiles } = await build({
+    stdin: {
+      contents: `export { ConnectorsPage } from './connectors-page.js'
+        export { BotSettingsForm } from './bot-settings.js'`,
+      resolveDir: fileURLToPath(new URL('../src/client', import.meta.url)),
+    },
+    bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+  })
+  let slots
+  let index
+  let effects
+  const appSlots = []
+  const settingsSlots = []
+  const react = {
+    createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity) } }),
+    createContext: value => ({ value }), useContext: ctx => ctx.value,
+    useState: initial => {
+      const list = slots
+      const i = index++
+      if (!(i in list)) list[i] = typeof initial === 'function' ? initial() : initial
+      return [list[i], value => { list[i] = value }]
+    },
+    useRef: current => slots[index++] ??= { current },
+    useEffect: (fn, deps) => {
+      const prior = slots[index]
+      slots[index++] = deps
+      if (!prior || deps.some((dep, i) => dep !== prior[i])) effects.push(fn)
+    },
+    useLayoutEffect() {}, useMemo: make => make(), useCallback: fn => fn, useId: () => 'id',
+    useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+  }
+  const module = { exports: {} }
+  runInNewContext(outputFiles[0].text, {
+    module, exports: module.exports, window: { location: { search: '' } },
+    require: name => (name === 'react' ? react : {}),
+  })
+  const render = (node, persistentSlots = []) => {
+    slots = persistentSlots
+    index = 0
+    effects = []
+    const view = node.type(node.props)
+    for (const effect of effects) effect()
+    return view
+  }
+  const expand = node => {
+    if (Array.isArray(node)) return node.map(expand)
+    if (node && typeof node === 'object') {
+      if (typeof node.type === 'function') return expand(render(node))
+      return { ...node, props: { ...node.props, children: expand(node.props.children) } }
+    }
+    return node
+  }
+  return {
+    app(props) {
+      const page = render({ type: module.exports.ConnectorsPage, props })
+      const app = render(page, appSlots)
+      const roleTree = findNode(app, node => node.type?.name === 'RoleShopSection' || node.type?.name === 'RoleShopCard')
+      return { page: app, roles: expand(roleTree) }
+    },
+    settings(props) {
+      const form = render({ type: module.exports.BotSettingsForm, props }, settingsSlots)
+      const card = findNode(form, node => node.type?.name === 'PackageAttachmentCard')
+      return { form, card: expand(card) }
+    },
+  }
+}
+
+const surfaceText = node => Array.isArray(node) ? node.map(surfaceText).join(' ')
+  : typeof node === 'object' && node !== null ? surfaceText(node.props?.children)
+    : typeof node === 'string' ? node : ''
+const surfaceButton = (tree, label) => findNode(tree, node => node.type === 'button' && surfaceText(node).trim() === label)
+
+test('the real Apps and Bot settings surfaces complete the package flow through owner POSTs', async t => {
+  const f = await fixture(t)
+  const { key, index } = signer()
+  const bytes = packageOf(f.manifest, f.script)
+  const catalog = index([
+    entryOf(bytes, { id: 'community-fixture', name: 'Community fixture', official: false, description: 'A sample role' }),
+    entryOf(bytes, { description: '<Catalog fixture>' }),
+  ])
+  installRoles(f.rt, {
+    keys: [key], now: () => clock,
+    fetch: async url => {
+      f.fetches.push(url)
+      if (url === INDEX) return new Response(catalog.bytes)
+      if (url === SIGNATURE) return new Response(catalog.signature)
+      assert.equal(url, f.entry.source)
+      return new Response(bytes)
+    },
+  })
+  let roster = (await f.call('state')).value
+  const posted = []
+  const pending = []
+  const actions = teamActions({
+    call: async (endpoint, payload) => {
+      posted.push([endpoint, payload])
+      const reply = await f.call(endpoint, payload)
+      assert.equal(reply.ok, true, reply.error?.message)
+      return reply.value
+    },
+    after: async work => {
+      const value = await work
+      roster = (await f.call('state')).value
+      return value
+    },
+  })
+  const catalogAction = actions.roleCatalog
+  actions.refreshModels = undefined
+  actions.roleCatalog = () => {
+    const request = catalogAction()
+    pending.push(request)
+    return request
+  }
+  const surfaces = await mountRoleSurfaces()
+  const app = () => surfaces.app({ roster, actions })
+  const settings = () => surfaces.settings({ roster, bot: roster.bots.find(bot => bot.id === BOT.id), actions,
+    run: work => { pending.push(work); return work } })
+  const first = app()
+  assert.equal(first.roles, undefined, 'discovery starts before the Roles section has rows')
+  await Promise.all(pending.splice(0))
+  assert.deepEqual(posted, [['role-catalog', undefined]])
+  const open = name => findNode(app().roles, node => node.props?.className === 'bt-app-main'
+    && surfaceText(node).trim().startsWith(name)).props.onClick()
+  const back = () => app().page.props.onBack()
+  const install = () => {
+    const button = findNode(app().roles, node => node.type === 'button' && surfaceText(node).trim() === 'Install' && !node.props.disabled)
+    assert.ok(button)
+    return button.props.onClick()
+  }
+
+  const community = findNode(app().roles, node => node.type === 'button' && node.props.disabled && surfaceText(node).trim() === 'Install')
+  assert.match(community.props.title, /isolated runtime ships/)
+  assert.match(surfaceText(app().roles), /Community roles can be installed once their isolated runtime ships/)
+  open('Community fixture')
+  assert.equal(surfaceButton(app().roles, 'Install').props.disabled, true)
+  assert.match(surfaceText(app().roles), /Waits for the isolated runtime/)
+  back()
+
+  await install()
+  assert.equal(posted.at(-1)[0], 'role-install')
+  assert.ok(findNode(app().page, node => node.props?.role === 'status' && surfaceText(node).includes('futureField')))
+  const picker = findNode(settings().form, node => node.props?.role === 'group' && node.props['aria-label'] === 'Role')
+  surfaceButton(picker, 'Sample role').props.onClick()
+  await Promise.all(pending.splice(0))
+  assert.deepEqual(posted.at(-1), ['role-attach', { id: BOT.id, role: ID }])
+  const attached = settings()
+  assert.ok(findNode(attached.form, node => node.props?.className === 'bt-tag' && surfaceText(node).trim() === 'Sample role'))
+  assert.match(surfaceText(attached.card), /sample-role@1\.0\.0/)
+  assert.match(surfaceText(attached.card), /Its tools arrive with the role runtime/)
+  await Promise.all(pending.splice(0))
+  const locked = surfaceButton(app().roles, 'Uninstall')
+  assert.equal(locked.props.disabled, true)
+  assert.match(locked.props.title, /Detach this role/)
+  open('Sample role')
+  assert.equal(surfaceButton(app().roles, 'Uninstall').props.disabled, true)
+  surfaceButton(attached.card, 'Detach').props.onClick()
+  await Promise.all(pending.splice(0))
+  assert.deepEqual(posted.at(-1), ['role-detach', { id: BOT.id }])
+  assert.equal(settings().card, undefined)
+  await surfaceButton(app().roles, 'Uninstall').props.onClick()
+  assert.equal(posted.at(-1)[0], 'role-uninstall')
+  assert.deepEqual((await f.disk()).roles, {})
+
+  await install()
+  assert.equal(posted.at(-1)[0], 'role-install', 'the package card installs the same signed role')
+  assert.match(surfaceText(app().roles), /Installed SHA-256/)
+  assert.match(surfaceText(app().roles), /Catalog SHA-256/)
+  await surfaceButton(app().roles, 'Uninstall').props.onClick()
+  assert.deepEqual((await f.disk()).roles, {})
+  assert.equal(posted.filter(([endpoint]) => endpoint === 'role-catalog').length, 2, 'Apps and settings each discover once')
+  assert.deepEqual(f.fetches, [INDEX, SIGNATURE, f.entry.source, f.entry.source])
+  await missing(f.marker)
+})
+
+test('an installed package makes no role writer available to agent MCP or Bot tools', async t => {
+  const f = await fixture(t)
+  assert.equal((await f.install()).ok, true)
+  await f.rt.agentAccess.owner('view')
+  const token = 'pinned-role-agent-fixture'
+  await fs.writeFile(join(f.home, 'agent-tokens.json'), JSON.stringify([
+    { id: 'fixture', name: 'MCP fixture', hash: SHA256(token), createdAt: 1 },
+  ]), { mode: 0o600 })
+  const rpc = (method, params) => f.post(MCP_PATH, { jsonrpc: '2.0', id: 1, method, params }, {
+    authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream',
+  })
+  const original = await fs.readFile(f.statePath, 'utf8')
+  const listed = (await rpc('tools/list')).result.tools
+  for (const name of ['role-attach', 'role_attach', 'role-detach', 'role_detach']) {
+    assert.equal(listed.some(tool => tool.name === name), false)
+    assert.equal(f.ctx.registeredTools.has(name), false)
+    const reply = await rpc('tools/call', { name, arguments: { id: BOT.id, role: ID } })
+    assert.ok(reply.error || reply.result?.isError)
+  }
+  const update = listed.find(tool => tool.name === 'update_bot')
+  assert.deepEqual(Object.keys(update.inputSchema.properties).sort(),
+    ['color', 'effort', 'id', 'instructions', 'model', 'name', 'permission', 'role'])
+  const proposal = f.ctx.registeredTools.get('propose_bot_change')
+  assert.deepEqual(Object.keys(proposal.parameters.properties).sort(),
+    ['bot', 'effort', 'instructions', 'model', 'name', 'note', 'role', 'work_dir'])
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), original)
+})
+
+test('concurrent readers share the first health check for the same install record', async t => {
+  const f = await fixture(t)
+  assert.equal((await f.install()).ok, true)
+  const scanning = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  let reads = 0
+  f.hooks.lstat = async path => {
+    if (path === f.verDir) {
+      reads += 1
+      scanning.resolve()
+      await release.promise
+    }
+    return fs.lstat(path)
+  }
+  const first = f.rt.roleRecordsView()
+  await scanning.promise
+  const second = f.rt.roleRecordsView()
+  release.resolve()
+  const answers = await Promise.all([first, second])
+  assert.deepEqual(answers[0], answers[1])
+  assert.equal(answers[0][ID].status, 'ok')
+  assert.equal(reads, 1)
+  await f.rt.roleRecordsView()
+  assert.equal(reads, 1)
+})

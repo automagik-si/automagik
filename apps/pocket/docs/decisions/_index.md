@@ -28,5 +28,6 @@ Write one from [`_Templates/decision.md`](../_Templates/decision.md).
 | [A card that closed while the phone was away comes back as a receipt](chat-receipts-on-reconnect.md) | Implemented | |
 | [One shared debug signing key for Pocket PR builds](shared-debug-signing-key.md) | Accepted | |
 | [Bot memory opens on its own connection](bot-memory.md) | Implemented | |
+| [Bot schedules open on their own connection](bot-schedules.md) | Implemented | |
 
 Back to the [docs home](../_index.md).
