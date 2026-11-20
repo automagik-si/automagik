@@ -240,6 +240,9 @@ half of #1374 is the OS boundary:
 If the runner cannot switch to the Bot uid, it refuses (`125`) rather than falling back to DSH's
 uid. That is what makes the OS half fail closed.
 
+A Bot's commands and its file tools use two disjoint trees (amendment "A Bot's files and its commands
+live in two trees", 2026-11-20).
+
 ### 4. What the member keeps
 
 The member's file rule is #1389's, unchanged: own area plus shared roots, denied roots win, the
@@ -1099,6 +1102,29 @@ Answered by the owner's delegate on 2026-11-20, each with the recommended option
    wait for Cloud's directory?** Now: it needs no new service and the pair is the principal's own
    identity; the directory can later fill the same entries. *Answered: by `(issuer, subject)`
    among those the gate already admitted, without waiting for Cloud's directory.*
+
+## Amendment (2026-11-20): a Bot's files and its commands live in two trees
+
+Decided by the owner's delegate on 2026-11-20, as the first safe step; the owner may revise it.
+
+Delivery 3 meets delivery 2 at a Bot's folder, and their ownership rules differ. The member wall
+(delivery 2, #1906) gives a Bot's file tools, which run in DSH's process, one own folder `<bots
+root>/<id>`: a real `0700` folder owned by DSH's uid. The member runner (#1406, Bot identity in
+#1903) gives a Bot's commands a work area `<workRoot>/.bots/<id>`: a `0700` folder owned by the
+Bot's own uid. One folder cannot be both.
+
+**Decision: two disjoint trees.** A Bot's file tools work in `<bots root>/<id>` as DSH's uid, under
+the wall; its commands run in the runner's area as the Bot's uid. Files do not cross between them:
+what a Bot's command writes is not visible to its file tools, and the reverse. The image refuses
+multiuser mode when the wall's bots root and the runner's work root are the same tree or either
+holds the other (delivery 3's server part). The trade-off is usability, not safety: neither tree
+gives a Bot a path to DSH's credentials or another Bot's files.
+
+**Possible evolution, for the owner (not in this delivery).** One tree shared by group: each Bot's
+area owned by the Bot's uid with a per-Bot group that DSH's uid belongs to (`2770`), and the wall
+accepting that owner and group pair for the Bot's own folder. A Bot's commands and file tools would
+then see the same files. It needs the runner to provision the group, the wall's own-folder rule to
+change, and its own review of what DSH's group membership exposes.
 
 ## Open questions
 
