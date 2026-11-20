@@ -745,7 +745,10 @@ MIT); the WebSocket library is `ws` at the version bots-dsh pins (8.18.3).
   handshake is destroyed and never reaches that handler. Every failed handshake disposes its
   provisional Peer and releases its quota. The adapter's loss while multiuser is on closes
   admission: on disposal it leaves the private namespace held by a refusing handler, on HTTP and
-  upgrade, until DSH restarts, so no later handler receives a member's connection.
+  upgrade, until DSH restarts, so no later handler receives a member's connection. Across a
+  restart, the gate forwards a member's request only on a loopback connection whose adapter has
+  just answered its readiness probe, so a handshake during a DSH restart never reaches a
+  mistaken handler registered before the adapter's reservation.
 - **Admission.** The same assertion checks as HTTP. The caller's Peer is made at admission, fixed
   for the socket's life and released on close. It has `interactions: 'answer'`, so DSH lets it
   open `$events`; DSH still gives pending events and answers only to owner Peers, and forwards
@@ -776,6 +779,13 @@ MIT); the WebSocket library is `ws` at the version bots-dsh pins (8.18.3).
   person (a `people` change, the Bot made a main Bot, a session moved, a role change) the
   affected streams and feeds end and their queued frames are dropped; the feed checks visibility
   again before each event it sends.
+  The mux passes `resourceKey` to both the frame projection and the stream withdrawal predicate.
+  For `session/follow` it is the Session ID from the DSH open's `args.request.address`, using
+  `childSessionId` for a subagent address. The carrier requires a nonempty string of at most
+  512 UTF-8 bytes, and DSH authorizes the same open arguments before the projection sees a
+  frame. The person's byte budget covers the key until the stream settles and its last frame
+  is released. Global streams such as `workspace/follow` have an undefined key and carry
+  resource IDs in their frames.
 - **What it loses.** The public `wireStream.open` takes no control handle and no uplink window
   (`lib/types/types.d.ts:95`), so the carrier has no per-stream uplink backpressure beyond its
   inbox. That matters for terminal input only, which delivery 5 refuses.
