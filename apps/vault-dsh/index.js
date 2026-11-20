@@ -5,6 +5,8 @@ import { cloudProfile, createHashicorpVault } from './src/hashicorp-vault/adapte
 import { endpointOf, provider as hashicorp, validMount, validToken } from './src/hashicorp-vault/parse.js'
 import { createSecretService } from './src/secret-service/adapter.js'
 import { provider as secretService } from './src/secret-service/parse.js'
+import { cloudProfile as protonCloud, createProtonPass } from './src/proton-pass/adapter.js'
+import { protonPass, validConnection as validProtonConnection, validToken as validProtonToken } from './src/proton-pass/parse.js'
 
 export const name = 'vault-dsh'
 export const Config = Schema.object({
@@ -18,6 +20,7 @@ export function apply(ctx, config = {}) {
     ['onepassword', createOnePassword(config)],
     [hashicorp, createHashicorpVault(config)],
     [secretService, createSecretService(config)],
+    [protonPass, createProtonPass(config)],
   ])
   let selection = Object.freeze({ provider: 'bitwarden', generation: 0 })
   let generation = 0
@@ -38,6 +41,10 @@ export function apply(ctx, config = {}) {
       if (provider === secretService) {
         const code = adapter.availability()
         if (code !== undefined) return { ok: false, code }
+      }
+      if (provider === protonPass) {
+        if (protonCloud()) return { ok: false, code: 'cloud' }
+        if (!validProtonToken(options.token) || !validProtonConnection(options.connection)) return refused()
       }
       if (options.signal?.aborted) return { ok: false, code: 'locked' }
       if (provider === hashicorp) {
@@ -95,6 +102,7 @@ export function apply(ctx, config = {}) {
     providerBinding: { value: provider => provider === secretService ? adapters.get(provider).binding : undefined },
     resolveHandle: { value: ({ provider, ...options }) => adapters.get(provider)?.resolveHandle?.(options) ?? refused() },
     itemDetail: { value: ({ provider, ...options }) => adapters.get(provider)?.detail?.(options) ?? refused() },
+    sessionOf: { value: ({ provider } = {}) => provider === protonPass ? adapters.get(provider).session : undefined },
     listFields: { value: ({ provider, ...options }) => adapters.get(provider)?.listFields?.(options) ?? refused() },
   })
   ctx.provide('secretSources', service)

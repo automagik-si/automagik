@@ -45,8 +45,8 @@ older host can read the mapping file. Delivery 2b covers shell delivery.
 Install a stable Vault CLI 2.0, 2.1 or 2.2 release. In local Settings › Secrets › Vault,
 select **HashiCorp Vault** and enter the server address, token and optional namespace.
 Use HTTPS. HTTP is available for loopback at `127.0.0.1`, `[::1]` or `localhost`.
-Automagik Cloud does not support this provider. Proton Pass and other OS
-keychain providers are deferred.
+Automagik Cloud does not support this provider. Other OS keychain providers are
+deferred.
 
 Enter a KV v1 or v2 mount to browse its folders and choose a field. The plugin checks
 the exact mount before each item read or listing. The token needs access to that
@@ -113,6 +113,25 @@ The required private-keyring acceptance test is
 Run it with Node 24.9 and the extracted AppImage runtime with `ELECTRON_RUN_AS_NODE=1`.
 It requires a private Unix socket, `dbus-daemon`, `gnome-keyring-daemon` and
 `/usr/bin/python3` with the D-Bus and libsecret bindings.
+
+## Proton Pass
+
+Install Proton Pass CLI 2.7.1 and create a personal access token with read access to a
+vault. In local Settings › Secrets › Vault › Proton Pass, choose **Set token**. The token
+is used once to sign in and is dropped after login. The CLI keeps its encrypted session
+in a private temporary folder with a memory-only key. On Windows the folder relies on
+the per-user temporary directory's access controls.
+
+**Lock**, idle lock, a provider switch, disabling the plugin and quitting remove the
+session. The plugin also locks at most 110 minutes after login starts, before Proton's
+two-hour session expiry. Enter the token again after the vault locks.
+
+The picker lists items shared through a vault, and only built-in fields can be mapped.
+Custom fields and grants for individually shared items are unsupported. Agent tokens
+are unsupported. The adapter supplies no reason, so the CLI refuses reads for sessions
+it classifies as agent sessions. A token the CLI classifies as an ordinary personal
+access token reads like one. Proton may record reads in its Business read report.
+Forward proxies are unsupported. Proton Pass is unavailable in Automagik Cloud.
 
 The host-only `secretSources` v1 service provides `status`, `unlock`, `lock`, `read`,
 `listItems` and `prepareQuit`. The `providers` property lists supported providers.

@@ -66,7 +66,8 @@ const MANAGER_READS = new Map([
   ['bws', ['secret get', 'secret list', 'run']],
   ['op', ['read', 'run', 'inject', 'item get']],
   ['vault', ['read', 'kv get', 'kv list', 'list', 'token lookup', 'token create', 'print token']],
-  ['pass-cli', ['item view', 'item get', 'item run', 'run']],
+  ['pass-cli', ['item view', 'item get', 'item run', 'run', 'item show', 'item totp', 'inject', 'export',
+    'item attachment', 'pat create', 'pat renew', 'personal-access-token create', 'personal-access-token renew', 'agent create', 'agent renew']],
   ['keepassxc-cli', ['show', 'export']],
   ['secret-tool', ['lookup', 'search']],
 ])
@@ -90,6 +91,7 @@ function managerRead(words) {
   const verbs = MANAGER_READS.get(executable)
   if (!verbs) return false
   const options = MANAGER_OPTIONS.get(executable) ?? []
+  if (executable === 'pass-cli' && args.includes('--show-secrets')) return true
   const operands = []
   for (let at = 0; at < args.length && operands.length < 2; at++) {
     const word = args[at]

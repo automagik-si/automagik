@@ -23,7 +23,7 @@ export async function untilAbort(job, signal, fallback) {
   }
 }
 
-export function createLifecycle({ idleLockMinutes = 5, timers = globalThis, run, timeouts, cleanup }) {
+export function createLifecycle({ idleLockMinutes = 5, timers = globalThis, run, timeouts, cleanup, onIdle }) {
   const idleMs = (Number.isFinite(idleLockMinutes) ? Math.min(480, Math.max(1, idleLockMinutes)) : 5) * 60000
   const lifecycle = serial()
   const children = new Set()
@@ -63,9 +63,9 @@ export function createLifecycle({ idleLockMinutes = 5, timers = globalThis, run,
     return lifecycle(() => finish(closing))
   }
 
-  function renewIdle() {
+  function renewIdle(maxMs = idleMs) {
     timers.clearTimeout(idle)
-    idle = timers.setTimeout(() => { void lock() }, idleMs)
+    idle = timers.setTimeout(() => { void (onIdle ?? lock)() }, Math.min(idleMs, maxMs))
     idle.unref?.()
   }
 
@@ -74,10 +74,10 @@ export function createLifecycle({ idleLockMinutes = 5, timers = globalThis, run,
     get credential() { return credential },
     get connection() { return connection },
     get disposed() { return disposed },
-    set(value, label) {
+    set(value, label, maxIdleMs) {
       credential = value
       connection = label
-      renewIdle()
+      renewIdle(maxIdleMs)
     },
     invalidate, child, finish, lock, renewIdle, lifecycle, reads: serial(),
     async dispose() {

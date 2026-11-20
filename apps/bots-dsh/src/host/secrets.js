@@ -20,6 +20,9 @@ import {
 import {
   GNOME_PROVIDER_ID, secretServiceItem, secretServiceHandle, secretServiceRows, secretServiceMessage,
 } from './vault-secret-service.js'
+import {
+  protonPass, protonCloud, protonItems, PROTON_FIELDS, validProtonConnection, validProtonItem, validProtonToken,
+} from './vault-proton.js'
 
 export const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/
 export const ENV_PREFIX = 'DSH_SECRET_'
@@ -72,13 +75,16 @@ const secondConnection = "The first cut supports one vault connection. Remove th
 const legacyConnection = 'The first cut supports one Bitwarden connection.'
 const cloudVault = '1Password is unavailable in Automagik Cloud.'
 const validReference = value => typeof value === 'string' && value.length > 0 && value.length <= 512
-const vaultProviders = ['bitwarden', 'onepassword', hashicorp, GNOME_PROVIDER_ID]
+const vaultProviders = ['bitwarden', 'onepassword', hashicorp, GNOME_PROVIDER_ID, protonPass]
+const fencedProvider = provider => provider === hashicorp || provider === protonPass
+const protonSetFailed = 'The Proton Pass token could not be set.'
 const validProvider = provider => vaultProviders.includes(provider)
 const validVaultReference = ({ provider, connection, item, field }) =>
   validProvider(provider) && [connection, item, field].every(validReference)
   && (provider !== 'onepassword' || (OP_ITEM_ID.test(item) && OP_FIELD_ID.test(field)))
   && (provider !== hashicorp || (validHashicorpConnection(connection) && hashicorpItem(item) !== undefined && validHashicorpField(field)))
   && (provider !== GNOME_PROVIDER_ID || (connection === GNOME_PROVIDER_ID && field === 'secret' && secretServiceItem(item) !== undefined))
+  && (provider !== protonPass || (connection === protonPass && validProtonItem(item) && PROTON_FIELDS.has(field)))
 const sameConnection = (a, b) => a.provider === b.provider && a.connection === b.connection
 const matchesLiveConnection = (service, mapping) => {
   const active = service.activeConnection?.()
@@ -125,6 +131,7 @@ async function probeVault(service, provider, settings = false) {
     if (settings && provider === GNOME_PROVIDER_ID) {
       return { state: 'unavailable', reason: secretServiceMessage(error?.code, 'The vault did not answer.') }
     }
+    if (settings && provider === protonPass && error?.code === 'cloud') return { state: 'unavailable', reason: protonCloud }
     // The adapter's error may name its account or a vault reference.
   } finally { clearTimeout(timer) }
 }
@@ -1248,6 +1255,11 @@ export function install(rt) {
     const entry = vaultAuditOf(botId, request)
     const service = secretSources
     const generation = credentialGeneration
+    const proton = mappingFor(name)?.provider === protonPass
+    const session = proton ? service?.sessionOf?.({ provider: protonPass }) : undefined
+    const checkSession = () => {
+      if (proton && (session === undefined || service?.sessionOf?.({ provider: protonPass }) !== session)) throw refusal(vaultLocked)
+    }
     const check = (status) => {
       const { binding, mapping } = checkVaultBinding(botId, request, status)
       if (binding.commandDigest !== body.commandDigest || snapshots.get(body.snapshot) !== binding) {
@@ -1255,8 +1267,9 @@ export function install(rt) {
       }
       if (service === undefined || service !== secretSources) throw refusal(`${name} is unavailable because the vault plugin is off.`)
       if (wrongHashicorpConnection(service, mapping)) throw refusal(hashicorpMismatch)
-      if (mapping.provider === hashicorp && generation !== credentialGeneration) throw refusal(vaultLocked)
+      if (fencedProvider(mapping.provider) && generation !== credentialGeneration) throw refusal(vaultLocked)
       if (mapping.provider === GNOME_PROVIDER_ID && !sameGate(service, binding.gate)) throw refusal(vaultLocked)
+      checkSession()
       if (!canUse(mapping, botId)) throw refusal(outsideScope(name))
       if (!rt.holdsLock()) throw refusal(rt.readOnly() ?? 'This host cannot approve vault requests.')
       if (blocked !== undefined) throw blockedWrite(blocked)
@@ -1307,6 +1320,7 @@ export function install(rt) {
         check('allowed')
       }
       const issuedAt = Date.now()
+      checkSession()
       grants.set(key, {
         name, botId, sessionId, commandDigest: binding.commandDigest, shell: request.shell, workdir: request.workdir,
         ...(mapping.provider === GNOME_PROVIDER_ID ? { gate: binding.gate, service } : {}),
@@ -1572,6 +1586,10 @@ export function install(rt) {
     return active?.provider === provider ? active.connection : provider === hashicorp ? undefined : provider
   }
   const entryConnection = (service, provider, connection) => {
+    if (provider === protonPass) {
+      if (!validProtonConnection(connection)) throw refusal('Choose a valid vault reference.')
+      return protonPass
+    }
     if (connection === undefined) return connectionOf(service, provider)
     if (!validReference(connection)) throw refusal('Choose a valid vault reference.')
     const mapped = sources.values().next().value
@@ -1654,9 +1672,10 @@ export function install(rt) {
       return true
     },
     async 'vault-lock'(service, body) {
+      if (body.provider === protonPass && !supportedProvider(service, protonPass)) throw refusal('The vault did not answer.')
       let locked
       try {
-        const provider = body.provider === hashicorp || body.provider === GNOME_PROVIDER_ID ? { provider: body.provider } : undefined
+        const provider = fencedProvider(body.provider) || body.provider === GNOME_PROVIDER_ID ? { provider: body.provider } : undefined
         const result = provider === undefined ? await service.lock() : await service.lock(provider)
         locked = result === true || (!Array.isArray(service.providers) && result === undefined)
       } catch {}
@@ -1684,6 +1703,17 @@ export function install(rt) {
         if (answer?.ok !== true) throw refusal('The Vault connection could not be set.')
         return true
       }
+      if (body.provider === protonPass) {
+        matchingProvider(protonPass)
+        if (!supportedProvider(service, protonPass)) throw refusal('The vault did not answer.')
+        const connection = entryConnection(service, protonPass, body.connection)
+        let answer
+        try { answer = await enter(protonPass, { token: body.token, connection }) } catch {}
+        if (answer?.code === 'cloud') throw refusal(protonCloud)
+        if (answer?.code === 'version') throw refusal('Install Proton Pass CLI 2.7.1.')
+        if (answer?.ok !== true) throw refusal(protonSetFailed)
+        return true
+      }
       if (body.provider !== 'onepassword') throw refusal('Choose a vault provider.')
       matchingProvider(body.provider)
       if (!supportedProvider(service, body.provider)) throw refusal('The vault did not answer.')
@@ -1699,8 +1729,8 @@ export function install(rt) {
       return true
     },
     async 'vault-token-clear'(service, body) {
-      if (body.provider === hashicorp) {
-        if (!supportedProvider(service, hashicorp)) throw refusal('The vault did not answer.')
+      if (fencedProvider(body.provider)) {
+        if (!supportedProvider(service, body.provider)) throw refusal('The vault did not answer.')
         return vaultRoutes['vault-lock'](service, body)
       }
       if (body.provider !== 'onepassword') throw refusal('Choose a vault provider.')
@@ -1725,6 +1755,17 @@ export function install(rt) {
         if (service !== secretSources || !sameGate(service, gate)) throw refusal(vaultLocked)
         matchingProvider(provider)
         return { items: secretServiceRows(result.items) }
+      }
+      if (provider === protonPass) {
+        const connection = entryConnection(service, provider, body.connection)
+        const signal = credentialGeneration.signal
+        const session = service.sessionOf?.({ provider })
+        let result
+        try { result = await service.listItems({ provider, connection, search, signal }) } catch {}
+        if (result?.code === 'cloud') throw refusal(protonCloud)
+        if (signal.aborted || session === undefined || service.sessionOf?.({ provider }) !== session) throw refusal(vaultLocked)
+        if (result?.ok !== true || !Array.isArray(result.items)) throw refusal('The vault items could not be listed.')
+        return { items: protonItems(result.items) }
       }
       let result
       try { result = await service.listItems(providerArgs(service, provider, { connection: connectionOf(service, provider), search })) } catch {}
@@ -1755,7 +1796,13 @@ export function install(rt) {
     const entry = endpoint === 'vault-unlock' || endpoint === 'vault-token-set'
     const clear = endpoint === 'vault-token-clear'
     const admitted = secretSources
-    const locking = endpoint === 'vault-lock' || (clear && (body.provider === 'onepassword' || body.provider === hashicorp)
+    if (body.provider === protonPass) {
+      if (!validProtonConnection(body.connection)) return Promise.reject(refusal('Choose a valid vault reference.'))
+      if (endpoint === 'vault-token-set' && !validProtonToken(body.token)) {
+        return Promise.reject(refusal('Enter your Proton Pass personal access token.'))
+      }
+    }
+    const locking = endpoint === 'vault-lock' || (clear && (body.provider === 'onepassword' || fencedProvider(body.provider))
       && supportedProvider(admitted, body.provider))
     const secretServiceOnly = body.provider === GNOME_PROVIDER_ID
     if (locking && secretServiceOnly) {
@@ -1763,8 +1810,8 @@ export function install(rt) {
       secretServiceEntry = new AbortController()
     } else if (locking) advanceCredentialGeneration()
     const entrySignal = secretServiceEntry.signal
-    // A HashiCorp clear also outdates a queued connection entry.
-    if (locking && body.provider === hashicorp) tokenRevision++
+    // These locks also outdate a queued credential entry.
+    if (locking && fencedProvider(body.provider)) tokenRevision++
     let generation = credentialGeneration
     const revision = endpoint === 'vault-token-set' ? ++tokenRevision : tokenRevision
     const checkEntry = () => {
@@ -1783,7 +1830,8 @@ export function install(rt) {
       if (!Object.hasOwn(vaultRoutes, endpoint)) throw refusal('Unknown vault operation.')
       if (body.provider !== undefined && !validProvider(body.provider)) throw refusal('Choose a vault provider.')
       if (endpoint === 'vault-token-set' && revision !== tokenRevision) {
-        throw refusal(body.provider === hashicorp ? 'The Vault connection could not be set.' : 'The 1Password service account token could not be set.')
+        throw refusal(body.provider === hashicorp ? 'The Vault connection could not be set.'
+          : body.provider === protonPass ? protonSetFailed : 'The 1Password service account token could not be set.')
       }
       const enter = async (provider, options, replacing = false) => {
         checkEntry()
@@ -1821,7 +1869,7 @@ export function install(rt) {
       if (secretSources !== service) throw refusal('The vault plugin is not on.')
       return answer
     }
-    return entry || (locking && body.provider === hashicorp) ? mutate(dispatch) : dispatch()
+    return entry || (locking && fencedProvider(body.provider)) ? mutate(dispatch) : dispatch()
   }
 
   // Internal cleanup only: the comparison and existing endpoint's map.delete run
@@ -1980,7 +2028,7 @@ export function install(rt) {
     if (message !== undefined) return refuse(message)
     if (fingerprintOf(sources.get(name)) !== fingerprint) return refuse(changedMapping(name))
     if (wrongHashicorpConnection(service, mapping)) return refuse(vaultUnavailable)
-    if ((mapping.provider === hashicorp && generation !== credentialGeneration)
+    if ((fencedProvider(mapping.provider) && generation !== credentialGeneration)
       || (mapping.provider === GNOME_PROVIDER_ID && !sameGate(service, gate))) return refuse(vaultLocked)
     if (sessionFolder(session) !== workdir) return refuse('No working folder is set for this chat; nothing was asked.')
     if (hasSecretMaterial(sources.get(name))) return refuse(unsafe)
@@ -1991,6 +2039,9 @@ export function install(rt) {
 
     const now = Date.now()
     const pending = status === 'unlocked'
+    const proton = mapping.provider === protonPass
+    const protonSession = proton ? service.sessionOf?.({ provider: protonPass }) : undefined
+    if (proton && pending && protonSession === undefined) return refuse(vaultLocked)
     const list = requestsOf(botId)
     const audits = []
     for (const previous of list) {
@@ -2022,6 +2073,14 @@ export function install(rt) {
       || (mapping.provider === GNOME_PROVIDER_ID && (service !== secretSources || !sameGate(service, gate)))) {
       if (mapping.provider === GNOME_PROVIDER_ID && request.status === 'pending') {
         cancelVaultRequest(request)
+        await rt.save()
+      }
+      return vaultLocked
+    }
+    if (proton && (generation !== credentialGeneration || service.sessionOf?.({ provider: protonPass }) !== protonSession)) {
+      if (request.status !== 'canceled') {
+        cancelVaultRequest(request)
+        await auditVault(entry, 'canceled', 'revoked')
         await rt.save()
       }
       return vaultLocked
