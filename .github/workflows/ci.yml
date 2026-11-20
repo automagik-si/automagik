@@ -609,9 +609,11 @@ jobs:
     runs-on: ubuntu-24.04
     # Measured: 10m58 on Node 22, 12m32 on Node 24, whose leg also runs the herdr-app
     # system-libraries apt-get (2m33 in the slow run). At 15 that leg was cancelled at its cap
-    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 keeps the
-    # suite, the install and a slow runner's variance under the cap. Do not trim it back.
-    timeout-minutes: 20
+    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 kept the
+    # suite, the install and a slow runner's variance under the cap until the Node 24 leg grew
+    # to 15-19 min on dev (2026-11-20) and was cancelled at 20 with 3683 of ~3774 tests done.
+    # 30 keeps that headroom. Do not trim it back.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # One list for CI and the release (#1645): .github/node-versions.json.
