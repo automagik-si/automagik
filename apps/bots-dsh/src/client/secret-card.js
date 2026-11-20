@@ -291,6 +291,37 @@ export function SecretRow({ secret, roster, actions, run, open, onToggle }) {
           : h('button', { type: 'button', className: 'bt-soft bt-soft-sm bt-secret-danger', onClick: () => setConfirm(true) }, h(TrashIcon), t('Delete')))) : null)
 }
 
+function VaultSourceRow({ source, actions, run, open, onToggle }) {
+  const [confirm, setConfirm] = useState(null)
+  const { name, purpose, definedTwice } = source
+  useEffect(() => { setConfirm(null) }, [open, definedTwice])
+  const remove = () => run(confirm === 'clear' ? actions.secretSourceClear(name) : actions.secretDelete(name))
+    .then(ok => { if (ok) setConfirm(null) })
+  return h('div', { className: 'bt-secret-item', 'data-open': open ? '' : undefined },
+    h('button', { type: 'button', className: 'bt-set-row bt-secret-summary', 'aria-expanded': open, onClick: onToggle },
+      h('span', { className: 'bt-set-copy' },
+        h('span', { className: 'bt-secret-title' }, h(KeyIcon), h('code', { className: 'bt-secret-name' }, name),
+          purpose ? h('span', { className: 'bt-secret-purpose' }, purpose) : null),
+        h('span', { className: 'bt-set-hint' }, definedTwice ? t('Defined twice') : t('Unavailable: the vault plugin cannot serve it yet'))),
+      h('span', { className: 'bt-set-control' }, h('span', { className: 'bt-tag' }, t('From a vault')))),
+    open ? h('div', { className: 'bt-secret-edit' },
+      definedTwice ? h('div', { className: 'bt-secret-warn', role: 'note' }, h(WarnIcon),
+        t('Defined twice: this name is also mapped to a vault item, so no Bot can use it. Delete one of them.')) : null,
+      h('div', { className: 'bt-secret-row-actions' },
+        confirm === null ? [
+          h('button', { key: 'clear', type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setConfirm('clear') },
+            definedTwice ? t('Remove the vault mapping') : t('Remove the mapping')),
+          definedTwice ? h('button', { key: 'delete', type: 'button', className: 'bt-soft bt-soft-sm bt-secret-danger', onClick: () => setConfirm('delete') },
+            h(TrashIcon), t('Delete the typed key')) : null,
+        ] : [
+          h('span', { key: 'q', className: 'bt-set-hint' }, confirm === 'clear'
+            ? t('Remove the mapping for {name}?', { name }) : t('Delete {name}? Bots lose it at once.', { name })),
+          h('button', { key: 'no', type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setConfirm(null) }, t('Keep')),
+          h('button', { key: 'yes', type: 'button', className: 'bt-soft bt-soft-sm bt-secret-danger', onClick: remove },
+            confirm === 'clear' ? t('Remove the mapping') : t('Delete')),
+        ])) : null)
+}
+
 function AddSecret({ actions, run, onDone }) {
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState('')
@@ -313,14 +344,21 @@ function AddSecret({ actions, run, onDone }) {
 export function SecretsPage({ roster, actions, run, Section }) {
   const [open, setOpen] = useState(null)
   const [adding, setAdding] = useState(false)
-  const secrets = roster.secrets ?? []
+  const sources = roster.secretSources?.rows ?? []
+  const mapped = new Set(sources.map(source => source.name))
+  const secrets = (roster.secrets ?? []).filter(secret => !mapped.has(secret.name))
+  const count = secrets.length + sources.length
+  const toggle = name => () => setOpen(open === name ? null : name)
   return [
     h('p', { key: 'about', className: 'bt-secret-about' },
       t('Keys your Bots asked for. Bots never see the values: they use them as '), h('code', null, '$DSH_SECRET_NAME'),
       t(' in their shell, and every value is replaced by '), h('code', null, '[secret:NAME]'), t(' before anything goes to a model.')),
-    h(Section, { key: 'list', title: t('Secrets · {count}', { count: secrets.length }) },
-      secrets.length === 0 && !adding ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No keys yet. When a Bot needs one, it shows a card in its chat.'))) : null,
-      secrets.map(secret => h(SecretRow, { key: secret.name, secret, roster, actions, run, open: open === secret.name, onToggle: () => setOpen(open === secret.name ? null : secret.name) })),
+    h(Section, { key: 'list', title: t('Secrets · {count}', { count }) },
+      roster.secretSources?.broken ? h('div', { className: 'bt-secret-warn', role: 'note' }, h(WarnIcon),
+        t('The vault mapping file could not be read; no secret can be used until it is fixed.')) : null,
+      count === 0 && !adding ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No keys yet. When a Bot needs one, it shows a card in its chat.'))) : null,
+      secrets.map(secret => h(SecretRow, { key: secret.name, secret, roster, actions, run, open: open === secret.name, onToggle: toggle(secret.name) })),
+      sources.map(source => h(VaultSourceRow, { key: source.name, source, actions, run, open: open === source.name, onToggle: toggle(source.name) })),
       adding ? h(AddSecret, { actions, run, onDone: () => setAdding(false) }) : null),
     adding ? null : h('div', { key: 'add', className: 'bt-actions' }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setAdding(true) }, t('Add a key'))),
   ]

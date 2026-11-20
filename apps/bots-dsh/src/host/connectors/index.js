@@ -125,7 +125,7 @@ export function install(rt) {
     }
     if (entry.custom !== undefined) {
       for (const [name, raw] of Object.entries(entry.custom.headers ?? {})) {
-        headers[name] = String(raw).replace(SECRET_REF, (_m, n) => rt.secretValue(n) ?? '')
+        headers[name] = resolveRefs(raw)
       }
     }
     return { url, headers }
@@ -152,7 +152,11 @@ export function install(rt) {
     return pluginP.p
   }
 
-  const resolveRefs = (value) => String(value).replace(SECRET_REF, (_m, name) => rt.secretValue(name) ?? '')
+  const resolveRefs = (value) => String(value).replace(SECRET_REF, (_match, name) => {
+    const unavailable = rt.secretSourceReason(name)
+    if (unavailable !== undefined) throw refusal(unavailable)
+    return rt.secretValue(name) ?? ''
+  })
 
   async function configFor(id) {
     const entry = entryFor(id)
@@ -230,7 +234,7 @@ export function install(rt) {
     await rt.loadSecrets()
     for (const name of [tokenSecretOf(id), refreshSecretOf(id), clientSecretOf(id), keySecretOf(id)]) {
       if (id !== 'github' || name === GITHUB_SECRET || name !== tokenSecretOf(id)) {
-        if (rt.secretValue(name) !== undefined) await rt.secretEndpoint('secret-delete', { name }).catch(() => {})
+        if (rt.secretStored(name)) await rt.secretEndpoint('secret-delete', { name }).catch(() => {})
       }
     }
   }
