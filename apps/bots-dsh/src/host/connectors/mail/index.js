@@ -434,7 +434,7 @@ export function install(rt, host) {
       const shared = accountList().some(other => other.id !== account.id && other.address === account.address)
       if (!shared) for (const suffix of ['PASSWORD', 'TOKEN', 'REFRESH']) {
         const name = mailSecretName(account.address, suffix)
-        if (rt.secretValue(name) !== undefined) await rt.secretEndpoint('secret-delete', { name }).catch(() => {})
+        if (rt.secretStored(name)) await rt.secretEndpoint('secret-delete', { name }).catch(() => {})
       }
       const rest = { ...accounts() }
       delete rest[account.id]

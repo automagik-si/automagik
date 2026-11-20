@@ -6,7 +6,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, unlinkSync, openSync, closeSync, statSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { judgeCode, cancelCode, shorten, shortenCode, shortenOpen, fingerprint, TRIES_PER_PHONE, TRIES_PER_CODE, COPIED_LIFE } from './pairing.mjs'
+import {
+  judgeCode, cancelCode, shorten, shortenCode, shortenOpen, fingerprint, desktopFingerprint,
+  TRIES_PER_PHONE, TRIES_PER_CODE, COPIED_LIFE,
+} from './pairing.mjs'
 
 const NOW = 1_000_000
 const code = (extra = {}) => ({ code: 'right', expires: NOW + 60_000, name: 'desk', ...extra })
@@ -177,4 +180,16 @@ test('a different code in its place is not shortened in the copied one\'s name',
 test('the fingerprint is the key\'s first 12 hex characters in fours', () => {
   assert.equal(fingerprint('6d35626dc129f365026a5cb104f735bb'), '6d35 626d c129')
   assert.equal(fingerprint('abc'), 'abc')
+})
+
+test('the desktop fingerprint shows only the key the bridge is serving', () => {
+  const status = { id: '4f1c9a07de21'.padEnd(64, '0'), ticket: 'ticket' }
+  const other = { ...status, id: '6d35626dc129'.padEnd(64, '0') }
+  assert.equal(desktopFingerprint(status, true), '4f1c 9a07 de21')
+  assert.equal(desktopFingerprint(other, true), '6d35 626d c129')
+  assert.equal(desktopFingerprint({ ...status, rotating: true }, true), null)
+  assert.equal(desktopFingerprint({ ...status, ticket: null }, true), null)
+  assert.equal(desktopFingerprint({ ...status, id: null }, true), null)
+  assert.equal(desktopFingerprint(status, false), null)
+  assert.equal(desktopFingerprint(null, true), null)
 })
