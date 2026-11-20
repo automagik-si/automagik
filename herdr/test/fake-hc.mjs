@@ -391,6 +391,7 @@ switch (words[0]) {
   }
   case "server": {
     // `hc server status`: the core's permanent id (state.core, else a fixed one).
+    if (words[1] === "stop") { out({ stopped: true }); break; }
     if (words[1] !== "status") fail(`fake hc: no server ${words[1]}`, 2);
     out({ core: state.core ?? { id: "fakecore0000", name: "fake" }, live: state.terminals.filter((t) => t.state === "live").length });
     break;
@@ -401,8 +402,34 @@ switch (words[0]) {
     break;
   }
   case "machine": {
+    // #1432: a local holder is added as a machine (`--via`), and removed when it holds nothing.
+    if (words[1] === "add") {
+      let name = null, target = null, temporary = false;
+      for (let i = 2; i < words.length; i += 1) {
+        if (words[i] === "--name") name = words[++i];
+        else if (words[i] === "--via" || words[i] === "--target") target = words[++i];
+        else if (words[i] === "--session") target = `${target ?? ""} --session ${words[++i]}`;
+        else if (words[i] === "--temp") temporary = true;
+      }
+      if (!name) fail("machine add needs --name", 2);
+      if ((state.machines ?? []).some((m) => m.name === name)) fail(JSON.stringify({ error: { kind: "name_taken", message: `${name} is taken` } }), 2);
+      const m = { name, id: `core-${name}`, state: "connected", host: name, target: target ?? name, temporary,
+        uname: "Linux x86_64", home: process.env.HOME, path: state.machinePath ?? null };
+      state.machines = [...(state.machines ?? []), m];
+      save();
+      out(m);
+      break;
+    }
+    if (words[1] === "rm" || words[1] === "remove") {
+      const name = words[2];
+      if (!(state.machines ?? []).some((m) => m.name === name)) fail(JSON.stringify({ error: { kind: "machine_unknown", message: `no machine "${name}"` } }), 4);
+      state.machines = (state.machines ?? []).filter((m) => m.name !== name);
+      save();
+      out({ removed: name });
+      break;
+    }
     if (words[1] !== "ls") fail(`fake hc: no machine ${words[1]}`, 2);
-    out({ machines: (state.machines ?? []).map(({ name, id, state: s, temporary = false }) => ({ name, id: id ?? `core-${name}`, host: name, state: s, temporary, target: name })) });
+    out({ machines: (state.machines ?? []).map(({ name, id, state: s, temporary = false, target = null, since_ms = null }) => ({ name, id: id ?? `core-${name}`, host: name, state: s, temporary, target: target ?? name, since_ms })) });
     break;
   }
   case "exec": {

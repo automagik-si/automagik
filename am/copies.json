@@ -114,6 +114,10 @@
       "to": "am/hermesPair.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/holderSpread.mjs",
+      "to": "am/holderSpread.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/inspect.js",
       "to": "am/inspect.js"
     },
