@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { VENDOR } from '../src/host/supervisor/stage.js'
-import { candidateMatches, completeSwitch, didSwitch, planSwitch, undoSwitch } from '../src/host/supervisor/switch.js'
+import { candidateMatches, completeSwitch, didSwitch, digest, planSwitch, undoSwitch } from '../src/host/supervisor/switch.js'
 import { BOTS, fixture, FROM, read, RUN_ID, TO, write } from './fixtures/supervisor.mjs'
 
 function prepared(t) {
@@ -80,6 +80,28 @@ test('a cut after every rename can be completed or undone from the persisted jou
   }
 })
 
+test('candidate inputs allow DSH metadata reconciliation and reject installer changes', t => {
+  const { config, staging, run, profileDir } = prepared(t)
+  run.journal = planSwitch(config, staging, run)
+  completeSwitch(config, staging, run, () => {})
+  const changed = join(profileDir, 'package.json')
+  const manifest = read(changed)
+  manifest.dsh.profile.bundles.push('reconciled')
+  write(changed, manifest)
+  assert.ok(candidateMatches(config, staging, run))
+
+  for (const file of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', 'compatibility.json']) {
+    const path = join(profileDir, file)
+    const original = fs.readFileSync(path)
+    fs.appendFileSync(path, '\n')
+    assert.equal(candidateMatches(config, staging, run), false, file)
+    fs.writeFileSync(path, original)
+  }
+  manifest.dependencies['custom-plugin'] = '^2.0.0'
+  write(changed, manifest)
+  assert.equal(candidateMatches(config, staging, run), false)
+})
+
 test('an interrupted undo continues in reverse and keeps its original reason', t => {
   const f = prepared(t)
   let run = f.run
@@ -127,3 +149,44 @@ test('prepares recovery inputs before intent and refuses to undo using changed s
   assert.deepEqual(fs.readFileSync(live), installed)
   assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, TO)
 })
+
+
+for (const mode of ['strict', 'relinking', 'rollback', 'rename conflict']) {
+  test('undo preflights the whole reverse switch for ' + mode, t => {
+    const f = prepared(t)
+    const { config, profileDir, run, staging } = f
+    run.journal = planSwitch(config, staging, run)
+    completeSwitch(config, staging, run, () => {})
+    const kept = join(f.store, run.journal.keep)
+    const liveLock = fs.readFileSync(join(profileDir, 'pnpm-lock.yaml'))
+    const live = join(profileDir, 'package.json')
+    let reason = 'stage-failed'
+    let error = /Profile entries changed/
+    if (mode === 'rollback') {
+      reason = 'health-failed'
+      error = /Rollback manifest changed/
+      run.journal.rollbackManifestHash = digest(fs.readFileSync(join(staging.source, 'package.json')))
+      fs.writeFileSync(join(staging.source, 'rollback.json'), '{}')
+    } else if (mode === 'rename conflict') {
+      error = /Inconsistent switch rename/
+      fs.copyFileSync(join(kept, 'vendor', f.archive.split('/').at(-1)), f.archive)
+    } else {
+      const changed = read(live)
+      changed.dependencies['custom-plugin'] = '^2.0.0'
+      write(live, changed)
+      if (mode === 'relinking') {
+        run.journal.relinking = true
+        error = /Unrelated profile entries changed during relink/
+      }
+    }
+    const manifest = fs.readFileSync(live)
+    const journal = structuredClone(run.journal)
+    assert.throws(() => undoSwitch(config, staging, run, () => assert.fail('undo journal was saved'), reason,
+      () => assert.fail('a step was reversed')), error)
+    assert.deepEqual(run.journal, journal)
+    assert.deepEqual(fs.readFileSync(live), manifest)
+    assert.deepEqual(fs.readFileSync(join(profileDir, 'pnpm-lock.yaml')), liveLock)
+    assert.equal(read(join(profileDir, 'node_modules', BOTS, 'package.json')).version, TO)
+    assert.equal(read(join(kept, 'node_modules', BOTS, 'package.json')).version, FROM)
+  })
+}

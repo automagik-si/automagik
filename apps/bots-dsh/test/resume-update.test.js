@@ -61,9 +61,10 @@ function runtime(ctx, home) {
   }
 }
 
-function useBootHold(rt, phase = 'health') {
+function useBootHold(rt, phase = 'health', expectedRun) {
   let run = liveRun(phase)
   const hold = createUpdateHold({
+    expectedRun,
     readStatus: () => ({ supervised: true, profileKnown: true, run }),
     bootPlan: () => rt.resumeDestinationsPlanned,
     schedule: () => ({}),
@@ -93,7 +94,7 @@ function replayBench(t, home, { agents = new Map(), logs = new Map(), before, ga
   }
   before?.(rt)
   install(rt)
-  const verdict = gate ? useBootHold(rt) : undefined
+  const verdict = gate ? useBootHold(rt, typeof gate === 'string' ? gate : undefined, gate === 'rollingBack' ? 'test-update' : undefined) : undefined
   t.after(() => ctx.dispose())
   return { ctx, rt, sent, verdict }
 }
@@ -1219,4 +1220,25 @@ test('cutting a turn opened by a subagent settlement lets the resumed answer rea
   assert.equal(replies().length, 1)
   assert.equal(replies()[0].content[0].text, 'Done')
   assert.deepEqual(closed, [{ work: asker.exchangeId, text: 'Done' }])
+})
+
+test('a restored child picks up sticky work only after the rollback verdict', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = temp(t)
+  const resumed = []
+  const daily = { count: 2, at: Date.now() }
+  const agent = { id: 'chat', session: { id: 'chat' }, followup: message => resumed.push(message) }
+  seed(home, { turns: { chat: { since: 1, botId: 'ada', stoppedBy: 'update' } } })
+  const b = replayBench(t, home, { gate: 'rollingBack', agents: new Map([['chat', agent]]),
+    logs: new Map([['chat', [user('resume this')]]]), before(rt) {
+      rt.chatOwners.set('chat', 'ada')
+      rt.state.restartResumes = { chat: daily }
+    } })
+  t.mock.timers.tick(61_000)
+  await immediate()
+  assert.deepEqual(resumed, [])
+  assert.deepEqual((await finishBoot(t, b, 'rolledBack')).resumed, ['chat'])
+  assert.equal(resumed.length, 1)
+  assert.equal(resumed[0].source.resumedByUpdate, true)
+  assert.deepEqual(b.rt.state.restartResumes.chat, daily)
 })

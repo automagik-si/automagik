@@ -524,6 +524,12 @@ export function install(rt) {
         || (endpoint === 'vault-token-clear' && body.provider === 'bitwarden-secrets')) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
+      const healthForm = body.health === true && Object.keys(body).length === 1
+      if (endpoint === 'state' && healthForm) {
+        await rt.load()
+        const health = rt.teamHealth()
+        return health ? ok(health) : fail('The saved team could not be read.', 'bot/team-unread')
+      }
       await rt.refresh()
       // The web self-update (RFC 0041): owner routes of the window that holds the team, never READS, never a Bot tool.
       if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result'
@@ -536,7 +542,7 @@ export function install(rt) {
         const status = endpoint === 'self-update-status' ? rt.selfUpdateStatus() : undefined
         const result = endpoint === 'self-update-status'
           // Only an instance whose owner turned in-app updates on (`selfUpdate: true`) offers Update now.
-          ? { ...status, ...(rt.config.selfUpdate === true
+          ? { ...status, ...(healthForm ? rt.selfUpdateHealth() : {}), ...(rt.config.selfUpdate === true
             ? { startEnabled: true, startRefusal: rt.selfUpdateStartRefusal(status) } : {}) }
           : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId)
             : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation), { force: body.force === true })

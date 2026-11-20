@@ -14,7 +14,7 @@ import { UPDATE_CUT } from './constants.js'
 import { teamHomeOf } from './folders.js'
 import { savedResult } from './self-update-check.js'
 import { supervisorOf, usableStore, writeJsonAtomic } from './self-update.js'
-import { RUNNING } from './supervisor/records.js'
+import { isId, RUNNING } from './supervisor/records.js'
 import { readJson } from './supervisor/store.js'
 
 export { CHECK_FRESH_MS }
@@ -37,7 +37,7 @@ const VERDICTS = new Set(['healthy', 'rolledBack', 'notUpdated'])
  * - requestPresent(requestId): whether request.json still holds our request.
  * - onResume(): picks up, in this run, the work this process stopped (an update that did not happen).
  */
-export function createUpdateHold({ readStatus, requestPresent = () => false, onResume = () => {}, bootPlan = () => {}, warn = () => {}, now = Date.now, schedule = (fn, ms) => setTimeout(fn, ms) }) {
+export function createUpdateHold({ readStatus, expectedRun, requestPresent = () => false, onResume = () => {}, bootPlan = () => {}, warn = () => {}, now = Date.now, schedule = (fn, ms) => setTimeout(fn, ms) }) {
   let state = 'unknown'
   let ours = null
   let firstAt
@@ -85,7 +85,10 @@ export function createUpdateHold({ readStatus, requestPresent = () => false, onR
     })
   }
   function decide(run) {
-    if (VERDICTS.has(run.phase)) return open(run.phase)
+    if (VERDICTS.has(run.phase)) {
+      if (expectedRun === run.runId) expectedRun = undefined
+      return open(run.phase)
+    }
     if (run.phase === 'manualRecovery') {
       observedRun = run.runId
       state = 'manual'
@@ -101,6 +104,7 @@ export function createUpdateHold({ readStatus, requestPresent = () => false, onR
       stalledWarned = true
       warn('ds-bot: the web self-update has stopped making progress; new work stays held')
     }
+    return run.runId
   }
   function tick() {
     if (state !== 'unknown' && !awaitingVerdict()) return
@@ -129,8 +133,13 @@ export function createUpdateHold({ readStatus, requestPresent = () => false, onR
       if (time - ours.goneAt > GONE_WAIT_MS) open('request-unanswered')
       return
     }
+    if (expectedRun !== undefined) {
+      if (run?.runId === expectedRun) return decide(run)
+      if (state === 'unknown') state = 'closed'
+      return
+    }
     if (observedRun !== undefined) {
-      if (run?.runId === observedRun) decide(run)
+      if (run?.runId === observedRun) return decide(run)
       return
     }
     if (status.supervised && !known) {
@@ -155,7 +164,13 @@ export function createUpdateHold({ readStatus, requestPresent = () => false, onR
     get closed() { firstUse(); return closed() },
     get state() { return state },
     get awaitingVerdict() { return awaitingVerdict() },
+    get awaitingBootVerdict() { firstUse(); return expectedRun !== undefined },
     firstUse,
+    proof() {
+      firstUse()
+      const liveRun = tick()
+      return { state, run: state === 'closed' ? liveRun ?? null : null }
+    },
     tick,
     /** Close admission for our own request (the owner's click). */
     close(requestId, ownsTeam = () => true) {
@@ -217,7 +232,9 @@ export function install(rt) {
     const check = () => usableStore(profileDir)
     return readJson(check, check(), 'request.json')?.requestId === requestId
   }
+  const expected = env.AUTOMAGIK_SUPERVISOR_RUN
   const hold = createUpdateHold({
+    expectedRun: supervised() && isId(expected) ? expected : undefined,
     readStatus: () => {
       const profileDir = profileOf()
       if (typeof profileDir !== 'string') return { supervised: supervised(), profileKnown: false, run: null }

@@ -2545,6 +2545,18 @@ var ZH = {
   "Updating: checking that the new version answers…": "正在更新：检查新版本是否响应…",
   "Updating: going back to the previous version…": "正在更新：回退到上一个版本…",
   "Updated to Automagik {version}.": "已更新到 Automagik {version}。",
+  "DSH stopped during the health check.": "DSH 在健康检查期间停止。",
+  "The local web listener did not answer.": "本地 Web 监听端口没有响应。",
+  "Local sign-in did not work.": "本地登录失败。",
+  "The expected plugins or the update hold could not be verified.": "无法验证所需插件或更新暂停状态。",
+  "The saved team could not be read.": "无法读取已保存的团队。",
+  "The web page or its scripts did not load.": "网页或其脚本未能加载。",
+  "Failed check: {check}": "未通过的检查：{check}",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复，团队回到了更新前的状态。你的会话、记忆、设置和密钥都没有丢失。",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. If you changed the team between {start} and {end}, that change is in the copy kept with the update. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复，团队回到了更新前的状态。如果你在 {start} 到 {end} 之间修改了团队，改动保存在此次更新保留的副本中。你的会话、记忆、设置和密钥都没有丢失。",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复。你的会话、记忆、设置和密钥都没有丢失。",
+  "This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).": "此版本的 Automagik 无法在应用内回退更新。请先手动更新一次（见 docs/upgrade.md）。",
+  'The update to Automagik {to} failed, and so did going back to {from}. See "In-app updates" in docs/upgrade.md; state.json in the update store names the step that failed.': "更新到 Automagik {to} 失败，回退到 {from} 也失败。请参阅 docs/upgrade.md 中的“In-app updates”。更新存储中的 state.json 记录了失败的步骤。",
   "The update was undone: Automagik {version} is back. Nothing was lost.": "更新已撤销：Automagik {version} 已恢复。没有丢失任何内容。",
   "Not updated: {reason} The work that was stopped goes on.": "未更新：{reason}被停止的工作会继续。",
   'The update needs manual recovery. See "In-app updates" in docs/upgrade.md.': "此次更新需要手动恢复。请参阅 docs/upgrade.md 中的“In-app updates”。",
@@ -35243,18 +35255,51 @@ function runStep(phase) {
       return null;
   }
 }
+function failedHealthCheck(failed) {
+  switch (failed) {
+    case "exited":
+      return t("DSH stopped during the health check.");
+    case "port":
+      return t("The local web listener did not answer.");
+    case "sign-in":
+      return t("Local sign-in did not work.");
+    case "plugins":
+      return t("The expected plugins or the update hold could not be verified.");
+    case "roster":
+      return t("The saved team could not be read.");
+    case "page":
+      return t("The web page or its scripts did not load.");
+    default:
+      return null;
+  }
+}
 function runMessage(run3) {
   if (!run3) return null;
   if (RUNNING_PHASES.has(run3.phase)) return runStep(run3.phase);
   switch (run3.phase) {
     case "healthy":
       return t("Updated to Automagik {version}.", { version: run3.to });
-    case "rolledBack":
-      return t("The update was undone: Automagik {version} is back. Nothing was lost.", { version: run3.from });
+    case "rolledBack": {
+      if (!run3.rollback) return t("The update was undone: Automagik {version} is back. Nothing was lost.", { version: run3.from });
+      const versions = { from: run3.from, to: run3.to };
+      if (run3.rollback.data?.restored) {
+        if (run3.rollback.data.trialKept === true && run3.rollback.trialFrom && run3.rollback.trialTo) {
+          return t("The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. If you changed the team between {start} and {end}, that change is in the copy kept with the update. Nothing in your sessions, memory, settings or keys was lost.", {
+            ...versions,
+            start: new Date(run3.rollback.trialFrom).toLocaleTimeString(),
+            end: new Date(run3.rollback.trialTo).toLocaleTimeString()
+          });
+        }
+        return t("The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. Nothing in your sessions, memory, settings or keys was lost.", versions);
+      }
+      return t("The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back. Nothing in your sessions, memory, settings or keys was lost.", versions);
+    }
     case "notUpdated":
-      return t("Not updated: {reason} The work that was stopped goes on.", { reason: selfUpdateReason(run3.reason) });
+      return t("Not updated: {reason} The work that was stopped goes on.", {
+        reason: run3.detail === "previous-unsupported" ? t("This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).") : selfUpdateReason(run3.reason)
+      });
     case "manualRecovery":
-      return t('The update needs manual recovery. See "In-app updates" in docs/upgrade.md.');
+      return run3.rollback ? t('The update to Automagik {to} failed, and so did going back to {from}. See "In-app updates" in docs/upgrade.md; state.json in the update store names the step that failed.', { from: run3.from, to: run3.to }) : t('The update needs manual recovery. See "In-app updates" in docs/upgrade.md.');
     default:
       return null;
   }
@@ -35611,9 +35656,15 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
     );
   }
   const message = forceChecking ? t("Checking for updates…") : forceView?.message ? forceView.message : attempt?.refusal && !hasVerdict && !expired2 ? attempt.refusal : refused !== null ? cannotUpdate(refused) : runText !== null && (hasVerdict && attempt !== null || runLive && !expired2 || result === null) ? runText : expired2 || unconfirmedStart ? t("The update status could not be confirmed. Check again shortly.") : awaitingVerdict ? null : result === null || waiting ? null : result.state === "available" && checkExpired ? t("Cannot update: {reason}", { reason: selfUpdateReason("check-stale") }) : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : result.state === "interrupted" ? t("The check was interrupted. Check again.") : result.state === "checking" ? t("A check is already running. Try again shortly.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
+  const failed = message === runText && run3?.phase === "rolledBack" ? failedHealthCheck(run3.rollback?.failed) : null;
   return (0, import_react89.createElement)(
     Row3,
-    { label: "Automagik", hint: (0, import_react89.createElement)("span", { role: "status" }, message) },
+    { label: "Automagik", hint: (0, import_react89.createElement)(
+      "span",
+      { role: "status" },
+      message,
+      failed === null ? null : " " + t("Failed check: {check}", { check: failed })
+    ) },
     ...canStart ? [(0, import_react89.createElement)(
       "button",
       { type: "button", className: "bt-soft bt-soft-sm", disabled: updating || forceBusy, onClick: onConfirm },

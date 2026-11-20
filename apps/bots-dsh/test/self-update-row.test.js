@@ -242,3 +242,24 @@ test('the owner room renders its recorded update resume with update wording', as
   assert.match(renderText(cell), /Ada was interrupted by an Automagik update and picked its work back up/)
   assert.match(renderText(cell), /Ada was cut off by a restart and picked its work back up/)
 })
+
+test('the About row reports the failed check, team restore window, and manual recovery', async () => {
+  const base = { phase: 'rolledBack', from: '1.2.3', to: '1.2.4' }
+  const rollback = { failed: 'page', trialFrom: '2026-11-20T12:00:00Z', trialTo: '2026-11-20T12:01:00Z' }
+  const hint = async run => text((await rowFixture({ readStatus: async () => ({ ...ready, run }) }).draw()).props.hint)
+  const restored = await hint({ ...base, rollback: { ...rollback, data: { restored: true, trialKept: true } } })
+  assert.match(restored, /Automagik 1\.2\.4 did not pass.*Automagik 1\.2\.3 is back, with the team as it was before the update/)
+  for (const time of [rollback.trialFrom, rollback.trialTo]) assert.ok(restored.includes(new Date(time).toLocaleTimeString()))
+  assert.match(restored, /that change is in the copy kept with the update/)
+  assert.match(restored, /Failed check: The web page or its scripts did not load\./)
+  const noCopy = await hint({ ...base, rollback: { ...rollback, data: { restored: true, trialKept: false } } })
+  assert.match(noCopy, /is back, with the team as it was before the update/)
+  assert.doesNotMatch(noCopy, /copy kept with the update/)
+  const untouched = await hint({ ...base, rollback: { ...rollback, data: { restored: false, why: 'same-format' } } })
+  assert.match(untouched, /Automagik 1\.2\.3 is back\. Nothing in your sessions, memory, settings or keys was lost\./)
+  assert.doesNotMatch(untouched, /changed the team/)
+  assert.match(await hint({ ...base, phase: 'manualRecovery', rollback }),
+    /going back to 1\.2\.3.*state.json in the update store names the step that failed/)
+  assert.match(await hint({ ...base, phase: 'notUpdated', reason: 'profile-invalid', detail: 'previous-unsupported' }),
+    /cannot roll an update back from the app/)
+})

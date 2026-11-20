@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { prepareStore } from '../../src/host/supervisor/store.js'
 import { downloadPath, stagePaths, VENDOR } from '../../src/host/supervisor/stage.js'
 
+import { healthPage } from './supervisor-health-wire.mjs'
+
 export const BOTS = '@automagik/bots-dsh'
 export const WELCOME = '@automagik/welcome-dsh'
 export const FROM = '3.160.2'
@@ -38,7 +40,9 @@ export function fixture(t, { plugins = [BOTS], mode } = {}) {
   fs.symlinkSync(dirname(yaml), join(dshPackage, '../../js-yaml'))
   write(join(dshPackage, 'package.json'), { type: 'module', version: '0.2.2-rc.2' })
   fs.copyFileSync(fileURLToPath(new URL('./supervisor-dsh.mjs', import.meta.url)), dshBin)
-  fs.copyFileSync(fileURLToPath(new URL('./supervisor-lock.mjs', import.meta.url)), join(dirname(dshBin), 'supervisor-lock.mjs'))
+  for (const file of ['supervisor-lock.mjs', 'supervisor-health-wire.mjs']) {
+    fs.copyFileSync(fileURLToPath(new URL(file, import.meta.url)), join(dirname(dshBin), file))
+  }
   fs.mkdirSync(botsHome)
   write(join(botsHome, 'state.json'), { version: 2, note: 'preserve me' })
   fs.mkdirSync(join(profileDir, VENDOR), { recursive: true })
@@ -61,6 +65,10 @@ export function fixture(t, { plugins = [BOTS], mode } = {}) {
     const dir = join(profileDir, 'node_modules', name)
     fs.mkdirSync(dir, { recursive: true })
     write(join(dir, 'package.json'), { name, version: FROM })
+    if (name === BOTS) {
+      fs.mkdirSync(join(dir, 'src/host'), { recursive: true })
+      fs.copyFileSync(join(HOST, 'update-contract.json'), join(dir, 'src/host/update-contract.json'))
+    }
   }
   const tarballs = new Map()
   const release = plugins.map(name => {
@@ -78,7 +86,7 @@ export function fixture(t, { plugins = [BOTS], mode } = {}) {
   }
   const env = {
     ...testEnv, PATH: bin + ':' + testEnv.PATH, AUTOMAGIK_BOTS_HOME: botsHome, SUPERVISOR_FIXTURE: root, SUPERVISOR_MODE: mode ?? '',
-    SUPERVISOR_HOST_SOURCE: HOST,
+    SUPERVISOR_HOST_SOURCE: HOST, SUPERVISOR_HEALTH_PAGE: healthPage,
     XDG_CONFIG_HOME: join(root, 'config'), NPM_CONFIG_USERCONFIG: join(root, 'user.npmrc'),
     SUPERVISOR_PACKAGES: JSON.stringify(Object.fromEntries(release.map(plugin => [plugin.sha256, { name: plugin.name, version: plugin.version }]))),
   }

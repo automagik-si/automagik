@@ -1,15 +1,18 @@
 [
   "bounded-get.js",
+  "home-lock.js",
   "lane-verify.js",
   "role-keys.json",
   "supervisor/child.js",
   "supervisor/copy.js",
   "supervisor/files.json",
+  "supervisor/health.js",
   "supervisor/main.js",
   "supervisor/pnpm.js",
   "supervisor/records.js",
   "supervisor/release.js",
   "supervisor/request.js",
+  "supervisor/rollback.js",
   "supervisor/stage.js",
   "supervisor/store.js",
   "supervisor/switch.js"

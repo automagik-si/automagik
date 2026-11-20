@@ -213,15 +213,45 @@ function runStep(phase) {
   }
 }
 
+function failedHealthCheck(failed) {
+  switch (failed) {
+    case 'exited': return t('DSH stopped during the health check.')
+    case 'port': return t('The local web listener did not answer.')
+    case 'sign-in': return t('Local sign-in did not work.')
+    case 'plugins': return t('The expected plugins or the update hold could not be verified.')
+    case 'roster': return t('The saved team could not be read.')
+    case 'page': return t('The web page or its scripts did not load.')
+    default: return null
+  }
+}
+
 // What the live update run of this supervisor says (RFC 0041 state.json, read through self-update-status).
 function runMessage(run) {
   if (!run) return null
   if (RUNNING_PHASES.has(run.phase)) return runStep(run.phase)
   switch (run.phase) {
     case 'healthy': return t('Updated to Automagik {version}.', { version: run.to })
-    case 'rolledBack': return t('The update was undone: Automagik {version} is back. Nothing was lost.', { version: run.from })
-    case 'notUpdated': return t('Not updated: {reason} The work that was stopped goes on.', { reason: selfUpdateReason(run.reason) })
-    case 'manualRecovery': return t('The update needs manual recovery. See "In-app updates" in docs/upgrade.md.')
+    case 'rolledBack': {
+      if (!run.rollback) return t('The update was undone: Automagik {version} is back. Nothing was lost.', { version: run.from })
+      const versions = { from: run.from, to: run.to }
+      if (run.rollback.data?.restored) {
+        if (run.rollback.data.trialKept === true && run.rollback.trialFrom && run.rollback.trialTo) {
+          return t('The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. If you changed the team between {start} and {end}, that change is in the copy kept with the update. Nothing in your sessions, memory, settings or keys was lost.', {
+            ...versions, start: new Date(run.rollback.trialFrom).toLocaleTimeString(), end: new Date(run.rollback.trialTo).toLocaleTimeString(),
+          })
+        }
+        return t('The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. Nothing in your sessions, memory, settings or keys was lost.', versions)
+      }
+      return t('The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back. Nothing in your sessions, memory, settings or keys was lost.', versions)
+    }
+    case 'notUpdated': return t('Not updated: {reason} The work that was stopped goes on.', {
+      reason: run.detail === 'previous-unsupported'
+        ? t('This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).')
+        : selfUpdateReason(run.reason),
+    })
+    case 'manualRecovery': return run.rollback
+      ? t('The update to Automagik {to} failed, and so did going back to {from}. See "In-app updates" in docs/upgrade.md; state.json in the update store names the step that failed.', { from: run.from, to: run.to })
+      : t('The update needs manual recovery. See "In-app updates" in docs/upgrade.md.')
     default: return null
   }
 }
@@ -575,7 +605,9 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
     : result.state === 'interrupted' ? t('The check was interrupted. Check again.')
     : result.state === 'checking' ? t('A check is already running. Try again shortly.')
     : t('Cannot update: {reason}', { reason: selfUpdateReason(result.reason) })
-  return h(Row, { label: 'Automagik', hint: h('span', { role: 'status' }, message) },
+  const failed = message === runText && run?.phase === 'rolledBack' ? failedHealthCheck(run.rollback?.failed) : null
+  return h(Row, { label: 'Automagik', hint: h('span', { role: 'status' }, message,
+    failed === null ? null : ' ' + t('Failed check: {check}', { check: failed })) },
     ...(canStart ? [h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: updating || forceBusy, onClick: onConfirm },
       t('Update now'))] : []),
     h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || forceBusy, onClick: onCheck },

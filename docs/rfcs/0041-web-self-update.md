@@ -126,8 +126,10 @@ profile directory (`server/profile-follow.mjs:144-174`), which would carry or dr
   plugins' entries into the live `package.json` (leaving every other key as it is) and puts the staged
   lockfile in place. It then relinks that tree in place, offline (`dsh plugin install --offline
   --frozen-lockfile` on the live profile: every package is already in the store), so no path written
-  under the staging profile survives the move; a relink that fails is a failed candidate and the
-  rollback below runs. Plugin installs and removals are refused while an update runs.
+  under the staging profile survives the move. If live relinking fails, the supervisor reverses the
+  switch and checks the previous version's health. A healthy previous version gives back stopped
+  work with `notUpdated` and `stage-failed`. Failed recovery needs manual recovery. Plugin installs
+  and removals are refused while an update runs.
 - **A switch or a rollback cut half-way is finished before anything starts.** Each switch and each
   rollback writes its intent and every completed rename to `state.json` before the next one, under
   the store's lock. A supervisor that starts and finds an unfinished one completes it or undoes it, by
@@ -358,6 +360,9 @@ and the sections above now carry the corrected design:
 13. **Corrections to "What exists already":** the Bots plugin's own updater and the desktop's lane
    reader are listed (the desktop can take a subset; the web takes the whole set); am reads its own pointer; the plugin pointer moves only on releases that ship
    plugins; the supervisor ships under an already shipped path, so the plugin-only lane holds.
+14. **Failed live relink (delivery 6):** the supervisor reverses the switch and checks the previous
+    version. It records `notUpdated` with `stage-failed` if that version passes health. The candidate
+    never reached its trial.
 
 ## Deliveries (each one PR)
 

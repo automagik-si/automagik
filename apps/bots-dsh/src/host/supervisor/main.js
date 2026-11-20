@@ -6,15 +6,17 @@ import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { compareVersions } from '../lane-verify.js'
-import { answers, LISTENER_UNKNOWN, localListener, startChild } from './child.js'
+import { LISTENER_UNKNOWN, startChild } from './child.js'
+import { checkHealth, healthListener, listenerOf, verifyListener } from './health.js'
 import { copyVersion, installCopy, refreshCopy, runningCopy, SELF_CHECK_OK, supervisorVersion } from './copy.js'
 import { checkRelinkConfig, installRegistry } from './pnpm.js'
 import { currentOf, isId, isVersion, RUNNING, runOf, TERMINAL } from './records.js'
-import { inspectRelease, installedPlugins, releaseSource } from './release.js'
+import { inspectRelease, releaseSource } from './release.js'
 import { takeRequest } from './request.js'
+import { baseline, finishRolledBack, liveTeamLineage, rollbackLocation, runRollback, teamSnapshot, unpinnedPlugins, updateContract } from './rollback.js'
 import { assertRelinked, discardArchives, downloadPath, relink, stageInstall, stagePaths, takeProfileLock } from './stage.js'
-import { identity, prepareStore, readJson, regularBytes, takeLifetimeLock, usableStore, writeJsonAtomic } from './store.js'
-import { candidateMatches, completeSwitch, didSwitch, planSwitch, undoSwitch, validJournal, validTerminalJournal } from './switch.js'
+import { identity, prepareStore, readJson, regularBytes, syncDirectory, takeLifetimeLock, usableStore, writeJsonAtomic } from './store.js'
+import { candidateMatches, completeSwitch, didSwitch, planSwitch, UndoPreflightError, undoSwitch, validJournal, validTerminalJournal } from './switch.js'
 
 const IDLE_POLL_MS = 1000
 const stamp = () => new Date().toISOString()
@@ -45,7 +47,7 @@ function storeLock(store) {
 
 export async function runSupervisor({
   home, profile, command, version, env = process.env, laneUrl, keys, fetch = globalThis.fetch,
-  healthTimeout,
+  healthTimeout, healthProbe,
 }) {
   if (!isVersion(version)) throw new Error('Invalid supervisor copy version')
   const source = releaseSource(laneUrl, keys)
@@ -56,12 +58,17 @@ export async function runSupervisor({
   const bootId = `sup_${randomUUID()}`
   const controller = new AbortController()
   const { signal } = controller
-  const bootEnv = { ...env, DSH_HOME: config.home, AUTOMAGIK_SUPERVISOR_BOOT: bootId, AUTOMAGIK_SUPERVISOR_VERSION: version }
-  const listener = localListener(command.slice(2))
+  const bootEnv = { ...env, DSH_HOME: config.home, AUTOMAGIK_SUPERVISOR_BOOT: bootId, AUTOMAGIK_SUPERVISOR_VERSION: version,
+    AUTOMAGIK_SUPERVISOR_ROLLBACK: bootId }
+  const args = command.slice(2)
+  const listener = healthListener(args)
   bootEnv[LISTENER_UNKNOWN] = listener ? '0' : '1'
+  delete bootEnv.AUTOMAGIK_SUPERVISOR_RUN
+  let checkedListener, listenerCheck
   const seen = new Set()
   let child, run, active, exitCode, recoveredAt
   let trial = false
+  let recovering = false
   let verdictFailed = false
   let executingCopy
 
@@ -78,9 +85,27 @@ export async function runSupervisor({
     writeJsonAtomic(join(store, file), value, { profileDir, durable: true })
   }
   const announce = () => write('supervisor.json', { version: 1, bootId, runId: run?.runId ?? null })
+  const announceListener = listener => write('listener.json', { version: 1, bootId, listener })
+  async function checked(target, probeSignal = signal) {
+    if (target !== child || !target?.launchUrl || target.result || probeSignal.aborted) return null
+    if (checkedListener) return checkedListener
+    if (!listenerCheck) {
+      listenerCheck = verifyListener(target, args, { signal: probeSignal, probe: healthProbe }).then(found => {
+        if (!found || target !== child || target.result || signal.aborted) return null
+        announceListener(found.status)
+        checkedListener = found
+        return found
+      }).finally(() => {
+        if (target === child) listenerCheck = undefined
+      })
+    }
+    return listenerCheck
+  }
   const save = (changes = {}) => {
     const proposed = { ...run, ...changes, updatedAt: stamp() }
     try {
+      // Once the verdict is visible, the admitted owner can already ask for another update.
+      if ((active || recovering) && TERMINAL.has(proposed.phase)) takeRequest(store, read, bootId, true, seen)
       write('state.json', proposed)
     } catch (error) {
       if (TERMINAL.has(proposed.phase)) {
@@ -100,11 +125,26 @@ export async function runSupervisor({
     exitCode ??= code
     controller.abort()
   }
-  function start() {
+  function start(forRun = false) {
     signal.throwIfAborted()
-    child = startChild(command, bootEnv, ended => {
+    checkedListener = undefined
+    listenerCheck = undefined
+    announceListener('unknown')
+    const env = forRun ? { ...bootEnv, AUTOMAGIK_SUPERVISOR_RUN: run.runId } : bootEnv
+    const startedAt = Date.now()
+    child = startChild(command, env, ended => {
       if (!ended.expectedExit && !trial) shutdown(ended.result.code)
     })
+    const target = child
+    target.onLaunchUrl = () => {
+      if (target !== child || target.result || signal.aborted) return
+      const found = listenerOf(target, args)
+      if (!found) return
+      if (found.isPublic) return checked(target)
+      announceListener('verified')
+      checkedListener = { ...found, status: 'verified' }
+    }
+    child.startedAt = startedAt
     return child
   }
   const stop = async (sig) => {
@@ -128,27 +168,81 @@ export async function runSupervisor({
     }
   }
 
-  const serving = target => answers(target, { signal, timeout: healthTimeout })
+  const health = (target, expect, options) => checkHealth(target, {
+    args, expect, runId: run.runId, signal, probe: healthProbe, since: target.startedAt,
+    verifiedListener: deadline => checked(target, deadline),
+    windows: typeof healthTimeout === 'number' ? { first: healthTimeout, second: healthTimeout } : healthTimeout,
+    ...options,
+  })
 
-  async function giveBack(staging, reason, restart) {
+  async function giveBack(staging, reason, restart, { legacy = false } = {}) {
     signal.throwIfAborted()
-    // A child exiting during the health check belongs to this verdict.
     trial = true
-    const unchanged = restart ? start() : child
-    if (!await serving(unchanged)) {
-      signal.throwIfAborted()
-      return manualRecovery(unchanged.result?.code)
-    }
-    finishNotUpdated(staging)
-    phase('notUpdated', reason)
+    if (restart && !legacy && !updateContract(profileDir)) return manualRecovery(1, 'rollback-failed')
+    const unchanged = restart ? start(true) : child
+    const expect = run.fromVersions ?? unpinnedPlugins(profileDir)
+    const team = run.journal && identity(join(store, run.journal.keep, 'data.json')) ? teamSnapshot(config, run) : null
+    const result = await health(unchanged, expect, { team, legacy, ...(!restart ? { since: Date.now() } : {}) })
+    const versionsMatch = !legacy || !run.fromVersions || isDeepStrictEqual(baseline(profileDir), run.fromVersions)
+    signal.throwIfAborted()
+    if (!result.ok || unchanged.result || !versionsMatch) return manualRecovery(unchanged.result?.code)
+    // The verdict comes first: a cut before the cleanup leaves a terminal run whose leftovers the next start removes,
+    // never an open journal whose kept data is already gone.
+    save({ phase: 'notUpdated', reason, ...(legacy ? { detail: 'previous-unsupported' } : {}) })
     trial = false
+    finishNotUpdated(staging)
   }
 
-  async function manualRecovery(code = 1, reason = 'health-failed') {
-    phase('manualRecovery', reason)
-    warn('manual recovery is required; see state.json in the update store')
+  async function manualRecovery(code = 1, reason = 'health-failed', fields = {}) {
+    save({ phase: 'manualRecovery', reason, ...fields })
+    const rollback = fields.rollback
+    if (rollback?.location) {
+      const describe = item => `previous=${item.previous}, candidate=${item.candidate}`
+      warn(`rollback step ${rollback.step} requires recovery; node_modules ${describe(rollback.location.modules)}; pnpm-lock.yaml ${describe(rollback.location.lockfile)}. See "Rename back after manualRecovery" in docs/upgrade.md and state.json in the update store`)
+    } else {
+      warn('manual recovery is required; see state.json in the update store')
+    }
     shutdown(code || 1)
     await stop()
+  }
+
+  function undoFailure(staging) {
+    return manualRecovery(1, 'rollback-failed', {
+      rollback: { trialFrom: run.trialStartedAt ?? run.startedAt, tried: [], step: 'manifest',
+        location: rollbackLocation(config, staging, run) },
+    })
+  }
+
+  async function rollBack(staging, failed, teamMissing = false) {
+    signal.throwIfAborted()
+    trial = true
+    if (run.phase !== 'rollingBack') {
+      const { commitCurrent, ...journal } = run.journal
+      const restoreCurrent = commitCurrent === true || isDeepStrictEqual(read('current.json'), nextCurrent())
+      save({
+        phase: 'rollingBack', reason: 'health-failed', journal: { ...journal, undo: true, undoReason: 'health-failed' },
+        rollback: { failed, step: 'stop', tried: [], trialFrom: run.trialStartedAt ?? stamp(), restoreCurrent,
+          ...(teamMissing ? { teamMissing: true } : {}) },
+      })
+    }
+    await runRollback({
+      config, staging, run, save, signal, stop, start: () => start(true), health, manualRecovery, retry: () => shutdown(1),
+      restoreCurrent: () => {
+        if (!Object.hasOwn(run, 'priorCurrent')) throw new Error('The prior version record was not saved')
+        if (run.priorCurrent === null) {
+          requireLock()
+          fs.rmSync(join(store, 'current.json'), { force: true })
+          syncDirectory(store)
+        } else {
+          if (!currentOf(run.priorCurrent, [bootId])) throw new Error('The prior version record is invalid')
+          write('current.json', run.priorCurrent)
+        }
+      },
+    })
+    if (run.phase === 'rolledBack') {
+      trial = false
+      finishRolledBack(config, staging, run)
+    }
   }
 
   async function relinkAndRestart(staging, releaseLock) {
@@ -160,7 +254,6 @@ export async function runSupervisor({
       releaseLock()
       released = true
       await relink(config, signal)
-      if (!candidateMatches(config, staging, run)) throw new Error('The relink changed the switched inputs')
       assertRelinked(profileDir, staging)
     } catch {
       const release = released ? await takeProfileLock(profileDir, signal) : releaseLock
@@ -182,23 +275,46 @@ export async function runSupervisor({
   })
 
   async function restartCandidate(staging) {
-    phase('restarting')
-    trial = true
-    const candidate = start()
-    phase('health')
-    const answering = await serving(candidate)
-    signal.throwIfAborted()
-    let versionsMatch = false
-    if (answering) {
-      try {
-        versionsMatch = isDeepStrictEqual(installedPlugins(profileDir), new Map(run.names.map(name => [name, run.to])))
-      } catch {}
+    const team = teamSnapshot(config, run)
+    let candidate, failure, teamMissing
+    const beforeSpawn = await takeProfileLock(profileDir, signal)
+    try {
+      signal.throwIfAborted()
+      const lineage = team ? liveTeamLineage(team) : 'descended'
+      if (lineage !== 'descended') {
+        failure = 'roster'
+        teamMissing = lineage === 'lost'
+      } else if (!candidateMatches(config, staging, run)) {
+        failure = 'plugins'
+      } else {
+        save({ phase: 'restarting', reason: null, trialStartedAt: run.trialStartedAt ?? stamp() })
+        trial = true
+        candidate = start(true)
+        phase('health')
+      }
+    } finally {
+      beforeSpawn()
     }
-    if (!versionsMatch || candidate.result) return manualRecovery(candidate.result?.code)
-    save({ journal: { ...run.journal, commitCurrent: true } })
-    write('current.json', nextCurrent())
-    phase('healthy', 'health-check-finished')
-    trial = false
+    if (failure) return rollBack(staging, failure, teamMissing)
+    const expect = Object.fromEntries(run.names.map(name => [name, run.to]))
+    const result = await health(candidate, expect, { team })
+    signal.throwIfAborted()
+    if (!result.ok || candidate.result) return rollBack(staging, candidate.result ? 'exited' : result.failed, result.teamMissing)
+
+    const beforeCommit = await takeProfileLock(profileDir, signal)
+    try {
+      signal.throwIfAborted()
+      failure = candidate.result ? 'exited' : !candidateMatches(config, staging, run) ? 'plugins' : null
+      if (!failure) {
+        save({ journal: { ...run.journal, commitCurrent: true } })
+        write('current.json', nextCurrent())
+        phase('healthy', 'health-check-finished')
+        trial = false
+      }
+    } finally {
+      beforeCommit()
+    }
+    if (failure) return rollBack(staging, failure)
     await finishHealthy(staging)
   }
 
@@ -230,10 +346,24 @@ export async function runSupervisor({
         const release = await takeProfileLock(profileDir, signal)
         try { discardArchives(profileDir, staging) } finally { release() }
       }
+      if (!updateContract(profileDir)) return giveBack(staging, 'profile-invalid', true, { legacy: true })
       return giveBack(staging, 'supervisor-restarted', true)
     }
     if (!validJournal(run) || !Number.isSafeInteger(run.sequence) || run.sequence < 0) {
       return manualRecovery(1, 'rollback-failed')
+    }
+
+    if (run.phase === 'rollingBack') {
+      if (!run.rollback || run.journal.undo !== true || run.journal.undoReason !== 'health-failed') {
+        return manualRecovery(1, 'rollback-failed')
+      }
+      return rollBack(staging, run.rollback.failed)
+    }
+
+    // Relink finished before this trial started. Boot the candidate without touching its installer inputs.
+    if (['restarting', 'health'].includes(run.phase) && !run.rollback && run.trialStartedAt
+      && didSwitch(config, staging, run)) {
+      return restartCandidate(staging)
     }
 
     let release = await takeProfileLock(profileDir, signal)
@@ -243,10 +373,7 @@ export async function runSupervisor({
       const legacyCommit = !run.journal.undo && run.journal.pending === null
         && run.journal.done.length === run.journal.steps.length && isDeepStrictEqual(read('current.json'), nextCurrent())
       if (run.journal.commitCurrent || legacyCommit) {
-        if (!candidateMatches(config, staging, run)) throw new Error('The committed inputs changed')
         assertRelinked(profileDir, staging)
-        save({ journal: { ...run.journal, commitCurrent: true } })
-        write('current.json', nextCurrent())
         release()
         release = null
         await restartCandidate(staging)
@@ -271,7 +398,10 @@ export async function runSupervisor({
     const staging = stagePaths(store, run.runId, profile)
     let release, restart = false
     try {
-      if (!listener) return phase('notUpdated', 'listener-unknown')
+      if (!listener || !await checked(child)) return phase('notUpdated', 'listener-unknown')
+      const contract = updateContract(profileDir)
+      if (!contract) return await giveBack(staging, 'profile-invalid', false, { legacy: true })
+      config.stateFormats = contract.stateFormats
       const raw = read('current.json')
       const current = currentOf(raw, [bootId])
       if (raw !== undefined && !current) return await giveBack(staging, 'store-invalid', false)
@@ -312,11 +442,15 @@ export async function runSupervisor({
     } catch (error) {
       if (signal.aborted) return
       if (error.code === 'DSH_PROFILE_LOCK_TIMEOUT') warn(error.message)
-      if (run.phase === 'healthy' || run.phase === 'notUpdated') {
+      if (TERMINAL.has(run.phase)) {
         warn('update cleanup did not finish')
         return
       }
       try {
+        if (error instanceof UndoPreflightError) return await undoFailure(staging)
+        if (['restarting', 'health'].includes(run.phase) && validJournal(run)) {
+          return await rollBack(staging, child?.result ? 'exited' : 'port')
+        }
         if (trial) return await manualRecovery(child?.result?.code)
         if (run.journal || release) {
           release ??= await takeProfileLock(profileDir, signal)
@@ -328,7 +462,10 @@ export async function runSupervisor({
         await giveBack(staging, 'stage-failed', restart)
       } catch (error) {
         if (error.code === 'DSH_PROFILE_LOCK_TIMEOUT') warn(error.message)
-        if (!signal.aborted) await manualRecovery(1, 'rollback-failed')
+        if (!signal.aborted) {
+          if (error instanceof UndoPreflightError) await undoFailure(staging)
+          else await manualRecovery(1, 'rollback-failed')
+        }
       }
     } finally {
       release?.()
@@ -342,14 +479,24 @@ export async function runSupervisor({
     const raw = read('state.json')
     const prior = runOf(raw, [raw?.bootId].filter(isId))
     if (raw !== undefined && prior === null) throw new Error('Invalid state.json in the update store')
+    announceListener('unknown')
     announce()
     if (prior && (RUNNING.has(prior.phase) || prior.phase === 'manualRecovery')) {
+      recovering = true
       try { await recover(raw) } catch (error) {
         if (error.code === 'DSH_PROFILE_LOCK_TIMEOUT') warn(error.message)
-        if (!signal.aborted) await manualRecovery(1, 'rollback-failed')
+        if (!signal.aborted && error instanceof UndoPreflightError) {
+          await undoFailure(stagePaths(store, run.runId, profile))
+        } else if (!signal.aborted && ['restarting', 'health'].includes(run.phase) && validJournal(run)) {
+          await rollBack(stagePaths(store, run.runId, profile), child?.result ? 'exited' : 'port')
+        } else if (!signal.aborted && !TERMINAL.has(run.phase)) {
+          await manualRecovery(1, 'rollback-failed')
+        }
       } finally {
-        recoveredAt = Date.now()
-        if (!verdictFailed) takeRequest(store, read, bootId, true, seen)
+        recovering = false
+        const completed = TERMINAL.has(run.phase)
+        recoveredAt = completed ? Date.parse(run.updatedAt) : Date.now()
+        if (!verdictFailed && !completed) takeRequest(store, read, bootId, true, seen)
       }
     } else {
       if (raw?.journal != null && !validTerminalJournal(raw)) {
@@ -359,22 +506,27 @@ export async function runSupervisor({
       if (prior?.phase === 'healthy' && read('current.json')?.live?.version === prior.to) {
         const staging = stagePaths(store, prior.runId, profile)
         try { await finishHealthy(staging, raw) } catch { warn('update cleanup did not finish') }
+      } else if (prior?.phase === 'rolledBack' && raw.journal) {
+        try { finishRolledBack(config, stagePaths(store, prior.runId, profile), raw) } catch { warn('update cleanup did not finish') }
       } else if (prior?.phase === 'notUpdated') {
         try { finishNotUpdated(stagePaths(store, prior.runId, profile), raw) } catch { warn('update cleanup did not finish') }
       }
     }
     while (!signal.aborted) {
-      const request = takeRequest(store, read, bootId, !!active, seen)
+      if (!active) await checked(child)
+      if (signal.aborted) break
+      const request = active && TERMINAL.has(run.phase) ? null : takeRequest(store, read, bootId, !!active, seen)
       if (request && (recoveredAt === undefined || Date.parse(request.requestedAt) > recoveredAt)) {
         run = {
           version: 1, runId: randomUUID(), requestId: request.requestId, bootId,
           phase: 'checking', from: null, to: null, reason: null, startedAt: stamp(), startedBy: 'owner-route',
+          fromVersions: baseline(profileDir), priorCurrent: read('current.json') ?? null,
         }
         save()
         announce()
         active = update().finally(() => {
           try {
-            if (!verdictFailed) takeRequest(store, read, bootId, true, seen)
+            if (!verdictFailed && !TERMINAL.has(run.phase)) takeRequest(store, read, bootId, true, seen)
           } finally { active = null }
         }).catch(() => shutdown(1))
       }

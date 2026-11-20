@@ -5,6 +5,7 @@ import fs, {
   rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -13,7 +14,7 @@ import { AGENT_TOOLS } from '../src/host/agent-access.js'
 import { ROUTE } from '../src/host/constants.js'
 import { install as installLocalAgents } from '../src/host/local-agents/index.js'
 import {
-  REASON_CODES, install, readSelfUpdate, selfUpdateStatus, storeDirOf, supervisorOf, usableStore, writeJsonAtomic,
+  REASON_CODES, install, pluginHealth, readSelfUpdate, selfUpdateStatus, storeDirOf, supervisorOf, usableStore, writeJsonAtomic,
 } from '../src/host/self-update.js'
 import { fakeContext } from './fake-ctx.js'
 
@@ -598,8 +599,8 @@ test('runtime installation captures the supervisor and polls the configured prof
 
 const endpoint = 'self-update-status'
 
-function statusChannel(profileDir, teamHome, routeEndpoint = endpoint) {
-  const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+function statusChannel(profileDir, teamHome, routeEndpoint = endpoint, services = {}) {
+  const ctx = fakeContext({ services: { profileContext: { dir: profileDir }, ...services } })
   const register = ctx.connection.fetch.register
   let route
   ctx.connection.fetch.register = options => {
@@ -641,6 +642,27 @@ test('the channel answers self-update-status only while the host holds the team 
     assert.equal(AGENT_TOOLS.some(tool => tool.endpoint === endpoint || /^self[-_]update[-_]status$/.test(tool.name)), false)
   } finally {
     await dispose()
+  }
+})
+
+test('the default channel status advertises rollback only for an explicit supervisor capability', requiresStore, async t => {
+  const { home, profileDir } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  const previous = process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK
+  t.after(() => {
+    if (previous === undefined) delete process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK
+    else process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK = previous
+  })
+  for (const value of [undefined, '', '1', 'sup_inherited', bootId]) {
+    if (value === undefined) delete process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK
+    else process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK = value
+    const { post, dispose } = statusChannel(profileDir, join(home, 'team'))
+    try {
+      const answer = await post()
+      assert.deepEqual(answer, { ok: true, value: { ...available, ...(value === bootId ? { rollback: true } : {}) } })
+    } finally {
+      await dispose()
+    }
   }
 })
 
@@ -874,4 +896,149 @@ test('the two check routes are absent from the MCP, Bot and local-agent tool lis
   } finally {
     await dispose()
   }
+})
+
+test('the status health form reports active loader entries and the matching closed hold', requiresStore, async t => {
+  const { home, profileDir, statePath, supervisorPath } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home, AUTOMAGIK_SUPERVISOR_RUN: run.runId })
+  writeJsonAtomic(statePath, { ...run, phase: 'rollingBack' }, { profileDir })
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  const name = '@automagik/bots-dsh'
+  const installAt = join(home, 'tree')
+  const manifest = join(installAt, 'node_modules', name, 'package.json')
+  mkdirSync(dirname(manifest), { recursive: true })
+  writeFileSync(manifest, JSON.stringify({ version: '1.2.3' }))
+  const parent = { tree: { ctx: { baseUrl: pathToFileURL(installAt + '/').href } } }
+  const active = { options: { name }, fiber: { state: 2 }, parent }
+  const entries = [active, { options: { name }, fiber: { state: 3 } }]
+  const loader = { entries: () => entries.values() }
+  const { post, dispose } = statusChannel(profileDir, join(home, 'team'), endpoint, { loader })
+  t.after(dispose)
+  const first = await post({ health: true })
+  assert.equal(first.ok, true)
+  assert.deepEqual(first.value.hold, { state: 'closed', run: run.runId })
+  assert.deepEqual(first.value.plugins.find(row => row.name === name), { name, version: '1.2.3', loaded: true })
+  assert.ok(first.value.plugins.filter(row => row.name !== name).every(row => row.loaded === false))
+  writeFileSync(manifest, JSON.stringify({ version: '9.9.9' }))
+  const second = await post({ health: true })
+  assert.deepEqual(second.value.plugins, first.value.plugins)
+  entries.push({ ...active })
+  assert.deepEqual(pluginHealth({ get: () => loader }).find(row => row.name === name), { name, version: null, loaded: false })
+  entries.shift()
+  const replaced = await post({ health: true })
+  assert.deepEqual(replaced.value.plugins.find(row => row.name === name), { name, version: '9.9.9', loaded: true })
+  for (const payload of [undefined, { health: false }, { health: true, extra: true }]) {
+    const ordinary = await post(payload)
+    assert.equal(Object.hasOwn(ordinary.value, 'plugins'), false)
+    assert.equal(Object.hasOwn(ordinary.value, 'hold'), false)
+  }
+})
+
+for (const [label, bytes, present] of [
+  ['corrupt', '{broken', null],
+  ['no Main Bot', '{"version":2,"bots":{}}', true],
+  ['missing', undefined, false],
+]) {
+  test('the roster health read does not bootstrap a ' + label + ' team', requiresStore, async t => {
+    const { home, profileDir } = fixture(t)
+    const team = join(home, 'team')
+    mkdirSync(team)
+    if (bytes !== undefined) writeFileSync(join(team, 'state.json'), bytes)
+    const { rt, post, dispose } = statusChannel(profileDir, team)
+    t.after(dispose)
+    await rt.load()
+    await new Promise(resolve => setImmediate(resolve))
+    const effects = ['bootstrap', 'catalog', 'loadSecrets', 'deliver'].map(name => t.mock.method(rt, name,
+      () => assert.fail('health invoked ' + name)))
+    const response = await post({ health: true }, 'state')
+    if (present === null) {
+      assert.equal(response.ok, false)
+      assert.equal(response.error.code, 'bot/team-unread')
+    } else {
+      assert.equal(response.ok, true)
+      assert.equal(response.value.present, present)
+      assert.equal(response.value.bots, 0)
+    }
+    assert.ok(effects.every(effect => effect.mock.callCount() === 0))
+  })
+}
+
+test('an owner page read and saves leave a missing trial team absent until the verdict', requiresStore, async t => {
+  const { home, profileDir, statePath, supervisorPath } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home, AUTOMAGIK_SUPERVISOR_RUN: run.runId })
+  writeJsonAtomic(statePath, { ...run, phase: 'health' }, { profileDir })
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  const team = join(home, 'team')
+  const path = join(team, 'state.json')
+  const { rt, post, dispose } = statusChannel(profileDir, team)
+  t.after(dispose)
+
+  await rt.load()
+  assert.equal(rt.updateHoldView(), true)
+  assert.equal(existsSync(path), false)
+  const bootstrap = t.mock.method(rt, 'bootstrap', () => assert.fail('owner page tried to bootstrap the held team'))
+  const page = await post({}, 'state')
+  assert.equal(page.ok, true)
+  assert.equal(bootstrap.mock.callCount(), 0)
+  await rt.save()
+  assert.match(rt.readOnly(), /read-only while the update is being checked/)
+  const message = 'This host cannot save the Bot team: ' + rt.readOnly()
+  await assert.rejects(rt.save({ required: true }), { message })
+  await assert.rejects(rt.saveCopy(() => assert.fail('held team copy was prepared')), { message })
+  assert.equal(existsSync(path), false)
+
+  writeJsonAtomic(statePath, { ...run, phase: 'healthy', reason: 'health-check-finished' }, { profileDir })
+  rt.updateHold.tick()
+  await rt.updateGate(AbortSignal.timeout(1000))
+  assert.equal(rt.readOnly(), undefined)
+  await rt.save({ required: true })
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).revision, 1)
+
+  await rt.updateHold.wait(AbortSignal.timeout(10_000))
+  rt.updateHold.close('later-update')
+  assert.equal(rt.updateHoldView(), true)
+  await rt.save({ required: true })
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).revision, 2)
+})
+
+test('a validated rollback is exposed in status, with an invalid one refused', requiresStore, t => {
+  const { profileDir, statePath, supervisorPath } = fixture(t)
+  const rollback = { failed: 'page', trialFrom: run.startedAt, trialTo: run.updatedAt, data: { restored: true } }
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  writeJsonAtomic(statePath, { ...run, phase: 'rolledBack', reason: 'health-failed', rollback }, { profileDir })
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }).run.rollback, rollback)
+  writeJsonAtomic(statePath, { ...run, phase: 'rolledBack', reason: 'health-failed',
+    rollback: { ...rollback, failed: 'unrecognized' } }, { profileDir })
+  assert.equal(selfUpdateStatus({ profileDir, env, inDesktop: false }).problem, 'Invalid state.json')
+})
+
+test('listener eligibility is authoritative for this boot and falls back for stale or unreadable state', requiresStore, t => {
+  const { profileDir, storeDir } = fixture(t)
+  const path = join(storeDir, 'listener.json')
+  const status = override => selfUpdateStatus({ profileDir, env: { ...env, ...override }, inDesktop: false })
+  writeJsonAtomic(path, { version: 1, bootId, listener: 'unknown' }, { profileDir })
+  assert.equal(status().reason, 'listener-unknown')
+  writeJsonAtomic(path, { version: 1, bootId: formerBootId, listener: 'unknown' }, { profileDir })
+  assert.equal(status().available, true)
+  writeFileSync(path, '{')
+  assert.equal(status().available, true)
+  writeJsonAtomic(path, { version: 1, bootId, listener: 'verified-argv' }, { profileDir })
+  assert.equal(status({ AUTOMAGIK_SUPERVISOR_LISTENER_UNKNOWN: '1' }).available, true)
+})
+
+
+test('status carries the rollback team-loss reason and whether the trial bytes were kept', requiresStore, t => {
+  const { profileDir, statePath, supervisorPath } = fixture(t)
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  const status = data => {
+    const rollback = { failed: 'exited', trialFrom: run.startedAt, trialTo: run.updatedAt, data }
+    writeJsonAtomic(statePath, { ...run, phase: 'rolledBack', reason: 'health-failed', rollback }, { profileDir })
+    return selfUpdateStatus({ profileDir, env, inDesktop: false })
+  }
+  for (const trialKept of [true, false]) {
+    const data = { restored: true, why: 'team-lost', trialKept }
+    assert.deepEqual(status(data).run.rollback.data, data)
+  }
+  assert.equal(status({ restored: true, trialKept: 'yes' }).problem, 'Invalid state.json')
+  assert.equal(status({ restored: false, why: 'same-format', trialKept: true }).problem, 'Invalid state.json')
 })
