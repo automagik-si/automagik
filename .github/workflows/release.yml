@@ -105,6 +105,7 @@ name: Release
 # public keys are plugin-lane/keys.json) and puts it on the rolling `plugin-lane` release, which
 # holds nothing else. The desktop app and Omni's market install the plugins from it, without a
 # release of their own.
+# Every versioned release that packs bots-dsh, including prereleases, also carries roles.json and roles.json.sig.
 #
 # Nothing is published to npm: the plugins ship as git sources and release files only.
 # Pushes use the workflow's own token; CI already ran on the dev commit being released, and
@@ -465,6 +466,30 @@ jobs:
           cat release/plugins.json
           (cd release && sha256sum -- * > PLUGINS.SHA256SUMS)
 
+      - name: Write the role catalog
+        if: steps.cut.outputs.version != '' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+          SHA: ${{ steps.cut.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ISSUED=$(TZ=UTC git show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd "${SHA}")
+          bun scripts/lane.ts roles-manifest "${VERSION}" "${ISSUED}" > release/roles.json
+
+      - name: Sign the role catalog
+        if: steps.cut.outputs.version != '' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'
+        env:
+          PLUGIN_LANE_KEY: ${{ secrets.PLUGIN_LANE_KEY }}
+        run: |
+          bun scripts/lane.ts sign release/roles.json > release/roles.json.sig
+
+      - name: Check the role catalog
+        if: steps.cut.outputs.version != '' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+        run: |
+          bun scripts/lane.ts verify-roles release/roles.json release/roles.json.sig "${VERSION}"
+
       - name: Publish the release
         id: publish
         if: steps.cut.outputs.version != ''
@@ -482,6 +507,7 @@ jobs:
           [[ "${KIND}" == "pocket" ]] && notes="Automagik Pocket (no plugins, no desktop build)."
           [[ "${KIND}" == "am" ]] && notes="am, the Automagik command, alone (no plugins, no desktop build)."
           [[ "${KIND}" == "meter" ]] && notes="usagemeter, the Automagik token meter, alone (no plugins, no desktop build)."
+          [[ -f release/plugins.json ]] && [[ -f release/roles.json ]] && notes="${notes} \`roles.json\` (signed, \`roles.json.sig\`) lists the official role packages."
           [[ "${HERDR}" == "yes" ]] && notes="${notes} Automagik Herdr: \`automagik-herdr-pack-${VERSION}.tgz\` (its sha256 in \`.sha256\`); install with \`curl -fsSL https://raw.githubusercontent.com/automagik-si/automagik/main/herdr/install.sh | bash\`, or run \`automagik-herdr update\`."
           notes="${notes} am: \`automagik-am-${VERSION}.tgz\` (its sha256 in \`.sha256\`); \`am update\` takes it from the signed am-lane."
           [[ "${METER}" == "yes" ]] && notes="${notes} usagemeter: \`usagemeter-darwin-arm64\`, \`usagemeter-darwin-x86_64\`, \`usagemeter-linux-x86_64\` and \`usagemeter-linux-aarch64\` follow (the meter jobs) with \`usagemeter.SHA256SUMS\` and their signed pointer, \`meter.json\` and \`meter.json.sig\`."

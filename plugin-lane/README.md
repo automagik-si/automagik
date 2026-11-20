@@ -80,6 +80,10 @@ while one is rotated.
 
 The signing key is the `PLUGIN_LANE_KEY` Actions secret. It exists only there.
 
+Every versioned release that packs `bots-dsh`, including prereleases, also carries the official
+role catalog `roles.json` and its detached signature `roles.json.sig`, signed with the same key.
+The rolling `plugin-lane` release holds only `lane.json` and `lane.json.sig`.
+
 ## Consuming
 
 - **The desktop app** (`apps/desktop/src/lane.js`):
