@@ -79,6 +79,17 @@ and no other Bot is made. `state` reports it as `host`, and Omni and Genie come 
 instance: Omni's card offers no new Omni of its own, and Genie's names the command line the
 instance brought instead of the line that installs one.
 
+When **Install Omni here** finds that npm cannot install the Omni this Automagik pins
+(npm has an older version, the version is unpublished, the install failed, or systemd is
+unavailable), the card says why and falls back to GitHub when needed. Without systemd,
+the installer can also use npm when the version is available there. The card shows
+Check, Download, Build, Install and Connect alongside the installer output, then connects
+to Omni. Powering Omni off requests cancellation. If the install step is already underway,
+it finishes that step. Reloading the team step picks up a running install and connects
+on success. Apps shows the same install progress and offers **Power Omni on** to connect
+after a successful install. See
+[Installing Omni from GitHub](#installing-omni-from-github) for the host's checks.
+
 ### Power in each Bot's settings
 
 Where the Bot team runs, the welcome puts each built-in Bot's power in that Bot's own
