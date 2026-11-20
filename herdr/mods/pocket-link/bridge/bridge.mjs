@@ -130,8 +130,9 @@ const engines = new ChatEngines({
   make: name => createEngine({ home: homedir(), appHome: appHome(), hcPath: hcPath(), env: { ...process.env, HC_SESSION: name }, log }),
 })
 // The Automagik Bots' chats, from bots-dsh's owner-only socket in the team home (#517); absent, it
-// lists nothing. Writes on them go to it only when it answered `write: 1` (dsh-source.mjs).
-const dsh = new DshSource({ log, attachments: true, documents: true })
+// lists nothing. Writes go to it only when it answered `write: 1` (dsh-source.mjs). It also serves
+// the team's group chats for a phone that asks (RFC 0040).
+const dsh = new DshSource({ log, attachments: true, documents: true, groups: true })
 
 // Admitted (a paired key) and its header read, by guard.mjs, on the chat route.
 async function chatRoute({ conn, bi, value, rest, peer: phone }) {
