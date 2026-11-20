@@ -1076,6 +1076,40 @@ describe('passkeys on an existing account', () => {
     expect(await count('SELECT count(*) AS n FROM passkey_write_authorization')).toBe(0);
   });
 
+  test('saving an already stored credential again refuses the duplicate and preserves the original', async () => {
+    const { userId } = await signup();
+    const db = await runtime.getD1Database('DB');
+    const original = await db.prepare('SELECT * FROM passkey WHERE userId = ?').bind(userId).first();
+    const retry = db.prepare(`INSERT INTO passkey (id, userId, credentialID, publicKey, counter, deviceType, backedUp)
+      SELECT ?, userId, credentialID, publicKey, counter, deviceType, backedUp FROM passkey WHERE userId = ?`);
+    await expect(retry.bind('duplicate-write-fixture', userId).run()).rejects.toThrow('passkey registration refused');
+    const stored = await db.prepare('SELECT * FROM passkey').all();
+    expect(stored.results).toEqual([original]);
+    expect(await count('SELECT count(*) AS n FROM passkey_write_authorization')).toBe(0);
+  });
+
+  test('admission migration preserves historical duplicate credential records and refuses another insert', async () => {
+    state = resolve(await mkdtemp(`${root}/legacy-duplicates-`));
+    const old = await instance();
+    const db = await old.getD1Database('DB');
+    await migrate(db, ['0001_auth.sql', '0002_whatsapp.sql', '0004_session_sign_in_method.sql']);
+    const insertUser = db.prepare(`INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt)
+      VALUES (?, 'Test user', ?, 0, '2025-01-01', '2025-01-01')`);
+    const insertRecord = db.prepare(`INSERT INTO passkey (id, userId, credentialID, publicKey, counter, deviceType, backedUp)
+      VALUES (?, ?, 'legacy-credential-fixture', 'inert-storage-fixture', 0, 'singleDevice', 0)`);
+    for (const owner of ['legacy-one', 'legacy-two']) {
+      await insertUser.bind(owner, `${owner}@example.invalid`).run();
+      await insertRecord.bind(`${owner}-row`, owner).run();
+    }
+    const records = db.prepare('SELECT * FROM passkey ORDER BY id');
+    const before = (await records.all()).results;
+    await migrate(db, ['0003_admission.sql']);
+    expect(before).toHaveLength(2);
+    expect((await records.all()).results).toEqual(before);
+    await expect(insertRecord.bind('repeated-import', 'legacy-one').run()).rejects.toThrow('passkey registration refused');
+    expect((await records.all()).results).toEqual(before);
+  });
+
   test('adding a passkey without a session is refused and creates no account', async () => {
     for (const jar of ['', '__Secure-better-auth.session_token=not-a-session.fixture']) {
       cookie = jar;

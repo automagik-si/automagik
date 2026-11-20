@@ -26,6 +26,14 @@ CREATE TABLE passkey_write_authorization (
 );
 CREATE INDEX passkey_write_expiry ON passkey_write_authorization(expiresAt);
 
+-- Authentication looks up a credential ID globally. Enforce that lookup's uniqueness
+-- on new writes while allowing databases with historical duplicates to migrate intact.
+CREATE TRIGGER passkey_reject_duplicate_credential BEFORE INSERT ON passkey
+WHEN EXISTS (SELECT 1 FROM passkey WHERE credentialID = NEW.credentialID)
+BEGIN
+  SELECT RAISE(ABORT, 'passkey registration refused');
+END;
+
 CREATE TRIGGER admission_on_passkey AFTER INSERT ON passkey
 BEGIN
   UPDATE admission_ticket SET state = 'used'

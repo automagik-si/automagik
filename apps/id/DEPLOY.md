@@ -174,6 +174,11 @@ triggers that spend them with the credential or phone account insert. Migration
 still sign in while deploying. Until the updated Worker is live, the new triggers
 can refuse registrations started by the previous Worker, including additional passkeys.
 
+Migration 0003 also rejects a new passkey insert when its credential ID is
+already stored. It preserves historical duplicate rows and their recorded owners.
+If an existing database has duplicates, resolving their ownership is a separate
+account-recovery decision.
+
 D1 keeps each ticket's `jti` with the user row it reserved, its state and its
 ceremony count, so a ticket creates at most one account, and nothing else about
 the invitation. After the ticket's 30-second clock-skew allowance ends,
