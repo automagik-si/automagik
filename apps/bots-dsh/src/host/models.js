@@ -12,8 +12,8 @@ const CATALOG_TTL_MS = 10_000
 // What a refused model says, by case; `{connection}` is the agent's name and route. The client
 // words each template in the interface language (i18n.js hostText).
 export const ACCESS_MESSAGES = Object.freeze({
-  off: 'Turn on {connection} in Settings → Claude Code and Codex before using this model.',
-  installing: 'Wait for {connection} to finish installing, or retry it in Settings → Claude Code and Codex.',
+  off: 'Turn on {connection} in Settings → Coding agents before using this model.',
+  installing: 'Wait for {connection} to finish installing, or retry it in Settings → Coding agents.',
   signIn: 'Sign in to {connection} before using this model.',
   // Signed in on this computer, to an account the person has not confirmed for Bots (#869).
   account: 'Confirm the account of {connection} before using this model.',

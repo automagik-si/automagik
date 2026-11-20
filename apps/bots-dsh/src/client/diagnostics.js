@@ -58,6 +58,8 @@ const FAILURES = {
   ACCOUNT_SIGNED_OUT: 'The DeepSeek account is signed out',
   ACCOUNT_TOKEN_INVALID: 'The DeepSeek account sign-in has expired',
   RATE_LIMIT: 'Too many requests to the model',
+  ACP_CLAUDE_USAGE_LIMIT: 'The coding agent reached its usage limit',
+  ACP_CODEX_USAGE_LIMIT: 'The coding agent reached its usage limit',
   CONTEXT_WINDOW_EXCEEDED: 'The conversation is too long for the model',
   INVALID_REQUEST: 'The model service refused the request',
   SERVER: 'The model service failed',

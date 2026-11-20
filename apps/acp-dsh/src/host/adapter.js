@@ -14,6 +14,7 @@ import {
   isAgentLoopRequest, offloadedImageText,
 } from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
+import { ACP_USAGE_LIMIT_CODES } from './usage-limit.js'
 import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
@@ -1492,6 +1493,7 @@ export class AcpAdapter extends LlmAdapter {
             const takesIdentity = ['acp-claude', 'acp-codex'].includes(options.provider)
             const run = new AgentRun({
               ...spec,
+              provider: options.provider,
               cwd: dshAgent?.session?.header?.cwd
                 ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME ?? homedir(),
               name: agent.name,
@@ -1931,6 +1933,9 @@ export class AcpAdapter extends LlmAdapter {
         if (options.signal?.aborted !== true && live.run.cancelled !== true
             && (this.hostStopping() || live.run.exited?.signal === 'SIGTERM' || live.run.exited?.signal === 'SIGINT')) {
           return yield finish('error', `${agent.name}: ${event.message}`, AGENT_INTERRUPTED)
+        }
+        if (event.usageLimit === true && Object.hasOwn(ACP_USAGE_LIMIT_CODES, options.provider)) {
+          return yield finish('error', `${agent.name}: ${event.message}`, ACP_USAGE_LIMIT_CODES[options.provider])
         }
         return yield finish('error', `${agent.name}: ${event.message}`)
       } else if (event.type === 'aborted') {

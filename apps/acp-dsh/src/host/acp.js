@@ -14,6 +14,7 @@ import { BRIDGE_NAME, isBridgeName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
+import { usageLimitOf } from './usage-limit.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -180,7 +181,7 @@ function stopped(what) {
 export class AgentRun {
   /**
    * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
-   *   name: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
+   *   name: string, provider?: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
    *   onWarn?: (message: string) => void, startMs?: number, requestMs?: number,
    *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
@@ -465,7 +466,11 @@ export class AgentRun {
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
       result => this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' }),
-      error => this.endPrompt({ type: 'error', message: error?.message ?? String(error), ...(error?.code === undefined ? {} : { code: error.code }) }),
+      error => this.endPrompt({
+        type: 'error', message: error?.message ?? String(error),
+        ...(error?.code === undefined ? {} : { code: error.code }),
+        ...(this.exited === undefined && usageLimitOf(this.spec.provider, error) ? { usageLimit: true } : {}),
+      }),
     )
     return this.prompting
   }

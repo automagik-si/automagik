@@ -623,7 +623,7 @@ var ZH = {
   "The Bot account was reset. Press Sign in again.": "Bot 账号已被重置。请再次点击登录。",
   "This sign-in is not available for this Bot.": "此 Bot 无法使用这个登录。",
   "This Bot is no longer available.": "此 Bot 已不可用。",
-  "The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.": "编程助手尚未就绪。请在设置 → Claude Code 和 Codex 中检查安装，然后重试。",
+  "The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.": "编程助手尚未就绪。请在设置 → 编程助手中检查安装，然后重试。",
   "Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.": "Codex 设备登录不可用。请在 ChatGPT 安全设置或工作区权限中启用设备代码登录后重试。",
   "Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.": "Codex 无法启动设备登录。请检查网络连接和 ChatGPT 中的设备代码登录权限后重试。",
   "Sign-in did not finish. Try again.": "登录未完成，请重试。",
@@ -653,8 +653,8 @@ var ZH = {
   "{model} did not answer. This Bot stays on {kept}.": "{model} 没有回答。此 Bot 仍使用 {kept}。",
   "{model} needs a sign-in before it can answer.": "{model} 需要先登录才能回答。",
   "Switching to this model. It has not answered yet.": "正在切换到此模型，它还没有回答。",
-  "Turn on {connection} in Settings → Claude Code and Codex before using this model.": "使用此模型前，请在设置 → Claude Code 和 Codex 中开启 {connection}。",
-  "Wait for {connection} to finish installing, or retry it in Settings → Claude Code and Codex.": "等待 {connection} 安装完成，或在设置 → Claude Code 和 Codex 中重试。",
+  "Turn on {connection} in Settings → Coding agents before using this model.": "使用此模型前，请在设置 → 编程助手中开启 {connection}。",
+  "Wait for {connection} to finish installing, or retry it in Settings → Coding agents.": "等待 {connection} 安装完成，或在设置 → 编程助手中重试。",
   "Sign in to {connection} before using this model.": "使用此模型前，请登录 {connection}。",
   // A Bot Session adopt refused after it began (#877, host agents.js adoptBotSession).
   "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}": "会话 {session} 无法加入 {bot}，因为这个窗口现在不能修改 Bot 团队。{reason}",
@@ -1097,6 +1097,7 @@ var ZH = {
   "The DeepSeek account sign-in has expired.": "DeepSeek 账号的登录失效了。",
   "Could not reach the model service.": "连不上模型服务。",
   "Too many requests. Wait a moment, then try again.": "请求太频繁，稍等一会儿再试。",
+  "{provider} reached its usage limit.": "{provider} 已达到使用限额。",
   "The model service failed.": "模型服务出错了。",
   "DeepSeek Harness stopped before this turn finished.": "这一轮还没完成，DeepSeek Harness 就停下了。",
   "This turn failed.": "这一轮运行失败了。",
@@ -2306,6 +2307,7 @@ var ZH = {
   "The API key was rejected": "API 密钥无效",
   "The account is out of quota": "账户额度已用尽",
   "Too many requests to the model": "模型请求太频繁",
+  "The coding agent reached its usage limit": "编程助手已达到使用限额",
   "The conversation is too long for the model": "对话太长，超出模型上限",
   "The model service refused the request": "模型服务拒绝了请求",
   "The model service failed": "模型服务出错",
@@ -3178,8 +3180,8 @@ var HOST_TEMPLATES = [
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
   "This step is hard to undo: {step}. Allow it once?",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?",
-  "Turn on {connection} in Settings → Claude Code and Codex before using this model.",
-  "Wait for {connection} to finish installing, or retry it in Settings → Claude Code and Codex.",
+  "Turn on {connection} in Settings → Coding agents before using this model.",
+  "Wait for {connection} to finish installing, or retry it in Settings → Coding agents.",
   "Sign in to {connection} before using this model.",
   "Confirm the account of {connection} before using this model.",
   // A host sign-in refusal with no sentence of its own carries its ACP class.
@@ -3288,6 +3290,8 @@ var FAILURES = {
   ACCOUNT_SIGNED_OUT: "The DeepSeek account is signed out",
   ACCOUNT_TOKEN_INVALID: "The DeepSeek account sign-in has expired",
   RATE_LIMIT: "Too many requests to the model",
+  ACP_CLAUDE_USAGE_LIMIT: "The coding agent reached its usage limit",
+  ACP_CODEX_USAGE_LIMIT: "The coding agent reached its usage limit",
   CONTEXT_WINDOW_EXCEEDED: "The conversation is too long for the model",
   INVALID_REQUEST: "The model service refused the request",
   SERVER: "The model service failed",
@@ -27904,8 +27908,12 @@ var ACCOUNT_MODELS_WAIT_MS = 2e4;
 var SIGNED_OUT = /* @__PURE__ */ new Set(["ACCOUNT_SIGN_IN_REQUIRED", "ACCOUNT_SIGNED_OUT", "ACCOUNT_TOKEN_INVALID"]);
 var KEY_CODES = /* @__PURE__ */ new Set(["MISSING_CREDENTIAL", "INVALID_CREDENTIAL", "AUTH"]);
 var CREDENTIAL_CODES = /* @__PURE__ */ new Set([...KEY_CODES, ...SIGNED_OUT]);
+var USAGE_LIMIT = { ACP_CLAUDE_USAGE_LIMIT: "acp-claude", ACP_CODEX_USAGE_LIMIT: "acp-codex" };
 function failureText2(code, { name, provider, status }) {
   switch (code) {
+    case "ACP_CLAUDE_USAGE_LIMIT":
+    case "ACP_CODEX_USAGE_LIMIT":
+      return t("{provider} reached its usage limit.", { provider: CLI_NAMES[USAGE_LIMIT[code]] });
     case "MISSING_CREDENTIAL":
       return t("{name}'s model has no API key yet.", { name });
     case "INVALID_CREDENTIAL":
@@ -27933,10 +27941,13 @@ function failureText2(code, { name, provider, status }) {
       return knownFailure(code) ?? t("This turn failed.");
   }
 }
-function fixesFor(code, { canSignIn, official, topUp, onAccount = false }) {
+function fixesFor(code, { canSignIn, canSwitch, official, topUp, onAccount = false }) {
   if (onAccount && KEY_CODES.has(code)) return [];
   if (SIGNED_OUT.has(code)) return canSignIn ? ["sign-in-again"] : ["model"];
   switch (code) {
+    case "ACP_CLAUDE_USAGE_LIMIT":
+    case "ACP_CODEX_USAGE_LIMIT":
+      return canSwitch ? ["switch-account"] : [];
     case "MISSING_CREDENTIAL":
       return ["key", canSignIn ? "sign-in" : null, "model"].filter(Boolean);
     case "INVALID_CREDENTIAL":
@@ -27958,6 +27969,7 @@ var FIX_LABELS = {
   "sign-in": (signedIn) => signedIn ? t("Use the DeepSeek account") : t("Sign in with a DeepSeek account"),
   "use-account": () => t("Use a DeepSeek account instead"),
   "sign-in-again": () => t("Sign in again"),
+  "switch-account": () => t("Switch account"),
   model: () => t("Pick another model"),
   "top-up": () => t("Top up ↗")
 };
@@ -28024,12 +28036,35 @@ function FailureCell({ node, sessionId, useRoster, useTurnClock, actions }) {
   const [keying, setKeying] = (0, import_react71.useState)(false);
   const [retry, setRetry] = (0, import_react71.useState)("idle");
   const [error, setError] = (0, import_react71.useState)("");
+  const [switching, setSwitching] = (0, import_react71.useState)("idle");
+  const switchBusy = (0, import_react71.useRef)(false);
   const [joining, setJoining] = (0, import_react71.useState)(null);
   const blocked = bot?.blocked?.code === data.code ? bot.blocked : void 0;
   const provider = blocked?.provider ?? providerOf2(bot, roster);
   const text2 = failureText2(data.code, { name: bot?.name ?? t("This Bot"), provider: providerName(roster, provider), status: blocked?.status });
   const facts = failureFacts2(data, blocked);
-  const current = bot !== void 0 && currentPart(bot) === sessionId && !later;
+  const inCurrentPart = bot !== void 0 && currentPart(bot) === sessionId;
+  const current = inCurrentPart && !later;
+  const cliProvider = Object.hasOwn(USAGE_LIMIT, data.code) ? USAGE_LIMIT[data.code] : void 0;
+  const canSwitch = typeof actions.cliLoginSwitch === "function" && typeof actions.openCliLogin === "function";
+  const settledSwitch = !current && inCurrentPart && canSwitch && cliProvider !== void 0 && cliProviderOf(bot.model) === cliProvider;
+  const switchAccount = async () => {
+    if (switchBusy.current) return;
+    switchBusy.current = true;
+    setSwitching("busy");
+    setError("");
+    try {
+      await actions.cliLoginSwitch(bot.id, cliProvider);
+      await actions.refreshModels?.();
+      actions.openCliLogin(bot.id, cliProvider);
+      setSwitching("idle");
+    } catch (failure) {
+      setError(hostText(failure?.message ?? String(failure)));
+      setSwitching("confirm");
+    } finally {
+      switchBusy.current = false;
+    }
+  };
   const moveToAccount = () => {
     const model = accountModel(roster);
     if (model === void 0) {
@@ -28059,15 +28094,8 @@ function FailureCell({ node, sessionId, useRoster, useTurnClock, actions }) {
     }, ACCOUNT_MODELS_WAIT_MS);
     return () => clearTimeout(timer);
   }, [joining, signedIn, listed]);
-  const settled = () => (0, import_react71.createElement)(
-    "div",
-    { className: "bt-fail", "data-settled": "", role: "status" },
-    (0, import_react71.createElement)("div", { className: "bt-fail-head" }, (0, import_react71.createElement)("span", { className: "bt-fail-dot", "aria-hidden": true }), (0, import_react71.createElement)("span", { className: "bt-fail-text" }, text2)),
-    (0, import_react71.createElement)(TechnicalDetails, { facts })
-  );
-  if (!current) return settled();
   const official = provider === OFFICIAL;
-  const canSignIn = typeof actions.signIn === "function" && actions.canSignIn?.() === true;
+  const canSignIn = current && typeof actions.signIn === "function" && actions.canSignIn?.() === true;
   const keyHere = typeof actions.setProviderKey === "function" && provider !== void 0;
   const keyElsewhere = official && actions.openHarnessOnboarding ? () => actions.openHarnessOnboarding(OFFICIAL) : manageModels(actions);
   const viaAccount = () => {
@@ -28084,11 +28112,15 @@ function FailureCell({ node, sessionId, useRoster, useTurnClock, actions }) {
     "sign-in": viaAccount,
     "use-account": viaAccount,
     "sign-in-again": () => actions.signIn(),
+    "switch-account": () => {
+      setError("");
+      setSwitching("confirm");
+    },
     model: actions.showDetails ? () => actions.showDetails(sessionId) : void 0
   };
-  const fixes = fixesFor(data.code, { canSignIn, official, topUp: topUp !== void 0, onAccount: provider === ACCOUNT }).filter((fix) => fix === "top-up" || runs[fix] !== void 0);
-  const asked2 = isHiddenTurn(roster, sessionId, data.turn);
-  const retrying = !asked2 && typeof actions.resume === "function" && retryShown(data.code, blocked);
+  const fixes = current ? fixesFor(data.code, { canSignIn, canSwitch, official, topUp: topUp !== void 0, onAccount: provider === ACCOUNT }).filter((fix) => fix === "top-up" || runs[fix] !== void 0) : settledSwitch ? ["switch-account"] : [];
+  const asked2 = current && isHiddenTurn(roster, sessionId, data.turn);
+  const retrying = current && !asked2 && typeof actions.resume === "function" && retryShown(data.code, blocked);
   const retryFirst = retrying && (fixes.length === 0 || CREDENTIAL_CODES.has(data.code));
   const resume = () => {
     setRetry("busy");
@@ -28107,15 +28139,23 @@ function FailureCell({ node, sessionId, useRoster, useTurnClock, actions }) {
     return (0, import_react71.createElement)("button", { key: fix, type: "button", className, "aria-expanded": toggles ? keying : void 0, onClick: () => runs[fix]() }, FIX_LABELS[fix](signedIn));
   };
   const retryButton = (primary) => (0, import_react71.createElement)("button", { key: "retry", type: "button", className: primary ? "bt-send bt-fail-go" : "bt-soft bt-soft-sm", disabled: retry !== "idle", onClick: resume }, retry === "idle" ? t("Retry") : t("Retrying…"));
-  const row = retryFirst ? [retryButton(true), ...fixes.map((fix) => button(fix, false))] : [...fixes.map((fix, index) => button(fix, index === 0)), retrying ? retryButton(false) : null];
-  if (!row.some(Boolean)) return settled();
+  const row = retryFirst ? [retryButton(true), ...fixes.map((fix) => button(fix, false))] : [...fixes.map((fix, index) => button(fix, current && index === 0)), retrying ? retryButton(false) : null];
+  const hasActions = row.some(Boolean);
+  const confirmSwitch = switching !== "idle" && fixes.includes("switch-account");
   return (0, import_react71.createElement)(
     "div",
-    { className: "bt-fail", role: "status" },
+    { className: "bt-fail", "data-settled": !current || !hasActions ? "" : void 0, role: "status" },
     (0, import_react71.createElement)("div", { className: "bt-fail-head" }, (0, import_react71.createElement)("span", { className: "bt-fail-dot", "aria-hidden": true }), (0, import_react71.createElement)("span", { className: "bt-fail-text" }, text2)),
-    (0, import_react71.createElement)("div", { className: "bt-fail-actions" }, row),
-    keying && keyHere ? (0, import_react71.createElement)(ModelKeyCard, { model: { provider, providerName: providerName(roster, provider) }, actions, onSaved: () => setKeying(false) }) : null,
-    error ? (0, import_react71.createElement)("div", { className: "bt-fail-error", role: "alert" }, error) : null,
+    hasActions ? (0, import_react71.createElement)("div", { className: "bt-fail-actions" }, confirmSwitch ? [
+      (0, import_react71.createElement)("span", { key: "confirm" }, t("This stops running Bot work for this account. Continue?")),
+      (0, import_react71.createElement)("button", { key: "continue", type: "button", className: current ? "bt-send bt-fail-go" : "bt-soft bt-soft-sm", disabled: switching === "busy", onClick: switchAccount }, t("Continue")),
+      (0, import_react71.createElement)("button", { key: "cancel", type: "button", className: "bt-soft bt-soft-sm", disabled: switching === "busy", onClick: () => {
+        setSwitching("idle");
+        setError("");
+      } }, t("Cancel"))
+    ] : row) : null,
+    current && hasActions && keying && keyHere ? (0, import_react71.createElement)(ModelKeyCard, { model: { provider, providerName: providerName(roster, provider) }, actions, onSaved: () => setKeying(false) }) : null,
+    hasActions && error && (current || confirmSwitch) ? (0, import_react71.createElement)("div", { className: "bt-fail-error", role: "alert" }, error) : null,
     (0, import_react71.createElement)(TechnicalDetails, { facts })
   );
 }

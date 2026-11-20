@@ -323,6 +323,21 @@ test('owner only: DSH answers 403 to a share viewer on every sign-in endpoint, a
   assert.equal((await allowed.json()).value.attemptId, h.attemptId)
 })
 
+test('a share viewer receives 403 on the CLI account list', async (t) => {
+  const h = await fixture(t)
+  const connection = { fetchRoutes: new Map(), interceptors: new Map() }
+  HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, h.route)
+  const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
+  const viewer = { principal: { kind: 'share-viewer', shareId: 'share', actor: { providerId: 'p', tenantId: 't', subjectId: 's' } } }
+  const response = await handler.fetch(new Request('http://localhost/api/omni-ui', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ endpoint: 'cli-login-accounts', payload: {} }),
+  }), viewer)
+  assert.equal(response.status, 403)
+  assert.equal(h.calls.length, 0)
+})
+
 test('a delivery carrying a shown state is never noted for a resend; one dropped at its step is forgotten', async (t) => {
   const h = await fixture(t)
   const sessionId = h.rt.chatOf('first')

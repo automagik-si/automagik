@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import { heldText } from '../src/client/stops.js'
 import { HELD_LINES } from '../src/shared/held.js'
 import { DICTIONARY, hostText, hostTemplateOf, installLocale, language, t } from '../src/client/i18n.js'
+import { ACCESS_MESSAGES } from '../src/host/models.js'
 
 function fakeLocale(active) {
   const dicts = new Map()
@@ -28,6 +29,20 @@ test('every literal the client translates has a Chinese entry', () => {
     }
   }
   assert.deepEqual(missing, [])
+})
+
+test('coding agent access messages name the renamed Settings section in all three languages', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(ACCESS_MESSAGES.off, 'Turn on {connection} in Settings → Coding agents before using this model.')
+  assert.equal(ACCESS_MESSAGES.installing, 'Wait for {connection} to finish installing, or retry it in Settings → Coding agents.')
+  for (const key of [ACCESS_MESSAGES.off, ACCESS_MESSAGES.installing]) {
+    assert.match(DICTIONARY.zh[key], /设置 → 编程助手/)
+    assert.match(pt[key], /Configurações → Agentes de código/)
+    assert.equal(hostTemplateOf(key.replace('{connection}', 'Codex')), key)
+  }
+  const notReady = 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
+  assert.match(DICTIONARY.zh[notReady], /设置 → 编程助手/)
+  assert.match(pt[notReady], /Configurações → Agentes de código/)
 })
 
 test('copy follows the DSH language and stays English without a locale service', () => {
