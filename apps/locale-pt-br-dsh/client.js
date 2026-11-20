@@ -1804,6 +1804,7 @@ const pack = createPack({
     "Wait for {connection} to finish installing, or retry it in Settings → Coding agents.": "Aguarde a instalação de {connection} terminar ou tente de novo em Configurações → Agentes de código.",
     "Sign in to {connection} before using this model.": "Faça login em {connection} antes de usar este modelo.",
     "{name} could not switch to {model}. It stays on {kept}.": "{name} não conseguiu mudar para {model}. Continua em {kept}.",
+    "{name} cannot use the {route} route.": "{name} não pode usar a rota “{route}”.",
     "Authorization code": "Código de autorização",
     "Copy link": "Copiar link",
     "Cancel the {name} sign-in opened in {bot}?": "Cancelar o login em {name} aberto em {bot}?",

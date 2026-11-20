@@ -9580,6 +9580,7 @@ var ZH = {
   '{bot} changed while Session {session} was joining it (another window or an edit). For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.': "{bot} 在会话 {session} 加入时发生了变化（另一个窗口或一次编辑）。Bot 团队没有任何改动，请重试。在这次拒绝之前，会话 {session} 的原生预设已被设为「{preset}」。",
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.': "{bot} 在保存会话 {session} 时发生了变化。Bot 团队没有任何改动，请重试。在这次拒绝之前，会话 {session} 的原生预设已被设为「{preset}」。",
   "{name} could not switch to {model}. It stays on {kept}.": "{name} 无法切换到 {model}，仍使用 {kept}。",
+  "{name} cannot use the {route} route.": "{name} 无法使用“{route}”路线。",
   // A Bot's capability pills (capability-pills.js); 'Channels' is the Channels page's.
   "Computer": "电脑",
   "Leads the team": "带领团队",
@@ -12203,6 +12204,7 @@ var HOST_TEMPLATES = [
   "Could not continue this sign-in ({kind}). Try again.",
   "The account could not be confirmed ({kind}). Try again.",
   "{name} could not switch to {model}. It stays on {kept}.",
+  { template: "{name} cannot use the {route} route.", host: ["route"] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
   // message (the store's read-only reason) is worded in turn.
   { template: "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}", host: ["reason"] },

@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { DEFAULT_ROUTE_POLICY } from '../src/shared/route-policy.js'
 
 const bundle = await build({
   stdin: {
@@ -493,7 +494,7 @@ const cascade = [
   { ref: 'acp-codex/gpt-6.1-sol', id: 'gpt-6.1-sol', provider: 'acp-codex', providerName: 'Codex', via: 'cli', name: '6.1 Sol' },
 ]
 
-function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default', effort: 'high' }, chat = false, onPick, onPickEffort, routePolicy } = {}) {
+function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default', effort: 'high' }, chat = false, onPick, onPickEffort, routePolicy, prefs } = {}) {
   const updates = []
   const chosen = []
   const switched = []
@@ -503,7 +504,7 @@ function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', a
     switchRoute: (id, ref, patch) => { switched.push([id, ref, { ...patch }]); return Promise.resolve() },
     openHarnessSettings: () => {},
   }
-  const roster = { ready: true, byId: { [bot.id]: bot }, models: cascade, defaultModel: 'deepseek/flash', ...(routePolicy ? { routePolicy } : {}) }
+  const roster = { ready: true, byId: { [bot.id]: bot }, models: cascade, defaultModel: 'deepseek/flash', ...(routePolicy ? { routePolicy } : {}), ...(prefs ? { prefs } : {}) }
   menuOpen = true
   try {
     const open = drawMenu({ bot, roster, actions, run: promise => promise, chat, onPick, onPickEffort })
@@ -516,6 +517,38 @@ function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', a
 }
 const labelOf = row => nodes(row, node => node.props.className === 'bt-menu-label')[0].children[0]
 const hintOf = row => nodes(row, node => node.props.className === 'bt-menu-hint')[0]?.children[0] ?? null
+
+test('the default opens the allowed route rows for each kind, including disconnected Remote Hermes', () => {
+  for (const kind of [undefined, 'omni', 'genie', 'unfold', 'dsh']) {
+    const bot = { id: 'b1', name: 'Ops', model: 'deepseek/flash', ...(kind === undefined ? {} : { kind }) }
+    const { step } = openMenu({ bot, routePolicy: DEFAULT_ROUTE_POLICY })
+    const routes = nodes(step(), node => node.type === 'button' && node.props['data-route'] !== undefined)
+    assert.deepEqual(routes.map(labelOf), kind === 'dsh' ? ['Native', 'Remote Hermes'] : ['Native', 'ACP', 'Remote Hermes'], kind)
+    assert.equal(hintOf(routes.at(-1)), 'Set up', kind)
+  }
+})
+
+test('a saved Remote Hermes connection stays in the default menu for Automagik and DSH', () => {
+  for (const kind of [undefined, 'dsh']) {
+    const bot = { id: 'b1', name: 'Ops', model: 'deepseek/flash', ...(kind ? { kind } : {}) }
+    const { step } = openMenu({ bot, routePolicy: DEFAULT_ROUTE_POLICY, prefs: { hermesRemote: { enabled: true, profile: 'Lab' } } })
+    const routes = nodes(step(), node => node.type === 'button' && node.props['data-route'] !== undefined)
+    assert.deepEqual(routes.map(labelOf), kind === 'dsh' ? ['Native', 'Remote Hermes'] : ['Native', 'ACP', 'Remote Hermes'])
+    assert.equal(hintOf(routes.at(-1)), 'Lab')
+  }
+})
+
+test('with the default policy, hosted Unfold still shows its plugin entries and thinking levels', () => {
+  menuOpen = true
+  try {
+    const tree = drawHost({ bot: hostBot, roster: { ...hostRoster(), routePolicy: DEFAULT_ROUTE_POLICY }, actions: {}, run: promise => promise })
+    const rows = nodes(tree, node => node.type === 'button' && node.props.role === 'menuitemradio')
+    assert.deepEqual(rows.map(labelOf), ['Granite 4.1 3B', 'DeepSeek V4.1 Flash', 'GPT-5.5', 'Auto', 'Off', 'High'])
+    assert.equal(nodes(tree, node => node.props['data-route'] !== undefined).length, 0)
+  } finally {
+    menuOpen = false
+  }
+})
 
 test('step 1 lists the four routes in order, marks the one the Bot is on, and ends on the providers', () => {
   const { step, steps } = openMenu()
