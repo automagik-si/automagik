@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892; the amendment's 5b-5d open; narrowed the same day by the owner's delegate: member and guest prompting moves to 5e) |
+| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892, and 5b, #1911; the amendment's 5c-5d open; narrowed the same day by the owner's delegate: member and guest prompting moves to 5e) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P); the gate and the server image |
 | Created | 2026-11-20 |

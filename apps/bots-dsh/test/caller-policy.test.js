@@ -103,6 +103,9 @@ test('R4 RFC 0038 records 5b as merged and leaves native reads conditional after
   const index = readFileSync(new URL('../../../docs/rfcs/README.md', import.meta.url), 'utf8')
   assert.match(rfc, /[Mm]erged: delivery 5b \(`b86e0234e`\)/)
   assert.match(index, /\| \[0038\].*delivery 5b \(`b86e0234e`\)/)
+  const status = rfc.split('\n').find(line => line.startsWith('| Status |'))
+  assert.match(status, /5b, #1911/)
+  assert.doesNotMatch(status, /5b-5d open/)
   for (const grant of ['am:global', 'am:bot-session-read', 'am:bot-workspace']) {
     const line = rfc.split('\n').find(line => line.startsWith('- `' + grant + '`'))
     assert.match(line, /conditional future work/)
