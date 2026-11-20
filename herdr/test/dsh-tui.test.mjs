@@ -9,17 +9,19 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSyn
   realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 import { workerArgs } from "../mods/am-sidebar/workers.js";
 import {
   DSH_TUI, PIN, PROFILE, RECORD_FILE, SHIM, SHIM_MARK, SHIM_TEXT, SKIP, desktopFingerprint, doctorDshTui, findDsh, installDshTui, installSandboxRow, lockIntegrity,
-  ownershipOf, packRootOf, packWrapperOf, packageOfEntry, panePathOf, profileState, releaseAgeEntries, sandboxRootOf, sandboxState, sandboxWrapperOf, scopeReleaseAge, STABLE_FILES,
-  shimIsOurs, uninstallDshTui, MAX_SYMLINK_DEPTH, realOrAbs, stableRootProblem,
+  ownershipOf, packRootOf, packWrapperOf, packageOfEntry, panePathOf, profileState, releaseAgeEntries, sandboxRootOf, sandboxState, sandboxWrapperOf, scopeReleaseAge, STABLE_FILES, STABLE_FOLDERS,
+  shimIsOurs, uninstallDshTui, MAX_SYMLINK_DEPTH, realOrAbs, stableFilesCurrent, stableRootProblem,
   approvedDataRootProblem,
 } from "../mods/am-sidebar/dshTui.mjs";
 import { approveProject } from "../mods/am-sidebar/approved.js";
 import { scratchRoot } from "./scratch-project.mjs";
+import { trustScreen } from "./agy-prompt-fixture.mjs";
+import { agyHookSource } from "./agy-guard-shapes.mjs";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 /** The pinned release's publish time: an hour before this run, so the fresh path never depends on the wall clock. */
@@ -277,6 +279,81 @@ test("the stable copy from STABLE_FILES loads hcPane.mjs", async (t) => {
   assert.equal(installed.status, "installed", installed.detail);
   const mod = await import(`${pathToFileURL(join(sandboxRootOf(s.env), "hcPane.mjs")).href}?t=${Date.now()}`);
   assert.equal(typeof mod.runPane, "function");
+});
+
+test("STABLE_FILES is closed under its modules' and the guard entries' local imports (RFC 0042)", () => {
+  const root = packRootOf();
+  const sources = [
+    ...STABLE_FILES.filter((file) => /\.[cm]?js$/.test(file)),
+    ...STABLE_FOLDERS.map((folder) => join(folder, "hc")),
+  ];
+  const imports = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["'](\.{1,2}\/[^"']+)["']/g;
+  assert.ok(STABLE_FILES.includes("agyPrompt.js"));
+  for (const file of sources) {
+    const source = join(root, file);
+    for (const [, specifier] of readFileSync(source, "utf8").matchAll(imports)) {
+      const dependency = relative(root, resolve(dirname(source), specifier));
+      assert.ok(STABLE_FILES.includes(dependency), `${file} imports ${dependency}, which is missing from STABLE_FILES`);
+    }
+  }
+});
+
+test("the installed stable copy carries the Antigravity matcher the guard imports", async (t) => {
+  const s = scene(t);
+  const installed = await installDshTui({ forbiddenRoots: rootsOf(s), env: s.env, publishedAt: PUBLISHED });
+  assert.equal(installed.status, "installed", installed.detail);
+  const root = realpathSync(sandboxRootOf(s.env));
+  const matcher = join(root, "agyPrompt.js");
+  assert.ok(existsSync(matcher));
+  assert.equal(stableFilesCurrent(packRootOf(), root), true);
+  const guard = await import(`${pathToFileURL(join(root, "hcGuard.mjs")).href}?t=${Date.now()}`);
+  for (const name of ["runGuard", "runKillGuard", "heldTarget"]) assert.equal(typeof guard[name], "function", name);
+  const { AGY_SHAPES } = await import(pathToFileURL(matcher).href);
+  assert.deepEqual(AGY_SHAPES, []);
+
+  const stubDir = join(s.root, "stub-hc"), log = join(s.root, "stub-hc.log");
+  mkdirSync(stubDir);
+  exe(join(stubDir, "hc"), `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const argv = process.argv.slice(2);
+appendFileSync(${JSON.stringify(log)}, JSON.stringify(argv) + "\\n");
+if (argv[0] === "get" && argv[1] === "m/t9") {
+  console.log(JSON.stringify({
+    address: "m/t9", state: "live", created_ms: 100, status: { state: "working" },
+    foreground: { argv: ["agy"] },
+  }));
+} else if (argv[0] === "read") {
+  console.log(JSON.stringify({ text: ${JSON.stringify(trustScreen)}, complete: true }));
+} else {
+  console.log("stub-out " + JSON.stringify(argv));
+}
+`);
+  const hook = join(s.root, "agy-hook.mjs"), shimDir = join(root, "hc-kill");
+  writeFileSync(hook, agyHookSource(pathToFileURL(matcher).href));
+  const args = ["send", "m/t9", "x"];
+  const run = (nodeArgs) => spawnSync(process.execPath, [...nodeArgs, join(shimDir, "hc"), ...args], {
+    env: { PATH: `${shimDir}:${stubDir}:${dirname(process.execPath)}`, HOME: s.home },
+    encoding: "utf8",
+  });
+  const lookups = [["get", "m/t9", "--json"], ["read", "m/t9", "--lines", "40", "--json"]];
+  const calls = () => readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const held = run(["--import", pathToFileURL(hook).href]);
+  assert.ifError(held.error);
+  assert.equal(held.status, 9, held.stderr);
+  assert.equal(held.stdout, "");
+  assert.equal(held.stderr, `${JSON.stringify({ error: { kind: "blocked",
+    message: "m/t9 is held by a dialog: a person must answer a question, permission or sign-in in it, so nothing was sent.",
+    hint: "Answer the dialog in that pane, or route this message to another pane; it was not typed and was not dropped." } })}\n`);
+  assert.deepEqual(calls(), lookups);
+
+  writeFileSync(log, "");
+  const sent = run([]);
+  assert.ifError(sent.error);
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.equal(sent.stdout, `stub-out ${JSON.stringify(args)}\n`);
+  assert.equal(sent.stderr, "");
+  assert.deepEqual(calls(), [...lookups, args]);
+  assert.equal(stableFilesCurrent(packRootOf(), root), true);
 });
 
 test("sandboxState sees a stable runner whose exec line differs from its comment", async (t) => {
