@@ -48,14 +48,20 @@ const bindingAddress = (b) => (typeof b?.address === "string" && b.address ? b.a
   : (b?.machine && typeof b?.terminal === "string" && !b.terminal.includes("/") ? `${b.machine}/${b.terminal}` : b?.terminal ?? null));
 const bindingProject = (b) => (b?.project
   ? projectId({ machine: b.machine ?? machineOfAddress(bindingAddress(b)), key: b.project }) : null);
+// The terminal addresses the ledger's rows name, whatever their bot or state: the ledger
+// decides those panes, and a live pane none of them names falls back to its bot= label
+// (#1875: a bot bound on another machine's ledger, or an address seen as `wsl/t2y`). Empty
+// without `bindings` (`null`), so every pane goes by its label.
+const ledgerClaims = (bindings) => new Set(bindings === null ? [] : (bindings ?? []).map(bindingAddress).filter(Boolean));
 
 /**
  * The live map: bot id -> its live pane, from `terminals()` rows. With `bindings` (the attach
  * ledger's `whois --all` answer, rows with `{ bot, address, project, machine, state }`), the
- * ledger names each bot's pane: a terminal counts while it is live and has an agent in front,
- * whatever its `bot=` label says, and only the bindings that are `live` count. Without
- * `bindings` (`null`), a terminal counts while it is live, carries `bot=<id>` for a bot in
- * `known` (every id when `known` is null) and has an agent in front. On any machine: the view
+ * ledger names the bot of each pane it has a row for: such a terminal counts while it is live
+ * and has an agent in front, whatever its `bot=` label says, and only the bindings that are
+ * `live` count. Any other terminal (every one without `bindings`, `null`) counts while it is
+ * live, carries `bot=<id>` for a bot in `known` (every id when `known` is null) and has an
+ * agent in front (ledgerClaims). On any machine: the view
  * shows remote bots too (launch.js' liveTerminalOf is this computer's only, for Start and
  * Attach). Several holders: the newest by `created_ms` counts, flagged `duplicate`. `argv`:
  * the pane's foreground command line when the row carries it (`foreground.argv`), else what
@@ -85,12 +91,13 @@ export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = (
       const t = rows.get(bindingAddress(b));
       if (t && t.state === "live" && agentInFront(t, readArgv)) hold(id, bindingProject(b), t);
     }
-  } else {
-    for (const t of terminals ?? []) {
-      const id = t?.labels?.[BOT_LABEL];
-      if (!id || (known && !known.has(id)) || t.state !== "live" || !addressOf(t) || !agentInFront(t, readArgv)) continue;
-      hold(id, paneProject(t, keyOf), t);
-    }
+  }
+  const claimed = ledgerClaims(bindings);
+  for (const t of terminals ?? []) {
+    const id = t?.labels?.[BOT_LABEL];
+    if (!id || (known && !known.has(id)) || t.state !== "live" || !addressOf(t) || claimed.has(addressOf(t))
+      || !agentInFront(t, readArgv)) continue;
+    hold(id, paneProject(t, keyOf), t);
   }
   const entry = (rows) => {
     const pick = rows.reduce((a, b) => ((b.created_ms ?? -1) > (a.created_ms ?? -1) ? b : a));
@@ -121,9 +128,10 @@ export const liveOf = (live, project, botId) => live?.[liveKey(botId, projectId(
 
 /**
  * The terminal address -> bot id map the sidebar draws rows from: the ledger's live bindings
- * when it answers (`bindings`), never the pane's `bot=` label; the labels when it can't answer
- * (`null`), so a CLI without `whois --all` still draws its rows. `known`: the ids a project
- * defines; a binding for any other id is no bot row.
+ * when it answers (`bindings`), never the `bot=` label of a pane it has a row for; the label
+ * of every other pane (every pane when it can't answer, `null`, so a CLI without `whois --all`
+ * still draws its rows: ledgerClaims). `known`: the ids a project defines; a binding or label
+ * for any other id is no bot row.
  */
 export function botTerminals(terminals, known, bindings = null) {
   const rows = new Map((terminals ?? []).filter((t) => addressOf(t)).map((t) => [addressOf(t), t]));
@@ -135,11 +143,11 @@ export function botTerminals(terminals, known, bindings = null) {
       const t = rows.get(bindingAddress(b));
       if (t) out.set(addressOf(t), id);
     }
-    return out;
   }
+  const claimed = ledgerClaims(bindings);
   for (const t of rows.values()) {
     const id = t?.labels?.[BOT_LABEL];
-    if (id && known.has(id)) out.set(addressOf(t), id);
+    if (id && (!known || known.has(id)) && !claimed.has(addressOf(t))) out.set(addressOf(t), id);
   }
   return out;
 }
@@ -770,19 +778,19 @@ export function clickActionOf(terminal, panes) {
  * The live terminal a bot's row holds when liveFrom doesn't count it (no agent seen in front
  * yet: the `sh -c` wrapper, a command line not read yet, a shell): the bot row's click still
  * goes to it (clickActionOf), never nowhere. With `bindings` (liveFrom's ledger answer) the
- * ledger names it, never the `bot=` label; a bound terminal still counts, and an unbound label
- * names nothing. Without (`null`), the live terminal labelled with bot `botId`. Of several, one
+ * ledger names the terminals it has a row for, never their `bot=` label; a bound terminal
+ * still counts. Any other live terminal labelled with bot `botId` counts by its label (every
+ * one without `bindings`, `null`: ledgerClaims). Of several, one
  * a pane shows (`panes`: panes() rows) first, then the newest by `created_ms`. Null when the
  * bot has no live terminal. With `project`, only the terminals that count for it (paneCounts,
  * `keyOf` as liveFrom's; the binding's project with `bindings`).
  */
 export function heldTerminalOf(botId, terminals, panes = [], project = null, keyOf = () => null, bindings = null) {
   const shown = new Set((panes ?? []).map((p) => p?.terminal).filter(Boolean));
-  let held;
+  const held = [];
   if (bindings !== null) {
     const rows = new Map((terminals ?? []).filter((t) => addressOf(t)).map((t) => [addressOf(t), t]));
     const pid = project ? projectId(project) : null;
-    held = [];
     const seen = new Set();
     for (const b of bindings ?? []) {
       if (b?.bot !== botId || (b.state && b.state !== "live")) continue;
@@ -793,10 +801,10 @@ export function heldTerminalOf(botId, terminals, panes = [], project = null, key
       seen.add(address);
       held.push(t);
     }
-  } else {
-    held = (terminals ?? []).filter((t) => botId && t?.labels?.[BOT_LABEL] === botId && t.state === "live" && addressOf(t)
-      && (!project || paneCounts(t, project, keyOf)));
   }
+  const claimed = ledgerClaims(bindings);
+  held.push(...(terminals ?? []).filter((t) => botId && t?.labels?.[BOT_LABEL] === botId && t.state === "live"
+    && addressOf(t) && !claimed.has(addressOf(t)) && (!project || paneCounts(t, project, keyOf))));
   if (!held.length) return null;
   const rank = (t) => [shown.has(addressOf(t)) ? 1 : 0, t.created_ms ?? -1];
   const pick = held.reduce((a, b) => {
