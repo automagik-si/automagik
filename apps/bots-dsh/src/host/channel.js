@@ -257,7 +257,7 @@ export function install(rt) {
   }
   const live = (roles) => ({
     activity: rt.activityView(),
-    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
+    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
     memoryNews: rt.memoryNews(),
     memoryReviews: rt.memoryReviews(),
     learning: rt.learningView(),

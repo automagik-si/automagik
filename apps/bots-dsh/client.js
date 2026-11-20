@@ -2940,6 +2940,8 @@ var ZH = {
   "Wants to use {tool}": "想要使用 {tool}",
   "Nothing running right now.": "现在没有在运行的任务。",
   "Just finished": "刚刚完成",
+  "This step was withdrawn: its task ended": "这一步已撤回：它的任务结束了",
+  "The task ended with an approval unanswered": "任务结束时还有一个审批没有回答",
   "Automations": "自动化",
   "What runs on a schedule or a trigger": "按计划或触发运行的任务",
   "Failed: {reason}": "失败：{reason}",
@@ -3189,6 +3191,7 @@ var HOST_ERRORS = [
   [/^Memory cannot change now: [\s\S]*$/, "现在不能修改记忆：另一个 dsh 正在使用这个 Bot 团队"]
 ];
 var HOST_ZH = {
+  "This approval is no longer open": "这个审批已经关闭了",
   "The Server address must start with ws:// or wss://": "服务器地址必须以 ws:// 或 wss:// 开头",
   "Enter the Server address first": "请先填服务器地址",
   "Turn on phone access first": "请先打开手机访问",
@@ -9196,6 +9199,14 @@ var COMPOSER_PACK_CSS = `
 `;
 
 // src/client/approvals.js
+function withdrawnText(why) {
+  switch (why) {
+    case "task":
+      return t("This step was withdrawn: its task ended");
+    default:
+      return "";
+  }
+}
 var useApproval = (useWork, match) => useWork ? useWork((work) => (work.approvals ?? []).some(match)) : false;
 var approvalCount = (work, match) => (work?.approvals ?? []).filter(match).length;
 function groupApprovals(entries2) {
@@ -9335,6 +9346,7 @@ function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, useWork })
     const entry = taskId === null ? void 0 : openStops(work).filter((item) => item.taskId === taskId).sort((a, b) => b.at - a.at)[0];
     return entry ? stopLine(entry) : "";
   }) : "";
+  const unanswered = useWork ? useWork((work) => taskId !== null && (work.unanswered ?? []).includes(taskId)) : false;
   const waiting = asked2 || approval;
   const status = taskState(task, waiting);
   const working = status === "working" || status === "waiting";
@@ -9392,6 +9404,7 @@ function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, useWork })
         (0, import_react18.createElement)("div", { className: "op-task-bar", "aria-hidden": true }, (0, import_react18.createElement)("i"))
       ) : task?.summary ? (0, import_react18.createElement)("p", { className: "op-task-summary" }, task.summary) : null,
       status === "waiting" && detail ? (0, import_react18.createElement)("span", { className: "op-task-said" }, detail) : null,
+      !working && unanswered ? (0, import_react18.createElement)("span", { className: "op-task-said" }, t("The task ended with an approval unanswered")) : null,
       sessionId ? (0, import_react18.createElement)("button", { type: "button", className: "op-task-open", onClick: onOpen }, ask ? t("Open task") : status === "waiting" ? t("Answer it") : working ? t("Watch it work") : t("Open task"), " →") : null
     )
   );
@@ -21076,6 +21089,23 @@ function liveSummary({ needs, working }) {
   parts.push(working.length > 0 ? t("{count} working", { count: working.length }) : t("nothing working"));
   return parts.join(" · ");
 }
+function withdrawnOf(work, now = Date.now()) {
+  return (work?.withdrawn ?? []).filter((row) => withdrawnText(row.why) !== "" && now - (row.at ?? 0) < ENDED_FOR_MS).map((row) => ({
+    key: `gone:${row.id}`,
+    name: String(row.botName ?? ""),
+    at: row.at ?? 0,
+    place: String(row.roomName ?? row.label ?? ""),
+    line: `${withdrawnText(row.why)} · ${row.tool}`
+  })).sort((a, b) => b.at - a.at).slice(0, ENDED_SHOWN);
+}
+function GoneCard({ item }) {
+  return (0, import_react49.createElement)("div", { className: "bt-live-card", role: "note" }, (0, import_react49.createElement)(
+    "span",
+    { className: "bt-live-text" },
+    (0, import_react49.createElement)("span", { className: "bt-live-name" }, item.name, item.place ? (0, import_react49.createElement)("span", { className: "bt-live-place" }, ` · ${item.place}`) : null),
+    (0, import_react49.createElement)("span", { className: "bt-live-line" }, item.line)
+  ));
+}
 var since = (at, now) => {
   const minutes = Math.max(0, Math.round((now - at) / 6e4));
   return minutes < 1 ? t("just now") : minutes < 60 ? t("{count} min", { count: minutes }) : t("{count} h", { count: Math.round(minutes / 60) });
@@ -21145,6 +21175,10 @@ function LiveRail({ roster, actions, useWork, useSessionStatus }) {
     return () => clearInterval(timer);
   }, []);
   const live = liveOf(work, roster, now);
+  const finished = [
+    ...live.ended.map((item) => ({ at: item.at, node: (0, import_react49.createElement)(Entry, { key: item.key, item, tone: item.status === "failed" ? "bad" : "done", actions, line: `${item.title} · ${item.label}` }) })),
+    ...withdrawnOf(work, now).map((item) => ({ at: item.at, node: (0, import_react49.createElement)(GoneCard, { key: item.key, item }) }))
+  ].sort((a, b) => b.at - a.at).map((entry) => entry.node);
   return (0, import_react49.createElement)(
     "aside",
     { className: "bt-live", "aria-label": t("Live") },
@@ -21164,11 +21198,7 @@ function LiveRail({ roster, actions, useWork, useSessionStatus }) {
       { label: t("Working"), dot: "work", empty: t("Nothing running right now.") },
       live.working.map((item) => (0, import_react49.createElement)(Entry, { key: item.key, item, tone: "work", actions, line: item.task && item.at ? `${item.phrase} · ${since(item.at, now)}` : item.phrase }))
     ),
-    live.ended.length > 0 ? (0, import_react49.createElement)(
-      Section,
-      { label: t("Just finished"), dot: "done", empty: "" },
-      live.ended.map((item) => (0, import_react49.createElement)(Entry, { key: item.key, item, tone: item.status === "failed" ? "bad" : "done", actions, line: `${item.title} · ${item.label}` }))
-    ) : null,
+    finished.length > 0 ? (0, import_react49.createElement)(Section, { label: t("Just finished"), dot: "done", empty: "" }, finished) : null,
     (0, import_react49.createElement)(
       "section",
       { className: "bt-live-sec" },

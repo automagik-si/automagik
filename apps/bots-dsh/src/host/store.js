@@ -555,6 +555,11 @@ export function install(rt) {
   }
 
   rt.holdsLock = () => !stopped && !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  // RFC 0039 delivery 3: the team an ending operation began in. An adopt replaces the team in memory (`epoch`);
+  // a lost and re-claimed lock ends this host's term (`term`, claimLock). Only a host that holds the team now,
+  // in the same epoch and term, may publish an end.
+  rt.teamGeneration = () => ({ epoch: lockEpoch, term: lockTerm })
+  rt.sameTeam = gen => gen !== undefined && gen.epoch === lockEpoch && gen.term === lockTerm && rt.holdsLock()
   rt.dropAutoMarks = () => {
     let dropped = false
     for (const bot of Object.values(state.bots ?? {})) {
@@ -667,12 +672,13 @@ export function install(rt) {
         for (const listener of savedListeners) {
           try { listener() } catch (error) { warn('omni-ui: saved listener failed: %s', error) }
         }
+        return true
       } catch (error) {
         await unlink(temp).catch(() => {})
         throw error
       }
     })
-    writing = run.catch(() => {})
+    writing = run.then(() => {}, () => {})
     return run.catch(error => {
       warn('omni-ui: state write failed: %s', error)
       throw error

@@ -141,3 +141,15 @@ test('Voice / Mouth card and recovery copy has Chinese and Brazilian Portuguese 
     assert.notEqual(pt[key], key)
   }
 })
+
+test('rfc0039 [P] I1 Chinese withdrawn and stale texts', async () => {
+  const clientApprovals = await import('../src/client/approvals.js')
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(clientApprovals.withdrawnText?.('task'), '这一步已撤回：它的任务结束了')
+    assert.equal(t('The task ended with an approval unanswered'), '任务结束时还有一个审批没有回答')
+    assert.equal(hostText('This approval is no longer open'), '这个审批已经关闭了')
+  } finally {
+    off()
+  }
+})

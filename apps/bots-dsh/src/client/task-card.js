@@ -30,8 +30,8 @@ export const runningTasksOf = (roster, botId) => Object.entries(roster.tasks ?? 
   .map(([sessionId, task]) => ({ sessionId, ...task }))
   .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
 
-const ENDED_SHOWN = 3
-const ENDED_FOR_MS = 6 * 60 * 60 * 1000
+export const ENDED_SHOWN = 3
+export const ENDED_FOR_MS = 6 * 60 * 60 * 1000
 export const endOf = task => task.endedAt ?? task.at ?? 0
 
 // The ended tasks the Live rail lists, newest end first: a Bot's, three at most, six hours
@@ -101,6 +101,7 @@ export function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, use
     const entry = taskId === null ? undefined : openStops(work).filter(item => item.taskId === taskId).sort((a, b) => b.at - a.at)[0]
     return entry ? stopLine(entry) : ''
   }) : ''
+  const unanswered = useWork ? useWork(work => taskId !== null && (work.unanswered ?? []).includes(taskId)) : false
   const waiting = asked || approval
   const status = taskState(task, waiting)
   const working = status === 'working' || status === 'waiting'
@@ -141,6 +142,7 @@ export function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, use
           h('div', { className: 'op-task-bar', 'aria-hidden': true }, h('i')))
           : task?.summary ? h('p', { className: 'op-task-summary' }, task.summary) : null,
       status === 'waiting' && detail ? h('span', { className: 'op-task-said' }, detail) : null,
+      !working && unanswered ? h('span', { className: 'op-task-said' }, t('The task ended with an approval unanswered')) : null,
       sessionId ? h('button', { type: 'button', className: 'op-task-open', onClick: onOpen }, ask ? t('Open task') : status === 'waiting' ? t('Answer it') : working ? t('Watch it work') : t('Open task'), ' →') : null))
 }
 
