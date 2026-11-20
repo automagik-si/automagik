@@ -1587,7 +1587,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, vault-dsh, welcome-dsh]
+        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, multiuser-dsh, vault-dsh, welcome-dsh]
     defaults:
       run:
         working-directory: apps/${{ matrix.app }}

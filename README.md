@@ -88,6 +88,7 @@ Automagik's plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepse
 | [`apps/welcome-dsh`](apps/welcome-dsh/README.md) | `@automagik/welcome-dsh` | The welcome: the octopus, the team step, and Connect AI through DSH's own sign-ins. |
 | [`apps/acp-dsh`](apps/acp-dsh/README.md) | `@automagik/acp-dsh` | Agents other than DSH's own, over ACP (Agent Client Protocol), as DSH models: the agent's tool calls show as DSH tool cards and ask through DSH's approval dialog (RFC 0003). |
 | [`apps/locale-pt-br-dsh`](apps/locale-pt-br-dsh/README.md) | `@automagik/locale-pt-br-dsh` | Português: the Bot team's Brazilian Portuguese under DSH's own Portuguese entry. Adds no language of its own, so Settings › General › Language keeps one Portuguese row; a pt-BR choice saved by an older pack moves to DSH's pt. |
+| [`apps/multiuser-dsh`](apps/multiuser-dsh/README.md) | `@automagik/multiuser-dsh` | Server-side caller admission and attribution for gated workspaces (RFC 0038). |
 | [`apps/vault-dsh`](apps/vault-dsh/README.md) | `@automagik/vault-dsh` | Bitwarden fields for approved Bot commands, with unlock and mapping in Settings › Secrets (RFC 0034). |
 | [`apps/desktop`](apps/desktop/README.md) | (the app) | The Automagik desktop app: DSH of its own with the Bot team, the welcome and Omni's channels and canvases. `omni desktop` opens it with Omni preloaded, `genie desktop` with Genie. |
 

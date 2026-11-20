@@ -147,7 +147,7 @@ describe('the packages', () => {
     }
     // The scan read the packages: each plugin's own test script is among what it read, so an
     // empty result below cannot come from reading nothing.
-    for (const plugin of ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh']) {
+    for (const plugin of ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'multiuser-dsh', 'vault-dsh', 'welcome-dsh']) {
       expect(read.get(plugin)?.some((script) => script.includes('--test'))).toBe(true);
     }
     const scripts = [...read.values()].flat().filter((script) => script.includes('--test-force-exit'));

@@ -36,7 +36,7 @@ describe('the plugin lane', () => {
     try {
       for (const path of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'package.json', 'am/part.json', 'meter/usagemeter/part.json',
         'meter/usagemeter/Cargo.toml', 'meter/usagemeter/Cargo.lock', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
-        'apps/locale-pt-br-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) {
+        'apps/locale-pt-br-dsh/package.json', 'apps/multiuser-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) {
         mkdir(dirname(join(repo, path)), { recursive: true });
         cpSync(join(root, path), join(repo, path));
       }
@@ -52,6 +52,56 @@ describe('the plugin lane', () => {
       expect(result.status).toBe(0);
       expect(result.stdout.trim()).toBe('full');
     } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
+  test('the server adapter stays on the plugin lane and a shipped NOTICE moved into its harness still ships', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'lane-server-plugin-'));
+    const root = join(import.meta.dir, '..');
+    const git = (...args: string[]) => {
+      const result = spawnSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      return result.stdout.trim();
+    };
+    const copy = (file: string) => {
+      mkdir(dirname(join(repo, file)), { recursive: true });
+      cpSync(join(root, file), join(repo, file));
+    };
+    try {
+      for (const file of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'package.json', 'am/part.json',
+        'meter/usagemeter/part.json', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
+        'apps/locale-pt-br-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(file);
+      git('init', '-q'); git('add', '.'); git('commit', '-qm', 'base');
+      const base = git('rev-parse', 'HEAD');
+      for (const file of ['package.json', 'dev/harness/package.json', 'index.js', 'src/carrier.js', 'NOTICE']) copy('apps/multiuser-dsh/' + file);
+      git('add', '.'); git('commit', '-qm', 'feat: add caller adapter');
+      const result = spawnSync('bun', [join(repo, 'scripts/lane.ts'), 'kind', base, base], { cwd: repo, encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('plugins');
+      const installed = git('rev-parse', 'HEAD');
+      const notice = 'apps/multiuser-dsh/NOTICE';
+      const harnessNotice = 'apps/multiuser-dsh/dev/harness/NOTICE';
+      git('mv', notice, harnessNotice);
+      git('commit', '-qm', 'refactor: move adapter notice into the harness');
+      expect(git('diff', '--name-status', '--find-renames', `${installed}..HEAD`)).toBe(`R100\t${notice}\t${harnessNotice}`);
+      const shipping = spawnSync('bun', [join(repo, 'scripts/lane.ts'), 'ships', installed], { cwd: repo, encoding: 'utf8' });
+      expect(shipping.status).toBe(0);
+      expect(shipping.stdout.trim()).toBe('yes');
+    } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
+  test('the server adapter ships source and stays outside the signed desktop lane', () => {
+    const files = JSON.parse(readFileSync(join(import.meta.dir, '../apps/multiuser-dsh/package.json'), 'utf8')).files;
+    const unpacked = unpackedIn({ 'multiuser-dsh': files });
+    expect(ships(['apps/multiuser-dsh/src/carrier.js'], unpacked)).toBe(true);
+    expect(ships(['apps/multiuser-dsh/index.js'], unpacked)).toBe(true);
+    expect(ships(['apps/multiuser-dsh/scripts/lint.mjs', 'apps/multiuser-dsh/test/carrier.test.js'], unpacked)).toBe(false);
+    expect(ships(['apps/multiuser-dsh/dev/harness/package.json'], unpacked)).toBe(false);
+    expect(ships(['apps/multiuser-dsh/bun.lock', 'apps/multiuser-dsh/dev/harness/bun.lock'], unpacked)).toBe(false);
+    expect(kindOf(['apps/bots-dsh/dev/harness/package.json', 'apps/multiuser-dsh/index.js'], () => false)).toBe('full');
+    const lane = manifest({ version: '3.160.2', commit: 'a'.repeat(40), repository: 'automagik-si/automagik',
+      packages: { '@automagik/multiuser-dsh': { version: '3.160.2', file: 'adapter.tgz', integrity: 'sha512-unused', size: 1 } },
+    }, { base: '3.160.0', issuedAt: '2026-11-20T00:00:00Z', dir: '/unused', engines: () => { throw new Error('desktop engines only'); } });
+    expect(lane.plugins).toEqual([]);
   });
 
   test('the usagemeter crate ships on the meter lane, its notes and tests never (RFC 0017 delivery 4)', () => {
@@ -251,7 +301,7 @@ describe('the plugin lane', () => {
     try {
       for (const path of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'am/part.json', 'meter/usagemeter/part.json',
         'meter/usagemeter/Cargo.toml', 'meter/usagemeter/Cargo.lock', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
-        'apps/locale-pt-br-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(path);
+        'apps/locale-pt-br-dsh/package.json', 'apps/multiuser-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(path);
       put('meter/usagemeter/src/main.rs', 'fn main() {}\n');
       put(METER_KEYS, NO_KEY);
       put(METER_CONTRACT, DEV);
