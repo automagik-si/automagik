@@ -18,6 +18,7 @@ import { normalizeAddressList } from './browser/address-policy.js'
 import { verifiedWindow } from './desktop-window.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
+import { installRoles } from './roles.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -64,6 +65,7 @@ export function install(rt) {
   installBtw(rt)
   installSide(rt)
   const { ctx, state } = rt
+  installRoles(rt)
 
   // The DSH interface language of the last browser that asked for the team.
   let uiLocale
@@ -333,6 +335,7 @@ export function install(rt) {
   }
 
   async function setPrefs(body) {
+    const roles = body.roles
     if (body.theme !== undefined) {
       if (typeof body.theme !== 'string' || !/^[a-z][\w-]{0,31}$/.test(body.theme)) throw invalid('Unknown theme')
       state.prefs.theme = body.theme
@@ -420,7 +423,9 @@ export function install(rt) {
       if (sizes.length === 0) delete state.prefs.memoryLimits
       else state.prefs.memoryLimits = { ...state.prefs.memoryLimits, ...Object.fromEntries(sizes) }
     }
-    return rt.save()
+    const saved = await rt.save()
+    if (roles === false || roles === true || roles === null) await rt.setRolesPreference(roles)
+    return saved
   }
 
   // UI edits retain their existing concurrency. An MCP audit excludes UI config edits
@@ -467,7 +472,7 @@ export function install(rt) {
   }
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),
     'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
-    'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback'])
+    'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
   const handle = async (endpoint, payload, signal, desktopWindow = false) => {
     try {
@@ -644,8 +649,15 @@ export function install(rt) {
           await rt.load()
           return ok(await rt.setBotAuto(String(body.id ?? ''), body.rev))
         case 'update-bot':
+          if (Object.hasOwn(body, 'roles')) throw invalid("A Bot's role changes with role-attach and role-detach")
           await rt.load()
           return ok(await rt.updateBot(body.id, body))
+        case 'role-attach':
+          if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
+          return ok(await rt.attachRole(body.id, body.role))
+        case 'role-detach':
+          if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
+          return ok(await rt.detachRole(body.id))
         // A model on another route (parts.js): a new conversation with a handoff note.
         case 'switch-route':
           await rt.load()

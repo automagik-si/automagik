@@ -1321,6 +1321,13 @@ var ZH = {
   Label: "标签",
   "Optional. Shown under the name.": "可选，显示在名字下方。",
   Role: "角色",
+  Genie: "Genie",
+  "What this Bot can do, on top of what every Bot has.": "这个 Bot 在通用能力之外还能做什么。",
+  "Genie can be given to another Bot after the next Genie update.": "Genie 下次更新后，就可以把此角色分配给其他 Bot。",
+  "Roles are turned off for this team.": "此团队已关闭角色功能。",
+  "Unknown role": "未知角色",
+  "A Bot's role changes with role-attach and role-detach": "请使用 role-attach 和 role-detach 更改 Bot 的角色",
+  "{name} does not have the {tool} tool: its Genie role is off.": "{name} 的 Genie 角色已关闭，无法使用 {tool} 工具。",
   "A few words on what it does.": "用几个词说明它做什么。",
   "Research, admin…": "研究、行政…",
   Tools: "工具",
@@ -3189,6 +3196,7 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 var HOST_TEMPLATES = [
+  "{name} does not have the {tool} tool: its Genie role is off.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
   "This step is hard to undo: {step}. Allow it once?",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?",
@@ -15405,6 +15413,37 @@ var ADVANCED_SETTINGS_CSS = `
 .bt-advanced-stats p{margin:10px 0 0;overflow-wrap:anywhere}
 `;
 
+// src/shared/roles.js
+var BUILTIN_ROLES = Object.freeze({
+  genie: Object.freeze({
+    id: "genie",
+    name: "Genie",
+    kind: "genie",
+    tools: Object.freeze(["grant_wish"]),
+    botChildren: Object.freeze(["genie-wishes"]),
+    suggestions: Object.freeze(["genie"])
+  })
+});
+var GENIE_ATTACH_REFUSAL = "Genie can be given to another Bot after the next Genie update.";
+var rolesOn = (prefs) => prefs?.roles !== false;
+var isAttachment = (entry) => typeof entry?.id === "string" && Object.hasOwn(BUILTIN_ROLES, entry.id) && typeof entry.version === "string" && entry.version.length > 0 && typeof entry.attachedAt === "string" && Array.isArray(entry.grants);
+var storedRoles = (bot) => {
+  if (!Object.hasOwn(bot ?? {}, "roles")) return void 0;
+  const entry = Array.isArray(bot.roles) ? bot.roles.find(isAttachment) : void 0;
+  return entry === void 0 ? [] : [entry];
+};
+function effectiveRoleIds(bot, prefs) {
+  const stored = rolesOn(prefs) ? storedRoles(bot) : void 0;
+  return stored?.map((entry) => entry.id) ?? (bot?.kind === "genie" ? ["genie"] : []);
+}
+var genieDetached = (bot, prefs) => bot?.kind === "genie" && rolesOn(prefs) && !effectiveRoleIds(bot, prefs).includes("genie");
+var roleTagOf = (bot, prefs) => rolesOn(prefs) ? BUILTIN_ROLES[effectiveRoleIds(bot, prefs)[0]]?.name : void 0;
+function roleOutletVisible(outlet, id, bot, roster) {
+  if (!roster || !rolesOn(roster.prefs)) return true;
+  const owner = Object.values(BUILTIN_ROLES).find((role) => role[outlet].includes(id));
+  return owner === void 0 || effectiveRoleIds(bot, roster.prefs).includes(owner.id);
+}
+
 // src/client/bot-settings.js
 var import_react40 = require("react");
 var capitalize2 = (word2) => word2[0].toUpperCase() + word2.slice(1);
@@ -15525,7 +15564,7 @@ function denyToolsText(bot) {
 function parseDenyTools(text2) {
   return [...new Set(String(text2 ?? "").split(/[\n,]+/).map((name) => name.trim()).filter(Boolean))];
 }
-function BotSettingsForm({ bot, roster, actions, run: run3 }) {
+function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const [editing, setEditing] = (0, import_react40.useState)(false);
   const [confirming, setConfirming] = (0, import_react40.useState)(false);
   const closeEditor = (0, import_react40.useCallback)(() => setEditing(false), []);
@@ -15541,6 +15580,9 @@ function BotSettingsForm({ bot, roster, actions, run: run3 }) {
   const privateHint = t("Other Bots cannot read its folder, memory or chats, and you approve what it shares with them.");
   const privacyHint = bot.private === true ? privateHint : isMainBot ? t("A Main Bot cannot be private.") : inGroup ? t("Leave its group chats before making it private.") : !bot.workDir ? t("Choose a working folder of its own first.") : privateHint;
   const save = (patch) => run3(actions.updateBot(bot.id, patch));
+  const teamBot = roster.bots?.some((item) => item.id === bot.id) ?? roster.byId?.[bot.id]?.id === bot.id;
+  const roleTag = teamBot ? roleTagOf(bot, roster.prefs) : void 0;
+  const canAttachGenie = bot.kind === BUILTIN_ROLES.genie.kind;
   const [signIn, setSignIn] = (0, import_react40.useState)(null);
   (0, import_react40.useEffect)(() => {
     setSignIn(null);
@@ -15585,7 +15627,12 @@ function BotSettingsForm({ bot, roster, actions, run: run3 }) {
       (0, import_react40.createElement)(
         "div",
         { className: "bt-bs-who" },
-        (0, import_react40.createElement)("span", { className: "bt-bs-name" }, bot.name),
+        (0, import_react40.createElement)(
+          "span",
+          { className: "bt-row-name" },
+          (0, import_react40.createElement)("span", { className: "bt-bs-name" }, bot.name),
+          roleTag ? (0, import_react40.createElement)("span", { className: "bt-tag" }, t(roleTag)) : null
+        ),
         (0, import_react40.createElement)("span", { className: "bt-bs-sub" }, [bot.role, isMainBot ? t("Main Bot") : ""].filter(Boolean).join(" · ") || t("Bot"))
       )
     ),
@@ -15593,7 +15640,39 @@ function BotSettingsForm({ bot, roster, actions, run: run3 }) {
       Card2,
       { title: t("Profile") },
       (0, import_react40.createElement)(Row, { label: t("Name") }, (0, import_react40.createElement)(InlineText, { label: t("Name"), value: bot.name, placeholder: "Bob", required: true, maxLength: 40, onSave: (name) => save({ name }) })),
-      (0, import_react40.createElement)(Row, { label: t("Role"), hint: t("A few words on what it does.") }, (0, import_react40.createElement)(InlineText, { label: t("Role"), value: bot.role, placeholder: t("Research, admin…"), maxLength: 24, onSave: (role) => save({ role }) }))
+      (0, import_react40.createElement)(Row, { label: t("Description"), hint: t("A few words on what it does.") }, (0, import_react40.createElement)(InlineText, { label: t("Description"), value: bot.role, placeholder: t("Research, admin…"), maxLength: 24, onSave: (role) => save({ role }) })),
+      teamBot && rolesOn(roster.prefs) ? (0, import_react40.createElement)(
+        "div",
+        { className: "bt-set-row bt-bs-row" },
+        (0, import_react40.createElement)(
+          "span",
+          { className: "bt-set-copy" },
+          (0, import_react40.createElement)("span", { className: "bt-bs-label" }, t("Role")),
+          (0, import_react40.createElement)("span", { className: "bt-set-hint" }, t("What this Bot can do, on top of what every Bot has."))
+        ),
+        (0, import_react40.createElement)(
+          Segmented,
+          { label: t("Role"), value: roleTag },
+          (0, import_react40.createElement)("button", {
+            type: "button",
+            className: "bt-soft bt-soft-sm",
+            "aria-pressed": !roleTag,
+            onClick: () => {
+              if (roleTag) void run3(actions.detachRole(bot.id));
+            }
+          }, t("None")),
+          (0, import_react40.createElement)("button", {
+            type: "button",
+            className: "bt-soft bt-soft-sm",
+            "aria-pressed": roleTag === "Genie",
+            disabled: !canAttachGenie,
+            title: canAttachGenie ? void 0 : t(GENIE_ATTACH_REFUSAL),
+            onClick: () => {
+              if (!roleTag && canAttachGenie) void run3(actions.attachRole(bot.id, "genie"));
+            }
+          }, t("Genie"))
+        )
+      ) : null
     ),
     (0, import_react40.createElement)(
       Card2,
@@ -19989,6 +20068,8 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     createRoom: (members, options = {}) => after(call2("create-room", { members, ...options })),
     setBotAuto: (id, rev) => after(call2("set-bot-auto", { id, rev })),
     updateBot: (id, patch) => after(call2("update-bot", { id, ...patch })),
+    attachRole: (id, role) => after(call2("role-attach", { id, role })),
+    detachRole: (id) => after(call2("role-detach", { id })),
     // A model on another route: the host starts a new conversation with a handoff note
     // (parts.js). `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call2("switch-route", { id, ...patch, model: ref })),
@@ -22883,6 +22964,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
         null,
         (0, import_react57.createElement)("span", { className: "lb-art" }, renderArt2(row.bot, art, state2)),
         (0, import_react57.createElement)("span", { className: "lb-name" }, row.name),
+        row.bot.roleTag ? (0, import_react57.createElement)("span", { className: "bt-tag" }, t(row.bot.roleTag)) : null,
         row.unread ? (0, import_react57.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         renderEnd ? renderEnd(row) : null,
         status(row)
@@ -23278,7 +23360,7 @@ function currentKey2(roster, shownId) {
   const agent = (roster.agents ?? []).find((candidate) => (candidate.sessions ?? []).includes(shownId));
   return agent ? `bot:${agent.id}` : void 0;
 }
-function teamOf({ roster, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
+function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
   const main = roster.byId?.[roster.mainBotId];
   const shown2 = (key) => key === current;
   const unread = (id, key, own) => !shown2(key) && (own || marked[id] === true);
@@ -23286,7 +23368,8 @@ function teamOf({ roster, order, status, marked = {}, current, now = Date.now(),
     const key = `bot:${item.id}`;
     if (item.hidden && !shown2(key) && !isMainOf(roster, item.id)) return null;
     const seen = status.bots.get(item.id) ?? { status: "idle", unread: false };
-    return { ...item, channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) };
+    const roleTag = roleTagOf(roster.byId?.[item.id] ?? item, roster.prefs);
+    return { ...item, ...roleTag ? { roleTag } : {}, channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) };
   };
   const agent = (item) => {
     const tasks = item.kind === "tasks";
@@ -24008,7 +24091,8 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   };
   const pinned = bot.pinned === true && !crowned;
   const role = crowned ? bot.role : "";
-  const label = [bot.name, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
+  const tag = roleTagOf(bot, roster.prefs);
+  const label = [bot.name, tag ? t(tag) : "", role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   return (0, import_react61.createElement)(
     "button",
     {
@@ -24027,7 +24111,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
     wide ? (0, import_react61.createElement)(
       "span",
       { className: "bt-row-body" },
-      (0, import_react61.createElement)("span", { className: "bt-row-name" }, (0, import_react61.createElement)("span", { className: "bt-row-title" }, bot.name), bot.engine ? (0, import_react61.createElement)(AgentBadge, { engine: bot.engine }) : null, role ? (0, import_react61.createElement)("span", { className: "bt-role" }, role) : null, pinned ? (0, import_react61.createElement)(PinMark) : null),
+      (0, import_react61.createElement)("span", { className: "bt-row-name" }, (0, import_react61.createElement)("span", { className: "bt-row-title" }, bot.name), tag ? (0, import_react61.createElement)("span", { className: "bt-tag" }, t(tag)) : null, bot.engine ? (0, import_react61.createElement)(AgentBadge, { engine: bot.engine }) : null, role ? (0, import_react61.createElement)("span", { className: "bt-role" }, role) : null, pinned ? (0, import_react61.createElement)(PinMark) : null),
       // What to ask this Bot for, on a line of its own: the name line has no room for it.
       (0, import_react61.createElement)(BotPills, { roster, bot, className: "bt-row-caps" }),
       blockedLine || stoppedLine ? (0, import_react61.createElement)("span", { className: "bt-row-preview bt-row-preview-ask" }, blockedLine || stoppedLine) : runningLine ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, runningLine) : awayLine ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, awayLine) : waitsFor ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, waitsFor) : threadsLine ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, threadsLine) : preview ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, preview) : null
@@ -24044,7 +24128,7 @@ function RowBadges(props) {
 function BotChildren({ wide, ...props }) {
   const entries2 = useEntries(botChildren);
   if (!wide || entries2.length === 0) return null;
-  return entries2.map((entry) => (0, import_react61.createElement)(entry.Component, { key: entry.id, ...props, wide }));
+  return entries2.filter((entry) => roleOutletVisible("botChildren", entry.id, props.bot, props.roster)).map((entry) => (0, import_react61.createElement)(entry.Component, { key: entry.id, ...props, wide }));
 }
 function threadAge(ms, now = Date.now()) {
   const minutes = Math.floor(Math.max(0, now - ms) / 6e4);
@@ -28793,12 +28877,12 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
     (0, import_react74.createElement)(
       "label",
       { className: "bt-field" },
-      (0, import_react74.createElement)("span", { className: "bt-field-label" }, t("Role")),
+      (0, import_react74.createElement)("span", { className: "bt-field-label" }, t("Description")),
       (0, import_react74.createElement)("input", {
         className: "bt-input",
         value: role,
         maxLength: ROLE_MAX,
-        "aria-label": t("Role"),
+        "aria-label": t("Description"),
         onChange: (event) => setRole(event.target.value)
       })
     ),
@@ -39733,6 +39817,7 @@ function personWrote(outline, hiddenTurns = []) {
 function suggestionsFor(entries2, context) {
   const items = [];
   for (const entry of entries2) {
+    if (!roleOutletVisible("suggestions", entry.id, context.bot, context.roster)) continue;
     try {
       if (entry.when && !entry.when(context)) continue;
       for (const item of entry.items(context) ?? []) if (item?.label && item?.text) items.push({ ...item, key: `${entry.id}:${item.id ?? item.label}` });
@@ -39752,10 +39837,10 @@ function fillComposer(text2) {
 }
 function SuggestionDock({ sessionId, input, session, useRoster, useSessions }) {
   const roster = useRoster((value) => value);
-  const bot = roster.byId[sessionId];
+  const bot = roster?.byId?.[sessionId];
   const part = sessionId;
   const outline = (list) => list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline;
-  const wrote = useSessions ? useSessions((list) => personWrote(outline(list), roster.exchangeTurns?.[part] ?? [])) : true;
+  const wrote = useSessions ? useSessions((list) => personWrote(outline(list), roster?.exchangeTurns?.[part] ?? [])) : true;
   const entries2 = useEntries(chatSuggestions);
   const [images, setImages] = (0, import_react101.useState)(false);
   (0, import_react101.useEffect)(() => {

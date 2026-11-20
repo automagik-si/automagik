@@ -14,11 +14,12 @@ import { BotComputerCard } from './computer.js'
 import { avatarImage } from './avatar-library.js'
 import { botSettings, useEntries } from './extend.js'
 import { useMemoryCount } from './memory-panel.js'
-import { SPRING_SHAPE, SPRING_TAP, spring } from './motion.js'
+import { SPRING_SHAPE, SPRING_TAP, Segmented, spring } from './motion.js'
 import { t } from './i18n.js'
 import { cliProviderOf } from './cli-login-model.js'
 import { CliAccounts } from './cli-accounts.js'
 import { AdvancedSettings, ADVANCED_SETTINGS_CSS } from './advanced-settings.js'
+import { BUILTIN_ROLES, GENIE_ATTACH_REFUSAL, roleTagOf, rolesOn } from '../shared/roles.js'
 
 const capitalize = word => word[0].toUpperCase() + word.slice(1)
 
@@ -118,10 +119,10 @@ export function parseDenyTools(text) {
   return [...new Set(String(text ?? '').split(/[\n,]+/).map(name => name.trim()).filter(Boolean))]
 }
 
-// A Bot's settings as grouped cards: who it is (avatar, name, role), what it runs on
+// A Bot's settings as grouped cards: who it is (avatar, name, description, role), what it runs on
 // (model), what it does (instructions), its memory and tasks, its Main Bot role, its
 // sidebar place, and copies.
-export function BotSettingsForm({ bot, roster, actions, run }) {
+export function BotSettingsForm({ bot, roster = {}, actions, run }) {
   const [editing, setEditing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const closeEditor = useCallback(() => setEditing(false), [])
@@ -137,6 +138,9 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
   const privateHint = t('Other Bots cannot read its folder, memory or chats, and you approve what it shares with them.')
   const privacyHint = bot.private === true ? privateHint : isMainBot ? t('A Main Bot cannot be private.') : inGroup ? t('Leave its group chats before making it private.') : !bot.workDir ? t('Choose a working folder of its own first.') : privateHint
   const save = patch => run(actions.updateBot(bot.id, patch))
+  const teamBot = roster.bots?.some(item => item.id === bot.id) ?? (roster.byId?.[bot.id]?.id === bot.id)
+  const roleTag = teamBot ? roleTagOf(bot, roster.prefs) : undefined
+  const canAttachGenie = bot.kind === BUILTIN_ROLES.genie.kind
   // A model whose agent is signed out: the refusal shows as usual, and Sign in opens the sign-in
   // row in this Bot's chat (rule 2). The chat opens only on this click.
   const [signIn, setSignIn] = useState(null)
@@ -169,11 +173,21 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
           h('span', { className: 'bt-avatar-pencil', 'aria-hidden': true }, h(PencilIcon))),
         editing ? h(CharacterSelect, { bot, actions, run, onClose: closeEditor, avatarImage }) : null),
       h('div', { className: 'bt-bs-who' },
-        h('span', { className: 'bt-bs-name' }, bot.name),
+        h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-bs-name' }, bot.name),
+          roleTag ? h('span', { className: 'bt-tag' }, t(roleTag)) : null),
         h('span', { className: 'bt-bs-sub' }, [bot.role, isMainBot ? t('Main Bot') : ''].filter(Boolean).join(' · ') || t('Bot')))),
     h(Card, { title: t('Profile') },
       h(Row, { label: t('Name') }, h(InlineText, { label: t('Name'), value: bot.name, placeholder: 'Bob', required: true, maxLength: 40, onSave: name => save({ name }) })),
-      h(Row, { label: t('Role'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Role'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) }))),
+      h(Row, { label: t('Description'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Description'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) })),
+      teamBot && rolesOn(roster.prefs) ? h('div', { className: 'bt-set-row bt-bs-row' },
+        h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Role')),
+          h('span', { className: 'bt-set-hint' }, t('What this Bot can do, on top of what every Bot has.'))),
+        h(Segmented, { label: t('Role'), value: roleTag },
+          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': !roleTag,
+            onClick: () => { if (roleTag) void run(actions.detachRole(bot.id)) } }, t('None')),
+          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': roleTag === 'Genie', disabled: !canAttachGenie,
+            title: canAttachGenie ? undefined : t(GENIE_ATTACH_REFUSAL),
+            onClick: () => { if (!roleTag && canAttachGenie) void run(actions.attachRole(bot.id, 'genie')) } }, t('Genie')))) : null),
     h(Card, { title: t('Model') },
       h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Model')), h('span', { className: 'bt-set-hint', role: modelState?.lastFailure?.kept ? 'status' : undefined }, modelHint(bot, roster, modelState))),

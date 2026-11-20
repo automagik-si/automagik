@@ -1278,6 +1278,13 @@ const ZH = {
   Label: '标签',
   'Optional. Shown under the name.': '可选，显示在名字下方。',
   Role: '角色',
+  Genie: 'Genie',
+  'What this Bot can do, on top of what every Bot has.': '这个 Bot 在通用能力之外还能做什么。',
+  'Genie can be given to another Bot after the next Genie update.': 'Genie 下次更新后，就可以把此角色分配给其他 Bot。',
+  'Roles are turned off for this team.': '此团队已关闭角色功能。',
+  'Unknown role': '未知角色',
+  "A Bot's role changes with role-attach and role-detach": '请使用 role-attach 和 role-detach 更改 Bot 的角色',
+  '{name} does not have the {tool} tool: its Genie role is off.': '{name} 的 Genie 角色已关闭，无法使用 {tool} 工具。',
   'A few words on what it does.': '用几个词说明它做什么。',
   'Research, admin…': '研究、行政…',
   Tools: '工具',
@@ -3153,6 +3160,7 @@ export function t(key, params) {
 // a model switch DSH turned down, roster.js): the template is the dictionary key, worded with
 // the values the message carried.
 const HOST_TEMPLATES = [
+  '{name} does not have the {tool} tool: its Genie role is off.',
   'This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.',
   'This step is hard to undo: {step}. Allow it once?',
   '{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?',

@@ -10,6 +10,7 @@ import { absoluteLinks } from './links.js'
 import { NAME_MAX } from './requests.js'
 import { unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
+import { BUILTIN_ROLES, genieDetached } from '../shared/roles.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
@@ -102,6 +103,10 @@ export function install(rt) {
   const { ctx, state } = rt
 
   const callerBot = (exec) => rt.botOf(rt.selfOf(exec.agent?.id))
+  // Only the Bot's own chat and its group Sessions take the role mask and guard.
+  // Genie itself refuses calls from task runs, subagents and fresh schedule Sessions.
+  const roleBotOf = id => (rt.chatOwners?.has(id) || rt.groupOwners?.has(id) ? rt.botOf(rt.selfOf(id)) : undefined)
+  const withheldRoleTools = bot => (genieDetached(bot, state.prefs) ? BUILTIN_ROLES.genie.tools : [])
   const callerRoom = (exec) => {
     const roomId = rt.groupOwners.get(exec.agent?.id)?.roomId
     return roomId ? { fromRoomId: roomId } : {}
@@ -1052,7 +1057,7 @@ export function install(rt) {
     const held = scoped.get(id)
     if (held === undefined) return
     scoped.delete(id)
-    for (const dispose of held.disposers) {
+    for (const dispose of [...held.disposers, ...(held.roleLifts ?? [])]) {
       try {
         dispose()
       } catch (error) {
@@ -1239,10 +1244,33 @@ export function install(rt) {
       } catch { /* a scoped name cannot be restricted; connectors are global */ }
     }
   }
+  const maskRoleTools = (agent, held) => {
+    if (typeof agent.ctx?.tools?.restrict !== 'function' || typeof ctx.tools?.schemas !== 'function') return
+    const wanted = withheldRoleTools(roleBotOf(agent.session?.id))
+    const before = held.roleDenied ?? new Set()
+    if (wanted.length === 0 && before.size === 0) return
+    // Visible schemas omit the names we already masked. Prefer the registry's
+    // pre-restriction view so our mask stays in place when other masks lift.
+    const served = ctx.tools.view?.(agent)?.restrictableNames
+      ?? new Set([...before, ...ctx.tools.schemas(agent).map(schema => schema.name)])
+    const deny = wanted.filter(name => served.has(name))
+    if (deny.length === before.size && deny.every(name => before.has(name))) return
+    // Update the held names before restrict/lift, which can emit tools/change.
+    held.roleDenied = new Set(deny)
+    for (const lift of held.roleLifts ?? []) { try { lift() } catch { /* already lifted */ } }
+    held.roleLifts = []
+    for (const name of deny) {
+      try {
+        const lift = agent.ctx.tools.restrict({ deny: [name] })
+        if (typeof lift === 'function') held.roleLifts.push(lift)
+      } catch { /* the executor guard still refuses the call */ }
+    }
+  }
   const reapplyToolMasks = () => {
     for (const held of scoped.values()) {
       if (held.agent === undefined) continue
       try { maskConnectorTools(held.agent, held) } catch (error) { rt.warn('omni-ui: connector mask failed: %s', error) }
+      try { maskRoleTools(held.agent, held) } catch (error) { rt.warn('omni-ui: role mask failed: %s', error) }
     }
   }
 
@@ -1302,6 +1330,7 @@ export function install(rt) {
       maskHiddenTools(agent, held, new Set(ctx.tools.schemas(agent).map(schema => schema.name)))
     }
     maskConnectorTools(agent, held)
+    maskRoleTools(agent, held)
   }
   ctx.on('tools/change', () => reapplyToolMasks())
   // A new Bot, part, or group Session gets its Agent before ds-bot records it, so the
@@ -1311,6 +1340,8 @@ export function install(rt) {
   ctx.tools.guard((exec) => {
     if (!rt.isBotSession(exec.agent?.id) || nativeDshSession(exec.agent?.id)) return undefined
     if (exec.name === BLOCKING_QUESTION_TOOL) return `Bots cannot use ${BLOCKING_QUESTION_TOOL}. Ask with ask_user in your own chat, or ask in your reply.`
+    const bot = roleBotOf(exec.agent?.id)
+    if (withheldRoleTools(bot).includes(exec.name)) return `${bot.name} does not have the ${exec.name} tool: its Genie role is off.`
     const target = exec.arguments?.target
     return SCHEDULE_TARGET_TOOLS.includes(exec.name) && target !== undefined && target !== 'this_session' ? SCHEDULE_TARGET_REFUSAL : undefined
   })
