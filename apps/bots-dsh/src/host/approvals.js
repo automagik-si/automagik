@@ -35,6 +35,7 @@ export function install(rt) {
   const { ctx } = rt
   /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
+  const folderIds = new Set()
   // RFC 0039 delivery 3: withdrawals live in memory for the team they happened in. Owners bind each ask
   // to its admission epoch and owner records by identity. A child inherits its parent's owner.
   const withdrawn = []
@@ -108,6 +109,7 @@ export function install(rt) {
     const botId = owner?.botId ?? chat ?? task?.from ?? runOwner?.botId
     if (botId === undefined) return next()
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id,
       sessionId,
@@ -142,6 +144,7 @@ export function install(rt) {
     const settle = (outcome, decidedBy = 'dsh', why) => {
       if (!pending.has(id)) return false
       pending.delete(id)
+      folderIds.delete(id)
       rt.noteApproval?.(sessionId, undefined)
       emit('settled', { id, outcome, decidedBy, at: Date.now(), ...(why !== undefined ? { why } : {}) })
       return true
@@ -208,6 +211,7 @@ export function install(rt) {
       return 'cancelled'
     }
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id, sessionId, botId: owner.botId, child: true, ownerSessionId: owner.sessionId,
       ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
@@ -228,6 +232,7 @@ export function install(rt) {
       const aborted = () => entry.answer('cancelled')
       entry.answer = outcome => {
         if (!pending.delete(id)) return false
+        folderIds.delete(id)
         request.signal?.removeEventListener('abort', aborted)
         resolve(outcome)
         return true
@@ -238,6 +243,12 @@ export function install(rt) {
   }
 
   const approvalsView = () => [...pending.values()].map(({ answer, ...entry }) => ({ ...entry, answerable: answer !== undefined }))
+  function groupAskCurrent(id, room) {
+    const entry = pending.get(id)
+    if (entry === undefined) return false
+    const owner = owners.get(entry)
+    return owner?.kind === 'group' && owner.epoch === teamEpoch() && owner.room === room && owner.bot === rt.botOf(entry.botId)
+  }
   const waitsForApproval = sessionId => [...pending.values()].some(entry => entry.sessionId === sessionId || entry.ownerSessionId === sessionId)
 
   function answerApproval(id, choice, client = 'web') {
@@ -278,5 +289,5 @@ export function install(rt) {
   const withdrawnView = () => { prune(); return withdrawn.map(({ epoch, ...row }) => row) }
   const unansweredView = () => { const epoch = teamEpoch(); return [...unanswered].filter(([, at]) => at === epoch).map(([id]) => id) }
 
-  Object.assign(rt, { approvalsView, waitsForApproval, answerApproval, cancelApprovals, onApproval, endApprovals, withdrawnView, unansweredView })
+  Object.assign(rt, { approvalsView, groupAskCurrent, isFolderApproval: id => folderIds.has(id), waitsForApproval, answerApproval, cancelApprovals, onApproval, endApprovals, withdrawnView, unansweredView })
 }

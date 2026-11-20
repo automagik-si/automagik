@@ -58,15 +58,15 @@ test('the gated Compose DSH service has no public URL, trusted host or published
   }
 })
 
-// The gate runs as the same uid 1000 as DSH: a read-only mount of the whole volume would still
-// let it read the model key and agent logins and connect to Pocket's chat socket.
-test('the gate mounts only DSH_HOME of the DSH volume, read-only', () => {
+// The gate runs as the same uid as DSH. Its only mount of that volume is the published view.
+test('the gate mounts only the read-only view of the DSH volume', () => {
   const config = parseCompose(readFileSync(FILE, 'utf8'))
   const mounts = (config.services?.gate?.volumes ?? []).filter((mount) => mount.source === 'dsh-data')
   assert.equal(mounts.length, 1, JSON.stringify(config.services?.gate?.volumes))
   const [mount] = mounts
   assert.equal(mount.type, 'volume')
-  assert.equal(mount.target, '/dsh/dsh')
+  assert.equal(mount.target, '/dsh-view')
   assert.equal(mount.read_only, true)
-  assert.equal(mount.volume?.subpath, 'dsh')
+  assert.equal(mount.volume?.subpath, 'gate-view')
+  assert.equal(config.services.gate.depends_on?.dsh?.condition, 'service_healthy')
 })

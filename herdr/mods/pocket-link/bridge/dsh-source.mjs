@@ -33,6 +33,12 @@
 // that phone's own upload.
 // The 65 s finish deadline covers the socket's authority check and its 60 s admission.
 //
+// RFC 0040 asks for `groups: 1` in both socket hellos when groups are enabled. The final reply
+// decides. Each phone's grant belongs to its connection, socket and team home. Even a reconnect
+// to the same home needs a fresh phone hello. The `dsh:room:` prefix is reserved before Bot
+// routing and refused by management. Group watches are text-only and keep approvals by id.
+// Only group sends forward `retry`.
+//
 // Absent is empty: no socket, a socket another account could reach, or one that answers neither
 // `readOnly: true` nor `readOnly: false, write: 1`, and the source lists nothing and opens nothing.
 //
@@ -49,7 +55,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { ATTACH_METHODS, cutRow, DOCUMENT_TYPES, MANAGE_METHODS, MAX_REQUEST, memoryRefused, page, phoneId } from './chat.mjs'
+import { ATTACH_METHODS, cutRow, DOCUMENT_TYPES, isRoom, MANAGE_METHODS, MAX_REQUEST, memoryRefused, page, phoneId, ROOM_PREFIX } from './chat.mjs'
 
 export const PREFIX = 'dsh:'
 export const ANSWER_ON_COMPUTER = 'Answer on the computer'
@@ -218,7 +224,8 @@ function admittedMetadata(result, rec, offer) {
 }
 
 export const isDsh = (terminal) => typeof terminal === 'string' && terminal.startsWith(PREFIX)
-const manageTerminal = (terminal) => isDsh(terminal) && terminal.length > PREFIX.length && terminal.length <= 128
+const manageTerminal = (t) => isDsh(t) && !isRoom(t) && t.length > PREFIX.length && t.length <= 128
+const roomTerminal = (t) => isRoom(t) && t.length > ROOM_PREFIX.length && t.length <= 128
 
 const expand = (text, home) => (text === '~' ? home : /^~[\\/]/.test(text) ? join(home, text.slice(2)) : text)
 
@@ -298,8 +305,8 @@ export class DshSource {
    * The clock and attachment deadlines can be replaced by the wire tests.
    */
   constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, realpath = realpathSync, log = () => {}, requestMs = REQUEST_MS, now = Date.now,
-    attachments = false, documents = false, timers = realTimers, attachmentMs = {}, settingsWriteMs = SETTINGS_WRITE_MS } = {}) {
-    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now, attachments, documents, timers, settingsWriteMs })
+    attachments = false, documents = false, groups = false, timers = realTimers, attachmentMs = {}, settingsWriteMs = SETTINGS_WRITE_MS } = {}) {
+    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now, attachments, documents, groups, timers, settingsWriteMs })
     this.attachmentMs = { ...ATTACH_MS, ...attachmentMs }
     /** The socket in use: the first of `paths` that passed the check. */
     this.path = null
@@ -315,6 +322,8 @@ export class DshSource {
     // Keep the team across reconnects. Switching homes invalidates the old phone hellos.
     this.team = null
     this.negotiated = new WeakMap()
+    this.groupsOffered = false
+    this.groupsAgreed = new WeakMap()
     this.attachOffer = null
     this.attachmentsAgreed = new WeakMap()
     this.documentsWithdrawn = new WeakSet()
@@ -325,7 +334,7 @@ export class DshSource {
     this.attachmentWrites = new Map()
     this.grants = new Map()
     this.nextGrant = 1
-    /** channel -> { socket, listener, status, approval, client, terminal } */
+    /** channel -> { socket, listener, status, approval, client, terminal, group, approvals } */
     this.subs = new Map()
     /** Paired key -> write and read windows, interrupt windows and separate busy sets. */
     this.phones = new Map()
@@ -373,6 +382,7 @@ export class DshSource {
           const greeting = { write: 1 }
           if (this.attachments) greeting.attachments = 1
           if (this.attachments && this.documents) greeting.documents = 1
+          if (this.groups) greeting.groups = 1
           let hello = await this.ask(socket, 'hello', greeting)
           if (validHello(hello) && writableHello(hello) && !this.stopped && !socket.destroyed) {
             hello = await this.ask(socket, 'hello', { ...greeting, manage: 1 })
@@ -390,6 +400,7 @@ export class DshSource {
           const offered = writableHello(hello) && hello.manage === 1 ? MANAGE_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : []
           this.manages = new Set(this.#settingsFamily(offered))
           this.attachOffer = this.attachments ? attachmentOffer(hello, this.documents) : null
+          this.groupsOffered = this.groups === true && writableHello(hello) && hello.groups === 1
           this.path = path
           if (this.team?.path !== path || this.team.real !== real) this.team = { path, real }
           this.socket = socket
@@ -488,14 +499,36 @@ export class DshSource {
     const sub = Number.isSafeInteger(m?.channel) ? this.subs.get(m.channel) : null
     if (sub?.socket !== socket || !m.event || typeof m.event.type !== 'string') return
     const e = rowsCut(m.event, sub.attachments)
+    if (sub.group) {
+      if (e.type !== 'gone' && !this.#groupLive(sub)) {
+        if (this.#unwatch(sub)) {
+          try { sub.listener({ type: 'gone', reason: 'unavailable' }) } catch {}
+        }
+        return
+      }
+      if (e.type === 'snapshot') {
+        const approvals = Array.isArray(e.approvals) ? e.approvals : []
+        sub.approvals = new Map(approvals.filter((r) => typeof r?.id === 'string' && r.open !== false).map((r) => [r.id, r]))
+      } else if (e.type === 'approval' && typeof e.row?.id === 'string') {
+        if (e.row.open === false) sub.approvals.delete(e.row.id)
+        else sub.approvals.set(e.row.id, e.row)
+      }
+    } else if (e.type === 'snapshot' || e.type === 'approval') {
+      sub.approval = e.type === 'snapshot' ? e.approval : (e.row?.open === false ? null : e.row)
+    }
     if (e.type === 'snapshot' || e.type === 'status') sub.status = e.status ?? sub.status
-    if (e.type === 'snapshot' || e.type === 'approval') sub.approval = e.type === 'snapshot' ? e.approval : (e.row?.open === false ? null : e.row)
-    if (e.type === 'gone' && sub.attachments) this.#unwatch(sub)
+    if (e.type === 'gone' && (sub.attachments || sub.group)) this.#unwatch(sub)
     try { sub.listener(e) } catch {}
   }
 
   onClose(socket) {
-    if (this.socket === socket) { this.socket = null; this.writes.clear(); this.manages.clear(); this.attachOffer = null }
+    if (this.socket === socket) {
+      this.socket = null
+      this.writes.clear()
+      this.manages.clear()
+      this.attachOffer = null
+      this.groupsOffered = false
+    }
     this.attachmentWrites.delete(socket)
     for (const p of this.pending.values()) if (p.socket === socket) p.fail('unavailable')
     for (const rec of this.uploads.values()) if (rec.socket === socket) this.#dropUpload(rec, 'unavailable')
@@ -515,6 +548,26 @@ export class DshSource {
 
   liveClient(client, socket) {
     return !client.closed && !this.stopped && socket === this.socket && Boolean(socket && !socket.destroyed)
+  }
+
+  /** RFC 0040: a phone's hello asked for groups; granted only on a live socket that offered them. */
+  groupsHello(client) {
+    const { socket, team } = this
+    if (this.groupsOffered && this.liveClient(client, socket) && typeof client.device === 'string' && PHONE_KEY.test(client.device)) {
+      this.groupsAgreed.set(client, { team, socket })
+      return true
+    }
+    this.groupsAgreed.delete(client)
+    return false
+  }
+
+  groupsFor(client, socket = this.socket) {
+    const rec = client && this.groupsAgreed.get(client)
+    return Boolean(rec && this.groupsOffered && rec.socket === socket && rec.team === this.team && this.liveClient(client, rec.socket))
+  }
+
+  #groupLive(sub) {
+    return sub.group === true && this.subs.get(sub.channel) === sub && sub.socket === this.socket && this.groupsFor(sub.client, sub.socket)
   }
 
   #settingsFamily(methods) {
@@ -571,9 +624,15 @@ export class DshSource {
   closeClient(client) {
     this.negotiated.delete(client)
     this.attachmentsAgreed.delete(client)
-    for (const sub of this.subs.values()) if (sub.client === client && sub.attachments) this.#unwatch(sub)
+    this.groupsAgreed.delete(client)
+    for (const sub of this.subs.values()) if (sub.client === client && (sub.attachments || sub.group)) this.#unwatch(sub)
     const grant = this.grants.get(client)
     if (grant) this.releaseGrant(grant)
+  }
+
+  #manageAgreed(client, method) {
+    const agreed = this.negotiated.get(client)
+    return !client.closed && Boolean(agreed?.methods.has(method)) && agreed.team === this.team
   }
 
   async #manageGrant(client, method) {
@@ -586,6 +645,7 @@ export class DshSource {
   }
 
   async memory(client, method, params) {
+    if (isRoom(params?.terminal)) return memoryRefused(this.#manageAgreed(client, method) ? 'invalid' : 'read-only')
     const grant = await this.#manageGrant(client, method)
     if (!grant) return memoryRefused('read-only')
     const { terminal, id, rev, text } = params
@@ -600,6 +660,7 @@ export class DshSource {
   }
 
   async schedule(client, method, params) {
+    if (isRoom(params?.terminal)) return memoryRefused(this.#manageAgreed(client, method) ? 'invalid' : 'read-only')
     const grant = await this.#manageGrant(client, method)
     if (!grant) return memoryRefused('read-only')
     const { terminal, id, rev, title } = params
@@ -617,6 +678,7 @@ export class DshSource {
   }
 
   async settings(client, method, params) {
+    if (isRoom(params?.terminal)) return memoryRefused(this.#manageAgreed(client, method) ? 'invalid' : 'read-only')
     const grant = await this.#manageGrant(client, method)
     if (!grant) return memoryRefused('read-only')
     const { terminal, rev, name, model } = params
@@ -674,10 +736,13 @@ export class DshSource {
   }
 
   /** The DSH chats, as chat.list rows; [] when the source is absent. */
-  async list() {
+  async list(client) {
     try {
-      const result = await this.request('list')
-      return (Array.isArray(result?.terminals) ? result.terminals : []).filter((t) => isDsh(t?.terminal))
+      const socket = await this.open()
+      const result = await this.ask(socket, 'list')
+      const rows = (Array.isArray(result?.terminals) ? result.terminals : []).filter((t) => isDsh(t?.terminal))
+      // Group rows only for a connection holding the grant on this same socket (RFC 0040).
+      return rows.filter((t) => !isRoom(t.terminal) || this.groupsFor(client, socket))
     } catch {
       return []
     }
@@ -1043,15 +1108,19 @@ export class DshSource {
    * calls start(after) instead of building one (`streamsSnapshot`).
    */
   watch(terminal, client, listener) {
+    const group = isRoom(terminal)
+    if (group && (!roomTerminal(terminal) || !this.groupsFor(client))) return null
     const channel = this.nextChannel++
-    const attachments = Boolean(this.offerFor(client))
-    const documents = this.documentsFor(client)
-    const sub = { channel, socket: attachments ? this.socket : null, team: this.team, listener, status: null, approval: null,
-      client, terminal, attachments, documents, work: new AbortController() }
+    const attachments = !group && Boolean(this.offerFor(client))
+    const documents = !group && this.documentsFor(client)
+    const sub = { channel, socket: attachments || group ? this.socket : null, team: this.team, listener, status: null, approval: null,
+      client, terminal, attachments, documents, group, ...(group ? { approvals: new Map() } : {}), work: new AbortController() }
     return {
       streamsSnapshot: true,
       attachments,
       attachmentLive: () => this.#activeSub(sub),
+      group,
+      groupLive: () => this.#groupLive(sub),
       start: (after) => {
         this.subs.set(channel, sub)
         sub.ready = this.#startWatch(sub, after)
@@ -1060,10 +1129,13 @@ export class DshSource {
       rows: () => null,
       screen: () => [],
       status: () => sub.status,
-      approval: () => sub.approval,
+      approval: () => (group ? null : sub.approval),
+      approvals: () => [...(sub.approvals?.values() ?? [])],
       held: () => [],
       backfill: async (before, limit) => {
+        if (group && !this.#groupLive(sub)) return []
         const result = await this.ask(sub.socket, 'backfill', { channel, before, limit })
+        if (group && !this.#groupLive(sub)) return []
         return page(Array.isArray(result?.rows) ? watchRows(result.rows, attachments) : [])
       },
       close: () => this.#unwatch(sub),
@@ -1071,11 +1143,12 @@ export class DshSource {
   }
 
   async #startWatch(sub, after) {
-    const { channel, terminal, attachments, documents } = sub
+    const { channel, terminal, attachments, documents, group } = sub
     try {
-      const socket = attachments ? sub.socket : await this.open()
+      const socket = attachments || group ? sub.socket : await this.open()
       if (this.subs.get(channel) !== sub) return false
       if (attachments && !this.#activeSub(sub)) throw socketError('unavailable')
+      if (group && !this.#groupLive(sub)) throw socketError('unavailable')
       sub.socket = socket
       sub.subscribing = true
       const result = await this.ask(socket, 'subscribe', {
@@ -1083,10 +1156,11 @@ export class DshSource {
         ...(attachments ? { attachments: 1 } : {}), ...(documents ? { documents: 1 } : {}),
       })
       if (attachments && result?.channel !== channel) throw socketError('unavailable')
+      if (group && !this.#groupLive(sub)) throw socketError('unavailable')
       sub.subscribed = this.subs.get(channel) === sub
       return sub.subscribed
     } catch (error) {
-      const removed = attachments ? this.#unwatch(sub, 'not-watching') : this.subs.delete(channel)
+      const removed = group ? this.#unwatch(sub) : attachments ? this.#unwatch(sub, 'not-watching') : this.subs.delete(channel)
       if (removed) {
         try { sub.listener({ type: 'gone', reason: attachments ? 'unavailable' : (error.kind ?? 'unavailable') }) } catch {}
       }
@@ -1110,13 +1184,16 @@ export class DshSource {
     const withUploads = method === 'send' && Object.hasOwn(params, 'uploads')
     const socket = this.socket
     const attachmentRefused = (reason) => attachmentRefusal({ reason }, { id })
+    const group = isRoom(terminal)
+    if (group && withUploads) return attachmentRefused('unsupported')
+    if (group && !this.groupsFor(client, socket)) return refused('not-watching', id)
     const readOnly = () => withUploads ? attachmentRefused('read-only') : refusedDsh(id)
     if (!socket || socket.destroyed || !this.writes.has(method)) return readOnly()
     const key = client?.device
     if (typeof key !== 'string' || !key) return readOnly()
     if (withUploads && !this.offerFor(client)) return readOnly()
     const sub = withUploads ? this.#attachmentSub(client, terminal)
-      : [...this.subs.values()].find((s) => s.socket === socket && s.client === client && s.terminal === terminal)
+      : [...this.subs.values()].find((s) => s.socket === socket && s.client === client && s.terminal === terminal && (!group || s.group === true))
     if (!sub) return refused('not-watching', id)
     const now = this.now()
     const phone = this.phoneState(key, now)
@@ -1171,6 +1248,8 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
   if (!dsh) return engine
   return {
     dshWrite: () => dsh.writable(),
+    groupsHello: (client) => dsh.groupsHello(client),
+    groupsFor: (client) => dsh.groupsFor(client),
     attachHello: (client, opts) => dsh.attachHello(client, opts),
     attachOffer: (client) => dsh.offerFor(client),
     uploadBegin: (client, terminal, params) => dsh.uploadBegin(client, terminal, params),
@@ -1187,13 +1266,17 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
       try { dsh.closeClient(client) } finally { engine.closeClient?.(client) }
     },
     ready: () => engine.ready(),
-    async list() {
-      const [terminals, bots] = await Promise.all([engine.list(), dsh.list().catch(() => [])])
+    async list(client) {
+      const [terminals, bots] = await Promise.all([engine.list(), dsh.list(client).catch(() => [])])
       return [...terminals, ...bots]
     },
     watch: (terminal, client, listener) => (isDsh(terminal) ? dsh.watch(terminal, client, listener) : engine.watch(terminal, client, listener)),
     send: (client, terminal, m) => (isDsh(terminal)
-      ? dsh.write(client, terminal, 'send', { text: m?.text, id: m?.id, ...(m && Object.hasOwn(m, 'uploads') ? { uploads: m.uploads } : {}) }, { by })
+      ? dsh.write(client, terminal, 'send', {
+        text: m?.text, id: m?.id,
+        ...(isRoom(terminal) && m && Object.hasOwn(m, 'retry') ? { retry: m.retry } : {}),
+        ...(m && Object.hasOwn(m, 'uploads') ? { uploads: m.uploads } : {}),
+      }, { by })
       : engine.send(client, terminal, m)),
     sendHeld: (client, terminal, m) => (isDsh(terminal) ? refusedDsh(m?.id) : engine.sendHeld(client, terminal, m)),
     cancelHeld: (client, terminal, m) => (isDsh(terminal) ? refusedDsh(m?.id) : engine.cancelHeld(client, terminal, m)),

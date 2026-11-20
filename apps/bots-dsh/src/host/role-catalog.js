@@ -30,7 +30,7 @@ function cancel(body) {
   void body?.cancel().catch(() => {})
 }
 
-async function boundedGet(fetch, url, { limit, signal, label, missing = false }) {
+export async function boundedGet(fetch, url, { limit, signal, label, missing = false, allowEmpty = false }) {
   for (let hops = 0; ; hops++) {
     let response
     try {
@@ -54,10 +54,11 @@ async function boundedGet(fetch, url, { limit, signal, label, missing = false })
       if (missing && response.status === 404) return undefined
       throw refusal(`${label} returned HTTP ${response.status}.`)
     }
-    if (!response.body || Number(response.headers.get('content-length')) > limit) {
+    if ((!response.body && !allowEmpty) || Number(response.headers.get('content-length')) > limit) {
       cancel(response.body)
       throw refusal(`${label} is missing or exceeds its size limit.`)
     }
+    if (!response.body) return Buffer.alloc(0)
 
     const reader = response.body.getReader()
     const chunks = []

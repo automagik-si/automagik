@@ -20,6 +20,7 @@ import { isWindowEndpoint } from './extend.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
+import { CHECK_READ_ONLY } from './self-update-check.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -186,7 +187,7 @@ export function install(rt) {
     // `sessionId` is the group's own Session's current part, `ownParts` its earlier
     // ones; `parts` the members' hidden group Sessions and their earlier segments,
     // for usage. `lateRounds` and `relays` are what an older team's rooms may still hold.
-    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, ...room }) => {
+    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, scoped: _scoped, legacySpeakers: _legacySpeakers, legacyUnproven: _legacyUnproven, ...room }) => {
       const parts = [...Object.values(sessions ?? {}), ...Object.values(segments ?? {}).flat().map(segment => segment.sessionId), ...(ownParts ?? []).map(segment => segment.sessionId)]
       const last = (log ?? []).filter(line => line.kind === undefined).at(-1)
       // The row's one line: the start of the last message, without its markdown marks (#1155).
@@ -511,6 +512,16 @@ export function install(rt) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
       await rt.refresh()
+      if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result') {
+        if (rt.holdsLock() !== true) return fail(CHECK_READ_ONLY, 'bot/read-only')
+        if (endpoint === 'self-update-check-result' && (typeof body.runId !== 'string' || body.runId === '')) {
+          return fail('An update check run ID is required.', 'bot/invalid')
+        }
+        const generation = rt.teamGeneration()
+        const result = endpoint === 'self-update-status' ? rt.selfUpdateStatus()
+          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId) : await rt.selfUpdateCheck()
+        return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
+      }
       const readOnly = rt.readOnly()
       // An endpoint another Omni plugin serves (extend.js) says itself whether it only reads.
       const added = rt.extended.endpointOf(endpoint)

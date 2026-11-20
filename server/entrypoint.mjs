@@ -7,13 +7,13 @@
 // --network host or a proxy in the same network namespace, not -p.
 import { spawn } from 'node:child_process'
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync,
-  writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   ensureDataDirs,
+  gateViewDir,
   launchUrlOf,
   PORT,
   prepareWorkspace,
@@ -22,15 +22,15 @@ import {
   publicUrlArgs,
   redactTokens,
 } from './lib.mjs'
+import { LAUNCH_FILE, prepareGateView, writePrivateFile, writeProfileState } from './gate-view.mjs'
 import { followImage } from './profile-follow.mjs'
-import { nativeWorkerEnv } from './native-worker-login.mjs'
+import { nativeWorkerEnv, panelCliHomes } from './native-worker-login.mjs'
 import { installVendorClis, runFirstBoot } from './first-boot.mjs'
 import { HC_SESSION, XDG_RUNTIME_DIR, herdrCoreSocket, onSharedVolume, toolchainChildEnv } from './toolchain.mjs'
 
 const ROOT = '/opt/automagik'
 const DSH_BIN = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const SEED = join(ROOT, 'profile')
-const LAUNCH_FILE = 'launch-url'
 const KEY_DEFAULT = '/data/secrets/deepseek-api-key'
 const CORE_BIN = '/usr/local/bin/herdr-core'
 
@@ -60,13 +60,18 @@ function modelKey(env) {
   return { source: file, key }
 }
 
-/** Write the launch URL (the only place the token survives) beside the data, readable only by its owner. */
-function recordLaunch(dshHome, url) {
+/** Save the owner-only launch URL for operators and the gate. */
+export function recordLaunch(dshHome, gateView, url) {
   const target = join(dshHome, LAUNCH_FILE)
-  const fresh = `${target}.${process.pid}`
-  writeFileSync(fresh, `${url}\n`, { mode: 0o600 })
-  chmodSync(fresh, 0o600)
-  renameSync(fresh, target)
+  const published = join(gateView, LAUNCH_FILE)
+  const bytes = `${url}\n`
+  try {
+    writePrivateFile(published, bytes)
+  } catch (error) {
+    warn(`startup: could not publish the gate launch URL: ${error.message}`)
+    rmSync(published, { force: true })
+  }
+  writePrivateFile(target, bytes)
   return target
 }
 
@@ -116,11 +121,13 @@ async function main() {
     warn(error.message)
     process.exit(1)
   }
-  const home = env.AUTOMAGIK_HOME || '/data'
-  const dshHome = env.DSH_HOME || join(home, 'dsh')
-  const botsHome = env.AUTOMAGIK_BOTS_HOME || join(home, 'bots')
-  const workspace = env.AUTOMAGIK_WORKSPACE || join(home, 'workspace')
-  const appHome = env.HERDR_APP_HOME || join(home, 'herdr-app')
+  // Keep the checked paths stable when startup changes into the workspace.
+  const home = resolve(env.AUTOMAGIK_HOME || '/data')
+  const dshHome = resolve(env.DSH_HOME || join(home, 'dsh'))
+  const gateView = gateViewDir(home)
+  const botsHome = resolve(env.AUTOMAGIK_BOTS_HOME || join(home, 'bots'))
+  const workspace = resolve(env.AUTOMAGIK_WORKSPACE || join(home, 'workspace'))
+  const appHome = resolve(env.HERDR_APP_HOME || join(home, 'herdr-app'))
   const runtimeDir = resolve(env.XDG_RUNTIME_DIR || XDG_RUNTIME_DIR)
   const session = env.HC_SESSION ?? HC_SESSION
   const socketPath = herdrCoreSocket(session, runtimeDir)
@@ -128,10 +135,19 @@ async function main() {
   if (runtimeDir === '/data' || runtimeDir.startsWith('/data/')) {
     throw new Error('XDG_RUNTIME_DIR must be outside the shared /data volume')
   }
-  const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), join(home, 'secrets')]
+  const secrets = join(home, 'secrets')
+  const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), secrets]
   try {
+    prepareGateView(gateView, dirname(gateView), {
+      AUTOMAGIK_HOME: home, DSH_HOME: dshHome, AUTOMAGIK_BOTS_HOME: botsHome,
+      AUTOMAGIK_WORKSPACE: workspace, HERDR_APP_HOME: appHome, secrets,
+      // ACP's store and the agents' sign-in homes (acp-dsh: <AUTOMAGIK_HOME>/acp, cli-homes).
+      acp: join(home, 'acp'), 'acp cli-homes': panelCliHomes(join(home, 'acp'), dshHome),
+    })
     prepareWorkspace(workspace, { uid: 1000 })
     ensureDataDirs([...dirs, appHome], { uid: 1000 })
+    // Clear the previous launch before starting a new one.
+    rmSync(join(gateView, LAUNCH_FILE), { force: true })
     for (const dir of [runtimeDir, coreRuntime]) {
       mkdirSync(dir, { recursive: true, mode: 0o700 })
       // The physical path, after it exists: a symlink into /data is refused before any chmod.
@@ -163,6 +179,7 @@ async function main() {
   log(`profile ${PROFILE}: automagik ${build.automagik ?? 'unknown'}, dsh ${build.dsh ?? 'unknown'}`)
 
   const seeded = await followImage({ dshHome, source: SEED, store: join(ROOT, 'offline-store'), build, dshBin: DSH_BIN })
+  writeProfileState(gateView, seeded)
   log(seeded.seeded ? `seeded ${seeded.target}` : `profile present at ${seeded.target}`)
   log(`image follow: ${seeded.result}; ${seeded.reason}`)
 
@@ -294,7 +311,7 @@ async function main() {
     if (!url || announced) return
     announced = true
     try {
-      const file = recordLaunch(dshHome, url)
+      const file = recordLaunch(dshHome, gateView, url)
       log(`startup: http://127.0.0.1:${PORT}/ (token in ${file})`)
     } catch (error) {
       warn(`startup: dsh is up, but the launch URL could not be written: ${error.message}`)
