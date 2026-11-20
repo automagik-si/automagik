@@ -20,11 +20,13 @@ import { buildCodeTree, readCodeTree, readRegistryTree, resolvePane, statusWord 
 import { connectCore } from '../src/host/code-core.js'
 import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
 import { connectFakeCore } from './fixtures/fake-core-connection.mjs'
+import { aWindowProof } from './fixtures/window-proof.mjs'
 import { CODE_STREAM_ROUTE, CODE_TREE_ENDPOINT, MAX_QUEUED_BYTES, install, openPaneStream, streamAdmission, streamTarget, streamTargets } from '../src/host/code-side.js'
 import { CODE_INPUT_ROUTE, CODE_RELEASE_ROUTE, CODE_TAKE_ROUTE } from '../src/host/code-typing.js'
 import { install as installChannel } from '../src/host/channel.js'
 import { install as installSeats } from '../src/host/seat-chat.js'
-import { install as installHooks } from '../src/host/extend.js'
+import { install as installHooks, windowEndpoint } from '../src/host/extend.js'
+import { fromWindow } from '../src/host/desktop-window.js'
 
 const WINDOW = 'ab'.repeat(32)
 const DIGEST = createHash('sha256').update(WINDOW, 'ascii').digest('hex')
@@ -450,7 +452,7 @@ test('installing the Code side reads no tree: the read starts with the first Ter
     effect: (fn) => { const off = fn(); if (typeof off === 'function') disposers.push(off); return () => {} },
     connection: { fetch: { register: () => () => {} } },
   }
-  const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = () => fn(undefined, undefined, true); return () => {} } }, warn: () => {}, home: f.root }
+  const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = () => fn(undefined, undefined, aWindowProof()); return () => {} } }, warn: () => {}, home: f.root }
   const off = install(rt, { env: f.env, desktop: true, connect: (...args) => { connects += 1; return connectCore(...args) } })
   t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
   assert.equal(typeof endpoint, 'function', 'the tree endpoint is served')
@@ -712,6 +714,23 @@ test('the real owner dispatcher requires the window marker for the tree and seat
   assert.deepEqual((await call('seat-chat-open', WINDOW, seat)).value.screen, screen)
   assert.deepEqual((await call('seat-chat-read', WINDOW, seat)).value.screen, screen)
   assert.equal((await call('seat-chat-read', undefined, seat)).error.message, 'desktop-only')
+  // An unmarked close is refused and leaves the watch; the window's own close releases it.
+  assert.equal((await call('seat-chat-close', undefined, seat)).error.message, 'desktop-only')
+  assert.deepEqual((await call('seat-chat-read', WINDOW, seat)).value.screen, screen)
+  assert.deepEqual((await call('seat-chat-close', WINDOW, seat)).value, { closed: true })
+  assert.match((await call('seat-chat-read', WINDOW, seat)).error.message, /not open/)
+  // Another plugin's endpoint, called by the window itself, gets no proof to keep.
+  const seen = []
+  const off = rt.hooks.endpoint('another-plugin-endpoint', async (_body, _signal, windowSeen) => { seen.push(windowSeen); return 'ok' }, { read: true })
+  assert.deepEqual(await call('another-plugin-endpoint', WINDOW, {}), { ok: true, value: 'ok' })
+  off()
+  assert.deepEqual(seen, [false])
+  // A window-only endpoint gets the proof for its request, and the route revokes it when the request ends.
+  let kept
+  const offWindow = windowEndpoint(rt, 'test-window-endpoint', async (_body, _signal, windowSeen) => { kept = windowSeen; return fromWindow(windowSeen) }, { read: true })
+  assert.deepEqual(await call('test-window-endpoint', WINDOW, {}), { ok: true, value: true })
+  offWindow()
+  assert.equal(fromWindow(kept), false, 'a proof kept after its request opens nothing')
   delete process.env.AUTOMAGIK_WINDOW_DIGEST
   assert.deepEqual((await call('code-tree', WINDOW)).value, DESKTOP_ONLY)
 })

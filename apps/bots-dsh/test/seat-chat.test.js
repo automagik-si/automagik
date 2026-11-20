@@ -13,6 +13,7 @@ import { test } from 'node:test'
 import { Engine } from '../src/host/live-chat/engine.js'
 import { createFakeHc } from '../src/host/live-chat/fake-hc.mjs'
 import { SEAT_ENDPOINTS, SeatChat, hcAvailable, install, seatStatusOf } from '../src/host/seat-chat.js'
+import { aWindowProof } from './fixtures/window-proof.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLAUDE_ROWS = join(HERE, '..', 'src', 'host', 'live-chat', 'fixtures', 'claude.jsonl')
@@ -236,7 +237,7 @@ test('through the route, a window lists, opens, reads and closes a local seat, a
     hooks: { endpoint: (name, fn, options) => { registered.set(name, { fn, options }); return () => registered.delete(name) } },
   }
   install(rt, { engine })
-  const endpoint = name => body => registered.get(name).fn(body, undefined, true)
+  const endpoint = name => body => registered.get(name).fn(body, undefined, aWindowProof())
   const listed = await endpoint('seat-chat-list')({})
   assert.deepEqual(listed.seats.map(seat => [seat.terminal, seat.status]), [['t1', 'working']])
   await assert.rejects(() => endpoint('seat-chat-open')({ client: 'win-1', terminal: 'box/t1' }), /another computer/)

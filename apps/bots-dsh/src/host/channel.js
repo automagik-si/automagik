@@ -15,7 +15,8 @@ import { handoffReply, questionReply, viewReply } from './parts.js'
 import { validateViewAnswer } from 'deep-view/core'
 import { previewText } from '../shared/plain-text.js'
 import { normalizeAddressList } from './browser/address-policy.js'
-import { verifiedWindow } from './desktop-window.js'
+import { revokeWindowProof, windowProof } from './desktop-window.js'
+import { isWindowEndpoint } from './extend.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
@@ -495,7 +496,7 @@ export function install(rt) {
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach',
     'role-install', 'role-uninstall', 'role-grant', 'role-settings', 'role-settings-set'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
-  const handle = async (endpoint, payload, signal, desktopWindow = false) => {
+  const handle = async (endpoint, payload, signal, windowSeen = false) => {
     try {
       const body = payload ?? {}
       // The permission section of the diagnostics page (permission-diagnostics.js): answered
@@ -1257,7 +1258,7 @@ export function install(rt) {
           await rt.diagnostics.clear()
           return ok(true)
         default:
-          if (added !== undefined) return ok(await added.fn(body, signal, desktopWindow))
+          if (added !== undefined) return ok(await added.fn(body, signal, isWindowEndpoint(added) ? windowSeen : false))
           if (endpoint.startsWith('computer-')) {
             await rt.load()
             return ok(await rt.computerEndpoint(endpoint.slice('computer-'.length), body))
@@ -1399,7 +1400,9 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
-      const desktopWindow = appBrowserBridge() && verifiedWindow(request)
+      // The proof goes only to endpoints; this route's own checks read it as a boolean.
+      const proof = appBrowserBridge() ? windowProof(request) : false
+      const desktopWindow = proof !== false
       const dispatch = () => {
         if (VAULT_LOCAL.has(endpoint)) {
           // DSH rebuilds the request on an internal URL (http://dsh.internal), so the page's own
@@ -1418,10 +1421,16 @@ export function install(rt) {
             return fail('Unlock the vault in Settings on this computer.', 'bot/refused')
           }
         }
-        return handle(endpoint, body?.payload, request.signal, desktopWindow)
+        return handle(endpoint, body?.payload, request.signal, proof)
       }
+      // Read before the dispatch, as #1845 does: the dispatch can settle the request it names.
       const keyringDetail = endpoint === 'secret-source-detail' && rt.secretServiceDetail?.(body?.payload?.requestId)
-      const result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
+      let result
+      try {
+        result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
+      } finally {
+        revokeWindowProof(proof)
+      }
       const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail
         || ['role-settings', 'role-settings-set'].includes(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)

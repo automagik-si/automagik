@@ -4,6 +4,8 @@ import { accessSync, constants, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { CODE_REFUSED } from './cli-login.js'
+import { fromWindow } from './desktop-window.js'
+import { windowEndpoint } from './extend.js'
 
 const LOCAL_BINS = ['/opt/homebrew/bin', '/usr/local/bin']
 const AGENT_COMMANDS = {
@@ -160,8 +162,8 @@ export function install(rt, { env = process.env } = {}) {
     return next
   }
 
-  const endpoint = (name, fn, { read = false } = {}) => rt.hooks.endpoint(name, async (body, _signal, desktopWindow) => {
-    if (desktopWindow !== true) return { reason: 'desktop-only' }
+  const endpoint = (name, fn, { read = false } = {}) => windowEndpoint(rt, name, async (body, _signal, windowSeen) => {
+    if (!fromWindow(windowSeen)) return { reason: 'desktop-only' }
     try {
       return await (read ? fn(body) : enqueue(() => fn(body)))
     } catch (error) {
