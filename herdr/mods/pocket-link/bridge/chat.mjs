@@ -18,8 +18,8 @@
 // `write: 1`, and the hello answer then says `dshWrite: true`; otherwise they are refused
 // `read-only`, and a phone that sees no `dshWrite` keeps the DSH chat read-only.
 // RFC 0036 adds memory.read, memory.edit, memory.add, schedule.list, schedule.pause,
-// schedule.resume and schedule.rename on channel 0. They need a grant opened at hello
-// for this connection's opted-in methods. Their replies are live-only.
+// schedule.resume, schedule.rename, settings.read, settings.name and settings.model on channel 0.
+// They need a grant opened at hello for this connection's opted-in methods. Their replies are live-only.
 // RFC 0033 adds image and TXT/PDF uploads and mixed sends on opted-in DSH watches. The phone
 // asks for attachments and separately opts into documents at hello. Only document begins take
 // a display name. Row frames carry metadata and reads serve image thumbnails. Attachment replies
@@ -63,7 +63,8 @@ const attachmentRequest = (m) => typeof m?.method === 'string' && (Object.hasOwn
 export const phoneId = (id) => typeof id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(id)
 export const MEMORY_METHODS = ['memory.read', 'memory.edit', 'memory.add']
 export const SCHEDULE_METHODS = ['schedule.list', 'schedule.pause', 'schedule.resume', 'schedule.rename']
-export const MANAGE_METHODS = [...MEMORY_METHODS, ...SCHEDULE_METHODS]
+export const SETTINGS_METHODS = ['settings.read', 'settings.name', 'settings.model']
+export const MANAGE_METHODS = [...MEMORY_METHODS, ...SCHEDULE_METHODS, ...SETTINGS_METHODS]
 export const memoryRefused = (reason) => ({ ok: false, state: 'refused', reason })
 
 /** Queue writes in wire order, checking whether a chunk can still go when its turn comes. */
@@ -252,7 +253,8 @@ export class ChatConnection {
       if (attachmentRequest(m)) return this.onAttachment(m)
       const memory = typeof m?.method === 'string' && m.method.startsWith('memory.')
       const schedule = typeof m?.method === 'string' && m.method.startsWith('schedule.')
-      const liveOnly = memory || schedule
+      const settings = typeof m?.method === 'string' && m.method.startsWith('settings.')
+      const liveOnly = memory || schedule || settings
       const opts = liveOnly ? { liveOnly: true } : undefined
       if (this.inFlight >= MAX_IN_FLIGHT) { this.reply(errorOf(m?.id ?? null, 'busy', `at most ${MAX_IN_FLIGHT} requests at once`), opts); return }
       this.inFlight += 1
@@ -260,6 +262,7 @@ export class ChatConnection {
         .then((answer) => this.reply(answer, opts), () => {
           if (memory) this.log('chat: memory request failed')
           else if (schedule) this.log('chat: schedule request failed')
+          else if (settings) this.log('chat: settings request failed')
           else this.log('chat: request failed')
           this.reply(errorOf(m?.id ?? null, 'failed'), opts)
         })
@@ -389,6 +392,10 @@ export class ChatConnection {
       case 'schedule.resume':
       case 'schedule.rename':
         return ok(this.engine.schedule ? await this.engine.schedule(this.client, m.method, p) : memoryRefused('read-only'))
+      case 'settings.read':
+      case 'settings.name':
+      case 'settings.model':
+        return ok(this.engine.settings ? await this.engine.settings(this.client, m.method, p) : memoryRefused('read-only'))
       default:
         return errorOf(id, 'unknown_method', String(m?.method ?? ''))
     }
