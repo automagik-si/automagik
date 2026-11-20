@@ -790,21 +790,37 @@ Session ids. Claude gets its id from Herdr at launch. dsh-TUI, Antigravity, Code
 launch, so the pack reads the id from what each leaves on disk (DSH's session folders for the
 pane's folder, Antigravity's prompt history, Codex's rollout session_meta, Kimi's session index:
 only ids, folders and times) and records it as it does Claude's: a session row in the workers ledger and the pane's
-`agent.session` label. Anyone can leave a session in that folder with no pane the pack knows (a
-terminal of your own, DSH Desktop), so the pack takes only a pane's first conversation: the one
-session born within two minutes after the pane started. It records none, and the bot comes back
-on a new conversation, which the report says, when two sessions were born then, when none was,
-or when another pane of that agent in that folder (any hc pane, whoever started it, and every
-launch the workers ledger names) started within two minutes before the pane or before that
-session. A session born later is never taken, and a recorded id is never replaced. What stays
-unknowable: a session someone started outside hc in that folder inside those two minutes, when
-the pane's own agent left none. A conversation started later inside the pane is not followed:
+`agent.session` label. The search root is the seat's own, never the reviving process's: its
+launch records the person's `HOME` and the agent's own home (`$DSH_HOME`, `$CODEX_HOME` or
+`$KIMI_CODE_HOME`, only absolute ones) in the seat row, and a hand launch's own `env` words on
+the pane count too; a search reads those. When the seat's launch names no home, the search
+fails closed and the bot starts new; the reviving process's `HOME` or `$CODEX_HOME` is not used.
+The recorded home is the launching command's environment: a herdr-core started with another
+home isn't followed. A seat started before this release names none, so it comes back on a new
+conversation once, and the report says why. Anyone can leave a session in that folder
+with no pane the pack knows (a terminal of your own, DSH Desktop), so the pack takes only a
+pane's first conversation: the one session born within two minutes after the pane started. It
+records none, and the bot comes back on a new conversation, which the report says, when two
+sessions were born then, when none was, or when another pane of that agent in that folder (any
+hc pane, whoever started it, and every launch the workers ledger names) started within two
+minutes before the pane or before that session. An id another live pane's label or the workers
+ledger ties to another launch is never taken, whatever folder or agent that pane shows, and
+when hc can't read one of its panes nothing is taken. A session born later is never taken,
+and a recorded id is never replaced. A rollout's file name must name the id inside it, and a
+session file that is a symlink, or is replaced under the read, is refused. What stays
+unknowable: a session someone started outside hc in that folder inside those two minutes, or one
+an older pane of that agent there (started more than two minutes before this pane) started inside
+them, when the pane's own agent left none; that one is taken, since ids, folders and times can't
+tell it from the pane's own. A conversation started later inside the pane is not followed:
 the bot resumes its first one. Codex's UUIDv7 dates its thread's creation at launch, even if its
 first turn writes the rollout days later; the pack looks in every dated folder from the launch's
 local day minus one onward. DSH's home is `$DSH_HOME`, else `~/.dsh`; Codex's is `$CODEX_HOME`, else
 `~/.codex`; Kimi's is `$KIMI_CODE_HOME`, else `~/.kimi-code` (only absolute overrides count).
-Revive never guesses Codex's or Kimi's latest conversation: with no id of its own, it starts a
-new conversation and the report says why. Manual `am restart` keeps its existing fallback.
+Revive never guesses Codex's or Kimi's latest conversation, for a bot or its helper: with no
+conversation of its own (recorded, or found by the rule above) it starts a new one, and the report
+says why. A helper whose own shell or template command names that agent's latest-conversation
+flag (`--last`, `--continue`, `-c`) is not started; the report gives the command to run it by hand.
+A manual `am restart` keeps its latest-conversation fallback.
 Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
