@@ -8,9 +8,12 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -93,15 +96,27 @@ fun PocketState.withMachine(id: String, transform: (MachineState) -> MachineStat
     if (id !in machines && hosts.none { it.id == id }) this
     else copy(machines = machines + (id to transform(machines[id] ?: MachineState())))
 
-class PocketViewModel(application: Application, private val initDispatcher: CoroutineDispatcher = Dispatchers.IO) : AndroidViewModel(application) {
+class PocketViewModel(application: Application, private val initDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val hostStore: HostStore = HostStore.of(application)) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("pocket", 0)
-    /** Null when the saved list couldn't be read: it then shows empty, but its SSH entries may still be in the preferences. */
-    private val savedHosts = LegacySsh.loadHosts(prefs.getString("hosts", "[]"))
+    private val loaded = hostStore.load()
+    /** Null when the saved list couldn't be read: its SSH entries may still be on disk. */
+    private val savedHosts = loaded.hosts
+    @Volatile private var hostsBlocked = loaded.blocked
+    private val hostLock = Any()
+    private var hostSeq = 0L
+    private var hostSaved = 0L
+    private var oversizedSeq: Long? = null
+    private var pendingHosts: List<HostProfile>? = null
+    private val pendingEvictions = mutableSetOf<String>()
+    private val hostWaiters = mutableListOf<Pair<Long, CompletableDeferred<HostStore.Result>>>()
+    private val hostWriter = Mutex()
     private val _state = MutableStateFlow(PocketState(nativeDisplay = prefs.getBoolean("native_display", false),
         fontSize = prefs.getInt("font_size", DEFAULT_FONT_SIZE).coerceIn(FONT_SIZES), folded = prefs.getStringSet("folded_machines", null).orEmpty().toSet(),
         alertSounds = prefs.getBoolean("alert_sounds", true), alertBlocked = prefs.getBoolean("alert_blocked", true), alertDone = prefs.getBoolean("alert_done", true),
         lockAnswers = prefs.getBoolean("lock_answers", false), watch = prefs.getBoolean(WatchResume.PREF_WATCH, true),
-        seen = runCatching { JSONArray(prefs.getString("seen_done", "[]")).let { a -> (0 until a.length()).map(a::getString) }.toSet() }.getOrDefault(emptySet()), hosts = savedHosts.orEmpty()))
+        seen = runCatching { JSONArray(prefs.getString("seen_done", "[]")).let { a -> (0 until a.length()).map(a::getString) }.toSet() }.getOrDefault(emptySet()),
+        hosts = savedHosts.orEmpty(), message = if (loaded.blocked) HOSTS_UNREADABLE else null))
     val state = _state.asStateFlow()
     internal var pocketLink: PocketLinkBackend = IrohBackend
     internal var linkDispatcher: CoroutineDispatcher = Dispatchers.IO
@@ -172,6 +187,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private val keystrokes = Channel<Pair<Pair<CoreClient, Int>, ByteArray>>(64)
 
     companion object {
+        private const val HOSTS_UNREADABLE = "Saved computers can’t be read right now. Try again later; if it keeps failing, clear Automagik’s storage in Android settings and pair again."
+        private const val HOST_NOT_SAVED = "Couldn’t save that change on this phone."
+        private const val HOSTS_TOO_LARGE = "Too many saved computers to save on this phone."
         /** The live instance, for notification actions that arrive outside the activity. */
         @Volatile var current: PocketViewModel? = null
     }
@@ -217,32 +235,147 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     fun dismissMessage() { _state.update { it.copy(message = null) } }
-    private fun saveHosts(hosts: List<HostProfile>) {
-        prefs.edit().putString("hosts", JSONArray(hosts.map { it.json() }).toString()).apply()
-        _state.update { it.copy(hosts = hosts) }
+
+    /** Derives the new list, shows it at once and queues it, or joins an unchanged pending save. */
+    private fun mutateHosts(transform: (List<HostProfile>) -> List<HostProfile>): Deferred<HostStore.Result>? {
+        val waiter = synchronized(hostLock) {
+            if (hostsBlocked) return CompletableDeferred(HostStore.Result.BLOCKED)
+            val before = state.value.hosts
+            val after = transform(before)
+            if (after != before) {
+                hostSeq++
+                pendingHosts = after
+            } else {
+                if (hostSeq == hostSaved) return null
+                if (hostSeq == oversizedSeq) return CompletableDeferred(HostStore.Result.TOO_LARGE)
+                hostWaiters.lastOrNull()?.takeIf { it.first == hostSeq }?.let { return it.second }
+            }
+            CompletableDeferred<HostStore.Result>().also {
+                hostWaiters.add(hostSeq to it)
+                if (after != before) _state.update { it.copy(hosts = after) }
+            }
+        }
+        viewModelScope.launch(linkDispatcher) { drainHosts() }
+        return waiter
     }
+
+    /** Writes the latest queued list and resolves all the changes it represents. */
+    private suspend fun drainHosts(retry: Boolean = false) = hostWriter.withLock {
+        val (seq, hosts) = synchronized(hostLock) {
+            if (hostsBlocked || hostSeq == hostSaved || hostSeq == oversizedSeq || (!retry && hostWaiters.isEmpty())) return@withLock
+            hostSeq to (pendingHosts ?: return@withLock)
+        }
+        val result = runCatching { hostStore.write(JSONArray(hosts.map { it.json() }).toString()) }.getOrDefault(HostStore.Result.FAILED)
+        val (waiters, evictions) = synchronized(hostLock) {
+            val evict = when (result) {
+                HostStore.Result.SAVED -> {
+                    hostSaved = seq
+                    if (hostSeq == seq) pendingHosts = null
+                    pendingEvictions.filter { id -> hosts.none { it.id == id } }.also { pendingEvictions.removeAll(it) }
+                }
+                HostStore.Result.BLOCKED -> {
+                    hostsBlocked = true
+                    emptyList()
+                }
+                HostStore.Result.TOO_LARGE -> {
+                    oversizedSeq = seq
+                    emptyList()
+                }
+                HostStore.Result.FAILED -> emptyList()
+            }
+            val done = hostWaiters.filter { it.first <= seq || hostsBlocked }
+            hostWaiters.removeAll(done)
+            done to evict
+        }
+        if (result == HostStore.Result.TOO_LARGE) _state.update { it.copy(message = HOSTS_TOO_LARGE) }
+        if (result == HostStore.Result.SAVED) runCatching {
+            LegacySsh.deleteKeyIfUnused(getApplication<Application>().noBackupFilesDir, if (savedHosts == null) null else hosts)
+        }
+        waiters.forEach { it.second.complete(result) }
+        for (id in evictions) {
+            try { teamsSync.removed(id) } catch (e: CancellationException) { throw e } catch (_: Exception) { }
+        }
+    }
+
+    /** Reloads the authoritative list when access to the sealed record returns. */
+    private suspend fun retryHosts(): Boolean {
+        if (!hostsBlocked) return true
+        return hostWriter.withLock {
+            if (!hostsBlocked) return@withLock true
+            val recovered = runCatching { hostStore.load().hosts }.getOrNull() ?: return@withLock false
+            synchronized<Unit>(hostLock) {
+                if (hostsBlocked) {
+                    pendingHosts = null
+                    pendingEvictions.clear()
+                    hostSaved = hostSeq
+                    oversizedSeq = null
+                    _state.update { it.copy(hosts = recovered, message = it.message?.takeUnless { it == HOSTS_UNREADABLE }) }
+                    hostsBlocked = false
+                }
+            }
+            true
+        }
+    }
+
+    private fun showHostSaveFailure(waiter: Deferred<HostStore.Result>?) {
+        if (waiter == null) return
+        viewModelScope.launch {
+            when (waiter.await()) {
+                HostStore.Result.SAVED -> Unit
+                HostStore.Result.TOO_LARGE -> _state.update { it.copy(message = HOSTS_TOO_LARGE) }
+                else -> _state.update { it.copy(message = HOST_NOT_SAVED) }
+            }
+        }
+    }
+
     fun saveHost(profile: HostProfile) {
         if (state.value.demo) leaveDemo()
-        val hosts = state.value.hosts
-        val previous = hosts.find { it.id == profile.id }
-        val moved = previous != null && (previous.host != profile.host || previous.port != profile.port || previous.user != profile.user || previous.session != profile.session)
         val live = state.value.machines[profile.id]?.let { it.connected || it.connecting } == true
-        saveHosts(if (previous != null) hosts.map { if (it.id == profile.id) profile.copy(linked = if (moved) emptyList() else it.linked) else it } else hosts + profile)
+        var reconnect: HostProfile? = null
+        val waiter = mutateHosts { hosts ->
+            val previous = hosts.find { it.id == profile.id } ?: return@mutateHosts hosts + profile
+            val moved = previous.host != profile.host || previous.port != profile.port || previous.user != profile.user || previous.session != profile.session
+            val edited = previous.copy(name = profile.name, session = profile.session, host = profile.host, user = profile.user,
+                port = profile.port, fingerprint = profile.fingerprint, linked = if (moved) emptyList() else previous.linked)
+            if (moved && live) reconnect = edited
+            hosts.map { if (it.id == profile.id) edited else it }
+        }
         // A live connection to the old address would otherwise keep running under the new name.
-        if (moved && live) connect(profile)
+        reconnect?.let { connect(it) }
+        showHostSaveFailure(waiter)
     }
     fun removeHost(id: String) {
-        // Its cached projects and bots go with it (TeamsSync), so Teams never shows a machine the phone no longer has.
-        viewModelScope.launch(Dispatchers.IO) { runCatching { teamsSync.removed(id) } }
-        disconnect(id)
-        saveHosts(state.value.hosts.filter { it.id != id })
-        _state.update { it.copy(machines = it.machines - id, repairing = if (it.repairing == id) null else it.repairing) }
-        dropSshKeyIfUnused()
+        var allowed = false
+        val waiter = mutateHosts { hosts ->
+            allowed = true
+            hosts.filter { it.id != id }.also {
+                if (it != hosts) pendingEvictions.add(id)
+            }
+        }
+        if (allowed) {
+            disconnect(id)
+            _state.update { it.copy(machines = it.machines - id, repairing = if (it.repairing == id) null else it.repairing) }
+        }
+        showHostSaveFailure(waiter)
     }
     private fun dropSshKeyIfUnused() {
         // An unreadable saved list may still hold SSH entries: keep the key for as long as this process runs.
-        val hosts = if (savedHosts == null) null else state.value.hosts
-        viewModelScope.launch(Dispatchers.IO) { runCatching { LegacySsh.deleteKeyIfUnused(getApplication<Application>().noBackupFilesDir, hosts) } }
+        // Started from init, before linkDispatcher can be set, so it runs on initDispatcher.
+        viewModelScope.launch(initDispatcher) {
+            hostWriter.withLock<Unit> {
+                val dir = getApplication<Application>().noBackupFilesDir
+                if (savedHosts == null || !File(dir, "ssh").exists()) return@withLock
+                val idle = synchronized(hostLock) {
+                    !hostsBlocked && hostSeq == hostSaved && LegacySsh.keyDeletable(state.value.hosts)
+                }
+                if (!idle || !hostStore.confirmDurable()) return@withLock
+                synchronized<Unit>(hostLock) {
+                    if (!hostsBlocked && hostSeq == hostSaved) runCatching {
+                        LegacySsh.deleteKeyIfUnused(dir, state.value.hosts)
+                    }
+                }
+            }
+        }
     }
     /** A tab (or Settings), opened at its top. */
     fun navigate(screen: String) { place(Nav.tab(screen)) }
@@ -345,10 +478,22 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         _state.update { it.copy(offeredPairing = null) }
         val link = PairingLink.parse(text) ?: run { _state.update { it.copy(message = LegacySsh.NOT_A_LINK) }; return }
         viewModelScope.launch(linkDispatcher) {
+            if (!retryHosts()) {
+                withContext(Dispatchers.Main) {
+                    if (gen == offerGen) _state.update { it.copy(message = HOSTS_UNREADABLE) }
+                }
+                return@launch
+            }
             val desktop = runCatching { pocketLink.desktopId(link.ticket) }.getOrNull()
             val offer = desktop?.let { PairingOffer.of(gen, link, it, state.value.hosts, pocketLink::desktopId) }
             withContext(Dispatchers.Main) {
-                if (gen == offerGen) _state.update { if (offer == null) it.copy(message = LegacySsh.NOT_A_LINK) else it.copy(offeredPairing = offer) }
+                if (gen == offerGen) _state.update {
+                    when {
+                        hostsBlocked -> it.copy(message = HOSTS_UNREADABLE)
+                        offer == null -> it.copy(message = LegacySsh.NOT_A_LINK)
+                        else -> it.copy(offeredPairing = offer)
+                    }
+                }
             }
         }
     }
@@ -383,26 +528,51 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         _state.update { it.copy(pairing = true, offeredPairing = null) }
         viewModelScope.launch(linkDispatcher) {
             try {
+                if (!retryHosts()) {
+                    _state.update { it.copy(pairing = false, repairing = null, message = HOSTS_UNREADABLE) }
+                    return@launch
+                }
                 val device = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL).distinct().joinToString(" ").trim().ifBlank { "Android phone" }
                 val name = displayName(pocketLink.pair(getApplication(), link, device)).ifBlank { displayName(link.name).ifBlank { "Herdr desktop" } }
                 val desktop = pocketLink.desktopId(link.ticket)
                 // Pairing the same desktop again keeps its card and history, with the new ticket.
-                val previous = state.value.hosts.find { it.paired && runCatching { pocketLink.desktopId(it.ticket) }.getOrNull() == desktop }
-                val profile = (previous ?: HostProfile(UUID.randomUUID().toString(), name, desktop.take(12), "", 0, transport = "iroh"))
-                    .copy(ticket = link.ticket, transport = "iroh")
-                withContext(Dispatchers.Main) {
+                val previousId = state.value.hosts.find { it.paired && runCatching { pocketLink.desktopId(it.ticket) }.getOrNull() == desktop }?.id
+                val newProfile = HostProfile(UUID.randomUUID().toString(), name, desktop.take(12), "", 0, transport = "iroh", ticket = link.ticket)
+                var saved: HostProfile? = null
+                var pairedAgain = false
+                val waiter = withContext(Dispatchers.Main) {
+                    var replaced = emptySet<String>()
                     // The legacy SSH entry this pairing replaces goes only now, after the pairing succeeded.
-                    val hosts = LegacySsh.afterPairing(state.value.hosts, profile, replacing)
-                    val replaced = state.value.hosts.filter { h -> hosts.none { it.id == h.id } }.map { it.id }
+                    val pending = mutateHosts { before ->
+                        val previous = before.find { it.id == previousId }
+                        pairedAgain = previous != null
+                        val profile = previous?.copy(ticket = link.ticket, transport = "iroh") ?: newProfile
+                        val after = LegacySsh.afterPairing(before, profile, replacing)
+                        saved = after.first { it.id == profile.id }
+                        replaced = before.filter { h -> after.none { it.id == h.id } }.map { it.id }.toSet()
+                        after
+                    }
                     replaced.forEach { disconnect(it) }
-                    saveHosts(hosts)
-                    val saved = hosts.first { it.id == profile.id }
-                    val savedName = displayName(saved.name)
-                    val message = if (previous != null) "Paired $savedName again." else if (connectNow) "Paired with $savedName"
-                        else "Paired with $savedName. Connect it in Settings when you’re ready."
-                    _state.update { it.copy(pairing = false, repairing = null, machines = it.machines - replaced.toSet(), message = message) }
-                    dropSshKeyIfUnused()
-                    if (connectNow) connect(saved)
+                    _state.update { it.copy(repairing = null, machines = it.machines - replaced) }
+                    pending
+                }
+                val result = waiter?.await() ?: HostStore.Result.SAVED
+                withContext(Dispatchers.Main) {
+                    val current = state.value.hosts.find { it.id == saved?.id && it.ticket == link.ticket }
+                    if (current == null) {
+                        _state.update { it.copy(pairing = false, message = if (saved == null) HOSTS_UNREADABLE else it.message) }
+                        return@withContext
+                    }
+                    val savedName = displayName(current.name)
+                    val message = when {
+                        result == HostStore.Result.TOO_LARGE -> HOSTS_TOO_LARGE
+                        result != HostStore.Result.SAVED -> "Paired with $savedName, but this phone couldn’t save it yet. Automagik will try again; if it keeps failing, pair again."
+                        pairedAgain -> "Paired $savedName again."
+                        connectNow -> "Paired with $savedName"
+                        else -> "Paired with $savedName. Connect it in Settings when you’re ready."
+                    }
+                    _state.update { it.copy(pairing = false, message = message) }
+                    if (connectNow) connect(current)
                 }
             } catch (e: Throwable) {
                 if (e is CancellationException) throw e
@@ -484,7 +654,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         // What to reconnect if an update or a restart ends the process ([WatchResume]).
         val active = s.machines.filterValues { it.connected || it.connecting }.keys + retrying
         val watched = WatchResume.watched(s.watch, s.demo, active)
-        if (watched != kept) { kept = watched; prefs.edit { putStringSet(WatchResume.PREF, watched) } }
+        synchronized<Unit>(hostLock) {
+            if (!hostsBlocked && watched != kept) { kept = watched; prefs.edit { putStringSet(WatchResume.PREF, watched) } }
+        }
         val machines = s.machines.values.count { it.connected }
         if (!s.watch || s.demo || (machines == 0 && retrying.isEmpty() && s.machines.values.none { it.connecting })) {
             watchText = ""; WatchService.stop(app); return
@@ -525,7 +697,12 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     fun setForeground(shown: Boolean) {
         onScreen.value = shown
         // Android lets the watch service start only from the foreground.
-        if (shown) { watchText = ""; syncWatch(); kickSlowReconnects() }
+        if (shown) {
+            watchText = ""; syncWatch(); kickSlowReconnects()
+            if (synchronized(hostLock) { !hostsBlocked && hostSeq > hostSaved && hostSeq != oversizedSeq }) {
+                viewModelScope.launch(linkDispatcher) { drainHosts(retry = true) }
+            }
+        }
         AppUpdates.setForeground(shown)
     }
     // Opening the app checks for an update (setForeground); this tells a waiting one when installing would interrupt.
@@ -533,6 +710,11 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     // still being constructed (a download finishing then), and a registration before them would read a null field (#762).
     init {
         AppUpdates.registerUsage({ foreground }, { state.value.selected != null }, { watchText.isNotEmpty() })
+        if (loaded.migrate) viewModelScope.launch(initDispatcher) {
+            if (runCatching { hostStore.migrate() }.getOrNull() == HostStore.Result.TOO_LARGE) {
+                _state.update { it.copy(message = HOSTS_TOO_LARGE) }
+            }
+        }
     }
     private suspend fun alert(found: List<Alerts.Alert>, client: CoreClient) {
         val s = state.value
@@ -830,9 +1012,10 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }.getOrDefault("")
     /** Saves which machines a core reaches, so the start screen lists them before the next connection. */
     private fun rememberLinked(id: String, names: List<String>) {
-        val hosts = state.value.hosts
-        if (hosts.none { it.id == id && it.linked != names }) return
-        saveHosts(hosts.map { if (it.id == id) it.copy(linked = names) else it })
+        mutateHosts { hosts ->
+            if (hosts.none { it.id == id && it.linked != names }) hosts
+            else hosts.map { if (it.id == id) it.copy(linked = names) else it }
+        }
     }
 
     // Called only once the local terminal page has measured its actual viewport.
