@@ -717,7 +717,7 @@ export function install(rt) {
     } else {
       // The capability is gone: only the Session's keys that no saved MCP capability still uses.
       const used = new Set(Object.values(library()).filter(other => other.kind === 'mcp').flatMap(other => [...referencedSecrets(other)]))
-      scoped = (await rt.sessionSecretNames(sessionId)).filter(secret => !used.has(secret))
+      scoped = (await rt.sessionSecretNames(sessionId, { stored: true })).filter(secret => !used.has(secret))
     }
     const free = scoped.filter(secret => !live.has(secret))
     const released = free.length > 0 && await rt.releaseSessionSecrets(free, sessionId)

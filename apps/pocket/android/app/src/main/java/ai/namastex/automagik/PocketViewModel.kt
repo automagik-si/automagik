@@ -64,7 +64,7 @@ data class PocketState(
     /** The legacy SSH machine ([LegacySsh]) whose "Pair with QR" started the scan: the next pairing replaces it. */
     val repairing: String? = null,
     /** A pairing link that arrived from outside the app, waiting for the person to confirm it. */
-    val offeredPairing: PairingLink? = null,
+    val offeredPairing: PairingOffer? = null,
     /** Folded drawer machine groups, as "hostId|machine". */
     val folded: Set<String> = emptySet(),
     /** Finished turns the person looked at on the phone ([Cockpit.seenKey]); they leave the cockpit's Done. */
@@ -103,6 +103,10 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         lockAnswers = prefs.getBoolean("lock_answers", false), watch = prefs.getBoolean(WatchResume.PREF_WATCH, true),
         seen = runCatching { JSONArray(prefs.getString("seen_done", "[]")).let { a -> (0 until a.length()).map(a::getString) }.toSet() }.getOrDefault(emptySet()), hosts = savedHosts.orEmpty()))
     val state = _state.asStateFlow()
+    internal var pocketLink: PocketLinkBackend = IrohBackend
+    internal var linkDispatcher: CoroutineDispatcher = Dispatchers.IO
+    /** The latest external offer or pairing action, changed on Main. */
+    private var offerGen = 0L
     /** Herdr desktop's program table, for the drawer's names and icons. */
     val programs: Programs by lazy { Programs(JSONObject(application.assets.open("programs.json").bufferedReader().use { it.readText() })) }
     private val colorsRead = ConcurrentHashMap<String, Long>()
@@ -281,12 +285,12 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         LegacySsh.refusal(profile)?.let { reason -> _state.update { it.copy(message = reason) }; return }
         disconnect(profile.id, deliberate = retry == 0)
         if (state.value.demo) leaveDemo()
-        jobs[profile.id] = viewModelScope.launch(Dispatchers.IO) {
+        jobs[profile.id] = viewModelScope.launch(linkDispatcher) {
             updateMachine(profile.id) { it.copy(connecting = true, connected = false, error = null) }
             var client: CoreClient? = null
             try {
                 val connectionScope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
-                val t = IrohLink.open(getApplication(), profile.ticket, profile.session, connectionScope)
+                val t = pocketLink.open(getApplication(), profile.ticket, profile.session, connectionScope)
                 ensureActive()
                 lateinit var c: CoreClient
                 c = CoreClient(t.input, t.output, t, connectionScope) { reason -> lost(profile, c, reason) }
@@ -337,13 +341,28 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     fun offerPairing(text: String) {
-        val link = PairingLink.parse(text) ?: run { _state.update { it.copy(message = "That isn’t a Pocket Link pairing link.") }; return }
-        _state.update { it.copy(offeredPairing = link) }
+        val gen = ++offerGen
+        _state.update { it.copy(offeredPairing = null) }
+        val link = PairingLink.parse(text) ?: run { _state.update { it.copy(message = LegacySsh.NOT_A_LINK) }; return }
+        viewModelScope.launch(linkDispatcher) {
+            val desktop = runCatching { pocketLink.desktopId(link.ticket) }.getOrNull()
+            val offer = desktop?.let { PairingOffer.of(gen, link, it, state.value.hosts, pocketLink::desktopId) }
+            withContext(Dispatchers.Main) {
+                if (gen == offerGen) _state.update { if (offer == null) it.copy(message = LegacySsh.NOT_A_LINK) else it.copy(offeredPairing = offer) }
+            }
+        }
     }
-    fun dismissOfferedPairing() { _state.update { it.copy(offeredPairing = null) } }
+    fun dismissOfferedPairing(id: Long) {
+        if (state.value.offeredPairing?.id != id) return
+        ++offerGen
+        _state.update { it.copy(offeredPairing = null) }
+    }
+    fun confirmOfferedPairing(id: Long) {
+        val offer = state.value.offeredPairing?.takeIf { it.id == id } ?: return
+        pair(offer.link, connectNow = false)
+    }
 
-    /** Pairs with the desktop that showed [text] (a Pocket Link QR or pasted link), saves it and connects. */
-    /** A pasted link: it replaces no legacy card. */
+    /** Pairs, saves and connects from a pasted link, without replacing a legacy card. */
     fun pair(text: String) {
         pair(PairingLink.parse(text) ?: run { _state.update { it.copy(message = LegacySsh.NOT_A_LINK) }; return })
     }
@@ -357,17 +376,18 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     fun repairWithQr(hostId: String) { _state.update { LegacySsh.start(it, hostId) } }
     /** The scan was cancelled: the legacy card stays as it was. */
     fun cancelRepair() { _state.update(LegacySsh::cancel) }
-    /** [replacing]: the legacy SSH card this pairing replaces once it succeeds ([scanned]); none for a pasted or external link. */
-    fun pair(link: PairingLink, replacing: String? = null) {
+    /** [replacing] is the legacy SSH card to replace on success. [connectNow] opens a session after saving. */
+    fun pair(link: PairingLink, replacing: String? = null, connectNow: Boolean = true) {
+        ++offerGen
         if (state.value.demo) leaveDemo()
         _state.update { it.copy(pairing = true, offeredPairing = null) }
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(linkDispatcher) {
             try {
                 val device = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL).distinct().joinToString(" ").trim().ifBlank { "Android phone" }
-                val name = IrohLink.pair(getApplication(), link, device)
-                val desktop = IrohLink.desktopId(link.ticket)
+                val name = displayName(pocketLink.pair(getApplication(), link, device)).ifBlank { displayName(link.name).ifBlank { "Herdr desktop" } }
+                val desktop = pocketLink.desktopId(link.ticket)
                 // Pairing the same desktop again keeps its card and history, with the new ticket.
-                val previous = state.value.hosts.find { it.paired && runCatching { IrohLink.desktopId(it.ticket) }.getOrNull() == desktop }
+                val previous = state.value.hosts.find { it.paired && runCatching { pocketLink.desktopId(it.ticket) }.getOrNull() == desktop }
                 val profile = (previous ?: HostProfile(UUID.randomUUID().toString(), name, desktop.take(12), "", 0, transport = "iroh"))
                     .copy(ticket = link.ticket, transport = "iroh")
                 withContext(Dispatchers.Main) {
@@ -376,9 +396,13 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
                     val replaced = state.value.hosts.filter { h -> hosts.none { it.id == h.id } }.map { it.id }
                     replaced.forEach { disconnect(it) }
                     saveHosts(hosts)
-                    _state.update { it.copy(pairing = false, repairing = null, machines = it.machines - replaced.toSet(), message = "Paired with $name") }
+                    val saved = hosts.first { it.id == profile.id }
+                    val savedName = displayName(saved.name)
+                    val message = if (previous != null) "Paired $savedName again." else if (connectNow) "Paired with $savedName"
+                        else "Paired with $savedName. Connect it in Settings when you’re ready."
+                    _state.update { it.copy(pairing = false, repairing = null, machines = it.machines - replaced.toSet(), message = message) }
                     dropSshKeyIfUnused()
-                    hosts.find { it.id == profile.id }?.let { connect(it) }
+                    if (connectNow) connect(saved)
                 }
             } catch (e: Throwable) {
                 if (e is CancellationException) throw e
@@ -502,13 +526,13 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         onScreen.value = shown
         // Android lets the watch service start only from the foreground.
         if (shown) { watchText = ""; syncWatch(); kickSlowReconnects() }
-        if (shown) Updater.opened() else Updater.left()
+        AppUpdates.setForeground(shown)
     }
     // Opening the app checks for an update (setForeground); this tells a waiting one when installing would interrupt.
-    // Registered after the fields its lambda reads (onScreen, watchText): Updater can call it while this view model is
+    // Registered after the fields it reads (onScreen, watchText): the GitHub updater can call it while this view model is
     // still being constructed (a download finishing then), and a registration before them would read a null field (#762).
     init {
-        Updater.usage = { val s = state.value; Updater.Usage(foreground, s.selected != null, watchText.isNotEmpty()) }
+        AppUpdates.registerUsage({ foreground }, { state.value.selected != null }, { watchText.isNotEmpty() })
     }
     private suspend fun alert(found: List<Alerts.Alert>, client: CoreClient) {
         val s = state.value
@@ -993,21 +1017,30 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
      * How [openChatLink] reaches a chat route. It is the production Pocket Link route by default; a unit test points
      * it at a fake bridge to drive the chat wiring without a device (#754). The app never sets it.
      */
-    internal var chatOpener: suspend (hostId: String, scope: CoroutineScope, lost: (String) -> Unit) -> ChatLink =
-        { hostId, scope, lost -> connectChatLink(hostId, scope, lost) }
+    private val defaultChatOpener: suspend (String, CoroutineScope, (String) -> Unit) -> ChatLink =
+        { hostId, scope, lost -> connectChatLink(hostId, scope, emptyList(), lost) }
+    internal var chatOpener: suspend (hostId: String, scope: CoroutineScope, lost: (String) -> Unit) -> ChatLink = defaultChatOpener
+    internal var chatOpenerManage: (suspend (String, CoroutineScope, List<String>, (String) -> Unit) -> ChatLink)? = null
     /** Automatic reconnects of the open DSH chat since its last snapshot (main thread only); see [Chat.RESUMABLE]. */
     private var resumeAttempt = 0
     private var resumeJob: Job? = null
 
-    private suspend fun openChatLink(hostId: String, scope: CoroutineScope, lost: (String) -> Unit): ChatLink =
-        chatOpener(hostId, scope, lost)
+    private suspend fun openChatLink(hostId: String, scope: CoroutineScope, manage: List<String> = emptyList(),
+                                     lost: (String) -> Unit): ChatLink =
+        chatOpenerManage?.invoke(hostId, scope, manage, lost)
+            ?: if (manage.isEmpty() || chatOpener !== defaultChatOpener) chatOpener(hostId, scope, lost)
+            else connectChatLink(hostId, scope, manage, lost)
 
     /** The production chat route: Iroh to the paired desktop, then Pocket Link's chat version 1 ([ChatClient]). */
-    private suspend fun connectChatLink(hostId: String, scope: CoroutineScope, lost: (String) -> Unit): ChatLink {
+    private suspend fun connectChatLink(hostId: String, scope: CoroutineScope, manage: List<String>, lost: (String) -> Unit): ChatLink {
         val profile = state.value.hosts.find { it.id == hostId && it.paired } ?: error("This machine isn’t paired with Pocket Link.")
         val t = try { IrohLink.open(getApplication(), profile.ticket, profile.session, scope, IrohLink.CHAT) }
             catch (e: Exception) { if (e !is CancellationException && ChatClient.refusedRoute(e)) throw ChatUnsupported() else throw e }
-        return withTimeout(20_000) { PocketLinkChat(ChatClient.start(CoreClient(t.input, t.output, t, scope, lost))) }
+        val core = CoreClient(t.input, t.output, t, scope, lost)
+        // The transport scope owns the hello read so a timeout can close it while it is still blocked on input.
+        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage) }
+        try { return withTimeout(20_000) { PocketLinkChat(hello.await()) } }
+        catch (e: Exception) { core.close(); hello.cancel(); throw e }
     }
 
     private fun chatUpdate(gen: Int, change: (Chat.State) -> Chat.State) {
@@ -1030,7 +1063,8 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         val prior = _chat.value?.takeIf { chatRef == ref }
         val unknown = prior?.let(Chat::unknown).orEmpty()
         val attempt = if (resuming) resumeAttempt else 0
-        closeChat()
+        closeChat(ref = null, keepMemory = chatRef == ref)
+        _botManage.update { it - ref.hostId }
         resumeAttempt = attempt
         val gen = ++chatGen
         chatRef = ref
@@ -1120,8 +1154,11 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     /** Closes the chat for [ref] (any chat when null); its rows are dropped. */
-    fun closeChat(ref: TerminalRef? = null) {
+    fun closeChat(ref: TerminalRef? = null) = closeChat(ref, keepMemory = false)
+
+    private fun closeChat(ref: TerminalRef?, keepMemory: Boolean) {
         if (ref != null && ref != chatRef) return
+        if (!keepMemory) closeMemory()
         // bots-dsh stops following a Bot chat no phone watches: what it lists next is not a finish ([ChatWatch.left]).
         chatRef?.takeIf { Chat.isDsh(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
         ++chatGen
@@ -1139,6 +1176,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
      */
     fun streams(started: Boolean) {
         if (!started) {
+            closeMemory()
             held.stop(activeChannel != null || attachJob?.isActive == true || nativeJob?.isActive == true, chatRef?.takeIf { chatJob?.isActive == true || resumeJob?.isActive == true })
             dropStream()
             chatJob?.cancel(); chatJob = null
@@ -1282,6 +1320,144 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             result.getOrNull()?.let { rows -> _chatWatch.update { ChatWatch.read(it, hostId, rows, System.currentTimeMillis()) } }
             _botChats.update { it + (hostId to result) }
         }
+    }
+
+    private val _memory = MutableStateFlow<ChatMemory.State?>(null)
+    val memory = _memory.asStateFlow()
+    /** The latest memory hello for each host since its chat last opened or reconnected. */
+    private val _botManage = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val botManage = _botManage.asStateFlow()
+    private var memoryToken = 0L
+    private var memoryLink: ChatLink? = null
+    private var memoryJob: Job? = null
+
+    /** The dialog owns a connection even when the Bot chat could not subscribe. Its claims and completions run on Main. */
+    fun openMemory(ref: TerminalRef) {
+        if (state.value.demo || !Chat.isDsh(ref.address)) return
+        if (_memory.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
+        closeMemory()
+        val token = ++memoryToken
+        val connecting = ChatMemory.State(ref.hostId, ref.address, token, op = ChatMemory.Op.READ)
+        _memory.value = connecting
+        memoryJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+            var ownedLink: ChatLink? = null
+            try {
+                val link = try {
+                    withContext(linkDispatcher) {
+                        openChatLink(ref.hostId, scope, ChatClient.MEMORY) {
+                            viewModelScope.launch { memoryLost(token) }
+                        }.also { ownedLink = it }
+                    }
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (e is ChatUnsupported) memoryUnsupported(connecting)
+                    else endMemory(connecting.closed("Couldn't connect to the computer."))
+                    return@launch
+                }
+                if (token != memoryToken) return@launch
+                val grants = link.manage
+                if ("memory.read" !in grants) { memoryUnsupported(connecting); return@launch }
+                _botManage.update { it + (ref.hostId to true) }
+                memoryLink = link
+                _memory.value = connecting.copy(phase = ChatMemory.Phase.LOADING, status = ChatMemory.CHECKING, grants = grants)
+                launch { readMemory(token, link) }
+                awaitCancellation()
+            } finally {
+                scope.cancel()
+                ownedLink?.let { link ->
+                    withContext(NonCancellable + linkDispatcher) { runCatching { link.close() } }
+                }
+            }
+        }
+        memoryJob?.start()
+    }
+
+    private fun memoryUnsupported(s: ChatMemory.State) {
+        _botManage.update { it + (s.hostId to false) }
+        endMemory(s.closed("Memory isn't offered on this connection. If this keeps happening, update Pocket Link and Automagik on this computer."))
+    }
+
+    private fun memoryLost(token: Long) {
+        val s = _memory.value ?: return
+        if (token != memoryToken || s.phase == ChatMemory.Phase.CLOSED) return
+        val mayHaveSaved = s.op == ChatMemory.Op.ADD || s.op == ChatMemory.Op.EDIT ||
+            s.phase == ChatMemory.Phase.RECONCILING || s.outcome == ChatMemory.UNCONFIRMED
+        val line = if (mayHaveSaved)
+            "The connection closed before the computer answered. The change may have been saved: open Memory again to check."
+        else "The connection to the computer closed."
+        endMemory(s.closed(line))
+    }
+
+    private fun currentMemory(token: Long, link: ChatLink) =
+        _memory.value?.takeIf { token == memoryToken && memoryLink === link }
+
+    private fun endMemory(closed: ChatMemory.State) {
+        releaseMemory()
+        _memory.value = closed
+    }
+
+    private fun releaseMemory() {
+        memoryLink = null
+        // The job closes its link on linkDispatcher, including when its own scope is already cancelled.
+        memoryJob?.cancel(); memoryJob = null
+    }
+
+    fun closeMemory() {
+        ++memoryToken
+        releaseMemory()
+        _memory.value = null
+    }
+
+    private suspend fun readMemory(token: Long, link: ChatLink) {
+        val terminal = currentMemory(token, link)?.terminal ?: return
+        val result = memoryResult { link.memoryRead(terminal) }
+        val current = currentMemory(token, link) ?: return
+        applyMemory(ChatMemory.afterRead(current, result).first)
+    }
+
+    fun refreshMemory() {
+        val s = _memory.value?.takeIf { it.canRefresh } ?: return
+        val link = memoryLink ?: return
+        val parent = memoryJob ?: return
+        val token = s.token
+        _memory.value = s.copy(phase = ChatMemory.Phase.LOADING, op = ChatMemory.Op.READ, status = ChatMemory.CHECKING)
+        viewModelScope.launch(parent) { readMemory(token, link) }
+    }
+
+    fun memoryAdd(text: String) = writeMemory("memory.add", ChatMemory.Op.ADD, text) { link, terminal ->
+        link.memoryAdd(terminal, text)
+    }
+
+    fun memoryEdit(entry: ChatMemory.Entry, text: String) = writeMemory("memory.edit", ChatMemory.Op.EDIT, text) { link, terminal ->
+        link.memoryEdit(terminal, entry.id, entry.rev, text)
+    }
+
+    /** Claim the operation before dispatching so a second tap cannot send another write. */
+    private fun writeMemory(method: String, op: ChatMemory.Op, text: String, call: suspend (ChatLink, String) -> JSONObject) {
+        val s = _memory.value?.takeIf { it.canWrite(method) } ?: return
+        val issue = ChatMemory.checkText(text)
+        if (issue != null) { _memory.value = s.copy(outcome = issue); return }
+        val link = memoryLink ?: return
+        val parent = memoryJob ?: return
+        val (_, terminal, token) = s
+        _memory.value = s.copy(op = op, outcome = null)
+        viewModelScope.launch(parent) {
+            val result = memoryResult { call(link, terminal) }
+            val current = currentMemory(token, link) ?: return@launch
+            val (next, needsRead) = ChatMemory.afterWrite(current, op, result)
+            applyMemory(next)
+            if (needsRead) readMemory(token, link)
+        }
+    }
+
+    /** A per-call timeout is a reply failure. Closing the dialog cancels the operation itself. */
+    private suspend fun memoryResult(call: suspend () -> JSONObject): Any = withContext(linkDispatcher) {
+        try { call() } catch (e: Exception) { currentCoroutineContext().ensureActive(); e }
+    }
+
+    private fun applyMemory(s: ChatMemory.State) {
+        if (s.phase == ChatMemory.Phase.CLOSED) endMemory(s) else _memory.value = s
     }
 
     fun startTerminal(hostId: String, cwd: String, command: String) {

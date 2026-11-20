@@ -7,7 +7,7 @@ import { registerHooks } from "node:module";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -76,9 +76,10 @@ const seed = (bots, extra = {}) => writeFileSync(join(project, ".herdr/bots.json
 // The pack's Antigravity model cache (modelCache.js) in the test app home: opening a form on
 // Antigravity then reads this list and never runs the host's agy. A test that deletes it and
 // puts a fake agy on PATH watches the one refresh.
-const seedAgModels = (models = [{ id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }, { id: "claude-sonnet-5-5-high", label: "Claude Sonnet 5.5 (High)" }]) => {
+const seedAgModels = (models = [{ id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }, { id: "claude-sonnet-5-5-high", label: "Claude Sonnet 5.5 (High)" }],
+  at = new Date().toISOString()) => {
   mkdirSync(join(state.appHome, "automagik-herdr"), { recursive: true });
-  writeFileSync(join(state.appHome, "automagik-herdr/antigravity-models.json"), JSON.stringify({ version: 1, source: "agy models", at: new Date().toISOString(), models }));
+  writeFileSync(join(state.appHome, "automagik-herdr/antigravity-models.json"), JSON.stringify({ version: 1, source: "agy models", at, models }));
 };
 const stored = () => JSON.parse(readFileSync(join(project, ".herdr/bots.json"), "utf8"));
 async function open(props) {
@@ -132,6 +133,37 @@ test("Runs on: the pack's agents fill in what knownAgents misses (#793), install
   const dim = await form.withPackAgents([]);
   assert.equal(dim.find((a) => a.key === "antigravity").installed, false, "not installed: shown dimmed when it is the bot's own");
   assert.equal(new Set(dim.map((a) => a.key)).size, dim.length, "no duplicates");
+  // Use a fixture-specific program name so lookup cannot pick up an installed agy.
+  delete form.programFile;
+  const early = join(root, "early");
+  const later = join(root, "later bin");
+  const put = (dir, mode) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "agy-809"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "agy-809"), mode);
+  };
+  put(early, 0o644);
+  put(later, 0o755);
+  const pathBefore = process.env.PATH;
+  process.env.PATH = `${early}:${later}`;
+  try {
+    state.calls = [];
+    assert.equal(await form.programFile("agy-809-missing"), null, "nowhere: null");
+    assert.equal(state.calls.filter((call) => call.kind === "exec").length, 0, "missing candidates need no probe");
+    assert.equal(await form.programFile(join(later, "agy-809")), join(later, "agy-809"), "an explicit executable path is kept");
+    if (existsSync("/bin/test")) {
+      state.calls = [];
+      assert.equal(await form.programFile("agy-809"), join(later, "agy-809"), "the 0644 file is passed; the later folder, with a space, has the one that runs");
+      assert.equal(await form.programFile(join(early, "agy-809")), null, "an explicit path that is not executable is a miss");
+      assert.ok(!state.calls.some((c) => c.kind === "exec" && String(c.command).endsWith("/agy-809")), "the check never runs the program");
+    }
+    // The probe cannot run (no /bin/test on this system): the exists answer is kept.
+    state.execFault = (command) => (command === "/bin/test" ? new Error("spawn /bin/test ENOENT") : null);
+    assert.equal(await form.programFile("agy-809"), join(early, "agy-809"), "an existing file still counts when the probe throws");
+  } finally {
+    delete state.execFault;
+    process.env.PATH = pathBefore;
+  }
 });
 
 test("Antigravity (#793): the pin list is the cached agy models, never the settings label", async () => {
@@ -150,12 +182,17 @@ test("Antigravity (#793): the pin list is the cached agy models, never the setti
 });
 
 test("Antigravity (#793): a missing model cache is refreshed once with `agy models`, then read from the app home", async (t) => {
-  const bin = join(root, "bin");
+  const bin = join(root, "later bin");
   mkdirSync(bin, { recursive: true });
   const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
   exe(join(bin, "agy"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
+  // #809: an earlier PATH folder holds an agy that is not executable; the scan passes it.
+  const shadow = join(root, "shadow bin");
+  mkdirSync(shadow, { recursive: true });
+  writeFileSync(join(shadow, "agy"), "#!/bin/sh\nexit 9\n");
+  chmodSync(join(shadow, "agy"), 0o644);
   const before = process.env.PATH;
-  process.env.PATH = `${bin}:${before}`;
+  process.env.PATH = `${existsSync("/bin/test") ? `${shadow}:` : ""}${bin}:${before}`;
   t.after(() => { process.env.PATH = before; });
   state.agents = withAntigravity(true);
   const AG = { ...MAIN, id: "b-agyaaaaaaa", name: "ag-bot", kind: "member", lead: MAIN.id, agent: "antigravity" };
@@ -173,38 +210,87 @@ test("Antigravity (#793): a missing model cache is refreshed once with `agy mode
   assert.equal(execs(), 1);
   await open({ form: "edit", bot: AG.id });
   assert.equal(execs(), 1, "once per session");
+  assert.deepEqual(readdirSync(join(state.appHome, "automagik-herdr")).filter((n) => n.startsWith("antigravity-models.json")),
+    ["antigravity-models.json"], "the form's temp file was moved into place");
+
+  // #809: exercise both Herdr rejecting exec and the real /bin/mv returning a non-zero exit.
+  t.after(() => { delete state.execFault; });
+  for (const result of ["exec rejects", "mv exits non-zero"]) {
+    state.appHome = join(root, result);
+    state.calls = [];
+    const dir = join(state.appHome, "automagik-herdr");
+    const otherTemp = "antigravity-models.json.tmp-unrelated";
+    const rejects = result === "exec rejects";
+    if (rejects) seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
+    else mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, otherTemp), "another refresh");
+    state.execFault = (command, [from, to]) => {
+      if (command !== "/bin/mv") return;
+      if (rejects) return new Error("mv was ended");
+      // A directory of the same name inside the destination makes mv refuse the move.
+      mkdirSync(join(to, from.split("/").pop()), { recursive: true });
+    };
+    const { form: failed } = await open({ form: "edit", bot: AG.id });
+    delete state.execFault;
+    const moves = state.calls.filter((c) => c.kind === "exec" && c.command === "/bin/mv");
+    assert.equal(moves.length, 1, result);
+    assert.match(moves[0].args[0], /antigravity-models\.json\.tmp-\d+-\d+-[a-z0-9]+$/);
+    assert.equal(failed.modelsWhy, "the model cache couldn't be written", result);
+    assert.deepEqual(readdirSync(dir).filter((n) => n.includes(".tmp-")), [otherTemp], result);
+    assert.equal(readFileSync(join(dir, otherTemp), "utf8"), "another refresh", result);
+    if (rejects) {
+      assert.ok(failed.modelInfo("antigravity").models.includes("old-model"), "the old list stays");
+    } else {
+      assert.deepEqual(readdirSync(moves[0].args[1]), [moves[0].args[0].split("/").pop()], "only the blocking folder is at the destination");
+    }
+  }
 });
 
-test("Antigravity (#793): a field typed while a slow model refresh runs is still saved", async (t) => {
+test("Antigravity (#793): a slow refresh updates both forms and preserves edits typed while it runs", async (t) => {
   const bin = join(root, "bin");
   mkdirSync(bin, { recursive: true });
   const release = join(root, "agy-release");
-  const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
+  const agy = join(bin, "agy");
   // The fake agy waits for the test's release file: the refresh is held while the person types.
-  exe(join(bin, "agy"), `#!/bin/sh\ni=0\nwhile [ ! -e "${release}" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i + 1)); done\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
+  writeFileSync(agy, `#!/bin/sh\ni=0\nwhile [ ! -e "${release}" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i + 1)); done\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
+  chmodSync(agy, 0o755);
   const before = process.env.PATH;
   process.env.PATH = `${bin}:${before}`;
-  t.after(() => {
-    try { writeFileSync(release, "go"); } catch { /* the temp root is gone: the fake's loop ends on its own */ }
-    process.env.PATH = before;
-  });
-  state.agents = withAntigravity(true);
+  t.after(() => { process.env.PATH = before; });
+  state.agents = withAntigravity(true).filter((a) => a.key === "antigravity");
   const AG = { ...MAIN, id: "b-agyaaaaaaa", name: "ag-bot", kind: "member", lead: MAIN.id, agent: "antigravity" };
   seed([MAIN, AG]);
-  const cx = makeCx();
-  const form = new BotForm({ overlay: "o9", project, form: "edit", bot: AG.id }, cx);
-  // load() fills the fields, snapshots the opened state, then awaits the cache refresh.
-  const started = Date.now();
-  while (!form.initial && Date.now() - started < 5000) await new Promise((go) => setTimeout(go, 10));
-  assert.ok(form.initial, "the form filled and snapshotted before the refresh");
-  form.inputs.name.type("typed-while-refreshing", cx);
-  writeFileSync(release, "go");
-  await cx.settle();
-  assert.ok(form.modelInfo("antigravity").models.includes("gemini-4-argon-high"), "the refreshed list is used");
-  index(form.render(cx));
-  nodes.get("bot-save").click(null, cx);
-  await cx.settle();
-  assert.equal(stored().bots.find((b) => b.id === AG.id).name, "typed-while-refreshing", "the typed name was not lost to the snapshot");
+
+  for (const mode of ["create", "edit"]) {
+    state.appHome = join(root, `app-${mode}`);
+    state.calls = [];
+    seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
+    const cx = makeCx();
+    const form = new BotForm({ overlay: "o9", project, form: mode, bot: AG.id }, cx);
+    const refreshing = () => state.calls.some((call) => call.command === agy && call.args?.[0] === "models");
+    try {
+      // Wait for the call itself; the 10 s ceiling is only a net against a hang.
+      const until = Date.now() + 10_000;
+      while (!refreshing() && Date.now() < until) await new Promise((go) => setTimeout(go, 10));
+      assert.ok(refreshing(), `${mode}: agy started`);
+      if (mode === "edit") {
+        assert.ok(form.initial, "the edit form snapshotted before the refresh");
+        form.inputs.name.type("typed-while-refreshing", cx);
+      }
+      assert.deepEqual(form.modelInfo("antigravity").models, ["old-model"], `${mode}: memoize the old list during refresh`);
+    } finally {
+      writeFileSync(release, "go");
+      await cx.settle();
+      rmSync(release);
+    }
+    assert.ok(form.modelInfo("antigravity").models.includes("claude-opus-5-5-high"), `${mode}: the refreshed list is used`);
+    if (mode === "edit") {
+      index(form.render(cx));
+      nodes.get("bot-save").click(null, cx);
+      await cx.settle();
+      assert.equal(stored().bots.find((b) => b.id === AG.id).name, "typed-while-refreshing", "the typed name was not lost to the snapshot");
+    }
+  }
 });
 
 test("Runs on: a knownAgents() failure is shown, not swallowed", async () => {
@@ -1295,17 +1381,43 @@ test("menu busy labels: only the running action's item changes", async () => {
 
 // ---- automagik#206: a project on a linked machine ("vm": its files are scratch paths here) ----
 
-test("menu on a linked machine: Configure, Prompt and Run there; no What happened yet; Configure opens the form there", async () => {
+test("menu on a linked machine: Configure, Prompt, Run and What happened there; Configure opens the form there", async () => {
   seed([MAIN, OMP]);
   const { draw, click } = await menu({ machine: "vm" });
   draw();
-  for (const id of ["menu-configure", "menu-prompt", "menu-start", "menu-restart"]) assert.ok(nodes.has(id), id);
-  for (const id of ["menu-attach", "menu-detach", "menu-focus", "menu-inspect"]) assert.ok(!nodes.has(id), id);
-  assert.match(textOf(nodes.get("menu-remote-note")), /On vm\. What happened isn't shown/);
+  for (const id of ["menu-configure", "menu-prompt", "menu-start", "menu-restart", "menu-inspect"]) assert.ok(nodes.has(id), id);
+  for (const id of ["menu-attach", "menu-detach", "menu-focus"]) assert.ok(!nodes.has(id), id);
+  // #206: the scope is said: the events this computer recorded for that machine, nothing more.
+  assert.equal(textOf(nodes.get("menu-remote-note")), "Attach, detach and end events recorded by this computer for vm.");
   assert.doesNotMatch(textOf(nodes.get("bot-form-body")), /work from that computer/);
   state.opened = [];
   await click("menu-configure");
   assert.deepEqual(state.opened[0].props, { form: "edit", bot: OMP.id, project, machine: "vm" });
+});
+
+test("menu What happened on a linked machine asks history --machine and shows its rows, or names the machine when empty (#206)", async () => {
+  seed([MAIN, OMP]);
+  const at = (m) => `2026-11-03T10:0${m}:00.000Z`;
+  const args = fakeCli({ id: OMP.id, name: OMP.name, machine: "vm", bot: OMP.id,
+    attach: [{ v: 1, event: "attach", bot: OMP.id, terminal: "t8", core: "core-of-vm", machine: "vm", by: "attach", at: at(1) },
+      { v: 1, event: "detach", bot: OMP.id, terminal: "t8", core: "core-of-vm", machine: "vm", by: "detach", at: at(2) }],
+    starts: [], workers: [], sessions: [], transcript: null });
+  const { draw, click } = await menu({ machine: "vm" });
+  draw();
+  await click("menu-inspect");
+  const text = textOf(draw());
+  assert.deepEqual(args(), [`history ${OMP.id} --project ${project} --machine vm --json`]);
+  assert.match(text, /2026-11-03 10:02 detached from t8 · by detach/);
+  assert.match(text, /2026-11-03 10:01 attached to t8 · by attach/);
+  assert.match(textOf(nodes.get("menu-remote-note")), /recorded by this computer for vm/);
+  assert.ok(!nodes.has("menu-transcript"));
+
+  seed([MAIN, OMP]);
+  fakeCli({ id: OMP.id, name: OMP.name, machine: "vm", bot: OMP.id, attach: [], starts: [], workers: [], sessions: [], transcript: null });
+  const none = await menu({ machine: "vm" });
+  none.draw();
+  await none.click("menu-inspect");
+  assert.match(textOf(none.draw()), /Nothing recorded by this computer for vm yet\./);
 });
 
 test("menu on a linked machine, running: Focus and Detach its pane there; Attach only to a pane of that machine; actions pass --machine", async () => {
@@ -1633,4 +1745,46 @@ test("menu Restart with its helpers on a Herdr that takes no exec timeout: not r
   assert.throws(() => args(), /ENOENT/, "no restart reached the CLI");
   assert.match(form.error, /cannot wait long enough for a restart with its helpers; restart it from a terminal/);
   assert.equal(form.busy, false);
+});
+
+// ---- #1172: a paired Hermes bot's menu explains the binding before offering a restart ----
+
+const HERMES_BOT = { id: "b-hermesaaaa", name: "hermes-bot", kind: "member", look: look("star", "blue"), role: "r", instructions: "",
+  agent: "hermes", hermes: { home: "/srv/hermes", profile: "default" } };
+
+test("#1172 a paired Hermes bot's menu explains the pairing and offers only the restarts it can take", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const running = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes", live: "t5", terminal: "t5" });
+  running.draw();
+  assert.ok(nodes.has("menu-focus") && nodes.has("menu-restart"), "Focus and Restart stay");
+  assert.equal(nodes.has("menu-restart-fresh"), false, "no fresh session for a paired bot");
+  assert.equal(nodes.has("menu-restart-on"), false, "no other agent for a paired bot");
+  assert.match(textOf(nodes.get("menu-paired-note")), /Paired to its Hermes Bot Chat \(profile default\)/);
+  assert.match(textOf(nodes.get("menu-paired-note")), /Configure… clears it/);
+  assert.match(textOf(nodes.get("menu-configure")), /Configure… \(unpair\)/);
+  const off = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes" });
+  off.draw();
+  assert.ok(nodes.has("menu-start") && nodes.has("menu-restart"), "Start and Restart stay");
+  assert.equal(nodes.has("menu-restart-fresh"), false);
+  assert.equal(nodes.has("menu-restart-on"), false);
+});
+
+test("#1172 a paired bot's menu on a linked machine explains the pairing there too", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const { draw } = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes",
+    machine: "vm", live: "vm/t8", terminal: "vm/t8" });
+  draw();
+  assert.ok(nodes.has("menu-restart") && nodes.has("menu-focus"));
+  assert.equal(nodes.has("menu-restart-fresh"), false);
+  assert.equal(nodes.has("menu-restart-on"), false);
+  assert.match(textOf(nodes.get("menu-paired-note")), /profile default/);
+});
+
+test("#1172 a paired bot's menu from a stale linked roster snapshot still names the pairing and how to unpair", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const { draw } = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes", machine: "vm", stale: true });
+  draw();
+  assert.ok(!nodes.has("menu-configure") && !nodes.has("menu-restart-on"), "nothing to press while vm is away");
+  assert.match(textOf(nodes.get("menu-remote-note")), /vm isn't answering/);
+  assert.match(textOf(nodes.get("menu-remote-note")), /paired to its Hermes Bot Chat \(profile default\): Configure… unpairs it once vm is back/);
 });

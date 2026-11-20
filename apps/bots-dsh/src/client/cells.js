@@ -31,7 +31,9 @@ import { layoutOf, thinkingShown } from './themes.js'
 import { hasCanvas, splitCanvases } from './canvas-text.js'
 import { CanvasSlot } from './canvas-slot.js'
 import { TaskCard, endLabel } from './task-card.js'
+import { ProposalCall, SettingsCall } from './settings-card.js'
 import { toolCards } from './extend.js'
+import { READ_SCOPE_CODE } from '../shared/read-scope.js'
 
 export { clockLabel }
 
@@ -1138,7 +1140,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
 // its sub-calls, so a call draws by its own name wherever it sits in the tree.
 // Another Omni plugin's tools draw when they register a card (extend.js).
 const isComputerCall = name => name === 'cua' || name?.startsWith('cua_driver_native__') === true
-const DRAWN = new Set(['start_task', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'group_relay', 'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'request_secret', 'request_connector', 'mail_send', 'ask_user_question', 'show_view', 'browser_handoff', 'read_group_chat', 'remember', 'forget', 'generate_image'])
+const DRAWN = new Set(['start_task', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'group_relay', 'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'request_secret', 'request_connector', 'mail_send', 'ask_user_question', 'show_view', 'show_settings', 'propose_bot_change', 'browser_handoff', 'read_group_chat', 'remember', 'forget', 'generate_image'])
 // Calls whose card a dock above the composer carries when the call is not drawn.
 const CARDS = new Set(['ask_user', 'request_secret', 'request_connector', 'mail_send', 'show_view', 'browser_handoff', 'computer_handoff'])
 // An image an agent makes with its own tool draws as the image card (image-cell.js).
@@ -1191,7 +1193,15 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
     }
     case 'message_bot': {
       const target = findBot(arg('to')) ?? { name: arg('to') ?? '…', color: 'gray' }
-      if (done && call.isError) return h('div', { className: 'bt-event' }, t("Couldn't message {name}", { name: target.name }))
+      if (done) {
+        // The host marks a call that sent nothing with `sent: false` and its reason:
+        // show that reason, never "Messaged", so the user is not told a message left
+        // when it did not. A delivery keeps its string result and says "Messaged".
+        const refused = call.meta?.sent === false ? call.meta.reason ?? contentText(call.content) : ''
+        if (refused !== '') return h('div', { className: 'bt-event bt-event-error', role: 'status' }, refused)
+        // The refusal stands without a reason or content: never fall through to "Messaged".
+        if (call.isError || call.meta?.sent === false) return h('div', { className: 'bt-event' }, t("Couldn't message {name}", { name: target.name }))
+      }
       return h(EventLine, { prefix: t('Messaged'), bots: [target], onOpen: bot => bot.id && actions.openExchange(self?.id ?? sessionId, bot.id), whole: true })
     }
     case 'stop_bot': {
@@ -1252,6 +1262,10 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
     }
     case 'show_view':
       return h(WidgetCell, { sessionId, callId: call.callId, args: { text: arg, value: argValue }, done, isError: call.isError, roster, actions, heldCards })
+    case 'show_settings':
+      return h(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions })
+    case 'propose_bot_change':
+      return h(ProposalCall, { done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions })
     case 'generate_image':
       // The chat's own Bot paints (image-cell.js painterOf); a group chat has none, so the mark does.
       return h(ImageCell, { bot: self, callId: call.callId, prompt: arg('prompt'), size: arg('size'), done, content: done ? contentText(call.content) : '', isError: call.isError, onAsk: askHere })
@@ -1316,7 +1330,8 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
     return entry ? [[call.callId, stopLine(entry), entry.why]] : []
   }))) : '[]'
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]))
-  const drawn = calls.filter(call => DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
+  const readRefused = call => call.isError === true && call.error?.code === READ_SCOPE_CODE
+  const drawn = calls.filter(call => readRefused(call) || DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
   // The newest call still running names the work, so a program reads as the tool it is in.
   const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result')
   const note = running ? toolActivity(toolName(running), toolArgs(running).text, findBot, roster.byId[sessionId]) : null
@@ -1327,6 +1342,10 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } }
   return h(Fragment, null, drawn.map((call, index) => {
     const stop = stops.get(call.callId)
+    if (readRefused(call)) {
+      return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status' },
+        call.error.reason ?? contentText(call.content))
+    }
     // A call that draws nothing leaves the empty mark: one of this plugin's own, or a
     // card another plugin registered (extend.js) that returned nothing.
     return h(Fragment, { key: call.callId ?? index }, renderCall(call, env) ?? h(CellEmpty),

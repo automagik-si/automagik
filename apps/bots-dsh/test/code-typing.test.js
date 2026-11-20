@@ -2,6 +2,7 @@
 // pane, keystrokes never recorded, and no start, stop, resize or kill. Every core here is the
 // test's own fake (fixtures/fake-hc-core.mjs), never a live Herdr and never a real pane.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,7 +10,13 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { createTypingService, typingRoutes } from '../src/host/code-typing.js'
+import { verifiedWindow } from '../src/host/desktop-window.js'
 import { connectCore } from '../src/host/code-core.js'
+import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
+
+const WINDOW = 'ab'.repeat(32)
+const DIGEST = createHash('sha256').update(WINDOW, 'ascii').digest('hex')
+const WINDOW_HEADERS = { 'x-automagik-window': WINDOW }
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-hc-core.mjs', import.meta.url))
 const LEAD = 'b-aaaaaaaaaa'
@@ -34,6 +41,7 @@ function fixture(t) {
   writeFileSync(join(automagikHome, 'bots', 'bots.json'), JSON.stringify({
     version: 2,
     projects: [{ folder: project }],
+    shown: [{ project, bots: [LEAD, DEV] }],
     bots: [
       { id: LEAD, name: 'Atlas', main: true, folder: project },
       { id: DEV, name: 'Dev', folder: project },
@@ -49,8 +57,11 @@ function fixture(t) {
   writeFileSync(terminalsFile, JSON.stringify(TERMINALS))
   const log = join(root, 'core.log')
   const recordPath = join(root, 'typing.jsonl')
+  const probeEnv = coreProbeFixture(t, root)
   const env = {
     ...process.env,
+    ...probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: root,
     AUTOMAGIK_HOME: automagikHome,
     HERDR_APP_HOME: appHome,
@@ -59,7 +70,7 @@ function fixture(t) {
     FAKE_CORE_TERMINALS: terminalsFile,
     FAKE_CORE_KEEP_OPEN: '1',
   }
-  return { root, project, env, log, recordPath }
+  return { root, project, env, probeEnv, log, recordPath }
 }
 
 const readLog = (path) => {
@@ -167,13 +178,13 @@ test('owner only: the take route is an exact Fetch route DSH answers only for th
   const f = fixture(t)
   const typing = service(f)
   t.after(() => typing.dispose())
-  const routes = typingRoutes(typing)
+  const routes = typingRoutes(typing, req => verifiedWindow(req, f.env))
   assert.deepEqual(routes.map(([path]) => path), ['/api/omni-ui/code/take', '/api/omni-ui/code/input', '/api/omni-ui/code/release'])
   const take = routes[0][1]
   const connection = { fetchRoutes: new Map(), interceptors: new Map() }
   HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, { path: '/api/omni-ui/code/take', methods: ['POST'], requestBody: 'buffered', fetch: take })
   const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
-  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/take', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }) })
+  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/take', { method: 'POST', headers: { ...WINDOW_HEADERS, 'content-type': 'application/json' }, body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }) })
   const viewer = { principal: { kind: 'share-viewer', shareId: 'share', actor: { providerId: 'p', tenantId: 't', subjectId: 's' } } }
   const botSession = { principal: { kind: 'agent', sessionId: 'session-341a3de3-87c4-4dda-b228-67efca79821b' } }
   assert.equal((await handler.fetch(request(), viewer)).status, 403)
@@ -199,9 +210,12 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
   mkdirSync(team, { recursive: true })
   const saved = {}
   const env = {
+    ...f.probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: f.root,
     AUTOMAGIK_HOME: join(f.root, 'automagik'),
     AUTOMAGIK_BOTS_HOME: team,
+    AUTOMAGIK_APP_BROWSER: '1',
     HERDR_APP_HOME: join(f.root, 'herdr-app'),
     HERDR_HC: FAKE,
     FAKE_CORE_TERMINALS: join(f.root, 'terminals.json'),
@@ -209,7 +223,11 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
     FAKE_CORE_KEEP_OPEN: '1',
   }
   for (const [key, value] of Object.entries(env)) { saved[key] = process.env[key]; process.env[key] = value }
+  const send = process.send
+  process.send = () => true
   t.after(() => {
+    if (send === undefined) delete process.send
+    else process.send = send
     for (const key of Object.keys(saved)) {
       if (saved[key] === undefined) delete process.env[key]
       else process.env[key] = saved[key]
@@ -246,7 +264,7 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
   assert.ok(takeRoute, 'the take route is registered in the real plugin scope')
   const response = await takeRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/take', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { ...WINDOW_HEADERS, 'content-type': 'application/json' },
     body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }),
   }))
   assert.equal(response.status, 200)
@@ -255,7 +273,7 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
   const closed = await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2))
   // A scope that does not stop its typing attach would leave an open core; let it go before
   // failing with the reason.
-  if (!closed && releaseRoute) await releaseRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/release', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session: taken.session }) })).catch(() => {})
+  if (!closed && releaseRoute) await releaseRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/release', { method: 'POST', headers: { ...WINDOW_HEADERS, 'content-type': 'application/json' }, body: JSON.stringify({ session: taken.session }) })).catch(() => {})
   assert.ok(closed, 'stopping the real plugin scope sends CLOSE for the typing attach')
   await new Promise(resolve => setTimeout(resolve, 100))
 })

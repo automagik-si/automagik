@@ -117,6 +117,7 @@ test('push filters and literal publish/record/lane dependency contracts remain u
       - apps/desktop/runtime/patches/**
       - apps/desktop/scripts/prune-runtime.mjs
       - apps/desktop/scripts/runtime-patches.mjs
+      - apps/desktop/src/profile-patch.mjs
       - herdr/scripts/privacy-check.mjs
       - herdr/scripts/privacy-list.json
       - .github/workflows/server-image.yml

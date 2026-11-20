@@ -14,6 +14,8 @@ import { isBotId } from '../shared/registry.js'
 import { connectCore } from './code-core.js'
 import { readCodeTree, resolvePane } from './code-tree.js'
 import { createTypingService, typingRecordPath, typingRoutes } from './code-typing.js'
+import { appBrowserBridge } from './constants.js'
+import { verifiedWindow } from './desktop-window.js'
 
 /** The one terminal stream: exact GET under the shared API channel, so only the owner Peer reaches it. */
 export const CODE_STREAM_ROUTE = '/api/omni-ui/code/stream'
@@ -178,15 +180,18 @@ export function openPaneStream({ url, signal, env = process.env, warn = () => {}
 /**
  * Install the Code side on a running team: the tree endpoint and the pane stream route.
  * @param {any} rt the team runtime
- * @param {{ env?: NodeJS.ProcessEnv, connect?: typeof connectCore, readFile?: typeof readFileSync }} [options]
+ * @param {{ env?: NodeJS.ProcessEnv, connect?: typeof connectCore, readFile?: typeof readFileSync, desktop?: boolean }} [options]
  */
-export function install(rt, { env = process.env, connect = connectCore, readFile } = {}) {
+export function install(rt, { env = process.env, connect = connectCore, readFile, desktop = appBrowserBridge() } = {}) {
   const warn = (...args) => rt.warn?.(`omni-ui: ${args.map(value => (typeof value === 'string' ? value : String(value))).join(' ')}`)
-  rt.hooks.endpoint(CODE_TREE_ENDPOINT, async () => {
+  const offTree = rt.hooks.endpoint(CODE_TREE_ENDPOINT, async (_body, _signal, desktopWindow = false) => {
+    // RFC 0030 delivery 1 keeps standalone hosts from serving terminals (lines 129–130, 439–440).
+    if (!desktop || desktopWindow !== true) return { v: 1, machine: null, projects: [], reason: 'desktop-only' }
     const answer = await readCodeTree({ env, warn, connect, readFile })
     if (answer.tree) return answer.tree
     return { v: 1, machine: null, projects: [], reason: answer.reason ?? 'unavailable' }
   }, { read: true })
+  if (!desktop) return offTree
   const streams = new Set()
   const live = new Set()
   const closeAll = () => {
@@ -198,27 +203,29 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
   // A host without a browser carrier (a test's bare context, a headless run) has no route
   // registry: the tree still answers, and the pane simply has nowhere to stream to.
   const fetchRoutes = rt.ctx?.connection?.fetch
-  if (typeof fetchRoutes?.register !== 'function') return () => {}
+  if (typeof fetchRoutes?.register !== 'function') return offTree
   // Typing: its own exact routes, owner-only and re-admitted per batch (code-typing.js).
   const typing = createTypingService({
     env, connect, readFile, warn,
     recordPath: typingRecordPath(rt.home ?? process.cwd()),
     admit: request => rt.ctx.connection.admit(request),
   })
-  rt.ctx.effect(() => () => { void typing.dispose() }, 'omni-ui: code typing releases')
-  for (const [path, handler] of typingRoutes(typing)) {
-    rt.ctx.effect(() => fetchRoutes.register({
+  const offEffects = [rt.ctx.effect(() => () => { void typing.dispose() }, 'omni-ui: code typing releases')]
+  for (const [path, handler] of typingRoutes(typing, request => verifiedWindow(request, env))) {
+    const off = rt.ctx.effect(() => fetchRoutes.register({
       path,
       methods: ['POST'],
       requestBody: 'buffered',
       fetch: request => handler(request),
     }), `omni-ui: code typing ${path}`)
+    offEffects.push(off)
   }
-  rt.ctx.effect(() => fetchRoutes.register({
+  const offStream = rt.ctx.effect(() => fetchRoutes.register({
     path: CODE_STREAM_ROUTE,
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: async (request) => {
+      if (!verifiedWindow(request, env)) return jsonError(403, 'desktop-only')
       const refusal = streamAdmission(request)
       if (refusal) return jsonError(refusal.status, refusal.error)
       const target = streamTarget(request.url)
@@ -257,6 +264,7 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
       }
     },
   }), 'omni-ui: code pane stream')
+  offEffects.push(offStream)
   // The only scope ends of a browser stream are the plugin and its Connection: close every
   // stream (and typing attach) when either goes. A stopped Connection has no `fetch` service
   // to hear from, so this watches for it while a stream is live.
@@ -265,5 +273,10 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
     if (typeof rt.ctx.get === 'function' && rt.ctx.get('connection') === undefined) closeAll()
   }, 250)
   scopeWatch.unref?.()
-  return () => { clearInterval(scopeWatch); closeAll() }
+  return () => {
+    offTree()
+    for (const off of offEffects.splice(0).reverse()) off?.()
+    clearInterval(scopeWatch)
+    closeAll()
+  }
 }

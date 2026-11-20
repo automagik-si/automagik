@@ -121,6 +121,7 @@ export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, ent
     let settled = false
     let child
     let folder
+    let timer
     // The folder goes when the child is gone: only then is nothing writing into it.
     const clear = () => {
       try { if (folder !== undefined) rmSync(folder, { recursive: true, force: true }) } catch {}
@@ -136,7 +137,15 @@ export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, ent
     }
     // The kill stops a script that never yields, which a Promise.race cannot.
     const expire = () => end(reject, new Error(`Script ran longer than ${timeout / 1000} seconds.`))
-    let timer = setTimeout(expire, 2 * timeout)
+    // Node timers have millisecond resolution and can fire just short of a performance.now() deadline.
+    const expireAt = (deadline) => {
+      const delay = Math.min(2_147_483_647, Math.max(1, Math.ceil(deadline - performance.now())))
+      timer = setTimeout(() => {
+        if (performance.now() < deadline) expireAt(deadline)
+        else expire()
+      }, delay)
+    }
+    expireAt(startDeadline)
     const enterRun = () => {
       const now = performance.now()
       if (now >= startDeadline) {
@@ -146,7 +155,7 @@ export function runIsolatedScript(body, helpers, { timeout = SCRIPT_TIMEOUT, ent
       phase = 'run'
       clearTimeout(timer)
       runDeadline = now + timeout
-      timer = setTimeout(expire, timeout)
+      expireAt(runDeadline)
       return true
     }
     try {

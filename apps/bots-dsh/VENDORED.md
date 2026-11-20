@@ -78,3 +78,13 @@ The desktop app counts as "the app" for updates and the Bot browser through `OMN
 This merge incorporates upstream commit `a66cc737cfb6c3d8a2597e748cded6cab1206dd3`.
 Automagik names, routes, storage prefixes, service defaults and the `omni-ui:` namespace remain
 as documented above; generated client and Office bundles are rebuilt by the lead after assembly.
+
+Renamed after v0.3.6, the `ds-bot-office` and `ds-bot-goal` providers are now
+`automagik-bots-office` and `automagik-bots-goal`. Office checks `AUTOMAGIK_BOTS_OFFICE_NODE`
+first and falls back to `DS_BOT_OFFICE_NODE` if the new variable is unset, empty or points to a missing path.
+
+The GitHub connector's User-Agent is now `automagik-bots` (was `ds-bot`). The subagent-asks prompt context id
+is now `automagik-bots:subagent-asks` (was `ds-bot:subagent-asks`). Older Sessions keep the old id in their
+stored runtime-context snapshots, and the chat's context view shows it as stored. Session restoration does
+not look up providers by the stored id. When a child still qualifies for this context and its other sections
+are unchanged, DSH sends one fresh snapshot under the new id on the child's next step.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync, readFileSync, renameSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync, readFileSync, renameSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -12,7 +12,7 @@ const CANCELLED = { outcome: { outcome: 'cancelled' } }
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const yes = id => ({ answers: [{ id, selected: [FILE_ALLOW] }] })
 function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), 'session-files-'))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'session-files-')))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   for (const dir of ['ws', 'outside', 'codex', 'bin']) mkdirSync(join(root, dir))
   const file = join(root, 'outside', 'approved.png')

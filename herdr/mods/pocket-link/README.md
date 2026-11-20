@@ -70,6 +70,9 @@ updates Pocket Link by itself, so updating it as above is what turns the chat on
     `automagik-pocket-link-<hash>/`, so a test window never sees your phones.
     `POCKET_LINK_STATE_DIR` sets the folder outright; the login service is given it.
   - Deleting this folder unpairs every phone.
+  - **Reset key…** in Pocket Link changes this computer's key, unpairs every phone and
+    ends any pairing code. Each phone shows the old desktop as unreachable or not paired.
+    Pair again with a new code, then remove the old desktop card on the phone.
   - **One writer for the paired phones.** Only the running bridge writes `devices.json`. Remove
     (`bridge.mjs forget <id>`) hands the phone to it over `bridge.sock`, a socket in this folder,
     and waits for its answer, so a removed phone can't be written back by a session updating its
@@ -106,7 +109,7 @@ updates Pocket Link by itself, so updating it as above is what turns the chat on
 
 A paired phone can use every herdr-core session on this computer, just like a terminal running `hc`.
 Pair only your own phones. Remove one in the dialog and its new connections are refused; the
-bridge checks its list every 2 seconds and then closes that phone's open sessions. Agents it
+bridge checks its list every second and then closes that phone's open sessions. Agents it
 started keep running on the computer.
 
 ## The chat route
@@ -126,8 +129,16 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   `chat.sendHeld` and `chat.cancelHeld {terminal, id}`; `chat.answer {terminal, row, choice,
   text?}` (an approval's `allow`/`deny`; a question's option digit, digits joined by `,` on a
   multi-select, or `other` with `text`; `chat/question.js`);
-  `chat.interrupt {terminal}`. Every write needs a subscription to that terminal on the same
-  connection.
+  `chat.interrupt {terminal}`. Every chat write needs a subscription to that terminal on the
+  same connection. The memory methods are `memory.read {terminal}`, `memory.edit
+  {terminal, id, rev, text}` and `memory.add {terminal, text}`. They can run with the Bot's
+  chat closed. The 16-request limit applies first, with a JSON-RPC `busy` error. Memory
+  refusals then come in the result as `{ok:false, state:'refused', reason}`: `read-only`
+  for missing authority, then `invalid` for bad fields, `busy` for another memory call
+  for this phone and Bot, and `rate` after 60 reads or 20 writes per minute per phone.
+  Memory edits and adds share the Bot chat write budget. A lost read reply is `offline`;
+  a lost edit or add reply is `unknown` with reason `offline` once sent. A phone that
+  asks for edit or add should also ask for read to reconcile an unknown outcome.
 - **Events** (JSON lines on the subscription's channel, sent while the phone has credit; it
   grants more with CREDIT): first a `snapshot` (rows, screen, status, approval, question, held;
   `reset` when the cursor in `after` is no longer held), then `rows`, `screen`, `status`, `approval`,
@@ -145,7 +156,7 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   hc's (letters, digits, `_`, `.`, `-`), never only dots.
 - **Automagik Bots' chats (#517).** Beside the terminals, `chat.list` also lists the Automagik
   Bots' own chats, as `dsh:<botId>` with `chat: "session"`, read from the Bot plugin's
-  read-only socket in the team's home, `<team home>/pocket/chat.sock`. The bridge tries these
+  socket in the team's home, `<team home>/pocket/chat.sock`. The bridge tries these
   team homes in order and uses the first whose socket passes the check below (a folder that
   exists is not enough): `$AUTOMAGIK_BOTS_HOME` when the bridge's own environment sets it, then
   the desktop app's team `~/.automagik/desktop/bots` (the app sets `AUTOMAGIK_BOTS_HOME` there
@@ -156,12 +167,18 @@ otherwise, and a removed phone's chats end within 2 seconds. Its header line is 
   group or other access), every folder above them belongs to this account or root and nobody
   else can write it (a sticky folder like `/tmp` is fine; on Linux a folder writable by your own
   primary group is fine too, as umask 002 makes it, so a shared primary group there is trusted;
-  on macOS, where that group is the shared `staff`, it is not), and the socket says it is
-  read-only; otherwise nothing is listed and the bridge log says so once. These chats only read:
-  their rows come from the Bot's DSH Session log (a cursor is `dsh:<session>:<seq>`), and
-  `chat.send`, `chat.sendHeld`, `chat.cancelHeld`, `chat.answer` and
-  `chat.interrupt` on them are `refused` (`read-only`). An approval or a question shows as a row
-  without buttons that says "Answer on the computer". Terminal chats are unchanged.
+  on macOS, where that group is the shared `staff`, it is not). The socket must answer
+  read-only or advertise chat writes with `write: 1` for its chats to be listed. Rows come
+  from the Bot's DSH Session log (a cursor is `dsh:<session>:<seq>`). A writable socket
+  can take `chat.send`, `chat.answer` and `chat.interrupt` on a subscribed chat. A read-only
+  socket refuses these writes. Its approval and question rows say "Answer on the computer".
+  For memory, the phone includes the methods it wants in `manage` in its chat hello. The bridge
+  returns the methods both peers support after it opens a grant for that connection. A bridge
+  failover to another team home requires a fresh phone hello. Memory replies are sent only
+  while the connection is live. Forget closes each grant. The control socket starts that close
+  at once, and file-based forget is checked every second. The bridge drops the DSH socket if a
+  grant close has no ack within 500 ms. Revocation ends host authority within 2 seconds
+  while the bridge's timers run on schedule.
 
 ## For other mods
 

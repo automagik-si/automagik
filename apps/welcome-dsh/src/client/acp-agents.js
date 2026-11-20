@@ -14,7 +14,7 @@ import { raised } from './clay.js'
 // A signed-out CLI is signed in from a Bot's chat (the Bot team's sign-in row, plan v3 2.3): the
 // row's Sign in button opens that chat, in the selected Bot or else the Main Bot, through the Bot
 // team's bridge. Opening it starts no sign-in, picks no model and sends nothing; the page never
-// sees a link, a code or a credential. The terminal command stays as the other way (D7).
+// sees a link, a code or a credential. The terminal command signs in to a shared CLI home.
 
 export const CLI_OF = { 'acp-claude': 'claude', 'acp-codex': 'codex', 'acp-hermes': 'hermes', 'acp-antigravity': 'agy', 'acp-omp': 'omp' }
 export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'HM', 'acp-antigravity': 'AG', 'acp-omp': 'OM' }
@@ -23,6 +23,7 @@ export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'H
 // command that signs in (`cli.signInHint`). They are off until the person turns one on, which
 // is their word that the app may use the sign-in that CLI already has on this computer.
 export const isNative = agent => agent?.connector?.native === true
+const isolatedSignIn = agent => agent.authScope === 'isolated' && !isNative(agent)
 const signInCommand = agent => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key
 // How the person signs in to the CLI in a terminal, the other way to the chat's row.
 export const SIGN_IN_OF = { 'acp-claude': 'claude auth login', 'acp-codex': 'codex login' }
@@ -34,6 +35,7 @@ export function openChatLogin(provider, scope = globalThis) {
   try { return scope[CHAT_LOGIN]?.open?.(provider) === true } catch { return false }
 }
 export const POLL_MS = 2000
+const UNREACHABLE_POLL_MS = 15_000
 export const SETTINGS_SECTION = 'acp-agents'
 const cliBusy = agent => agent.cli.state === 'installing' || agent.cli.updating === true
 
@@ -108,24 +110,33 @@ export function agentLines(agent) {
   if (agent.signedIn === true && agent.consent === 'needed' && !cliBusy(agent)) lines.push({ tone: 'bad', text: t('{name} is signed in on this computer. Confirm its account in a Bot\'s chat before Bots use it.', { name }), action: 'login', label: t('Confirm account') })
   // A native agent signs in only in a terminal, with its own command.
   if (agent.signedIn === false && isNative(agent)) lines.push({ tone: 'bad', text: t('Not signed in to {name}. Run {command} in a terminal, then check again.', { name, command: signInCommand(agent) }), action: 'check' })
-  // Signed out (and only then): the chat's sign-in row, or the terminal command (D7).
+  // A terminal sign-in cannot reach the isolated home used by the app.
   if (agent.signedIn === false && !isNative(agent) && !cliBusy(agent)) {
     lines.push({ tone: 'bad', text: t('Not signed in to {name}. Sign in from a Bot\'s chat.', { name }), action: 'login' })
-    lines.push({ tone: 'muted', text: t('Or run {command} in a terminal, then check again.', { command: SIGN_IN_OF[agent.id] ?? cli }), action: 'check' })
+    if (!isolatedSignIn(agent)) lines.push({ tone: 'muted', text: t('Or run {command} in a terminal, then check again.', { command: SIGN_IN_OF[agent.id] ?? cli }), action: 'check' })
   }
   // A native agent that is off is never started, so there is no sign-in to check yet.
-  if (agent.signedIn === undefined && !cliBusy(agent) && (agent.on || !isNative(agent))) lines.push({ tone: 'muted', text: t('The sign-in to {name} has not been checked yet.', { name }), action: 'check' })
+  if (agent.signedIn === undefined && !cliBusy(agent) && (agent.on || !isNative(agent))) {
+    const text = agent.signInCheck === 'timeout'
+      ? t('Could not check the sign-in to {name}: {cli} took too long to answer.', { name, cli })
+      : agent.signInCheck === 'unreadable'
+        ? t('Could not tell whether you are signed in to {name}.', { name })
+        : t('The sign-in to {name} has not been checked yet.', { name })
+    lines.push({ tone: 'muted', text, action: 'check' })
+  }
   if (!agent.on) {
     lines.push({ tone: 'muted', text: t('Off. Turn it on to use {name} as a model in DSH.', { name }) })
     if (isNative(agent)) lines.push({ tone: 'muted', text: t('Turning it on lets Automagik use the sign-in {name} already has on this computer.', { name }) })
     return lines
   }
-  const { state, version, error, diagnostic, logPath } = agent.connector
+  const { state, version, error, diagnostic, logPath, unreachable } = agent.connector
   if (state === 'installing') lines.push({ tone: 'wait', text: t('Installing its connector in the background. This takes a minute or two.') })
   if (state === 'failed') {
     lines.push({
       tone: 'bad',
-      text: error ? t('The connector did not install: {error}', { error: redactText(error) }) : t('The connector did not install.'),
+      text: unreachable === true
+        ? t('Could not reach the connector registry. Automagik tries again by itself, or press Retry.')
+        : error ? t('The connector did not install: {error}', { error: redactText(error) }) : t('The connector did not install.'),
       action: 'retry',
       // What DSH 0.2.2 shows for a failed plugin install: the full diagnostic and its log file.
       // The panel and its expander read this one value, so the shared table runs here too: a
@@ -147,9 +158,9 @@ export function agentLines(agent) {
 }
 
 // The agents' state from the host, refreshed (CLI search, sign-in) when the page opens and
-// polled while a CLI or a connector installs or a switch has not settled yet. `onLoginOpen`
-// runs once a Bot's chat took a sign-in, so the page around it can step aside; `open` is the
-// bridge (a test hands its own).
+// polled while a CLI or a connector installs, a switch is settling, or the connector registry
+// is unreachable. `onLoginOpen` runs once a Bot's chat took a sign-in, so the page around it
+// can step aside; `open` is the bridge (a test hands its own).
 export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {}) {
   const [view, setView] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -174,11 +185,13 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
   useEffect(() => { void load(true) }, [load])
 
   const settling = view?.agents?.some(agent => cliBusy(agent) || (agent.on && agent.cli.found && agent.connector.state === 'installing') || (wanted[agent.id] !== undefined && wanted[agent.id] !== agent.on)) === true
+  const unreachable = view?.agents?.some(agent => agent.on && agent.cli.found && agent.connector.state === 'failed' && agent.connector.unreachable === true) === true
+  const pollMs = settling ? POLL_MS : unreachable ? UNREACHABLE_POLL_MS : undefined
   useEffect(() => {
-    if (!settling) return undefined
-    const timer = setInterval(() => { void load(false) }, POLL_MS)
+    if (pollMs === undefined) return undefined
+    const timer = setInterval(() => { void load(false) }, pollMs)
     return () => clearInterval(timer)
-  }, [settling, load])
+  }, [pollMs, load])
 
   const say = (id, message) => setProblems(previous => ({ ...previous, [id]: message }))
   // Whether the host took it; a refusal leaves its words on the row.
@@ -213,12 +226,13 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
-    // Opens the sign-in row in a Bot's chat; nothing is asked of the host here. Without the Bot
-    // team (or a Bot), the row says to use the terminal.
+    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat.
     login: (agent) => {
       say(agent.id, null)
       if (!open(agent.id)) {
-        say(agent.id, t('No Bot chat to sign in from here. Run {command} in a terminal instead.', { command: signInCommand(agent) }))
+        say(agent.id, isolatedSignIn(agent)
+          ? t('Sign-in needs a Bot chat. If you have no Bot yet, set one up first.')
+          : t('No Bot chat to sign in from here. Run {command} in a terminal instead.', { command: signInCommand(agent) }))
         return false
       }
       onLoginOpen?.(agent)

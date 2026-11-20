@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import { refusal } from './refusal.js'
-import { chmodSync, copyFileSync, readFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -52,6 +52,14 @@ const forNoBot = secret => Array.isArray(secret?.scope) && secret.scope.length =
 // write path, which stores the trimmed value.
 const held = secret => secret !== undefined && typeof secret.value === 'string' && secret.value.trim().length < MIN_VALUE
 const heldReason = name => `Secret ${name} is held: its saved value is shorter than ${MIN_VALUE} characters, so it is never used. Save a new value with at least ${MIN_VALUE} characters.`
+const brokenSources = 'The vault mapping file could not be read; no secret can be used until it is fixed.'
+const dualSource = name => `${name} is defined both in secrets.json and in vault-sources.json, so it cannot be used. The user must delete one of them in Settings › Secrets.`
+const mappedWrite = name => `The name ${name} is mapped to a vault item. A typed value cannot share it; delete the mapping first or use another name.`
+const secondConnection = 'The first cut supports one Bitwarden connection.'
+const validReference = value => typeof value === 'string' && value.length > 0 && value.length <= 512
+const validScope = scope => scope === 'all' || (Array.isArray(scope) && scope.every(id => typeof id === 'string'))
+const plainObject = value => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+const purposeOf = purpose => typeof purpose === 'string' ? purpose.trim().slice(0, 300) : ''
 
 export function normalizeName(raw) {
   return String(raw ?? '').trim().replace(/^\$(env:)?/i, '').replace(/^DSH_SECRET_/i, '').replace(/[\s-]+/g, '_').toUpperCase()
@@ -607,20 +615,37 @@ export function freezeLoopRequest(request) {
 export function install(rt) {
   const { ctx, home, state } = rt
   const path = join(home, 'secrets.json')
+  const sourcesPath = join(home, 'vault-sources.json')
 
   // `session` is kept beside an empty Bot list, never in `scope`: a version without it reads
   // an unknown scope as every Bot, but reads this entry as no Bot's.
   /** @type {Map<string, {name:string, value:string, purpose:string, scope:'all'|string[], session?:string, requestedBy:string|null, createdAt:number, updatedAt:number, lastUsedAt?:number}>} */
-  const secrets = new Map()
+  let secrets = new Map()
+  let sources = new Map()
+  let sourcesBroken = false
+  let sourcesPresent = false
+  let sourcesSnapshot
+  let typedStamp
+  // A value from a dual name may already have reached a consumer. Keep masking it
+  // for this process even after either stored definition is removed.
+  const dualValues = new Map()
   let loaded = null
   let writing = Promise.resolve()
+  let mutations
   let redact = text => text
   let redactAnywhere = text => text
   let refreshEnv = () => {}
   let stopped = false
 
   const changed = () => {
+    for (const name of sources.keys()) {
+      const entry = secrets.get(name)
+      if (entry !== undefined && !dualValues.has(entry.value)) dualValues.set(entry.value, name)
+    }
     const entries = [...secrets.values()]
+    for (const [value, name] of dualValues) {
+      if (secrets.get(name)?.value !== value) entries.push({ name, value })
+    }
     redact = redactor(entries)
     redactAnywhere = redactor(entries, { wholeWords: false })
     refreshEnv()
@@ -629,6 +654,25 @@ export function install(rt) {
 
   // Error messages from JSON.parse quote the file, so only the code or name is logged.
   const reason = error => error?.code ?? error?.name ?? 'error'
+  const unavailable = name => sourcesBroken || sources.has(name)
+  const sourceReason = (name) => {
+    if (sourcesBroken) return brokenSources
+    if (!sources.has(name)) return undefined
+    if (secrets.has(name)) return dualSource(name)
+    return sourcesPresent
+      ? `${name} comes from a vault, and this version of the Bot team cannot use vault secrets yet.`
+      : `${name} is unavailable because the vault plugin is off.`
+  }
+  const secretHeldReason = name => sourceReason(name) ?? (held(secrets.get(name)) ? heldReason(name) : undefined)
+  const refuseTypedWrite = (name) => {
+    if (unavailable(name)) throw refusal(sourcesBroken ? brokenSources : mappedWrite(name))
+  }
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['secretSources'], sub => {
+      sourcesPresent = true
+      sub.effect(() => () => { sourcesPresent = false })
+    })
+  } else sourcesPresent = ctx.get?.('secretSources') !== undefined
 
   // While another dsh holds the team, that host writes secrets.json, so a reading host
   // reads it again each time; a copy read then is also read again after taking over,
@@ -641,28 +685,79 @@ export function install(rt) {
   // A reading host reloads on every request, so a held value is reported once per change,
   // not once per read.
   let heldWarned = ''
-  const loadSecrets = () => {
-    if (loaded !== null && (loadedReadOnly || rt.readOnly() !== undefined || blocked !== undefined)) loaded = null
-    return loaded ??= readSecrets()
+  const blockedWrite = code => refusal(`The secrets file could not be read (${code}). Omni does not change it; fix or move it and reload.`)
+
+  function readSourceFile() {
+    let entry
+    try { entry = lstatSync(sourcesPath) } catch (error) {
+      return error?.code === 'ENOENT' ? {} : { error: reason(error) }
+    }
+    try {
+      if (!(entry.isSymbolicLink() ? statSync(sourcesPath) : entry).isFile()) return { error: 'NOT_FILE' }
+      return { bytes: readFileSync(sourcesPath) }
+    } catch (error) {
+      return { error: reason(error) }
+    }
   }
-  // Synchronous on purpose: a shell resolves its environment without an await, so the
-  // map must be full before the first resolve after a start reads it.
-  const readSecrets = async () => {
-    loadedReadOnly = rt.readOnly() !== undefined
+
+  const sameSourceFile = (a, b) => a !== undefined && a.error === b.error
+    && (a.bytes === undefined ? b.bytes === undefined : b.bytes !== undefined && a.bytes.equals(b.bytes))
+
+  function parseSources(file) {
+    if (file.error !== undefined) return { error: file.error }
+    if (file.bytes === undefined) return { rows: new Map() }
+    let parsed
+    try { parsed = JSON.parse(file.bytes.toString('utf8')) } catch { return { error: 'INVALID_JSON' } }
+    if (parsed?.version !== 1 || !plainObject(parsed.sources)) return { error: 'INVALID_FORMAT' }
+    const rows = new Map()
+    let connection
+    for (const [name, row] of Object.entries(parsed.sources)) {
+      if (!SECRET_NAME.test(name) || !plainObject(row) || row.provider !== 'bitwarden'
+        || !validReference(row.connection) || !validReference(row.item) || !validReference(row.field)
+        || !validScope(row.scope) || Object.hasOwn(row, 'value')) return { error: 'INVALID_ROW' }
+      if (connection !== undefined && connection !== row.connection) return { error: 'MULTIPLE_CONNECTIONS' }
+      connection = row.connection
+      rows.set(name, {
+        provider: row.provider,
+        connection,
+        item: row.item,
+        field: row.field,
+        scope: row.scope,
+        purpose: purposeOf(row.purpose),
+        requestedBy: typeof row.requestedBy === 'string' ? row.requestedBy : null,
+        createdAt: Number.isFinite(row.createdAt) ? row.createdAt : 0,
+        updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : 0,
+      })
+    }
+    return { rows }
+  }
+
+  // With mappings, an edited typed file can introduce a collision even when the
+  // mapping bytes and the team's revision stay the same.
+  function typedFileStamp() {
+    try {
+      const { dev, ino, size, mtimeNs } = statSync(path, { bigint: true })
+      return `${dev}:${ino}:${size}:${mtimeNs}`
+    } catch (error) { return reason(error) }
+  }
+
+  const loadSecrets = () => {
+    const first = readSourceFile()
+    if (loaded === null || loadedReadOnly || rt.readOnly() !== undefined || blocked !== undefined
+      || sourcesBroken || !sameSourceFile(sourcesSnapshot, first)
+      || (sources.size > 0 && typedStamp !== typedFileStamp())) loaded = readSecrets(first)
+    return loaded
+  }
+
+  function readTypedFile() {
     let contents
     try {
       contents = readFileSync(path, 'utf8')
     } catch (error) {
-      if (error?.code === 'ENOENT') {
-        blocked = undefined
-        secrets.clear()
-        heldWarned = ''
-      } else {
-        blocked = reason(error)
-        rt.warn('ds-bot: unreadable secrets file %s (%s)', path, blocked)
-      }
-      changed()
-      return
+      if (error?.code === 'ENOENT') return { entries: [] }
+      const code = reason(error)
+      rt.warn('ds-bot: unreadable secrets file %s (%s)', path, code)
+      return { error: code }
     }
     let parsed
     try {
@@ -676,26 +771,25 @@ export function install(rt) {
       const backup = `${path}.broken-${Date.now()}`
       try {
         copyFileSync(path, backup)
-        blocked = undefined
-        secrets.clear()
-        heldWarned = ''
         rt.warn('ds-bot: unreadable secrets file %s; backed up as %s', path, backup)
+        return { entries: [] }
       } catch (error) {
-        blocked = reason(error)
         rt.warn('ds-bot: unreadable secrets file %s; backup failed: %s', path, error)
+        return { error: reason(error) }
       }
-      changed()
-      return
     }
-    blocked = undefined
-    secrets.clear()
+    return { entries: parsed.secrets, valid: true }
+  }
+
+  function collectTyped(entries) {
+    const rows = new Map()
     const heldNames = []
-    for (const entry of parsed.secrets) {
+    for (const entry of entries) {
       if (!SECRET_NAME.test(entry?.name ?? '') || typeof entry.value !== 'string') continue
       // Named, not silently dropped: the entry stays in the map (and the file) but is used
       // nowhere until a value of at least MIN_VALUE characters is saved.
       if (held(entry)) heldNames.push(entry.name)
-      secrets.set(entry.name, {
+      rows.set(entry.name, {
         name: entry.name,
         value: entry.value,
         purpose: typeof entry.purpose === 'string' ? entry.purpose : '',
@@ -707,28 +801,60 @@ export function install(rt) {
         ...(Number.isFinite(entry.lastUsedAt) ? { lastUsedAt: entry.lastUsedAt } : {}),
       })
     }
-    if (!loadedReadOnly) try { chmodSync(path, 0o600) } catch {}
+    return { rows, heldNames }
+  }
+
+  // A shell resolves synchronously. Read around the typed file and retry once if
+  // another host changes the mapping, before publishing either store.
+  const readSecrets = async (first) => {
+    const readOnly = rt.readOnly() !== undefined
+    let stamp = typedFileStamp()
+    let typed = readTypedFile()
+    let last = readSourceFile()
+    if (!sameSourceFile(first, last)) {
+      first = readSourceFile()
+      stamp = typedFileStamp()
+      typed = readTypedFile()
+      last = readSourceFile()
+    }
+    const mapping = sameSourceFile(first, last) ? parseSources(last) : { error: 'CHANGED_DURING_READ' }
+    const next = typed.error === undefined ? collectTyped(typed.entries) : undefined
+    if (mapping.error !== undefined && (sourcesBroken !== mapping.error || !sameSourceFile(sourcesSnapshot, last))) {
+      rt.warn('ds-bot: unreadable vault mapping file (%s)', mapping.error)
+    }
+    if (typed.valid && !readOnly) try { chmodSync(path, 0o600) } catch {}
+    loadedReadOnly = readOnly
+    typedStamp = stamp
+    blocked = typed.error
+    sourcesSnapshot = last
+    sourcesBroken = mapping.error ?? false
+    sources = mapping.rows ?? new Map()
+    if (next !== undefined) {
+      secrets = next.rows
+      reportHeld(next.heldNames)
+    }
+    changed()
+  }
+
+  function reportHeld(heldNames) {
     const heldNotice = heldNames.join(',')
     if (heldNotice !== heldWarned) {
       heldWarned = heldNotice
       for (const name of heldNames) rt.warn('ds-bot: secret %s in %s is held: its saved value is shorter than the %d-character minimum; nothing uses it until a longer value is saved', name, path, MIN_VALUE)
     }
-    changed()
   }
 
-  // Resolves once secrets.json holds the current map; rejects when the write failed.
-  const persist = () => {
-    if (blocked !== undefined) return Promise.reject(refusal(`The secrets file could not be read (${blocked}). Omni does not change it; fix or move it and reload.`))
+  function writeStore(file, snapshot, onWritten) {
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) return Promise.reject(refusal(readOnly))
-    const snapshot = JSON.stringify({ version: 1, secrets: [...secrets.values()] }, null, 2)
     const job = writing.then(async () => {
       await mkdir(home, { recursive: true })
-      const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
+      const temp = `${file}.${process.pid}.${randomUUID()}.tmp`
       try {
         await writeFile(temp, snapshot, { encoding: 'utf8', mode: 0o600 })
         await chmod(temp, 0o600)
-        await replaceFile(temp, path)
+        await replaceFile(temp, file)
+        onWritten()
       } catch (error) {
         await unlink(temp).catch(() => {})
         throw error
@@ -736,6 +862,13 @@ export function install(rt) {
     })
     writing = job.catch(error => rt.warn('ds-bot: secrets write failed (%s)', reason(error)))
     return job
+  }
+  // Resolves once secrets.json holds the current map; rejects when the write failed.
+  const persist = () => blocked !== undefined ? Promise.reject(blockedWrite(blocked))
+    : writeStore(path, JSON.stringify({ version: 1, secrets: [...secrets.values()] }, null, 2), () => { typedStamp = typedFileStamp() })
+  const persistSources = rows => {
+    const bytes = Buffer.from(JSON.stringify({ version: 1, sources: Object.fromEntries(rows) }, null, 2))
+    return writeStore(sourcesPath, bytes, () => { sourcesSnapshot = { bytes } })
   }
 
   let usedTimer = null
@@ -798,7 +931,7 @@ export function install(rt) {
   // After any change to `name`, every pending card for it either resolves (its Bot can
   // use the key now) or shows the form that still applies.
   function reconcile(name, notes, except) {
-    const secret = secrets.get(name)
+    const secret = unavailable(name) ? undefined : secrets.get(name)
     for (const [botId, list] of Object.entries(state.secretRequests ?? {})) {
       for (const request of list) {
         if (request.status !== 'pending' || request.name !== name || request === except) continue
@@ -850,15 +983,34 @@ export function install(rt) {
     ...(held(secret) ? { held: true } : {}),
   })
   const secretsView = () => [...secrets.values()].sort((a, b) => a.name.localeCompare(b.name)).map(secretView)
+  const sourceView = (name, row) => ({
+    name, purpose: row.purpose, scope: row.scope, requestedBy: row.requestedBy,
+    createdAt: row.createdAt, updatedAt: row.updatedAt, definedTwice: secrets.has(name),
+  })
+  const secretSourcesView = () => ({
+    broken: Boolean(sourcesBroken),
+    rows: [...sources.keys()].sort().map(name => sourceView(name, sources.get(name))),
+  })
+  const exactName = (name) => {
+    if (typeof name !== 'string' || !SECRET_NAME.test(name)) throw refusal('A name uses capitals, digits, and underscores, and starts with a letter')
+    return name
+  }
+  const checkSourceWrite = () => {
+    const readOnly = rt.readOnly()
+    if (readOnly !== undefined) throw refusal(readOnly)
+    if (sourcesBroken) throw refusal(brokenSources)
+  }
 
   const endpoints = {
     // From a card (requestId) or from the settings page (name).
     async 'secret-set'(body) {
-      const value = cleanValue(body.value)
       const now = Date.now()
       const notes = []
+      if (sourcesBroken) throw refusal(brokenSources)
       if (body.requestId !== undefined) {
         const { botId, request } = pendingRequest(body.requestId)
+        refuseTypedWrite(request.name)
+        const value = cleanValue(body.value)
         const existing = secrets.get(request.name)
         if (existing?.session !== undefined) throw refusal(sessionOnly(request.name))
         let scope
@@ -881,6 +1033,8 @@ export function install(rt) {
         return secretView(secrets.get(request.name))
       }
       const name = normalizeName(body.name)
+      refuseTypedWrite(name)
+      const value = cleanValue(body.value)
       if (!SECRET_NAME.test(name)) throw refusal('A name uses capitals, digits, and underscores, and starts with a letter')
       const existing = secrets.get(name)
       const scope = body.scope !== undefined ? cleanScope(body.scope) : existing?.scope ?? 'all'
@@ -903,6 +1057,8 @@ export function install(rt) {
     },
     async 'secret-allow'(body) {
       const { botId, request } = pendingRequest(body.requestId)
+      const unavailableReason = sourceReason(request.name)
+      if (unavailableReason !== undefined) throw refusal(unavailableReason)
       const secret = secrets.get(request.name)
       if (secret === undefined) throw refusal(`${request.name} is not saved yet`)
       if (held(secret)) throw refusal(heldReason(request.name))
@@ -923,7 +1079,10 @@ export function install(rt) {
       return true
     },
     async 'secret-update'(body) {
-      const secret = secrets.get(normalizeName(body.name))
+      const name = normalizeName(body.name)
+      const unavailableReason = sourceReason(name)
+      if (unavailableReason !== undefined) throw refusal(unavailableReason)
+      const secret = secrets.get(name)
       if (secret === undefined) throw refusal('No such key')
       if (body.scope !== undefined) secret.scope = cleanScope(body.scope)
       // The person who gives the key to Bots ends its Session scope.
@@ -943,12 +1102,69 @@ export function install(rt) {
       await commit(notes)
       return true
     },
+    async 'secret-source-set'(body) {
+      checkSourceWrite()
+      if (!sourcesPresent) throw refusal('The vault plugin is not on.')
+      const name = exactName(body.name)
+      if (blocked !== undefined) throw blockedWrite(blocked)
+      // A failed typed write can leave the in-memory store different from disk.
+      const typed = readTypedFile()
+      if (typed.error !== undefined) throw blockedWrite(typed.error)
+      if (typed.entries.some(entry => entry?.name === name)) {
+        throw refusal(`The name ${name} is already a typed secret. Delete it in Settings › Secrets first, or map the vault item under another name.`)
+      }
+      const { connection, item, field } = body
+      if (![connection, item, field].every(validReference)) throw refusal('Choose a valid vault reference.')
+      for (const [other, row] of sources) {
+        if (other !== name && row.connection !== connection) throw refusal(secondConnection)
+      }
+      const previous = sources.get(name)
+      const now = Date.now()
+      const row = {
+        provider: 'bitwarden', connection, item, field, scope: cleanScope(body.scope),
+        purpose: purposeOf(body.purpose), requestedBy: previous?.requestedBy ?? null,
+        createdAt: previous?.createdAt ?? now, updatedAt: now,
+      }
+      sources.set(name, row)
+      changed()
+      try {
+        await persistSources(sources)
+      } catch (error) {
+        if (sources.get(name) === row) {
+          if (previous === undefined) sources.delete(name)
+          else sources.set(name, previous)
+          changed()
+        }
+        throw error
+      }
+      return sourceView(name, row)
+    },
+    async 'secret-source-clear'(body) {
+      checkSourceWrite()
+      const name = exactName(body.name)
+      if (!sources.has(name)) throw refusal('No such vault mapping')
+      const next = new Map(sources)
+      next.delete(name)
+      await persistSources(next)
+      sources.delete(name)
+      changed()
+      return true
+    },
   }
 
-  async function secretEndpoint(endpoint, body) {
+  function mutate(task) {
+    // An idle endpoint reaches its load await immediately, as conditional cleanup
+    // relies on when it compares a value against a concurrent replacement.
+    const job = mutations === undefined ? task() : mutations.then(task)
+    const clear = () => { if (mutations === settled) mutations = undefined }
+    const settled = job.then(clear, clear)
+    mutations = settled
+    return job
+  }
+  const secretEndpoint = (endpoint, body) => mutate(async () => {
     await loadSecrets()
     return endpoints[endpoint](body ?? {})
-  }
+  })
 
   // Internal cleanup only: the comparison and existing endpoint's map.delete run
   // in one synchronous segment after loading, so a newer value cannot be deleted
@@ -973,9 +1189,10 @@ export function install(rt) {
     await loadSecrets()
     const bind = []
     for (const name of new Set(names)) {
+      const unavailableReason = secretHeldReason(name)
+      if (unavailableReason !== undefined) throw refusal(unavailableReason)
       const secret = secrets.get(name)
       if (secret === undefined) throw refusal(`No secret named ${name}. Save it in Settings → Secrets for no Bot first.`)
-      if (held(secret)) throw refusal(heldReason(name))
       if (secret.session === sessionId) continue
       if (secret.session !== undefined) throw refusal(`${name} is scoped to another Session.`)
       if (!forNoBot(secret)) throw refusal(`${name} is for ${scopeText(secret.scope)}. A Session's secret is one no Bot may use: in Settings → Secrets, choose Chosen Bots with none picked.`)
@@ -994,9 +1211,10 @@ export function install(rt) {
       throw error
     }
   }
-  async function sessionSecretNames(sessionId) {
+  async function sessionSecretNames(sessionId, { stored = false } = {}) {
     await loadSecrets()
-    return [...secrets.values()].filter(secret => canUseInSession(secret, sessionId)).map(secret => secret.name)
+    return [...secrets.values()].filter(secret => canUseInSession(secret, sessionId)
+      && (stored || !unavailable(secret.name))).map(secret => secret.name)
   }
   // Ends the Session scope of each named secret still scoped to that Session: it is no Bot's
   // and no Session's again until a mount scopes it anew.
@@ -1022,7 +1240,7 @@ export function install(rt) {
   }
 
   // A deleted Bot leaves every list it was on, and its cards go with it.
-  async function forgetBotSecrets(botId) {
+  const forgetBotSecrets = botId => mutate(async () => {
     await loadSecrets()
     if (state.secretRequests !== undefined) delete state.secretRequests[botId]
     let touched = false
@@ -1036,7 +1254,19 @@ export function install(rt) {
       changed()
       await persist().catch(() => {})
     }
-  }
+    const next = new Map(sources)
+    for (const [name, row] of sources) {
+      if (Array.isArray(row.scope) && row.scope.includes(botId)) {
+        next.set(name, { ...row, scope: row.scope.filter(id => id !== botId) })
+      }
+    }
+    if ([...next].some(([name, row]) => sources.get(name) !== row)) {
+      await persistSources(next).then(() => {
+        sources = next
+        changed()
+      }).catch(() => {})
+    }
+  })
 
   // What the card asks GitHub for, so the Bot words the same ask and never a broader one.
   const githubAsk = work => work.length === 0 ? ''
@@ -1061,6 +1291,8 @@ export function install(rt) {
       if (bot === undefined) return 'Only Bots on the team can use request_secret.'
       const name = normalizeName(args.name)
       if (!SECRET_NAME.test(name)) return 'Name the key with capitals, digits, and underscores, starting with a letter (for example GITHUB_TOKEN).'
+      const unavailableReason = sourceReason(name)
+      if (unavailableReason !== undefined) return unavailableReason
       const { work, unknown } = cleanGitHubWork(args.github)
       if (unknown.length > 0) return `Unknown GitHub work: ${unknown.join(', ')}. Pass github with ${Object.keys(GITHUB_WORK).join(', ')}.`
       const stored = secrets.get(name)
@@ -1115,15 +1347,21 @@ export function install(rt) {
       await loadSecrets()
       const self = callerOf(exec)
       if (rt.botOf(self) === undefined) return 'Only Bots on the team can use list_secrets.'
+      if (sourcesBroken) return brokenSources
       // A Session's secret is never offered to a Bot: not listed here, and a Bot that names it
-      // in request_secret is only told it cannot have it.
-      const listed = secretsView().filter(secret => secret.session === undefined)
+      // in request_secret is only told it cannot have it. A collision is still reported.
+      const listed = secretsView().filter(secret => secret.session === undefined || sources.has(secret.name))
+      for (const [name, row] of sources) if (!secrets.has(name)) listed.push(sourceView(name, row))
       if (listed.length === 0) return 'No keys are saved yet. Ask for one with request_secret.'
       return [
         'Saved keys (values are never shown):',
-        ...listed.map((secret) => {
+        ...listed.sort((a, b) => a.name.localeCompare(b.name)).map((secret) => {
           const stored = secrets.get(secret.name)
-          const use = held(stored)
+          const use = sources.has(secret.name)
+            ? stored !== undefined ? 'unavailable: this name is defined both in secrets.json and in vault-sources.json'
+              : sourcesPresent ? 'unavailable: it comes from a vault, and this version cannot use vault secrets yet'
+                : 'unavailable: it comes from a vault, and the vault plugin is off'
+            : held(stored)
             ? `held: its saved value is shorter than ${MIN_VALUE} characters, so nothing uses it; save a new value`
             : canUse(stored, self) ? `you may use it as $${envName(secret.name)}` : 'you may not use it; ask with request_secret'
           return `- ${secret.name}${secret.purpose ? ` — ${secret.purpose}` : ''} — for ${scopeText(secret.scope)} — ${use}`
@@ -1138,7 +1376,7 @@ export function install(rt) {
   // re-renders a changed success result from its redacted value.
   ctx.on('tools/execute', async function redactToolResult(exec, next) {
     const result = await next()
-    if (secrets.size === 0 || result === null || typeof result !== 'object') return result
+    if ((secrets.size === 0 && dualValues.size === 0) || result === null || typeof result !== 'object') return result
     return redactDeep(result, redact)
   })
 
@@ -1151,7 +1389,7 @@ export function install(rt) {
   // to keep agent routes accepting the redacted request.
   const rewritten = new WeakSet()
   ctx.on('llm/stream', (options, next) => {
-    if (secrets.size === 0 || rewritten.has(options.messages)) return next()
+    if ((secrets.size === 0 && dualValues.size === 0) || rewritten.has(options.messages)) return next()
     const messages = redactDeep(options.messages, redact)
     const system = redactDeep(options.system, redact)
     if (messages === options.messages && system === options.system) return next()
@@ -1164,13 +1402,16 @@ export function install(rt) {
   })
 
   function resolveEnv(execution) {
+    // loadSecrets reads synchronously, including on a host that follows another writer.
+    void loadSecrets()
+    if (sourcesBroken) return {}
     const botId = rt.selfOf(execution?.agent?.session?.header?.id ?? execution?.agent?.id)
     if (rt.botOf(botId) === undefined) return {}
     const command = typeof execution.arguments?.command === 'string' ? execution.arguments.command : ''
     const values = {}
     let used = false
     for (const secret of secrets.values()) {
-      if (held(secret) || !canUse(secret, botId)) continue
+      if (unavailable(secret.name) || held(secret) || !canUse(secret, botId)) continue
       values[envName(secret.name)] = secret.value
       if (command.includes(envName(secret.name))) {
         secret.lastUsedAt = Date.now()
@@ -1188,7 +1429,7 @@ export function install(rt) {
     let declared = ''
     refreshEnv = () => {
       // A Session's secret reaches no shell, so it is not declared to any.
-      const list = [...secrets.values()].filter(secret => !held(secret) && secret.session === undefined).sort((a, b) => a.name.localeCompare(b.name))
+      const list = [...secrets.values()].filter(secret => !unavailable(secret.name) && !held(secret) && secret.session === undefined).sort((a, b) => a.name.localeCompare(b.name))
       const key = list.map(secret => `${secret.name}\u0000${secret.purpose}`).join('\n')
       if (key === declared) return
       unregister?.()
@@ -1227,13 +1468,16 @@ export function install(rt) {
 
   Object.assign(rt, {
     secretsView,
-    secretValue: name => (held(secrets.get(name)) ? undefined : secrets.get(name)?.value),
-    canUseSecret: (name, botId) => !held(secrets.get(name)) && canUse(secrets.get(name), botId),
-    canUseSecretInSession: (name, sessionId) => !held(secrets.get(name)) && canUseInSession(secrets.get(name), sessionId),
+    secretSourcesView,
+    secretStored: name => secrets.has(name) && !held(secrets.get(name)),
+    secretValue: name => (unavailable(name) || held(secrets.get(name)) ? undefined : secrets.get(name)?.value),
+    canUseSecret: (name, botId) => !unavailable(name) && !held(secrets.get(name)) && canUse(secrets.get(name), botId),
+    canUseSecretInSession: (name, sessionId) => !unavailable(name) && !held(secrets.get(name)) && canUseInSession(secrets.get(name), sessionId),
     bindSessionSecrets,
     releaseSessionSecrets,
     sessionSecretNames,
-    secretHeldReason: name => (held(secrets.get(name)) ? heldReason(name) : undefined),
+    secretHeldReason,
+    secretSourceReason: sourceReason,
     secretEndpoint,
     deleteSecretIfUnchanged,
     forgetBotSecrets,

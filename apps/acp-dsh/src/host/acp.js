@@ -40,6 +40,68 @@ export function structuredNameOf(update) {
   return undefined
 }
 
+/**
+ * The Agent/Task call a call ran inside, when the agent says so: Claude Code's adapter stamps
+ * every call a native subagent makes, and its result, with `_meta.claudeCode.parentToolUseId`,
+ * the subagent's own Agent/Task call id. Undefined for a call the main agent made.
+ */
+export function parentToolOf(update) {
+  const parent = update?._meta?.claudeCode?.parentToolUseId
+  return isToolId(parent) ? parent : undefined
+}
+
+// Claude Code's subagent tool: `Agent`, `Task` on older CLIs (the adapter's agent reporter).
+export const WORKER_TOOLS = new Set(['Agent', 'Task'])
+export const WORKERS_MAX = 12
+export const WORKER_STEPS_MAX = 40
+const WORKER_TEXT_MAX = 160
+// A call DSH closed itself (`ended`: endPrompt, when the turn was stopped or the agent went
+// away) did not finish, whatever status it was closed with: it failed, it was never done.
+const workerStatus = tool => (tool.ended === true ? 'failed' : tool.status === 'completed' ? 'done' : tool.status === 'failed' ? 'failed' : 'running')
+const shortLine = text => String(text ?? '').slice(0, 4096).split('\n').map(line => line.trim()).find(Boolean)?.slice(0, WORKER_TEXT_MAX) ?? ''
+// The ending a worker reports: its stripped report, else the raw result less the adapter's
+// `<usage>` block and `agentId:` line, which only the raw text still carries for this client.
+// One DSH stopped reports only that (`Stopped`, with `stopped`): what it had said is partial.
+const workerResult = (tool) => {
+  if (tool.ended === true) return 'Stopped'
+  if (workerStatus(tool) === 'running') return ''
+  const text = contentText(tool.content) || (typeof tool.rawOutput === 'string' ? tool.rawOutput : '')
+  return shortLine(text.replace(/<usage>[\s\S]*?<\/usage>/g, '').replace(/^agentId:.*$/gm, ''))
+}
+
+/**
+ * The native subagents of one prompt, as workers: each Agent/Task call in `ids` (the prompt's
+ * calls, in the order they came) with its title, its state, the line its result opens with and
+ * the calls stamped with its id as its steps. Newest workers last; bounded, never the payloads.
+ * One DSH closed when its turn ended (`ended`) is failed, `stopped`, and its result `Stopped`.
+ * @param {Map<string, any>} tools
+ * @param {Iterable<string>} ids
+ */
+export function workersOf(tools, ids) {
+  const calls = [...ids].map(id => tools.get(id)).filter(tool => tool !== undefined && tool.retired !== true)
+  const workers = calls.filter(tool => WORKER_TOOLS.has(tool.structuredName)).slice(-WORKERS_MAX)
+  return workers.map((worker) => {
+    const steps = calls.filter(tool => tool.parent === worker.id)
+    const shown = steps.slice(-WORKER_STEPS_MAX)
+    const result = workerResult(worker)
+    return {
+      id: worker.id,
+      title: shortLine(worker.title) || worker.structuredName,
+      state: workerStatus(worker),
+      ...(result ? { result } : {}),
+      ...(worker.ended === true ? { stopped: true } : {}),
+      ...(worker.seenAt === undefined ? {} : { at: worker.seenAt }),
+      steps: shown.map(step => ({
+        id: step.id,
+        title: shortLine(step.title) || step.structuredName || 'Tool',
+        ...(step.structuredName === undefined ? {} : { tool: String(step.structuredName).slice(0, 80) }),
+        state: workerStatus(step),
+      })),
+      ...(steps.length > shown.length ? { more: steps.length - shown.length } : {}),
+    }
+  })
+}
+
 // The text of ACP content: a content block, or a tool call's content items.
 export function contentText(content) {
   if (content == null) return ''
@@ -132,12 +194,18 @@ export class AgentRun {
     this.queue = []
     this.waiters = []
     this.tools = new Map()
+    // Told of each question stored for a call (onPermission): a mirror body that waits on
+    // another call hears of it (tool.js, native-tools mode: a subagent's nested calls).
+    this.askListeners = new Set()
     this.turn = new Set()
     this.retired = new Set()
     this.didIgnore = false
     this.stderr = ''
     this.prompting = undefined
     this.exited = undefined
+    // Whether this prompt was cancelled by the app (a Stop, a reap, an ended session), so a
+    // cancel the app did not ask for is told apart: it comes from the host stopping.
+    this.cancelled = false
   }
 
   /**
@@ -369,6 +437,7 @@ export class AgentRun {
     this.queue = []
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
+    this.cancelled = false
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
     // has nobody left to answer it (onPermission); one still stored is withdrawn here.
@@ -479,6 +548,7 @@ export class AgentRun {
 
   async cancel() {
     if (!this.busy || this.sessionId === undefined) return
+    this.cancelled = true
     await this.held(() => this.conn.cancel({ sessionId: this.sessionId })).catch(() => {})
   }
 
@@ -601,6 +671,15 @@ export class AgentRun {
 
   // --- the agent's side of the conversation ---------------------------------------------
 
+  /**
+   * The native subagents this prompt started, as workers (workersOf): what the Bot team draws
+   * under the Bot's row. The prompt's calls only, so a finished worker stays until the next
+   * prompt. Read-only.
+   */
+  workers() {
+    return workersOf(this.tools, this.turn)
+  }
+
   ignored(what, payload) {
     // Rejected traffic still needs safety checks, without retaining it or making a card.
     try {
@@ -679,7 +758,10 @@ export class AgentRun {
       return known
     }
     if (this.reviews?.last) this.reviews.after = true
-    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set() }
+    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now() }
+    // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) tool.parent = parent
     // First seen after its prompt ended: its event lands behind the prompt's end, where no step
     // reads it, and the next prompt drops it. No card will ever ask its question.
     if (this.promptEnded === true) tool.unanswerable = true
@@ -719,6 +801,12 @@ export class AgentRun {
     if (typeof chunk === 'string') tool.output = (tool.output ?? '') + chunk
     for (const key of ['title', 'kind', 'status', 'content', 'locations', 'rawInput', 'rawOutput', 'ended']) {
       if (update[key] !== undefined && update[key] !== null) tool[key] = update[key]
+    }
+    // The link can come on a later update only (a streamed refinement or the result).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) {
+      if (typeof tool.parent === 'string' && tool.parent !== parent) tool.parentConflict = true
+      tool.parent = parent
     }
     const status = tool.rawOutput?.review?.status
     if (this.reviews && tool.id.startsWith('guardian_assessment:') && typeof status === 'string' && !tool.reviewed) {
@@ -833,8 +921,8 @@ export class AgentRun {
       // A later call update must not change what an answer to this question allows
       // (tool.js reviewHolds). A failed copy leaves this question to be asked as before.
       try {
-        const { id, title, kind, rawInput, content, locations, structuredName } = tool
-        permission.call = structuredClone({ id, title, kind, rawInput, content, locations, structuredName })
+        const { id, title, kind, rawInput, content, locations, structuredName, parent } = tool
+        permission.call = structuredClone({ id, title, kind, rawInput, content, locations, structuredName, parent })
       } catch {}
       tool.permission = permission
       // The agent took its question back (it cancelled the request, or the connection closed):
@@ -843,6 +931,7 @@ export class AgentRun {
       if (signal?.aborted) return withdraw()
       signal?.addEventListener('abort', withdraw, { once: true })
       for (const listener of tool.listeners) listener()
+      for (const listener of this.askListeners) listener(tool)
     })
   }
 }

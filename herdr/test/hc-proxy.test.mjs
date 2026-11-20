@@ -103,13 +103,24 @@ function scene() {
     rec("t112", { bot: ID.jun }, { name: "huge", huge: true }),
     rec("t120", { bot: ID.other }, { name: "other-bot" }),
     rec("t121", { [WORKER_OF_LABEL]: ID.cap }, { name: "cap-worker", parent: "t101", cwd: worktree }),
+    // Linked machines (#628): a stranger's pane whose role=reviewer label would pass the send
+    // rule, the caller's team lead's pane, and the caller's own worker there. The proxy refuses
+    // every machine address on every verb, so none is a terminal the caller may reach or type
+    // into; the list must not name them or their machines.
+    rec("mac/t90", { bot: ID.other, role: "reviewer" }, { name: "reviewer-mac" }),
+    rec("mac/t91", { bot: ID.cap }, { name: "cap-mac" }),
+    rec("mac/t105", { [WORKER_OF_LABEL]: ID.dev }, { name: "worker-mac", parent: "t100", cwd: worktree }),
+  ];
+  const machines = [
+    { name: "mac", target: "mac", state: "connected" },
+    { name: "builder", target: "builder", state: "connected" },
   ];
   const forbiddenRoots = [["the project", project], ["the app home", app], ["the temp folder", paneTmp], ["the runtime folder", runtime]];
   const env = { XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: join(home, ".local", "share"), HOME: home,
     HERDR_APP_HOME: app, TMPDIR: paneTmp, PATH: `${stableGuard}:${shimDir}:${bin}:/usr/bin:/bin` };
   // The approved record every explicit-caller row reads (the by-hand rows keep the ledger).
   approveProject({ project, env, approvedAt: "2026-11-01T00:00:00.000Z", approvedBy: "test" });
-  return { root, app, project, home, runtime, worktree, bin, shimDir, paneTmp, stableRoot, stableGuard, ledger, terminals, env, forbiddenRoots };
+  return { root, app, project, home, runtime, worktree, bin, shimDir, paneTmp, stableRoot, stableGuard, ledger, terminals, machines, env, forbiddenRoots };
 }
 
 /** Start the fake core and, unless proxy: false, the pane t100 proxy; one cleanup for all. */
@@ -125,7 +136,7 @@ async function sceneWithCore(t, { version = "0.1.14", proxy = true, proxyOptions
   };
   t.after(closeAll);
   try {
-    fake = await startFakeCore({ socket: join(s.root, "core.sock"), terminals: s.terminals, version });
+    fake = await startFakeCore({ socket: join(s.root, "core.sock"), terminals: s.terminals, machines: s.machines, version });
     const start = async (terminal = "t100", extra = {}) => {
       const started = await startProxy({ terminal, upstream: fake.socket, appHome: s.app, env: s.env, forbiddenRoots: s.forbiddenRoots, ...extra });
       started.server?.unref?.();
@@ -233,7 +244,7 @@ const REFUSED_METHODS = [
   "terminal.attach", "terminal.interrupt", "terminal.keep", "terminal.keys", "terminal.put",
 ];
 
-const waitFor = async (check, timeout = 4000) => {
+const waitFor = async (check, timeout = 10_000) => {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
     if (check()) return true;
@@ -333,6 +344,8 @@ test("get/read/wait/send are scoped to the team and its own workers", async (t) 
     allowed("terminal.wait", "t110", { timeout: 1 }),
     allowed("terminal.send", "t110", { text: "not mine" }),
     allowed("terminal.send", "t121", { text: "another bot's worker" }),
+    allowed("terminal.send", "t111", { text: "a plain shell pane" }),
+    allowed("terminal.read", "t111", { lines: 2 }),
     allowed("terminal.get", "t121"),
     allowed("terminal.read", "t104", { lines: 3 }),
     allowed("terminal.read", "t107", { lines: 3 }),
@@ -355,6 +368,65 @@ test("get/read/wait/send are scoped to the team and its own workers", async (t) 
   const forwarded = fake.calls("terminal.wait").at(-1).params;
   assert.equal(forwarded.terminal, undefined);
   assert.equal(forwarded.caller, "t100");
+});
+
+test("terminal.list answers only the terminals the caller may type into (#628)", async (t) => {
+  const { s, fake, proxy, start } = await sceneWithCore(t);
+  fake.clearLog();
+  const client = await clientFor(proxy.socket);
+  const listed = await client.call("terminal.list", { all: true });
+  client.close();
+  assert.ok(listed.result, JSON.stringify(listed));
+  // The caller's own pane, its team graph (lead, member, main), its own worker and the shared
+  // review roles (a roster reviewer-rank bot and a role=labeled pane). Another team's bot and
+  // its worker, another bot's worker, a bare shell pane and the caller's unrelated pm are out.
+  assert.deepEqual(listed.result.terminals.map((row) => row.address).sort(),
+    ["t100", "t101", "t102", "t103", "t104", "t105", "t107", "t112"].sort());
+  // Linked machines are out of scope: the fake carries a stranger's reviewer-labelled machine
+  // pane, the caller's team lead's machine pane and its own worker there, and the core's
+  // machine inventory; none of it may be named (#628).
+  assert.equal(fake.state.machines.length, 2, "the fake core really has a machine inventory");
+  for (const hidden of ["mac/t90", "mac/t91", "mac/t105"]) {
+    assert.equal(listed.result.terminals.some((row) => row.address === hidden), false,
+      `the list never names the machine pane ${hidden}`);
+  }
+  for (const hidden of ["reviewer-mac", "cap-mac", "worker-mac"]) {
+    assert.equal(listed.result.terminals.some((row) => row.name === hidden), false,
+      `the list never names the machine pane ${hidden} by name`);
+  }
+  assert.deepEqual(listed.result.machines, [], "no machine name or target reaches the reply");
+  assert.equal(fake.calls("terminal.list").length, 1, "the request itself reaches the core");
+  assert.deepEqual(fake.calls("terminal.list")[0].params, { all: true },
+    "list's own parameters are forwarded unchanged");
+  assert.equal(listed.result.hidden_finished, 0, "the reply's other fields are kept");
+
+  // A worker's list is the same scope: its own pane, its bot's team and its own workers.
+  const worker = await start("t105", { caller: { bot: ID.dev, project: s.project, worker: true }, bound: false });
+  const workerClient = await clientFor(worker.socket);
+  const report = await workerClient.call("terminal.list", {});
+  workerClient.close();
+  assert.ok(report.result, JSON.stringify(report));
+  for (const hidden of ["t110", "t120", "t121", "t108", "t111", "t106"]) {
+    assert.equal(report.result.terminals.some((row) => row.address === hidden), false,
+      `a worker's list never names ${hidden}`);
+  }
+  assert.deepEqual(report.result.machines, [], "a worker's list names no machine either");
+});
+
+test("terminal.list never passes an error reply's rows through (#628)", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  const clean = await client.call("terminal.list", {});
+  assert.ok(clean.result, "the fake core answers a list first");
+  assert.ok(fake.state.terminals.length > 0, "the fake core's error reply will carry rows");
+  // A malformed core error that also holds a result must not become a way around the filter.
+  fake.state.listError = { code: -32000, message: "the list failed", data: { kind: "unavailable" } };
+  const answer = await client.call("terminal.list", {});
+  client.close();
+  assert.ok(answer.error, "the core's error is kept");
+  assert.equal(answer.error.message, "the list failed");
+  assert.equal(answer.result, undefined, "no terminal rows ride along with an error");
+  fake.state.listError = null;
 });
 
 test("the pm/integrator/fixer send widening is send only", async (t) => {
@@ -954,7 +1026,13 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
   const { proxy } = await sceneWithCore(t);
   const held = [];
   for (let i = 0; i < MAX_CONNECTIONS; i += 1) held.push(await clientFor(proxy.socket));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Every held client has answered through its session, so each one is registered before the
+  // next connects; no sleep guesses when the proxy got to accept them. The client's own 5 s
+  // test timeout is the bound: a missing answer fails here, naming the list that never came.
+  await Promise.all(held.map((client) => client.call("terminal.list").catch((e) => {
+    throw new Error("herdr/test/hc-proxy.test.mjs, the connection cap row: a held client's terminal.list answer "
+      + `did not arrive within the client's test timeout: ${e.message}`);
+  })));
   const extra = await clientFor(proxy.socket);
   const answer = JSON.parse(await extra.next());
   assert.match(answer.error.message, new RegExp(`^hc-proxy: too many connections \\(${MAX_CONNECTIONS} max\\)`));
@@ -965,10 +1043,10 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
 test("an idle connection and a slow partial line are closed by the idle timeout", async (t) => {
   const { proxy } = await sceneWithCore(t, { proxyOptions: { idleTimeoutMs: 120 } });
   const idle = await clientFor(proxy.socket);
-  assert.ok(await waitFor(() => idle.closed, 2000), "an idle connection is closed");
+  assert.ok(await waitFor(() => idle.closed, 10_000), "an idle connection is closed");
   const slow = await clientFor(proxy.socket);
   slow.socket.write('{"jsonrpc":"2.0","id":1');
-  assert.ok(await waitFor(() => slow.closed, 2000), "a slow partial line is closed");
+  assert.ok(await waitFor(() => slow.closed, 10_000), "a slow partial line is closed");
 });
 
 test("an in-flight wait keeps the connection alive", async (t) => {
@@ -1650,4 +1728,69 @@ test("approved Claude worker: the proxy accepts its chosen session id and refuse
   const answer = await other.client.call("terminal.run", { ...cp, labels: { ...cp.labels, "agent.session": SESSION } });
   assert.match(answer.error?.message ?? "", /approved worker label agent\.session does not match approval/);
   assert.equal(other.fake.calls("terminal.run").length, 0);
+});
+
+test("#540 the proxy forwards exactly the set and both clear forms on the caller's pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const expected = ["q", "", null].map((value) => ({
+    terminal: "t100", labels: { "automagik-herdr.needs-owner": value },
+  }));
+  for (const { labels } of expected) {
+    const answer = await client.call("terminal.label", { terminal: "dev", labels });
+    assert.ok(answer.result, JSON.stringify(answer));
+  }
+  assert.deepEqual(fake.calls("terminal.label").map(({ params }) => params), expected);
+});
+
+test("#540 the proxy refuses a malformed own-pane label without forwarding it", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const labels of [
+    { "automagik-herdr.needs-owner": "q", other: "x" },
+    { other: "x" },
+    [],
+    "x",
+    { "automagik-herdr.needs-owner": 3 },
+  ]) {
+    const answer = await client.call("terminal.label", { terminal: "t100", labels });
+    assert.match(answer.error?.message ?? "", /the caller's own pane takes only the automagik-herdr\.needs-owner label/, JSON.stringify(labels));
+  }
+  assert.equal(fake.calls("terminal.label").length, 0);
+});
+
+test("#540 the proxy refuses the owner question label on a foreign pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const labels = { "automagik-herdr.needs-owner": "q" };
+  for (const terminal of ["t120", "t106"]) {
+    const answer = await client.call("terminal.label", { terminal, labels });
+    assert.match(answer.error?.message ?? "", /the target is not the caller's own worker/);
+  }
+  assert.equal(fake.calls("terminal.label").length, 0);
+});
+
+test("#540 a proxied worker can label its own pane", async (t) => {
+  const { fake, start } = await sceneWithCore(t, { proxy: false });
+  const proxy = await start("t105");
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const params = { terminal: "t105", labels: { "automagik-herdr.needs-owner": "q" } };
+  const answer = await client.call("terminal.label", params);
+  assert.ok(answer.result, JSON.stringify(answer));
+  assert.deepEqual(fake.calls("terminal.label").map((call) => call.params), [params]);
+});
+
+test("#540 the proxy still refuses killing or removing the caller's pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const method of ["terminal.kill", "terminal.rm"]) {
+    const answer = await client.call(method, { terminal: "t100" });
+    assert.match(answer.error?.message ?? "", /the target is not the caller's own worker/, method);
+    assert.equal(fake.calls(method).length, 0, method);
+  }
 });

@@ -242,7 +242,8 @@ pub struct Report {
 pub struct Backfilled {
     pub from_ms: i64,
     pub adopted: u64,
-    /// Calls re-read that no pre-evidence row held with the same logging: left as they were.
+    /// Calls re-read that were left as they were: no pre-evidence row held them with the same
+    /// logging, or they already had their evidence (issue 1229).
     pub left_alone: u64,
     /// Calls the rollups of the backfilled hours held beyond their evidence (pruned, and no log
     /// gave it back), moved to those hours' frozen rows when the backfill ended: before evidence.
@@ -2092,7 +2093,7 @@ fn read_agy_into_store(
         .attribute(store, read.events, counted_from)
         .map_err(store_write)?;
     let applied = store
-        .apply_agy(state, &attributed, health, now)
+        .apply_agy(state, &attributed, &read.later_step_keys, health, now)
         .map_err(store_write)?;
     report.health.add(&applied);
     report.files_read += 1;

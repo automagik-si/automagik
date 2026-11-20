@@ -280,6 +280,7 @@ export function install(rt) {
     try { rows = (await Promise.race([Promise.resolve().then(() => agents.status()), late]))?.agents } catch {} finally { clearTimeout(timer) }
     if (epoch !== catalogEpoch || !Array.isArray(rows)) return
     signInsDirty = false
+    const bots = Object.values(state.bots ?? {})
     for (const row of rows) {
       if (typeof row?.id !== 'string') continue
       noteConsent(row)
@@ -287,6 +288,9 @@ export function install(rt) {
       agentSignIn.delete(row.id)
       const last = signInChecks.get(row.id)
       if (row.on === false || row.connector?.state !== 'ready' || typeof agents.inspect !== 'function' || (last !== undefined && Date.now() - last < SIGN_IN_CHECK_MS)) continue
+      const providerMatches = bot => [bot.model, bot.appliedModel].some(ref => typeof ref === 'string' && ref.split('/')[0] === row.id)
+      if (bots.some(bot => providerMatches(bot) && bot.shellHeld !== undefined)
+        && !bots.some(bot => providerMatches(bot) && bot.shellHeld === undefined)) continue
       signInChecks.set(row.id, Date.now())
       void Promise.resolve().then(() => agents.inspect(row.id)).then((seen) => {
         if (epoch !== catalogEpoch || typeof seen?.signedIn !== 'boolean') return
@@ -323,7 +327,8 @@ export function install(rt) {
         })
       }
     }
-    const used = new Set(Object.values(state.bots ?? {}).filter(onDsh).flatMap(bot => [bot.model, bot.appliedModel].filter(Boolean)))
+    const used = new Set(Object.values(state.bots ?? {}).filter(bot => onDsh(bot) && bot.shellHeld === undefined)
+      .flatMap(bot => [bot.model, bot.appliedModel].filter(Boolean)))
     const entries = listed
     // Claude on pi-ai's anthropic route: the menu offers each family's newest model.
     const claude = entries.filter(entry => entry.provider === PI_AI_CLAUDE)
@@ -350,10 +355,12 @@ export function install(rt) {
     }
     // DSH's own ChatGPT or Claude sign-in: its CLI serves that plan, signed in or not.
     for (const entry of entries) if (coveredBy(entry) !== undefined) entry.covered = true
-    if (remember) noteConnected(entries)
-    // A key can arrive without an event (an environment variable at the next start), so
-    // a provider listed with its key again lifts what its missing key blocked.
-    rt.unblockBots?.({ keyed: new Set(entries.filter(entry => !entry.needsKey).map(entry => entry.provider)) })
+    if (remember) {
+      noteConnected(entries)
+      // A key can arrive without an event, so a provider listed with its key again lifts
+      // what its missing key blocked. Catalog reads used to validate a pick stay read-only.
+      rt.unblockBots?.({ keyed: new Set(entries.filter(entry => !entry.needsKey).map(entry => entry.provider)) })
+    }
     await Promise.all(entries.filter(entry => used.has(entry.ref)).map(async (entry) => {
       const reasoning = await reasoningOf(entry.ref, epoch)
       if (reasoning !== undefined) entry.reasoning = reasoning
@@ -451,8 +458,8 @@ export function install(rt) {
 
   // A full `provider/model` ref, or a model id or name that only one provider serves.
   // `checkAccess`: a model that cannot run now (modelAccess) is refused here, before anything
-  // is written. `remember: false` leaves the team's record of connected providers alone, so a
-  // refused pick changes nothing. `keep`: the Bot's current model, never moved (onPlanCli).
+  // is written. `remember: false` leaves team state alone while validating the pick.
+  // `keep`: the Bot's current model, never moved (onPlanCli).
   async function resolveModel(text, { checkAccess = false, remember = true, keep } = {}) {
     const entries = await catalog({ fresh: true, remember })
     const wanted = String(text ?? '').trim()
@@ -464,10 +471,11 @@ export function install(rt) {
       if (checkAccess) await assertModelAccess(found)
       return found
     }
+    if (named.length > 1) {
+      throw refusal(`Model ${wanted} is served by more than one provider; use one of ${named.map(entry => entry.ref).join(', ')}`)
+    }
     const known = entries.map(entry => entry.ref).join(', ') || 'none'
-    throw refusal(named.length > 1
-      ? `Model ${wanted} is served by more than one provider; use one of ${named.map(entry => entry.ref).join(', ')}`
-      : `Model ${wanted} is not available. Available models: ${known}`)
+    throw Object.assign(refusal(`Model ${wanted} is not available. Available models: ${known}`), { modelUnavailable: true })
   }
 
   // Whether a model can run now, read-only: nothing is installed, enabled or signed in, and no
@@ -621,6 +629,7 @@ export function install(rt) {
   const sessionSelections = new Map()
   function selectSessionModel(sessionId, { provider, model, reasoningEffort }) {
     const run = selecting.then(async () => {
+      rt.assertShellChoice?.(sessionId)
       const defaults = ctx.get?.('agentDefaultModel')
       const before = defaults?.currentSelection?.()
       const result = await ctx.sessionController.selectModel({
@@ -704,9 +713,14 @@ export function install(rt) {
     return stored?.unreadable === true || stored?.provider === 'hermes-remote'
   }
 
+  // The store can replace a Bot while a model choice is in flight.
+  const modelTargetLive = bot => bot.shellHeld === undefined
+    && (rt.botOf === undefined || rt.botOf(bot.id) === bot)
+
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
   async function applyModel(bot, { force = false } = {}) {
+    if (!modelTargetLive(bot)) return undefined
     // The Bot's own part is in a route switch: selecting the new model there would move the
     // old conversation, and restore() would then leave that Session on the target route. A
     // plain fresh part has no target and keeps taking the pick on the old part.
@@ -716,6 +730,7 @@ export function install(rt) {
     // A move off the Bot's coding CLI skips each Session that is at Full access; the others
     // take the model as before. When every one stays, nothing moved and the record stands.
     const chat = rt.chatOf(bot.id)
+    if (!modelTargetLive(bot)) return undefined
     const staying = offCli(bot, ref) ? wideAmong([chat, ...rt.groupSessionsOf(bot.id)]) : new Set()
     if (staying.size > 0) stays(bot, ref)
     if (staying.has(chat) && rt.groupSessionsOf(bot.id).every(sessionId => staying.has(sessionId))) return undefined
@@ -738,6 +753,7 @@ export function install(rt) {
     // took, or, when it is the chat that stayed, nothing unless the record already names that
     // model. A record left naming the CLI would skip the selection when the CLI is served
     // again, and the Sessions moved here would stay off it. Nothing is returned as applied.
+    if (!modelTargetLive(bot)) return undefined
     if (staying.size > 0 && staying.has(chat)) {
       if (bot.appliedModel === undefined || bot.appliedModel === ref) return undefined
       delete bot.appliedModel
@@ -794,7 +810,7 @@ export function install(rt) {
       refused.set(ref, served)
       rt.warn('omni-ui: %s is not a model endpoint, so it is not chosen again', ref)
       const entries = await catalog()
-      const pinned = Object.values(state.bots).filter(other => other.model === ref || other.appliedModel === ref)
+      const pinned = Object.values(state.bots).filter(other => other.shellHeld === undefined && (other.model === ref || other.appliedModel === ref))
       for (const other of pinned) {
         if (other.model === ref) other.model = pickDefault(entries)
         if (other.appliedModel === ref) delete other.appliedModel

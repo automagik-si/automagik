@@ -3,7 +3,7 @@ import { call } from './api.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
-import { badges, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons, mountShellInstallers, nav, onShell, registerComposerPack, sidebarTools, toolCards } from './extend.js'
+import { badges, botChannels, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons, mountShellInstallers, nav, onShell, registerComposerPack, sidebarTools, toolCards } from './extend.js'
 import { BUILTIN_PACKS, packCellSync, stepsAside } from './composer-packs.js'
 import { COMPOSER_PACK_CSS, packModelCell } from './composer-pack-cells.js'
 import { agentRowSessions, TASK_CSS } from './task-card.js'
@@ -32,7 +32,7 @@ import { sameVersion } from './dsh-offer.js'
 import { QuestionCard, QuestionDock } from './questions.js'
 import { DesktopUpdate, DESKTOP_UPDATE_CSS } from './desktop-update.js'
 import { WORK_CODE_SWITCH_CSS } from './work-code-switch.js'
-import { installCodeSide } from './code-side.js'
+import { CODE_PANEL, CodeMainPanel, codePanelNavigation, installCodeSide } from './code-side.js'
 import { LEFT_BAR_CSS } from './left-bar-css.js'
 import { installBarWidth } from './left-bar-width.js'
 import { PRIVACY_CSS } from './privacy.js'
@@ -49,6 +49,9 @@ import { headerNavigation, installHeaderNavigation } from './header-navigation.j
 import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
+import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
+import { PAGE_ICONS, PageBoundary, SettingsPage } from './settings.js'
+import { BotBrowserBody, installBotBrowserTab } from './bot-browser-tab.js'
 import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
 import { SECRET_CSS, SecretDock } from './secret-card.js'
@@ -58,9 +61,19 @@ import { MODEL_SWITCH_CSS, ModelSwitchNotice } from './model-switch.js'
 import { announceCarried, CLI_LOGIN_CSS, CliLoginConversation, installCliLoginBridge, installKnownStateGuard } from './cli-login.js'
 import { createCliLogin } from './cli-login-state.js'
 import { cliLoginBotOf } from './cli-login-model.js'
+import { installLoginCommand } from './login-command.js'
 import { ConnectorDock, MailDock, CONNECTOR_CSS } from './connectors.js'
 import { CONNECTORS_PAGE_CSS } from './connectors-page.js'
 import { LearningDock, LearningTurnTail, LEARNING_CSS } from './learning-card.js'
+import {
+  BackfillCard, CANCEL_BACKFILL, CoverageRow, GENUI_CSS, PersonCard, ProgressRow, ProgressRows,
+  READING_NOTE, START_BACKFILL, cancelBackfill, loadReadingNote, genuiRows, revisionOf, startBackfill,
+} from './genui.js'
+import {
+  backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, coverageLine,
+  coverageOf, countText, parseReadingNote, percentOf, personView, proposalView, rowView, runView,
+  shortDate, spanOf, stateId, stateWord,
+} from './genui-model.js'
 import { BOT_SETTINGS_CSS } from './bot-settings.js'
 import { AVATAR_LIBRARY_CSS } from './avatar-library.js'
 import { GROUP_SETTINGS_CSS } from './group-settings.js'
@@ -86,6 +99,7 @@ import { QueueDock, QUEUE_CSS } from './queue-dock.js'
 import { noticeApprovals } from './approval-notices.js'
 import { listedOpener } from './open-listed.js'
 import { agentSessionToReuse, singleFlight } from './agent-new.js'
+import { ReadScopeControl } from './read-scope.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -101,9 +115,23 @@ export const omni = Object.freeze({
   // Copy in this plugin's namespace; addStrings brings a plugin's Chinese copy.
   t, addStrings, hostText, language, dateLocale,
   // The Bot surface: what runs while it is up, and what draws in its places.
-  onShell, toolCards, nav, badges, botChildren, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
+  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
+  // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's
+  // own tool card. `rows(roster, batchId)` reads the host's slice; the model is the same
+  // words and number formats the kit's cards use, for a card of a plugin's own shape.
+  genui: Object.freeze({
+    PersonCard, ProgressRow, ProgressRows, CoverageRow, BackfillCard,
+    rows: genuiRows, revisionOf, loadReadingNote, READING_NOTE,
+    // The backfill card's actions (#1326 K2): one approval, and one job's stop.
+    startBackfill, cancelBackfill, START_BACKFILL, CANCEL_BACKFILL, backfillView,
+    model: Object.freeze({
+      backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, coverageLine,
+      coverageOf, countText, parseReadingNote, percentOf, personView, proposalView, rowView,
+      runView, shortDate, spanOf, stateId, stateWord,
+    }),
+  }),
   // The roster and actions of the running surface, or null before it runs.
   face: () => currentFace?.() ?? null,
 })
@@ -257,6 +285,7 @@ export function apply(ctx) {
     // Omni listens to: an unchanged answer carries only those.
     const live = {}
     if (value.connectors !== undefined && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live.connectors = value.connectors
+    if (value.secretSources !== undefined && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live.secretSources = value.secretSources
     if (value.capabilityStatuses !== undefined && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live.capabilityStatuses = value.capabilityStatuses
     if (value.learning !== undefined && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live.learning = value.learning
     if (value.learningSettled !== undefined && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live.learningSettled = value.learningSettled
@@ -366,6 +395,8 @@ export function apply(ctx) {
   // panel on there (`browser` in the state).
   const bridge = (window.dshDesktop?.protocolVersion === 1 ? window.dshDesktop.browser : globalThis.dsBotApp?.browser) ?? null
   const browsers = bridge ? createBotBrowsers({ bridge, createSource, savedTabs: () => roster.getSnapshot().browserTabs }) : null
+  const holdView = bridge?.views ? (botId, held) => bridge.views.hold(botId, held) : undefined
+  const viewClientId = holdView ? globalThis.crypto.randomUUID() : undefined
   if (browsers) {
     ctx.effect(() => {
       let stopReads = null
@@ -373,7 +404,7 @@ export function apply(ctx) {
         const snapshot = roster.getSnapshot()
         if (!snapshot.ready) return
         const on = snapshot.browser === true
-        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call })
+        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call, clientId: viewClientId, holdView })
         if (!on && stopReads) { stopReads(); stopReads = null }
         // A Bot deleted here or in another window takes its guests and saved tabs along.
         void browsers.retain(snapshot.bots.map(bot => bot.id))
@@ -531,6 +562,7 @@ export function apply(ctx) {
     }
   }
   let cliLogin
+  const codePanel = codePanelNavigation(ctx.layout)
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
     learningAnswer: (id, approve) => after(call('learning-answer', { id, approve })),
@@ -640,6 +672,10 @@ export function apply(ctx) {
       seatChatView.set({ seat })
       try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
     },
+    openCodePane: (selected) => {
+      try { codePanel.open(selected) } catch (error) { noteClientError('code-side', error) }
+    },
+    closeCodePane: codePanel.close,
     seatList: () => call('seat-chat-list'),
     selectPanel: (id) => { ctx.layout.selectPanel(id) },
     toggleSidebar: () => { ctx.layout.toggleSidebar() },
@@ -719,22 +755,10 @@ export function apply(ctx) {
       browserNavigate: (tabId, input) => browsers.navigate(tabId, input),
       browserCommand: (tabId, name) => browsers.command(tabId, name),
       browserFocus: (tabId) => browsers.focus(tabId),
-      browserTakeover: bridge.views ? async botId => {
-        const result = await call('browser-takeover', { botId })
-        await bridge.views.hold(botId, true)
-        return result
-      } : undefined,
-      browserStop: bridge.views ? async botId => {
-        const result = await call('browser-stop', { botId })
-        await bridge.views.hold(botId, true)
-        return result
-      } : undefined,
+      browserTakeover: holdView ? (botId, callId) => call('browser-takeover', { botId, callId, viewClientId }) : undefined,
+      browserStop: holdView ? botId => call('browser-stop', { botId, viewClientId }) : undefined,
       // `answer` is a handoff card's { callId, outcome }; the panel's Give back sends none.
-      browserGiveBack: bridge.views ? async (botId, answer = {}) => {
-        const result = await call('browser-give-back', { botId, ...answer })
-        await bridge.views.hold(botId, false)
-        return result
-      } : undefined,
+      browserGiveBack: holdView ? (botId, answer = {}) => call('browser-give-back', { ...answer, botId, viewClientId }) : undefined,
       // Cookie imports, only where the bridge offers them (the desktop app): a file or an
       // installed browser's profile is previewed, then applied into the Bot's storage key.
       browserImport: typeof bridge.importSources === 'function' ? {
@@ -749,7 +773,7 @@ export function apply(ctx) {
     // Without the bridge a Bot's own browser is a window of the Chrome on this computer: it
     // still hands over to the user, through the host alone, and the team view carries the hold.
     Object.assign(actions, {
-      browserTakeover: botId => call('browser-takeover', { botId }),
+      browserTakeover: (botId, callId) => call('browser-takeover', { botId, callId }),
       browserStop: botId => call('browser-stop', { botId }),
       browserGiveBack: (botId, answer = {}) => call('browser-give-back', { botId, ...answer }),
     })
@@ -1180,6 +1204,8 @@ export function apply(ctx) {
     () => installCompiledStyles(GOAL_CSS, 'goal'),
     () => installCompiledStyles(USER_MESSAGE_CSS, 'user-messages'),
     () => installCompiledStyles(TASK_CSS, 'tasks'),
+    () => installCompiledStyles(SETTINGS_CARD_CSS, 'settings-card'),
+    () => setSettingsPages({ PAGE_ICONS, PageBoundary, SettingsPage }),
     () => installCompiledStyles(DESKTOP_UPDATE_CSS, 'desktop-update'),
     () => installCompiledStyles(WORK_CODE_SWITCH_CSS, 'work-code-switch'),
     () => installCompiledStyles(PRIVACY_CSS, 'privacy'),
@@ -1189,10 +1215,19 @@ export function apply(ctx) {
     () => installCompiledStyles(VOICE_SETTINGS_CSS, 'voice-settings'),
     () => installCompiledStyles(IMAGE_CELL_CSS, 'image-cell'),
     () => installCompiledStyles(SUGGEST_CSS, 'suggestions'),
+    () => installCompiledStyles(GENUI_CSS, 'genui'),
     () => installCompiledStyles(LIVE_CSS, 'live'),
     () => {
       const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
         scope.effect(() => installLiveTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: LiveTab }), 'ds-bot: native Live tab')
+      })
+      return () => fiber.dispose()
+    },
+    // The Bot browser in the same right column: the person drives the Bot's own page, then
+    // hands it back, so the Web app needs no Electron webview to show it.
+    () => {
+      const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
+        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody }), 'ds-bot: native Bot browser tab')
       })
       return () => fiber.dispose()
     },
@@ -1216,6 +1251,10 @@ export function apply(ctx) {
       name: 'main', key: SEAT_CHAT_PANEL,
       inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
     }, SeatChatPanel)),
+    () => ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main', key: CODE_PANEL,
+      inject: () => ({ onBack: codePanel.close }),
+    }, CodeMainPanel)),
     () => shadow('sidebar.brand.mark', { priority: BOT_PRIORITY }, BrandMark),
     () => shadow('sidebar.brand.name', { priority: BOT_PRIORITY }, BrandName),
     // The desktop app's own update, above the account and Channels (desktop-update.js).
@@ -1298,6 +1337,7 @@ export function apply(ctx) {
     () => installCompiledStyles(QUEUE_CSS, 'queue'),
     () => installMentions(),
     () => installAtMenu(),
+    () => installLoginCommand(ctx, { roster, actions, t }),
     () => installAdvancedStyle(),
     installHeader,
     installNativeBotHeader,
@@ -1338,6 +1378,7 @@ export function apply(ctx) {
     () => shadow('conversation.composer.dock', { id: 'btw', order: 2, priority: BOT_PRIORITY, inject: face }, BtwDock),
     () => shadow('conversation.input.left', { id: 'bot-plus', order: -100, inject: face }, ComposerPlus),
     () => shadow('conversation.input.left', { id: 'bot-permission-chip', order: -99, inject: face }, ComposerPermission),
+    () => shadow('conversation.input.left', { id: 'session-read-scope', order: -98 }, ReadScopeControl),
     () => shadow('conversation.input.right', { id: 'bot-voice', order: 100, inject: face }, ComposerVoice),
     () => shadow('conversation.composer', {
       priority: BOT_PRIORITY,

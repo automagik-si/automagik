@@ -1,20 +1,21 @@
-// The Code side's flip (RFC 0030 delivery 1): the state a Bot conversation's Chat / Terminal
-// switch and a seat face's switch share (RFC 0022 delivery 1L), and the lazy seam to the
-// renderer.
+// The Code side's flip (RFC 0030 delivery 1): the seat's Chat / Terminal face, the bar's
+// independent Team / Code list, and the lazy seam to the renderer.
 //
 // Nothing of the renderer loads at app start: this module carries only the switch's state, the
 // tree read (on a press) and the registration that swaps the body while Terminal is chosen.
 // The pane, the tree's rows, xterm.js and their stylesheets live in `client.pane.js`, a
-// package-local client chunk the DSH module loader fetches the first time the body renders
-// (`loadPane` below). Opening Chat alone fetches neither the chunk nor the team tree.
+// package-local client chunk the DSH module loader fetches after the tree read permits the
+// pane (`loadPane` below). Opening Chat alone fetches neither the chunk nor the team tree.
 import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react'
 import { call } from './api.js'
 import { t } from './i18n.js'
-import { FaceSwitch } from './left-bar-faces.js'
+import { FaceSwitch, TwoPartSwitch } from './left-bar-faces.js'
 import { botRowOf, codeHasPane, paneFor, statusKey, stillThere } from './code-side-model.js'
 import { PANE_CHUNK, loadPane } from './code-side-lazy.js'
 
-const NO_STATE = { face: 'chat', botId: null, seat: false, tree: null, loading: false, error: null, selected: null, loadedAt: 0 }
+export const CODE_PANEL = 'automagik-code'
+
+const NO_STATE = { side: 'team', barSelected: null, face: 'chat', botId: null, seat: false, tree: null, loading: false, error: null, selected: null, loadedAt: 0 }
 
 // One store for the window, as the rest of the team's client uses.
 const listeners = new Set()
@@ -84,24 +85,92 @@ export function useCodeFace(botId, { seat = false } = {}) {
 
 /** The open Bot's switch, wired to the flip: the view's entry to Code mode. */
 export function BotFaceSwitch({ bot }) {
-  const code = useCodeFace(bot?.id)
-  return h(FaceSwitch, { face: code.face, onFace: code.onFace })
+  const code = useCodeFace(bot?.id, { seat: true })
+  return bot?.seat === true ? h(FaceSwitch, { face: code.face, onFace: code.onFace }) : null
 }
+
+export function useCodeSide() {
+  return useSyncExternalStore(storeSubscribe, snapshot, snapshot)
+}
+
+export function setCodeSide(side) {
+  set({ side })
+  if (side === 'code') void loadTree({ fresh: true })
+}
+
+export function CodeSideSwitch({ current, onSelect }) {
+  const needs = (current.tree?.projects ?? []).reduce((count, project) => count + project.bots.reduce(
+    (sum, bot) => sum + Number(bot.status === 'needs-you') + bot.workers.filter(worker => worker.status === 'needs-you').length, 0,
+  ), 0)
+  const badge = needs > 0 ? h('span', { className: 'lb-count', title: t('Needs you') }, needs > 99 ? '99+' : String(needs)) : null
+  return h(TwoPartSwitch, {
+    current: current.side, onSelect, label: t('Team or Code'),
+    parts: [{ name: 'team', content: [t('Team')] }, { name: 'code', content: [t('Code'), badge] }],
+  })
+}
+
+/** A root panel overlays the retained Session or seat panel, with its own terminal selection. */
+export function codePanelNavigation(layout) {
+  let previous = null
+  const active = () => layout.panelInfo.getSnapshot().activePanelId
+  return {
+    open(selected) {
+      if (active() !== CODE_PANEL) {
+        previous = active()
+        layout.selectPanel(CODE_PANEL)
+      }
+      set({ barSelected: selected })
+    },
+    close() {
+      if (active() !== CODE_PANEL) return
+      try { layout.selectPanel(previous) } catch { layout.selectPanel(null) }
+      set({ barSelected: null })
+    },
+  }
+}
+
 
 /**
  * The body of the Terminal face, for a conversation (registered below) and for a seat's panel
  * (rendered by seat-chat.js): it loads the chunk once and draws the pane the flip selected.
  */
 export function CodeBody() {
+  const current = useCodeSide()
+  return h(CodeRenderer, { current, render: pane => h(pane.CodeBody, { code: codeApi }) })
+}
+
+export function CodeBarList({ current, onSelect }) {
+  return h(CodeRenderer, {
+    current, showLoading: true,
+    render: pane => h(pane.CodeTree, { current: { ...current, selected: current.barSelected }, onSelect, sidebar: true }),
+  })
+}
+
+export function CodeMainPanel({ onBack }) {
+  const current = useCodeSide()
+  return h('div', { className: 'bt-seat', 'data-code-panel': '' },
+    h('header', { className: 'bt-seat-head' },
+      h('button', { type: 'button', className: 'bt-seat-back', 'aria-label': t('Back'), title: t('Back'), onClick: onBack }, '←')),
+    h('div', { className: 'bt-seat-body' },
+      h(CodeRenderer, { current, render: pane => h('section', { className: 'cs-host' },
+        h(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, loading: current.loading })) })))
+}
+
+function CodeRenderer({ current, render, showLoading }) {
+  const desktopOnly = current.tree?.reason === 'desktop-only'
+  const shouldLoadPane = current.loadedAt !== 0 && !desktopOnly
   const [pane, setPane] = useState(null)
   const [failed, setFailed] = useState(false)
   useEffect(() => {
+    if (!shouldLoadPane) return
     let live = true
     loadPane().then((module) => { if (live) setPane(module) }, () => { if (live) setFailed(true) })
     return () => { live = false }
-  }, [])
-  if (pane) return h(pane.CodeBody, { code: codeApi })
-  return failed ? h('div', { className: 'cs-host' }, h('p', { className: 'cs-empty' }, t('The Code side could not load here.'))) : null
+  }, [shouldLoadPane])
+  if (desktopOnly) return h('div', { className: 'cs-host' }, h('p', { className: 'cs-empty' }, t('Terminals show in the Automagik desktop app.')))
+  if (shouldLoadPane && pane) return render(pane)
+  if (failed) return h('div', { className: 'cs-host' }, h('p', { className: 'cs-empty' }, t('The Code side could not load here.')))
+  return showLoading ? h('p', { className: 'bt-hint', role: 'status' }, t('Reading this computer’s team…')) : null
 }
 
 /** The Session the window shows: the one the shell keeps as its main view. */

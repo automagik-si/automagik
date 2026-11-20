@@ -89,12 +89,20 @@ async function setup({ served = ['read', 'ask_user', QUESTION], goals, throwOn }
   const rt = createRuntime(ctx, { home, github: false, diagnosticsFile: false })
   await rt.load()
   const guard = (name, sessionId) => ctx.guards.map(check => check({ name, agent: sessionId === undefined ? undefined : { id: sessionId } })).find(reason => reason !== undefined)
+  // The file tools' guards read what DSH's tools/pre-execute prepared for this call's token,
+  // from the calling Session's header; run that preparation first, as DSH does.
+  const preparedGuard = async (name, sessionId) => {
+    const exec = { name, token: {}, agent: { id: sessionId, session: { id: sessionId, header: { id: sessionId } } } }
+    const prepare = ctx.listeners.get('tools/pre-execute').find(listener => listener.name === 'prepareReadScope')
+    await prepare(exec, async () => {})
+    return ctx.guards.map(check => check(exec)).find(reason => reason !== undefined)
+  }
   const hiddenIn = id => hidden.filter(([sessionId, deny]) => sessionId === id && deny.includes(QUESTION))
   const stop = async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { ctx, rt, agentFor, hidden, hiddenIn, guard, sent, scopedListeners, stop }
+  return { ctx, rt, agentFor, hidden, hiddenIn, guard, preparedGuard, sent, scopedListeners, stop }
 }
 
 // DSH's goal service, holding one goal per Session; block() records what was asked.
@@ -175,12 +183,13 @@ test('an adopted DSH Bot retains native question and goal tools alongside team t
 })
 
 test('the guard refuses the blocking question tool in Bot Sessions only', async (t) => {
-  const { guard, stop } = await setup()
+  const { guard, preparedGuard, stop } = await setup()
   t.after(stop)
   for (const sessionId of ['chief', 'writer', 'room-writer']) assert.match(guard(QUESTION, sessionId), /Ask with ask_user in your own chat, or ask in your reply\./)
   for (const sessionId of ['plain', 'elsewhere', undefined]) assert.equal(guard(QUESTION, sessionId), undefined)
   assert.equal(guard('ask_user', 'writer'), undefined)
-  assert.equal(guard('read', 'writer'), undefined)
+  // A prepared read in a root Session with no file-tool folder set.
+  assert.equal(await preparedGuard('read', 'writer'), undefined)
 })
 
 // FeiZhuLulu/DS-Bot#77: a new Bot told never to use a question tool was opened

@@ -9,9 +9,10 @@
 // more output; kind 2 is a stream close. The attach is `observe: true`: herdr-core itself
 // refuses to let this viewer type or resize, so the pane is a watcher, not a second owner.
 //
-// This module is the protocol and the process only: no files, no registry, no policy. The
+// This module probes for a running core and manages its protocol connection. The
 // tree and the route (code-side.js) decide which terminal may be attached.
 import { spawn } from 'node:child_process'
+import { probeCore } from './core-probe.js'
 
 export const KINDS = Object.freeze({ data: 0, credit: 1, close: 2, resize: 3, focus: 4 })
 /** The core's cap on one frame's payload; a header above it is a broken stream. */
@@ -64,8 +65,11 @@ export class CoreError extends Error {
  * @returns {Promise<CoreConnection>}
  */
 export async function connectCore({ bin, env = process.env, cwd, onStderr = () => {}, spawn: spawnProcess = spawn } = {}) {
+  const socket = await probeCore(env)
+  if (socket === null) throw new CoreError('no-core')
+  // Use the socket that answered, even when hc's first choice was stale.
   const command = bin ?? (env.HERDR_HC && String(env.HERDR_HC).trim() ? env.HERDR_HC : 'hc')
-  const child = spawnProcess(command, ['connect'], { stdio: ['pipe', 'pipe', 'pipe'], env, cwd, windowsHide: true })
+  const child = spawnProcess(command, ['connect'], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...env, HC_SOCKET: socket }, cwd, windowsHide: true })
   const core = new CoreConnection(child, { onStderr })
   try {
     await core.start()

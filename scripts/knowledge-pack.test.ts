@@ -391,13 +391,13 @@ describe('the knowledge pack', () => {
     expect(() => placeholderTest([{ rule: 'email', match: 'x', pattern: '^x$', why: 'w' }])).toThrow(/one of match or pattern/);
     expect(() => placeholderTest([{ rule: 'email', pattern: 'x', why: 'w' }])).toThrow(/anchored/);
     const at = String.fromCharCode(64);
-    const pass = placeholderTest([{ rule: 'email', pattern: `^a${at}[0-9]$`, why: 'w' }, { rule: 'home-path', match: 'h', why: 'w' }]);
-    expect(pass({ rule: 'email', match: `a${at}1` })).toBe(true);
-    expect(pass({ rule: 'email', match: `a${at}12` })).toBe(false);
+    const pass = placeholderTest([{ rule: 'email', pattern: `^omni${at}v[0-9]+$`, why: 'w' }, { rule: 'home-path', match: 'h', why: 'w' }]);
+    expect(pass({ rule: 'email', match: `omni${at}v1` })).toBe(true);
+    expect(pass({ rule: 'email', match: `omni${at}v1x` })).toBe(false);
     expect(pass({ rule: 'email', match: 'h' })).toBe(false);
     expect(pass({ rule: 'home-path', match: 'h' })).toBe(true);
-    expect(pass({ rule: 'home-path', match: `a${at}1` })).toBe(false);
-    expect(pass({ rule: 'secret', match: `a${at}1` })).toBe(false);
+    expect(pass({ rule: 'home-path', match: `omni${at}v1` })).toBe(false);
+    expect(pass({ rule: 'secret', match: `omni${at}v1` })).toBe(false);
   });
 
   test('a placeholder pattern that matches empty text, has no literal part or matches unrelated text is refused', () => {
@@ -471,9 +471,17 @@ describe('the knowledge pack', () => {
     const shipped: Placeholder[] = JSON.parse(readFileSync(PLACEHOLDERS_PATH, 'utf8')).placeholders;
     expect(() => placeholderTest(shipped)).not.toThrow();
     expect(placeholderTest(shipped)({ rule: 'email', match: `omni${at}2.251115` })).toBe(true);
-    const narrow = [`^a${at}[0-9]$`, `^you${at}x\\.com$|^me${at}x\\.com$`, `^omni${at}v[0-9]+$`];
+    const narrow = [`^you${at}x\\.com$|^omni${at}[0-9]+\\.[0-9A-Za-z]+$`, `^you${at}x\\.com$|^me${at}x\\.com$`, `^omni${at}v[0-9]+$`];
     for (const pattern of narrow) expect(load(pattern)).not.toThrow();
     expect(load(`^${home}user$`, 'home-path')).not.toThrow();
+    expect(load(`^${home}user/docs/notes$`, 'home-path')).not.toThrow();
+    // A pinned local part or home name is not enough: the domain, and the path below the name,
+    // must be literal text too, the omni version forms aside. Each branch is checked on its own.
+    const DOMAIN = /must carry its whole domain as literal text/;
+    for (const pattern of [
+      `^a${at}[0-9]$`, `^you${at}[a-z]+\\.[a-z]+$`, `^omni${at}[a-z]+\\.[a-z]+$`, `^you${at}x\\.com$|^you${at}[a-z]+\\.[a-z]+$`,
+    ]) expect(load(pattern)).toThrow(DOMAIN);
+    expect(load(`^${home}user/[a-z]+/[a-z]+$`, 'home-path')).toThrow(/must carry the path below its home name as literal text/);
     const two = placeholderTest([{ rule: 'email', pattern: narrow[1], why: 'w' }]);
     expect([`you${at}x.com`, `me${at}x.com`, `them${at}x.com`].map((match) => two({ rule: 'email', match }))).toEqual([true, true, false]);
   });

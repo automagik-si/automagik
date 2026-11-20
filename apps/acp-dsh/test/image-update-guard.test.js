@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { AgentRun } from '../src/host/acp.js'
+import { ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { drawImage, IMAGE_TITLE, REFUSED } from '../src/host/image.js'
 import { CANCELLED, OPTIONS, soon } from './support/state-probe.js'
 
@@ -84,6 +87,9 @@ for (const [label, params] of [
 }
 
 async function refusedDraw(t, rejectTraffic) {
+  const home = mkdtempSync(join(tmpdir(), 'image-update-guard-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const profileModes = ensureChatProfiles(home, { platform: 'linux' })
   const prompt = AgentRun.prototype.prompt
   // Inject malformed traffic at the run boundary; the fake still supplies a valid image.
   t.mock.method(AgentRun.prototype, 'prompt', async function (...args) {
@@ -92,7 +98,8 @@ async function refusedDraw(t, rejectTraffic) {
     return prompting
   })
   await assert.rejects(drawImage({
-    spawn: () => ({ command: process.execPath, args: [join(import.meta.dirname, '../dev/fake-image-agent.mjs')], env: { FAKE_IMAGE_MODE: 'ok', CODEX_PATH: '/fake/codex' } }),
+    spawn: () => ({ command: process.execPath, args: [join(import.meta.dirname, '../dev/fake-image-agent.mjs')],
+      profileModes, env: { CODEX_HOME: home, FAKE_IMAGE_MODE: 'ok', FAKE_IMAGE_PROFILE: 'offer', CODEX_PATH: '/fake/codex' } }),
     prompt: 'a synthetic image',
   }), error => error.code === REFUSED && /Codex tried to do something other than draw/.test(error.message))
 }

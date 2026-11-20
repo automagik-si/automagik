@@ -5,7 +5,8 @@
 // A fake ACP agent for tests. Each prompt: two text chunks, one shell-like tool call that asks
 // permission first, then a line saying whether it ran. A prompt that says "twice" makes two
 // calls; one that says "hang" waits until it is cancelled; one that says "bridge <tool>" calls
-// that tool on the `dsh` MCP server it was given and reports what it answered; one that says
+// that tool on the `dsh` MCP server it was given and reports what it answered. "bridge-respawn
+// <tool>" restarts that server first, and "bridge-drop" closes it. One that says
 // "drift" announces a built-in tool call (a call `tools: []` should have removed) and waits;
 // one that says "image-call" makes an image the way Codex's image tool reports it.
 //
@@ -26,6 +27,7 @@
 // list starts with a "default" row, as Claude Code's does; FAKE_ACP_NO_DEFAULT_EFFORT=1 leaves it
 // out, as Codex's does. FAKE_ACP_AUTH=session (or prompt) refuses `session/new` (or every
 // prompt) with ACP's auth_required, as an adapter whose CLI is signed out does.
+// FAKE_ACP_EXTRA_EFFORT adds an effort only to fake-small.
 //
 // As a native agent's CLI (a command started with `acp`, #959): FAKE_ACP_SESSION_MODELS=1 offers
 // its models only as the session's own list (`models` in the `session/new` answer, switched
@@ -44,14 +46,15 @@
 // FAKE_ACP_REFUSE_MODES=a,b refuses those session/set_mode requests with invalidParams.
 // FAKE_ACP_IGNORE_CANCEL=1 makes it ignore `session/cancel`, as a stuck agent would.
 import { spawn } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
 
+const EXTRA_EFFORT = process.env.FAKE_ACP_EXTRA_EFFORT
 const MODELS = [
   { value: 'fake-large', name: 'Fake Large', efforts: ['low', 'medium', 'high'], effort: 'medium' },
-  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high'], effort: 'low' },
+  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high', ...(EXTRA_EFFORT ? [EXTRA_EFFORT] : [])], effort: 'low' },
   { value: 'fake-plain', name: 'Fake Plain', efforts: [], effort: undefined },
 ]
 const OFFERS = process.env.FAKE_ACP_NO_OPTIONS !== '1'
@@ -94,6 +97,17 @@ function connect(server, sessionId) {
   child.stdin.on('error', () => {})
   let seq = 0
   const pending = new Map()
+  let failure
+  const exited = new Promise(resolve => {
+    const end = error => {
+      failure = error
+      for (const { reject } of pending.values()) reject(error)
+      pending.clear()
+      resolve()
+    }
+    child.once('error', end)
+    child.once('exit', (code, signal) => end(new Error(`${server.name} exited (${signal ?? code})`)))
+  })
   let buffer = ''
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', (chunk) => {
@@ -114,12 +128,14 @@ function connect(server, sessionId) {
       const waiter = pending.get(message.id)
       if (waiter === undefined) continue
       pending.delete(message.id)
-      waiter(message)
+      if (message.error === undefined) waiter.resolve(message.result)
+      else waiter.reject(new Error(message.error.message))
     }
   })
   const request = (method, params) => new Promise((resolve, reject) => {
+    if (failure !== undefined) return reject(failure)
     const id = ++seq
-    pending.set(id, (message) => (message.error === undefined ? resolve(message.result) : reject(new Error(message.error.message))))
+    pending.set(id, { resolve, reject })
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
   })
   const notify = (method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`)
@@ -129,19 +145,32 @@ function connect(server, sessionId) {
     const listed = await request('tools/list', {})
     return Array.isArray(listed?.tools) ? listed.tools : []
   })()
-  return { name: server.name, child, request, tools: ready, close: () => { try { child.stdin.end() } catch {} ; try { child.kill('SIGTERM') } catch {} } }
+  const stop = () => {
+    child.stdin.end()
+    return exited
+  }
+  const close = () => {
+    try { child.stdin.end() } catch {}
+    try { child.kill('SIGTERM') } catch {}
+  }
+  return { request, tools: ready, stop, close }
+}
+
+async function attachServer(session, server, sessionId) {
+  const connection = connect(server, sessionId)
+  session.mcp.set(server.name, connection)
+  const tools = await connection.tools.catch(() => [])
+  trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name) })
 }
 
 async function attach(session, servers, sessionId) {
   session.mcp = new Map()
   if (SKIP_MCP) return
   for (const server of servers ?? []) {
-    const connection = connect(server, sessionId)
-    session.mcp.set(server.name, connection)
-    const tools = await connection.tools.catch(() => [])
+    if (server.name === 'dsh') session.dshServer = server
     // The adapter's first `tools/list` for this session, before its `session/new` (or fork)
     // answer: the delivery 6 probes read this order from the trace.
-    trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name) })
+    await attachServer(session, server, sessionId)
   }
 }
 
@@ -400,10 +429,87 @@ const implementation = {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' The MCP tool answered.' } })
       return { stopReason: 'end_turn' }
     }
+    // Claude Code's own tools by their structured names, as in native-tools mode: `native-read`
+    // is a Read that does not ask (its default mode lets reads through), `native-bash` a Bash
+    // that asks first, `native-agent` an Agent call whose subagent's nested Bash asks while the
+    // Agent call is still running. `native-agent-late` stamps the child's parent after asking.
+    // A call that asks runs only when allowed; the trace says so.
+    const native = /native-(read|bash|agent-late|agent)/.exec(said)
+    if (native !== null) {
+      const toolCallId = `native-${session.turns}`
+      const ask = async (id, title, rawInput) => {
+        const answer = await conn.requestPermission({
+          sessionId,
+          toolCall: { toolCallId: id, title, kind: 'execute', rawInput },
+          options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+        })
+        return answer.outcome.outcome === 'selected' ? answer.outcome.optionId : answer.outcome.outcome
+      }
+      const runBash = async (id, parent) => {
+        const rawInput = { command: 'echo native' }
+        const late = native[1] === 'agent-late'
+        await update({ sessionUpdate: 'tool_call', toolCallId: id, name: 'Bash', title: 'echo native', kind: 'execute', status: 'pending', rawInput, _meta: { claudeCode: { toolName: 'Bash', ...(parent === undefined || late ? {} : { parentToolUseId: parent }) } } })
+        const asking = ask(id, 'Run command?', rawInput)
+        if (late) {
+          if (/native-agent-late hold\b/.test(said)) {
+            // The test signals from the reviewer once the unstamped row has been logged.
+            const deadline = Date.now() + 5_000
+            while (!existsSync('.native-agent-late-ready') && !session.cancelled) {
+              if (Date.now() >= deadline) throw new Error('Timed out waiting for the late parent test signal')
+              await new Promise(resolve => setTimeout(resolve, 10))
+            }
+          }
+          if (!session.cancelled) await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'in_progress', _meta: { claudeCode: { parentToolUseId: parent } } })
+        }
+        const answer = await asking
+        if (answer === 'yes') {
+          trace({ event: 'native-tool-ran', sessionId, toolCallId: id, name: 'Bash' })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'native' } }] })
+        } else {
+          trace({ event: 'native-tool-refused', sessionId, toolCallId: id, name: 'Bash', answer })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'Not allowed' } }] })
+        }
+        return answer
+      }
+      if (native[1] === 'read') {
+        await update({ sessionUpdate: 'tool_call', toolCallId, name: 'Read', title: 'Read notes.txt', kind: 'read', status: 'pending', rawInput: { file_path: 'notes.txt' }, _meta: { claudeCode: { toolName: 'Read' } } })
+        trace({ event: 'native-tool-ran', sessionId, toolCallId, name: 'Read' })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'the notes' } }] })
+        // "native-read hold": the turn then waits until it is cancelled, as "drift" does, so a
+        // turn the drift detector cancels ends only once that cancel arrived (and was traced).
+        if (/hold/.test(said)) {
+          if (!session.cancelled) await new Promise((resolve) => { session.wake = resolve })
+          return { stopReason: 'cancelled' }
+        }
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' I read the notes.' } })
+      } else if (native[1] === 'bash') {
+        const answer = await runBash(toolCallId)
+        if (session.cancelled || answer === 'cancelled') return { stopReason: 'cancelled' }
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: answer === 'yes' ? ' It printed native.' : ' I was not allowed to run it.' } })
+      } else {
+        await update({ sessionUpdate: 'tool_call', toolCallId, name: 'Agent', title: 'Look around', kind: 'think', status: 'pending', rawInput: { description: 'Look around', prompt: 'look', subagent_type: 'general-purpose' }, _meta: { claudeCode: { toolName: 'Agent' } } })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'in_progress' })
+        const answer = await runBash(`${toolCallId}-child`, toolCallId)
+        if (session.cancelled || answer === 'cancelled') return { stopReason: 'cancelled' }
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: `subagent report (${answer})` } }] })
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` The subagent reported (${answer}).` } })
+      }
+      return { stopReason: 'end_turn' }
+    }
     // A tool call on the `dsh` bridge, by the name Claude Code puts on the wire. With "permit"
     // the call first asks session/request_permission, as Claude Code does in Manual; without it
     // the call runs with no ACP-level request at all, as it would in Auto.
-    const bridged = /bridge(-permit)? (\S+)/.exec(said)
+    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
+    const respawn = /\bbridge(-respawn) (\S+)/.exec(current)
+    const drop = /\bbridge-drop\b/.test(current)
+    if (respawn !== null || drop) {
+      const connection = session.mcp.get('dsh')
+      session.mcp.delete('dsh')
+      await connection?.stop()
+      if (drop) return { stopReason: 'end_turn' }
+      if (session.dshServer !== undefined) await attachServer(session, session.dshServer, sessionId)
+    }
+    const bridged = respawn ?? /bridge(-permit)? (\S+)/.exec(said)
     if (bridged !== null) {
       const permit = bridged[1] === '-permit'
       const name = bridged[2]

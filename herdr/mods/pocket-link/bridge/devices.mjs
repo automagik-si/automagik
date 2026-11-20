@@ -1,25 +1,25 @@
-// devices.json, the paired phones, has one writer: the running bridge. `forget` (the dialog's
-// Remove) runs as its own process, so it hands the removal to the bridge over bridge.sock in the
-// state folder and waits for the answer; it writes the file itself only when no bridge answers.
-// Two writers each reading, changing and writing the file could put a removed phone back.
+// The running bridge owns devices.json. The dialog's `forget` and `reset` commands ask it over
+// bridge.sock. When they write the file themselves, devices.lock serializes those changes.
 //
 //   bridge.sock   one JSON line in, {"forget": "<id>"}; one line out, {"ok", "removed"} or {"ok": false, "error"}
+//                 or {"reset": true} / {"adopt": true}; one line out, {"ok", "unpaired", "id"} or {"ok": false, "error"}
 //                 or {"ping": true}; one line out, {"ok": true, "pid"}: bridgeState() below
 //
 // status.json's pid alone does not say a bridge runs: after a crash the pid can belong to another
 // process. bridgeState() asks the socket, then checks the pid's start time against the one the
-// bridge recorded, and serve, start, stop, status, pair and forget all go by it (issue #301).
+// bridge recorded, and serve, start, stop, status, pair, forget and reset all go by it (issue #301).
 //
 // No dependencies, so node --test runs it without the bridge's packages.
 import { execFileSync } from 'node:child_process'
 import { createConnection, createServer } from 'node:net'
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 export const SOCKET = 'bridge.sock'
 export const FILE = 'devices.json'
 export const STATUS = 'status.json'
-// How long `forget` waits for the bridge (its loop can be busy finding hc for a session), and the
+// How long `forget` and `reset` wait for the bridge (its loop can be busy), and the
 // bridge for a request line. Under the dialog's 30s exec limit.
 export const TIMEOUT = 10_000
 const MAX_REQUEST = 4096
@@ -76,6 +76,38 @@ export function store(path, { held = () => {} } = {}) {
     touch: (id, now = Date.now()) => { const all = read(); if (all.some((d) => d.id === id)) write(all.map((d) => (d.id === id ? { ...d, seen: now } : d))) },
     /** True when the phone was listed. */
     remove: (id) => { const all = read(); const kept = all.filter((d) => d.id !== id); if (kept.length !== all.length) write(kept); return kept.length !== all.length },
+    clear: () => { const count = read().length; write([]); return count },
+  }
+}
+
+/** Serializes file changes by commands that cannot leave the write to a running bridge. */
+export async function withLock(dir, fn) {
+  const path = join(dir, 'devices.lock')
+  const deadline = Date.now() + 3000
+  let fd
+  for (;;) {
+    try { fd = openSync(path, 'wx', 0o600); break } catch (e) { if (e.code !== 'EEXIST') throw e }
+    if (Date.now() >= deadline) throw new Error('Another change to the paired phones is running. Try again.')
+    const own = fileId(path)
+    if (!own) continue
+    const { pid } = readJson(path, {}) ?? {}
+    let age
+    try { age = Date.now() - statSync(path).mtimeMs } catch (e) { if (e.code === 'ENOENT') continue; throw e }
+    // A new owner may still be writing its pid.
+    if (age > 30_000 || (Number.isInteger(pid) && pid > 0 && !defaultAlive(pid))) {
+      if (fileId(path) === own) try { unlinkSync(path) } catch (e) { if (e.code !== 'ENOENT') throw e }
+      continue
+    }
+    await delay(50)
+  }
+  try {
+    // Record ownership before doing any work that another command might have to wait for.
+    writeSync(fd, JSON.stringify({ pid: process.pid }))
+    return await fn()
+  } finally {
+    const own = fileId(path, (_, options) => fstatSync(fd, options))
+    closeSync(fd)
+    if (own && fileId(path) === own) try { unlinkSync(path) } catch (e) { if (e.code !== 'ENOENT') throw e }
   }
 }
 
@@ -84,7 +116,7 @@ export function store(path, { held = () => {} } = {}) {
  * returns whether it was listed. A stale socket from a bridge that died is replaced. Resolves to
  * the server once it listens; the socket is the owner's only (and the state folder is 0700).
  */
-export function listen(path, { forget, log = () => {}, pid = process.pid }) {
+export function listen(path, { forget, reset, adopt, log = () => {}, pid = process.pid }) {
   if (!fits(path)) return Promise.reject(new Error(`${path} is ${Buffer.byteLength(path)} bytes, too long for a socket (at most ${SOCKET_MAX})`))
   try { unlinkSync(path) } catch {}
   const server = createServer((sock) => {
@@ -92,7 +124,7 @@ export function listen(path, { forget, log = () => {}, pid = process.pid }) {
     sock.setTimeout(TIMEOUT, () => sock.destroy())
     sock.on('error', () => {})
     let buf = ''
-    const onData = (chunk) => {
+    const onData = async (chunk) => {
       buf += chunk
       const nl = buf.indexOf('\n')
       if (nl < 0) { if (buf.length > MAX_REQUEST) sock.destroy(); return }
@@ -101,6 +133,8 @@ export function listen(path, { forget, log = () => {}, pid = process.pid }) {
       try {
         const request = JSON.parse(buf.slice(0, nl))
         if (request?.ping === true) answer = { ok: true, pid }
+        else if (request?.reset === true && reset) answer = { ok: true, ...(await reset()) }
+        else if (request?.adopt === true && adopt) answer = { ok: true, ...(await adopt()) }
         else if (typeof request?.forget !== 'string' || request.forget === '') throw new Error('unknown request')
         else answer = { ok: true, removed: Boolean(forget(request.forget)) }
       } catch (e) { answer = { ok: false, error: e.message } }
@@ -294,7 +328,7 @@ export async function forget({ dir, id, alive = defaultAlive, started = startedA
       await new Promise((resolve) => setTimeout(resolve, wait))
     }
   }
-  const removed = store(join(dir, FILE)).remove(id)
+  const removed = await withLock(dir, () => store(join(dir, FILE)).remove(id))
   // A bridge that bound the socket after the check above may have read the list before this write.
   const late = await ask(sock, { forget: id }, { timeout }).catch(() => null)
   return { ok: true, removed: removed || Boolean(late?.removed), via: 'file' }

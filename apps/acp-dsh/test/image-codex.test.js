@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -28,12 +29,82 @@ function home(t, config = '') {
   for (const dir of ['home', 'codex', 'cwd']) mkdirSync(join(root, dir))
   if (config !== '') writeFileSync(join(root, 'codex', 'config.toml'), config)
   // No key of the person's own reaches Codex: it must stay signed out.
-  const env = { HOME: join(root, 'home'), USERPROFILE: join(root, 'home'), CODEX_HOME: join(root, 'codex'), CODEX_PATH: CODEX, OPENAI_API_KEY: '', CODEX_API_KEY: '', CODEX_ACCESS_TOKEN: '' }
+  const env = {
+    HOME: join(root, 'home'), USERPROFILE: join(root, 'home'), CODEX_HOME: join(root, 'codex'), CODEX_PATH: CODEX,
+    OPENAI_API_KEY: '', CODEX_API_KEY: '', CODEX_ACCESS_TOKEN: '', NO_COLOR: '1',
+    HTTP_PROXY: 'http://127.0.0.1:9', HTTPS_PROXY: 'http://127.0.0.1:9', ALL_PROXY: 'http://127.0.0.1:9',
+    NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost',
+  }
   return { root, env, launch: { command: process.execPath, args: [ADAPTER], env } }
 }
 const cli = (launch, args) => new Promise((resolve, reject) => {
   execFile(launch.command, [...launch.args, 'cli', ...args], { env: { ...process.env, ...launch.env, NO_COLOR: '1' }, cwd: tmpdir(), timeout: 30_000, maxBuffer: 8 << 20 }, (error, stdout) => (error ? reject(error) : resolve(stdout)))
 })
+
+// A fixed loopback Responses peer, so a real codex-acp session can run signed out. One ordinary
+// answer is returned; nothing leaves this computer and no model is asked.
+async function fixedPeer(t) {
+  const inputs = []
+  const server = createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    let body
+    try { body = JSON.parse(raw) } catch { res.writeHead(400).end(); return }
+    inputs.push(body.input)
+    const n = inputs.length
+    const id = `resp_${n}`
+    const item = { type: 'message', id: `msg_${n}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'DONE', annotations: [] }] }
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    const emit = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`)
+    emit('response.created', { response: { id, status: 'in_progress', output: [] } })
+    emit('response.output_item.added', { output_index: 0, item })
+    emit('response.output_item.done', { output_index: 0, item })
+    emit('response.completed', { response: { id, status: 'completed', output: [item], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })
+    res.end()
+  })
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  t.after(() => { server.closeAllConnections(); if (server.listening) server.close() })
+  return { port: server.address().port, inputs }
+}
+const provider = port => ({
+  model: 'gpt-6.1-sol',
+  model_provider: 'automagik-image-test',
+  model_providers: {
+    'automagik-image-test': {
+      name: 'fixed loopback test peer', base_url: `http://127.0.0.1:${port}/v1`,
+      wire_api: 'responses', requires_openai_auth: false,
+    },
+  },
+  shell_environment_policy: { inherit: 'none' },
+  analytics: { enabled: false },
+  feedback: { enabled: false },
+})
+const execDescription = input => (input ?? [])
+  .flatMap(item => (item.type === 'additional_tools' ? item.tools ?? [] : []))
+  .find(tool => tool.name === 'functions')?.tools?.find(tool => tool.name === 'exec')?.description ?? ''
+
+// The session's own path: CODEX_CONFIG goes to codex-acp, which hands it to Codex per thread.
+// A signed-out Codex stops at `session/new` without a provider, so this starts a real session
+// with the fixed loopback peer and reads the model-visible tools Codex itself built.
+async function session(t, launch, env, cwd, overrides, peer) {
+  const run = new AgentRun({
+    ...launch, env: { ...env, CODEX_CONFIG: JSON.stringify(overrides) }, cwd, name: 'Codex',
+    mcpServers: [], startMs: 20000, requestMs: 15000,
+  })
+  t.after(() => run.dispose())
+  await run.start()
+  const prompting = run.prompt([{ type: 'text', text: 'Say done.' }])
+  prompting.catch(() => {})
+  for (;;) {
+    const event = await run.next()
+    assert.notEqual(event.type, 'error', 'the fixed peer turn must finish')
+    assert.notEqual(event.type, 'aborted', 'the fixed peer turn must not be aborted')
+    if (event.type === 'end') break
+  }
+  await prompting
+  await run.stop().catch(() => {})
+  return execDescription(peer.inputs.at(-1))
+}
 
 test('real Codex: the shipped lists pass, and the tools left are the allowed ones', { skip }, async (t) => {
   const { root, launch } = home(t)
@@ -89,9 +160,8 @@ test('real Codex: a config it cannot load is told apart', { skip }, async (t) =>
 })
 
 // The session's own path: CODEX_CONFIG goes to codex-acp, which hands it to Codex per thread.
-// A Codex that is not signed in stops at `session/new`, so this proves only that the real
-// adapter starts with the run's CODEX_CONFIG and answers; that the per-thread overrides are
-// honoured needs a signed-in Codex (the human test in the local app).
+// Without a provider a signed-out Codex stops at `session/new`; with the fixed loopback peer
+// the next test reads the model-visible tools Codex built from that per-thread config.
 test('real codex-acp: starts with the run\'s CODEX_CONFIG and stops at the sign-in', { skip }, async (t) => {
   const { root, launch, env } = home(t)
   const { overrides } = await imageSetup(launch)
@@ -99,6 +169,20 @@ test('real codex-acp: starts with the run\'s CODEX_CONFIG and stops at the sign-
   t.after(() => run.dispose())
   await assert.rejects(run.start(), error => isAuthRequired(error))
   assert.equal(typeof run.init?.protocolVersion, 'number', 'initialize answered')
+})
+
+test('real codex-acp: the per-thread CODEX_CONFIG is honoured for view_image', { skip, timeout: 90_000 }, async (t) => {
+  const { root, launch, env } = home(t)
+  const cwd = realpathSync(join(root, 'cwd'))
+  const { overrides } = await imageSetup(launch, { cwd })
+  const peer = await fixedPeer(t)
+  const fixed = { ...overrides, ...provider(peer.port) }
+  assert.equal(fixed.features.view_image, false)
+  const off = await session(t, launch, env, cwd, fixed, peer)
+  assert.match(off, /declare const tools: \{ apply_patch\(/)
+  assert.doesNotMatch(off, /view_image/)
+  const on = await session(t, launch, env, cwd, { ...fixed, features: { ...fixed.features, view_image: true } }, peer)
+  assert.match(on, /declare const tools: \{ view_image\(/, 'the same config with the switch on offers it')
 })
 
 

@@ -200,6 +200,10 @@ Proposed `meter/usagemeter/part.json`:
 - Whether a release builds the meter is its own question, whatever the kind:
   `bun scripts/lane.ts meter <tag>` (yes or no), as `herdr` and `pocket` are. The tag is
   `meter-since`: the version `meter-lane` names, or the last release when there is no lane yet.
+  An existing `meter-lane` without a usable pointer pair makes the next release measure
+  from the start and rebuild the meter, and the cut can wait a bounded time for a previous stable
+  release's meter post (#668). Replacing an unverifiable pair needs the owner's
+  `replace_unverified_meter_pointer` dispatch.
   Pocket's reason applies: a prerelease never moves the pointer, so a meter change that shipped
   only in a prerelease is still ahead of the lane and the next release builds it again.
 - `release.yml`: every condition that reads "not herdr and not pocket" today also excludes
@@ -269,7 +273,8 @@ Three ways to make that pointer trustworthy:
   name, URL, sha256 and size. The signature is ed25519 over its exact bytes, detached, base64.
 - The key is `METER_LANE_KEY`, the meter's own, never `PLUGIN_LANE_KEY`, `HERDR_PACK_KEY` or
   `AM_LANE_KEY`. Two slots, `METER_LANE_KEY` and `METER_LANE_KEY_NEXT`; the variable
-  `METER_LANE_SIGNER` names the one releases sign with. `bun scripts/meter-lane.ts keygen`
+  `METER_LANE_SIGNER` names the one releases sign with. The workflow uses only the selected
+  slot, even when its secret is empty. `bun scripts/meter-lane.ts keygen`
   generates the pair in memory and pipes the private key straight to `gh secret set`: never
   printed, never on disk. Only then does it add the public key to
   `meter/usagemeter/meter-keys.json`. A rotation is RFC 0011's two phases: keygen fills the slot
