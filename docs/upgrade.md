@@ -270,8 +270,9 @@ With `--port 0 --public-url` the check refuses the update with `listener-unknown
 work. If a request reaches the supervisor with those flags, it records `notUpdated` with
 `listener-unknown` before changing the installation. For other `notUpdated` verdicts, the
 previous installation answered its own local health check. If a verdict cannot be written
-durably, the supervisor exits with an error and leaves the DSH child running for recovery.
-The last durable state guides recovery on the next supervised start.
+durably, the supervisor exits with an error without stopping DSH itself; the service manager
+then stops and restarts the unit, and the next supervised start recovers from the last durable
+state.
 
 ### Recover an unchanged or restored profile after `manualRecovery`
 
