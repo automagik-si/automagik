@@ -2837,6 +2837,7 @@ const pack = createPack({
     "Reading…": "Lendo…",
     "Reconnect": "Reconectar",
     "The Code side could not load here.": "O lado de código não pôde carregar aqui.",
+    "Terminals show in the Automagik desktop app.": "Os terminais aparecem no app Automagik para desktop.",
     "The Code side could not read this computer’s team.": "O lado de código não pôde ler a equipe deste computador.",
     "The terminal could not be reached": "Não foi possível alcançar o terminal",
     "This terminal ended": "Este terminal terminou",

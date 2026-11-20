@@ -5,8 +5,8 @@
 // Nothing of the renderer loads at app start: this module carries only the switch's state, the
 // tree read (on a press) and the registration that swaps the body while Terminal is chosen.
 // The pane, the tree's rows, xterm.js and their stylesheets live in `client.pane.js`, a
-// package-local client chunk the DSH module loader fetches the first time the body renders
-// (`loadPane` below). Opening Chat alone fetches neither the chunk nor the team tree.
+// package-local client chunk the DSH module loader fetches after the tree read permits the
+// pane (`loadPane` below). Opening Chat alone fetches neither the chunk nor the team tree.
 import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react'
 import { call } from './api.js'
 import { t } from './i18n.js'
@@ -93,13 +93,19 @@ export function BotFaceSwitch({ bot }) {
  * (rendered by seat-chat.js): it loads the chunk once and draws the pane the flip selected.
  */
 export function CodeBody() {
+  const current = useSyncExternalStore(storeSubscribe, snapshot, snapshot)
+  const desktopOnly = current.tree?.reason === 'desktop-only'
+  const shouldLoadPane = current.loadedAt !== 0 && !desktopOnly
   const [pane, setPane] = useState(null)
   const [failed, setFailed] = useState(false)
   useEffect(() => {
+    if (!shouldLoadPane) return
     let live = true
     loadPane().then((module) => { if (live) setPane(module) }, () => { if (live) setFailed(true) })
     return () => { live = false }
-  }, [])
+  }, [shouldLoadPane])
+  if (desktopOnly) return h('div', { className: 'cs-host' }, h('p', { className: 'cs-empty' }, t('Terminals show in the Automagik desktop app.')))
+  if (!shouldLoadPane) return null
   if (pane) return h(pane.CodeBody, { code: codeApi })
   return failed ? h('div', { className: 'cs-host' }, h('p', { className: 'cs-empty' }, t('The Code side could not load here.'))) : null
 }
