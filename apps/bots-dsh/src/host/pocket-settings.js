@@ -57,7 +57,7 @@ function readField(read) {
   try { return read() } catch { return undefined }
 }
 
-const snapshotOf = rt => rt.cachedCatalog({ current: true })
+const snapshotOf = rt => rt.cachedCatalog({ held: true })
 
 export function settingsOf(rt, botId, bot, terminal) {
   const catalog = readField(() => snapshotOf(rt)) ?? []
