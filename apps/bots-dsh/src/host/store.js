@@ -217,6 +217,7 @@ export function install(rt) {
     lockEpoch += 1
     // Until the end of this: a file that could not be read, or was set aside as corrupt,
     // leaves an empty team in memory that is not the saved one.
+    const kept = rt.hostAuthority?.capture()
     teamRead = false
     const valid = parsed !== null && parsed !== undefined ? true : stuck === undefined && !aside
     const hadCapabilities = parsed !== null && parsed !== undefined && Object.hasOwn(parsed, 'capabilities')
@@ -440,6 +441,7 @@ export function install(rt) {
     for (const room of stale) room.name = rt.autoRoomName(room.members)
     indexSessions()
     teamRead = valid
+    rt.hostAuthority?.restore(kept)
     return { migrated: migrated || stale.length > 0, stale }
   }
 

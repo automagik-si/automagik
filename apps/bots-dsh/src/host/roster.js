@@ -615,6 +615,7 @@ export function install(rt) {
   }
 
   async function updateBot(id, patch, actorId, fromSessionId, options) {
+    if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
     const run = () => updateBotRecord(id, patch, actorId, fromSessionId, options)
     return patch.model !== undefined || patch.effort !== undefined ? withModelChange(id, run, options?.admit !== undefined) : run()
   }
@@ -1417,7 +1418,15 @@ export function install(rt) {
   // The first Main Bot is the sidebar tile. `replace` gives a Main Bot's place to
   // another Bot in one step, so the team never has none; `primary` moves a Bot to the
   // front and keeps the others.
-  async function setMain(id, main, { primary = false, replace } = {}) {
+  async function setMain(id, main, options) {
+    if (rt.hostAuthority === undefined) return writeMain(id, main, options)
+    return rt.peopleQueue(async () => {
+      await writeMain(id, main, options)
+      await rt.mainChanged(id)
+    })
+  }
+
+  async function writeMain(id, main, { primary = false, replace } = {}) {
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
     if (main && bot.private === true) throw refusal(`${bot.name} is private, so it cannot be a Main Bot`)
@@ -1546,6 +1555,7 @@ export function install(rt) {
     let removed
     try { removed = rt.botOf(id) } catch {}
     delete state.bots[id]
+    rt.forgetShare?.(id)
     rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
     // The shared capability list is the user's and keeps its items; only a

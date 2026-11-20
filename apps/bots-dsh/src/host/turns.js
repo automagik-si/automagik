@@ -4,6 +4,7 @@
 // Turn tracking: which turns were triggered by another Bot, and what they said.
 import { randomUUID } from 'node:crypto'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
+import { closesPart } from './caller-view.js'
 import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate } from './constants.js'
 import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
@@ -482,7 +483,8 @@ export function install(rt) {
     showCall(id, entry)
   }
 
-  const markExchangeTurn = (sessionId, turn) => {
+  const markExchangeTurn = (sessionId, turn, { close = true } = {}) => {
+    if (close && rt.hostAuthority !== undefined) rt.closePart?.(sessionId, 'exchange')
     const turns = state.exchangeTurns[sessionId] ??= []
     if (!turns.includes(turn)) {
       turns.push(turn)
@@ -566,7 +568,9 @@ export function install(rt) {
     // A message that owes no reply is still an exchange between Bots: its turn is
     // hidden like the others.
     if (((expectsReply(info) || (info.role === 'request' && info.noReply === true)) && !answersUser(info)) || info.role === 'room' || (info.role === 'handoff' && info.resume !== true)) {
-      markExchangeTurn(sessionId, entry.turn)
+      // The owner's hidden acknowledgement of a plain move is safe for the part.
+      const close = info.role !== 'handoff' || closesPart({ type: 'user/message', data: { source: info } })
+      markExchangeTurn(sessionId, entry.turn, { close })
     }
   }
 
