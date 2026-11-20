@@ -598,7 +598,7 @@ the assertion contract stays.
 ## Amendment (2026-11-20): delivery 5 specified, the role-filtered DSH routes
 
 *Status: approved by the owner's delegate on 2026-11-20, with every recommended option; its
-questions are answered below. In delivery: none of its deliveries has merged. Issue #1373 (Refs).
+questions are answered below. In delivery. Merged: delivery 5b (`b86e0234e`). Issue #1373 (Refs).
 It specifies delivery 5, changes the earlier amendment's agent-access and upgrade lines, and adds
 contracts, a migration step, threat-model lines and a rollback. It builds on delivery 1 (#1892),
 merged the same day. Repository files are cited from `dev` at 487ab5d41, delivery 1's included
@@ -786,7 +786,7 @@ MIT); the WebSocket library is `ws` at the version bots-dsh pins (8.18.3).
 - **Withdrawn Bots.** From 5d the caller routes track each open feed by gate session family and the
   Bots it was allowed for. When a Bot or part stops being readable, the affected feeds end and
   their queued frames are dropped. The feed checks access before each event it sends.
-  Bound native streams follow the same withdrawal rule in 5e. The mux passes `resourceKey` to
+  Any future native stream binding must follow the same withdrawal rule. The mux passes `resourceKey` to
   both the frame projection and the stream withdrawal predicate.
   For `session/follow` it is the Session ID from the DSH open's `args.request.address`, using
   `childSessionId` for a subagent address. The carrier requires a nonempty string of at most
@@ -821,13 +821,13 @@ before it dispatches any caller HTTP or stream traffic, and keeps it for its lif
 registration (another plugin's policy came first) or a lost one closes member admission and their
 open streams. Through 5d the policy stays empty (the owner's delegate, 2026-11-20). No native
 method, stream or forwarded event is bound for members or guests, who read through the Bot UI's
-caller routes in 5d. 5e binds `am:bot-session-prompt`. A native read is bound only once its fields,
-cost and withdrawal are proven safe.
+caller routes in 5d. 5e binds `am:bot-session-prompt`. Native reads are conditional future work
+and require proof that their fields, cost and withdrawal are safe.
 
 bots-dsh is the designated provider. In 5c and 5d it supplies only Bot visibility facts through
 `automagikCaller` version 2. The adapter checks the facts, builds no native bindings and returns
-an empty visibility set if the provider throws. Session and workspace ownership facts take
-effect with delivery 5e. The adapter builds any native bindings from those facts.
+an empty visibility set if the provider throws. In 5e, the adapter uses the current Bot Session's
+ownership for its prompt binding. Any future native read binding also needs verified ownership facts.
 
 Session ownership needs provenance. During a period when Bots ran as DSH's uid,
 both the team file's record of a Bot's parts (`bot.segments`, indexed at
@@ -845,14 +845,14 @@ hostile plugin from patching another. The roles follow LiveShare's non-owner pol
 for a second principal kind (`dsh-experimental-liveshare/lib/index.js:6760-6850, 7038`, registered
 at `:8000`):
 
-- `am:global` (global, delivery 5e): `session/control` and `workspace/follow`. Native `session/list` is a
+- `am:global` (global, conditional future work): candidates are `session/control` and `workspace/follow`. Native `session/list` is a
   unary read whose rows carry each session's summary projections (its pending inbox, permission
   and model values included). The stream filter below cannot filter a unary result, so the
   method stays unbound. The caller routes serve a visible Bot's readable parts. A unary native
   read can be bound only when every field it returns is safe for the caller.
-- `am:bot-session-read` (session, delivery 5e): on a visible Bot's own chat sessions, only the
-  native methods, arguments, event names and result fields listed and verified in 5e, including
-  the actions above (DSH checks them per session too, `dsh-api-session-controller/lib/index.js:3988-3992, 4271-4291`,
+- `am:bot-session-read` (session, conditional future work): on a visible Bot's own chat sessions, only
+  native methods, arguments, event names and result fields verified for a future binding. DSH checks
+  the actions above per session too (`dsh-api-session-controller/lib/index.js:3988-3992, 4271-4291`,
   and `dsh-api-workspace-controller/src/index.ts:207-210`), and `session/follow` never with
   `activate: true` (it starts the Agent, `src/web/controller.ts:62`). A native result can carry
   fields the caller may not see (`session/control` sends each visible session's whole projection
@@ -872,17 +872,16 @@ at `:8000`):
   Agent, `:906`). The condition and the staged-image limits apply to every invocation, RPC
   included. DSH records the caller's principal on the prompt (`:4150-4155`); the pre-step check
   above checks it again before the turn runs. The grant stays unbound until 5e.
-- `am:bot-workspace` (workspace, delivery 5e): `workspace/follow` on a workspace holding a visible Bot's
-  session.
+- `am:bot-workspace` (workspace, conditional future work): `workspace/follow` on a workspace holding
+  a visible Bot's session would require safe fields, cost and withdrawal.
 - `am:terminal`: a reserved name, bound by no one in delivery 5.
 
 Never bound: cancel, fork, rename and queue edits, `job/*`, `settings/*`, credentials and every
 workspace write. bots-dsh signals the adapter to invalidate on every team save that changes a
 Bot's `people`, its sessions, its main flag or its existence.
 
-The native session and workspace reads specified for 5e return a Bot's working folder path
-(the session header's `cwd` or the workspace's `path`). A member allowed on a Bot sees that path.
-Its files stay behind the member wall (§ 4).
+Disclosing a Bot's working folder path (the session header's `cwd` or the workspace's `path`) in a
+future native read would require explicit approval of that field. Its files stay behind the member wall (§ 4).
 
 ### The Bot UI's routes for a caller: `automagikCallerRoutes`
 
@@ -1073,8 +1072,8 @@ DSH capability asked in RFC 0023's form or one certified route.
 
 - **A member reads a Bot they were not given.** Visibility is computed per call from the `people`
   field and the current assertion's role. The caller routes and feed apply that rule in 5d, and
-  the native bindings apply it in 5e. An unreadable field is owner-only. Withdrawing a Bot ends
-  its open feeds and, from 5e, its bound streams.
+  5e prompt binding applies it on admission. An unreadable field is owner-only. Withdrawing a Bot ends
+  its open feeds and must end any future bound read streams.
 - **A member reads the owner's history on a shared Bot.** By design (Q1), only on a Bot the owner
   allowed them on; the owner decides per Bot. Rooms, asides and exchanges with other Bots stay
   out.
@@ -1083,8 +1082,8 @@ DSH capability asked in RFC 0023's form or one certified route.
   field is safe.
 - **A member acts in someone else's turn.** Steering, retries, stop and cancel are refused. From 5e, cards
   answer only to the person whose turn raised them.
-- **A stale grant.** A `people` save invalidates access and ends affected feeds and, from 5e,
-  bound streams. Revocation or expiry closes the session's sockets and feeds. From 5e, queued
+- **A stale grant.** A `people` save invalidates access and ends affected feeds and any future
+  bound read streams. Revocation or expiry closes the session's sockets and feeds. From 5e, queued
   input runs only on the gate's decision for its own session family, asked at the step.
 - **Stream exhaustion.** The per-stream inbox, the stream, socket and message limits, the
   downlink and heartbeat bound one person's load. Feeds and, from 5e, staged images also have
