@@ -83,7 +83,9 @@ export function holdersText(config) {
 /**
  * The pool as rows for `am holders`: { name, machine, session, local, limit, count, connected,
  * atLimit, overLimit }. `counts` maps holder name -> live pack agents; `connected` maps holder
- * name -> whether its hc core answers now (local always true).
+ * name -> whether its hc core answers now (local always true). One meaning for the budget in
+ * both this function and `chooseHolder`: `atLimit` is `count >= limit` (the holder is full), and
+ * `overLimit` is `count > limit` (strictly above it), for the wording only.
  */
 export function holderRows({ config, counts = new Map(), connected = new Map() } = {}) {
   const limit = config?.limit ?? DEFAULT_HOLDER_LIMIT;
@@ -96,20 +98,23 @@ export function holderRows({ config, counts = new Map(), connected = new Map() }
 }
 
 /**
- * The holder a new agent's pane starts on: the one with the fewest pack agents below `limit`,
- * the pool's order deciding a tie (so two counts at 0 spread in turn). With every holder at
- * `limit`, the least loaded takes it anyway (`overLimit: true`): a start is never refused for
+ * The holder a new agent's pane starts on: the one with the fewest pack agents, the pool's
+ * order deciding a tie (so two counts at 0 spread in turn). With every holder full (at its
+ * `limit`), the least loaded takes it anyway (`atLimit: true`): a start is never refused for
  * the budget, and the pack says so. `holder` names one explicitly; an unknown name is a usage
  * problem (`error`), and a full one still wins when named. `connected: false` holders are left
- * out unless every holder is.
+ * out unless every holder is. `reserved` maps holder name -> starts already chosen but whose
+ * attach row isn't written yet; it is added to `counts`, so two starts in flight cannot both
+ * pick the same holder.
  */
-export function chooseHolder({ config, counts = new Map(), connected = new Map(), holder = undefined } = {}) {
-  const rows = holderRows({ config, counts, connected });
+export function chooseHolder({ config, counts = new Map(), connected = new Map(), holder = undefined, reserved = new Map() } = {}) {
+  const load = new Map((config?.holders ?? [localHolder()]).map((h) => [h.name, (counts.get(h.name) ?? 0) + (reserved.get(h.name) ?? 0)]));
+  const rows = holderRows({ config, counts: load, connected });
   if (holder !== undefined) {
     const named = rows.find((r) => r.name === holder);
     if (!named) return { error: `no holder "${holder}" (am holders lists them)` };
     return { name: named.name, machine: named.machine, local: named.local, count: named.count,
-      connected: named.connected, overLimit: named.overLimit };
+      connected: named.connected, atLimit: named.atLimit, overLimit: named.overLimit };
   }
   const usable = rows.filter((r) => r.connected);
   const pool = usable.length ? usable : rows;
@@ -120,7 +125,7 @@ export function chooseHolder({ config, counts = new Map(), connected = new Map()
   }, null);
   if (!pick) return { error: "the holder pool is empty" };
   return { name: pick.name, machine: pick.machine, local: pick.local, count: pick.count,
-    connected: pick.connected, overLimit: pick.count >= pick.limit };
+    connected: pick.connected, atLimit: pick.atLimit, overLimit: pick.overLimit };
 }
 
 /**

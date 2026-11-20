@@ -5,8 +5,8 @@ import { startFakeCore } from "./fake-core.mjs";
 // only: the real hc, the window and any live core are never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
@@ -16,6 +16,9 @@ import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
 const MAIN = "b-aaaaaaaaaa", MEMBER = "b-bbbbbbbbbb", WORKER = "b-cccccccccc";
+// A burst's bots: `b-` + ten base32 chars, unique and never Main's.
+const burstId = (i) => `b-${"a".repeat(9)}${"bcdefghijklmn"[i]}`;
+const BURST = Array.from({ length: 13 }, (_, i) => burstId(i));
 const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
 
 function scene(t) {
@@ -43,13 +46,34 @@ function scene(t) {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
+  // A start that must be launched beside another one: no sleep, the promises settle on close.
+  const cliAsync = (args) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI, ...args], { cwd: project, env });
+    let out = "", err = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; });
+    child.on("close", (code) => resolve({ code, out, err, json: () => JSON.parse(out) }));
+  });
   const state = () => JSON.parse(readFileSync(statePath, "utf8"));
   const setState = (fn) => { const s = state(); fn(s); writeFileSync(statePath, JSON.stringify(s)); };
   const calls = () => readJsonLines(logPath);
   const rows = () => (existsSync(attachPath(app)) ? readAttach(readFileSync(attachPath(app), "utf8")).rows : []);
   const holdersFile = join(app, "automagik-herdr/holders.json");
   const lossesFile = join(app, "automagik-herdr/holder-loss.log");
-  return { root, project, app, cli, state, setState, calls, rows, holdersFile, lossesFile };
+  const reservationsFile = join(app, "automagik-herdr/holder-reservations.json");
+  const reservations = () => {
+    try { return JSON.parse(readFileSync(reservationsFile, "utf8")).reserved ?? []; } catch { return []; }
+  };
+  const addBots = (ids) => {
+    const file = join(project, ".herdr", "bots.json"), def = JSON.parse(readFileSync(file, "utf8"));
+    for (const id of ids) {
+      if (def.bots.some((b) => b.id === id)) continue;
+      def.bots.push({ id, name: `Burst ${id.slice(-1)}`, kind: "member", lead: MAIN, look, role: "r", instructions: "", agent: "claude" });
+    }
+    writeFileSync(file, JSON.stringify(def));
+  };
+  return { root, project, app, cli, cliAsync, state, setState, calls, rows, holdersFile, lossesFile, reservationsFile,
+    reservations, addBots };
 }
 
 test("holders: one local holder and the documented default limit; the limit is configurable", (t) => {
@@ -256,4 +280,120 @@ test("a start over the limit is accepted and says so, in text and --json", (t) =
 
   const rows = s.cli(["holders", "--json"]).json().holders;
   assert.deepEqual(rows.map((h) => [h.name, h.count, h.overLimit]), [["local", 2, true], ["h2", 1, false]]);
+});
+
+// #1881: the start's choice and seat are reserved together under holders.json's lock. Two
+// starts launched together must not both read 0/0 and pick local; the peer takes the other
+// holder. Three fresh runs, a real Promise.all (no sleep, no shared fixture).
+for (let run = 1; run <= 3; run += 1) {
+  test(`two starts launched together go to different holders (run ${run}/3)`, async (t) => {
+    const s = scene(t);
+    assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+    assert.equal(s.cli(["holders", "limit", "1"]).code, 0);
+    const [a, b] = await Promise.all([
+      s.cliAsync(["start", "Main", "--json"]),
+      s.cliAsync(["start", "Member", "--json"]),
+    ]);
+    assert.equal(a.code, 0, a.err);
+    assert.equal(b.code, 0, b.err);
+    const rows = s.rows().filter((r) => r.event === "attach");
+    assert.deepEqual(rows.map((r) => r.bot).sort(), [MAIN, MEMBER].sort(), "both starts wrote their row");
+    assert.deepEqual(rows.map((r) => r.machine ?? null).sort(), [null, "h2"].sort(), "one on local, the other on h2");
+    assert.equal(rows.filter((r) => (r.machine ?? null) === null).length, 1, "not both on local");
+    assert.deepEqual(s.reservations(), [], "both reservations are released once the rows are written");
+  });
+}
+
+test("a burst of ten starts spreads over two holders and stays within the limit", async (t) => {
+  // #1881: a team start in parallel must not pile every seat on local. Ten concurrent starts,
+  // two holders, limit 6: the seats split 5/5 (the least-loaded rule), each holder stays at or
+  // under the limit, and no start says it is over budget. Then the pool is filled to 6/6 and the
+  // next start is still accepted (the budget is soft) but says so, as the README documents.
+  const s = scene(t);
+  s.addBots(BURST);
+  assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+  assert.equal(s.cli(["holders", "limit", "6"]).code, 0);
+  const results = await Promise.all(BURST.slice(0, 10).map((id) => s.cliAsync(["start", id, "--json"])));
+  for (const r of results) {
+    assert.equal(r.code, 0, r.err);
+    assert.equal(r.json().limitWarning, undefined, "no holder is full at ten starts");
+  }
+  const by = new Map();
+  for (const row of s.rows().filter((r) => r.event === "attach")) by.set(row.machine ?? "local", (by.get(row.machine ?? "local") ?? 0) + 1);
+  assert.deepEqual([...by.entries()].sort(), [["h2", 5], ["local", 5]], "ten seats spread 5/5, never six on one holder");
+  assert.ok(Math.max(...by.values()) <= 6, "no holder over the limit");
+  assert.deepEqual(s.reservations(), [], "every reservation is released");
+
+  // Fill the pool: 6/6. The eleventh and twelfth starts are accepted quietly (neither holder is
+  // full at 5/6); the thirteenth finds every holder full and says so.
+  const eleventh = s.cli(["start", BURST[10], "--json"]);
+  assert.equal(eleventh.code, 0, eleventh.err);
+  assert.equal(eleventh.json().limitWarning, undefined);
+  const twelfth = s.cli(["start", BURST[11], "--json"]);
+  assert.equal(twelfth.code, 0, twelfth.err);
+  assert.equal(twelfth.json().limitWarning, undefined);
+  const rows = s.cli(["holders", "--json"]).json().holders;
+  assert.deepEqual(rows.map((h) => [h.name, h.count]), [["local", 6], ["h2", 6]]);
+
+  const thirteenth = s.cli(["start", BURST[12], "--json"]);
+  assert.equal(thirteenth.code, 0, thirteenth.err);
+  assert.match(thirteenth.json().limitWarning, /holder "local" is at its limit \(6\/6\)/);
+  assert.match(thirteenth.err, /at its limit \(6\/6\)/);
+  assert.deepEqual(s.cli(["holders", "--json"]).json().holders.map((h) => [h.name, h.count]), [["local", 7], ["h2", 6]]);
+});
+
+test("a start that fails releases its holder reservation", (t) => {
+  // #1881: a reserved seat must not outlive a failed start (the CLI releases it in `finally`),
+  // or one failed start would push every later start off local for the reservation's lifetime.
+  const s = scene(t);
+  assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+  assert.equal(s.cli(["holders", "limit", "1"]).code, 0);
+  s.setState((st) => { st.failRun = ["main"]; });
+  const failed = s.cli(["start", "Main", "--json"]);
+  assert.notEqual(failed.code, 0, "the forced hc run failure fails the start");
+  assert.match(failed.err, /can't start main/);
+  assert.deepEqual(s.reservations(), [], "the failed start's reservation is released");
+  assert.equal(s.rows().filter((r) => r.event === "attach").length, 0, "no attach row was written");
+
+  // With the seat free again, the next start is the first seat: local, not h2.
+  const member = s.cli(["start", "Member", "--json"]);
+  assert.equal(member.code, 0, member.err);
+  assert.equal(member.json().holder, undefined, "the failed start left local free");
+});
+
+test("a linked machine that isn't a holder is not recorded as a holder loss", (t) => {
+  // #1881: a pack that never runs `am holders` must not gain a holder-loss line when an
+  // unrelated linked machine's line drops; only a pool holder's loss is a holder loss.
+  const s = scene(t);
+  assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+  s.setState((st) => {
+    st.machines = [...(st.machines ?? []), { name: "mac", id: "core-mac", state: "disconnected",
+      since_ms: Date.parse("2026-11-16T10:00:00.000Z") }];
+  });
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  const row = { v: 1, event: "attach", bot: MAIN, project: s.project, terminal: "t7", core: "core-mac", created_ms: 5,
+    machine: "mac", at: new Date().toISOString(), by: "start" };
+  appendFileSync(attachPath(s.app), `${JSON.stringify(row)}\n`, { mode: 0o600 });
+  const view = s.cli(["holders", "--json"]);
+  assert.equal(view.code, 0, view.err);
+  assert.equal(existsSync(s.lossesFile) && readJsonLines(s.lossesFile).some((e) => e.holder === "mac"), false);
+  assert.equal(existsSync(s.lossesFile), false, "no holder-loss record was made for a non-holder");
+});
+
+test("a corrupt holders.json is said, not silently replaced by one holder", (t) => {
+  // #1881: a typo used to turn spreading off in silence. The warning goes to stderr (so --json
+  // still parses) and the command keeps the safe one-holder default.
+  const s = scene(t);
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(s.holdersFile, "{not json");
+  const view = s.cli(["holders", "--json"]);
+  assert.equal(view.code, 0, view.err);
+  assert.match(view.err, /am: holders: the file isn't JSON/);
+  assert.equal(view.json().limit, 6);
+  assert.deepEqual(view.json().holders.map((h) => [h.name, h.count]), [["local", 0]]);
+
+  const start = s.cli(["start", "Main", "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.match(start.err, /am: holders: the file isn't JSON/);
+  assert.equal(s.rows().filter((r) => r.event === "attach" && r.machine == null).length, 1);
 });

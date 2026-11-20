@@ -853,17 +853,27 @@ host, and a bot started there runs the pack's normal linked-machine launch.
   holder's panes show in this window in that machine's space on the project. `am holders remove
   NAME` takes one away only once it holds no agent, live or on a dropped line; the refusal names
   the agents. `am holders up` starts a holder's core after a reboot.
-- A new `am start` goes to the holder with the fewest of the pack's agents, and never to a holder
-  whose core isn't answering while another is. With N agents and a limit L over two or more
-  holders, a start above the limit goes to another holder: one holder's loss cannot take every
-  seat. A start is never refused for the limit; when every holder is full, the least loaded takes
-  it and says so on stderr (and as `limitWarning` with `--json`).
+- A holder is **full at its limit**: `count >= limit` leaves no room, and `over limit` is
+  `count > limit` (the wording only; the choice and `am holders` use the same meaning). A new
+  `am start` chooses its holder and reserves that seat together under `holders.json`'s lock, so
+  two starts launched at once go to different holders instead of both picking `local`; the
+  reservation is released once the start's attach row is written, or when the start fails (a
+  reservation left by a killed CLI lapses after the holder-start timeout). `am holders` counts
+  attached agents, not in-flight reservations. A start goes to the holder with the fewest of the
+  pack's agents, and never to a holder whose core isn't answering while another is. With N agents
+  and a limit L over two or more holders, a start above the limit goes to another holder: one
+  holder's loss cannot take every seat. A start is never refused for the limit; when every holder
+  is full, the least loaded takes it and says so on stderr (and as `limitWarning` with `--json`).
 - `am ls`, `am show` and `am whois` name the holder; a bot whose holder's line dropped reads
   `unknown in NAME/tN`, never stopped. `am restart` finds the bot's holder and runs the restart
   there. A worker started from a holder's pane runs in that holder (its `am` talks to that
   core). `am holders losses` reads back what each loss took; a lost holder and a dropped
   machine line are recorded in `<app home>/automagik-herdr/holder-loss.log` as the holder's name
-  and the bot ids, never a path, socket or command line.
+  and the bot ids, never a path, socket or command line. Only a pool holder's dropped line is a
+  `holder_unreachable` record: a linked machine that isn't a holder has no seat in the spread.
+- A `holders.json` that isn't JSON, or whose limit or holder entries are bad, is said on stderr
+  (so `--json` still parses) and the run keeps the one-holder default instead of silently
+  turning spreading off; fix it with `am holders limit N` / `am holders add` / `remove`.
 - After a reboot, `am holders up` starts the extra holders, then `am restart <bot> --machine
   NAME --project <folder> --tree` brings a holder's bot back (restart resumes its session as any
   other restart does); `am revive` still brings back this computer's own bindings.

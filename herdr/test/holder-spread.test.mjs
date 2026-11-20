@@ -75,14 +75,40 @@ test("a named holder wins, an unknown one is a usage problem, and a disconnected
   assert.equal(allAway.name, "local");
 });
 
-test("over the limit the least loaded still takes the start, and says so", () => {
+test("a holder at its limit is full; only one above it is over the limit", () => {
+  // #1881: `holderRows` and `chooseHolder` used `count > limit` and `count >= limit` for the
+  // same `overLimit` name. One meaning now, in both: `atLimit` (`count >= limit`) is full,
+  // which is when the next start moves on; `overLimit` (`count > limit`) is strictly above.
   const config = pool(["local", "h2"], 1);
   const rows = holderRows({ config, counts: counts([["local", 2], ["h2", 1]]) });
   assert.deepEqual(rows.map((r) => [r.name, r.count, r.atLimit, r.overLimit]),
     [["local", 2, true, true], ["h2", 1, true, false]]);
-  const pick = chooseHolder({ config, counts: counts([["local", 2], ["h2", 1]]) });
-  assert.equal(pick.name, "h2");
-  assert.equal(pick.overLimit, true);
+  // Both at the limit: the least loaded (h2) still takes it, and says it is full.
+  const room = chooseHolder({ config, counts: counts([["local", 1], ["h2", 0]]) });
+  assert.equal(room.name, "h2");
+  assert.equal(room.atLimit, false, "0/1 has room");
+  const full = chooseHolder({ config, counts: counts([["local", 1], ["h2", 1]]) });
+  assert.equal(full.name, "local", "a tie keeps the pool's order");
+  assert.equal(full.atLimit, true);
+  assert.equal(full.overLimit, false, "exactly at the limit is full, not over");
+  const over = chooseHolder({ config, counts: counts([["local", 2], ["h2", 2]]) });
+  assert.equal(over.atLimit, true);
+  assert.equal(over.overLimit, true);
+});
+
+test("reserved seats count for the choice, so two starts in flight spread", () => {
+  // #1881: the pure half of the concurrency repair. A start already chosen but not attached is
+  // in `reserved`; the next choice must see that seat. Without it two starts both read 0/0 and
+  // both pick local.
+  const config = pool(["local", "h2"], 1);
+  const none = chooseHolder({ config, counts: counts([["local", 0], ["h2", 0]]) });
+  assert.equal(none.name, "local");
+  const first = chooseHolder({ config, counts: counts([["local", 0], ["h2", 0]]), reserved: counts([["local", 1]]) });
+  assert.equal(first.name, "h2", "local's seat is reserved by the first start");
+  const both = chooseHolder({ config, counts: counts([["local", 0], ["h2", 0]]), reserved: counts([["local", 1], ["h2", 1]]) });
+  assert.equal(both.name, "local", "every holder full: the least loaded (a tie) takes it");
+  assert.equal(both.count, 1, "the returned count includes the other starts' seats");
+  assert.equal(both.atLimit, true);
 });
 
 test("a loss record names the holder and the bots it took, and nothing else", () => {
