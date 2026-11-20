@@ -252,6 +252,7 @@ export function install(rt) {
     learningSettled: rt.learningSettledView(),
     connectors: rt.connectorsView(),
     secretSources: rt.secretSourcesView(),
+    secretSourcesPresent: rt.secretSourcesPresent(),
     capabilityStatuses: rt.capabilityStatusesView(),
     ...rt.extended.live(),
     // Per Bot whose model menu a plugin owns, that menu (host-models.js); absent otherwise.
@@ -301,7 +302,7 @@ export function install(rt) {
   // Updates change the dsh profile, not the team, so a reading host may run them too.
   const privacy = createPrivacy()
   const pets = createPets({ home: () => rt.home, warn: (...args) => rt.warn?.(...args) })
-  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame'])
+  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
   // Sign-in (cli-login.js): its replies are never cached by the browser.
   const CLI_LOGIN = new Set([
     'cli-login-start', 'cli-login-current', 'cli-login-status', 'cli-login-answer',
@@ -826,6 +827,7 @@ export function install(rt) {
         case 'secret-delete':
         case 'secret-source-set':
         case 'secret-source-clear':
+        case 'secret-source-detail':
           await rt.load()
           return ok(await rt.secretEndpoint(endpoint, body))
         case 'connector-connect':

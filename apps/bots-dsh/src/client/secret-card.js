@@ -96,15 +96,46 @@ export function GitHubSteps({ bot, work }) {
       h('li', null, t('Click “{button}”, copy it and paste it below.', { button: GITHUB_FIELDS.generate }))))
 }
 
+const vaultLocked = 'The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.'
+const vaultDetailUnavailable = 'The vault item details could not be loaded.'
+
+function VaultRequestContext({ request }) {
+  return h('div', { className: 'bt-secret-body' },
+    h('div', { className: 'bt-secret-saved' }, h(KeyIcon), t('From a vault')),
+    h('div', { className: 'bt-secret-note' }, t('Shell: {shell}', { shell: request.shell })),
+    h('div', { className: 'bt-secret-note' }, t('Folder: {folder}', { folder: request.workdir })),
+    h('pre', { className: 'bt-aa-pre', tabIndex: 0, 'aria-label': t('Command') }, h('code', null, request.command)))
+}
+
 export function SecretCard({ sessionId, bot, request, roster, actions, inline = false }) {
   const [value, setValue] = useState('')
   const [scope, setScope] = useState('all')
   const [replacing, setReplacing] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [vaultDetail, setVaultDetail] = useState(null)
   const busyRef = useRef(false)
   const hold = useDockHold(sessionId, 'secret', request.id, actions, inline)
   const noteId = useId()
+  const vault = request.source === 'vault'
+  const detailKey = vault ? JSON.stringify([request.id, request.name, request.sessionId, request.commandDigest, request.shell, request.workdir, request.command]) : null
+  const detail = vaultDetail?.key === detailKey ? vaultDetail : null
+  const displayed = useRef({ id: request.id, key: detailKey, digest: request.commandDigest })
+  const fetchDetail = actions.secretSourceDetail
+  useEffect(() => {
+    const { id, key, digest } = displayed.current
+    if (key === null) return
+    let active = true
+    Promise.resolve().then(() => fetchDetail(id)).then(value => {
+      if (!active) return
+      const { commandDigest, snapshot, provider, item, field } = value ?? {}
+      const verified = commandDigest === digest && [commandDigest, snapshot, provider, item, field].every(part => typeof part === 'string')
+      setVaultDetail(verified ? { key, value: { commandDigest, snapshot, provider, item, field } } : { key, error: vaultDetailUnavailable })
+    }, () => {
+      if (active) setVaultDetail({ key, error: vaultDetailUnavailable })
+    })
+    return () => { active = false }
+  }, [fetchDetail])
   const secret = (roster.secrets ?? []).find(entry => entry.name === request.name)
   const run = (make) => {
     if (busyRef.current) return undefined
@@ -118,6 +149,26 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
     })
   }
   const cancel = () => run(() => actions.secretCancel(request.id))
+  if (vault) {
+    const item = detail?.value
+    const allow = () => {
+      if (item && !busy) void run(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }))
+    }
+    return h('div', { className: 'bt-q bt-secret', role: 'group', onFocusCapture: hold, onPointerDownCapture: hold },
+      h(SecretHead, {
+        bot, title: t('Let {bot} use {name}?', { bot: bot.name, name: request.name }),
+        name: request.name, detail: request.purpose, onClose: busy ? undefined : cancel,
+      }),
+      h(VaultRequestContext, { request }),
+      item ? h('div', { className: 'bt-secret-note' },
+        h('div', null, t('Provider: {provider}', { provider: item.provider })),
+        h('div', null, t('Item: {item}', { item: item.item })),
+        h('div', null, t('Field: {field}', { field: item.field }))) : null,
+      error || detail?.error ? h('div', { className: 'bt-secret-error', role: 'alert' }, error || t(detail.error)) : null,
+      h('div', { className: 'bt-q-actions' },
+        h('button', { type: 'button', className: 'bt-q-btn', disabled: busy, onClick: cancel }, t('Cancel')),
+        h('button', { type: 'button', className: 'bt-q-submit', disabled: busy || !item, onClick: allow }, busy ? t('Allowing…') : t('Allow'))))
+  }
   const long = value.trim().length >= MIN_VALUE
   const save = () => { if (long && !busy) void run(() => actions.secretSet({ requestId: request.id, value, scope })) }
   const allow = () => { if (!busy) void run(() => actions.secretAllow(request.id)) }
@@ -150,6 +201,13 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
 }
 
 function SettledSecret({ bot, request, roster }) {
+  if (request.source === 'vault') {
+    const title = request.status === 'allowed' ? t('Allowed once')
+      : request.status === 'locked' ? t(vaultLocked) : t('Canceled')
+    return h('div', { className: 'bt-q bt-q-settled bt-secret bt-secret-done', role: 'group', 'data-status': request.status },
+      h(SecretHead, { bot, title, name: request.name, detail: request.purpose }),
+      h(VaultRequestContext, { request }))
+  }
   const canceled = request.status === 'canceled'
   const text = canceled ? t('{bot} asked for {name}', { bot: bot.name, name: request.name })
     : request.status === 'allowed' ? t('Allowed {bot} to use {name}', { bot: bot.name, name: request.name })
@@ -291,7 +349,7 @@ export function SecretRow({ secret, roster, actions, run, open, onToggle }) {
           : h('button', { type: 'button', className: 'bt-soft bt-soft-sm bt-secret-danger', onClick: () => setConfirm(true) }, h(TrashIcon), t('Delete')))) : null)
 }
 
-function VaultSourceRow({ source, actions, run, open, onToggle }) {
+function VaultSourceRow({ source, present, actions, run, open, onToggle }) {
   const [confirm, setConfirm] = useState(null)
   const { name, purpose, definedTwice } = source
   useEffect(() => { setConfirm(null) }, [open, definedTwice])
@@ -302,7 +360,8 @@ function VaultSourceRow({ source, actions, run, open, onToggle }) {
       h('span', { className: 'bt-set-copy' },
         h('span', { className: 'bt-secret-title' }, h(KeyIcon), h('code', { className: 'bt-secret-name' }, name),
           purpose ? h('span', { className: 'bt-secret-purpose' }, purpose) : null),
-        h('span', { className: 'bt-set-hint' }, definedTwice ? t('Defined twice') : t('Unavailable: the vault plugin cannot serve it yet'))),
+        h('span', { className: 'bt-set-hint' }, definedTwice ? t('Defined twice') : present
+          ? t("Each use asks you first, in the Bot's chat.") : t('Unavailable: the vault plugin cannot serve it yet'))),
       h('span', { className: 'bt-set-control' }, h('span', { className: 'bt-tag' }, t('From a vault')))),
     open ? h('div', { className: 'bt-secret-edit' },
       definedTwice ? h('div', { className: 'bt-secret-warn', role: 'note' }, h(WarnIcon),
@@ -358,7 +417,7 @@ export function SecretsPage({ roster, actions, run, Section }) {
         t('The vault mapping file could not be read; no secret can be used until it is fixed.')) : null,
       count === 0 && !adding ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No keys yet. When a Bot needs one, it shows a card in its chat.'))) : null,
       secrets.map(secret => h(SecretRow, { key: secret.name, secret, roster, actions, run, open: open === secret.name, onToggle: toggle(secret.name) })),
-      sources.map(source => h(VaultSourceRow, { key: source.name, source, actions, run, open: open === source.name, onToggle: toggle(source.name) })),
+      sources.map(source => h(VaultSourceRow, { key: source.name, source, present: roster.secretSourcesPresent, actions, run, open: open === source.name, onToggle: toggle(source.name) })),
       adding ? h(AddSecret, { actions, run, onDone: () => setAdding(false) }) : null),
     adding ? null : h('div', { key: 'add', className: 'bt-actions' }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setAdding(true) }, t('Add a key'))),
   ]
