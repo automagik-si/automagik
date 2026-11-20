@@ -203,7 +203,7 @@ export function routesFor({ paired, codeLive, pair, session, chat }) {
 
 /**
  * End what removed phones still have open: every entry of `live` ({ phone, end() }) whose phone
- * is not among `paired` ids. bridge.mjs runs it every 2 s, for terminal sessions and chats alike.
+ * is not among `paired` ids. bridge.mjs runs it every second, for terminal sessions and chats alike.
  * @returns {number} how many were ended
  */
 export function endRemoved(live, paired, log = () => {}) {

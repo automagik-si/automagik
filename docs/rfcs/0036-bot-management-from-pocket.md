@@ -67,9 +67,10 @@ Propose an additive management capability under `herdr-pocket/chat/1` and local 
 both handshakes with RFC 0033 (#1181) and the group-chat plan (#1180). Management is independent
 of groups and attachments. The shared negotiation format and exact method names remain open.
 
-- **Pocket Link to bots-dsh.** The bridge requests management in socket `hello` alongside
-  `write: 1`. The host returns the capability and the management methods it supports only
-  after opt-in. A peer that omits `write: 1` still gets `protocol: 1, readOnly: true`. A peer
+- **Pocket Link to bots-dsh.** The bridge sends its write hello, then a management hello
+  with `write: 1, manage: 1` if the first reply is writable. It uses the socket after the
+  hello exchange completes. The host returns the capability and the management methods it
+  supports only after opt-in. A peer that omits `write: 1` still gets `protocol: 1, readOnly: true`. A peer
   that requests existing writes alone keeps its existing write methods and receives a
   `read-only` refusal for management. A new bridge on an old host gets no management capability
   (`apps/bots-dsh/src/host/pocket-socket.js:198-204`,
@@ -78,8 +79,8 @@ of groups and attachments. The shared negotiation format and exact method names 
   supported by the bridge and the host. The bridge shares one DSH source across phones, so a
   socket-wide capability cannot grant management to every phone. Track opt-in per phone chat
   connection. Older phones keep their existing chat behavior. A new phone paired with an old
-  bridge or plugin stays read-only for management and hides its controls. Renegotiate on
-  reconnect and refuse calls if the socket loses support
+  bridge or plugin stays read-only for management and hides its controls. A grant can reopen
+  after a socket reconnect only in the same team home and for a method still supported by the host
   (`herdr/mods/pocket-link/bridge/bridge.mjs:143`, `herdr/mods/pocket-link/bridge/chat.mjs:169-178`).
 
 ## Threat model
@@ -93,19 +94,20 @@ own memory (D3). It makes no direct level write (D2), cannot read a task's promp
 methods or change its timing, recurrence, prompt or target (D4, D6), and cannot manage a global
 Bot (D5). Memory text can be sensitive. Resuming a task or changing the model, which can clear
 Auto, can also affect what later runs on the computer. Remove the phone in Pocket Link or stop
-the bridge to end access. Revocation ends management access within 2 seconds. A change already
-applied on the computer remains there.
+the bridge to end access. Revocation ends management access within 2 seconds while the bridge's
+timers run on schedule. A change already applied on the computer remains there.
 
 - Every call needs a live paired `herdr-pocket/chat/1` connection and a Bot currently listed
   and `shown` by DSH. Pairing gives no project `shown[]` consent. The bridge checks the target,
-  derives `phone` from the authenticated paired key and forwards it to the owner-only socket.
+  derives `phone` from the authenticated paired key and sends it to the owner-only socket
+  when opening the grant.
   The host checks the Bot binding, visibility and operation at execution. The phone can manage
   the Bot with its chat closed, through this bridge and socket path alone
   (`apps/bots-dsh/src/host/pocket-chat.js:282-289`, `apps/bots-dsh/src/host/pocket-chat.js:561-565`,
   `herdr/mods/pocket-link/bridge/dsh-source.mjs:265-291`).
 - Count limits across connections by paired key. Propose sharing the existing 20 writes per
   minute per phone, with one management write in flight per phone and Bot and bounded reads and
-  replies. The bridge's forget and 2-second checks must invalidate any queued work on the shared
+  replies. The bridge's forget and 1-second checks must invalidate any queued work on the shared
   socket and stop undelivered replies for that phone. The host must reject revoked work before
   mutation. Specify that revocation mechanism and read and payload caps before coding
   (`apps/bots-dsh/src/host/pocket-socket.js:54-74`, `herdr/mods/pocket-link/bridge/bridge.mjs:196-217`).
@@ -190,18 +192,20 @@ management adds `manage: 1` and `manageMethods` when hello asks for both `write:
 `manage: 1`. The `methods` list stays the same. A bridge may manage a Bot with its chat closed.
 
 ```jsonl
-{"id":1,"method":"hello","params":{"write":1,"manage":1}}
-{"id":1,"result":{"protocol":1,"readOnly":false,"write":1,"methods":["hello","list","subscribe","unsubscribe","backfill","send","interrupt","answer"],"dedupe":"log","manage":1,"manageMethods":["manage-open","manage-close","memory-read","memory-edit","memory-add"]}}
-{"id":2,"method":"manage-open","params":{"grant":"g1","phone":"paired-key"}}
-{"id":2,"result":{"grant":"g1"}}
-{"id":3,"method":"memory-read","params":{"grant":"g1","terminal":"dsh:worker"}}
-{"id":3,"result":{"ok":true,"state":"read","memory":{"terminal":"dsh:worker","entries":[],"size":0,"limit":8000,"truncated":false}}}
-{"id":4,"method":"memory-add","params":{"grant":"g1","terminal":"dsh:worker","text":"Use the staging fixture."}}
-{"id":4,"result":{"ok":true,"state":"saved","entry":{"id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the staging fixture.","topic":null,"added":"2026-11-19","until":null,"pinned":false,"expired":false},"memory":{"terminal":"dsh:worker","entries":[{"id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the staging fixture.","topic":null,"added":"2026-11-19","until":null,"pinned":false,"expired":false}],"size":24,"limit":8000,"truncated":false}}}
-{"id":5,"method":"memory-edit","params":{"grant":"g1","terminal":"dsh:worker","id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the current fixture."}}
-{"id":6,"method":"manage-close","params":{"grant":"g1"}}
-{"id":6,"result":{}}
-{"id":5,"result":{"ok":false,"state":"refused","reason":"revoked","applied":true}}
+{"id":1,"method":"hello","params":{"write":1}}
+{"id":1,"result":{"protocol":1,"readOnly":false,"write":1,"methods":["hello","list","subscribe","unsubscribe","backfill","send","interrupt","answer"],"dedupe":"log"}}
+{"id":2,"method":"hello","params":{"write":1,"manage":1}}
+{"id":2,"result":{"protocol":1,"readOnly":false,"write":1,"methods":["hello","list","subscribe","unsubscribe","backfill","send","interrupt","answer"],"dedupe":"log","manage":1,"manageMethods":["manage-open","manage-close","memory-read","memory-edit","memory-add"]}}
+{"id":3,"method":"manage-open","params":{"grant":"g1","phone":"paired-key"}}
+{"id":3,"result":{"grant":"g1"}}
+{"id":4,"method":"memory-read","params":{"grant":"g1","terminal":"dsh:worker"}}
+{"id":4,"result":{"ok":true,"state":"read","memory":{"terminal":"dsh:worker","entries":[],"size":0,"limit":8000,"truncated":false}}}
+{"id":5,"method":"memory-add","params":{"grant":"g1","terminal":"dsh:worker","text":"Use the staging fixture."}}
+{"id":5,"result":{"ok":true,"state":"saved","entry":{"id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the staging fixture.","topic":null,"added":"2026-11-19","until":null,"pinned":false,"expired":false},"memory":{"terminal":"dsh:worker","entries":[{"id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the staging fixture.","topic":null,"added":"2026-11-19","until":null,"pinned":false,"expired":false}],"size":24,"limit":8000,"truncated":false}}}
+{"id":6,"method":"memory-edit","params":{"grant":"g1","terminal":"dsh:worker","id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the current fixture."}}
+{"id":7,"method":"manage-close","params":{"grant":"g1"}}
+{"id":7,"result":{}}
+{"id":6,"result":{"ok":false,"state":"refused","reason":"revoked","applied":true}}
 ```
 
 Read returns `{ok:true, state:'read', memory}`. Add and edit return
@@ -271,7 +275,7 @@ Durable receipts keyed by phone, Bot, operation and fingerprint were considered.
 | Peer | Result |
 |---|---|
 | Old bridge, new host | A hello without `write: 1` gets the old read-only answer. A hello with only `write: 1` keeps the old chat write answer. |
-| New bridge, old host | Hello has no `manage`. The bridge advertises no management. |
+| New bridge, old host | The management hello reply has no `manage`. The bridge advertises no management. |
 | New bridge, new host | Both hello flags and a writable source with memory enable management. Otherwise the bridge advertises no management. |
 | Old phone or old bridge | Chat continues and no management methods are negotiated. |
 
@@ -281,14 +285,19 @@ intersection of the phone's request, the bridge's methods and the host's `manage
 It maps socket names such as `memory-read` to `memory.read`. A phone that requests
 `['memory.read']` gets only `['memory.read']` when all peers support it. If the phone asks
 for read, edit and add and the host offers only read and add, the reply is
-`['memory.read', 'memory.add']`. The bridge forwards only negotiated methods.
+`['memory.read', 'memory.add']`. The hello reply includes the intersection only after the
+host acknowledges the grant opened for that phone connection. If the open fails, the
+phone gets the ordinary chat hello. The bridge forwards only negotiated methods. A phone
+that asks for edit or add should ask for read too so it can reconcile an unknown outcome.
 
-Open and close exist only on the owner socket. The bridge opens one grant on hello per
-phone chat connection using the authenticated phone key. It closes the grant when the
-connection ends, on forget or when the 2-second check revokes the phone. If the close
-is not acknowledged within the 2-second revocation deadline, the bridge destroys the
-socket. It drops a reply if its phone connection is no longer live and renegotiates on
-reconnect.
+Open and close exist only on the owner socket. The bridge opens one grant at the phone's
+hello using the authenticated phone key. It closes the grant when the connection ends.
+Control-socket forget ends the connection immediately, and a 1-second poll checks for
+file-based forget. If the close has no empty result ack within 500 ms, the bridge destroys
+that socket. A queued memory reply can go out only while the phone connection is still live.
+A switch to another team home requires a fresh phone hello before any more memory calls.
+The connection's 16-request transport limit returns a JSON-RPC `busy` error before the
+memory refusal checks.
 
 ## Open questions
 
