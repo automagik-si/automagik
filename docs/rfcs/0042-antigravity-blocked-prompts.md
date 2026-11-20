@@ -224,7 +224,7 @@ Every test and smoke runs with fake `hc`, `herdr-core` and `systemctl` first on 
    synthetic shapes. Does not wait for delivery 0.
 2. **Sends** (herdr patch, Refs #917): section 5 and section 6's copies, over the same empty
    table. Does not wait for delivery 0.
-3. **Captured shapes** (herdr patch, Closes #917): delivery 0's fixtures, the shapes in
+3. **Captured shapes** (herdr patch, the one that finishes #917): delivery 0's fixtures, the shapes in
    `AGY_SHAPES`, the tests on the real captures and the README's Antigravity section. Waits for
    delivery 0.
 
@@ -297,4 +297,4 @@ later amendment.
 
 Order: deliveries 1 and 2 do not depend on the captured text and land first, over a matcher
 that knows no shape yet and so never matches; delivery 3 adds the captured shapes after
-delivery 0 and closes #917.
+delivery 0 and finishes #917.
