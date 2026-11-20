@@ -110,8 +110,9 @@ export const AGENTS = Object.freeze({
     // claude-agent-acp passes this session's settings to the SDK; lists merge with the person's
     // settings, and Bash rules check subcommands too, including in auto mode.
     hardAsk: () => ({ claudeCode: { options: { settings: { permissions: { ask: [...CLAUDE_HARD_ASK] } } } } }),
-    // RFC 0031: asked only through acpAgents.ownMode.
-    ownMode: 'auto',
+    // RFC 0031 question 5: withhold Claude Code's own auto mode until it is captured from a signed-in CLI.
+    // A scratch MCP server passed in session/new ran a call in auto without a permission request.
+    // The same applies to any non-bridge MCP server (docs/research/acp-dsh-tools-spike.md).
     key: 'claude',
     name: 'Claude Code (ACP)',
     // The models and efforts come from the agent itself (catalog.js). Until it has answered once,

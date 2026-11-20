@@ -145,9 +145,10 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   preset with the same knobs keeps Manual (and the bridge's own approval). Full access lets every
   call through, as it does DSH's own tools. An agent that does not offer the strict mode fails
   the turn instead of running in its own default.
-  A Workspace Session on unbridged Codex can instead take `agent` when the Bot team's
-  `ownMode` answerer returns exactly `true` twice, before the prompt. After that agent session
-  has attempted the own mode, any Workspace prompt that does not take it re-sends and confirms
+  A Workspace Session on Codex, bridged or unbridged, can take `agent` when the Bot team's
+  `ownMode` answerer returns exactly `true` twice, before the prompt. RFC 0031 question 5 withholds
+  Claude Code's own `auto` mode until it is captured from a signed-in CLI. After a Codex session
+  has attempted its own mode, any Workspace prompt that does not take it re-sends and confirms
   strict `workspace-write` (or its chat profile below), even if cached; refusal ends the agent
   session and fails the turn.
   Sessions that never attempt the own mode keep the usual mode cache and failure handling.
@@ -223,7 +224,7 @@ that makes your harness lose all your power."
   | Level | Claude Code mode | What asks DSH | What can bypass DSH |
   |---|---|---|---|
   | Manual | `default` | every native call its own settings leave as "ask"; DSH's dialog answers | a call its own allow rules or hooks allow (the hard asks still ask) |
-  | Auto | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers every call, a subagent's nested call included; the person only when the review escalates | whatever its auto mode runs without asking |
+  | DSH Auto review | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers every call, a subagent's nested call included; the person only when the review escalates | whatever its auto mode runs without asking |
   | Full | `bypassPermissions` | nothing; no hard asks injected | every native call |
 
   Manual is the guarded level; Auto is convenience, and its review sees only what reaches the
@@ -385,8 +386,8 @@ A settings page reads the agents through this host service; the plugin stays hos
 | `imageAccess()` | `{ ready, signedIn?, reason?, unsupported? }`: preliminary readiness on Codex's own ChatGPT sign-in (Codex on, its CLI found, its connector installed, `codex login status` says signed in; an unknown sign-in is asked once; the person confirmed its account, else `reason: 'account'`; the preliminary checks hold for this Codex, else not ready, with `reason`: `unsupported` (and `unsupported: true`), `config` or `unreadable`). Selecting the permission profile is checked separately for each draw. Reads no credential and starts no sign-in. |
 | `generateImage({ prompt, size?, quality?, background?, signal?, timeoutMs? })` | Draws one image with the Codex CLI (`src/host/image.js`) and resolves `{ base64, mimeType: 'image/png' }`. Refusals carry an `acp/image-*` code (`signed-out`, `usage-limit`, `timeout`, `unavailable`, `failed`, `stopped`, `refused`) and a message to show as it is. |
 | `keepImages(keeper)` | Where an image an agent makes in a chat is kept, so the chat can show it (`src/host/agent-image.js`). `keeper` is `{ start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) -> Promise<{ file }>, fail?({ callId, sessionId, error }) }`; one at a time, and the call returns its disposer. The Bot team registers its images folder. |
-| `ownMode(answer)` | Registers one answerer for an unbridged Workspace Session's own mode. Only exact `true` within two seconds counts, twice per prompt. Returns a disposer for that registration; competing registrations disable own mode permanently. |
-| `ownModeOf(provider, sessionId?)` | `{ mode, bridged, answerer }` for a provider offering its own mode, otherwise undefined. Pass the Session id to include its Bot's bridge default. |
+| `ownMode(answer)` | Registers one answerer for a Codex Workspace Session's own mode, bridged or unbridged. Only exact `true` within two seconds counts, twice per prompt. Returns a disposer for that registration; competing registrations disable own mode permanently. |
+| `ownModeOf(provider, sessionId?)` | `{ mode, bridged, answerer }` for Codex, or `undefined` for Claude Code and other providers without an own mode. Pass the Session id to include its Bot's bridge default. |
 | `ownModeIn(sessionId)` | Whether that Session is busy on a prompt in its own mode. |
 | `holdTurns(gate)` | A veto on agent turns, for a plugin that must keep an agent from acting in a Session (the Bot team: a Session whose permission level could not be set). `gate({ sessionId, agent, provider })` is asked before every model step on an agent's route and again right before a turn's prompt is sent; it answers undefined to let the Session go, or the sentence the step answers with. It can only refuse: a gate that throws, takes longer than ten seconds, or answers anything else holds the Session with a fixed sentence, and a held Session's agent session is ended. Several plugins may register: any refusal wins, and the returned disposer removes only its own gate. With none registered nothing is asked. |
 | `endSession(sessionId, why?)` | Ends one Session's agent session now, a turn under way included: the agent's process is stopped, its bridge credential revoked, and the step answers `why`. The DSH Session and its transcript stay; the next turn starts a fresh agent session, which takes its permission mode again. Answers whether one was live. |
@@ -1059,7 +1060,7 @@ tool name `acp_tool` are public: Sessions keep them.
 
 ### Auto on every route
 
-`acpAgents.ownMode` can request Claude Code's `auto` mode or Codex's `agent` mode, including bridged sessions. Two exact `true` answers are required before a prompt. Strict sessions retain their existing mode handling.
+`acpAgents.ownMode` can request Codex's `agent` mode, including bridged sessions, after two exact `true` answers before the prompt. Claude Code's own `auto` mode is withheld until it is captured from a signed-in CLI (RFC 0031, question 5).
 
 A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits a one-shot allow in the mirror body. Questions with no allow option keep their flow. The bridge's own answers and DSH's Auto review before the mirror body keep their existing behavior.
 

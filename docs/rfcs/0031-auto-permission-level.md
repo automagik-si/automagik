@@ -391,7 +391,8 @@ answer, the answer says so.
    CLI and the bridge's part is designed. #1110 already offers Auto on Claude Code, and the
    capture is still missing (`apps/acp-dsh/test/fixtures/permission-payloads/README.md`: "Claude
    Code is not captured yet"). Owed: that capture, or the owner's decision to keep Claude Code on
-   Auto without it.
+   Auto without it. Until then Auto is withheld on Claude Code again: acp-dsh no longer asks it
+   for its own mode, and a saved Claude Code Auto runs as Workspace and is cleared (#1092).
 6. **Question 6:** keep both names, "Auto" and DSH's "Auto review"; they are different levels and
    the second is marked Experimental.
 
