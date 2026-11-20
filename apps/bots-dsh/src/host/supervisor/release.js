@@ -163,4 +163,3 @@ export async function inspectRelease({
   }
   return { ...result('available', null), plugins, registry: registryUrl }
 }
-

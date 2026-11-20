@@ -1453,6 +1453,7 @@ const pack = createPack({
     "the published release needs a different DeepSeek Harness version.": "a versão publicada precisa de outra versão do DeepSeek Harness.",
     "a downloaded plugin package did not match the signed release.": "um pacote baixado não corresponde à versão assinada.",
     "the package registry could not be reached.": "não foi possível acessar o registro de pacotes.",
+    "the profile .npmrc contains settings besides the registry.": "o arquivo .npmrc do perfil contém configurações além do registro de pacotes.",
     "this window does not hold the team lock.": "esta janela não tem o controle da equipe.",
     "the update check is taking too long. Try again.": "a verificação de atualizações está demorando demais. Tente novamente.",
     "The check was interrupted. Check again.": "A verificação foi interrompida. Verifique novamente.",

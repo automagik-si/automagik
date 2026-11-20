@@ -195,7 +195,7 @@ export function discardArchives(profileDir, staging) {
 
 export function lockPins(lockfile) {
   // pnpm repeats local references in importer values, package keys and peer suffixes.
-  return new Set(Array.from(lockfile.matchAll(/(?:file|link):([^\s'"(){}\[\],]+?)(?=:\s|[\s'"(){}\[\],]|$)/g), match => match[1]))
+  return new Set(Array.from(lockfile.matchAll(/(?:file|link):([^\s'"(){}[\],]+?)(?=:\s|[\s'"(){}[\],]|$)/g), match => match[1]))
 }
 
 function verifyCandidate(profileDir, staging, plugins, expectedEntries) {

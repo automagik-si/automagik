@@ -2512,6 +2512,7 @@ var ZH = {
   "the published release needs a different DeepSeek Harness version.": "已发布版本需要其他版本的 DeepSeek Harness。",
   "a downloaded plugin package did not match the signed release.": "下载的插件包与已签名的发行版本不符。",
   "the package registry could not be reached.": "无法连接软件包仓库。",
+  "the profile .npmrc contains settings besides the registry.": "此配置的 .npmrc 含有软件包仓库以外的设置。",
   "this window does not hold the team lock.": "此窗口未持有团队锁。",
   "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
   "The check was interrupted. Check again.": "更新检查已中断。请重新检查。",
@@ -35132,6 +35133,8 @@ function selfUpdateReason(reason) {
       return t("a downloaded plugin package did not match the signed release.");
     case "registry-unreachable":
       return t("the package registry could not be reached.");
+    case "profile-npmrc":
+      return t("the profile .npmrc contains settings besides the registry.");
     case "bot/read-only":
       return t("this window does not hold the team lock.");
     case "check-timeout":

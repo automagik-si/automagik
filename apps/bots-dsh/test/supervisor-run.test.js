@@ -67,7 +67,8 @@ function request(f, overrides = {}) {
 }
 
 function driver(t, f) {
-  const signed = lane(f)
+  // One signed lane per fixture: a second driver must not re-sign the file the first one trusts.
+  const signed = f.signed ??= lane(f)
   const options = {
     home: f.home, profile: f.profile, command: f.command, version: FROM, laneUrl: signed.laneUrl, keys: signed.keys,
     tarballs: [...f.tarballs].map(([url, bytes]) => [url, bytes.toString('base64')]),
