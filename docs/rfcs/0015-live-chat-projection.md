@@ -1510,7 +1510,11 @@ manifest atomically in the 0600 `<team home>/pocket/document-manifests.json`. It
 fields (`phoneHash, id, requestId, sessionId, textHash, uploadIds, receiptIds, at`) plus `kinds`
 (`'image'` or `'document'` per upload, in order). It keeps the newest 64 per phone for 24 h from
 `at`. Retry does not refresh it. A failed manifest write answers `unavailable` before any prompt.
-The separate file keeps the old ledger readable on rollback.
+The separate file keeps the old ledger readable on rollback. A missing file is an empty store. A
+file that cannot be read or does not validate is moved to `document-manifests.json.bad`, as the
+ledger is: for 24 h from that moment every upload begin and every send with `uploads` (images
+included, since both stores must be consulted) is refused `quota` and prompts nothing; text sends
+keep working.
 
 **Manifest exception.** The caption hash and the `pocket-a/` DSH request id use the images
 rule. A Retry sends the same id, caption and ordered uploads. On a saved document manifest,
