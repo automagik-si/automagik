@@ -62,6 +62,23 @@ test('the origin host is the one Custom Domain, read back by Wrangler itself', a
   expect(config.account_id).toBeUndefined();
 });
 
+test.each(['automagik.si', 'login-2.eu.automagik.si'])('accepts the concrete hostname %s', async (host) => {
+  const run = configure(`https://${host}`);
+  expect(run.status, run.stderr).toBe(0);
+  const config = unstable_readConfig({ config: resolve(dir, 'wrangler.local.toml') }, { hideWarnings: true });
+  expect(config.routes).toEqual([{ pattern: host, custom_domain: true }]);
+});
+
+test.each(['*', '_id', '-id', 'id-', 'id..eu', 'a'.repeat(64), Array(4).fill('a'.repeat(63)).join('.')])(
+  'refuses the invalid DNS name %s.automagik.si before writing a route', async (prefix) => {
+    const file = resolve(dir, 'wrangler.local.toml');
+    await rm(file, { force: true });
+    const run = configure(`https://${prefix}.automagik.si`);
+    expect(run.status).not.toBe(0);
+    await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);
+
 test('an invalid origin writes no route', async () => {
   await rm(resolve(dir, 'wrangler.local.toml'), { force: true });
   for (const origin of ['https://id.automagik.si:8443', 'https://id.automagik.si/?a=1', '']) {

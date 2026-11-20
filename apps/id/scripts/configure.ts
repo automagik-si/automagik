@@ -9,6 +9,11 @@ if (origin.protocol !== 'https:' || !hostUnderSiteName(origin.hostname, PASSKEY_
     origin.port) {
   throw new Error(`ID_WORKER_ORIGIN must be an HTTPS origin on ${PASSKEY_SITE_NAME} or a subdomain of it`);
 }
+// URL also accepts wildcards and other labels that cannot name a public HTTPS host.
+const dnsLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+if (origin.hostname.length > 253 || !origin.hostname.split('.').every(label => dnsLabel.test(label))) {
+  throw new Error('ID_WORKER_ORIGIN must name a concrete DNS hostname for the Custom Domain');
+}
 const databaseId = process.env.ID_DATABASE_ID ?? '';
 if (!/^[0-9a-f-]{36}$/i.test(databaseId)) throw new Error('Set ID_DATABASE_ID');
 const receiving = process.env.WHATSAPP_RECEIVING_NUMBER;
