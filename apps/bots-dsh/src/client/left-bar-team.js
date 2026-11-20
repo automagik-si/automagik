@@ -9,7 +9,7 @@ import { QUIET, Status, WORDED, stateOfStatus, statusOr, word, worstStatus } fro
 // -------------------------------------------------------------------------
 // The Team side of the new left bar (direction C): the project's Bots, the channels and chats
 // under a Bot, then the group chats. One line per row: the art, the name, one status mark. No
-// crown, no role chip, no tags, no preview line.
+// crown or preview line.
 //
 // A team, as the bar reads it:
 //   bots      [{ id, name, status, unread, channelSource?, channels?, ...the Bot's own look
@@ -275,6 +275,7 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
       return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), null,
         h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
         h('span', { className: 'lb-name' }, row.name),
+        row.bot.roleTag ? h('span', { className: 'bt-tag' }, t(row.bot.roleTag)) : null,
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
         renderEnd ? renderEnd(row) : null,
         status(row))

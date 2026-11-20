@@ -37,6 +37,43 @@ function settings(bot, { main = false, rooms = [] } = {}) {
 }
 const bot = { id: 'b', name: 'Writer', role: 'Writer', instructions: '', capabilities: [] }
 
+test('the role picker serves team Bots, keeps Description, and follows the current role', () => {
+  const record = { id: 'role-fixture', name: 'Bot', role: 'Description' }
+  const calls = []
+  const actions = {
+    attachRole: (...args) => calls.push(['attach', ...args]),
+    detachRole: (...args) => calls.push(['detach', ...args]),
+  }
+  const form = (bot, roster) => walk(BotSettingsForm({ bot, roster, actions, run: result => result }))
+  const picker = tree => tree.find(node => node.type?.name === 'Segmented' && node.props.label === 'Role')
+  const tagged = tree => tree.some(node => node.props?.className === 'bt-tag' && node.props.children.includes('Genie'))
+  const tree = form(record, { bots: [record] })
+  assert.equal(tree.find(node => node.type?.name === 'InlineText' && node.props.label === 'Description').props.value, record.role)
+  const [none, genie] = picker(tree).props.children
+  assert.equal(none.props['aria-pressed'], true)
+  assert.equal(genie.props['aria-pressed'], false)
+  assert.equal(genie.props.disabled, true)
+  assert.equal(genie.props.title, 'Genie can be given to another Bot after the next Genie update.')
+  assert.equal(tagged(tree), false)
+
+  const attached = { ...record, kind: 'genie' }
+  const attachedTree = form(attached, { byId: { [record.id]: attached } })
+  assert.equal(tagged(attachedTree), true)
+  assert.equal(picker(attachedTree).props.children[1].props['aria-pressed'], true)
+  picker(attachedTree).props.children[0].props.onClick()
+  const detached = { ...attached, roles: [] }
+  const detachedTree = form(detached, { bots: [detached] })
+  assert.equal(tagged(detachedTree), false)
+  assert.equal(picker(detachedTree).props.children[0].props['aria-pressed'], true)
+  picker(detachedTree).props.children[1].props.onClick()
+  assert.deepEqual(calls, [['detach', record.id], ['attach', record.id, 'genie']])
+  for (const roster of [undefined, { bots: [] }, { bots: [attached], prefs: { roles: false } }]) {
+    const hidden = form(attached, roster)
+    assert.equal(picker(hidden), undefined)
+    assert.equal(tagged(hidden), false)
+  }
+})
+
 test('the Private switch is enabled only for a state the host accepts', () => {
   const noFolder = settings(bot).find(node => node.props?.label === 'Private')
   assert.equal(noFolder.props.disabled, true)
