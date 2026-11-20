@@ -100,6 +100,7 @@ jobs:
     outputs:
       version: ${{ steps.newest.outputs.version }}
       commit: ${{ steps.newest.outputs.commit }}
+      tree: ${{ steps.newest.outputs.tree }}
       dev: ${{ steps.newest.outputs.dev }}
       held: ${{ steps.hold.outputs.held }}
     env:
@@ -228,9 +229,13 @@ jobs:
             fi
           done
           commit="${WANT_COMMIT:-$(gh api "repos/${OMNI}/commits/v${newest}" --jq .sha)}"
+          [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::Omni's candidate commit is not a full sha"; exit 1; }
+          tree=$(gh api "repos/${OMNI}/git/commits/${commit}" --jq .tree.sha)
+          [[ "${tree}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::Omni's candidate tree is not a full sha"; exit 1; }
           {
             echo "version=${newest}"
             echo "commit=${commit}"
+            echo "tree=${tree}"
             echo "dev=${WANT_DEV:-$(git rev-parse HEAD)}"
           } >> "$GITHUB_OUTPUT"
           echo "### Candidate: Omni ${newest} (${commit:0:9}), omni.json is at ${current}$([[ "${DRY_RUN}" == true ]] && echo ', dry run: boot check only')" >> "$GITHUB_STEP_SUMMARY"
@@ -311,22 +316,23 @@ jobs:
         env:
           VERSION: ${{ needs.follow.outputs.version }}
           COMMIT: ${{ needs.follow.outputs.commit }}
+          TREE: ${{ needs.follow.outputs.tree }}
           BOOTED: ${{ needs.follow.outputs.dev }}
           DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
         run: |
           set -euo pipefail
           node -e '
             const fs = require("node:fs")
-            const [version, commit] = process.argv.slice(1)
+            const [version, commit, tree] = process.argv.slice(1)
             const file = "apps/desktop/omni.json"
             const json = JSON.parse(fs.readFileSync(file, "utf8"))
             fs.writeFileSync(file, JSON.stringify({ ...json, version, commit }, null, 2) + "\n")
             // The welcome installs the same release of the Omni plugins in a plain DSH.
             const welcome = "apps/welcome-dsh/package.json"
             const pkg = JSON.parse(fs.readFileSync(welcome, "utf8"))
-            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit }
+            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit, tree }
             fs.writeFileSync(welcome, JSON.stringify(pkg, null, 2) + "\n")
-          ' "${VERSION}" "${COMMIT}"
+          ' "${VERSION}" "${COMMIT}" "${TREE}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           empty=()

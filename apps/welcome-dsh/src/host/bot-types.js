@@ -205,7 +205,7 @@ export const hasGenieSkills = (home = homedir()) => existsSync(join(home, '.agen
 // What an install in Unfold's instance says when a plugin its pack brings is not there.
 export const BUNDLED_MISSING = 'Unfold brings this plugin, and it is missing from this instance.'
 
-export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.env, checkGit = gitProblem, genieSkills = hasGenieSkills, genieCli = () => genieOnPath(env), release = {}, releases = null, offersUnfold = hostOf(env) === 'unfold' }) {
+export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.env, checkGit = gitProblem, genieSkills = hasGenieSkills, genieCli = () => genieOnPath(env), release = {}, releases = null, offersUnfold = hostOf(env) === 'unfold', omniInstaller }) {
   const manager = () => service(ctx, 'pluginManager')
   // Unfold's own instance brings its plugins and Genie's command line with it: the card names
   // that command line, never the line that installs one, and nothing here installs a plugin.
@@ -576,7 +576,7 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
   }
 
   return {
-    'omni-plugins': () => status(),
+    'omni-plugins': () => status().then(answer => ({ ...answer, server: omniInstaller?.view() ?? null })),
     async 'omni-plugins-install'() {
       startInstall()
       return status()

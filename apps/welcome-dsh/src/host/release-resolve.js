@@ -8,6 +8,9 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { dirname, join } from 'node:path'
 import { GENIE_PIN_CHOICE, GENIE_PLUGIN, GENIE_RELEASE, OMNI_PIN_CHOICE, OMNI_PLUGINS, OMNI_RELEASE, onPath } from './bot-types.js'
 import { tarballDir, verifyLane } from './release-lane.js'
+import { installationRoute, npmStatusOf, registryOf } from './omni-github.js'
+
+export { registryOf }
 
 const PUBLISHER_KEYS = JSON.parse(readFileSync(new URL('./publisher-keys.json', import.meta.url), 'utf8'))
 const [botTeam, channels, canvas] = OMNI_PLUGINS
@@ -135,15 +138,6 @@ export async function dshCheck(ctx) {
       try { return appBoot.evaluatePluginCompatibility(manifest, {}, version) === undefined } catch { return true }
     }
   } catch { return hasEngine }
-}
-
-// Use the registry Omni's installer uses, in the same order.
-export function registryOf(env = process.env) {
-  for (const value of [env.BUN_CONFIG_REGISTRY, env.NPM_CONFIG_REGISTRY, env.npm_config_registry]) {
-    const url = URL.parse(value)
-    if (url?.protocol === 'https:' && !url.username && !url.password) return url.href.endsWith('/') ? url.href : `${url.href}/`
-  }
-  return 'https://registry.npmjs.org/'
 }
 
 async function untilAbort(promise, signal) {
@@ -328,32 +322,43 @@ export function createReleases({ fetch = globalThis.fetch, env = process.env, no
   return {
     omni, genie, cachedOmni: () => cachedOmni, cachedGenie: () => cachedGenie,
     recordTaken: (publisher, sequence) => recordTaken(env, publisher, sequence),
-    checkOmniServer: omniServerCheck(requests, env, process.platform, resolutionMs),
+    checkOmniServer: omniServerCheck(requests, { env, resolutionMs }),
   }
 }
 
-export function createOmniServerCheck({ fetch = globalThis.fetch, env = process.env, now = Date.now, platform = process.platform, requestMs = 5000, resolutionMs = 20_000 } = {}) {
-  return omniServerCheck(releaseRequests({ fetch, env, now, requestMs }), env, platform, resolutionMs)
+export function createOmniServerCheck({ fetch = globalThis.fetch, env = process.env, now = Date.now, requestMs = 5000, ...options } = {}) {
+  return omniServerCheck(releaseRequests({ fetch, env, now, requestMs }), { env, ...options })
 }
 
-function omniServerCheck({ get, npmLatest, registry }, env, platform, resolutionMs) {
-  return async (version) => {
-    if (platform === 'linux' && !onPath('systemctl', env)) return { ok: false, reason: 'no-systemd' }
+function omniServerCheck({ get, npmLatest, registry }, {
+  env, platform = process.platform, arch = process.arch, run, pin, resolutionMs = 20_000,
+}) {
+  return async (version, capability, available) => {
+    if (capability !== true && platform === 'linux' && !onPath('systemctl', env)) return { ok: false, reason: 'no-systemd' }
     const signal = AbortSignal.timeout(resolutionMs)
     const status = await get(`${registry}${OMNI_NPM}/${version}`, signal, (response) => {
       // The status alone answers this lookup. There is no manifest to keep.
       void response.body?.cancel().catch(() => {})
       return response.status === 200 || response.status === 404 ? response.status : null
     })
-    if (status === 200) return { ok: true }
-    if (status !== 404) return { ok: true, unchecked: true }
-    const [npm, github] = await Promise.all([
+    const releaseDetails = async () => Promise.all([
       npmLatest(signal),
       get(OMNI_GITHUB, signal, async (response, requestSignal) => {
         const release = await jsonOf(response, requestSignal, MAX_GITHUB_RELEASE_BODY)
         return typeof release?.tag_name === 'string' && release.tag_name !== '' ? release.tag_name : null
       }),
     ])
-    return { ok: false, reason: 'unpublished', version, npm, github }
+    if (capability !== true) {
+      if (status === 200) return { ok: true }
+      if (status !== 404) return { ok: true, unchecked: true }
+      const [npm, github] = await releaseDetails()
+      return { ok: false, reason: 'unpublished', version, npm, github }
+    }
+    const state = npmStatusOf(status)
+    const { route, login, fallback } = await installationRoute({ V: version, npm: state, env, platform, arch, run, pin, available })
+    if (route === 'terminal') return { ok: true, fallback, ...(state === 'unknown' ? { unchecked: true } : {}) }
+    if (!login) return { ok: false, reason: 'no-systemd', version, npmHas: route === 'npm', fallback }
+    const [npm, github] = await releaseDetails()
+    return { ok: false, reason: state === 'published' ? 'behind' : 'unpublished', version, npm, github, fallback }
   }
 }

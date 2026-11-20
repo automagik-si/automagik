@@ -123,7 +123,7 @@ jobs:
   image:
     name: Server image (build, smoke, scan)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     outputs:
       version: ${{ steps.gate.outputs.version }}
       content: ${{ steps.gate.outputs.content }}
@@ -411,6 +411,12 @@ jobs:
           path: secrecy/
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Install and restart the pinned Omni sandbox
+        if: steps.gate.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.gate.outputs.tag }}
+        run: node server/omni-smoke.mjs "automagik-server:${TAG}"
 
       - name: Save the scanned image for the publish job
         if: steps.gate.outputs.publish == 'true' && steps.gate.outputs.source == 'release' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')

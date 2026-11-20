@@ -286,10 +286,13 @@ The shape was read from DSH 0.2.1-rc.2:
 | `ai-dedupe` | `{ id }` | Stops the other ways that row's AI is connected. |
 | `ai-subscription` | `{ provider, on }` | Shows or hides a dsh-subscriptions vendor's models. |
 | `provider-key`, `signin-*` | see `src/host/providers.js` | A key, or a sign-in run through DSH's authorization service. |
-| `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, and the install in progress. |
+| `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, the plugin install in progress, and the local Omni installer job in `server`. |
 | `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager. The Bot team comes from this plugin's sibling source or checked release tarball. Omni's plugins come from the release chosen above. Switches on installed plugins that are off. |
 | `genie-plugin-install` | none | Installs the Bot team if needed, then installs Genie from its signed lane or its pin. Switches on installed plugins that are off. |
-| `omni-server-check` | `{ version }` | Checks the version named by the card's installer command on its npm registry. Reports `unpublished` with the latest npm version and GitHub tag when available, or `no-systemd` on Linux without `systemctl`. An unavailable registry check lets the installer continue. |
+| `omni-server-check` | `{ version, fallback?: true }` | Checks the version named by the card's installer command on its npm registry. With `fallback: true`, reports whether the local installer can take over and the pinned GitHub release it can use. |
+| `omni-github-install` | `{ version, reason, exitCode? }` | Starts the local Omni install or returns the running job. The host checks which source is usable. |
+| `omni-github-status`, `omni-github-cancel` | `{ id? }` | Reads the current or named job, or requests cancellation. Once Omni's installer starts, it runs to completion. |
+| `omni-github-ack` | `{ id }` | Claims a completed job once so a single card connects to the new Omni. |
 | `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, signInCheck?, listed, restartNeeded }] }`. `signInCheck` is `timeout` or `unreadable`: why the last check could not tell, only while `signedIn` is absent. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |
@@ -298,6 +301,16 @@ The shape was read from DSH 0.2.1-rc.2:
 The host declares `inject: ['settings', 'credentials', 'connection']`; `connection` serves
 the route. It reads DSH's `llm`, `authorization`, `pluginManager`, `agentDefaultModel`, `tools`, `skills`
 and `permissionPresets` services when they are there, and acp-dsh's `acpAgents`.
+
+### Installing Omni from GitHub
+
+The welcome can build the Omni release pinned in its package manifest when the version offered by npm is behind, unpublished, or the npm terminal install fails. Without a usable service session, the welcome runs the installer itself. It uses npm when the requested version is published and at least as new as the pin. The GitHub route requires the pin to be at least as new as the requested version. An image with the Omni supervisor installs into a fresh sandbox and lets the supervisor start it. An interrupted image install can resume in the same sandbox at the same version. An existing supervised sandbox stays in place.
+
+The welcome checks that the GitHub tag resolves to the pinned commit and that its commit API names the pinned Git tree. It streams and verifies the commit archive against that tree before extraction. It verifies the Bun zip and executable against pinned SHA-256 hashes. The build installs dependencies with lifecycle scripts disabled, then runs Omni's pinned build and pack scripts with an allowlisted environment and scratch home.
+
+The Omni root is `OMNI_HOME` or `~/.omni`. It holds the sandbox in `sandbox/`, Bun in `automagik-bun/`, and the packaged CLI in `packages/`. The installer removes its temporary checkout under `automagik-build/` after the build and install processes stop. The image publishes `sandbox/automagik-supervised.json` after a successful install so the supervisor can start the sandbox. On desktop, Omni can adopt an existing sandbox once its process has stopped. Omni starts at login when the desktop has a usable login service and starts its own detached supervisor on Linux without one. Omni manages cleanup inside the sandbox home.
+
+DSH, Bots and Omni share the workspace identity. Omni's build scripts can read files accessible to that user. The local installer is unavailable in multiuser mode and in Unfold's instance. The channels plugin runs its own Bun probe when it prepares a terminal install. Omni's inner runtime install drops proxy settings, so a proxy-only network can block that step. The build and embedded runtime were exercised on Linux x64 with glibc.
 
 ## Develop
 
