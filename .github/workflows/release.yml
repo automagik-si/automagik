@@ -86,6 +86,7 @@ name: Release
 # [--field replace_unverified_am_pointer=true] (the same for the posted am-lane pointer;
 # scripts/am-lane.ts posted) [--field replace_unverified_meter_pointer=true] (the same for the
 # posted meter-lane pointer; scripts/meter-lane.ts posted).
+# [--field restamp_roles=true] uses the cut version for every role on the next eligible plugin cut.
 # The workflow's own pushes (the version commit, the index listing, follow-omni's pin) start no
 # run: GitHub starts none for a push made with the workflow token. A dev that has nothing since the
 # last release but those commits cuts nothing. Cuts queue one at a time; a merge that lands while
@@ -107,6 +108,7 @@ name: Release
 # holds nothing else. The desktop app and Omni's market install the plugins from it, without a
 # release of their own.
 # Every versioned release that packs bots-dsh, including prereleases, also carries roles.json and roles.json.sig.
+# A role's version is the release in which its package bytes last changed. Each later plugin cut attaches the same bytes under its own tag.
 #
 # Nothing is published to npm: the plugins ship as git sources and release files only.
 # Pushes use the workflow's own token; CI already ran on the dev commit being released, and
@@ -142,6 +144,11 @@ on:
         required: false
         type: boolean
         default: false
+      restamp_roles:
+        description: 'Stamp every role with the cut version on the next eligible plugin cut (RFC 0037)'
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       prerelease:
@@ -166,6 +173,11 @@ on:
         default: false
       replace_unverified_meter_pointer:
         description: 'Post the meter lane over a posted pointer that does not verify (RFC 0017)'
+        required: false
+        type: boolean
+        default: false
+      restamp_roles:
+        description: 'Stamp every role with the cut version on the next eligible plugin cut (RFC 0037)'
         required: false
         type: boolean
         default: false
@@ -467,6 +479,74 @@ jobs:
           cat release/plugins.json
           (cd release && sha256sum -- * > PLUGINS.SHA256SUMS)
 
+      - name: Pack the roles
+        if: steps.cut.outputs.version != '' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+          SHA: ${{ steps.cut.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RESTAMP_ROLES: ${{ inputs.restamp_roles }}
+        run: |
+          set -euo pipefail
+          pack=(bun scripts/lane.ts pack-roles release "${VERSION}" "${SHA}")
+          if [[ "${RESTAMP_ROLES}" == true ]]; then
+            echo "::warning::restamp_roles is set. Every role will use the version of this cut."
+            "${pack[@]}" --no-predecessor
+            exit 0
+          fi
+
+          history_error() {
+            printf '::error::Could not read role release history (%s). Set restamp_roles=true on the next plugin cut to stamp every role with its cut version.\n' "$1" >&2
+            exit 1
+          }
+          history=$(mktemp -d)
+          trap 'rm -rf -- "${history}"' EXIT
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${history}/releases.json" ||
+            history_error 'release listing failed'
+          candidates=$(jq -rs --arg cut "${VERSION}" '
+            def version: ltrimstr("v") | split(".") | map(tonumber);
+            def size_ok($name; $limit):
+              all(.assets[] | select(.name == $name); .size | type == "number" and . >= 0 and . <= $limit);
+            if length != 1 then error("expected one release listing") else .[0] end
+            | if type != "array" or length == 0 or any(.[]; type != "array") then error("expected release pages") else .[][] end
+            | if (.tag_name | type) != "string" or (.draft | type) != "boolean"
+                 or (.assets | type) != "array" or any(.assets[]; (.name | type) != "string")
+              then error("invalid release") else . end
+            | select(.draft == false and (.tag_name | test("^v3\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$")))
+            | select((.tag_name | version) < ($cut | version))
+            | {tag: .tag_name, version: (.tag_name | version),
+               catalog: any(.assets[]; .name == "roles.json"), signature: any(.assets[]; .name == "roles.json.sig"),
+               catalog_size_ok: size_ok("roles.json"; 262144), signature_size_ok: size_ok("roles.json.sig"; 1024)}
+            | select(.catalog or .signature)
+          ' "${history}/releases.json" | jq -rs 'sort_by(.version) | reverse | .[] | [.tag, .catalog, .signature, .catalog_size_ok, .signature_size_ok] | @tsv') ||
+            history_error 'invalid release listing'
+
+          predecessor=
+          while IFS=$'\t' read -r tag catalog signature catalog_size_ok signature_size_ok; do
+            [[ -n "${tag}" ]] || continue
+            # A lone asset on any earlier published release makes history unusable.
+            [[ "${catalog}" == "${signature}" ]] || history_error "${tag} has only one catalog asset"
+            [[ -z "${predecessor}" ]] || continue
+            if git merge-base --is-ancestor "refs/tags/${tag}" "${SHA}"; then
+              predecessor=${tag}
+              predecessor_catalog_size_ok=${catalog_size_ok}
+              predecessor_signature_size_ok=${signature_size_ok}
+            elif [[ "$?" != 1 ]]; then
+              history_error "could not check ancestry of ${tag}"
+            fi
+          done <<< "${candidates}"
+          if [[ -z "${predecessor}" ]]; then
+            "${pack[@]}" --no-predecessor
+          else
+            [[ "${predecessor_catalog_size_ok}" == true ]] || history_error "${predecessor} has an invalid roles.json size (limit 262144 bytes)"
+            [[ "${predecessor_signature_size_ok}" == true ]] || history_error "${predecessor} has an invalid roles.json.sig size (limit 1024 bytes)"
+            gh release download "${predecessor}" --repo "${GITHUB_REPOSITORY}" -p roles.json -p roles.json.sig --dir "${history}" ||
+              history_error "could not download ${predecessor}'s catalog"
+            "${pack[@]}" --predecessor "${history}/roles.json" "${history}/roles.json.sig" "${predecessor#v}" ||
+              history_error "could not use ${predecessor}'s catalog"
+          fi
+
       - name: Write the role catalog
         if: steps.cut.outputs.version != '' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'
         env:
@@ -475,7 +555,7 @@ jobs:
         run: |
           set -euo pipefail
           ISSUED=$(TZ=UTC git show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd "${SHA}")
-          bun scripts/lane.ts roles-manifest "${VERSION}" "${ISSUED}" > release/roles.json
+          bun scripts/lane.ts roles-manifest "${VERSION}" "${ISSUED}" release > release/roles.json
 
       - name: Sign the role catalog
         if: steps.cut.outputs.version != '' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'

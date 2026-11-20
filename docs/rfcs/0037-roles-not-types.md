@@ -381,8 +381,13 @@ process, and this RFC does not claim they do. That is why community roles wait f
    extension point. Herdr's roster has its own seat `kind` (contract 12), which is not a crew
    kind.
 10. **Release artifacts.** An official role is `automagik-role-<id>-<version>.tgz` plus its
-    `.sha256`, attached to the release; the signed `roles.json` on that release names it. Nothing
-    is published to npm.
+    `.sha256`, attached to the release; the signed `roles.json` on that release names it.
+    Its `<version>` is the release in which the package's bytes last changed; a later release
+    attaches the same bytes under its own tag, so an unchanged role keeps its version and its sha256.
+    Nothing is published to npm.
+
+    **Alternative considered.** Stamping every release's version would show an update on every
+    plugin release and block fresh attachments after a plugin upgrade and restart.
 11. **The roles setting.** `state.json: prefs.roles` is a team-level boolean introduced in P1,
     on by default: the one switch the deliveries reuse. It gates the Role picker and tag (P1),
     the temporary install action (P2) and the Roles section and chip (P3). It is not a Bot

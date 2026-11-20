@@ -445,6 +445,7 @@ jobs:
             for name in ${assets}; do
               case "${name}" in automagik-*.tgz|plugins.json|PLUGINS.SHA256SUMS|lane.json|lane.json.sig|automagik-pocket-*.apk|latest.json|usagemeter-*|usagemeter.SHA256SUMS|meter.json|meter.json.sig|server-image.json) continue ;; esac
               case "${name}" in roles.json|roles.json.sig) continue ;; esac
+              case "${name}" in automagik-role-*.tgz.sha256) continue ;; esac
               grep -qxF -- "${name}" <<< "${cut}" && continue
               [[ -e "assets/${name}" ]] || gh release delete-asset "${TAG}" "${name}" --yes --repo "${GITHUB_REPOSITORY}"
             done
