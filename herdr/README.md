@@ -846,20 +846,22 @@ host, and a bot started there runs the pack's normal linked-machine launch.
 - **Default: one holder, `local`, and a limit of 6 agents per holder.** Nothing is spread and no
   core is started until the lead adds a holder, so a pack that never runs `am holders` behaves
   exactly as before. The limit is configurable with `am holders limit N` (1-64).
-- `am holders` shows the pool: each holder's live agent count against the limit, whether its core
+- `am holders` shows the pool: each holder's agent count against the limit (a binding on a
+  holder whose line is down still counts: its terminal keeps running there), whether its core
   answers, and the recent losses. `am holders add --local NAME` adds one: it creates the hc
   session `am-holder-NAME` and links it as the machine `NAME` (`hc machine add --via`), so the
   holder's panes show in this window in that machine's space on the project. `am holders remove
-  NAME` takes one away once it holds no agent. `am holders up` starts a holder's core after a
-  reboot.
+  NAME` takes one away only once it holds no agent, live or on a dropped line; the refusal names
+  the agents. `am holders up` starts a holder's core after a reboot.
 - A new `am start` goes to the holder with the fewest of the pack's agents, and never to a holder
   whose core isn't answering while another is. With N agents and a limit L over two or more
   holders, a start above the limit goes to another holder: one holder's loss cannot take every
   seat. A start is never refused for the limit; when every holder is full, the least loaded takes
-  it and says so.
-- `am ls`, `am show` and `am whois` name the holder; `am restart` finds the bot's holder and runs
-  the restart there. A worker started from a holder's pane runs in that holder (its `am` talks to
-  that core). `am holders losses` reads back what each loss took; a lost holder and a dropped
+  it and says so on stderr (and as `limitWarning` with `--json`).
+- `am ls`, `am show` and `am whois` name the holder; a bot whose holder's line dropped reads
+  `unknown in NAME/tN`, never stopped. `am restart` finds the bot's holder and runs the restart
+  there. A worker started from a holder's pane runs in that holder (its `am` talks to that
+  core). `am holders losses` reads back what each loss took; a lost holder and a dropped
   machine line are recorded in `<app home>/automagik-herdr/holder-loss.log` as the holder's name
   and the bot ids, never a path, socket or command line.
 - After a reboot, `am holders up` starts the extra holders, then `am restart <bot> --machine

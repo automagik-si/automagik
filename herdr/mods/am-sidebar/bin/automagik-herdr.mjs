@@ -1370,7 +1370,8 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
   if (bot.planned) status = "planned";
   else if (hcError) status = project.machine ? "unknown" : "hc unavailable";
   else if (!held && view && unknownFor(view, bot.id, project)) status = "unknown"; // its machine isn't answering
-  else if (held) status = agentInForeground(live) ? live.status?.state ?? "running" : "no agent in front";
+  else if (held) status = !held.get ? "unknown" // a holder's line dropped; its terminal is still there
+    : agentInForeground(live) ? live.status?.state ?? "running" : "no agent in front";
   // #823: the effective permission lists the launch carries: a seat's on the project folder,
   // and a worker default's (its task worktree is added at its launch).
   const seatAgy = bot.agent === "antigravity"
@@ -3740,19 +3741,31 @@ function writeHolders(config) {
   }
 }
 
-/** The pool, its live agent counts (by holder), and whether each holder's core answers now. */
+/**
+ * The pool, its agent counts by holder, those agents, and whether each holder's core answers
+ * now. A binding counts wherever its attach row names a holder, live or not: a machine whose
+ * line dropped keeps its terminals running there (hc machine rm says so), and its row still
+ * names the holder. Counting only `liveAt` let `holders remove` drop a holder that still held
+ * an agent, stranding the pane unlinked (#1881).
+ */
 async function holderView() {
   const config = readHolders();
   const view = await attachView();
   const counts = new Map(config.holders.map((h) => [h.name, 0]));
-  for (const { binding } of view.liveAt.values()) {
+  const agents = new Map(config.holders.map((h) => [h.name, []]));
+  const bindings = [...view.liveAt.values()].map((l) => l.binding).concat([...view.unknownAt.values()]);
+  for (const binding of bindings) {
     const place = placeOfRow(binding);
-    const name = place === null ? LOCAL_HOLDER : view.machines.get(place)?.name;
-    if (name && counts.has(name)) counts.set(name, counts.get(name) + 1);
+    // The machine's name as hc gives it now, else the row's own: a machine whose line is gone
+    // from `hc machine ls` still has a row that names its holder.
+    const name = place === null ? LOCAL_HOLDER : (view.machines.get(place)?.name ?? binding.machine ?? null);
+    if (!name || !counts.has(name)) continue;
+    counts.set(name, counts.get(name) + 1);
+    agents.get(name).push(binding.bot);
   }
   const connected = new Map();
   for (const m of view.machines.values()) if (m?.name) connected.set(m.name, Boolean(m.connected));
-  return { config, view, counts, connected };
+  return { config, view, counts, agents, connected };
 }
 
 /**
@@ -3978,12 +3991,17 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
   }
   if (verb === "remove" || verb === "rm") {
     if (arg === undefined) throw new CliError("holders remove needs a name.", 2);
-    const { config, counts } = await holderView();
+    const { config, agents } = await holderView();
     const h = config.holders.find((x) => x.name === arg);
     if (!h) throw new CliError(`no holder "${arg}" (am holders lists them).`, 2);
     if (h.name === LOCAL_HOLDER) throw new CliError("local is this computer's holder; it stays.", 2);
-    const count = counts.get(h.name) ?? 0;
-    if (count > 0) throw new CliError(`holder "${h.name}" holds ${count} ${count === 1 ? "agent" : "agents"}; move them off before removing it.`);
+    // Live and last-known bindings both count: a holder whose line is down still holds its
+    // terminals there, and its attach row names it. The refusal names them, as the live case.
+    const held = [...new Set(agents.get(h.name) ?? [])].sort();
+    if (held.length) {
+      throw new CliError(`holder "${h.name}" holds ${held.length} ${held.length === 1 ? "agent" : "agents"} `
+        + `(${held.join(", ")}); move them off before removing it.`, 1, { holder: h.name, agents: held });
+    }
     const r = await hc(["machine", "rm", h.machine, "--json"]);
     if (r.code !== 0) throw new CliError(`holder "${h.name}" wasn't removed: ${hcSaid((r.stderr || r.stdout).trim())}`);
     let stopped = null;
@@ -4003,25 +4021,54 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
   throw new CliError(usage, 2);
 }
 /**
+ * The line a start says when it goes to a holder already at its limit: the limit never refuses
+ * a start (README, "More than one holder"), but it must say so. `--json` also carries it as
+ * `limitWarning`; without that the only trace was a later `am holders`.
+ */
+function limitWarning(bot, name, count, limit) {
+  const state = count > limit ? `is over its limit (${count}/${limit})` : `is at its limit (${count}/${limit})`;
+  return `holder "${name}" ${state}; ${bot.name} starts there anyway. Add a holder (am holders add --local <name>) `
+    + `or raise the limit (am holders limit N).`;
+}
+
+/**
  * The start path's holder decision: { holder } to start there, { local: true } for this
  * computer, or { held } when the bot already plays somewhere in the pool. Only a pool with more
  * than one holder spreads; `--holder` names one explicitly; `--space` is this computer's.
+ * `limitWarning`: the line `cmdStart` says once it starts there, above the limit.
  */
 async function holderForStart(opts, project, bot) {
   const config = readHolders();
-  if (config.holders.length < 2 && opts.holder === undefined) return { local: true };
+  const localWarning = (counts) => {
+    const count = counts.get(LOCAL_HOLDER) ?? 0;
+    return count >= config.limit ? limitWarning(bot, LOCAL_HOLDER, count, config.limit) : undefined;
+  };
+  if (config.holders.length < 2 && opts.holder === undefined) {
+    // The conservative default: this computer's core, exactly as before. It still reads the
+    // count so a start over the one holder's limit says so, like any other start.
+    const { counts } = await holderView();
+    const warning = localWarning(counts);
+    return { local: true, ...(warning ? { limitWarning: warning } : {}) };
+  }
   const { view, counts, connected } = await holderView();
   const held = holderHeld(view, bot.id, project.key);
   if (held) return { held };
-  if (opts.space !== undefined) return { local: true };
+  if (opts.space !== undefined) {
+    const warning = localWarning(counts);
+    return { local: true, ...(warning ? { limitWarning: warning } : {}) };
+  }
   const pick = chooseHolder({ config, counts, connected, holder: opts.holder });
   if (pick.error) throw new CliError(pick.error, 2);
-  if (pick.local) return { local: true };
+  if (pick.local) {
+    const warning = pick.overLimit ? limitWarning(bot, pick.name, pick.count, config.limit) : undefined;
+    return { local: true, ...(warning ? { limitWarning: warning } : {}) };
+  }
   if (!pick.connected) {
     if (opts.holder !== undefined) throw new CliError(`holder "${pick.name}" isn't connected (am holders up starts a local holder's core).`);
-    return { local: true };
+    const warning = localWarning(counts);
+    return { local: true, ...(warning ? { limitWarning: warning } : {}) };
   }
-  return { holder: pick };
+  return { holder: pick, ...(pick.overLimit ? { limitWarning: limitWarning(bot, pick.name, pick.count, config.limit) } : {}) };
 }
 
 async function cmdStart(opts, [ref], warnedRelabels) {
@@ -4042,7 +4089,8 @@ async function cmdStart(opts, [ref], warnedRelabels) {
   if (project.machine) return startOnMachine(opts, project, bot);
   // #1432: a pool with more than one holder puts the new pane on the least loaded one; the
   // holder is a local hc session exposed as a linked machine, so its launch is the pack's own
-  // linked-machine start, delegated to a child CLI. One holder (the default) changes nothing.
+  // linked-machine start, delegated to a child CLI. One holder (the default) places exactly as
+  // before; a start over its limit still says so, like any other.
   if (opts.holder !== undefined && readHolders().holders.length < 2) {
     const why = opts.holder === LOCAL_HOLDER ? null : `no holder "${opts.holder}": the pool is this computer's core (am holders add --local <name>)`;
     if (why) throw new CliError(why, 2);
@@ -4055,7 +4103,9 @@ async function cmdStart(opts, [ref], warnedRelabels) {
       : `${bot.name} is already running in ${decision.held.binding.terminal}${where}${elsewhere}.`;
   }
   if (decision.holder) {
+    if (decision.limitWarning) report([decision.limitWarning]);
     const out = startOnHolder(project, bot, decision.holder);
+    if (decision.limitWarning) out.limitWarning = decision.limitWarning;
     return opts.json ? out : out.terminal;
   }
   // One terminal plays a bot: the one the attach ledger names is reported, never a second
@@ -4071,7 +4121,10 @@ async function cmdStart(opts, [ref], warnedRelabels) {
     warnedRelabels, place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined,
   });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
-  return opts.json ? seatJson(bot, seat) : seat.terminal;
+  if (decision.limitWarning) report([decision.limitWarning]);
+  const out = seatJson(bot, seat);
+  if (decision.limitWarning) out.limitWarning = decision.limitWarning;
+  return opts.json ? out : seat.terminal;
 }
 
 // ---- a bot's pane on a linked machine (automagik#206 part b): start and restart ----
@@ -7003,18 +7056,25 @@ async function projectHomeHeld(project, bot) {
 /**
  * #1432: the same project's bot on a holder's core, when the pool has one. A holder is a local
  * linked machine, and the local view keeps machine bindings apart (`liveAt`), so a plain
- * `liveFor` for this computer misses it; ls, show and whois fall back to this.
+ * `liveFor` for this computer misses it; ls, show and whois fall back to this. A holder whose
+ * line dropped keeps its binding in `unknownAt`: its terminal still runs there, so the read
+ * says where the bot plays (unknown), never that it stopped (#1881).
  */
 function holderFallback(view, bot, project) {
   if (!view || project?.machine) return null;
   let config;
   try { config = readHolders(); } catch { return null; }
   if (config.holders.length < 2) return null;
+  const holderOf = (binding) => {
+    const place = placeOfRow(binding);
+    const name = place === null ? null : (view.machines.get(place)?.name ?? binding.machine ?? null);
+    return name && config.holders.some((h) => h.name === name) ? name : null;
+  };
   for (const l of view.liveAt.values()) {
-    if (l.binding.bot !== bot.id) continue;
-    const place = placeOfRow(l.binding);
-    const name = place === null ? null : view.machines.get(place)?.name;
-    if (name && config.holders.some((h) => h.name === name)) return l;
+    if (l.binding.bot === bot.id && holderOf(l.binding)) return l;
+  }
+  for (const binding of view.unknownAt.values()) {
+    if (binding.bot === bot.id && holderOf(binding)) return { binding, get: null };
   }
   return null;
 }

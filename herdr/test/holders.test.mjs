@@ -15,7 +15,7 @@ import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
-const MAIN = "b-aaaaaaaaaa", MEMBER = "b-bbbbbbbbbb";
+const MAIN = "b-aaaaaaaaaa", MEMBER = "b-bbbbbbbbbb", WORKER = "b-cccccccccc";
 const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
 
 function scene(t) {
@@ -29,6 +29,7 @@ function scene(t) {
   const project = scratchProject(root, "proj", { bots: { version: 1, categories: [], bots: [
     { id: MAIN, name: "Main", kind: "main", look, role: "lead", instructions: "", agent: "claude" },
     { id: MEMBER, name: "Member", kind: "member", lead: MAIN, look, role: "r", instructions: "", agent: "claude" },
+    { id: WORKER, name: "Worker", kind: "member", lead: MAIN, look, role: "r", instructions: "", agent: "claude" },
   ] } });
   const statePath = join(root, "hc.json"), logPath = join(root, "hc.log");
   writeFileSync(statePath, JSON.stringify({ next: 100, terminals: [], machines: [],
@@ -92,9 +93,14 @@ test("holders add --local makes a second holder; remove refuses while it holds a
     machine: "h2", at: new Date().toISOString(), by: "start" };
   mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
   writeFileSync(attachPath(s.app), `${JSON.stringify(row)}\n`, { mode: 0o600 });
-  const rm = s.cli(["holders", "remove", "h2"]);
+  const rm = s.cli(["holders", "remove", "h2", "--json"]);
   assert.equal(rm.code, 1);
-  assert.match(rm.err, /holds 1 agent/);
+  assert.match(rm.err, /holds 1 agent \(b-bbbbbbbbbb\); move them off before removing it/);
+  const refused = rm.json();
+  assert.equal(refused.holder, "h2");
+  assert.deepEqual(refused.agents, [MEMBER]);
+  assert.match(refused.error, /holds 1 agent \(b-bbbbbbbbbb\)/);
+  assert.ok(s.state().machines.some((m) => m.name === "h2"), "the machine stays while it holds an agent");
 
   // Without the agent, it goes: the machine is removed and the pool is one holder again.
   s.setState((st) => { st.terminals = []; });
@@ -103,6 +109,57 @@ test("holders add --local makes a second holder; remove refuses while it holds a
   assert.equal(gone.code, 0, gone.err);
   assert.equal(gone.json().removed, "h2");
   assert.deepEqual(s.cli(["holders", "--json"]).json().holders.map((h) => h.name), ["local"]);
+});
+
+test("remove refuses a holder whose line is down while it still holds an agent", (t) => {
+  // #1881: the machine's line dropped, but its core and terminal keep running there; the attach
+  // row still names the holder. Live-only counting let remove delete the machine and strand the
+  // agent, so the refusal must count the unknown binding too and leave everything in place.
+  const s = scene(t);
+  assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+  assert.equal(s.cli(["start", "Main", "--json"]).code, 0);
+  const member = s.cli(["start", "Member", "--json"]);
+  assert.equal(member.code, 0, member.err);
+  assert.equal(member.json().holder, "h2");
+  const address = `${member.json().machine}/${member.json().terminal}`;
+  s.setState((st) => {
+    const m = st.machines.find((x) => x.name === "h2");
+    m.state = "disconnected";
+    m.since_ms = Date.parse("2026-11-16T10:00:00.000Z");
+  });
+
+  // The holder is away, but the pack's own loss record says it holds the agent.
+  const view = s.cli(["holders", "--json"]);
+  assert.equal(view.code, 0, view.err);
+  const h2 = view.json().holders.find((h) => h.name === "h2");
+  assert.equal(h2.connected, false);
+  assert.equal(h2.count, 1, "an unknown binding still counts as held");
+  assert.ok(existsSync(s.lossesFile));
+  assert.ok(readJsonLines(s.lossesFile).some((e) => e.holder === "h2" && e.reason === "holder_unreachable"));
+
+  const removedBefore = s.calls().filter((c) => c[0] === "machine" && c[1] === "rm").length;
+  const rm = s.cli(["holders", "remove", "h2", "--json"]);
+  assert.equal(rm.code, 1);
+  assert.match(rm.err, /holds 1 agent \(b-bbbbbbbbbb\); move them off before removing it/);
+  const refused = rm.json();
+  assert.equal(refused.holder, "h2");
+  assert.deepEqual(refused.agents, [MEMBER]);
+  assert.match(refused.error, /holds 1 agent \(b-bbbbbbbbbb\)/);
+
+  // Nothing was removed: the pool, the machine line, the attach row and the pane all stay.
+  assert.equal(s.calls().filter((c) => c[0] === "machine" && c[1] === "rm").length, removedBefore, "hc machine rm was not called");
+  assert.deepEqual(s.cli(["holders", "--json"]).json().holders.map((h) => h.name), ["local", "h2"]);
+  assert.ok(s.state().machines.some((m) => m.name === "h2"), "the machine stays");
+  assert.ok(s.rows().some((r) => r.event === "attach" && r.bot === MEMBER && r.machine === "h2"), "the attach row keeps naming h2");
+  assert.equal(s.state().terminals.find((x) => x.address === address)?.state, "live", "the h2 pane keeps running");
+
+  // The bot is still found where it plays, unknown rather than stopped.
+  const shown = s.cli(["ls", "--json"]).json().projects[0].bots.find((b) => b.id === MEMBER);
+  assert.equal(shown.machine, "h2");
+  assert.equal(shown.terminal, member.json().terminal);
+  assert.equal(shown.status, "unknown");
+  assert.match(s.cli(["ls"]).out, new RegExp(`Member.* unknown in h2/${member.json().terminal}`));
+  assert.match(s.cli(["whois", "--bot", MEMBER]).out, new RegExp(`plays in h2/${member.json().terminal}`));
 });
 
 test("starts spread over the pool, and one holder's loss leaves the other's agent live", (t) => {
@@ -175,4 +232,28 @@ test("a holder machine whose line is down is recorded as unreachable, once", (t)
   // A second run doesn't duplicate the same drop.
   assert.equal(s.cli(["holders", "--json"]).code, 0);
   assert.equal(readJsonLines(s.lossesFile).filter((e) => e.reason === "holder_unreachable").length, 1);
+});
+
+test("a start over the limit is accepted and says so, in text and --json", (t) => {
+  // #1881: README and the PR body say a start past the budget is never refused but "says so".
+  // Three bots with two holders at limit 1: the third goes to the least loaded (local, first)
+  // and the start reports the over-limit move on stderr and as `limitWarning`.
+  const s = scene(t);
+  assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+  assert.equal(s.cli(["holders", "limit", "1"]).code, 0);
+  assert.equal(s.cli(["start", "Main", "--json"]).code, 0);
+  const member = s.cli(["start", "Member", "--json"]);
+  assert.equal(member.code, 0, member.err);
+  assert.equal(member.json().holder, "h2");
+  assert.doesNotMatch(member.err, /limit/, "a start under the budget stays quiet");
+
+  const worker = s.cli(["start", "Worker", "--json"]);
+  assert.equal(worker.code, 0, worker.err);
+  assert.equal(worker.json().holder, undefined, "the least loaded holder takes it: local, first");
+  assert.match(worker.json().limitWarning, /holder "local" is at its limit \(1\/1\); Worker starts there anyway/);
+  assert.match(worker.err, /am: holder "local" is at its limit \(1\/1\); Worker starts there anyway/);
+  assert.match(worker.err, /am holders add --local|am holders limit/);
+
+  const rows = s.cli(["holders", "--json"]).json().holders;
+  assert.deepEqual(rows.map((h) => [h.name, h.count, h.overLimit]), [["local", 2, true], ["h2", 1, false]]);
 });
