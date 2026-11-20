@@ -17,6 +17,7 @@ const FILE_LIMIT = 64 * 1024
 const ISO_TIMESTAMP = /^(?:\d{4}|[+-]\d{6})-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/
 const isId = value => typeof value === 'string' && ID.test(value)
 const isVersion = value => typeof value === 'string' && value.trim() === value && cleanVersion(value) !== null
+const isSequence = value => Number.isSafeInteger(value) && value >= 0
 
 const hasBootId = (value, bootIds) => bootIds.some(id => value.includes(id))
 const publicVersion = (value, bootIds) => isVersion(value) && !hasBootId(value, bootIds)
@@ -35,7 +36,46 @@ function contains(dir, path) {
   return !isAbsolute(part) && part !== '..' && !part.startsWith(`..${sep}`)
 }
 
-export function usableStore(profileDir) {
+function readLinuxMountInfo() {
+  return fs.readFileSync('/proc/self/mountinfo', 'utf8')
+}
+
+function sameMount(profile, store, mountInfo) {
+  const mounts = new Map()
+  const mountPath = /^\/(?:[^ \t\\]|\\(?:040|011|012|134))*$/
+  for (const line of mountInfo.replace(/\n$/, '').split('\n')) {
+    const fields = line.split(' ')
+    const [id, parent, device, root, point] = fields
+    const separator = fields.indexOf('-', 6)
+    if (separator < 6 || fields.length !== separator + 4 || fields.includes('')
+      || !/^\d+$/.test(id) || !/^\d+$/.test(parent) || !/^\d+:\d+$/.test(device)
+      || !/^\S+$/.test(root) || !mountPath.test(point) || mounts.has(id)) return false
+    const path = point.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)))
+    mounts.set(id, { id, parent, path })
+  }
+
+  // A mount stacked at the same path covers its parent at that path.
+  const covered = new Set()
+  for (const mount of mounts.values()) {
+    if (mount.parent !== mount.id && mounts.get(mount.parent)?.path === mount.path) covered.add(mount.parent)
+  }
+  const mountIdOf = path => {
+    let length = 0
+    let id
+    for (const mount of mounts.values()) {
+      if (covered.has(mount.id) || mount.path.length < length) continue
+      const prefix = mount.path === '/' ? '/' : mount.path + '/'
+      if (path !== mount.path && !path.startsWith(prefix)) continue
+      id = mount.path.length === length ? undefined : mount.id
+      length = mount.path.length
+    }
+    return id
+  }
+  const profileMount = mountIdOf(profile)
+  return profileMount !== undefined && profileMount === mountIdOf(store)
+}
+
+export function usableStore(profileDir, readMountInfo = readLinuxMountInfo) {
   // RFC 0041 supports Linux units and Linux images, where O_NOFOLLOW is available.
   if (constants.O_NOFOLLOW === undefined) return undefined
   const storeDir = storeDirOf(profileDir)
@@ -48,6 +88,7 @@ export function usableStore(profileDir) {
     if (!stat.isDirectory()) return undefined
     const realHome = fs.realpathSync(home)
     const realProfile = fs.realpathSync(profileDir)
+    let realNearest = realHome
     const profile = fs.statSync(realProfile)
     if (!profile.isDirectory() || contains(realProfile, realHome)) return undefined
     for (const dir of [updateDir, storeDir]) {
@@ -57,9 +98,11 @@ export function usableStore(profileDir) {
       const realDir = fs.realpathSync(dir)
       if (realDir === realHome || !contains(realHome, realDir) || contains(realProfile, realDir)) return undefined
       nearest = dir
+      realNearest = realDir
       stat = entry
     }
     if (stat.dev !== profile.dev) return undefined
+    if (process.platform === 'linux' && !sameMount(realProfile, realNearest, readMountInfo())) return undefined
     fs.accessSync(nearest, constants.W_OK | constants.X_OK)
     return storeDir
   } catch {
@@ -78,9 +121,10 @@ function projectedRealpath(path) {
   }
 }
 
-export function writeJsonAtomic(path, value, { profileDir } = {}) {
+export function writeJsonAtomic(path, value, { profileDir, readMountInfo } = {}) {
   const json = JSON.stringify(value)
-  const storeDir = usableStore(profileDir)
+  const checkStore = () => usableStore(profileDir, readMountInfo)
+  const storeDir = checkStore()
   const dir = dirname(path)
   const invalidStore = () => new Error('Invalid update store directory')
   if (storeDir === undefined) throw invalidStore()
@@ -94,11 +138,11 @@ export function writeJsonAtomic(path, value, { profileDir } = {}) {
         if (error.code !== 'EEXIST') throw error
       }
     }
-    if (!fs.lstatSync(folder).isDirectory() || usableStore(profileDir) !== storeDir) throw invalidStore()
+    if (!fs.lstatSync(folder).isDirectory() || checkStore() !== storeDir) throw invalidStore()
   }
 
   const checkedStore = () => {
-    if (usableStore(profileDir) !== storeDir || fs.realpathSync(storeDir) !== realDir
+    if (checkStore() !== storeDir || fs.realpathSync(storeDir) !== realDir
       || fs.realpathSync(dir) !== realDir) throw invalidStore()
     const entry = fs.lstatSync(realDir, { bigint: true })
     if (!entry.isDirectory()) throw invalidStore()
@@ -115,6 +159,7 @@ export function writeJsonAtomic(path, value, { profileDir } = {}) {
       fs.closeSync(fd)
     }
     if (!sameFile(checkedStore(), directory)) throw invalidStore()
+    // Same-user processes can still race this rename. RFC 0041 trusts them in the owner-private tree.
     fs.renameSync(temp, target)
   } catch (error) {
     try { if (sameFile(checkedStore(), directory)) fs.rmSync(temp, { force: true }) } catch {}
@@ -132,9 +177,11 @@ function isTimestamp(value) {
 function currentOf(value, bootIds) {
   if (value?.version !== 1) return null
   const { live, kept, lastSequence } = value
-  if (live !== null && (!publicVersion(live?.version, bootIds) || !Number.isInteger(live.sequence))) return null
   if (kept !== null && !publicVersion(kept?.version, bootIds)) return null
-  if (lastSequence !== null && !Number.isInteger(lastSequence)) return null
+  const firstUse = live === null && kept === null && lastSequence === null
+  if (!firstUse && !isSequence(lastSequence)) return null
+  if (live !== null && (!publicVersion(live?.version, bootIds) || !isSequence(live.sequence)
+    || lastSequence < live.sequence)) return null
   return {
     version: 1,
     live: live === null ? null : { version: live.version, sequence: live.sequence },
@@ -157,49 +204,54 @@ function runOf(value, bootIds) {
     || (!RUNNING.has(phase) && !TERMINAL.has(phase))
     || (from !== null && !publicVersion(from, bootIds)) || (to !== null && !publicVersion(to, bootIds))
     || (reason !== null && (!REASON_CODES.includes(reason) || hasBootId(reason, bootIds)))
-    || !isTimestamp(startedAt) || !isTimestamp(updatedAt)) return null
+    || !isTimestamp(startedAt) || hasBootId(startedAt, bootIds)
+    || !isTimestamp(updatedAt) || hasBootId(updatedAt, bootIds)) return null
   return { version: 1, runId, bootId, phase, from, to, reason, startedAt, updatedAt }
 }
 
-function readJson(profileDir, storeDir, file, io) {
+function readJson(checkStore, storeDir, file, io) {
   if (storeDir === undefined) return undefined
+  const path = join(storeDir, file)
   try {
-    if (usableStore(profileDir) !== storeDir) return null
-    const path = join(storeDir, file)
-    const entry = io.lstatSync(path, { throwIfNoEntry: false, bigint: true })
-    if (entry === undefined) return usableStore(profileDir) === storeDir ? undefined : null
-    if (!entry.isFile()) return null
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (checkStore() !== storeDir) return null
+      const entry = io.lstatSync(path, { throwIfNoEntry: false, bigint: true })
+      if (entry === undefined) return checkStore() === storeDir ? undefined : null
+      if (!entry.isFile()) return null
 
-    const fd = io.openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    try {
-      const stat = io.fstatSync(fd, { bigint: true })
-      if (!stat.isFile() || !sameFile(entry, stat) || stat.size > FILE_LIMIT
-        || usableStore(profileDir) !== storeDir) return null
+      const fd = io.openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      try {
+        const stat = io.fstatSync(fd, { bigint: true })
+        if (!sameFile(entry, stat)) continue
+        if (!stat.isFile() || stat.size > FILE_LIMIT || checkStore() !== storeDir) return null
 
-      const buffer = Buffer.alloc(FILE_LIMIT + 1)
-      let length = 0
-      while (length < buffer.length) {
-        const count = io.readSync(fd, buffer, length, buffer.length - length, null)
-        if (count === 0) break
-        length += count
+        const buffer = Buffer.alloc(FILE_LIMIT + 1)
+        let length = 0
+        while (length < buffer.length) {
+          const count = io.readSync(fd, buffer, length, buffer.length - length, null)
+          if (count === 0) break
+          length += count
+        }
+        if (length > FILE_LIMIT) return null
+        return JSON.parse(buffer.toString('utf8', 0, length))
+      } finally {
+        io.closeSync(fd)
       }
-      if (length > FILE_LIMIT) return null
-      return JSON.parse(buffer.toString('utf8', 0, length))
-    } finally {
-      io.closeSync(fd)
     }
   } catch {
     return null
   }
+  return null
 }
 
-function readStore(profileDir, io = fs) {
-  const storeDir = usableStore(profileDir)
+function readStore(profileDir, io = fs, readMountInfo) {
+  const checkStore = () => usableStore(profileDir, readMountInfo)
+  const storeDir = checkStore()
   return {
     storeAvailable: storeDir !== undefined,
-    currentRecord: readJson(profileDir, storeDir, 'current.json', io),
-    supervisorRecord: readJson(profileDir, storeDir, 'supervisor.json', io),
-    runRecord: readJson(profileDir, storeDir, 'state.json', io),
+    currentRecord: readJson(checkStore, storeDir, 'current.json', io),
+    supervisorRecord: readJson(checkStore, storeDir, 'supervisor.json', io),
+    runRecord: readJson(checkStore, storeDir, 'state.json', io),
   }
 }
 
@@ -244,8 +296,8 @@ function runView(run) {
   return view
 }
 
-function statusOf(profileDir, env, inDesktop) {
-  const records = readStore(profileDir)
+function statusOf(profileDir, env, inDesktop, readMountInfo) {
+  const records = readStore(profileDir, fs, readMountInfo)
   const bootIds = bootIdsOf(records, env?.AUTOMAGIK_SUPERVISOR_BOOT)
   const announced = supervisorOf(env)
   const supervisor = announced !== null && !hasBootId(announced.version, bootIds) ? announced : null
@@ -262,8 +314,8 @@ function statusOf(profileDir, env, inDesktop) {
   }
 }
 
-export function selfUpdateStatus({ profileDir, env = process.env, inDesktop = inDesktopApp() }) {
-  return statusOf(profileDir, env, inDesktop)
+export function selfUpdateStatus({ profileDir, env = process.env, inDesktop = inDesktopApp(), readMountInfo }) {
+  return statusOf(profileDir, env, inDesktop, readMountInfo)
 }
 
 export function install(rt) {

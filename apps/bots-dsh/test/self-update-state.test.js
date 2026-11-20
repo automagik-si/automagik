@@ -63,6 +63,7 @@ test('missing update files leave an empty status', requiresStore, t => {
   const initial = { version: 1, live: null, kept: null, lastSequence: null }
   writeJsonAtomic(currentPath, initial, { profileDir })
   assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, current: initial })
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), { ...available, current: initial })
 })
 
 test('an existing invalid or unreadable current record makes the store unavailable', requiresStore, t => {
@@ -73,6 +74,17 @@ test('an existing invalid or unreadable current record makes the store unavailab
   assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
   writeJsonAtomic(currentPath, null, { profileDir })
   assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
+  for (const lastSequence of [null, -1, current.live.sequence - 1, Number.MAX_SAFE_INTEGER + 1]) {
+    writeJsonAtomic(currentPath, { ...current, lastSequence }, { profileDir })
+    assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
+  }
+  for (const sequence of [-1, Number.MAX_SAFE_INTEGER + 1]) {
+    writeJsonAtomic(currentPath, { ...current, live: { ...current.live, sequence } }, { profileDir })
+    assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
+  }
+  const atZero = { ...current, live: { ...current.live, sequence: 0 }, lastSequence: 0 }
+  writeJsonAtomic(currentPath, atZero, { profileDir })
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), { ...available, current: atZero })
   rmSync(currentPath)
   mkdirSync(currentPath)
   assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
@@ -203,7 +215,29 @@ test('the reader refuses more bytes than the limit even when fstat reports a sma
   assert.equal(bytesRead, limit + 1)
 })
 
-test('the reader refuses a file whose device or inode changes between lstat and open', requiresStore, t => {
+test('the reader retries a replacement between lstat and open', requiresStore, t => {
+  const { profileDir, storeDir, currentPath } = fixture(t)
+  const replacementPath = join(storeDir, 'replacement.json')
+  const replacement = { ...current, lastSequence: current.lastSequence + 1 }
+  writeJsonAtomic(currentPath, current, { profileDir })
+  writeJsonAtomic(replacementPath, replacement, { profileDir })
+  const operations = []
+  const openSync = (...args) => {
+    operations.push('open')
+    if (existsSync(replacementPath)) fs.renameSync(replacementPath, currentPath)
+    return fs.openSync(...args)
+  }
+  const closeSync = fd => {
+    operations.push('close')
+    fs.closeSync(fd)
+  }
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }, { ...fs, openSync, closeSync }), {
+    ...empty, current: replacement,
+  })
+  assert.deepEqual(operations, ['open', 'close', 'open', 'close'])
+})
+
+test('the reader refuses a device or inode mismatch that persists after retrying', requiresStore, t => {
   const { profileDir, currentPath } = fixture(t)
   writeJsonAtomic(currentPath, current, { profileDir })
   for (const field of ['dev', 'ino']) {
@@ -218,7 +252,7 @@ test('the reader refuses a file whose device or inode changes between lstat and 
       ...empty, problem: 'Invalid current.json',
     })
     assert.equal(readSync.mock.callCount(), 0)
-    assert.equal(closeSync.mock.callCount(), 1)
+    assert.equal(closeSync.mock.callCount(), 2)
   }
 })
 
@@ -252,6 +286,43 @@ test('a non-directory update or profile store makes status unavailable', require
   writeFileSync(storeDir, '')
   assert.equal(usableStore(profileDir), undefined)
   assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), unavailable)
+})
+
+test('Linux stores require matching mount IDs even on the same device', {
+  skip: process.platform !== 'linux' || requiresStore.skip,
+}, t => {
+  const { profileDir: neighboringProfile } = fixture(t)
+  const profileDir = neighboringProfile + ' space'
+  mkdirSync(profileDir)
+  const storeDir = storeDirOf(profileDir)
+  const updateDir = dirname(storeDir)
+  const currentPath = join(storeDir, 'current.json')
+  const mountPath = path => fs.realpathSync(path).replaceAll('\\', '\\134').replaceAll(' ', '\\040')
+  const root = '1 0 8:1 / / rw - ext4 /dev/test rw\n'
+  const mount = (id, folder, source = '/') => root + id + ' 1 8:1 ' + source
+    + ' ' + mountPath(folder) + ' rw shared:1 - ext4 /dev/test rw\n'
+  const read = readMountInfo => selfUpdateStatus({ profileDir, env, inDesktop: false, readMountInfo })
+  const unavailable = { ...available, available: false, reason: 'no-store' }
+
+  // The neighboring mount name is a string prefix of the profile, but ends within a component.
+  assert.deepEqual(read(() => mount(2, neighboringProfile)), available)
+  const unrelatedProfile = neighboringProfile + ' other'
+  mkdirSync(unrelatedProfile)
+  assert.deepEqual(read(() => mount(2, unrelatedProfile)), available)
+  assert.deepEqual(read(() => root + '2 1 8:1 / / rw - ext4 /dev/test rw\n'), available)
+  // A namespace file's root is not a path (snapd's nsfs entries); it must not void the table.
+  assert.deepEqual(read(() => root + '3 1 0:5 mnt:[4026532922] /run/snapd/ns/cups.mnt rw - nsfs nsfs rw\n'), available)
+  assert.deepEqual(read(() => { throw new Error('mountinfo unavailable') }), unavailable)
+  assert.deepEqual(read(() => root + 'invalid mountinfo\n'), unavailable)
+
+  mkdirSync(updateDir)
+  assert.deepEqual(read(() => mount(3, updateDir)), unavailable)
+  const bindMount = () => mount(4, storeDir, mountPath(profileDir))
+  const readMountInfo = () => existsSync(storeDir) ? bindMount() : root
+  assert.throws(() => writeJsonAtomic(currentPath, current, { profileDir, readMountInfo }), /Invalid update store directory/)
+  assert.equal(existsSync(currentPath), false)
+  assert.deepEqual(read(bindMount), unavailable)
+  assert.throws(() => writeJsonAtomic(currentPath, current, { profileDir, readMountInfo: bindMount }), /Invalid update store directory/)
 })
 
 test('symlinked store directories and stores inside a resolved profile are refused', requiresStore, t => {
@@ -461,6 +532,20 @@ test('invalid public fields invalidate the entire state record', requiresStore, 
   ]) {
     writeJsonAtomic(statePath, { ...run, ...fields }, { profileDir })
     assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, problem: 'Invalid state.json' }, JSON.stringify(fields))
+  }
+})
+
+test('public timestamps cannot contain a known boot ID', requiresStore, t => {
+  const { profileDir, statePath, supervisorPath } = fixture(t)
+  const numericBoot = '12345678'
+  const announced = { ...env, AUTOMAGIK_SUPERVISOR_BOOT: numericBoot }
+  writeJsonAtomic(supervisorPath, { ...supervisor, bootId: numericBoot }, { profileDir })
+  for (const field of ['startedAt', 'updatedAt']) {
+    const timestamp = '2026-11-20T12:00:00.' + numericBoot + 'Z'
+    writeJsonAtomic(statePath, { ...run, bootId: numericBoot, [field]: timestamp }, { profileDir })
+    assert.deepEqual(selfUpdateStatus({ profileDir, env: announced, inDesktop: false }), {
+      ...available, problem: 'Invalid state.json',
+    })
   }
 })
 
