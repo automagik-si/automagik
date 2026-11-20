@@ -1,7 +1,8 @@
 // Resolve missing plugins from their publishers' lanes. The signed pointer names a commit,
 // and that commit's manifests say which versions and peers DSH will actually install.
-// follow-omni.yml keeps the shared Omni pin at the newest release whose channels plugin
-// accepts npm's newest Omni server. A fresh install considers that pin and the signed lane.
+// follow-omni.yml keeps the shared Omni pin at the newest Omni release on GitHub. A fresh install
+// considers that pin and the signed lane, preferring plugins whose Omni server can be installed:
+// npm's newest, or the pinned release the welcome builds from GitHub (omni-github.js).
 import { randomUUID } from 'node:crypto'
 import { addAbortListener } from 'node:events'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -95,8 +96,12 @@ const laneChoice = ({ from, release, commit, sequence }, manifests) => ({
   from, release, commit, ...(from === 'lane' ? { sequence } : {}), plugins: manifests.map(packageOf),
 })
 
-/** A partial profile picks by its installed sibling. A fresh one prefers a server pair. */
-export function chooseOmni({ candidates, server, team, dsh, present }) {
+/**
+ * A partial profile picks by its installed sibling. A fresh one prefers a server pair: plugins
+ * whose minimum Omni is at most the newest server that can be installed, npm's (`server`) or
+ * the pinned release built from GitHub (`buildable`).
+ */
+export function chooseOmni({ candidates, server, buildable, team, dsh, present }) {
   const viable = orderedCandidates(candidates).filter(({ manifests }) => {
     const pair = [manifests.channels, manifests.canvas]
     return (!present || pair.some(({ name, version }) => name === present.name && version === present.version))
@@ -104,11 +109,13 @@ export function chooseOmni({ candidates, server, team, dsh, present }) {
       && peerMet(manifests.canvas, channels.name, manifests.channels.version)
   })
   const known = typeof server === 'string' && OMNI_VERSION.test(server)
+  const builds = typeof buildable === 'string' && OMNI_VERSION.test(buildable)
+  const installable = known && builds ? (compareOmni(server, buildable) >= 0 ? server : buildable) : known ? server : builds ? buildable : null
   const pairs = ({ manifests }) => {
     const minimum = omniMinimum(manifests.channels)
-    return OMNI_VERSION.test(minimum) && compareOmni(minimum, server) <= 0
+    return installable !== null && OMNI_VERSION.test(minimum) && compareOmni(minimum, installable) <= 0
   }
-  const picked = (!present && known ? viable.find(pairs) : undefined) ?? viable[0]
+  const picked = (!present && installable !== null ? viable.find(pairs) : undefined) ?? viable[0]
   if (!picked) return { ...OMNI_PIN_CHOICE, ...(known ? { server } : {}) }
   return {
     ...laneChoice(picked, [picked.manifests.channels, picked.manifests.canvas]),
@@ -295,7 +302,7 @@ export function createReleases({ fetch = globalThis.fetch, env = process.env, no
     const rechoose = (current, currentTeam) => {
       const present = omniPresent(current)
       const candidates = [lane && sequenceAllowed(env, 'omni', lane.sequence) ? lane : null, pin].filter(Boolean)
-      cachedOmni = present.length === 2 ? null : chooseOmni({ candidates, server, team: currentTeam, dsh, present: present.length === 1 ? present[0] : null })
+      cachedOmni = present.length === 2 ? null : chooseOmni({ candidates, server, buildable: OMNI_RELEASE.version, team: currentTeam, dsh, present: present.length === 1 ? present[0] : null })
       return cachedOmni
     }
     return { ...rechoose(rows, team), rechoose }

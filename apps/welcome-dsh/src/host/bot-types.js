@@ -19,7 +19,7 @@ import { RELEASES, checkedTarballs } from './release-lane.js'
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
 // The desktop app and the welcome share the same Omni pin. follow-omni.yml keeps it at
-// the newest Omni release whose channels plugin accepts npm's newest Omni server.
+// the newest Omni release on GitHub; the welcome builds its server from GitHub when npm lacks it.
 export const OMNI_RELEASE = Object.freeze({ ...PKG.automagik.omni })
 
 // The Omni plugins, in install order: each one after the first needs the ones before it.

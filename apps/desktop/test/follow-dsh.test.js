@@ -87,10 +87,10 @@ test('follow-omni runs on Omni\'s dispatch and the outside daily clock, taking t
   // what is followed is still only what the lookup lists (or a dry run's omni_version).
   assert.match(text, /for try in 1 2 3 4 5 6; do\n\s+unlisted \|\| break\n[\s\S]*?sleep 20\n\s+lookup\n\s+done\n/)
   assert.match(text, /if unlisted; then\n\s+echo "::warning ::Omni dispatched \$\{wanted\}/)
-  assert.deepEqual([...text.matchAll(/\bnewest=(.*)/g)].map(match => match[1]), ['"${WANT_VERSION}"', '$(sort -V releases.txt | tail -1)', "''", '"${candidate}"'])
-  // The pair (#1905) picks `candidate` only from the same listed releases, newest first.
-  assert.deepEqual([...text.matchAll(/\bcandidate=|read -r candidate\b/g)].map(match => match[0]), ['read -r candidate'])
-  assert.match(text, /while IFS= read -r candidate; do\n[\s\S]*?\n\s+done < <\(sort -Vr releases\.txt\)\n/)
+  assert.deepEqual([...text.matchAll(/\bnewest=(.*)/g)].map(match => match[1]), ['"${WANT_VERSION}"', '$(sort -V releases.txt | tail -1)'])
+  // The newest listed release is followed as it is (#1915): npm's server no longer picks it.
+  assert.doesNotMatch(text, /registry\.npmjs\.org|\$\{candidate\}|read -r candidate/)
+  assert.match(text, /# follow: start\n[\s\S]*?! above "\$\{newest\}" "\$\{current\}"[\s\S]*?# follow: end\n/)
 })
 
 test('the boot gate boots the candidate exactly as carry writes it, both pins', () => {

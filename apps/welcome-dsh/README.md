@@ -123,9 +123,11 @@ installs them from. A DSH that has the team under its former name,
 `@automagik/omni-dsh`, has the team: it is switched on, not installed over. Omni's channels
 and canvases (`@automagik/omni-channels-dsh`, `@automagik/omni-canvas-dsh`) install from one
 commit in Omni's repository. `follow-omni.yml` keeps `automagik.omni` and the desktop app's
-pin at the newest Omni release whose channels plugin accepts npm's newest Omni server.
+pin at the newest Omni release on GitHub; when npm lacks that release's Omni server, the welcome
+builds it from GitHub (below, "Installing Omni from GitHub").
 On a fresh install the welcome compares that pin with Omni's signed plugin lane. It picks
-the newest candidate that works with this DSH, the Bot team, and the latest Omni server on npm.
+the newest candidate that works with this DSH, the Bot team, and an Omni server it can install:
+the latest on npm, or the pinned release built from GitHub.
 If no candidate pairs with the server, it picks the newest one compatible with DSH and the Bot
 team. With one Omni plugin already installed, it looks for a candidate with that exact plugin
 version. The shared pin is the fallback.

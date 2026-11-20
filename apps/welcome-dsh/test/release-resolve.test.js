@@ -21,7 +21,7 @@ const lanes = {
 }
 const manifestURL = (repo, commit, path) => `https://raw.githubusercontent.com/automagik-si/${repo}/${commit}/${path}/package.json`
 const server = '2.261109.2'
-const omniLane = { version: '2.261120.2', commit: 'a'.repeat(40) }
+const omniLane = { version: '2.261121.1', commit: 'a'.repeat(40) }
 const genieLane = { version: '0.1.5', commit: 'b'.repeat(40) }
 const dshEngine = '>=0.2.2-rc.1 <0.2.3-0'
 
@@ -145,7 +145,9 @@ test('the registry uses the first credential-free HTTPS URL and only takes a rel
     f.files.set(npm, body)
     const choice = await f.omni()
     assert.equal(choice.server, expected)
-    assert.equal(choice.from, expected ? 'pin' : 'lane')
+    // The lane's channels need 2.261116.3: npm's 2.261109.2 does not have it, but the pinned
+    // release the welcome builds from GitHub (#1915) does, so the newer lane pairs either way.
+    assert.equal(choice.from, 'lane')
     assert.equal(choice.pair, expected ? true : undefined)
   }
 })
@@ -285,4 +287,20 @@ test('the request deadline aborts slow body reads and the resolution deadline bo
   const stuck = fixture(t, { resolutionMs: 10, ctx: { get: () => ({ import: () => new Promise(() => {}) }) } })
   const [genie] = await Promise.all([stuck.genie(), setTimeout(25)])
   assert.equal(genie.from, 'pin')
+})
+
+test('a pair counts the pinned release the welcome builds from GitHub as an installable server (#1915)', () => {
+  // npm's server is too old for the lane's channels; the pin built from GitHub is new enough.
+  const built = choose({ buildable: '2.261120.2' })
+  assert.equal(built.from, 'lane')
+  assert.equal(built.pair, true)
+  assert.equal(built.server, server)
+  // A pin older than the lane's minimum leaves the npm pair as before.
+  const old = choose({ buildable: '2.261112.6' })
+  assert.equal(old.from, 'pin')
+  assert.equal(old.pair, true)
+  // With npm unknown, the buildable pin alone decides the pair, and no server is reported.
+  const unknown = choose({ server: null, buildable: '2.261112.6' })
+  assert.equal(unknown.from, 'pin')
+  assert.equal(unknown.server, undefined)
 })
