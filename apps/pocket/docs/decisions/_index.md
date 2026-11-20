@@ -27,5 +27,6 @@ Write one from [`_Templates/decision.md`](../_Templates/decision.md).
 | [Home counts the Bots' chats with the terminals](home-bot-chats.md) | Implemented | |
 | [A card that closed while the phone was away comes back as a receipt](chat-receipts-on-reconnect.md) | Implemented | |
 | [One shared debug signing key for Pocket PR builds](shared-debug-signing-key.md) | Accepted | |
+| [Bot memory opens on its own connection](bot-memory.md) | Implemented | |
 
 Back to the [docs home](../_index.md).
