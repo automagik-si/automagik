@@ -120,6 +120,8 @@ function takeCheckLock(store, owner) {
       // A contender can see the file before its owner has finished writing it.
       const age = Date.now() - (Number.isFinite(startedAt) ? startedAt : Number(entry.mtimeNs / 1_000_000n))
       if (age <= LOCK_TTL_MS && !ownerIsDead(holder, owner.host)) return null
+      // Two stale-lock contenders can both pass this check before either unlinks.
+      // The later unlink can remove the new lock, within RFC 0041's same-user trust boundary.
       const current = identity(path)
       if (sameEntry(current, entry) && current.ctimeNs === entry.ctimeNs) rmSync(path, { force: true })
       continue
@@ -153,6 +155,8 @@ function reclaimChecks(store, host, requireAccess) {
     if (!created?.isDirectory()) continue
     const marker = join(folder, MARKER)
     const owner = readOwner(marker, identity(marker))
+    // A replaced container's folder keeps its run marker and verified release tarballs
+    // until a check runs on a host with the same name and confirms the owner is dead.
     if (owner?.version !== 1 || `check-${owner.runId}` !== entry.name || !ownerIsDead(owner, host)) continue
     requireAccess()
     if (sameEntry(identity(folder), created)) rmSync(folder, { recursive: true, force: true })
@@ -182,11 +186,11 @@ async function verifyTarballs(plugins, folder, fetch, requireAccess) {
     }
     requireAccess()
     folder.assertIdentity()
-    writeFileSync(join(folder.path, `${plugin.name.split('/')[1]}.tgz`), bytes, { flag: 'wx', mode: 0o600 })
     const sha256 = typeof plugin.sha256 === 'string' ? plugin.sha256.toLowerCase() : null
     if (bytes.length !== plugin.size
       || createHash('sha256').update(bytes).digest('hex') !== sha256
       || `sha512-${createHash('sha512').update(bytes).digest('base64')}` !== plugin.integrity) return 'hash-mismatch'
+    writeFileSync(join(folder.path, `${plugin.name.split('/')[1]}.tgz`), bytes, { flag: 'wx', mode: 0o600 })
   }
   return null
 }
@@ -243,7 +247,9 @@ async function inspectRelease({
     requireAccess()
     const url = registryPing(await registry(profileDir))
     requireAccess()
-    await boundedGet(fetch, url, { label: 'Package registry', limit: 1024, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), allowEmpty: true })
+    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+    void response.body?.cancel().catch(() => {})
+    if (response.status >= 500) return result('refused', 'registry-unreachable')
   } catch {
     return result('refused', 'registry-unreachable')
   }

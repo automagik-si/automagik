@@ -191,12 +191,21 @@ function SelfUpdateRow({ Row, check, readResult }) {
       try {
         const value = await readResult(runId)
         if (stopped) return
-        if (value.state !== 'checking') setResult(value)
-        else if (++polls >= MAX_CHECK_POLLS) setResult({ reason: 'check-timeout' })
-        else timer = setTimeout(poll, CHECK_POLL_MS)
+        if (value.state !== 'checking') {
+          setResult(value)
+          return
+        }
       } catch (error) {
-        if (!stopped) setResult(failedCheck(error))
+        if (stopped) return
+        // A response interrupted during decoding can also fail without an error code.
+        const code = error?.code
+        if (code && code !== 'NETWORK' && !/^HTTP_5\d\d$/.test(code)) {
+          setResult(failedCheck(error))
+          return
+        }
       }
+      if (++polls >= MAX_CHECK_POLLS) setResult({ reason: 'check-timeout' })
+      else timer = setTimeout(poll, CHECK_POLL_MS)
     }
     timer = setTimeout(poll, CHECK_POLL_MS)
     return () => { stopped = true; clearTimeout(timer) }

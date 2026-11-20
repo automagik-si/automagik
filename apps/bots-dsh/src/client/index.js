@@ -359,21 +359,26 @@ export function apply(ctx) {
     return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', wake) }
   }, 'ds-bot: roster poll')
 
-  // Plugin updates: every window that opens asks the host once (the host keeps its
-  // answer for a while), again each hour, and every two seconds while installing.
+  // Plugin updates: each window asks the host on open, retries early misses, then
+  // checks hourly and every two seconds while installing.
   const update = createSource({ available: false, phase: 'idle' })
   const takeUpdateReply = value => update.set(previous => ({ ...value, app: previous.app, hostAnswered: true }))
   let wakeUpdate = () => {}
   ctx.effect(() => {
     let stopped = false
     let timer
+    const firstReplyBackoff = [5000, 15_000, 30_000]
+    let request = 0
     const loop = async () => {
       clearTimeout(timer)
       if (stopped) return
+      const current = ++request
       const value = await call('update-check', { fresh: false }).catch(() => null)
-      if (stopped) return
+      if (stopped || current !== request) return
       if (value) takeUpdateReply(value)
-      timer = setTimeout(loop, value?.phase === 'installing' || value?.dsh?.phase === 'installing' ? 2000 : 60 * 60_000)
+      const retry = update.getSnapshot().hostAnswered ? undefined : firstReplyBackoff.shift()
+      const installing = value?.phase === 'installing' || value?.dsh?.phase === 'installing'
+      timer = setTimeout(loop, installing ? 2000 : retry ?? 60 * 60_000)
     }
     wakeUpdate = loop
     void loop()

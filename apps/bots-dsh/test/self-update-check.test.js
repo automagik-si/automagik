@@ -218,14 +218,19 @@ test('refuses a redirect outside the GitHub release asset CDN', requiresStore, a
   assert.deepEqual(f.calls, [url])
 })
 
-test('pings the profile registry and refuses if it cannot be reached', requiresStore, async t => {
-  const f = fixture(t)
-  const ping = 'https://registry.example.invalid/npm/-/ping'
-  writeFileSync(join(f.profileDir, '.npmrc'), '# Different registry\nregistry = "https://registry.example.invalid/npm/"\n')
-  f.replies.set(ping, () => new Response('{}', { status: 503 }))
-  assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'registry-unreachable')
-  assert.deepEqual(f.calls, [f.lane.plugins[0].url, ping])
-})
+for (const [status, reachable] of [[302, true], [401, true], [403, true], [503, false], [null, false]]) {
+  test(`the profile registry is ${reachable ? 'reachable' : 'unreachable'} after ${status ?? 'a network error'}`, requiresStore, async t => {
+    const f = fixture(t)
+    const ping = 'https://registry.example.invalid/npm/-/ping'
+    writeFileSync(join(f.profileDir, '.npmrc'), '# Different registry\nregistry = "https://registry.example.invalid/npm/"\n')
+    f.replies.set(ping, () => {
+      if (status === null) throw new TypeError('fixture network error')
+      return new Response(null, { status })
+    })
+    assertCheck(f, await selfUpdateCheck(f.options), reachable ? 'available' : 'refused', reachable ? null : 'registry-unreachable')
+    assert.deepEqual(f.calls, [f.lane.plugins[0].url, ping])
+  })
+}
 
 test('prefers a registry resolved by the plugin manager without a profile npmrc', requiresStore, async t => {
   const f = fixture(t)

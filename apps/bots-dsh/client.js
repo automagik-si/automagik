@@ -35127,12 +35127,20 @@ function SelfUpdateRow({ Row: Row3, check, readResult }) {
       try {
         const value = await readResult(runId);
         if (stopped) return;
-        if (value.state !== "checking") setResult(value);
-        else if (++polls >= MAX_CHECK_POLLS) setResult({ reason: "check-timeout" });
-        else timer = setTimeout(poll, CHECK_POLL_MS);
+        if (value.state !== "checking") {
+          setResult(value);
+          return;
+        }
       } catch (error) {
-        if (!stopped) setResult(failedCheck(error));
+        if (stopped) return;
+        const code = error?.code;
+        if (code && code !== "NETWORK" && !/^HTTP_5\d\d$/.test(code)) {
+          setResult(failedCheck(error));
+          return;
+        }
       }
+      if (++polls >= MAX_CHECK_POLLS) setResult({ reason: "check-timeout" });
+      else timer = setTimeout(poll, CHECK_POLL_MS);
     };
     timer = setTimeout(poll, CHECK_POLL_MS);
     return () => {
@@ -43094,13 +43102,18 @@ function apply(ctx) {
   ctx.effect(() => {
     let stopped = false;
     let timer;
+    const firstReplyBackoff = [5e3, 15e3, 3e4];
+    let request = 0;
     const loop = async () => {
       clearTimeout(timer);
       if (stopped) return;
+      const current = ++request;
       const value = await call("update-check", { fresh: false }).catch(() => null);
-      if (stopped) return;
+      if (stopped || current !== request) return;
       if (value) takeUpdateReply(value);
-      timer = setTimeout(loop, value?.phase === "installing" || value?.dsh?.phase === "installing" ? 2e3 : 60 * 6e4);
+      const retry = update.getSnapshot().hostAnswered ? void 0 : firstReplyBackoff.shift();
+      const installing = value?.phase === "installing" || value?.dsh?.phase === "installing";
+      timer = setTimeout(loop, installing ? 2e3 : retry ?? 60 * 6e4);
     };
     wakeUpdate = loop;
     void loop();
