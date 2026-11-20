@@ -70,6 +70,9 @@ updates Pocket Link by itself, so updating it as above is what turns the chat on
     `automagik-pocket-link-<hash>/`, so a test window never sees your phones.
     `POCKET_LINK_STATE_DIR` sets the folder outright; the login service is given it.
   - Deleting this folder unpairs every phone.
+  - **Reset key…** in Pocket Link changes this computer's key, unpairs every phone and
+    ends any pairing code. Each phone shows the old desktop as unreachable or not paired.
+    Pair again with a new code, then remove the old desktop card on the phone.
   - **One writer for the paired phones.** Only the running bridge writes `devices.json`. Remove
     (`bridge.mjs forget <id>`) hands the phone to it over `bridge.sock`, a socket in this folder,
     and waits for its answer, so a removed phone can't be written back by a session updating its
