@@ -26,7 +26,8 @@ import { RESUME_DELAY_MS } from './resume.js'
 import { switchFailure } from './model-state.js'
 import { turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
-import { commandCapableAgent, crossesHarness, shellHoldText } from '../shared/routes.js'
+import { routeAllowed } from '../shared/route-policy.js'
+import { commandCapableAgent, crossesHarness, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -2509,6 +2510,7 @@ export function install(rt) {
         routeUnavailable(bot, model, entry, error)
         throw error
       }
+      assertRouteAllowed(bot, target, entry)
       const route = splitRef(target)
       if (route === undefined || commandCapableAgent(target)) throw refused('shell', shellHoldText(bot))
       await rt.assertModelAccess?.(target)
@@ -2605,6 +2607,13 @@ export function install(rt) {
     })
   }
 
+  function assertRouteAllowed(bot, target, entry) {
+    if (routeAllowed(bot, target, rt.routePolicy)) return
+    routeAttempt(bot, bot.model ?? bot.appliedModel, target, entry)('refused', 'route policy')
+    const route = { native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' }[routeOfRef(target).route]
+    throw refused('refused', `${bot.name} cannot use the ${route} route.`)
+  }
+
   // A missing model can stop a crossing before the usual route checks run.
   function routeUnavailable(bot, requested, entry, error) {
     if (error?.modelUnavailable !== true) return
@@ -2666,7 +2675,15 @@ export function install(rt) {
     // current level travels with it; desiredEffort drops it if the new model lacks it.
     let target, effortId
     try {
-      target = await rt.resolveModel(model, { checkAccess: true, remember: false, keep: bot.model })
+      target = await rt.resolveModel(model, { remember: false, keep: bot.model })
+    } catch (error) {
+      note('refused', 'model or thinking level unavailable')
+      throw error
+    }
+    // A saved plan ref can resolve to the CLI the Bot is already using.
+    if (crossesHarness(current, target)) assertRouteAllowed(bot, target, entry)
+    try {
+      await rt.assertModelAccess?.(target)
       effortId = effort === undefined ? bot.effort
         : effort === null || effort === '' ? null
         : await rt.resolveEffort(target, effort)
@@ -2996,7 +3013,7 @@ export function install(rt) {
     return true
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
     // A fresh part still waiting for its first answer: its failure goes back with the part.
     awaitingFirstAnswer: id => awaiting.has(id) })
 }

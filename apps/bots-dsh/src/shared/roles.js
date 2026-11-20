@@ -6,6 +6,17 @@ export const BUILTIN_ROLES = Object.freeze({
 export const GENIE_ATTACH_REFUSAL = 'Genie can be given to another Bot after the next Genie update.'
 export const rolesOn = prefs => prefs?.roles !== false
 
+export const RESERVED_ROLE_IDS = Object.freeze(['data'])
+export const isWindowsReservedName = name => /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)
+export const isRoleId = id => typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,40}$/.test(id)
+  && !RESERVED_ROLE_IDS.includes(id) && !isWindowsReservedName(id)
+export const isRoleVersion = version => typeof version === 'string' && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version)
+
+export function attachedRoleIds(bot) {
+  if (!Object.hasOwn(bot ?? {}, 'roles') || !Array.isArray(bot.roles)) return []
+  return bot.roles.flatMap(entry => typeof entry?.id === 'string' && Object.hasOwn(entry, 'id') ? [entry.id] : [])
+}
+
 const isAttachment = entry => typeof entry?.id === 'string' && Object.hasOwn(BUILTIN_ROLES, entry.id)
   && typeof entry.version === 'string' && entry.version.length > 0
   && typeof entry.attachedAt === 'string' && Array.isArray(entry.grants)

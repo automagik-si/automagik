@@ -14,14 +14,40 @@ ALTER TABLE whatsapp_challenge ADD COLUMN admissionExpiresAt INTEGER;
 -- Match verifyAdmission's 30-second issuer clock skew at the time SQLite writes the row.
 CREATE VIEW admission_clock AS SELECT (unixepoch() - 30) * 1000 AS cutoff;
 
--- The register endpoints always create an account. The provider's credential INSERT
--- and this claim succeed or roll back as one statement, even across Worker instances.
+-- Written after WebAuthn verifies the exact credential, then consumed by its INSERT.
+CREATE TABLE passkey_write_authorization (
+  userId TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  credentialId TEXT NOT NULL,
+  purpose TEXT NOT NULL CHECK (purpose IN ('signup', 'add')),
+  sessionId TEXT REFERENCES session(id) ON DELETE CASCADE,
+  expiresAt TEXT NOT NULL,
+  CHECK ((purpose = 'add') = (sessionId IS NOT NULL)),
+  PRIMARY KEY (userId, credentialId)
+);
+CREATE INDEX passkey_write_expiry ON passkey_write_authorization(expiresAt);
+
+-- Authentication looks up a credential ID globally. Enforce that lookup's uniqueness
+-- on new writes while allowing databases with historical duplicates to migrate intact.
+CREATE TRIGGER passkey_reject_duplicate_credential BEFORE INSERT ON passkey
+WHEN EXISTS (SELECT 1 FROM passkey WHERE credentialID = NEW.credentialID)
+BEGIN
+  SELECT RAISE(ABORT, 'passkey registration refused');
+END;
+
 CREATE TRIGGER admission_on_passkey AFTER INSERT ON passkey
 BEGIN
   UPDATE admission_ticket SET state = 'used'
     WHERE userId = NEW.userId AND state = 'pending' AND ceremonies > 0
-      AND expiresAt > (SELECT cutoff FROM admission_clock);
-  SELECT RAISE(ABORT, 'passkey admission refused') WHERE changes() <> 1;
+      AND expiresAt > (SELECT cutoff FROM admission_clock)
+      AND EXISTS (SELECT 1 FROM passkey_write_authorization
+        WHERE userId = NEW.userId AND credentialId = NEW.credentialID AND purpose = 'signup'
+          AND expiresAt > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  SELECT RAISE(ABORT, 'passkey authorization refused') WHERE changes() <> 1
+    AND NOT EXISTS (SELECT 1 FROM passkey_write_authorization a JOIN session s ON s.id = a.sessionId
+      WHERE a.userId = NEW.userId AND a.credentialId = NEW.credentialID AND a.purpose = 'add'
+        AND s.userId = a.userId AND s.signInMethod = 'passkey'
+        AND min(a.expiresAt, s.expiresAt) > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  DELETE FROM passkey_write_authorization WHERE userId = NEW.userId AND credentialId = NEW.credentialID;
 END;
 
 -- Identify the confirmed WhatsApp challenge for the provider's user INSERT.

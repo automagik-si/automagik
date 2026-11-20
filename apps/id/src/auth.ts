@@ -1,11 +1,12 @@
-import { betterAuth } from 'better-auth';
+import { betterAuth, type GenericEndpointContext } from 'better-auth';
 import { APIError } from 'better-auth/api';
 import { jwt } from 'better-auth/plugins';
 import { passkey } from '@better-auth/passkey';
 import { oauthProvider } from '@better-auth/oauth-provider';
 import { whatsappEnabled, whatsappPlugin } from './whatsapp';
 import { passkeySiteName } from './site';
-import { admitSignup, passkeyAdmissionFailure, refusal } from './gate';
+import { passkeyAccountPlugin } from './passkeys';
+import { admitSignup } from './gate';
 import { ADMISSION_HEADER } from './admission';
 
 function strictRedirectUri(uri: string, registered: readonly string[], defaultResult: boolean) {
@@ -43,7 +44,7 @@ export interface Env {
 }
 
 export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>,
-  onVerifiedSignup?: (userId: string, credentialId: string) => void) {
+  authorizeRegistration?: (endpoint: GenericEndpointContext, userId: string, credentialId: string) => Promise<void>) {
   if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) {
     throw new Error('BETTER_AUTH_SECRET must be provisioned');
   }
@@ -95,15 +96,13 @@ export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>,
             }
             return { id: user.id, name: 'Automagik user', displayName: 'Automagik user' };
           },
-          // D1 consumes the invitation in the credential INSERT. Retain the verified identity
-          // of this request so the Worker can report a concurrent or expired invitation.
-          async afterVerification({ user, verification }) {
-            const code = await passkeyAdmissionFailure(env.DB, user.id);
-            if (code) throw refusal(code);
-            onVerifiedSignup?.(user.id, verification.registrationInfo!.credential.id);
+          async afterVerification({ ctx: endpoint, user, verification }) {
+            if (!authorizeRegistration) throw new APIError('FORBIDDEN');
+            await authorizeRegistration(endpoint, user.id, verification.registrationInfo!.credential.id);
           },
         },
       }),
+      passkeyAccountPlugin(env),
       jwt({ disableSettingJwtHeader: true }),
       oauthProvider({
         loginPage: '/sign-in',

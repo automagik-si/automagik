@@ -167,11 +167,17 @@ With either missing, no account can be created: passkey sign-in, WhatsApp
 sign-in of an existing number and OIDC keep working. Put both in the operator's
 private environment and rerun `bun scripts/configure.ts`, which validates them,
 keeps only the public fields of each key and writes them to `wrangler.local.toml`.
-Apply `0003_admission.sql` before deploying this Worker. It records reservations
-and installs the triggers that spend them with the credential or phone account
-insert. Existing users can
+Apply both `0003_admission.sql` and `0004_session_sign_in_method.sql` before
+deploying this Worker. Migration 0003 records reservations and installs the
+triggers that spend them with the credential or phone account insert. Migration
+0004 supplies the session method checked when an existing user adds a passkey. Existing users can
 still sign in while deploying. Until the updated Worker is live, the new triggers
-can refuse sign-ups started by the previous Worker.
+can refuse registrations started by the previous Worker, including additional passkeys.
+
+Migration 0003 also rejects a new passkey insert when its credential ID is
+already stored. It preserves historical duplicate rows and their recorded owners.
+If an existing database has duplicates, resolving their ownership is a separate
+account-recovery decision.
 
 D1 keeps each ticket's `jti` with the user row it reserved, its state and its
 ceremony count, so a ticket creates at most one account, and nothing else about
@@ -238,7 +244,9 @@ store; it does not change later.
 Test a real passkey, desktop loopback sign-in with S256 and Cloud confidential
 sign-in on `https://id.automagik.si`. Confirm D1 migrations and seed records, secure cookies, correct
 issuer/audience/nonce checks in each client, and WhatsApp-disabled behavior. Apply every migration, including
-`0002_whatsapp.sql` and `0003_admission.sql`, before enabling the new configuration. Existing phone-account
+`0002_whatsapp.sql`, `0003_admission.sql` and `0004_session_sign_in_method.sql`, before enabling the new configuration.
+Sessions issued before `0004` carry no sign-in method, so they can never add or delete a passkey;
+a new passkey sign-in can. Existing phone-account
 fields remain intact; the service does not migrate or link identities automatically. Never
 share operational identifiers or current deployment details in public evidence.
 

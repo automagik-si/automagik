@@ -17,7 +17,10 @@ cancelled prompt reuses it (at most ten ceremonies per ticket), and only the
 first ceremony to finish takes the ticket; the others are refused. The
 credential insert checks the ticket's expiry with the same 30-second clock skew
 as the admission check. D1 commits the credential and the ticket claim
-together. A failed insert leaves the live ticket available for a fresh ceremony. `src/admission.ts` checks tickets; `src/gate.ts` applies them. See
+together. A failed insert leaves the live ticket available for a fresh ceremony.
+When a signed-in owner adds a passkey, the verified credential is instead bound
+to the owner's fresh passkey session. That insert consumes its own short-lived
+authorization and leaves invitations alone, including for accounts created before admission. `src/admission.ts` checks tickets; `src/gate.ts` applies them. See
 [DEPLOY.md](DEPLOY.md) for the keys and the operator's stand-in signer
 (`scripts/admission.ts`), and [PAGES-CONTRACT.md](PAGES-CONTRACT.md) for the
 header and the refusals.
@@ -28,6 +31,19 @@ discoverable credential options without requiring a username. The pages start th
 authenticator from an explicit passkey action. No email, password, social login
 or public OAuth client registration is exposed. There is no account management or recovery UI in
 this delivery. The service does not provide a passkey recovery mechanism.
+
+A signed-in person can add a second passkey to their account, list, rename and
+delete their passkeys (routes in PAGES-CONTRACT.md). These
+routes never create an account; the account-creation routes keep stripping the
+session. Adding and deleting need a fresh sign-in: a session created by a passkey
+ceremony less than five minutes ago. Each session records the ceremony that made
+it (`session.signInMethod`, migration `0004`) and `src/passkeys.ts` checks that and
+`session.createdAt` itself. Better Auth's `session.freshAge` is not used: it is one
+global setting, also behind `/list-sessions`, and cannot tell a passkey sign-in
+from a WhatsApp one. An account can delete its last passkey only when WhatsApp
+sign-in is enabled and it has a verified phone number usable for that sign-in.
+Another person's passkey ID answers exactly like a missing one.
+No page offers these yet; the account page is later work.
 
 Better Auth's user schema requires a unique email. Accounts receive a random
 address under the reserved `.invalid` domain solely for that database field.
@@ -143,6 +159,11 @@ local persistent D1 and a software WebAuthn authenticator. Outbound requests are
 denied except for local dispatch of the provider's own
 JWKS lookup for logout verification. No Cloudflare credentials are needed.
 The cross-runtime limiter test uses two independent workerd runtimes sharing D1.
+
+`test/service.test.ts` follows an account owner adding a second passkey,
+signing in with it, listing both passkeys, renaming one and deleting it.
+It checks the fields returned to the owner and the responses for a missing or
+stale session, another account's passkey and deletion of the last sign-in method.
 
 `test/pages.test.ts` covers the pages in three layers. The files: only the
 contract's endpoints, nothing stored or logged, no inline code. A real Chromium

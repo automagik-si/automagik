@@ -45,6 +45,13 @@ test('coding agent access messages name the renamed Settings section in all thre
   assert.match(pt[notReady], /Configurações → Agentes de código/)
 })
 
+test('Codex Auto confirmation describes unreviewed reads in Chinese and Brazilian Portuguese', () => {
+  const key = "On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps. With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads."
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(DICTIONARY.zh[key], "在自动模式下，Codex 通过自己的审查器决定执行哪些步骤、拒绝哪些步骤或询问你。它可能不经询问就修改{name}文件夹之外的文件，Automagik 不会审查这些步骤。它还可能用自有工具不经询问就读取 Automagik 本身能打开的任何文件，包括该文件夹之外的文件，它的审查器和 Automagik 都不会检查这些读取。")
+  assert.equal(pt[key], "No Automático, o Codex decide por conta própria, com seu próprio revisor, quais etapas executa, recusa ou pergunta a você. Pode alterar arquivos fora da pasta de {name} sem perguntar, e o Automagik não revisa essas etapas. Com suas próprias ferramentas, também pode ler qualquer arquivo que o próprio Automagik consegue abrir, inclusive fora dessa pasta, sem perguntar, e nem o revisor do Codex nem o Automagik verificam essas leituras.")
+})
+
 test('copy follows the DSH language and stays English without a locale service', () => {
   assert.equal(t('Message {name}', { name: 'Omni' }), 'Message Omni')
   assert.equal(language(), 'en')

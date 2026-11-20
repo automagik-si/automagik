@@ -44,3 +44,26 @@ export async function passkeyAdmissionFailure(db: D1Database, userId: string, sa
   if (!row || row.state !== 'pending') return 'INVITATION_USED';
   return row.expired ? 'INVITATION_INVALID' : null;
 }
+
+/** A short-lived authorization for this verified (user, credential) pair. The INSERT trigger
+ * checks the invitation or live owner session again and consumes this row atomically. */
+export async function authorizeCredential(db: D1Database, userId: string, credentialId: string,
+  authorization: { purpose: 'signup' } | { purpose: 'add'; sessionId: string; freshUntil: number }) {
+  const now = Date.now();
+  const deadline = now + 60_000;
+  const expiresAt = authorization.purpose === 'add' ? Math.min(deadline, authorization.freshUntil) : deadline;
+  const issued = await db.batch([
+    // A failed write or interrupted Worker can leave a short-lived authorization behind.
+    db.prepare(`DELETE FROM passkey_write_authorization WHERE rowid IN
+      (SELECT rowid FROM passkey_write_authorization WHERE expiresAt <= ? LIMIT 20)`).bind(new Date(now).toISOString()),
+    db.prepare(`INSERT INTO passkey_write_authorization (userId, credentialId, purpose, sessionId, expiresAt)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(userId, credentialId) DO UPDATE
+      SET purpose = excluded.purpose, sessionId = excluded.sessionId, expiresAt = excluded.expiresAt
+      WHERE passkey_write_authorization.expiresAt <= ?
+        OR (passkey_write_authorization.purpose = excluded.purpose
+          AND passkey_write_authorization.sessionId IS excluded.sessionId)`)
+      .bind(userId, credentialId, authorization.purpose, authorization.purpose === 'add' ? authorization.sessionId : null,
+        new Date(expiresAt).toISOString(), new Date(now).toISOString()),
+  ]);
+  if (!issued[1].meta.changes) throw new APIError('CONFLICT', { message: 'Please start again' });
+}
