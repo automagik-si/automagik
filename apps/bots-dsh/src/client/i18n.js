@@ -2491,6 +2491,8 @@ const ZH = {
   'Work': '工作',
   'Work, in this window': '工作，就在这个窗口',
   'Code: open this Bot’s folder in Herdr': '代码：在 Herdr 中打开这个 Bot 的文件夹',
+  'Open Herdr': '打开 Herdr',
+  'Team or Code': '团队或代码',
   'Code: open Herdr': '代码：打开 Herdr',
   'Opening Herdr…': '正在打开 Herdr…',
   'Herdr {version} is out': 'Herdr {version} 已发布',
@@ -3174,6 +3176,7 @@ function hostTemplate(message) {
 
 // A message from the host, in the interface language.
 export function hostText(message) {
+  if (message === 'desktop-only') return t('Terminals show in the Automagik desktop app.')
   if (typeof message === 'string' && (bound || language().startsWith('zh'))) {
     const worded = hostTemplate(message)
     if (worded !== undefined) return worded

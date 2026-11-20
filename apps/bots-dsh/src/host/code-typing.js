@@ -232,11 +232,12 @@ export async function routeBody(request, { max = MAX_INPUT_BYTES + 4 * 1024 } = 
 }
 
 /** The routes the service serves, as [path, handler] for one exact Fetch route each. */
-export function typingRoutes(service) {
+export function typingRoutes(service, verifyWindow = () => false) {
   const json = (answer) => answer.body === null
     ? new Response(null, { status: answer.status, headers: { 'cache-control': 'no-store' } })
     : Response.json(answer.body, { status: answer.status, headers: { 'cache-control': 'no-store' } })
   const route = (handle) => async (request) => {
+    if (!verifyWindow(request)) return json({ status: 403, body: { error: 'desktop-only' } })
     const parsed = await routeBody(request)
     if (parsed.error) return json(parsed.error)
     return json(await handle(request, parsed.body))

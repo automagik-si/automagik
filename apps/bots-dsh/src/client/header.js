@@ -190,9 +190,7 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
   return h('div', { className: native ? 'bt-native-head' : 'bt-head' },
     showGoal ? h(GoalIsland, { room, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     h('span', { className: 'bt-sr', role: 'status' }, memoryNotice ? t('Memory updated') : ''),
-    // The open Bot's two faces (left-bar-faces.js): Chat, and the herdr-core terminal the Code
-    // side watches (code-side.js). A Bot without a pane keeps Terminal on screen, says why it
-    // cannot open yet, and opens nothing; no shell is started.
+    // A seat can have a Terminal face. A DSH conversation stays in Chat.
     bot && !away && !native ? h(BotFaceSwitch, { bot }) : null,
     narrow ? more : h(Fragment, null, headButtons, liveButtons, details),
     native && bot ? h('button', { type: 'button', className: 'bt-head-details', 'aria-label': t('Bot settings'), title: t('Bot settings'), onClick: () => actions.openSettings('bots', bot.id) }, h(InfoIcon)) : null,

@@ -12,6 +12,7 @@
 // one (~/.automagik/bots), so neither sees the other's Bots or Sessions. Omni's own folder
 // (~/.omni: its sandbox, the Bun its channels download) is Omni's.
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { cp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -670,7 +671,7 @@ export async function startDshOnPort({ port, fresh = freePort, onPort, stopped =
  * `since` is when the current one was spawned: a busy file older than that is not its own
  * (quit-guard.js liveBusy).
  */
-export function dshRun({ now = Date.now } = {}) {
+export function dshRun({ now = Date.now, beforeStop = () => {} } = {}) {
   let child = null
   let since = null
   let stopped = false
@@ -686,6 +687,7 @@ export function dshRun({ now = Date.now } = {}) {
       if (stopped) void stopDsh(next, undefined, { tree: false })
     },
     stop(graceMs) {
+      beforeStop()
       stopped = true
       return stopDsh(child, graceMs)
     },
@@ -718,6 +720,54 @@ export async function serveDsh({ run, portFile, onSpawn, onUnkept = () => {}, ..
 export function servesOrigin(running, origin) {
   if (!running?.child || running.child.exitCode !== null || running.child.signalCode !== null) return false
   try { return new URL(running.url).origin === origin } catch { return false }
+}
+
+const WINDOW_HEADER = 'x-automagik-window'
+const WINDOW_PATHS = new Set([
+  '/api/omni-ui',
+  '/api/omni-ui/code/stream',
+  '/api/omni-ui/code/take',
+  '/api/omni-ui/code/input',
+  '/api/omni-ui/code/release',
+])
+
+/** Hold the secret in main, and mark only the DSH page's requests to the ready child. */
+export function dshWindowMarker() {
+  let active = null
+  return {
+    start() {
+      const mark = { secret: randomBytes(32).toString('hex'), origin: null }
+      active = mark
+      const digest = createHash('sha256').update(mark.secret, 'ascii').digest('hex')
+      return {
+        digest,
+        ready(running, origin) {
+          if (active !== mark || !servesOrigin(running, origin)) return
+          mark.origin = origin
+          running.child.once('exit', () => { if (active === mark) active = null })
+        },
+      }
+    },
+    clear() { active = null },
+    bind(contents) {
+      const { id, session } = contents
+      // Electron's URL filter has no webContentsId field. Match the actual request's id,
+      // and check its full origin because URL patterns alone do not bind the port.
+      session.webRequest.onBeforeSendHeaders({ urls: ['http://127.0.0.1/*'] }, (details, done) => {
+        const requestHeaders = details.requestHeaders
+        if (active && details.webContentsId === id) {
+          const url = new URL(details.url)
+          if (url.origin === active.origin && WINDOW_PATHS.has(url.pathname)) {
+            for (const name of Object.keys(requestHeaders)) {
+              if (name.toLowerCase() === WINDOW_HEADER) delete requestHeaders[name]
+            }
+            requestHeaders[WINDOW_HEADER] = active.secret
+          }
+        }
+        done({ requestHeaders })
+      })
+    },
+  }
 }
 
 /** The URL to load into the window: `running`'s launch URL, only when it serves `origin`. */
@@ -779,15 +829,18 @@ export async function forgetDshLogins(cookies, origin) {
  */
 export const toolDirs = (userHome = homedir()) => [join(userHome, '.local', 'bin'), join(userHome, '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin']
 
-export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform }) {
+export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform, windowDigest }) {
   // After the machine's own: a project's commands keep the user's node and pnpm, and then the
   // usual tool folders, then the app's own node and pnpm. dsh's plugin manager does not resolve
   // pnpm here: startDsh binds it to the bundled pnpm by absolute path (src/dsh-launch.cjs).
   const PATH = [...String(base.PATH ?? '').split(delimiter), ...toolDirs(userHome), ...(binDir ? [binDir] : [])]
     .filter((dir, index, all) => dir !== '' && all.indexOf(dir) === index)
     .join(delimiter)
+  const env = { ...base }
+  delete env.AUTOMAGIK_WINDOW_DIGEST
   return {
-    ...base,
+    ...env,
+    ...(windowDigest ? { AUTOMAGIK_WINDOW_DIGEST: windowDigest } : {}),
     PATH,
     DSH_HOME: join(home, 'dsh'),
     // The app's own team, apart from one in a dsh the person runs (bots-dsh folders.js).
@@ -820,7 +873,8 @@ export const busyFileOf = home => join(home, 'busy.json')
 
 /**
  * Start dsh on 127.0.0.1:`port` and resolve with { child, url } once it prints its launch
- * URL. `node` is the executable that runs dsh: Electron itself (with ELECTRON_RUN_AS_NODE),
+ * URL. An `env` factory is called for each spawn, including a retry.
+ * `node` is the executable that runs dsh: Electron itself (with ELECTRON_RUN_AS_NODE),
  * or a Node in tests. Output goes to `log` (a writable stream) when given. `onSpawn` gets
  * the process at once, so a quit while dsh starts can stop it, and the app can answer its
  * messages (the Bot browser bridge, main.js) from the start. `urlFile` is the file dsh's web
@@ -868,10 +922,11 @@ export function startDsh({
     ...(privacy ? ['--patch', privacy] : []),
     '--no-open', '--host', '127.0.0.1', '--port', String(port),
   ]
+  const childEnv = typeof env === 'function' ? env() : env
   const child = spawn(node, args, {
     cwd,
-    env: bundledPnpm === undefined ? env : {
-      ...env,
+    env: bundledPnpm === undefined ? childEnv : {
+      ...childEnv,
       AUTOMAGIK_DSH_ENTRY: bin,
       AUTOMAGIK_DSH_PNPM: bundledPnpm,
     },
