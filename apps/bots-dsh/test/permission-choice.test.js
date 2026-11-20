@@ -1018,6 +1018,7 @@ test('Auto question explains the reviewer and retains the revision at opening ac
   await act(render)
   await click(rowOf(document, 'workspace-write:auto'))
   for (const words of ['Codex', 'reviewer', 'outside', 'Automagik does not review', 'another Bot', 'schedule', 'Read only']) assert.ok(document.body.textContent.includes(words), words)
+  assert.match(document.body.textContent, /With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads\./)
   await click(button(document, 'Cancel'))
   assert.deepEqual(picks, [])
   await click(rowOf(document, 'workspace-write:auto'))
@@ -1037,7 +1038,10 @@ test('Auto questions explain each route and preserve Codex wording', t => {
   const codex = w.autoQuestion('ada', 'Workspace')
   assert.equal(codex.length, 3)
   assert.match(codex[2], /Codex 0.167.0/)
+  assert.match(codex[0], /It may change files outside ada's folder without asking you, and Automagik does not review those steps\./)
+  assert.match(codex[0], /With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads\./)
   assert.equal(w.autoQuestion('ada', 'Workspace', { by: 'codex', bridged: true, model: 'x' }).length, 5)
+  assert.equal(w.autoQuestion('ada', 'Workspace', { by: 'codex', bridged: true, model: 'x' })[0], codex[0])
 })
 
 for (const surface of ['chat', 'Details', 'composer']) {

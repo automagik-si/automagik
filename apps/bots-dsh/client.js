@@ -705,6 +705,7 @@ var ZH = {
   '{bot} changed while Session {session} was joining it (another window or an edit). For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.': "{bot} 在会话 {session} 加入时发生了变化（另一个窗口或一次编辑）。Bot 团队没有任何改动，请重试。在这次拒绝之前，会话 {session} 的原生预设已被设为「{preset}」。",
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.': "{bot} 在保存会话 {session} 时发生了变化。Bot 团队没有任何改动，请重试。在这次拒绝之前，会话 {session} 的原生预设已被设为「{preset}」。",
   "{name} could not switch to {model}. It stays on {kept}.": "{name} 无法切换到 {model}，仍使用 {kept}。",
+  "{name} cannot use the {route} route.": "{name} 无法使用“{route}”路线。",
   // A Bot's capability pills (capability-pills.js); 'Channels' is the Channels page's.
   "Computer": "电脑",
   "Leads the team": "带领团队",
@@ -1356,6 +1357,28 @@ var ZH = {
   "What this Bot can do, on top of what every Bot has.": "这个 Bot 在通用能力之外还能做什么。",
   "Genie can be given to another Bot after the next Genie update.": "Genie 下次更新后，就可以把此角色分配给其他 Bot。",
   "Roles are turned off for this team.": "此团队已关闭角色功能。",
+  "Roles": "角色",
+  "Uninstall": "卸载",
+  "Broken": "文件夹缺失",
+  "Damaged": "已损坏",
+  "Detach this role from every Bot before uninstalling it.": "请先从所有 Bot 移除此角色，再卸载。",
+  "Community: not installable yet": "社区角色：暂不可安装",
+  "Ignored role manifest field: {field}": "已忽略角色清单字段：{field}",
+  "Role package folder left at {folder}.": "角色包文件夹仍位于 {folder}。",
+  "This host does not hold the Bot team.": "此主机未持有 Bot 团队的锁。",
+  "The role catalog is unavailable.": "角色目录不可用。",
+  "This role is not in the catalog.": "目录中没有此角色。",
+  "Community roles cannot be installed yet.": "暂时无法安装社区角色。",
+  "The role install is damaged. Uninstall it first.": "角色安装已损坏。请先卸载。",
+  "Another version is installed. Uninstall it first.": "已安装其他版本。请先卸载。",
+  "The installed role conflicts with this package.": "已安装的角色与此软件包冲突。",
+  "The role download does not match the catalog size or checksum.": "下载的角色包大小或校验和与目录不符。",
+  "Role settings and ui are not supported yet.": "暂不支持角色设置和界面。",
+  "Required role features are not supported yet.": "暂不支持此角色要求的功能。",
+  "The role install record changed. Try again.": "角色安装记录已更改。请重试。",
+  "The role install records are damaged.": "角色安装记录已损坏。",
+  "This role is not installed.": "此角色尚未安装。",
+  "A folder is in the way: {folder}": "已有文件夹占用了路径：{folder}",
   "Unknown role": "未知角色",
   "A Bot's role changes with role-attach and role-detach": "请使用 role-attach 和 role-detach 更改 Bot 的角色",
   "{name} does not have the {tool} tool: its Genie role is off.": "{name} 的 Genie 角色已关闭，无法使用 {tool} 工具。",
@@ -1393,7 +1416,7 @@ var ZH = {
   "Works as Workspace. Where Workspace would ask you, Codex decides first, with its own reviewer: it runs the step, refuses it, or asks you.": "按工作区内修改运行。需要询问你时，Codex 会先由自己的审查器决定：执行、拒绝或询问你。",
   "Put {name} on Auto?": "让{name}使用自动模式？",
   "Use Auto": "使用自动模式",
-  "On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps.": "在自动模式下，Codex 通过自己的审查器决定执行哪些步骤、拒绝哪些步骤或询问你。它可能不经询问就修改{name}文件夹之外的文件，Automagik 不会审查这些步骤。",
+  "On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps. With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads.": "在自动模式下，Codex 通过自己的审查器决定执行哪些步骤、拒绝哪些步骤或询问你。它可能不经询问就修改{name}文件夹之外的文件，Automagik 不会审查这些步骤。它还可能用自有工具不经询问就读取 Automagik 本身能打开的任何文件，包括该文件夹之外的文件，它的审查器和 Automagik 都不会检查这些读取。",
   "Any message that reaches {name}'s chat can lead to such a step: yours, another Bot's or a schedule's. Tasks and Bots it starts from that chat while on Auto start on Auto too.": "任何到达{name}聊天的消息都可能引发这样的步骤：你的消息、其他 Bot 的消息或定时任务的消息。在自动模式下从该聊天启动的任务和 Bot 也以自动模式启动。",
   "This replaces {level}. Based on Codex 0.167.0; a later Codex may decide differently.": "这将替换{level}。基于 Codex 0.167.0；后续版本可能作出不同决定。",
   "Auto counts here: Codex decides on its own.": "自动模式在此生效：Codex 自行决定。",
@@ -3293,6 +3316,7 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 var HOST_TEMPLATES = [
+  "A folder is in the way: {folder}",
   "{name} does not have the {tool} tool: its Genie role is off.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
   "This step is hard to undo: {step}. Allow it once?",
@@ -3306,6 +3330,7 @@ var HOST_TEMPLATES = [
   "The account could not be confirmed ({kind}). Try again.",
   "This account is reserved for {label} by another installation that shares this team.",
   "{name} could not switch to {model}. It stays on {kept}.",
+  { template: "{name} cannot use the {route} route.", host: ["route"] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
   // message (the store's read-only reason) is worded in turn.
   { template: "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}", host: ["reason"] },
@@ -15744,6 +15769,14 @@ var BUILTIN_ROLES = Object.freeze({
 });
 var GENIE_ATTACH_REFUSAL = "Genie can be given to another Bot after the next Genie update.";
 var rolesOn = (prefs) => prefs?.roles !== false;
+var RESERVED_ROLE_IDS = Object.freeze(["data"]);
+var isWindowsReservedName = (name) => /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+var isRoleId = (id) => typeof id === "string" && /^[a-z0-9][a-z0-9-]{0,40}$/.test(id) && !RESERVED_ROLE_IDS.includes(id) && !isWindowsReservedName(id);
+var isRoleVersion = (version) => typeof version === "string" && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version);
+function attachedRoleIds(bot) {
+  if (!Object.hasOwn(bot ?? {}, "roles") || !Array.isArray(bot.roles)) return [];
+  return bot.roles.flatMap((entry) => typeof entry?.id === "string" && Object.hasOwn(entry, "id") ? [entry.id] : []);
+}
 var isAttachment = (entry) => typeof entry?.id === "string" && Object.hasOwn(BUILTIN_ROLES, entry.id) && typeof entry.version === "string" && entry.version.length > 0 && typeof entry.attachedAt === "string" && Array.isArray(entry.grants);
 var storedRoles = (bot) => {
   if (!Object.hasOwn(bot ?? {}, "roles")) return void 0;
@@ -15882,6 +15915,58 @@ function denyToolsText(bot) {
 function parseDenyTools(text2) {
   return [...new Set(String(text2 ?? "").split(/[\n,]+/).map((name) => name.trim()).filter(Boolean))];
 }
+function RolePackagesCard({ roster, actions, run: run3 }) {
+  const [result, setResult] = (0, import_react40.useState)(null);
+  const [pending, setPending] = (0, import_react40.useState)(false);
+  const records = roster.roles ?? {};
+  const roles = new Map((roster.roleCatalog?.roles ?? []).map((role) => [role.id, role]));
+  for (const id of Object.keys(records)) {
+    if (!roles.has(id)) roles.set(id, { id, name: id });
+  }
+  if (roles.size === 0 && !result && !pending) return null;
+  const attached = new Set((roster.bots ?? Object.values(roster.byId ?? {})).flatMap(attachedRoleIds));
+  const readOnly = Boolean(roster.readOnly) || roster.roleCatalog?.reason === "read-only";
+  const change = (action, id) => {
+    setPending(true);
+    setResult(null);
+    return run3(action(id).then((value) => {
+      if (value?.warnings?.length || value?.leftover) setResult(value);
+    }).finally(() => setPending(false)));
+  };
+  return (0, import_react40.createElement)(
+    Card2,
+    { title: t("Roles") },
+    [...roles.values()].map((role) => {
+      const record = Object.hasOwn(records, role.id) ? records[role.id] : void 0;
+      const inUse = record && attached.has(role.id);
+      const hints = [
+        record?.status === "broken" && t("Broken"),
+        record?.status === "damaged" && t("Damaged"),
+        inUse && t("Detach this role from every Bot before uninstalling it."),
+        !record && role.reason === "community" && t("Community: not installable yet")
+      ].filter(Boolean);
+      const version = record ? record.version : role.version;
+      const button = record ? (0, import_react40.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled: pending || readOnly || inUse,
+        onClick: () => change(actions.uninstallRole, role.id)
+      }, t("Uninstall")) : role.installable && (0, import_react40.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled: pending || readOnly,
+        onClick: () => change(actions.installRole, role.id)
+      }, t("Install"));
+      return (0, import_react40.createElement)(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(" · "), hint: hints.join(" · ") }, button || null);
+    }),
+    result ? (0, import_react40.createElement)(
+      "div",
+      { className: "bt-bs-shell-note", role: "status" },
+      result.warnings?.map((field) => (0, import_react40.createElement)("div", { key: field }, t("Ignored role manifest field: {field}", { field }))),
+      result.leftover ? (0, import_react40.createElement)("div", null, t("Role package folder left at {folder}.", { folder: result.leftover })) : null
+    ) : null
+  );
+}
 function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const [editing, setEditing] = (0, import_react40.useState)(false);
   const [confirming, setConfirming] = (0, import_react40.useState)(false);
@@ -15899,6 +15984,12 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const privacyHint = bot.private === true ? privateHint : isMainBot ? t("A Main Bot cannot be private.") : inGroup ? t("Leave its group chats before making it private.") : !bot.workDir ? t("Choose a working folder of its own first.") : privateHint;
   const save = (patch) => run3(actions.updateBot(bot.id, patch));
   const teamBot = roster.bots?.some((item) => item.id === bot.id) ?? roster.byId?.[bot.id]?.id === bot.id;
+  const requestedRoleCatalog = (0, import_react40.useRef)();
+  (0, import_react40.useEffect)(() => {
+    if (!teamBot || !actions.roleCatalog || requestedRoleCatalog.current === bot.id) return;
+    requestedRoleCatalog.current = bot.id;
+    void run3(actions.roleCatalog());
+  }, [teamBot, bot.id]);
   const roleTag = teamBot ? roleTagOf(bot, roster.prefs) : void 0;
   const canAttachGenie = bot.kind === BUILTIN_ROLES.genie.kind;
   const [signIn, setSignIn] = (0, import_react40.useState)(null);
@@ -15992,6 +16083,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         )
       ) : null
     ),
+    teamBot && rolesOn(roster.prefs) ? (0, import_react40.createElement)(RolePackagesCard, { key: bot.id, roster, actions, run: run3 }) : null,
     (0, import_react40.createElement)(
       Card2,
       { title: t("Model") },
@@ -20388,6 +20480,9 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     updateBot: (id, patch) => after(call2("update-bot", { id, ...patch })),
     attachRole: (id, role) => after(call2("role-attach", { id, role })),
     detachRole: (id) => after(call2("role-detach", { id })),
+    roleCatalog: () => after(call2("role-catalog")),
+    installRole: (id) => after(call2("role-install", { id })),
+    uninstallRole: (id) => after(call2("role-uninstall", { id })),
     // A model on another route: the host starts a new conversation with a handoff note
     // (parts.js). `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call2("switch-route", { id, ...patch, model: ref })),
@@ -26442,7 +26537,7 @@ var autoQuestion = (name, level, judge) => {
   const by = judge?.by ?? "codex";
   const words = { name, level, model: judge?.model, agent: ACP_NAME[judge?.agent] ?? judge?.agent };
   const first = { "own": "On Auto, {model}, {name}'s own model, decides in a separate request each step Workspace would ask you about, except plugin, folder and website changes: it runs the step, refuses it with a reason, or asks you. Commands and file changes stay in the sandbox, except a step it allows to leave it: that step may change files outside {name}'s folder without asking you.", "claude": "On Auto, Claude Code decides by itself, with its auto mode, which steps it runs, refuses or asks you about. Steps it runs with its own tools may change files outside {name}'s folder without asking you, and Automagik does not review them.", "team": "On Auto, {model}, the team's background model, decides each step {agent} asks you about: it runs the step, refuses it with a reason, or asks you. {agent} runs its own tools, so a step it allows may change files outside {name}'s folder without asking you." };
-  const out = [by === "codex" ? t("On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps.", { name }) : t(first[by], words)];
+  const out = [by === "codex" ? t("On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps. With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads.", { name }) : t(first[by], words)];
   if (judge?.bridged && judge.model && ["codex", "claude"].includes(by)) out.push(t("When it uses DeepSeek Harness's tools, {model}, the team's background model, decides each call first and asks you when unsure. Those tools stay in the sandbox.", words));
   if (judge?.model && (["own", "team"].includes(by) || judge.bridged)) out.push(t("{model} never decides hard-to-undo steps, such as deleting many files or a force push: they come to you, and so does the rest of a turn after three refusals in a row or ten in all.", words));
   out.push(t("Any message that reaches {name}'s chat can lead to such a step: yours, another Bot's or a schedule's. Tasks and Bots it starts from that chat while on Auto start on Auto too.", { name }));

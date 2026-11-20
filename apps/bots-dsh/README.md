@@ -777,6 +777,78 @@ node /opt/automagik/profile/node_modules/@automagik/bots-dsh/scripts/seed-regist
 
 It creates a missing file and leaves an identical one untouched, so re-running is safe. A repo file that differs is refused rather than overwritten; an existing home file is merged, keeping its other projects, picks and unknown fields, and a conflicting project entry or main Bot in it is refused. It never mints Bot ids: a project with no `.herdr/bots.json` is refused, because creating a team and its ids is Herdr's job. It keeps unknown fields, checks that the roster has exactly one main Bot, and removes `sessionId`, `sessions` and `segments` at every depth (including under `dsh`) before writing. The report it prints is the read-back: both files' Bot counts, any parser warnings and each file's `sha256`.
 
+## Role packages
+
+Bot settings discover the role catalog on first open. A host holding the team lock fetches
+`roles.json` and `roles.json.sig` from the GitHub release for the running bots-dsh version.
+If the index returns 404, the Roles card stays hidden on a team with no installed records.
+The catalog is bound to that release. Versioned releases are immutable and the consumer does
+not support replacing a catalog on the same tag.
+
+The release producer signs the exact `roles.json` bytes with the plugin lane's Ed25519 key
+and attaches the detached signature as base64 in `roles.json.sig`. The catalog schema is:
+
+```json
+{
+  "schemaVersion": 1,
+  "publisher": "automagik",
+  "keyId": "<plugin lane key ID>",
+  "version": "3.159.1",
+  "repository": "https://github.com/automagik-si/automagik",
+  "roles": [
+    {
+      "id": "example",
+      "version": "1.0.0",
+      "name": "Example role",
+      "publisher": "automagik",
+      "official": true,
+      "sha256": "<64 hexadecimal digits>",
+      "size": 1024,
+      "capabilities": [],
+      "source": "https://github.com/automagik-si/automagik/releases/download/v3.159.1/automagik-role-example-1.0.0.tgz"
+    }
+  ]
+}
+```
+
+`roles` allows up to 200 entries. IDs are lowercase ASCII letters, digits and hyphens,
+start with a letter or digit, and have at most 41 characters. `data` is reserved for
+per-Bot role data. Windows device names are reserved as well. Each of the three version
+components has 1–9 decimal digits. Name and publisher have 1–60 characters. `size` is the
+exact compressed byte count (1 byte to 16 MiB) and `sha256` covers those bytes. The consumer drops
+malformed entries and all entries sharing a duplicate ID. Only entries with `official: true`
+and publisher `automagik` are installable. Downloads follow GitHub release redirects only
+to `https://release-assets.githubusercontent.com`.
+
+Each `automagik-role-<id>-<version>.tgz` is a gzip-compressed POSIX ustar archive rooted
+at `package/`. Attach each archive and its `.sha256` beside the signed catalog.
+The archive contains regular files and directories, with at most 512 entries, 8 MiB per
+file and 32 MiB expanded. Paths are at most 200 bytes including the root. Components match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, exclude Windows device names and trailing dots, and
+use one spelling per case-folded path, including implied directories. The archive ends with
+two zero blocks and may pad with additional complete zero blocks.
+
+The required `package/role.json` (up to 64 KiB) contains `id`, `version`, `name` (1–60
+characters), `publisher`, `entry` (a relative `.js` or `.mjs` file), `prompt` (a relative
+`.md` or `.txt` file up to 16 KiB), `tools`, `capabilities`, `settings` and `ui`. IDs,
+versions and publishers match the catalog entry. Tools have a unique `name` matching
+`[a-z][a-z0-9_]{0,63}`, a 1–1024 character `description` and a JSON object
+`parameters`. At most 16 tools are allowed. The capability set matches the catalog and
+comes from `audio-out`, `task-start`, `route-policy` and `history-read`. P2 requires empty
+`settings` and `ui` arrays. Optional `description` is a string and optional `requires` is
+an array of feature names, which must be empty in P2. Unknown manifest fields produce
+warnings. Installation copies package files and records them without running package code.
+
+The team home is private and owner-controlled. The consumer refuses symlinked or
+non-directory package ancestors and linked or special entries within a package version
+directory. Its checks assume the team lock and owner control of concurrent filesystem writes.
+A missing version folder shows as broken. The host checks files against verified digests
+while it has them in memory and checks the local package structure after a restart. An
+explicit reinstall compares exact file contents against the verified archive. An
+orphan folder can be adopted only when those bytes match. To replace a damaged install,
+uninstall and install again. Uninstall works offline once the role has been detached from
+every Bot, and leaves `roles/data/` in place.
+
 ## Development
 
 You need Node 24 (DSH and the tests run on it), Bun (installs), pnpm and a deepseek-harness checkout with its dependencies installed, next to this repository (`../deepseek-harness`, or set `DSH_HARNESS`). The Desktop test bench also needs `xvfb-run` and `ffmpeg`. Web screenshots need Chrome or Chromium (`CHROME_BIN`; by default `google-chrome` or `chromium`).

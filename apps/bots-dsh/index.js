@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto'
 import fs, { cpSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
+import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
 import * as diagnostics from './src/host/diagnostics.js'
 import * as extend from './src/host/extend.js'
 import * as store from './src/host/store.js'
@@ -138,7 +139,7 @@ export function createRuntime(ctx, config = {}) {
   const rt = {
     ctx,
     config,
-    routePolicy: selectorRoutePolicy(config.routePolicy),
+    routePolicy: selectorRoutePolicy(config.routePolicy ?? DEFAULT_ROUTE_POLICY),
     dshHome,
     home,
     statePath: join(home, 'state.json'),

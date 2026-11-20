@@ -123,6 +123,9 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     updateBot: (id, patch) => after(call('update-bot', { id, ...patch })),
     attachRole: (id, role) => after(call('role-attach', { id, role })),
     detachRole: id => after(call('role-detach', { id })),
+    roleCatalog: () => after(call('role-catalog')),
+    installRole: id => after(call('role-install', { id })),
+    uninstallRole: id => after(call('role-uninstall', { id })),
     // A model on another route: the host starts a new conversation with a handoff note
     // (parts.js). `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),

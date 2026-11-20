@@ -1,5 +1,7 @@
 import { BUILTIN_ROLES, GENIE_ATTACH_REFUSAL, effectiveRoleIds, rolesOn } from '../shared/roles.js'
 import { refusal } from './refusal.js'
+import { createRoleCatalog } from './role-catalog.js'
+import { createRolePackages } from './role-package.js'
 
 let roleQueue = Promise.resolve()
 const serialize = (edit) => {
@@ -8,8 +10,19 @@ const serialize = (edit) => {
   return result
 }
 
-export function installRoles(rt) {
+export function installRoles(rt, deps = {}) {
   const { state } = rt
+  const catalog = createRoleCatalog({
+    ...deps,
+    canFetch: () => rt.readOnly() === undefined && rt.holdsLock(),
+    warn: (...args) => rt.warn?.(...args),
+  })
+  const packages = createRolePackages(rt, catalog, deps)
+  rt.roleCatalogView = catalog.view
+  rt.roleCatalog = async () => (await catalog.snapshot()).view
+  rt.roleRecordsView = packages.recordsView
+  rt.installRole = id => serialize(() => packages.install(id))
+  rt.uninstallRole = id => serialize(() => packages.uninstall(id))
   const commit = async (apply) => {
     await rt.saveCopy(apply, { afterWrite: () => apply(state) })
     rt.reapplyToolMasks?.()
