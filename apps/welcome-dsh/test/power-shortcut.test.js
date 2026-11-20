@@ -258,19 +258,28 @@ test('the Genie preload powers on only on the first-run team step', async (t) =>
   }
 })
 
-test('explicit team steps leave Omni and Unfold preloads asleep', async (t) => {
-  t.after(shortcut.resetPower)
+test('the Omni and Unfold preloads power on only on the first-run team step', async () => {
+  shortcut.resetPower()
   for (const kind of ['omni', 'unfold']) {
-    shortcut.resetPower()
-    fetched.length = 0
-    answers = { state: { companionName: 'Ada', teamDone: false, preload: kind } }
-    const view = mount(shortcut.TeamStep, { stepId: 'omni-team', explicit: true })
-    view.render()
-    await settle()
-    assert.ok(view.render())
-    await settle()
-    assert.equal(shortcut.powerOf(kind).phase, 'asleep', kind)
-    assert.equal(fetched.some(call => call.endpoint.endsWith('-install')), false, kind)
+    for (const explicit of [true, false]) {
+      fetched.length = 0
+      answers = { state: { companionName: 'Ada', teamDone: false, preload: kind } }
+      const view = mount(shortcut.TeamStep, { stepId: 'omni-team', explicit })
+      const context = `${kind} (explicit ${explicit})`
+      try {
+        view.render()
+        await settle()
+        assert.ok(view.render())
+        // Check the first-run wake before reduced motion advances it.
+        if (explicit) await settle()
+        const { phase } = shortcut.powerOf(kind)
+        if (explicit) assert.equal(phase, 'asleep', context)
+        else assert.notEqual(phase, 'asleep', context)
+        assert.equal(fetched.some(call => call.endpoint.endsWith('-install')), false, context)
+      } finally {
+        shortcut.resetPower()
+      }
+    }
   }
 })
 
