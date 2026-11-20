@@ -5,7 +5,7 @@ import { passkey } from '@better-auth/passkey';
 import { oauthProvider } from '@better-auth/oauth-provider';
 import { whatsappEnabled, whatsappPlugin } from './whatsapp';
 import { passkeySiteName } from './site';
-import { admitSignup, signupClaimed } from './gate';
+import { admitSignup, passkeyAdmissionFailure, refusal } from './gate';
 import { ADMISSION_HEADER } from './admission';
 
 function strictRedirectUri(uri: string, registered: readonly string[], defaultResult: boolean) {
@@ -42,7 +42,8 @@ export interface Env {
   PAGES?: Fetcher;
 }
 
-export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
+export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>,
+  onVerifiedSignup?: (userId: string, credentialId: string) => void) {
   if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) {
     throw new Error('BETTER_AUTH_SECRET must be provisioned');
   }
@@ -94,9 +95,12 @@ export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
             }
             return { id: user.id, name: 'Automagik user', displayName: 'Automagik user' };
           },
-          // Only one ceremony per ticket completes: its account takes the ticket for good.
-          async afterVerification({ ctx: endpoint, user }) {
-            await signupClaimed(env, endpoint, user.id);
+          // D1 consumes the invitation in the credential INSERT. Retain the verified identity
+          // of this request so the Worker can report a concurrent or expired invitation.
+          async afterVerification({ user, verification }) {
+            const code = await passkeyAdmissionFailure(env.DB, user.id);
+            if (code) throw refusal(code);
+            onVerifiedSignup?.(user.id, verification.registrationInfo!.credential.id);
           },
         },
       }),

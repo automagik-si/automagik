@@ -1,9 +1,7 @@
-// The invite gate on account creation, in Better Auth's terms. src/admission.ts holds the ticket
-// checks and the D1 statements; this file turns their refusals into plain JSON API errors.
-import { APIError, getSessionFromCtx } from 'better-auth/api';
-import type { GenericEndpointContext } from 'better-auth';
+// Translate ticket checks and D1 reservation state into Better Auth's JSON API errors.
+import { APIError } from 'better-auth/api';
 import {
-  AdmissionRefused, claimSignup, reserveSignup, verifyAdmission, ADMISSION_MESSAGES,
+  AdmissionRefused, reserveSignup, verifyAdmission, ADMISSION_MESSAGES,
   type Admission, type AdmissionCode, type AdmissionEnv,
 } from './admission';
 
@@ -34,14 +32,15 @@ export async function admitSignup(env: AdmissionEnv & { DB: D1Database },
   }
 }
 
-/**
- * At passkey verification: the ceremony's account takes its ticket, once. A passkey added to
- * the signed-in account's own user creates no account, so it needs no ticket; the passkey plugin
- * already refuses a ceremony whose user is not the session's.
- */
-export async function signupClaimed(env: { DB: D1Database }, endpoint: GenericEndpointContext,
-  userId: string): Promise<void> {
-  const session = await getSessionFromCtx(endpoint);
-  if (session?.user?.id === userId) return;
-  if (!(await claimSignup(env.DB, userId))) throw refusal('INVITATION_USED');
+/** Inspect the reservation at verification. After a storage error, an already persisted
+ * credential means a later operation failed: preserve the original provider error. */
+export async function passkeyAdmissionFailure(db: D1Database, userId: string, savedCredentialId?: string):
+  Promise<AdmissionCode | null> {
+  const row = await db.prepare(`SELECT state, expiresAt <= cutoff AS expired,
+    EXISTS (SELECT 1 FROM passkey WHERE userId = ?1 AND credentialID = ?2) AS saved
+    FROM admission_ticket, admission_clock WHERE userId = ?1 AND ceremonies > 0`).bind(userId, savedCredentialId ?? null)
+    .first<{ state: string; expired: number; saved: number }>();
+  if (row?.saved) return null;
+  if (!row || row.state !== 'pending') return 'INVITATION_USED';
+  return row.expired ? 'INVITATION_INVALID' : null;
 }

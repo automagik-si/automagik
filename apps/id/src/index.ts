@@ -7,6 +7,8 @@ import { getCookies } from 'better-auth/cookies';
 import { inbound, readChallenge, whatsappEnabled } from './whatsapp';
 import { passkeySiteName } from './site';
 import { cleanupOrphanUsers } from './cleanup';
+import { passkeyAdmissionFailure } from './gate';
+import { ADMISSION_MESSAGES } from './admission';
 
 function publicData(value: unknown, hidden: readonly string[] = ['email', 'emailVerified']): unknown {
   if (Array.isArray(value)) return value.map(entry => publicData(entry, hidden));
@@ -104,7 +106,8 @@ const router = {
         !url.pathname.startsWith('/api/') && !url.pathname.startsWith('/.well-known/')) {
       return env.PAGES.fetch(request);
     }
-    const auth = createAuth(env, ctx);
+    let verifiedSignup: { userId: string; credentialId: string } | undefined;
+    const auth = createAuth(env, ctx, (userId, credentialId) => { verifiedSignup = { userId, credentialId }; });
     if (url.pathname === '/.well-known/openid-configuration' ||
         url.pathname === '/api/auth/.well-known/openid-configuration') {
       return oauthProviderOpenIdConfigMetadata(auth)(request);
@@ -168,6 +171,13 @@ const router = {
       request = new Request(url, { method: 'POST', headers, body: JSON.stringify({ token }) });
     }
     const response = await auth.handler(request);
+    if (response.status === 500 && verifiedSignup) {
+      // A D1 outage may also prevent the diagnostic read. Keep the provider's original error.
+      const code = await passkeyAdmissionFailure(env.DB, verifiedSignup.userId, verifiedSignup.credentialId)
+        .catch(() => null);
+      if (code) return Response.json({ code, message: ADMISSION_MESSAGES[code] },
+        { status: 403, headers: response.headers });
+    }
     if (response.headers.get('content-type')?.includes('application/json')) {
       const text = await response.text();
       if (!text) return new Response(null, response);

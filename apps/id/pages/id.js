@@ -601,6 +601,7 @@
         if (error.kind === 'rate') { mood('hmm'); say(T.waSlow); run.held = true; return next(error.wait * 1000); }
         if (error.kind === 'refused') {
           stopWhatsApp();
+          if (invitation(error.code)) return offer(invitation(error.code), 'oops', true);
           return error.status === 403 || await requestEnded() ? ended() : offer(T.waExpired, '', true);
         }
         mood('fail');

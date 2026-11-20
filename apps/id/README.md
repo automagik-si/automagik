@@ -15,8 +15,9 @@ written; with no admission key configured, no account can be created, while
 sign-in and OIDC keep working. One ticket reserves one user row: a retry after a
 cancelled prompt reuses it (at most ten ceremonies per ticket), and only the
 first ceremony to finish takes the ticket; the others are refused. The
-reservation and the claim are each one D1 statement, so they hold across
-isolates. `src/admission.ts` checks tickets; `src/gate.ts` applies them. See
+credential insert checks the ticket's expiry with the same 30-second clock skew
+as the admission check. D1 commits the credential and the ticket claim
+together. A failed insert leaves the live ticket available for a fresh ceremony. `src/admission.ts` checks tickets; `src/gate.ts` applies them. See
 [DEPLOY.md](DEPLOY.md) for the keys and the operator's stand-in signer
 (`scripts/admission.ts`), and [PAGES-CONTRACT.md](PAGES-CONTRACT.md) for the
 header and the refusals.
@@ -54,7 +55,8 @@ One D1 batch deduplicates both event IDs, enforces ten events per sender per
 minute and three per challenge per five minutes, and consumes the challenge.
 The browser can claim the verified proof once. Better Auth creates the session
 for the account owning the verified number, or creates a separate phone account,
-but only when the start request carried a valid, unused admission ticket; without
+but only when the start request carried an unused admission ticket that remains
+valid when D1 inserts the account. The insert also spends the ticket. Without
 one, the proof ends with `invitation_required` and nothing is created.
 The browser's existing passkey account is never selected or modified. The
 receiving number, sender, code and secret are never logged.

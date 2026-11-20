@@ -167,13 +167,16 @@ With either missing, no account can be created: passkey sign-in, WhatsApp
 sign-in of an existing number and OIDC keep working. Put both in the operator's
 private environment and rerun `bun scripts/configure.ts`, which validates them,
 keeps only the public fields of each key and writes them to `wrangler.local.toml`.
-Apply `0003_admission.sql`, which adds the `admission_ticket` table and two
-columns on `whatsapp_challenge`, before the Worker that reads them.
+Apply `0003_admission.sql` before deploying this Worker. It records reservations
+and installs the triggers that spend them with the credential or phone account
+insert. Existing users can
+still sign in while deploying. Until the updated Worker is live, the new triggers
+can refuse sign-ups started by the previous Worker.
 
 D1 keeps each ticket's `jti` with the user row it reserved, its state and its
 ceremony count, so a ticket creates at most one account, and nothing else about
-the invitation. A row is useless once its `exp` has passed, since the ticket is
-refused from then on; the orphan cleanup removes the user row an abandoned
+the invitation. After the ticket's 30-second clock-skew allowance ends,
+the service refuses it; the orphan cleanup removes the user row an abandoned
 ceremony left. To rotate keys, list the new key beside the old one, switch the
 signer, then remove the old key once its last tickets have expired.
 

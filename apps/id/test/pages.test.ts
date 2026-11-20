@@ -23,6 +23,7 @@ import { createServer } from 'node:net';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { migrate } from './migrations';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { admissions, TEST_ISSUER } from './admission';
 
@@ -235,10 +236,7 @@ async function world(options: { whatsapp?: boolean } = {}) {
   worlds.push(mf);
   await mf.ready;
   const db = await mf.getD1Database('DB');
-  for (const file of ['migrations/0001_auth.sql', 'migrations/0002_whatsapp.sql', 'migrations/0003_admission.sql']) {
-    const migration = await readFile(file, 'utf8');
-    for (const sql of migration.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(sql).run();
-  }
+  await migrate(db);
   for (const sql of clientSeedSQL(digest('test-only-cloud-client-secret-never-deployed')).split(';').filter(Boolean)) {
     await db.prepare(sql).run();
   }

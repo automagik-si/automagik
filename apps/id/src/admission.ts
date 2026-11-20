@@ -127,7 +127,7 @@ export async function verifyAdmission(env: AdmissionEnv, token: string | null | 
   if (payload.iss !== issuer) throw invalid();
   if (!audienceMatches(payload.aud, new URL(env.BETTER_AUTH_URL).origin)) throw invalid();
   if (!Number.isSafeInteger(iat) || !Number.isSafeInteger(exp)) throw invalid();
-  if ((exp as number) <= seconds - ADMISSION_SKEW) throw invalid();
+  if (admissionExpired((exp as number) * 1000, now)) throw invalid();
   if ((iat as number) > seconds + ADMISSION_SKEW) throw invalid();
   if ((exp as number) <= (iat as number) || (exp as number) - (iat as number) > ADMISSION_MAX_LIFE) throw invalid();
   if (nbf !== undefined && (!Number.isSafeInteger(nbf) || (nbf as number) > seconds + ADMISSION_SKEW)) throw invalid();
@@ -166,26 +166,12 @@ export async function reserveSignup(db: D1Database, admission: Admission, now = 
   return row.userId;
 }
 
-/** Marks the ticket reserved for this user used, once; false when there is none left to use. */
-export async function claimSignup(db: D1Database, userId: string): Promise<boolean> {
-  const row = await db.prepare(`UPDATE admission_ticket SET state = 'used'
-    WHERE userId = ? AND state = 'pending' RETURNING jti`).bind(userId).first();
-  return row !== null;
+/** The same whole-second clock and 30-second skew used by the D1 admission triggers. */
+export function admissionExpired(expiresAt: number | null, now = Date.now()): boolean {
+  return expiresAt === null || expiresAt <= (Math.floor(now / 1000) - ADMISSION_SKEW) * 1000;
 }
 
 /** True when this ticket id was never recorded. */
 export async function admissionUnused(db: D1Database, jti: string): Promise<boolean> {
   return await db.prepare('SELECT 1 FROM admission_ticket WHERE jti = ?').bind(jti).first() === null;
-}
-
-/**
- * Uses a ticket for a phone account in one statement; returns the new account's id, or null
- * when the ticket was already recorded (used, or reserved by a passkey ceremony).
- */
-export async function consumeForPhone(db: D1Database, jti: string, expiresAt: number,
-  now = Date.now()): Promise<string | null> {
-  const userId = newUserId();
-  const result = await db.prepare(`INSERT INTO admission_ticket (jti, userId, state, ceremonies, expiresAt, createdAt)
-    VALUES (?, ?, 'used', 0, ?, ?) ON CONFLICT(jti) DO NOTHING`).bind(jti, userId, expiresAt, now).run();
-  return result.meta.changes ? userId : null;
 }

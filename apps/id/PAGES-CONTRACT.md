@@ -153,7 +153,10 @@ ignore session identity while retaining the WebAuthn challenge cookie.
      expiry, purpose), or the service has no admission key configured.
    - `INVITATION_USED`: the ticket already made an account, or it has started its
      ten ceremonies.
-   A retry with the same unused ticket (after a cancelled prompt) is allowed.
+   A retry with the same unused ticket (after a cancelled prompt or a failed
+   credential write) starts a fresh ceremony. The verification POST also returns
+   `INVITATION_INVALID` if the ticket expires beyond its 30-second clock skew
+   before the credential is saved.
    Response is `PublicKeyCredentialCreationOptionsJSON`: `{challenge, rp: {id,
    name}, user: {id, name, displayName}, pubKeyCredParams, timeout?,
    excludeCredentials?, authenticatorSelection, attestation?, extensions?}`.
@@ -211,7 +214,10 @@ WhatsApp inbound proof, only when `whatsappEnabled` is true:
    unused ticket. Otherwise the proof is spent, the challenge cookie is cleared,
    nothing is created and status answers `{status: "invitation_required"}` (no
    ticket was sent) or `{status: "invitation_used"}` (the ticket was used
-   meanwhile). Stop polling; say that new accounts need an invitation.
+   meanwhile). If the ticket has expired beyond its 30-second clock skew when
+   the account is written, status answers 403 with `INVITATION_INVALID`. Stop
+   polling and display the corresponding invitation message. A temporary user
+   write failure leaves a live ticket available to start a fresh proof.
 4. Treat 429 as a wait state, 403 as an invalid/cross-site request, and a signed
    query error as a request to restart from the product. A direct POST to status
    is not public and returns 404. Do not call `/api/omni/inbound` from a page;

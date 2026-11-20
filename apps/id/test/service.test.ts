@@ -2,9 +2,10 @@ import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, test } fr
 import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { createHash } from 'node:crypto';
-import { readFile, readdir, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createLocalJWKSet, jwtVerify } from 'jose';
+import { migrate } from './migrations';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { SoftwareAuthenticator } from './authenticator';
 import { ADMISSION_HEADER, admissions, TEST_ISSUER, type Admissions } from './admission';
@@ -150,10 +151,7 @@ beforeEach(async () => {
   runtimes = [];
   runtime = await instance();
   const db = await runtime.getD1Database('DB');
-  for (const file of (await readdir('migrations')).filter(name => name.endsWith('.sql')).sort()) {
-    const migration = await readFile(`migrations/${file}`, 'utf8');
-    for (const sql of migration.split(';').map(s => s.trim()).filter(Boolean)) await db.prepare(sql).run();
-  }
+  await migrate(db);
   for (const sql of clientSeedSQL(digest(cloudSecret)).split(';').filter(Boolean)) {
     await db.prepare(sql).run();
   }
@@ -1048,6 +1046,33 @@ describe('invite gate', () => {
     expect(await count('user')).toBe(1);
   });
 
+  test.each([[30, 403], [15, 200]])('a passkey finishes %d seconds after invitation expiry', async (age, status) => {
+    const ceremony = await begin(await tickets.mint());
+    const db = await runtime.getD1Database('DB');
+    await db.prepare('UPDATE admission_ticket SET expiresAt = (unixepoch() - ?) * 1000').bind(age).run();
+    const finished = await finish(ceremony);
+    if (status === 403) await refusedWith(finished, 'INVITATION_INVALID');
+    else expect(finished.status).toBe(200);
+    expect(await count('passkey')).toBe(status === 200 ? 1 : 0);
+    expect(await count('session')).toBe(status === 200 ? 1 : 0);
+  });
+
+  test('a credential write failure leaves the invitation available for a fresh ceremony', async () => {
+    const ticket = await tickets.mint();
+    const ceremony = await begin(ticket);
+    const db = await runtime.getD1Database('DB');
+    await db.prepare(`CREATE TRIGGER simulate_storage_failure AFTER INSERT ON passkey
+      BEGIN SELECT RAISE(ABORT, 'test storage unavailable'); END`).run();
+    expect((await finish(ceremony)).status).toBe(500);
+    expect(await db.prepare('SELECT state FROM admission_ticket').first('state')).toBe('pending');
+    expect(await count('passkey')).toBe(0);
+    expect(await count('session')).toBe(0);
+    await db.prepare('DROP TRIGGER simulate_storage_failure').run();
+    expect((await finish(await begin(ticket))).status).toBe(200);
+    expect(await count('user')).toBe(1);
+    expect(await count('passkey')).toBe(1);
+  });
+
   test('one ticket starts at most ten ceremonies', async () => {
     const ticket = await tickets.mint();
     for (let i = 0; i < 10; i++) await jsonOK((await begin(ticket)).response);
@@ -1149,6 +1174,37 @@ describe('invite gate', () => {
     expect(signedIn.status).toBe('verified');
     expect(signedIn.user.id).toBe(created.user.id);
     expect(await count('user', mf)).toBe(1);
+  });
+
+  test.each([[30, 403], [15, 200]])('WhatsApp finishes %d seconds after invitation expiry', async (age, status) => {
+    const mf = await instance(true);
+    const first = await startWhatsApp(mf);
+    expect((await deliver(mf, first.code)).status).toBe(200);
+    const db = await mf.getD1Database('DB');
+    await db.prepare('UPDATE whatsapp_challenge SET admissionExpiresAt = (unixepoch() - ?) * 1000').bind(age).run();
+    const finished = await request('/api/auth/whatsapp/status', undefined, { mf });
+    if (status === 403) {
+      await refusedWith(finished, 'INVITATION_INVALID');
+      expect(finished.headers.get('set-cookie')).toContain('Max-Age=0');
+    } else expect((await jsonOK(finished)).status).toBe('verified');
+    for (const table of ['user', 'admission_ticket', 'session']) expect(await count(table, mf)).toBe(status === 200 ? 1 : 0);
+  });
+
+  test('a phone user write failure leaves the invitation available for a fresh proof', async () => {
+    const mf = await instance(true);
+    const ticket = await tickets.mint();
+    const first = await startWhatsApp(mf, undefined, ticket);
+    expect((await deliver(mf, first.code)).status).toBe(200);
+    const db = await mf.getD1Database('DB');
+    await db.prepare(`CREATE TRIGGER simulate_storage_failure AFTER INSERT ON "user"
+      BEGIN SELECT RAISE(ABORT, 'test storage unavailable'); END`).run();
+    expect((await request('/api/auth/whatsapp/status', undefined, { mf })).status).toBe(500);
+    for (const table of ['user', 'admission_ticket', 'session']) expect(await count(table, mf)).toBe(0);
+    await db.prepare('DROP TRIGGER simulate_storage_failure').run();
+    const retry = await startWhatsApp(mf, undefined, ticket);
+    expect((await deliver(mf, retry.code)).status).toBe(200);
+    expect((await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf }))).status).toBe('verified');
+    for (const table of ['user', 'admission_ticket', 'session']) expect(await count(table, mf)).toBe(1);
   });
 
   test('WhatsApp: one ticket creates one phone account, and a used or bad ticket is refused at start', async () => {

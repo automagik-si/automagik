@@ -4,7 +4,7 @@ import { setSessionCookie } from 'better-auth/cookies';
 import type { BetterAuthPlugin } from 'better-auth';
 import type { User } from 'better-auth/types';
 import type { Env } from './auth';
-import { ADMISSION_HEADER, admissionUnused, consumeForPhone } from './admission';
+import { ADMISSION_HEADER, admissionExpired, admissionUnused, newUserId } from './admission';
 import { checkTicket, refusal } from './gate';
 
 const COOKIE = '__Host-automagik-id-whatsapp';
@@ -98,9 +98,10 @@ export function whatsappPlugin(env: Env): BetterAuthPlugin {
           return ctx.json({ status: 'expired' });
         }
         if (challenge.state !== 'verified') return ctx.json({ status: 'pending' });
-        const claimed = await env.DB.prepare(`UPDATE whatsapp_challenge SET state = 'used'
+        const signupUserId = newUserId();
+        const claimed = await env.DB.prepare(`UPDATE whatsapp_challenge SET state = 'used', signupUserId = ?
           WHERE cookieHash = ? AND state = 'verified' AND expiresAt > ?
-          RETURNING phoneNumber, admissionJti, admissionExpiresAt`).bind(challenge.cookieHash, Date.now())
+          RETURNING phoneNumber, admissionJti, admissionExpiresAt`).bind(signupUserId, challenge.cookieHash, Date.now())
           .first<{ phoneNumber: string; admissionJti: string | null; admissionExpiresAt: number | null }>();
         if (!claimed) return ctx.json({ status: 'expired' });
         const findPhoneUser = () => ctx.context.adapter.findOne<User>({
@@ -108,24 +109,28 @@ export function whatsappPlugin(env: Env): BetterAuthPlugin {
         });
         let user = await findPhoneUser();
         if (!user) {
-          // Invite only (RFC 0032, Decided 9): a number with no account needs the ticket its
-          // start request carried, used here once.
-          const admittedId = claimed.admissionJti
-            ? await consumeForPhone(env.DB, claimed.admissionJti, claimed.admissionExpiresAt ?? Date.now())
-            : null;
-          if (!admittedId) {
-            ctx.setCookie(COOKIE, '', { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 0 });
-            return ctx.json({ status: claimed.admissionJti ? 'invitation_used' : 'invitation_required' });
+          const clearChallenge = () => ctx.setCookie(COOKIE, '', {
+            httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 0,
+          });
+          if (!claimed.admissionJti) {
+            clearChallenge();
+            return ctx.json({ status: 'invitation_required' });
           }
           try {
+            // The user INSERT consumes the confirmed challenge's live invitation in D1.
             user = await ctx.context.internalAdapter.createUser({
-              id: admittedId, name: 'Automagik user', email: `${crypto.randomUUID()}@id.invalid`,
+              id: signupUserId, name: 'Automagik user', email: `${crypto.randomUUID()}@id.invalid`,
               emailVerified: false, phoneNumber: claimed.phoneNumber, phoneNumberVerified: true,
             }, { method: 'whatsapp' });
           } catch {
-            // A concurrent challenge for this same number may have created the unique user.
+            // A concurrent proof for this number may have completed first. It can sign in.
             user = await findPhoneUser();
-            if (!user) throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Please start again' });
+            if (!user) {
+              clearChallenge();
+              if (admissionExpired(claimed.admissionExpiresAt)) throw refusal('INVITATION_INVALID');
+              if (!(await admissionUnused(env.DB, claimed.admissionJti))) return ctx.json({ status: 'invitation_used' });
+              throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Please start again' });
+            }
           }
         }
         user = await ctx.context.internalAdapter.updateUser(user.id, { phoneNumberVerified: true });

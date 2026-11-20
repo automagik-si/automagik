@@ -2,9 +2,10 @@ import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, test } fr
 import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { createHash } from 'node:crypto';
-import { readFile, readdir, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createLocalJWKSet, decodeJwt, jwtVerify } from 'jose';
+import { migrate } from './migrations';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { SoftwareAuthenticator } from './authenticator';
 import { ADMISSION_HEADER, admissions, TEST_ISSUER, type Admissions } from './admission';
@@ -62,10 +63,7 @@ beforeEach(async () => {
     },
   });
   const db = await runtime.getD1Database('DB');
-  for (const file of (await readdir('migrations')).filter(name => name.endsWith('.sql')).sort()) {
-    const migration = await readFile(`migrations/${file}`, 'utf8');
-    for (const sql of migration.split(';').map(s => s.trim()).filter(Boolean)) await db.prepare(sql).run();
-  }
+  await migrate(db);
   for (const sql of clientSeedSQL(digest(cloudSecret)).split(';').filter(Boolean)) {
     await db.prepare(sql).run();
   }
