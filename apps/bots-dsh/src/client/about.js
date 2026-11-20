@@ -3,6 +3,7 @@
 // Inside the Automagik app the page is the app's: its version, its update and its plugins come
 // from the app (desktop-update.js); in a plain DSH the Bot team's own update (Omni's) shows.
 import { createElement as h, useEffect, useRef, useState } from 'react'
+import { CHECK_FRESH_MS } from '../shared/self-update.js'
 import { GitHubMark } from './connector-marks.js'
 import { whenText } from './feedback.js'
 import { dateLocale, hostText, t } from './i18n.js'
@@ -172,15 +173,109 @@ function selfUpdateReason(reason) {
     case 'profile-npmrc': return t('the profile .npmrc contains settings besides the registry.')
     case 'bot/read-only': return t('this window does not hold the team lock.')
     case 'check-timeout': return t('the update check is taking too long. Try again.')
+    case 'no-supervisor': return t('this instance is not run by the update supervisor.')
+    case 'no-writable-home': return t('there is no writable folder to keep the previous version in.')
+    case 'self-update-off': return t('in-app updates are turned off for this instance.')
+    case 'update-running': return t('an update is already running.')
+    case 'check-stale': return t('the last check is too old. Check for updates again.')
+    case 'team-home-custom': return t('the team is kept in a custom folder the update cannot snapshot.')
+    case 'request-unanswered': return t('the update supervisor did not answer.')
+    case 'starting-up': return t('Automagik is still picking up work from startup. Try again shortly.')
+    case 'notes-unwritable': return t('the notes needed to recover stopped work could not be saved.')
+    case 'stage-failed': return t('the new version could not be installed beside the current one.')
+    case 'switch-refused': return t('the installed plugins changed while the update was being prepared.')
+    case 'supervisor-restarted': return t('the update supervisor restarted before the switch.')
+    case 'health-failed': return t('the new version did not answer its health check.')
+    case 'rollback-failed': return t('going back to the previous version failed.')
     default: return t('the update check could not be completed.')
+  }
+}
+
+const RUNNING_PHASES = new Set(['checking', 'downloading', 'verifying', 'staging', 'switching', 'restarting', 'health', 'rollingBack'])
+const UPDATE_POLL_DEADLINE_MS = 15 * 60_000
+const VERDICT_PHASES = new Set(['healthy', 'rolledBack', 'notUpdated', 'manualRecovery'])
+
+function runStep(phase) {
+  switch (phase) {
+    case 'checking': return t('Updating: checking the release…')
+    case 'downloading': return t('Updating: downloading…')
+    case 'verifying': return t('Updating: verifying the signature and hashes…')
+    case 'staging': return t('Updating: installing beside the current version…')
+    case 'switching': return t('Updating: switching versions…')
+    case 'restarting': return t('Updating: restarting…')
+    case 'health': return t('Updating: checking that the new version answers…')
+    case 'rollingBack': return t('Updating: going back to the previous version…')
+    default: return null
+  }
+}
+
+// What the live update run of this supervisor says (RFC 0041 state.json, read through self-update-status).
+function runMessage(run) {
+  if (!run) return null
+  if (RUNNING_PHASES.has(run.phase)) return runStep(run.phase)
+  switch (run.phase) {
+    case 'healthy': return t('Updated to Automagik {version}.', { version: run.to })
+    case 'rolledBack': return t('The update was undone: Automagik {version} is back. Nothing was lost.', { version: run.from })
+    case 'notUpdated': return t('Not updated: {reason} The work that was stopped goes on.', { reason: selfUpdateReason(run.reason) })
+    case 'manualRecovery': return t('The update needs manual recovery. See "In-app updates" in docs/upgrade.md.')
+    default: return null
   }
 }
 
 const failedCheck = error => ({ reason: error?.code === 'bot/read-only' ? error.code : null })
 
-function SelfUpdateRow({ Row, check, readResult }) {
+export function SelfUpdateRow({ Row, check, readResult, readStatus, start }) {
   const [starting, setStarting] = useState(false)
   const [result, setResult] = useState(null)
+  // The update itself (delivery 5): the supervisor's live run, the confirmation, and the start's answer.
+  const [checkExpired, setCheckExpired] = useState(false)
+  const [status, setStatus] = useState(null)
+  const [confirming, setConfirming] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [refused, setRefused] = useState(null)
+  const [attempt, setAttempt] = useState(null)
+  const [expired, setExpired] = useState(false)
+  const run = attempt === null || status?.run?.requestId === attempt.requestId ? status?.run : null
+  const runLive = RUNNING_PHASES.has(run?.phase)
+  const hasVerdict = VERDICT_PHASES.has(run?.phase)
+  const awaitingVerdict = attempt !== null && !hasVerdict && !expired
+  const checkedAt = Date.parse(result?.checkedAt)
+  const checkFresh = () => result?.state === 'available' && checkedAt <= Date.now() && Date.now() < checkedAt + CHECK_FRESH_MS
+  useEffect(() => {
+    if (result?.state !== 'available' || attempt !== null || !Number.isFinite(checkedAt)) return
+    const timer = setTimeout(() => {
+      setCheckExpired(true)
+      setConfirming(false)
+    }, Math.max(0, checkedAt + CHECK_FRESH_MS - Date.now()))
+    return () => clearTimeout(timer)
+  }, [result, checkedAt, attempt])
+  useEffect(() => {
+    if (typeof readStatus !== 'function') return
+    let stopped = false
+    let timer
+    let following = false
+    const expire = attempt === null ? undefined : setTimeout(() => {
+      stopped = true
+      clearTimeout(timer)
+      setExpired(true)
+    }, Math.max(0, attempt.deadline - Date.now()))
+    const poll = async () => {
+      let next
+      try { next = await readStatus() } catch {}
+      if (stopped) return
+      if (next !== undefined) setStatus(next)
+      if (attempt !== null) {
+        // A prior run may remain visible until the supervisor takes this request.
+        if (next?.run?.requestId === attempt.requestId && VERDICT_PHASES.has(next.run.phase)) clearTimeout(expire)
+        else timer = setTimeout(poll, CHECK_POLL_MS)
+      } else {
+        if (next !== undefined) following = RUNNING_PHASES.has(next?.run?.phase)
+        if (following) timer = setTimeout(poll, CHECK_POLL_MS)
+      }
+    }
+    void poll()
+    return () => { stopped = true; clearTimeout(timer); clearTimeout(expire) }
+  }, [readStatus, attempt, result])
   const runId = result?.state === 'checking' ? result.runId : undefined
   const waiting = runId !== undefined
   const checking = starting || waiting
@@ -214,6 +309,10 @@ function SelfUpdateRow({ Row, check, readResult }) {
   }, [runId, readResult])
   const onCheck = async () => {
     setStarting(true)
+    setAttempt(null)
+    setExpired(false)
+    setCheckExpired(false)
+    setRefused(null)
     setResult(null)
     try { setResult(await check()) } catch (error) {
       setResult(failedCheck(error))
@@ -221,14 +320,69 @@ function SelfUpdateRow({ Row, check, readResult }) {
       setStarting(false)
     }
   }
-  const message = result === null || waiting ? null
+  const onConfirm = async () => {
+    setUpdating(true)
+    setRefused(null)
+    try {
+      const latest = await readStatus()
+      setStatus(latest)
+      if (!checkFresh()) setCheckExpired(true)
+      else if (latest?.startEnabled === true && latest.startRefusal === null && !RUNNING_PHASES.has(latest.run?.phase)) setConfirming(true)
+      else setRefused(latest?.startRefusal ?? null)
+    } catch (error) {
+      setStatus(null)
+      setRefused(error?.code === 'bot/read-only' ? error.code : 'update-running')
+    } finally {
+      setUpdating(false)
+    }
+  }
+  const onUpdate = async () => {
+    setConfirming(false)
+    if (!checkFresh()) {
+      setCheckExpired(true)
+      return
+    }
+    setUpdating(true)
+    setRefused(null)
+    try {
+      const answer = await start()
+      if (answer?.started === true) {
+        setExpired(false)
+        setAttempt({ requestId: answer.requestId, deadline: Date.now() + UPDATE_POLL_DEADLINE_MS })
+      }
+      else setRefused(answer?.reason ?? null)
+    } catch (error) {
+      setRefused(error?.code === 'bot/read-only' ? error.code : 'update-running')
+    } finally {
+      setUpdating(false)
+    }
+  }
+  const canStart = !checkExpired && checkFresh() && status?.startEnabled === true && status.startRefusal === null
+    && !awaitingVerdict && !runLive && typeof start === 'function'
+  const runText = runMessage(run)
+  if (confirming && checkFresh()) {
+    return h(Row, {
+      label: 'Automagik',
+      hint: h('span', { role: 'status' }, t('Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.')),
+    },
+    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onUpdate }, t('Update now')),
+    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setConfirming(false) }, t('Cancel')))
+  }
+  const message = refused !== null ? t('Cannot update: {reason}', { reason: selfUpdateReason(refused) })
+    : runText !== null && (hasVerdict && attempt !== null || runLive && !expired || result === null) ? runText
+    : expired ? t('The update status could not be confirmed. Check again shortly.')
+    : awaitingVerdict ? null
+    : result === null || waiting ? null
+    : result.state === 'available' && checkExpired ? t('Cannot update: {reason}', { reason: selfUpdateReason('check-stale') })
     : result.state === 'available' ? t('Automagik {version} is available, signed and checked.', { version: result.laneVersion })
     : result.state === 'current' ? t('Up to date.')
     : result.state === 'interrupted' ? t('The check was interrupted. Check again.')
     : result.state === 'checking' ? t('A check is already running. Try again shortly.')
     : t('Cannot update: {reason}', { reason: selfUpdateReason(result.reason) })
   return h(Row, { label: 'Automagik', hint: h('span', { role: 'status' }, message) },
-    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: checking, onClick: onCheck },
+    ...(canStart ? [h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: updating, onClick: onConfirm },
+      t('Update now'))] : []),
+    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: checking || runLive && !expired || updating || awaitingVerdict, onClick: onCheck },
       checking ? t('Checking…') : t('Check for updates')))
 }
 
@@ -333,7 +487,7 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
     repo ? h('p', { key: 'ask', className: 'bt-about-ask' }, t('If Omni helps you, a star on GitHub helps more people find it.')) : null,
     h(Section, { key: 'updates', title: t('Updates') },
       !ours && update.hostAnswered
-        ? h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
+        ? h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate }) : null,
       h(Row, { label: ours ? 'Automagik' : 'Omni', hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)
         // With the plugin's own check off, the app still knows the runtime it carries.
