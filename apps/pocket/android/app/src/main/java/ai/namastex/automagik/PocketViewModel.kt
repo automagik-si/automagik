@@ -1517,6 +1517,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private var memoryToken = 0L
     private var memoryLink: ChatLink? = null
     private var memoryJob: Job? = null
+    private val memoryNotice = mutableSetOf<TerminalRef>()
 
     /** The dialog owns a connection even when the Bot chat could not subscribe. Its claims and completions run on Main. */
     fun openMemory(ref: TerminalRef) {
@@ -1524,7 +1525,8 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         if (_memory.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
         closeMemory()
         val token = ++memoryToken
-        val connecting = ChatMemory.State(ref.hostId, ref.address, token, op = ChatMemory.Op.READ)
+        val notice = ChatMemory.EARLIER_CHANGE.takeIf { memoryNotice.remove(ref) }
+        val connecting = ChatMemory.State(ref.hostId, ref.address, token, op = ChatMemory.Op.READ, notice = notice)
         _memory.value = connecting
         memoryJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
@@ -1568,8 +1570,8 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private fun memoryLost(token: Long) {
         val s = _memory.value ?: return
         if (token != memoryToken || s.phase == ChatMemory.Phase.CLOSED) return
-        val mayHaveSaved = s.op == ChatMemory.Op.ADD || s.op == ChatMemory.Op.EDIT ||
-            s.phase == ChatMemory.Phase.RECONCILING || s.outcome == ChatMemory.UNCONFIRMED
+        val mayHaveSaved = s.mayHaveSaved
+        if (mayHaveSaved) memoryNotice += TerminalRef(s.hostId, s.terminal)
         val line = if (mayHaveSaved)
             "The connection closed before the computer answered. The change may have been saved: open Memory again to check."
         else "The connection to the computer closed."
@@ -1591,6 +1593,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     fun closeMemory() {
+        _memory.value?.takeIf { it.mayHaveSaved }?.let { memoryNotice += TerminalRef(it.hostId, it.terminal) }
         ++memoryToken
         releaseMemory()
         _memory.value = null

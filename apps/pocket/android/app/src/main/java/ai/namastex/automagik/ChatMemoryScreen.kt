@@ -17,6 +17,7 @@ import androidx.compose.ui.window.SecureFlagPolicy
         AlertDialog(onDismissRequest = vm::closeMemory, properties = secure,
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    s.notice?.let { Text(it, fontSize = 12.sp, color = Blocked) }
                     s.outcome?.let { MemoryOutcome(it) }
                     s.status?.let { Text(ChatText.clean(it), fontSize = 12.sp, color = Blocked) }
                 }
@@ -34,6 +35,7 @@ import androidx.compose.ui.window.SecureFlagPolicy
                     fontSize = 12.sp, color = Muted)
                 if (s.phase in listOf(ChatMemory.Phase.CONNECTING, ChatMemory.Phase.LOADING, ChatMemory.Phase.RECONCILING))
                     CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                s.notice?.let { Text(it, fontSize = 12.sp, color = Blocked) }
                 s.outcome?.let { MemoryOutcome(it) }
                 s.status?.let {
                     Text(ChatText.clean(it), fontSize = 12.sp, color = if (s.phase == ChatMemory.Phase.READ_FAILED) Blocked else Muted)
