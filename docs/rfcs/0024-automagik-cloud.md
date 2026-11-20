@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-10, by the owner; council review 2026-11-09: proceed with conditions, folded in; owner's answers: identity and billing, 2026-11-09; isolation, identity stand-up, hosting, the goal and Q18, 2026-11-10; Chat: Decided 19-25, 2026-11-09; amends RFC 0008; amended 2026-11-09 by [RFC 0025][25]; (f)'s machine-link rule: amendment proposed by [RFC 0022][22]'s (l), Q17, 2026-11-10; Invitations by project accepted by the owner, 2026-11-12, Decided 27) |
+| Status | Accepted (2026-11-10, by the owner; council review 2026-11-09: proceed with conditions, folded in; owner's answers: identity and billing, 2026-11-09; isolation, identity stand-up, hosting, the goal and Q18, 2026-11-10; Chat: Decided 19-25, 2026-11-09; amends RFC 0008; amended 2026-11-09 by [RFC 0025][25]; (f)'s machine-link rule: amendment proposed by [RFC 0022][22]'s (l), Q17, 2026-11-10; Invitations by project accepted by the owner, 2026-11-12, Decided 27; instance id, account evidence and reservations (#1426): amendment approved by the owner's delegate on 2026-11-20, questions 1-5 answered with its recommendations) |
 | Goal | First goal (owner, 2026-11-10): by 23 Nov, the owner signs in and opens one hosted workspace in test mode, with no real charges: RFC 0024 deliveries 0-4 and RFC 0025 phase A. |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); desktop (3.N) for secure storage, sign-in and the rail; the server image and plugin (3.N.P) for the self-hosted gate and the web rail; the Cloud service in its own private repository in the owner's organisation (its contracts stay public here) |
@@ -1152,6 +1152,250 @@ once, and no member or guest before the three safeguards of (f) hold.
 as its own project's decision: a new client and groups there, and its people re-bound, since
 principals are keyed by `(issuer, sub)`. Arca keeps its own sign-in (its own passkey approvals).
 
+## Amendment (2026-11-20): instance id, account evidence and reservations
+
+*Status: accepted, approved by the owner's delegate on 2026-11-20 (proposed 2026-11-19), with
+every recommended option; its questions are answered below. Issue #1426 (Refs, not Closes).*
+
+**Why it is here.** #1426 asks for a record of which subscription account (per vendor) belongs to
+which instance or project. The owner's policy (2026-11-16, on #1426): accounts are a **shared
+pool** by default; an account **can be reserved** to one instance or project; **only a reserved
+account refuses another instance**, and a shared account used by several instances is allowed.
+Identifiers only, never a credential; no credential moves between homes or machines; private
+homes and OS users stay as they are. (The owner's temporary priority rule, one named project first
+on a clash until 2026-11-23, is an operating rule and is not encoded.) A plan for #1426 stopped
+before code because three things it needs are contracts, not details: who a reservation is for,
+which account it names, and where a record lives that another instance can read. This amendment
+fixes all three and orders the work.
+
+Words used here: an **instance** is (Words) one DSH runtime with its own data, which is one
+Automagik home; two DSH processes that share one home are one instance. A **reservation** says
+"this vendor account is for instance X"; with none, the account is **shared**. The **check** is
+the read, at sign-in and at each fresh account read, that refuses a reserved account to every
+other instance.
+
+### (l) The instance id
+
+**What exists.** The self-hosted gate already makes the instance id this RFC specifies: a random
+`instance_id` in its owner record at the claim (`server/gate-store.mjs:55`, schema in
+[contracts-v1, section 2](../cloud/contracts-v1.md)). The desktop has none: the only name a plugin
+sees is the DSH profile name, which the app fixes to `omni` for every installation
+(`apps/desktop/src/dsh.js:26`), may be absent, and is free text.
+
+**Recommended (L-A): the owner record's `instance_id`, delivered on the desktop first.**
+
+- **Minted** once by the desktop shell at the first run of an Automagik home, as the owner record
+  version 1 of contracts-v1 (`version`, `local_id`, `instance_id`), both ids random (a UUID v4 or
+  128 random bits), never derived from the host, the OS user, the home's path or the profile name.
+- **Stored** at `<Automagik home>/desktop/owner.json` (the app's own home, `appHome` in
+  `apps/desktop/src/dsh.js`), created exclusively (`wx`), mode `0600`, outside every Bot's folder.
+  This settles contracts-v1's open file name and path for the desktop only; the gate keeps its
+  own store.
+- **Kept**: never rewritten or reset by the app. A record with a higher `version` or unknown
+  fields is left byte-equal, and its `instance_id` is used when it is a valid string; a record
+  that cannot be read stops reservations (with the reason on the card), never the app, and is
+  never overwritten. A team launch with its own `AUTOMAGIK_HOME` is its own instance with its own
+  id.
+- **Handed to DSH** by whoever launches it, as `AUTOMAGIK_INSTANCE_ID` in DSH's environment (the
+  desktop's `dsh.js`; a host install's launcher). It is not secret and grants nothing: knowing an
+  id lets no one act as that instance. Bots can read it, as they can read the home.
+- **The server image** has the id in the gate's store, which DSH cannot read by design ((c)). It
+  reaches plugins through the principal's `workspace` once (f)'s principal channel exists; until
+  then a server-image instance offers no reservation, and its card says so.
+- **A copied home** (a restore on a second machine, a cloned VM) copies the id: both copies are
+  one instance to the check. A restore is a move; running both copies is the owner's choice.
+- **A project** is a label the owner gives the reservation (shown, never compared). One instance
+  per project is the owner's setup; a project id across instances is not defined here.
+
+| Option | For | Against |
+|---|---|---|
+| **L-A, the owner record's id (recommended)** | the id this RFC already named and the gate already makes; one store, as contracts-v1 says | the server image waits for (f)'s channel |
+| L-B, a separate `instance.json` written by the plugins in each home | works everywhere at once | a second store contracts-v1 rules out; in a Bot-writable folder; two records to keep in step once the owner record lands |
+| L-C, derived from the host, OS user or home path | no file | two homes collide or one home changes id when moved; this RFC forbids host-derived ids |
+| L-D, the DSH profile name | exists today | `omni` everywhere on the desktop, optional, free text |
+
+### (m) The account evidence a reservation binds to
+
+**Rule.** The evidence is only what each vendor's CLI says about itself through the reads acp-dsh
+already makes (`apps/acp-dsh/src/host/account.js`: Claude Code's `auth status --json`, Codex's
+app-server `account/read`). Never a token, a key, a credential file, a keychain item or a cookie;
+no new read of any credential store is introduced. Today an account is named by vendor,
+organisation id and email (`account.js:44`, `:67`), and the consent record compares those facets
+tolerantly on purpose (`consent.js`: a facet only one side has says nothing), so a CLI release
+never loses a person's consent. An exclusivity claim needs the opposite direction: when in doubt,
+the reservation wins.
+
+**Recommended (M-A): per-vendor evidence, refuse when ambiguous.**
+
+| Vendor and sign-in | Evidence | Reservable |
+|---|---|---|
+| Claude, a person's sign-in with an email and an `orgId` | `claude`, the `orgId`, the email lowercased | yes |
+| Claude, an email with no `orgId` | none | no; the card says why (an older CLI, update it) |
+| Claude, an API key, a subscription token in the environment, Bedrock or Vertex | none | no; no subscription person is named. Never refused |
+| Codex, a ChatGPT sign-in | `codex`, the email lowercased, the plan class: `personal` (free, plus, pro) or `workspace` (team, business, enterprise, edu) | yes |
+| Codex, a ChatGPT sign-in whose `planType` is absent or unknown | none | no; at the check it matches either class |
+| Codex, an API key | none | no; never refused |
+
+- **The plan class, not the plan**: upgrading Plus to Pro is the same account.
+- **A Codex workspace reservation covers every workspace that email belongs to.** `account/read`
+  names no workspace today; a person in two ChatGPT workspaces cannot reserve one of them. If Codex
+  later names the workspace, it becomes one more evidence field (additive); the account id inside
+  Codex's own auth file is a credential store and is never read.
+- **Matching at the check.** Exact (every evidence field equal): refused. Ambiguous (same vendor and
+  email, and a field missing or unknown on the read being checked): refused too, with the reason and
+  the fix (update the CLI, or ask the reservation's owner to make it shared). Another `orgId` or
+  another plan class: another account, allowed.
+- **A comparable identifier.** Today's digests are keyed per home (`consent.js`, `digest`), so two
+  homes cannot compare them. The record ((n)) keeps two HMAC-SHA256 digests under the record's own
+  random key: `exact` over the canonical evidence, and `loose` over vendor and email only (for the
+  ambiguous match). No email, organisation name, plan or token is written. The key keeps the
+  digests meaningless to anyone without it (a backup, a log, a screenshot); it does not protect
+  them from a member of the record's group, who could test a guessed email. Said plainly in the
+  card's help.
+
+| Option | For | Against |
+|---|---|---|
+| **M-A, per-vendor evidence, refuse when ambiguous (recommended)** | a reservation never quietly misses its account | an old Claude CLI cannot reserve; two Codex workspaces of one email are one reservation |
+| M-B, today's facets with the consent rule's tolerance | no new rule | a missing `orgId` reads as "not another account", so two organisations with one email collide in both directions |
+| M-C, warn instead of refuse when ambiguous | no false refusal | the reservation the owner asked for becomes advice |
+| M-D, the account id from the CLI's credential files | exact | reads a credential store: refused by policy |
+
+### (n) The reservation record and the check at sign-in
+
+**Recommended (N-A): a machine directory with group permissions now; Cloud later for several
+machines.**
+
+- **Where.** `/var/lib/automagik/reservations` on Linux, and on macOS `Automagik/reservations` in the
+  system's shared folder for all users; `AUTOMAGIK_RESERVATIONS_DIR` overrides it. Made once by the machine's administrator (a
+  documented command; no Automagik process asks for root): group `automagik`, mode `3770`
+  (set-group-id, so every file keeps the group; sticky, so only a file's owner or root removes or
+  renames it). Each OS user that runs an instance joins the group. Windows: not offered until a
+  design with ACLs; the card says so.
+- **What is in it.** `key`: 32 random bytes, made by the setup command, mode `0640`. One file per
+  reservation, `<vendor>-<exact digest>.json`, mode `0640`:
+
+  ```json
+  {
+    "version": 1,
+    "vendor": "claude",
+    "exact": "{hmac of the evidence}",
+    "loose": "{hmac of vendor and email}",
+    "class": "workspace",
+    "instance": "{instance-id}",
+    "label": "{the owner's project label}",
+    "at": "2026-11-19T12:00:00Z"
+  }
+  ```
+
+  `class` is present for Codex only. `label` is one cleaned line of at most 60 characters. The
+  file's OS owner is who made it, and the card shows it.
+- **Reserving** (an owner-only route in the instance's app): the instance must have an id ((l)),
+  be signed in to that account now (a fresh read), and the evidence must be reservable ((m)). The
+  file is created exclusively (`wx`): two instances reserving at once leave exactly one winner and
+  need no lock. An existing file for another instance is refused with its label; for this
+  instance, only the label changes (its own file, replaced by rename). With no directory, the
+  reservation is kept in this instance's own home only and the card says it holds here alone.
+- **Making it shared**: the reserving OS user removes its own file. No other group member can
+  remove or replace it (the sticky bit); the administrator can, for an instance that no longer
+  exists.
+- **The check**: in bots-dsh's host, after acp-dsh reports a signed-in read of a Bot's vendor, and
+  at every fresh read after it (a start, the card, a new Bot session), never mid-turn:
+  1. evidence not reservable: allowed;
+  2. the `exact` file, else any `<vendor>-*.json` whose `loose` matches and whose evidence is
+     ambiguous against this read: found for another instance means **refused**; for this
+     instance, allowed and shown as "reserved for this instance";
+  3. refused, in an isolated Bot home: the app signs that vendor out of the Bot's own home (never
+     the terminal's sign-in) and the card shows "Reserved for {label} on another instance. Sign in
+     with another account, or ask its owner to make it shared." In consent mode (the Bot uses the
+     terminal's sign-in), the Bot does not use the account and the terminal is never touched;
+  4. no directory, or one this OS user cannot read: no reservation applies, and the card says
+     reservations are not checked here (fail open: a missing setup must not stop every sign-in);
+  5. an `exact` file that exists and cannot be read or parsed: refused, with that reason (the
+     reserver's claim stands).
+- An instance already signed in when another reserves the account is refused at its next fresh
+  read, not mid-turn.
+
+| Option | For | Against |
+|---|---|---|
+| **N-A, machine directory with group permissions (recommended now)** | the owner's instances run as separate OS users on one machine; no network, no Cloud; atomic without a lock | one machine only; needs one administrator step |
+| N-B, Cloud's workspace or the Cloud service as the registry | several machines | nothing self-hosted calls Cloud unless linked (delivery 6); needs every instance linked and Cloud up for a sign-in |
+| N-C, a herdr-core broker | already per machine | not every instance runs herdr; a live core becomes a dependency of a sign-in |
+| N-D, each home's own record only | no setup | no refusal across instances: what #1426 asks for is missing |
+
+**Limits, said plainly.** The reservation is a guard between the owner's own cooperating
+instances, not a boundary against a hostile one. A Bot runs as its instance's OS user (RFC 0022's
+same-user reach), so it can remove that instance's reservation or write a file for an account it
+can name; a group member can squat a reservation on an account it can name, which the
+administrator removes (the file's OS owner shows who). The same account on two machines is not
+seen until the Cloud registry (delivery R5). A copied home shares its id ((l)).
+
+### Contracts this amendment introduces
+
+All new and additive; nothing existing is renamed or moved.
+
+- **The desktop owner record**: contracts-v1's owner record, version 1, at
+  `<Automagik home>/desktop/owner.json`, `0600`.
+- **`AUTOMAGIK_INSTANCE_ID`**: the instance id in DSH's environment, set only by its launcher;
+  non-secret, never authority.
+- **The reservation directory and record**, version 1: the layout, modes, `key` and file of (n).
+  A newer version is additive; a reader skips a file whose `version` it does not know, except
+  that an `exact` match it cannot read is refused ((n), step 5).
+- **The evidence rules** of (m): which reads are reservable and how the two digests are made.
+- **One owner-only route in bots-dsh** for reserving and making shared, beside the account card's
+  existing routes; no plugin id, route prefix or storage prefix renamed.
+
+### Deliveries for this amendment, in order
+
+Each is one PR per lane, in this order.
+
+- **R0. This amendment and its evidence** (docs). Answer before R2: whether the current Claude Code
+  prints `orgId` for a personal (Pro, Max) and a Team or Enterprise sign-in; Codex's `account/read`
+  fields and its `planType` values, and whether it names a workspace; set-group-id and sticky
+  semantics for the directory on Linux and macOS. *Check:* a written record. *Rollback:* none.
+- **R1. The desktop instance id** (desktop lane). *Acceptance:* the first run writes the owner
+  record version 1 with random `local_id` and `instance_id`, `0600`, exclusively; a restart keeps
+  both; two Automagik homes on one machine and one OS user get different ids; a record with a higher
+  `version` or unknown fields stays byte-equal and its id is used; an unreadable record is never
+  overwritten and stops only reservations; DSH starts with `AUTOMAGIK_INSTANCE_ID`; nothing derives
+  the id from the host. *Rollback:* a release without it; the file stays, unused.
+- **R2. The account evidence** (plugin lane, acp-dsh). acp-dsh hands its owner-only host API, per
+  vendor, whether the read is reservable, the Codex plan class and the two digests under a key the
+  caller passes; the email stays where it already goes. *Acceptance:* every row of (m)'s table on
+  fixtures of both CLIs' outputs; Plus and Pro are one class, Team and Plus are not; an unknown
+  `planType` is not reservable; only the existing status reads are spawned (no file under a CLI's
+  credential folder is opened). *Rollback:* a release without the fields; nothing reads them.
+- **R3. The per-instance record and the card** (plugin lane, bots-dsh). The account card shows
+  shared or reserved per vendor and lets the owner reserve (with a project label) or make shared,
+  keyed on the instance id; with no machine directory the reservation holds in this instance only
+  and says so. *Acceptance:* shared by default; reserving refuses without an instance id, signed
+  out or not reservable; no email, organisation or token in the file's bytes; copy in English and
+  pt-BR; bundles rebuilt. *Rollback:* a release without it; the file is ignored.
+- **R4. The machine record and the check** (plugin lane, plus the documented administrator setup).
+  *Acceptance:* two concurrent reservations leave one file; another OS user in the group cannot
+  remove or replace it (a two-user test where CI can make users, else a recorded manual run); a
+  shared account is never refused; a reserved account is refused in another instance, at sign-in
+  and at the next fresh read, with the reason; the terminal's sign-in is never touched; an
+  ambiguous read is refused; no directory or an unreadable one allows with the notice; an
+  unreadable `exact` file refuses. *Rollback:* a release without the check; the directory stays
+  and is ignored.
+- **R5. The Cloud registry** (later, after delivery 6). The same record version 1 served by the
+  Cloud service per organisation, with a key per organisation, so a reservation holds across the
+  owner's machines. Its own amendment when delivery 6 is planned.
+
+### Questions for the owner
+
+Answered by the owner's delegate on 2026-11-20, each with the recommended option.
+
+1. **The instance id**: L-A, the owner record's `instance_id`, minted by the desktop first, handed
+   to DSH as `AUTOMAGIK_INSTANCE_ID`? *Answered: yes, L-A.*
+2. **Ambiguous reads**: refuse (M-A) or only warn (M-C)? *Answered: refuse, M-A.*
+3. **Codex workspaces**: accept that a workspace reservation covers every workspace of one email
+   until Codex names the workspace? *Answered: yes.*
+4. **The record's home**: the machine directory with group `automagik` now and Cloud later (N-A),
+   or wait for Cloud (N-B)? *Answered: N-A, the machine directory now, Cloud later (R5).*
+5. **A refused isolated Bot home**: sign that vendor out of the Bot's home, or keep it signed in
+   and unusable? *Answered: sign that vendor out of the Bot's home (never the terminal's).*
+
 ## Open questions
 
 Answered questions point to their Decided items; the numbers stay as they were, so references
@@ -1201,6 +1445,8 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 - Contracts: [docs/cloud/contracts-v1.md](../cloud/contracts-v1.md), version 1 (issue #904),
   frozen at merge; later changes are additive only.
 - Open issues: #902, #903, #904, #905, #906, #907, #908, #909, #910, #911, #912.
+- Amendment approved by the owner's delegate 2026-11-20: #1426, instance id, account evidence and
+  reservations (deliveries R0-R5).
 - Merged changes that cite this RFC: #866, #888, #913 (last merged 2026-11-10).
 
 ## Links
