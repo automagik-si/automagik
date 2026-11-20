@@ -8,6 +8,7 @@ issue ships as a plain fix and needs no RFC.
 
 | Status | Meaning |
 |---|---|
+| Proposed | Written and waiting for the owner's approval. Each open question carries a recommended answer; nothing is scheduled. |
 | Queued | Written, not yet in delivery. Its open questions wait for the owner. |
 | Accepted | Scheduled by the owner, with no delivery merged yet. Its deliveries are filed in milestone order. |
 | In delivery | Accepted, with some deliveries merged and the rest still open. A question left open is answered before the delivery it blocks. |
@@ -69,6 +70,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0034](0034-vault-plugin-bitwarden-first.md) | Vault plugin, Bitwarden first | Accepted (2026-11-19, approved by the owner's delegate: Q1-Q12 answered as decided, Q6 by the delegated #1668 contract; delivery 0, the RFC: #1655; no delivery merged) | none (ships outside the five milestones) |
 | [0036](0036-bot-management-from-pocket.md) | Bot management from Pocket | Accepted (2026-11-19, approved by the owner's delegate: Q1 by the approval, Q2-Q6 the most conservative option, D1-D6; amends RFC 0015; no delivery merged) | none (ships outside the five milestones) |
 | [0037](0037-roles-not-types.md) | One Bot; roles make the difference | Accepted (2026-11-19, approved by the owner's delegate: one Bot, roles make the difference; P1-P6 in order; Q1-Q10 answered with the RFC's recommendations; the role is the marketplace unit, Genie is the only crew kind it converts, and community roles wait for P5; no delivery merged) | none (ships outside the five milestones) |
+| [0039](0039-person-scoped-approval-grants.md) | Scoped approval grants the person makes | Accepted (2026-11-20, approved by the owner's delegate, #1718: #136's questions 1, 2, 3 and 5 and the dsh bridge's `allow_always` fallback answered with the RFC's recommendations; builds on [0031](0031-auto-permission-level.md) and #1740; no delivery merged) | none (ships outside the five milestones) |
 
 Milestones, in the owner's order:
 
