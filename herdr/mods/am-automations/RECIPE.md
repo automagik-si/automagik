@@ -111,10 +111,10 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   #501). A sent key with an empty value is removed, a key not sent is kept. So `agent_args` always
   goes, `[]` for none (leaving it out would keep the old flags after `Agent default`), and the form
   still sends back `catch_up_minutes`, `disabled` (a paused entry stays paused) and `workflow`.
-- **A new automation by `put` alone gets the form's flags** (#938), from the scheduler build after
-  0.12.1-am.1 only: the pinned 0.12.1-am.1 (`scheduler.js`) does not have it, so until the pin
-  moves a bot must send `agent_args` itself or its Codex run stays sandboxed. That later build's
-  `put` applies the automatic mode (`AUTO_ARGS` in `modes.js`; `config.DefaultAgentArgs` in the scheduler) to a new
+- **A new automation by `put` alone gets the form's flags** (#938), from 0.12.1-am.2, the pinned
+  release (`scheduler.js`), on: a scheduler still at 0.12.1-am.1 does not have it, so there a bot
+  must send `agent_args` itself or its Codex run stays sandboxed. From 0.12.1-am.2 on, `put`
+  applies the automatic mode (`AUTO_ARGS` in `modes.js`; `config.DefaultAgentArgs` in the scheduler) to a new
   automation whose request has no `agent_args` key, so one a bot writes runs with the access the
   same one made here has. The form always sends the key, so nothing changes for it. The two tables
   are held equal through `test/fixtures/automation-put-parity.json`: the panel's test checks the
@@ -209,8 +209,8 @@ scheduler's side `start` and `worker` for a target), and the agents a run starts
 - **A command automation runs a program as you** (#938): the scheduler starts it on its schedule
   with your network and files, no sandbox, and its result line is pasted into the named bot's
   terminal. Whoever can write `automations.yaml` (this form included) decides what runs.
-- The pinned scheduler release (`SCHEDULER`, `0.12.1-am.1`) does not run commands; the form offers
-  the kind once a build that names it is installed.
+- Command automations need the pinned scheduler release (`SCHEDULER`, `0.12.1-am.2`) or later; the
+  form offers the kind once a build that names it is installed (0.12.1-am.1 does not run commands).
 - Without the scheduler binary the panel shows the repair block instead of the list. `install.sh`
   provisions it (#220); shipping it as an RFC 0012 part (installed by `am install` and the pack's
   updater) comes later. A new scheduler release means updating `SCHEDULER` (version and all four

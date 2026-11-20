@@ -9655,6 +9655,8 @@ var ZH = {
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.': "{bot} 在保存会话 {session} 时发生了变化。Bot 团队没有任何改动，请重试。在这次拒绝之前，会话 {session} 的原生预设已被设为「{preset}」。",
   "{name} could not switch to {model}. It stays on {kept}.": "{name} 无法切换到 {model}，仍使用 {kept}。",
   "{name} cannot use the {route} route.": "{name} 无法使用“{route}”路线。",
+  "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route}.": "{name} 的对话已有记录，切换到 {route} 需要开启新对话。请选择“新对话”，然后选择 {route}。",
+  "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route} (pause an active goal first).": "{name} 的对话已有记录，切换到 {route} 需要开启新对话。如果有进行中的目标，请先暂停目标，再选择“新对话”，然后选择 {route}。",
   // A Bot's capability pills (capability-pills.js); 'Channels' is the Channels page's.
   "Computer": "电脑",
   "Leads the team": "带领团队",
@@ -10564,12 +10566,13 @@ var ZH = {
   "Not available yet": "尚不可用",
   "{agent}, current model {model}": "{agent}，当前模型 {model}",
   "{route}, current model {model}": "{route}，当前模型 {model}",
-  "Start a new conversation?": "开始新对话？",
-  "Changing the route starts a new conversation. {name} writes a handoff note first.": "更改路线会开始新对话。{name} 会先写一份交接说明。",
+  "Change route?": "更改路线？",
+  "Change agent?": "更改代理？",
+  "Changing the route requires a new conversation if this one has history.": "如果当前对话已有记录，更改路线需要开启新对话。",
   "Full access: DSH's own tools run without asking.": "完全访问：DSH 自己的工具无需询问即可运行。",
   "Full access: the CLI's own no-ask mode.": "完全访问：CLI 自身的免询问模式。",
   "Full access: the agent's actions run without asking.": "完全访问：代理的操作无需询问即可运行。",
-  "Changing the agent starts a new conversation. {name} writes a handoff note first.": "更改代理会开始新对话。{name} 会先写一份交接说明。",
+  "Changing the agent requires a new conversation if this one has history.": "如果当前对话已有记录，更改代理需要开启新对话。",
   "Keep this conversation": "保留当前对话",
   "Change route": "更改路线",
   "Change agent": "更改代理",
@@ -11099,6 +11102,23 @@ var ZH = {
   "Vault provider": "保管库提供方",
   "Bitwarden": "Bitwarden",
   "1Password": "1Password",
+  "Bitwarden Secrets Manager": "Bitwarden 机密管理器",
+  "Bitwarden Secrets Manager access token": "Bitwarden 机密管理器访问令牌",
+  "Bitwarden Secrets Manager is unavailable in Automagik Cloud.": "Bitwarden 机密管理器无法在 Automagik 云端使用。",
+  "Enter your Bitwarden Secrets Manager access token.": "请输入 Bitwarden 机密管理器访问令牌。",
+  "Install Bitwarden Secrets Manager CLI 2.x.": "请安装 Bitwarden 机密管理器 CLI 2.x。",
+  "The Bitwarden Secrets Manager access token could not be set.": "无法设置 Bitwarden 机密管理器访问令牌。",
+  "The Bitwarden Secrets Manager access token could not be cleared.": "无法清除 Bitwarden 机密管理器访问令牌。",
+  "The vault connection changed. Check it and try again.": "保管库连接已更改。请检查后重试。",
+  "Choose a vault connection to clear.": "请选择要清除的保管库连接。",
+  "Vault connection · {connection}": "保管库连接 · {connection}",
+  "No system keychain.": "系统钥匙串不可用。",
+  "No saved token for this connection.": "此连接没有已保存的令牌。",
+  "Vault connection label": "保险库连接标签",
+  "Server (us, eu, or HTTPS URL)": "服务器（us、eu 或 HTTPS 网址）",
+  "List projects": "列出项目",
+  "Vault project": "保管库项目",
+  "Choose a project": "选择一个项目",
   "1Password service account token": "1Password 服务账号令牌",
   "Set token": "设置令牌",
   "Replace token": "替换令牌",
@@ -12422,6 +12442,8 @@ var HOST_TEMPLATES = [
   MACHINE_MESSAGES.conflict,
   "{name} could not switch to {model}. It stays on {kept}.",
   { template: "{name} cannot use the {route} route.", host: ["route"] },
+  { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route} (pause an active goal first).", host: ["route"] },
+  { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route}.", host: ["route"] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
   // message (the store's read-only reason) is worded in turn.
   { template: "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}", host: ["reason"] },
@@ -13669,8 +13691,6 @@ html[data-windows-titlebar]:not([data-fullscreen]) :is(.bt-pane,.bt-panel)::befo
 [data-folded] .bt-fold-body{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 40px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 40px),transparent)}
 .bt-ubody .bt-fold .bt-more,.bt-ububble .bt-fold .bt-more,.bt-ubody .bt-fold-note,.bt-ububble .bt-fold-note{color:inherit;opacity:.7}
 .bt-ubody .bt-fold .bt-more:hover,.bt-ububble .bt-fold .bt-more:hover{opacity:1}
-.bt-ubody .bt-fold-code>.bt-tool,.bt-ububble .bt-fold-code>.bt-tool{color:inherit;opacity:.7}
-.bt-ubody .bt-fold-code>.bt-tool:hover,.bt-ububble .bt-fold-code>.bt-tool:hover{color:inherit;opacity:1}
 .bt-exchange .bt-dialog-foot{position:absolute;left:0;right:0;bottom:0;height:76px;box-sizing:border-box;align-items:flex-end;padding:0 0 28px;background:var(--bt-main);z-index:3;animation:bt-foot-in .3s cubic-bezier(.22,1,.36,1) .3s both}
 .bt-exchange .bt-dialog-foot::before{content:"";position:absolute;left:0;right:0;bottom:100%;height:40px;background:linear-gradient(to top,var(--bt-main),transparent);pointer-events:none}
 .bt-exchange[data-leaving] .bt-dialog-foot{animation:bt-foot-out .22s cubic-bezier(.4,0,1,1) forwards}

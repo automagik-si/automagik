@@ -461,8 +461,8 @@ nothing.
 **Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
 `am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
 including for a linked project named with `--machine M --project DIR`. Its scheduler must
-be running, with backend `hc` and bot targets (the `herdr-automations` release after
-0.12.1-am.1). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
+be running, with backend `hc` and bot targets (`herdr-automations` 0.12.1-am.2 or later, the
+pinned release). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
 just before the send, hc refuses to type into it and the failed run shows the reason.
 A new wake starts at its next occurrence. An already registered wake missed while the
 scheduler was stopped can catch up once on startup within 1380 elapsed minutes (23 hours).

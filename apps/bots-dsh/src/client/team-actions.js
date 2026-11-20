@@ -132,8 +132,8 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     voicePane: (sessionId, paneId, open, active) => call('voice-pane', { sessionId, paneId, open, active }),
     voiceWait: (sessionId, paneId, callId, signal) => call('voice-wait', { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call('voice-spoken', { sessionId, paneId, callId, outcome }),
-    // A model on another route: the host starts a new conversation with a handoff note
-    // (parts.js). `patch` carries the thinking level picked with it.
+    // A model on another route: the host changes it in place on a chat with nothing said.
+    // `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),
     switchRouteInChat: async (id, ref, patch = {}) => {
       try { return await after(call('switch-route', { id, ...patch, model: ref })) } catch (error) {
@@ -254,13 +254,18 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     vaultStatus: (signal, provider) => call('vault-status', provider === undefined ? undefined : { provider }, signal),
     vaultUnlock: (password, connection) => call('vault-unlock', { provider: 'bitwarden', password, connection }),
     vaultUnlockSecretService: () => call('vault-unlock', { provider: 'secret-service' }),
+    vaultUnlockSaved: (provider, connection, credentialRevision) => call('vault-unlock', { provider, connection,
+      ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
     vaultLock: provider => provider === undefined ? call('vault-lock') : call('vault-lock', { provider }),
-    vaultItems: (search, provider) => call('vault-items', provider === 'hashicorp-vault'
-      ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }) }),
+    vaultItems: (search, provider, project) => call('vault-items', provider === 'hashicorp-vault'
+      ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }),
+        ...(project === undefined ? {} : { project }) }),
     vaultFields: (provider, mount, path) => call('vault-fields', { provider, mount, path }),
-    vaultTokenSet: (provider, token, connection) => call('vault-token-set', provider === 'hashicorp-vault'
-      ? { provider, token, ...connection } : { provider, token, connection }),
-    vaultTokenClear: provider => call('vault-token-clear', { provider }),
+    vaultTokenSet: (provider, token, connection, server, credentialRevision) => call('vault-token-set', provider === 'hashicorp-vault'
+      ? { provider, token, ...connection } : { provider, token, connection, ...(server === undefined ? {} : { server }),
+        ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
+    vaultTokenClear: (provider, connection, credentialRevision) => call('vault-token-clear', { provider,
+      ...(connection === undefined ? {} : { connection }), ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
     secretSourceSet: mapping => after(call('secret-source-set', mapping)),
     secretCancel: requestId => after(call('secret-cancel', { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call('secret-update', { name, scope, purpose })),

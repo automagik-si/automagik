@@ -260,7 +260,7 @@ test('the mounted v1 service dispatches explicitly, locks the previous provider 
     const service = ctx.get('secretSources')
     const onepassword = { provider: 'onepassword', connection: op.ref.connection, token: op.credential }
     const bitwarden = { connection: bw.connection, password: bw.password }
-    assert.deepEqual(service.providers, ['bitwarden', 'onepassword', 'hashicorp-vault', 'secret-service', 'proton-pass'])
+    assert.deepEqual(service.providers, ['bitwarden', 'onepassword', 'hashicorp-vault', 'secret-service', 'proton-pass', 'bitwarden-secrets'])
     equalPrivate(await service.unlock(bitwarden), ok)
     assert.equal((await service.status()).state, 'unlocked')
     equalPrivate(await service.unlock(onepassword), ok)

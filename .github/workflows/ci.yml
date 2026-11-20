@@ -1933,6 +1933,31 @@ jobs:
       - name: Test
         run: node --test test/batch-spawn.test.js test/process-identity.test.js
 
+      - name: Test native Windows vault keychain
+        working-directory: apps/vault-dsh
+        run: node --test test/keychain-windows-native.test.js
+
+  vault-keychain-macos:
+    name: vault-keychain-macos
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Test disposable macOS vault keychain
+        working-directory: apps/vault-dsh
+        run: node --test test/keychain-macos-native.test.js
+
   boot:
     # The plugins booted for real with Omni's channels and canvases (the release omni.json
     # pins): boot-check.yml, which Follow Omni also runs on a candidate Omni before carrying it.
@@ -1948,7 +1973,7 @@ jobs:
     name: CI result
     needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
-            plugin, acp-image-read, pets, desktop, acp-windows, boot]
+            plugin, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

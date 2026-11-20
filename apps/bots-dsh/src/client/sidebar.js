@@ -7,7 +7,6 @@ import { isMainOf } from './sources.js'
 import { currentPart, previewOf, relativeShort } from './text.js'
 import { PlusIcon, SearchIcon, SidebarIcon, GaugeIcon, PlugIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, TasksIcon, SignOutIcon } from './icons.js'
 import { botState, BotAvatar, BotMark, RoomAvatar } from './mark.js'
-import { AgentBadge } from './agent-badge.js'
 import { DSH_LOOK } from './characters.js'
 import { reducedMotion } from './activity-row.js'
 import { Shimmer, workPhrase } from './cells.js'
@@ -119,7 +118,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, tag) : null, bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, tag) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
     blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)

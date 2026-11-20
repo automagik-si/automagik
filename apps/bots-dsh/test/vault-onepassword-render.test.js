@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
@@ -21,7 +21,7 @@ const text = node => Array.isArray(node) ? node.map(text).join('')
   : typeof node === 'object' && node !== null ? text(node.props.children) : String(node ?? '')
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
-function fixture({ hostname = 'localhost', mapped = false, cloud = false } = {}) {
+function fixture({ hostname = 'localhost', mapped = false, cloud = false, machineAccount = false, manager } = {}) {
   const module = { exports: {} }
   const slots = new Map()
   const inputs = new Map()
@@ -33,9 +33,13 @@ function fixture({ hostname = 'localhost', mapped = false, cloud = false } = {})
   let acceptsToken = false
   const token = randomBytes(24).toString('hex')
   const calls = []
+  const observed = []
   const id = () => randomBytes(13).toString('hex')
   const item = id() + '/' + id()
   const sectionField = id() + '/' + id()
+  const secretsManager = 'bitwarden-secrets'
+  const project = '16fa2335-4b11-4a64-ab3e-9697f022c765'
+  const projectItem = randomUUID()
   const slot = value => {
     const key = current.path + ':' + current.index++
     if (!slots.has(key)) slots.set(key, { value })
@@ -69,22 +73,46 @@ function fixture({ hostname = 'localhost', mapped = false, cloud = false } = {})
   const actions = {
     async vaultStatus(_signal, choice) {
       const provider = polledPair?.provider ?? (mapped ? 'onepassword' : choice ?? 'bitwarden')
-      return { provider, providers: ['bitwarden', 'onepassword'], connection: polledPair?.connection ?? provider,
-        state: provider === 'bitwarden' ? 'locked' : cloud ? 'unavailable' : onePassword,
+      const state = provider === 'bitwarden' ? 'locked' : cloud ? 'unavailable'
+        : provider === secretsManager && manager ? manager.state : onePassword
+      return { provider, providers: ['bitwarden', 'onepassword', ...(machineAccount ? [secretsManager] : [])],
+        connection: polledPair?.connection ?? provider, state,
+        ...(provider === secretsManager ? { connectionKnown: polledPair !== undefined || state === 'unlocked' } : {}),
+        ...(provider === secretsManager && manager ? { credentialRevision: manager.revision } : {}),
         ...(cloud && provider === 'onepassword' ? { reason: '1Password is unavailable in Automagik Cloud.' } : {}) }
     },
-    async vaultTokenSet(provider, value, connection) {
-      credentialPairs.push([provider, connection])
+    async vaultTokenSet(provider, value, connection, server, revision) {
+      credentialPairs.push(server === undefined ? [provider, connection] : [provider, connection, server])
       calls.push(['set', provider, value === token])
       if (!acceptsToken) throw new Error('fixture refused')
+      if (provider === secretsManager && manager) {
+        observed.push(['set', connection, revision])
+        if (revision !== manager.revision) throw new Error('stale revision')
+        manager.state = 'unlocked'
+        manager.revision = randomUUID()
+      }
       onePassword = 'unlocked'
     },
     async vaultUnlock(value, connection) {
       credentialPairs.push(['bitwarden', connection])
       calls.push(['unlock', 'bitwarden', value === token])
     },
-    async vaultTokenClear(provider) { calls.push(['clear', provider]); onePassword = 'locked' },
-    async vaultItems(query, provider) {
+    async vaultUnlockSaved(provider, connection, revision) {
+      calls.push(['saved', provider, connection])
+      if (provider === secretsManager) observed.push(['saved', connection, revision])
+      onePassword = 'unlocked'
+    },
+    async vaultTokenClear(provider, connection, revision) {
+      calls.push(['clear', provider])
+      if (provider === secretsManager) observed.push(['clear', connection, revision])
+      onePassword = 'locked'
+    },
+    async vaultItems(query, provider, selected) {
+      if (provider === secretsManager) {
+        calls.push(['project', selected])
+        return selected === undefined ? { projects: [{ id: project, name: 'Fixture project' }] }
+          : { items: [{ id: projectItem, name: 'Fixture key', fields: [{ selector: 'value', label: 'Value' }] }] }
+      }
       calls.push(['items', query, provider])
       return { items: [{ id: item, name: 'Fixture item', vault: 'Fixture vault', fields: [
         { selector: 'password', label: 'Password' },
@@ -93,6 +121,10 @@ function fixture({ hostname = 'localhost', mapped = false, cloud = false } = {})
     },
     async secretSourceSet(row) {
       calls.push(['mapping', row.provider, row.connection, row.name, row.item === item, row.field === sectionField])
+      if (row.provider === secretsManager) {
+        observed.push(['mapping', row.connection, row.credentialRevision])
+        if (row.credentialRevision !== manager?.revision) throw new Error('stale revision')
+      }
     },
   }
   const credentialPairs = []
@@ -124,19 +156,20 @@ function fixture({ hostname = 'localhost', mapped = false, cloud = false } = {})
   const button = name => find(node => node.type === 'button' && text(node) === name)
   const fill = (name, value) => label(name).props.onChange({ target: { value } })
   const enter = () => {
-    const input = label('1Password service account token').props
+    const input = label(machineAccount ? 'Bitwarden Secrets Manager access token' : '1Password service account token').props
     assert.equal(input.value, undefined)
     input.ref.current.value = token
     return input.ref.current
   }
   const choose = async () => {
     await ready()
-    fill('Vault provider', 'onepassword')
+    fill('Vault provider', machineAccount ? secretsManager : 'onepassword')
     await ready()
   }
-  return { ready, render, find, label, button, fill, enter, choose, calls, item, sectionField,
+  return { ready, render, find, label, button, fill, enter, choose, calls, observed, item, sectionField, project, projectItem,
     credentialPairs, accept: () => { acceptsToken = true },
-    async pollAs(provider, connection) { polledPair = { provider, connection }; await poll(); render() } }
+    async pollAs(provider, connection) { polledPair = { provider, connection }; await poll(); render() },
+    async poll() { await poll(); render() } }
 }
 
 test('Settings sets, replaces and clears an uncontrolled local token and clears the input on refusal', async () => {
@@ -161,6 +194,77 @@ test('Settings sets, replaces and clears an uncontrolled local token and clears 
   assert.equal(h.button('Add a vault key'), undefined)
   assert.deepEqual(h.calls, [['set', 'onepassword', true], ['set', 'onepassword', true],
     ['set', 'onepassword', true], ['clear', 'onepassword']])
+})
+
+test('Secrets Manager binds typed input to the server and polled connection, and requires a project choice', async () => {
+  const h = fixture({ machineAccount: true })
+  await h.choose()
+  const first = h.enter()
+  h.fill('Server (us, eu, or HTTPS URL)', 'eu')
+  assert.equal(first.value === '', true)
+  h.enter()
+  await h.pollAs('bitwarden-secrets', 'other')
+  const after = h.label('Bitwarden Secrets Manager access token').props
+  assert.equal(after.ref.current.value === '', true)
+  h.accept()
+  h.fill('Server (us, eu, or HTTPS URL)', 'eu')
+  h.enter()
+  await h.button('Set token').props.onClick()
+  assert.deepEqual(h.credentialPairs, [['bitwarden-secrets', 'other', 'eu']])
+  await h.ready()
+  assert.match(text(h.render()), /Vault connection · other/)
+  await h.button('Clear token').props.onClick()
+  await h.ready()
+  await h.button('Unlock').props.onClick()
+  await h.ready()
+  h.button('Add a vault key').props.onClick()
+  assert.deepEqual(h.calls.slice(-2), [['clear', 'bitwarden-secrets'], ['saved', 'bitwarden-secrets', 'other']])
+  assert.deepEqual(h.observed, [['clear', 'other', undefined], ['saved', 'other', undefined]])
+  await h.button('List projects').props.onClick()
+  await tick()
+  assert.deepEqual(h.calls.at(-1), ['project', undefined])
+  h.fill('Vault project', h.project)
+  await tick()
+  assert.deepEqual(h.calls.at(-1), ['project', h.project])
+})
+
+test('a second Secrets Manager window submits the observed picker revision and drops stale input on poll', async () => {
+  const revision = randomUUID()
+  const manager = { state: 'unlocked', revision }
+  const a = fixture({ machineAccount: true, manager })
+  const b = fixture({ machineAccount: true, manager })
+  await Promise.all([a.choose(), b.choose()])
+  b.button('Add a vault key').props.onClick()
+  await b.button('List projects').props.onClick()
+  b.fill('Vault project', b.project)
+  await tick()
+  assert.equal(b.label('Vault project').props.value, b.project)
+  b.fill('Key name', 'fixture_key')
+  b.fill('Vault item', b.projectItem)
+  b.fill('Vault field', 'value')
+  const stale = b.enter()
+
+  a.accept()
+  a.fill('Server (us, eu, or HTTPS URL)', 'eu')
+  a.enter()
+  await a.button('Replace token').props.onClick()
+  assert.deepEqual(a.observed, [['set', 'bitwarden-secrets', revision]])
+  assert.notEqual(manager.revision, revision)
+  await b.button('Save key').props.onClick()
+  assert.deepEqual(b.observed, [['mapping', 'bitwarden-secrets', revision]])
+  assert.equal(b.label('Vault project').props.value, b.project)
+  await b.poll()
+  const input = b.label('Bitwarden Secrets Manager access token').props.ref.current
+  assert.equal(input !== stale && input.value === '', true)
+  assert.equal(b.label('Vault project'), undefined)
+  await b.button('Replace token').props.onClick()
+  assert.deepEqual(b.credentialPairs, [])
+
+  manager.state = 'locked'
+  b.enter()
+  await b.poll()
+  assert.equal(b.label('Bitwarden Secrets Manager access token').props.ref.current.value, '')
+  assert.ok(b.button('Set token'))
 })
 
 for (const [provider, connection, label] of [

@@ -97,7 +97,10 @@ export function install(rt) {
   // Photos staged by `stage-image`, kept until the message that names them is sent.
   const staged = new Map()
   const ok = value => ({ ok: true, value })
-  const fail = (message, code = 'bot/error') => ({ ok: false, error: { code, message, details: {} } })
+  const fail = (message, code = 'bot/error', reason) => ({
+    ok: false,
+    error: { code, message, details: {}, ...(code === 'bot/refused' && reason === 'needs-new-conversation' ? { reason } : {}) },
+  })
   // Keep native holds and releases for one Bot in order across all browser controls.
   const browserChanges = new Set()
   async function changeBrowser(botId, body, change) {
@@ -503,7 +506,8 @@ export function install(rt) {
       // from memory before the refresh below, which may load the team or take its lock. It
       // takes no input.
       if (endpoint === 'diagnostics-permissions') return ok(rt.permissionDiagnostics())
-      if (endpoint === 'vault-unlock' || endpoint === 'vault-token-set') {
+      if (endpoint === 'vault-unlock' || endpoint === 'vault-token-set'
+        || (endpoint === 'vault-token-clear' && body.provider === 'bitwarden-secrets')) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
       await rt.refresh()
@@ -699,7 +703,7 @@ export function install(rt) {
           return ok(await rt.roleSettings(body))
         case 'role-settings-set':
           return ok(await rt.setRoleSettings(body))
-        // A model on another route (parts.js): a new conversation with a handoff note.
+        // A model on another route (parts.js): a chat with history needs New conversation first.
         case 'switch-route':
           await rt.load()
           return ok(await rt.switchRoute(String(body?.id ?? ''), String(body?.model ?? ''), body?.effort))
@@ -1271,7 +1275,7 @@ export function install(rt) {
       // or `memory/` code (memory writes `memory/*`). Any other error may be a
       // provider's, carrying its request or endpoint text, or a file system's, carrying
       // a path: neither the log nor the reply says its message, only its kind.
-      if (code !== 'bot/internal' && exposition(error) !== undefined) return fail(error.message, code)
+      if (code !== 'bot/internal' && exposition(error) !== undefined) return fail(error.message, code, error.reason)
       if (VAULT.has(endpoint)) return fail('The vault did not answer.', 'bot/internal')
       const kind = errorKind(error)
       rt.noteFailure({ source: 'api', text: `${endpoint}: ${kind}`, code: kind, stack: error?.stack })
@@ -1419,6 +1423,11 @@ export function install(rt) {
           if (request.headers.has('x-automagik-principal')
             || (!desktopWindow && (page === undefined || !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(page.hostname)))) {
             return fail('Unlock the vault in Settings on this computer.', 'bot/refused')
+          }
+          // Clear must reach the adapter to end the activation even when deletion is unavailable.
+          if (endpoint !== 'vault-token-clear' && body?.payload?.provider === 'bitwarden-secrets'
+            && process.env.AUTOMAGIK_GATE_CLOUD_WORKSPACE?.trim()) {
+            return fail('Bitwarden Secrets Manager is unavailable in Automagik Cloud.', 'bot/refused')
           }
         }
         return handle(endpoint, body?.payload, request.signal, proof)

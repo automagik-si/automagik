@@ -11,6 +11,7 @@ import { createSecretService } from '../src/secret-service/adapter.js'
 import { bus, busPath, connectBus, encodeMessage, Frames, serviceName } from '../src/secret-service/dbus.js'
 import { algorithm } from '../src/secret-service/crypto.js'
 import { attributeDigest, itemParts, provider, root } from '../src/secret-service/parse.js'
+import { fakeToken } from './fixtures/bws.mjs'
 const OAKLEY2 = 'ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74'
   + '020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f1437'
   + '4fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7ed'
@@ -222,7 +223,7 @@ async function mapped(h, adapter) {
   return { provider, field: 'secret', item: mapped.item }
 }
 
-test('pins owner, lists opaque handles without attributes, confirms identities and reads only the selected field', async t => {
+test('pins owner, lists opaque handles without exposing attributes, and reads only the selected field', async t => {
   const h = await fakeKeyring(t)
   const adapter = h.adapter()
   assert.deepEqual(adapter.status(), { state: 'locked' })
@@ -239,14 +240,15 @@ test('pins owner, lists opaque handles without attributes, confirms identities a
   assert.equal(items[0].created, created.toString())
   assert.equal(items[1].created, (created - 1n).toString())
   same(items[2], { collection: h.lockedLabel, locked: true })
-  assert.equal(h.calls.some(call => call.property === 'Attributes' || call.path === root + '/aliases/default'), false)
+  assert.equal(h.calls.some(call => call.path === root + '/aliases/default'), false)
+  assert.equal(h.calls.filter(call => call.property === 'Attributes').length, 2)
   const old = items[0].handle
   const listed = await adapter.listItems()
   assert.notEqual(listed.items[0].handle, old)
   assert.deepEqual(await adapter.resolveHandle({ handle: old }), refused('revoked'))
   const { item } = await adapter.resolveHandle({ handle: listed.items[0].handle })
   same(itemParts(item), [itemPath, created.toString(), attributeDigest(h.state.attributes)])
-  assert.equal(h.calls.filter(call => call.property === 'Attributes').length, 1)
+  assert.equal(h.calls.filter(call => call.property === 'Attributes').length, 5)
   const ref = { provider, item, field: 'secret' }
   h.state.renamed = privateText()
   assert.deepEqual(await adapter.resolveHandle({ handle: listed.items[0].handle }), refused('revoked'))
@@ -258,6 +260,35 @@ test('pins owner, lists opaque handles without attributes, confirms identities a
   assert.equal(h.state.closes, 1)
   assert.equal(h.calls.every(call => call.destination === bus || call.destination === h.state.owner), true)
   assert.equal(adapter.binding, gate)
+})
+
+test('the GNOME picker, handle resolution and read refuse reserved Automagik credential records', async t => {
+  const h = await fakeKeyring(t)
+  const adapter = h.adapter()
+  const credential = [['automagik-vault-item', 'automagik-vault:v1:' + privateText().slice(0, 32)]]
+  h.state.value = Buffer.from(Buffer.from(JSON.stringify({ v: 1, token: fakeToken(), server: 'us' })).toString('base64'))
+  let reserved = true
+  h.state.hook = ({ request, reply, property }) => {
+    if (request.headers.path !== itemPath) return false
+    if (property === 'Attributes' && reserved) reply('v', [{ signature: 'a{ss}', value: credential }])
+    else if (property === 'Label') reply('v', [{ signature: 's', value: 'Automagik Vault' }])
+    else return false
+    return true
+  }
+  assert.deepEqual(await adapter.unlock(), { ok: true })
+  const listing = await adapter.listItems()
+  assert.equal(listing.ok, true)
+  assert.equal(listing.items.filter(row => !row.locked).length, 1)
+  const ordinary = await adapter.resolveHandle({ handle: listing.items[0].handle })
+  assert.equal(ordinary.ok && itemParts(ordinary.item)[0] === secondPath, true)
+  reserved = false
+  const prior = await adapter.listItems()
+  const handle = prior.items.find(row => row.name === 'Automagik Vault').handle
+  reserved = true
+  assert.deepEqual(await adapter.resolveHandle({ handle }), refused('refused'))
+  const item = JSON.stringify([itemPath, created.toString(), attributeDigest(credential)])
+  assert.deepEqual(await adapter.read({ provider, item, field: 'secret' }), refused('refused'))
+  assert.equal(h.state.reads, 0)
 })
 
 test('checks attributes and membership before and after GetSecret, and confirms ambiguous deletion errors', async t => {

@@ -1,10 +1,21 @@
-// A route change is the one pick that starts a new conversation (RFC 0030, Decided 6 and
-// 10): the old harness writes the handoff note, a fresh part opens with it, and the Bot's
-// model record moves only with it. This runs the installed parts module on fakes.
+// RFC 0030 Q7a: the parts module refuses a crossing on a chat with history. After
+// New conversation, a crossing can apply in place while the fresh part has nothing said.
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import * as instructions from '@deepseek-ai/dsh-agent-instructions'
+import * as skill from '@deepseek-ai/dsh-tool-skill'
+import { install as installFallback } from '../src/host/fallback.js'
+import { install as installMemory } from '../src/host/memory.js'
 import { install, saidSomething } from '../src/host/parts.js'
+import { textOf } from '../src/host/text.js'
+import { install as installClock } from '../src/host/time-context.js'
 import { fakeContext } from './fake-ctx.js'
+
+const historyRefusal = { code: 'bot/refused', reason: 'needs-new-conversation' }
 
 const NOTE = [
   '## Goals', '- carry on', '## Constraints and preferences', '- none', '## Progress', '- Done: none',
@@ -102,8 +113,8 @@ function bench({ goal, withGoals = true } = {}) {
 // with the conversation, carrying the rounds it has left, or a long loop ends at the handoff.
 test('an active goal moves to the fresh part with the rounds it has left', async () => {
   const b = bench({ goal: { id: 'goal-1', revision: 4, objective: 'ship the release', phase: 'active', maxGoalRounds: 256, roundsStarted: 6 } })
-  const started = await b.rt.switchRoute('b1', 'acp-claude/default')
-  assert.equal(started.status, 'switching')
+  await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal)
+  await b.rt.startFresh('b1')
   await waitFor(() => b.calls.goals.length === 1)
   assert.deepEqual(b.calls.goals, [['s2', { objective: 'ship the release', maxGoalRounds: 250 }]])
 })
@@ -124,8 +135,8 @@ test('a goal that is not active, or a part with no goal, carries nothing', async
     { name: 'none', goal: undefined },
   ]) {
     const b = bench({ goal: scenario.goal })
-    const started = await b.rt.switchRoute('b1', 'acp-claude/default')
-    assert.equal(started.status, 'switching', scenario.name)
+    await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal, scenario.name)
+    await b.rt.startFresh('b1')
     await waitFor(() => b.calls.created.length === 1)
     await new Promise(resolve => setTimeout(resolve, 20))
     assert.deepEqual(b.calls.goals, [], scenario.name)
@@ -134,8 +145,8 @@ test('a goal that is not active, or a part with no goal, carries nothing', async
 
 test('a host without the goal service still moves the part', async () => {
   const b = bench({ withGoals: false })
-  const started = await b.rt.switchRoute('b1', 'acp-claude/default')
-  assert.equal(started.status, 'switching')
+  await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal)
+  await b.rt.startFresh('b1')
   await waitFor(() => b.calls.created.length === 1)
   assert.deepEqual(b.calls.goals, [])
 })
@@ -147,35 +158,6 @@ const waitFor = async (check, timeout = 2000) => {
     await new Promise(resolve => setTimeout(resolve, 5))
   }
 }
-
-test('a route change writes the note first and moves the Bot to a fresh part', async () => {
-  const b = bench()
-  const started = await b.rt.switchRoute('b1', 'acp-claude/default')
-  assert.equal(started.status, 'switching')
-  assert.equal(started.model, 'acp-claude/default')
-  await waitFor(() => b.bot.sessionId === 's2' && b.calls.archived.length > 0)
-  assert.equal(b.calls.notes, 1)
-  assert.deepEqual(b.calls.created, ['s2'])
-  assert.deepEqual(b.calls.archived, ['s1'])
-  assert.equal(b.bot.model, 'acp-claude/default')
-  assert.equal(b.bot.appliedModel, 'acp-claude/default')
-  // The note is asked of the old route, from the old Session's own prefix.
-  assert.equal(b.calls.notesAsked[0].provider, 'deepseek')
-  assert.equal(b.calls.notesAsked[0].model, 'v4')
-  // The fresh part is selected on the new route.
-  assert.deepEqual(b.calls.selected, [['s2', { provider: 'acp-claude', model: 'default' }]])
-  assert.equal(b.bot.segments.at(-1).sessionId, 's1')
-  assert.match(b.bot.segments.at(-1).note, /## Goals/)
-  // #1631: the attempt is in the redacted log, accepted and then completed, with the Bot,
-  // both refs and the entry point, and none of the conversation or its handoff note.
-  await waitFor(() => b.calls.diagnostics.length === 2)
-  assert.equal(b.rt.switchingChat('b1'), false)
-  assert.deepEqual(b.calls.diagnostics.map(({ level, source, bot, where, text }) => ({ level, source, bot, where, text })), [
-    { level: 'info', source: 'host', bot: 'b1', where: 'switch-route', text: 'Route change deepseek/v4 → acp-claude/default accepted' },
-    { level: 'info', source: 'host', bot: 'b1', where: 'switch-route', text: 'Route change deepseek/v4 → acp-claude/default completed' },
-  ])
-  assertNoConversation(b.calls.diagnostics)
-})
 
 // What a route-change record must never carry: the chat, the note, or anything secret-shaped.
 function assertNoConversation(entries) {
@@ -193,35 +175,6 @@ function assertUntouched(b, before) {
   assert.equal(b.rt.switchingChat('b1'), false)
   assert.equal([...b.rt.switchJobs()].length, 0)
 }
-
-test('a managed route change whose fresh conversation cannot take the route rolls back', async () => {
-  const b = bench()
-  const before = { ...b.bot }
-  // The target route cannot be selected on the fresh Session (its host does not start).
-  b.rt.selectSessionModel = async (id, selection) => {
-    b.calls.selected.push([id, selection])
-    if (id !== 's1') throw new Error('sandbox-exec: execvp() failed: Operation not permitted')
-  }
-  const started = await b.rt.switchRoute('b1', 'acp-claude/default')
-  assert.equal(started.status, 'switching')
-  assert.equal(b.bot.model, 'acp-claude/default')
-  await waitFor(() => b.calls.diagnostics.length === 2)
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  // Back on the route and Session it had; the unused fresh Session is archived, the old one kept.
-  assert.deepEqual({ ...b.bot }, before)
-  assert.deepEqual(b.calls.created, ['s2'])
-  assert.deepEqual(b.calls.archived, ['s2'])
-  assert.equal([...b.rt.switchJobs()].length, 0)
-  assert.deepEqual(b.calls.diagnostics.map(entry => [entry.level, entry.where, entry.text]), [
-    ['info', 'switch-route', 'Route change deepseek/v4 → acp-claude/default accepted'],
-    ['warn', 'switch-route', 'Route change deepseek/v4 → acp-claude/default rolled back'],
-  ])
-  assertNoConversation(b.calls.diagnostics)
-  assert.equal(JSON.stringify(b.calls.diagnostics).includes('sandbox-exec'), false)
-  // A second pick sees the kept route and can start again.
-  b.rt.selectSessionModel = async (id, selection) => { b.calls.selected.push([id, selection]) }
-  assert.equal((await b.rt.switchRoute('b1', 'acp-claude/default')).status, 'switching')
-})
 
 test('a conversation whose host cannot start refuses the route change before anything is written', async () => {
   const b = bench()
@@ -286,18 +239,6 @@ test('a pinned ACP-hosted Bot is refused a native route at once, with nothing wr
   assertNoConversation(b.calls.diagnostics)
 })
 
-test('a thinking level picked with the crossing reaches the fresh part', async () => {
-  const b = bench()
-  const started = await b.rt.switchRoute('b1', 'acp-claude/default', 'high')
-  assert.equal(started.effort, 'high')
-  await waitFor(() => b.bot.sessionId === 's2' && b.calls.archived.length > 0)
-  assert.equal(b.bot.model, 'acp-claude/default')
-  assert.equal(b.bot.effort, 'high')
-  assert.equal(b.bot.appliedModel, 'acp-claude/default')
-  assert.equal(b.bot.appliedEffort, 'high')
-  assert.deepEqual(b.calls.selected, [['s2', { provider: 'acp-claude', model: 'default', reasoningEffort: 'high' }]])
-})
-
 test('anything a person or another Bot said calls for a note; the team kickoff and context do not', () => {
   const user = source => ({ role: 'user', source })
   assert.equal(saidSomething([user({ kind: 'user' })]), true)
@@ -311,18 +252,7 @@ test('anything a person or another Bot said calls for a note; the team kickoff a
   assert.equal(saidSomething(undefined), false)
 })
 
-test('the switch trigger is true for a route change and false for a plain new conversation', async () => {
-  const route = bench()
-  let releaseRoute
-  const heldRoute = new Promise(resolve => { releaseRoute = resolve })
-  route.agent.whenIdle = async () => { await heldRoute }
-  await route.rt.switchRoute('b1', 'acp-claude/default')
-  // The old part is still current while the fresh part waits: the target switch is visible.
-  assert.equal(route.rt.switchingChat('b1'), true)
-  releaseRoute()
-  await waitFor(() => route.bot.sessionId === 's2' && route.calls.archived.length > 0)
-  assert.equal(route.rt.switchingChat('b1'), false)
-
+test('the switch trigger is false for a plain new conversation', async () => {
   const fresh = bench()
   let releaseFresh
   const heldFresh = new Promise(resolve => { releaseFresh = resolve })
@@ -347,7 +277,8 @@ test('handoff notes retry transient transport failures without changing route or
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'temporary failure' } } }
     } else yield* stream(options)
   }
-  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal)
+  await b.rt.newPart('s1')
   await waitFor(() => b.bot.sessionId === 's2' && b.calls.archived.length > 0)
   assert.equal(attempts, 2)
   assert.equal(requests[0], requests[1])
@@ -386,186 +317,223 @@ test('a kickoff-only crossing needs no handoff hooks and restores a failed selec
   ])
 })
 
-test('a failed old route job preserves a newer model and effort choice', async () => {
-  const b = bench()
-  let release
-  b.agent.whenIdle = () => new Promise(resolve => { release = resolve })
-  b.rt.selectSessionModel = async () => { throw new Error('selection failed') }
-  await b.rt.switchRoute('b1', 'acp-claude/default', 'high')
-  b.bot.model = b.bot.appliedModel = 'deepseek/newer'
-  b.bot.effort = b.bot.appliedEffort = 'low'
-  release()
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.equal(b.bot.model, 'deepseek/newer')
-  assert.equal(b.bot.appliedModel, 'deepseek/newer')
-  assert.equal(b.bot.effort, 'low')
-  assert.equal(b.bot.appliedEffort, 'low')
-  assert.equal(b.bot.sessionId, 's1')
-})
-
-
-test('a route job that moved but failed to finish is never diagnosed as completed', async () => {
-  const b = bench()
-  b.rt.moveSchedules = async () => { throw new Error('private failure after the move') }
-  await b.rt.switchRoute('b1', 'acp-claude/default')
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.equal(b.bot.sessionId, 's2')
-  assert.deepEqual(b.calls.diagnostics.map(entry => [entry.level, entry.text]), [
-    ['info', 'Route change deepseek/v4 → acp-claude/default accepted'],
-    ['warn', 'Route change deepseek/v4 → acp-claude/default failed (fresh conversation did not finish)'],
-  ])
-  assert.equal(JSON.stringify(b.calls.diagnostics).includes('private'), false)
-})
-
 const ROUTE_A = 'deepseek/v4'
 const ROUTE_B = 'acp-claude/default'
 
-function catalogBench(t) {
+const userMessage = (kind, text, source = {}) => ({
+  role: 'user', source: { kind, ...source }, content: [{ type: 'text', text }],
+})
+
+test('a native kickoff answered by the fallback leaves history that blocks an ACP pick', async t => {
   const b = bench()
   t.after(() => b.ctx.dispose())
-  const live = new Set([ROUTE_A, ROUTE_B])
-  let cached = [...live].map(ref => ({ ref }))
-  b.calls.catalog = []
-  b.calls.followups = []
-  b.rt.catalog = async ({ fresh = false, remember = true } = {}) => {
-    b.calls.catalog.push({ fresh, remember })
-    if (fresh) cached = [...live].map(ref => ({ ref }))
-    return cached
-  }
-  b.rt.desiredModel = async bot => {
-    if (cached.some(entry => entry.ref === bot.model)) return bot.model
-    if (cached.some(entry => entry.ref === bot.appliedModel)) return bot.appliedModel
-    return cached[0]?.ref
-  }
-  const resolveAgent = b.rt.resolveAgent
-  b.rt.resolveAgent = async id => {
-    const agent = await resolveAgent(id)
-    if (id !== 's1') agent.followup = () => { b.calls.followups.push(id) }
-    return agent
-  }
-  return { ...b, live }
-}
-
-async function switchToTarget(b, effort) {
-  assert.equal((await b.rt.switchRoute('b1', ROUTE_B, effort)).status, 'switching')
-}
-
-function assertRolledBack(b, before, reason = 'target not served') {
-  assert.deepEqual(b.bot, before)
-  assert.equal([...b.rt.switchJobs()].length, 0)
-  assert.deepEqual(b.calls.diagnostics.map(({ level, text }) => [level, text]), [
-    ['info', `Route change ${ROUTE_A} → ${ROUTE_B} accepted`],
-    ['warn', `Route change ${ROUTE_A} → ${ROUTE_B} rolled back (${reason})`],
-  ])
-}
-
-test('a route change checks the live catalog before creating the fresh part', async t => {
-  const b = catalogBench(t)
-  const before = { ...b.bot }
+  const messages = [userMessage('bot', 'Team kickoff.', { role: 'kickoff' })]
+  b.agent.session.deriveMessages = () => messages
+  let selection = { provider: 'deepseek', model: 'v4' }
+  b.agent.model = { current: () => selection, select: route => { selection = route } }
+  b.rt.defaultModel = async () => 'deepseek-official/deepseek-flash'
   const idle = Promise.withResolvers()
+  const followed = Promise.withResolvers()
   b.agent.whenIdle = () => idle.promise
-  await switchToTarget(b)
-  b.live.delete(ROUTE_B)
-  assert.equal(await b.rt.desiredModel(b.bot), ROUTE_B)
+  b.agent.followup = message => { messages.push(message); followed.resolve(message) }
+  installFallback(b.rt)
+  const requestError = b.ctx.listeners.get('agent/request-error').at(-1)
+  const turnEvent = b.ctx.listeners.get('session/event').at(-1)
+  const failure = { code: 'SERVER', message: 'Provider temporarily unavailable' }
+  await requestError({ agent: b.agent, turn: 1, step: 1, failure, signal: new AbortController().signal }, async () => undefined)
+  turnEvent(b.agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: failure } } })
   idle.resolve()
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.deepEqual(b.calls.catalog, [{ fresh: true, remember: false }])
-  assert.deepEqual(b.calls.created, [])
-  assert.deepEqual(b.calls.selected, [])
-  assert.deepEqual(b.calls.archived, [])
-  assertRolledBack(b, before)
+  const notice = await followed.promise
+  assert.deepEqual(notice.source, {
+    kind: 'model-selection', form: 'notice', summary: 'deepseek/v4 failed → deepseek-official/deepseek-flash',
+  })
+  assert.match(textOf(notice.content), /^\[model fallback: .*Provider temporarily unavailable/)
+  assert.deepEqual(selection, { provider: 'deepseek-official', model: 'deepseek-flash' })
+  messages.push({ role: 'assistant', source: selection, content: [{ type: 'text', text: 'The fallback answered the kickoff.' }] })
+  turnEvent(b.agent.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'stop' } } })
+  assert.deepEqual(selection, { provider: 'deepseek', model: 'v4' })
 
-  b.live.add(ROUTE_B)
-  await switchToTarget(b)
-  await waitFor(() => !b.rt.switchingChat('b1'))
+  const before = structuredClone(b.bot)
+  b.rt.applyModel = async bot => { bot.appliedModel = bot.model }
+  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+  assertUntouched(b, before)
 })
 
-test('a target dropped during Session creation never selects the old route', async t => {
-  const b = catalogBench(t)
-  const before = { ...b.bot }
-  const createSession = b.rt.createSession
-  b.rt.createSession = async (...args) => {
-    const id = await createSession(...args)
-    b.live.delete(ROUTE_B)
-    await b.rt.catalog({ fresh: true, remember: false })
-    return id
+test('a populated crossing refuses before clearing Auto, saving, or selecting anything', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  b.agent.whenIdle = () => new Promise(() => {})
+  const before = structuredClone(b.bot)
+  const mutations = []
+  for (const method of ['clearAuto', 'noteModelChoice', 'save', 'applyModel']) b.rt[method] = () => mutations.push(method)
+  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B, 'high'), {
+    ...historyRefusal,
+    message: `${b.bot.name}'s conversation has history, so changing to ACP needs a new conversation. Use New conversation, then pick ACP.`,
+  })
+  assertUntouched(b, before)
+  assertNoConversation(b.calls.diagnostics)
+  assert.deepEqual(mutations, [])
+  assert.deepEqual(b.calls.diagnostics.map(({ level, where, text }) => [level, where, text]), [
+    ['warn', 'switch-route', `Route change ${ROUTE_A} → ${ROUTE_B} refused (needs-new-conversation)`],
+  ])
+})
+
+test('a crossing refusal tells the person to pause an active goal before New conversation', async t => {
+  const b = bench({ goal: { phase: 'active', objective: 'Finish the work' } })
+  t.after(() => b.ctx.dispose())
+  b.agent.whenIdle = () => new Promise(() => {})
+  b.agent.session.deriveMessages = () => [userMessage('goal', 'Work on the current goal.')]
+  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), {
+    ...historyRefusal,
+    message: `${b.bot.name}'s conversation has history, so changing to ACP needs a new conversation. Use New conversation, then pick ACP (pause an active goal first).`,
+  })
+})
+
+for (const [kind, service] of [
+  ['replay throws', { get() { throw new Error('Goal replay failed') } }],
+  ['reader unavailable', {}],
+  ['state unreadable', { get: () => ({}) }],
+]) {
+  test(`a crossing still refuses and includes the pause hint when goal ${kind}`, async t => {
+    const b = bench({ withGoals: false })
+    t.after(() => b.ctx.dispose())
+    b.ctx.provide('goals', service)
+    const before = structuredClone(b.bot)
+    await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), {
+      ...historyRefusal,
+      message: `${b.bot.name}'s conversation has history, so changing to ACP needs a new conversation. Use New conversation, then pick ACP (pause an active goal first).`,
+    })
+    assertUntouched(b, before)
+    assert.deepEqual(b.calls.diagnostics.map(entry => entry.text), [
+      `Route change ${ROUTE_A} → ${ROUTE_B} refused (needs-new-conversation)`,
+    ])
+  })
+}
+
+async function freshPart(t, { rollover = false } = {}) {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const resolve = b.rt.resolveAgent
+  const messages = []
+  const fresh = await resolve('s2')
+  fresh.session.deriveMessages = () => messages
+  fresh.followup = message => messages.push(message)
+  b.rt.resolveAgent = id => id === 's2' ? Promise.resolve(fresh) : resolve(id)
+  if (rollover) await b.rt.newPart('s1')
+  else await b.rt.startFresh('b1')
+  await waitFor(() => b.bot.sessionId === 's2' && b.calls.archived.includes('s1') && [...b.rt.switchJobs()].length === 0)
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].source.handoff, true)
+  b.rt.chatOwners.set('s2', 'b1')
+  fresh.whenIdle = () => new Promise(() => {})
+  b.rt.applyModel = async bot => { bot.appliedModel = bot.model }
+  return { ...b, fresh, messages }
+}
+
+test('a new conversation takes the second pick in place with opening context and saved recall', async t => {
+  const b = await freshPart(t)
+  const home = mkdtempSync(join(tmpdir(), 'crossing-context-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const agentFile = join(home, 'AGENTS.md')
+  writeFileSync(agentFile, 'Use the workspace conventions.')
+  b.ctx.provide('fs', {
+    resolve: async path => path,
+    stat: async path => {
+      const stat = path === agentFile ? statSync(path) : undefined
+      return stat && { type: 'file', size: stat.size, version: '1' }
+    },
+    streamText: async function* (path) { yield readFileSync(path, 'utf8') },
+  })
+  b.ctx.workingDirectory = { ensure: async () => home }
+  b.fresh.session.surface = { nodes: [] }
+  b.fresh.session.seq = 0
+  b.ctx.tools.get = name => b.ctx.registeredTools.get(name)
+  b.ctx.skills = { snapshot: async () => ({
+    skills: [{ name: 'check-work', description: 'Check the workspace', invocation: { modelInvocable: true } }],
+    complete: true,
+  }) }
+  b.rt.home = home
+  b.rt.state.prefs = { memoryAutoRecall: true }
+  b.rt.state.rooms = {}
+  b.rt.teamTools = []
+  b.rt.isMain = () => true
+  b.rt.isPrivate = () => false
+  b.rt.backgroundModel = async () => undefined
+  const hooks = []
+  for (const register of [
+    () => instructions.apply(b.ctx, { dshHome: home, agentsHome: home, maxBytes: 4096 }),
+    () => skill.apply(b.ctx),
+    () => installModelSelection(b.ctx),
+    () => installClock(b.rt),
+    () => installMemory(b.rt),
+  ]) {
+    const prior = new Set(b.ctx.listeners.get('agent/pre-step'))
+    register()
+    hooks.push(...b.ctx.listeners.get('agent/pre-step').filter(listener => !prior.has(listener)))
   }
-  const selectSessionModel = b.rt.selectSessionModel
-  b.rt.selectSessionModel = async (id, selection) => {
-    await selectSessionModel(id, selection)
-    if (!b.live.has(`${selection.provider}/${selection.model}`)) throw new Error('model is unavailable')
+  const saved = 'Start each fresh conversation in Portuguese.'
+  await b.rt.memoryAdd({ botId: b.bot.id, scope: 'own', topic: 'preferences', text: saved })
+  const opening = b.messages[0]
+  const payload = {
+    agent: b.fresh, step: 1, signal: new AbortController().signal, messages: [opening],
+    modelSelection: { provider: 'deepseek', model: 'v4-pro' },
   }
-  await switchToTarget(b)
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.deepEqual(b.calls.created, ['s2'])
-  assert.deepEqual(b.calls.selected, [['s2', { provider: 'acp-claude', model: 'default' }]])
-  assert.deepEqual(b.calls.archived, ['s2'])
-  assertRolledBack(b, before)
-})
-
-test('a target dropped after selection rolls back before sending the handoff', async t => {
-  const b = catalogBench(t)
-  const before = { ...b.bot }
-  const saved = []
-  b.rt.save = async () => {
-    if (!b.live.has(ROUTE_B)) saved.push({ ...b.bot })
-  }
-  b.rt.applyPermission = async () => { b.live.delete(ROUTE_B) }
-  await switchToTarget(b, 'high')
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.deepEqual(b.calls.selected, [['s2', { provider: 'acp-claude', model: 'default', reasoningEffort: 'high' }]])
-  assert.deepEqual(b.calls.followups, [])
-  assert.deepEqual(b.calls.archived, ['s2'])
-  assert.deepEqual(saved[0], { ...before, model: ROUTE_B, effort: 'high' })
-  assertRolledBack(b, before)
-})
-
-test('an empty live catalog rolls back before creating a fresh part', async t => {
-  const b = catalogBench(t)
-  const before = { ...b.bot }
-  b.live.clear()
-  await switchToTarget(b)
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.deepEqual(b.calls.created, [])
-  assert.deepEqual(b.calls.selected, [])
-  assert.deepEqual(b.calls.archived, [])
-  assertRolledBack(b, before)
-})
-
-test('a route change rolls back when catalog availability is unknown', async t => {
-  const b = catalogBench(t)
-  const before = { ...b.bot }
-  b.rt.catalog = async () => { throw new Error('catalog unavailable') }
-  await switchToTarget(b)
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.deepEqual(b.calls.created, [])
-  assert.deepEqual(b.calls.selected, [])
-  assert.deepEqual(b.calls.archived, [])
-  assertRolledBack(b, before, 'target availability unknown')
-})
-
-test('a route change completes when the target stays served', async t => {
-  const b = catalogBench(t)
-  await switchToTarget(b)
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.deepEqual(b.calls.archived, ['s1'])
+  const context = await hooks.reduceRight((next, hook) => () => hook(payload, next),
+    async () => ({ kind: 'enter', messages: [opening] }))()
+  const snapshots = [
+    ...context.messages.filter(message => message !== opening),
+    userMessage('time-context', 'Current time: 12:00.'),
+    userMessage('tmux-context', 'Current tmux pane: %12.'),
+    userMessage('runtime-context', 'Current session environment.'),
+    userMessage('working-directory', 'The working directory changed.'),
+    userMessage('plan-mode', 'The user switched this session to plan mode.'),
+    userMessage('bot', 'Team kickoff.', { role: 'kickoff' }),
+  ]
+  const snapshot = kind => snapshots.find(message => message.source.kind === kind)
+  assert.match(textOf(snapshot('agent-instructions')?.content), /Use the workspace conventions/)
+  assert.match(textOf(snapshot('skill-catalog')?.content), /check-work/)
+  assert.deepEqual(snapshot('model-selection')?.source, { kind: 'model-selection', form: 'notice', summary: 'v4 → v4-pro' })
+  assert.match(textOf(snapshot('model-selection').content), /^\[model changed: assistant turns above this point/)
+  assert.match(textOf(snapshot('ds-bot-memory-recall')?.content), /Start each fresh conversation in Portuguese/)
+  assert.ok(snapshot('ds-bot-time-context'))
+  b.messages.push(...snapshots, { role: 'assistant', content: [{ type: 'text', text: 'Ready.' }] })
+  const result = await b.rt.switchRoute('b1', ROUTE_B)
+  assert.equal(result.status, 'switched')
   assert.equal(b.bot.sessionId, 's2')
   assert.equal(b.bot.appliedModel, ROUTE_B)
-  assert.deepEqual(b.calls.diagnostics.map(({ level, text }) => [level, text]), [
-    ['info', `Route change ${ROUTE_A} → ${ROUTE_B} accepted`],
-    ['info', `Route change ${ROUTE_A} → ${ROUTE_B} completed`],
-  ])
+  assert.deepEqual(b.calls.created, ['s2'])
 })
 
-test('a no-note route change rolls back without waiting for a first answer', async t => {
-  const b = catalogBench(t)
-  const before = { ...b.bot }
-  b.rt.answersAside = ref => ref !== ROUTE_A
-  b.rt.applyPermission = async () => { b.live.delete(ROUTE_B) }
-  await switchToTarget(b)
-  await waitFor(() => !b.rt.switchingChat('b1'))
-  assert.equal(b.calls.notes, 0)
-  assert.deepEqual(b.calls.archived, ['s2'])
-  assert.equal(b.rt.awaitingFirstAnswer('s2'), false)
-  assertRolledBack(b, before)
+test('a rollover carrying an earlier exchange refuses a crossing', async t => {
+  const b = await freshPart(t, { rollover: true })
+  assert.match(textOf(b.messages[0].content), /carry on/)
+  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
 })
+
+for (const [label, edit] of [
+  ['edited text', text => text + ' '],
+  ['another part number', text => text.replaceAll('part 2', 'part 9')],
+  ['a legacy package', () => '[Handoff] Pick up where the previous conversation stopped.'],
+]) {
+  test(`a handoff with ${label} counts as crossing history`, async t => {
+    const b = await freshPart(t)
+    const original = b.messages[0]
+    b.messages[0] = userMessage(original.source.kind, edit(original.content[0].text), original.source)
+    await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+  })
+}
+
+test('a handoff with a context source still needs to match the exact opening', async t => {
+  const b = await freshPart(t)
+  b.messages[0] = userMessage('runtime-context', 'Continue the earlier work.', { handoff: true })
+  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+})
+
+for (const kind of ['schedule', 'tool-jobs', 'user-approval', 'tool-goal', 'goal', 'repeat-tool-reminder',
+  'dsh-session-title-llm', 'model-selection', 'unknown-kind']) {
+  test(`a fresh opening with ${kind} still has crossing history`, async t => {
+    const b = await freshPart(t)
+    b.messages.push(userMessage(kind, 'Work or conversation content.'))
+    await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+  })
+}

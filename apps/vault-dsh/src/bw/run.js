@@ -1,24 +1,43 @@
 import { spawn } from 'node:child_process'
-import { statSync } from 'node:fs'
+import { accessSync, constants, statSync } from 'node:fs'
 import { url as inspectorUrl } from 'node:inspector'
-import { win32 } from 'node:path'
+import { delimiter, isAbsolute, join, win32 } from 'node:path'
 import { debuglog } from 'node:util'
 import { isUnlockVariable } from './unlock-env.js'
 
 const debugChild = debuglog('child_process')
 const stripped = new Set(['BW_RESPONSE', 'BW_CLEANEXIT', 'BW_NOINTERACTION', 'BW_RAW', 'BW_PRETTY', 'BW_QUIET', 'NODE_DEBUG', 'NODE_OPTIONS'])
+const rustDiagnostics = /^(?:RUST_(?:LOG|(?:LIB_)?BACKTRACE|SPANTRACE)(?:_|$)|COLORBT_)/
 const MAX_OUTPUT = 4 * 1024 * 1024
+const MAX_INPUT = 4096
 const decode = chunks => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks))
 export const tracing = () => debugChild.enabled || inspectorUrl() !== undefined
 
 export function childEnv(parent = process.env) {
-  const env = Object.fromEntries(Object.entries(parent).filter(([name]) =>
-    !isUnlockVariable(name) && !stripped.has(name.toUpperCase())))
-  return { ...env, BW_NOINTERACTION: 'true' }
+  return { ...sensitiveEnv(parent), BW_NOINTERACTION: 'true' }
 }
 
-function isFile(path) {
+function sensitiveEnv(parent) {
+  return Object.fromEntries(Object.entries(parent).filter(([name]) => {
+    const upper = name.toUpperCase()
+    return !isUnlockVariable(upper) && !stripped.has(upper) && !upper.startsWith('BWS_')
+      && !rustDiagnostics.test(upper)
+  }))
+}
+
+export function isFile(path) {
   try { return statSync(path).isFile() } catch { return false }
+}
+
+export function resolveExecutable(name, env) {
+  for (const dir of (env.PATH ?? '').split(delimiter).filter(isAbsolute)) {
+    const file = join(dir, name)
+    try {
+      if (!statSync(file).isFile()) continue
+      accessSync(file, constants.X_OK)
+      return file
+    } catch {}
+  }
 }
 
 export function windowsPath(env) {
@@ -65,11 +84,25 @@ export function runOp(args, { token, ...limits } = {}, options) {
     version ? {} : { OP_SERVICE_ACCOUNT_TOKEN: token })
 }
 
-export function runChild(args, { timeout, signal },
+// Only trusted CLI wrappers supply executable resolution, credentials and pipe contents.
+export function runSensitive(args, { stdin, credentials = {}, sensitive = true, ...limits }, resolveCli, options) {
+  return runChild(args, { ...limits, stdin, sensitive }, options, sensitiveEnv, resolveCli, credentials)
+}
+
+export function resolveBws({ platform, env, exists }) {
+  const file = platform === 'win32' ? windowsPath(env).map(dir => win32.join(dir, 'bws.exe')).find(exists)
+    : resolveExecutable('bws', env)
+  if (file !== undefined) return { file, prefix: [] }
+}
+
+export function runChild(args, { timeout, signal, stdin, sensitive, onDispatch, maxOutput = MAX_OUTPUT, stdoutPresence = false },
   { platform = process.platform, parent = process.env, spawnChild = spawn, exists = isFile, execPath = process.execPath } = {},
   cleanEnv, resolveCli, credentials, configureEnv) {
   if (signal?.aborted) return Promise.resolve({ failure: 'cancelled' })
-  if (Object.keys(credentials).length > 0 && tracing()) return Promise.resolve({ failure: 'refused' })
+  if ((sensitive || stdin !== undefined || Object.keys(credentials).length > 0) && tracing()) {
+    return Promise.resolve({ failure: 'refused' })
+  }
+  if (stdin !== undefined && Buffer.byteLength(stdin) > MAX_INPUT) return Promise.resolve({ failure: 'refused' })
   const env = cleanEnv(parent)
   const launch = resolveCli({ platform, env, exists, execPath })
   if (launch === undefined) return Promise.resolve({ failure: 'unavailable' })
@@ -79,7 +112,7 @@ export function runChild(args, { timeout, signal },
     let child
     try {
       child = spawnChild(launch.file, [...launch.prefix, ...args], {
-        env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+        env, shell: false, windowsHide: true, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       })
     } catch {
       resolve({ failure: 'unavailable' })
@@ -87,6 +120,7 @@ export function runChild(args, { timeout, signal },
     }
     const stdout = [], stderr = []
     let bytes = 0
+    let discardedStdout = 0
     let failure
     const killChild = () => { try { child.kill('SIGKILL') } catch {} }
     const stop = (reason) => {
@@ -106,10 +140,16 @@ export function runChild(args, { timeout, signal },
       } catch { killChild() }
     }
     const abort = () => stop('cancelled')
+    // A presence probe keeps only whether stdout had bytes and still bounds both streams.
     const collect = target => chunk => {
       if (failure !== undefined) return
+      if (stdoutPresence && target === stdout) {
+        discardedStdout += chunk.length
+        if (discardedStdout > maxOutput) stop('stdout-limit')
+        return
+      }
       bytes += chunk.length
-      if (bytes > MAX_OUTPUT) stop('output')
+      if (bytes > maxOutput) stop('output')
       else target.push(chunk)
     }
     const timer = setTimeout(() => stop('timeout'), timeout)
@@ -125,9 +165,19 @@ export function runChild(args, { timeout, signal },
       if (failure !== undefined || endedBySignal != null || !Number.isInteger(code)) {
         resolve({ failure: failure ?? 'unavailable' })
       } else {
-        try { resolve({ code, stdout: decode(stdout), stderr: decode(stderr) }) }
-        catch { resolve({ failure: 'unavailable' }) }
+        try {
+          resolve({ code, stdout: decode(stdout), stderr: decode(stderr),
+            ...(stdoutPresence ? { hasStdout: discardedStdout > 0 } : {}) })
+        } catch {
+          resolve(stdoutPresence && code === 0 ? { code } : { failure: 'unavailable' })
+        }
       }
     })
+    if (child.pid !== undefined) onDispatch?.()
+    if (stdin !== undefined) {
+      child.stdin.on('error', () => stop('unavailable'))
+      try { child.stdin.end(stdin) } catch { stop('unavailable') }
+    }
+    if (signal?.aborted) abort()
   })
 }

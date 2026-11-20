@@ -663,10 +663,10 @@ test('crossing a route asks first and only then switches; crossing an ACP agent 
     onCancel: () => asked.push('cancel'), onConfirm: () => asked.push('confirm'),
   })
   const text = node => nodes(node, n => n.props.className?.startsWith('bt-model-confirm'))[0]
-  assert.equal(text(route).children[0], 'Start a new conversation?')
+  assert.equal(text(route).children[0], 'Change route?')
   assert.equal(nodes(route, node => node.props.className === 'bt-model-confirm-move')[0].children.join(''), 'ACP · Codex → Native · DeepSeek')
   assert.equal(nodes(route, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
-    'Changing the route starts a new conversation. Ops writes a handoff note first.')
+    'Changing the route requires a new conversation if this one has history.')
   const buttons = nodes(route, node => node.type === 'button')
   assert.deepEqual(buttons.map(button => button.children[0]), ['Keep this conversation', 'Change route'])
   buttons[0].props.onClick()
@@ -675,7 +675,7 @@ test('crossing a route asks first and only then switches; crossing an ACP agent 
   // Another agent inside ACP is another harness: same warning, different word.
   const agent = RouteConfirm({ bot, roster, current: 'acp-codex/default', target: { ref: 'acp-claude/default' }, onCancel: () => {}, onConfirm: () => {} })
   assert.equal(nodes(agent, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
-    'Changing the agent starts a new conversation. Ops writes a handoff note first.')
+    'Changing the agent requires a new conversation if this one has history.')
   assert.deepEqual(nodes(agent, node => node.type === 'button').map(button => button.children[0]), ['Keep this conversation', 'Change agent'])
 })
 
