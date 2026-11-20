@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (unverified: no delivery PR found; #103, #121 and #127 predate the RFC) |
+| Status | In delivery (delivery 1 (3a): #1190, with #1230, #1501 and #1737; delivery 3 (3c), cookie storage: the browser keeps the sign-ins and Automagik's `cookies.json` is deleted; deliveries 2 (3b) and 4 (3d) open; #103, #121 and #127 predate the RFC) |
 | Milestone | 1. Safe browser and everyday fixes |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-10-30 |

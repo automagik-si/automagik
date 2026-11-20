@@ -2,7 +2,7 @@
 // share this directory, so a new conversation part keeps the login. Another Bot never
 // opens it: profiles are not copied across the team.
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, realpath, rm, stat, unlink } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative as relativePath } from 'node:path'
 import { gateScope } from './gate.js'
 import { runIsolatedScript } from './script-runner.js'
@@ -115,10 +115,14 @@ export async function openBotBrowser({
   const getDownloadDir = typeof downloadDir === 'function' ? downloadDir : async () => downloadDir
   const userDataDir = join(profileRoot, botId)
   const chromium = await loadChromium(playwrightUrl)
+  await mkdir(userDataDir, { recursive: true })
+  // Both hosts use the browser's own cookie storage. Remove the legacy export on open.
+  const cookieFile = join(userDataDir, 'cookies.json')
+  const entry = await lstat(cookieFile).catch(() => undefined)
+  if (entry?.isFile() || entry?.isSymbolicLink()) await rm(cookieFile, { force: true }).catch(() => {})
   const browser = connect
     ? await chromium.connectOverCDP(await connect(botId))
     : undefined
-  await mkdir(userDataDir, { recursive: true })
   const context = browser
     ? browser.contexts()[0]
     : await chromium.launchPersistentContext(userDataDir, {
@@ -134,14 +138,7 @@ export async function openBotBrowser({
     ? undefined
     : url => addressPolicy.check(url, 'open').then(d => d.allowed, () => true)
   const page = await restoreTabs(context, userDataDir, first, allowed)
-  const cookieFile = join(userDataDir, 'cookies.json')
-  if (!browser) {
-    try {
-      const saved = JSON.parse(await readFile(cookieFile, 'utf8'))
-      if (Array.isArray(saved) && saved.length > 0) await context.addCookies(saved)
-    } catch { /* no cookies yet */ }
-  }
-  const session = createSession({ context, browser, page, botId, userDataDir, cookieFile,
+  const session = createSession({ context, browser, page, botId, userDataDir,
     downloadDir: getDownloadDir, actionTimeout, getHold, onHold, uploadRoots,
     onTabs: onTabs ?? (() => {}), addressPolicy })
   await session.addressReady
@@ -149,7 +146,7 @@ export async function openBotBrowser({
 }
 
 export function createSession({
-  context, browser, page, botId, userDataDir, cookieFile, downloadDir, actionTimeout,
+  context, browser, page, botId, userDataDir, downloadDir, actionTimeout,
   getHold, onHold, uploadRoots, onTabs, addressPolicy,
 }) {
   const pages = new Set()
@@ -950,9 +947,6 @@ export function createSession({
       removal()
       keeper?.stop()
       if (browser) { await browser.close().catch(() => {}); return }
-      const cookies = await context.cookies().catch(() => [])
-      const kept = cookies.map(cookie => cookie.expires > 0 ? cookie : { ...cookie, expires: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60 })
-      await writeFile(cookieFile, JSON.stringify(kept)).catch(() => {})
       await context.close().catch(() => {})
     },
   }

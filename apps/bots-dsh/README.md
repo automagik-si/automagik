@@ -656,7 +656,7 @@ piece.
 
 Every Bot has a browser of its own, on by default (`browserPlugin: false` turns it off). It is the Chrome, Edge, Chromium or Brave already on this computer, driven through `playwright-core`: nothing is downloaded. Without one, a Bot that needs a browser says so and asks you to install Chrome.
 
-- **A profile per Bot**, in `browser-profiles/<id>/`: its sign-ins and cookies stay between runs and belong to that Bot only. Deleting a Bot deletes its profile.
+- **A profile per Bot**, in `browser-profiles/<id>/`. With launched Chrome, sign-ins live in that profile. Persistent sign-ins survive a browser restart. The old `cookies.json` is removed at plugin startup or when the browser opens. Sites that rely on session cookies may ask you to sign in again. Deleting a Bot deletes its profile.
 - **Tabs come back**: the Bot's open tabs (address and title) are saved there as they change and reopen at its next browser call after a crash or a restart. A browser that went away (closed, crashed) opens again at that call.
 - **What a Bot does**: `browser_open`, `browser_snapshot` (the page as an accessibility tree, each element with a ref), `browser_click`, `browser_type`, `browser_select`, `browser_press`, `browser_upload`, `browser_tabs`, `browser_back` and `browser_screenshot`. Page content is treated as data, never as instructions.
 - **What asks you first**: posting, uploading, downloading and deleting, each through dsh's approval. A delete needs a second, confirmed click. Settings → Browser lets a Bot do some of these on a site for an hour, until the end of the day, for 7 days or for good. Card fields are never typed, and a payment always goes back to you.
@@ -676,7 +676,7 @@ Every Bot has a browser of its own, on by default (`browserPlugin: false` turns 
 - **Files**: downloads go to the Bot's working folder or the team folder; uploads come only from those.
 - **Handing over**: for a sign-in, a payment or a check, the Bot calls `browser_handoff` and a card in its chat asks you to take over, skip, or say you are done. While you hold the browser, its tools refuse; the window is a normal browser window on your screen.
 - **The window**: on macOS and Windows, and on Linux with a display, the browser opens as a window you can watch. On Linux without a display it runs headless (`browserHeadless`).
-- **In the Automagik app** the Bot's browser is inside the app instead: the globe button in its chat header opens the same tabs the Bot drives, in a panel you can watch and take over. Its sign-ins stay in the app's own storage for that Bot; `read_browser` is not offered there, since the Bot reads its pages with its own browser tools.
+- **In the Automagik desktop app** the globe button in the Bot's chat header opens the same tabs the Bot drives, in a panel you can watch and take over. Sign-ins live in the Bot's persistent partition. The Bot reads its pages with its own browser tools, and the app omits `read_browser`.
 
 ### Browser panel (dsh Desktop)
 
@@ -693,7 +693,7 @@ In dsh Desktop, a Bot's chat header also has a globe button. It opens that Bot's
 - **Addresses**: http and https only. localhost and LAN addresses are allowed; cloud metadata addresses (such as `169.254.x.x`) and dsh's own ports are not.
 - The browser panel and the details drawer share the right column; opening one closes the other. Switching chats switches the panel to that Bot.
 
-The Automagik desktop app and dsh Web have no browser panel and no `read_browser`; their Bots use the browser above.
+dsh Web has no browser panel or `read_browser`. Its Bots use the browser above.
 
 ## Secrets
 
@@ -763,7 +763,7 @@ Files in `ui/`:
 | `side/` | Side chats, one file per Bot; `btw/` keeps the asides of earlier versions, read only |
 | `avatars/` | The photos added for Bots to wear (up to 500), with `index.json` |
 | `handoff-results/` | Whole results of delegated work longer than `state.json` keeps, until the work is answered |
-| `browser-profiles/` | Each Bot's browser profile: its sign-ins and cookies. Treat backups of it like passwords. |
+| `browser-profiles/` | Each Bot's saved tabs and, with launched Chrome, its sign-ins and cookies. Treat backups of it like passwords. |
 | `browser-downloads/` | A folder per Bot that its browser may also upload from |
 | `update.json` | Left by an update that reinstalled the plugin, for the start that follows it |
 | `workspace` | The team workspace: the working folder of every Bot without one of its own (`config.workspace` changes it) |
