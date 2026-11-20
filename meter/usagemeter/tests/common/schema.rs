@@ -1,6 +1,6 @@
-//! A JSON Schema 2020-12 checker for the query, outcomes and coverage v1 schemas under
-//! `meter/schema`, so the crate's contract tests need no new dependency. A keyword or a pattern
-//! it does not know is a panic, never a pass: the schema cannot grow past what this checks unnoticed.
+//! A JSON Schema 2020-12 checker for the contracts under `meter/schema`, so the crate's tests
+//! need no new dependency. An unknown keyword or pattern panics so schema changes cannot
+//! bypass validation.
 #![allow(dead_code)]
 
 use serde_json::Value;
@@ -272,11 +272,30 @@ fn pattern(p: &str) -> fn(&str) -> bool {
         },
         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$" => |s| {
             s.len() == 10
+                && s.is_ascii()
                 && digits(&s[0..4], 4)
                 && &s[4..5] == "-"
                 && digits(&s[5..7], 2)
                 && &s[7..8] == "-"
                 && digits(&s[8..10], 2)
+        },
+        r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{3})?Z$" => |s| {
+            let Some(s) = s.strip_suffix('Z') else {
+                return false;
+            };
+            let (whole, millis) = s
+                .split_once('.')
+                .map_or((s, None), |(whole, millis)| (whole, Some(millis)));
+            whole.len() == 19
+                && whole.is_ascii()
+                && pattern(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")(&whole[..10])
+                && &whole[10..11] == "T"
+                && digits(&whole[11..13], 2)
+                && &whole[13..14] == ":"
+                && digits(&whole[14..16], 2)
+                && &whole[16..17] == ":"
+                && digits(&whole[17..19], 2)
+                && millis.is_none_or(|millis| digits(millis, 3))
         },
         r"^[0-9a-f]{64}$" => |s| {
             s.len() == 64

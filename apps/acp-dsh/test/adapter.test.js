@@ -12,9 +12,10 @@ import { apply } from '../index.js'
 import { structuredNameOf } from '../src/host/acp.js'
 import { AcpAdapter, aside, choose, NOTICE_KIND, promptOf, SIDE_MODEL } from '../src/host/adapter.js'
 import { AGENTS } from '../src/host/agents.js'
-import { Backchannel, offeredTools, presetOf } from '../src/host/backchannel.js'
+import { Backchannel, NATIVE_TWIN_TOOLS, offeredTools, presetOf } from '../src/host/backchannel.js'
 import { CliHomes } from '../src/host/cli-homes.js'
 import { isAuthRequired, SYNTHETIC_KIND } from '../src/host/names.js'
+import { PermissionDiagnostics } from '../src/host/permission-diagnostics.js'
 import { credentialShapes } from '../src/host/redact.js'
 import { BOUNDARY_KIND, crossed } from '../src/host/switch.js'
 import { optionFor, TOOL_NAME } from '../src/host/tool.js'
@@ -791,6 +792,16 @@ test("DSH's answer maps to the option the agent offered", () => {
   assert.deepEqual(optionFor('cancelled', options), { outcome: { outcome: 'cancelled' } })
 })
 
+test('a mirror answer never substitutes a standing permission', () => {
+  const allowAlways = { optionId: 'a', kind: 'allow_always' }
+  const rejectOnce = { optionId: 'r', kind: 'reject_once' }
+  const rejectAlways = { optionId: 'n', kind: 'reject_always' }
+  const cancelled = { outcome: { outcome: 'cancelled' } }
+  assert.deepEqual(optionFor('allowed-once', [allowAlways, rejectOnce]), cancelled)
+  assert.deepEqual(optionFor('lasting-only', [allowAlways, rejectAlways]), cancelled)
+  assert.deepEqual(optionFor('lasting-only', [allowAlways, rejectOnce, rejectAlways]), { outcome: { outcome: 'selected', optionId: 'r' } })
+})
+
 test("the agent's own models and each one's efforts are DSH's models and efforts", async () => {
   const h = host()
   try {
@@ -926,11 +937,18 @@ const cordisTools = () => [
 // `preset` is the Session's DSH preset (RFC 0003): `standard` normally, `cordis` when the
 // Session is in creator mode. DSH records it in the creation header; its `agentPreset`
 // projection reads it back, which the fixture models directly.
-function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write', redactor, spec: extra = {}, trace, toolsOn = true, preset = 'standard' } = {}) {
+// `provider`/`base` run the host on another agent row (the real `acp-codex` spec, with the fake
+// agent's spawn); `definitions` replaces the preset's tools; `botIdentity` is bots-dsh's reader.
+function dshHost({
+  env = {}, answer = 'allowed-once', sandbox = 'workspace-write', redactor, spec: extra = {}, trace,
+  toolsOn = true, preset = 'standard', provider = 'acp-fake', base = {}, definitions: served,
+  botIdentity,
+} = {}) {
   const session = Session.create('s1', undefined, preset === 'standard' ? undefined : { version: 4, id: 's1', createdAt: 0, isSeeded: false, agentPreset: preset })
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 0 })
-  const definitions = preset === 'cordis' ? [...bridgeTools(), ...cordisTools()] : bridgeTools()
+  const definitions = served
+    ?? (preset === 'cordis' ? [...bridgeTools(), ...cordisTools()] : bridgeTools())
   const asked = []
   const executed = []
   const agent = { session, ctx: { tools: { register: () => () => {} } } }
@@ -965,6 +983,7 @@ function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write
   const catalog = { models: async () => [{ id: 'default', name: 'Fake agent' }], model: async () => undefined, ownEffort: () => undefined, dispose() {} }
   const spec = {
     name: 'Fake agent',
+    ...base,
     catalog,
     installed: () => true,
     spawn: () => ({ command: process.execPath, args: [FAKE], env: { ...(trace === undefined ? {} : { FAKE_ACP_TRACE: trace }), ...env } }),
@@ -973,8 +992,8 @@ function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write
   const backchannel = new Backchannel({ ctx })
   // `toolsOn` is true/false, or a getter for a live switch a test flips mid-run.
   const dshTools = typeof toolsOn === 'function' ? toolsOn : () => toolsOn
-  const adapter = new AcpAdapter(ctx, new Map([['acp-fake', spec]]),
-    { dshTools, backchannel, redactor })
+  const adapter = new AcpAdapter(ctx, new Map([[provider, spec]]),
+    { dshTools, backchannel, redactor, ...(botIdentity === undefined ? {} : { botIdentity }) })
   const close = () => { adapter.dispose(); backchannel.dispose() }
   return { adapter, spec, ctx, agent, session, definitions, asked, executed, backchannel, close }
 }
@@ -999,6 +1018,124 @@ test('with dshTools on, DSH approves a DSH tool call and the bridge writes its c
   }
 })
 
+// #1639: a Genie's role tools are DSH tools registered by its plugins (`grant_wish`,
+// `message_bot`, `start_task`, ...), and its Bot runs on `acp-codex`, which keeps its own
+// built-in tools. With no explicit `dshTools`, this session used to get no bridge at all, so the
+// model was never offered any of them (Codex's own `bash`, `read`... were its whole tool set).
+// The Bot's identity, which bots-dsh sends, says its role tools live in DSH; the bridge is then
+// on and drops only DSH's twins of Codex's built-ins, not the whole set. The names are the
+// Genie's real ones plus six twins, sorted so the wire's preset order equals the expected order.
+const GENIE_DSH_TOOLS = Object.freeze([
+  'bash', 'grant_wish', 'message_bot', 'read', 'send_message',
+  'start_task', 'subagent', 'todo_write', 'write',
+])
+const genieTools = () => GENIE_DSH_TOOLS.map(name => ({
+  name, description: `${name} tool`, parameters: { type: 'object', properties: {} },
+}))
+
+test('a Genie on acp-codex keeps its whole DSH tool set, without DSH twins', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-genie-codex-'))
+  const genieTrace = join(dir, 'genie.ndjson')
+  const genie = dshHost({
+    trace: genieTrace,
+    toolsOn: () => undefined,
+    provider: 'acp-codex',
+    base: AGENTS['acp-codex'],
+    env: { FAKE_ACP_MODES: 'read-only,workspace-write,agent,agent-full-access' },
+    definitions: genieTools(),
+    botIdentity: id => (id === 's1' ? {
+      name: 'Genie', role: 'Grants your wishes', instructions: 'Grant wishes.', needsDshTools: true,
+    } : undefined),
+  })
+  const plainTrace = join(dir, 'plain.ndjson')
+  const plain = dshHost({
+    trace: plainTrace,
+    toolsOn: () => undefined,
+    provider: 'acp-codex',
+    base: AGENTS['acp-codex'],
+    env: { FAKE_ACP_MODES: 'read-only,workspace-write,agent,agent-full-access' },
+    definitions: genieTools(),
+  })
+  try {
+    const ask = text => [{
+      role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }],
+    }]
+    const messages = ask('bridge grant_wish')
+    const chunks = await step(genie.adapter, messages, { provider: 'acp-codex' })
+    const events = traceEvents(genieTrace)
+    const opened = events.find(event => event.event === 'new-session')
+    assert.deepEqual(opened.servers, ['dsh'], 'the bridge is offered to the agent')
+    // The wire's real tools/list: every DSH tool the Genie's role delivers that Codex has no
+    // equivalent for, and none of DSH's twins of Codex's own tools. The expected list is derived
+    // from the twin list itself, so the test states the rule rather than a snapshot.
+    const listed = events.find(event => event.event === 'mcp-list' && event.server === 'dsh')
+    const expected = GENIE_DSH_TOOLS.filter(name => !NATIVE_TWIN_TOOLS.has(name)).sort()
+    for (const name of ['grant_wish', 'message_bot', 'start_task']) assert.ok(expected.includes(name), name)
+    const twins = GENIE_DSH_TOOLS.filter(name => NATIVE_TWIN_TOOLS.has(name))
+    assert.ok(twins.length >= 4, `the fixture carries twins of Codex's own tools: ${twins.join(', ')}`)
+    assert.deepEqual(listed.tools, expected)
+    for (const name of twins) assert.ok(!listed.tools.includes(name), `${name} is Codex's own tool, not a bridge tool`)
+    assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1).reason))
+    assert.match(textIn(chunks), /The bridge said: ran grant_wish/)
+    assert.deepEqual(genie.executed, ['grant_wish'])
+    assert.equal(genie.asked[0].toolName, 'grant_wish')
+    // A Codex Session whose Bot needs no DSH tools keeps today's default: no bridge, no list.
+    const plainMessages = ask('plain')
+    await step(plain.adapter, plainMessages, { provider: 'acp-codex' })
+    const plainEvents = traceEvents(plainTrace)
+    const plainOpened = plainEvents.find(event => event.event === 'new-session')
+    assert.deepEqual(plainOpened.servers, [])
+    assert.equal(plainEvents.some(event => event.event === 'mcp-list'), false)
+  } finally {
+    genie.close()
+    plain.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+const TEAM_DSH_TOOLS = ['bash', 'browser_open', 'message_bot', 'read', 'todo_write', 'write']
+for (const [setting, toolsOn, expectedTools, why] of [
+  ['absent', () => undefined, ['browser_open', 'message_bot'], 'agent-default'],
+  ['false', () => false, undefined, 'agent-default'],
+  ['true', () => true, TEAM_DSH_TOOLS, 'setting'],
+]) test(`a team Bot on acp-codex with dshTools ${setting}`, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-team-codex-'))
+  const trace = join(dir, 'codex.ndjson')
+  const h = dshHost({
+    trace,
+    toolsOn,
+    provider: 'acp-codex',
+    base: AGENTS['acp-codex'],
+    env: { FAKE_ACP_MODES: 'read-only,workspace-write,agent,agent-full-access' },
+    definitions: TEAM_DSH_TOOLS.map(name => ({
+      name, description: `${name} tool`, parameters: { type: 'object', properties: {} },
+    })),
+    botIdentity: id => (id === 's1' ? { name: 'Bot', needsDshTools: true } : undefined),
+  })
+  t.after(() => {
+    h.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+  const diagnostics = new PermissionDiagnostics()
+  h.adapter.diagnostics = diagnostics
+  const messages = [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }] }]
+  const chunks = await step(h.adapter, messages, { provider: 'acp-codex' })
+  assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1).reason))
+  const events = traceEvents(trace)
+  const opened = events.find(event => event.event === 'new-session')
+  const bridged = expectedTools !== undefined
+  assert.deepEqual(opened.servers, bridged ? ['dsh'] : [])
+  const listed = events.find(event => event.event === 'mcp-list')
+  assert.deepEqual(listed?.tools, expectedTools)
+  if (setting === 'absent') {
+    for (const name of NATIVE_TWIN_TOOLS) assert.ok(!listed.tools.includes(name), name)
+  }
+  // With explicit false, the reason uses Codex's agent default without reading the identity.
+  const bridge = diagnostics.read('s1').bridge
+  assert.equal(bridge.on, bridged)
+  assert.equal(bridge.why, why)
+})
+
 // UNPROVEN HERE: a saved always-allow rule for `mcp__*` in a real Claude Code profile can only
 // be exercised on a live CLI run, and no live turn was run here. What this test proves is the
 // mechanism that makes such a rule unable to skip DSH: acp-dsh answers the ACP permission
@@ -1016,6 +1153,17 @@ test('an allow-once rule answers the agent\'s own permission request and still c
   } finally {
     h.close()
   }
+})
+
+test('a bridged question offering only allow_always is cancelled and the turn stops before DSH is asked', async () => {
+  const h = dshHost({ env: { FAKE_ACP_ALWAYS_ONLY: '1' } })
+  try {
+    const chunks = await step(h.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'bridge-permit bash' }] }])
+    assert.equal(chunks.at(-1).reason.kind, 'aborted', JSON.stringify(chunks.at(-1).reason))
+    assert.doesNotMatch(textIn(chunks), /permit yes/)
+    assert.equal(h.asked.length, 0)
+    assert.equal(h.executed.length, 0)
+  } finally { h.close() }
 })
 
 test('a bridge the adapter never starts fails the turn with acp_bridge_missing', async () => {
@@ -1180,6 +1328,62 @@ test('probe (delivery 6): a fork continues the same conversation, closes the sou
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+for (const systemPrompt of [true, false]) {
+  test(`a Codex tool-refresh fork keeps the replaced role (systemPrompt=${systemPrompt})`,
+    async t => {
+      const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-role-fork-'))
+      const trace = join(dir, 'trace.ndjson')
+      const oldPart = '<role-prompt id="voice-mouth">\nOld role.\n</role-prompt>'
+      const newPart = '<role-prompt id="voice-mouth">\nNew role.\n</role-prompt>'
+      let rolePrompt = oldPart
+      const h = dshHost({
+        provider: 'acp-codex', base: AGENTS['acp-codex'], trace, spec: { refresh: 'fork' },
+        botIdentity: () => ({ name: 'Ada', rolePrompt }),
+        env: {
+          HOME: dir, USERPROFILE: dir, FAKE_ACP_MODES: 'workspace-write',
+          ...(systemPrompt ? { FAKE_ACP_SYSTEM_PROMPT: '1' } : {}),
+        },
+      })
+      t.after(() => { h.close(); rmSync(dir, { recursive: true, force: true }) })
+      // 'plain' ends the fake agent's turn without a tool call or a permission ask.
+      const messages = [{
+        role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }],
+      }]
+      const next = async () => {
+        const chunks = await step(h.adapter, messages, { provider: 'acp-codex' })
+        assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1).reason))
+      }
+      await next()
+      rolePrompt = newPart
+      await next()
+      h.definitions.push({
+        name: 'extra', description: 'Extra', parameters: { type: 'object', properties: {} },
+      })
+      await next()
+      const events = traceEvents(trace)
+      const starts = events.filter(event => event.event === 'new-session')
+      const forks = events.filter(event => event.event === 'fork')
+      const prompts = events.filter(event => event.event === 'prompt')
+      assert.equal(starts.length, 2)
+      assert.equal(forks.length, 1)
+      const [fork] = forks
+      assert.equal(fork.from, starts[1].sessionId)
+      assert.equal(prompts[2].sessionId, fork.sessionId)
+      assert.equal(h.backchannel.records.size, 1)
+      assert.equal(h.adapter.live.get('s1').bridge, [...h.backchannel.records.values()][0])
+      if (systemPrompt) {
+        assert.ok(starts[0].systemPrompt.includes(oldPart))
+        assert.ok(starts[1].systemPrompt.includes(newPart))
+        assert.equal(fork.systemPrompt, starts[1].systemPrompt)
+      } else {
+        assert.ok(prompts[0].text.includes(oldPart))
+        assert.ok(prompts[1].text.includes(newPart))
+        assert.equal(Object.hasOwn(fork, 'systemPrompt'), false)
+      }
+      assert.doesNotMatch(prompts[2].text, /<role-prompt /)
+    })
+}
 
 test('probe (delivery 6): a fork lists its bridge before the session answer, and a preset change before that answer is held', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-fork-order-'))

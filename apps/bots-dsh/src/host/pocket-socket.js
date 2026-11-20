@@ -15,11 +15,24 @@
 // phone by it, across connections, and a write without one is refused `read-only`. `by` is the
 // phone's name, for receipts only: renaming a phone, or a `by` naming another, changes no count.
 // To a `hello` without `write` the answer is today's (`readOnly: true`) and every write is refused
-// `read-only`, so an older bridge stays read only. Every other method is answered `read-only`.
+// `read-only`, so an older bridge stays read only.
+//
+// RFC 0033 also negotiates attachments with `attachments: 1`: upload-begin, upload-chunk,
+// upload-finish, upload-cancel, attachment-read, and an optional uploads list on send.
+// Each subscription also needs `attachments: 1` for attachment rows, reads and sends.
+// TXT and PDF upload and send also need `documents: 1` in both hello and subscribe.
+// Changing either effective offer closes the connection's watches and cancels their uploads.
+//
+// Management (RFC 0036) also needs `manage: 1` in hello. The bridge opens a grant for each
+// phone connection and closes it when access ends. Management calls name that grant and a Bot's
+// terminal, and need no subscription. Reads have their own limit and writes share the chat
+// limit. Settings management adds a read and name or model changes for shown project Bots.
+// A revoked grant stays revoked for queued requests, even if its id is opened again.
 import { lstatSync, unlinkSync } from 'node:fs'
 import { chmod, lstat, mkdir } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
 import { join } from 'node:path'
+import { ATTACH_METHODS, PocketUploads, READ_LINE_BYTES, isDocumentType, sha256, validId } from './pocket-attach.js'
 
 export const SOCKET_DIR = 'pocket'
 export const SOCKET_NAME = 'chat.sock'
@@ -29,6 +42,18 @@ export const PROTOCOL = 1
 export const METHODS = Object.freeze(['hello', 'list', 'subscribe', 'unsubscribe', 'backfill'])
 /** The write methods, served only to a connection that asked for them in its hello. */
 export const WRITE_METHODS = Object.freeze(['send', 'interrupt', 'answer'])
+const MEMORY_METHODS = Object.freeze(['memory-read', 'memory-edit', 'memory-add'])
+const SCHEDULE_WRITES = Object.freeze(['schedule-pause', 'schedule-resume', 'schedule-rename'])
+const SETTINGS_METHODS = Object.freeze(['settings-read', 'settings-name', 'settings-model'])
+const MANAGE_GRANT = /^[A-Za-z0-9._:-]{1,64}$/
+const MEMORY_ID = /^[A-Za-z0-9_-]{1,32}$/
+const MANAGE_REV = /^[0-9a-f]{16}$/
+export const SCHEDULE_ID = /^schedule-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const SCHEDULE_ALIAS = /^x[0-9a-f]{16}$/
+export const MAX_SCHEDULE_LINE = 1024 * 1024
+const MAX_GRANTS = 16
+const MAX_MANAGE_READS = 60
+const MAX_MANAGE_TEXT = 4 * 1024
 /** Writes per paired phone (its `phone` key) in a minute, across its chats and connections. */
 export const MAX_WRITES_PER_MINUTE = 20
 export const WRITE_WINDOW_MS = 60_000
@@ -48,7 +73,23 @@ export const CLOSE_GRACE_MS = 500
 export const socketPathOf = home => join(home, SOCKET_DIR, SOCKET_NAME)
 
 const readOnly = id => ({ id, error: { kind: 'read-only', message: 'This socket only reads; answer on the computer.' } })
-const refusedWrite = (reason, extra = {}) => ({ ok: false, state: 'refused', reason, ...extra })
+export const refusedWrite = (reason, extra = {}) => ({ ok: false, state: 'refused', reason, ...extra })
+export const scheduleReplyCheck = Symbol('schedule reply check')
+export const settingsReply = Symbol('settings reply')
+export const MODEL_REF_OK = (model) => {
+  // oxlint-disable-next-line eslint/no-control-regex
+  if (typeof model !== 'string' || /[\u0000-\u001f\u007f]/.test(model)) return false
+  const bytes = Buffer.byteLength(model)
+  const slash = model.indexOf('/')
+  return bytes >= 3 && bytes <= 512 && slash > 0 && slash < model.length - 1
+}
+
+export class ScheduleAdmissionRefusal extends Error {
+  constructor(reason) {
+    super(reason)
+    this.reason = reason
+  }
+}
 
 /**
  * The write limits one host keeps across its connections: 20 writes a minute per phone and one
@@ -56,12 +97,21 @@ const refusedWrite = (reason, extra = {}) => ({ ok: false, state: 'refused', rea
  */
 export function writeLimits(now = Date.now) {
   const writes = new Map()
+  const reads = new Map()
   const interrupts = new Map()
   const inFlight = new Set()
   return {
     busy: key => inFlight.has(key),
     begin: key => inFlight.add(key),
     end: key => inFlight.delete(key),
+    takeRead(phone) {
+      const at = now()
+      const recent = (reads.get(phone) ?? []).filter(time => at - time < WRITE_WINDOW_MS)
+      reads.set(phone, recent)
+      if (recent.length >= MAX_MANAGE_READS) return false
+      recent.push(at)
+      return true
+    },
     /** Count one write, or say it is past a cap (and count nothing). */
     take(phone, chat, interrupt) {
       const at = now()
@@ -138,9 +188,10 @@ async function start({ home, source, log, lstatNow, now }) {
   }
   const connections = new Set()
   const limits = writeLimits(now)
+  const uploads = new PocketUploads({ home, log, now })
   const server = createServer(socket => {
     if (connections.size >= MAX_CONNECTIONS) { socket.destroy(); return }
-    const connection = serve(socket, source, log, limits)
+    const connection = servePocketConnection(socket, source, log, limits, uploads)
     connections.add(connection)
     socket.once('close', () => { connections.delete(connection); connection.close() })
   })
@@ -169,14 +220,41 @@ async function start({ home, source, log, lstatNow, now }) {
 }
 
 /** One reader of the socket (and writer, when its hello asked and the source takes writes). */
-function serve(socket, source, log, limits) {
+export function servePocketConnection(socket, source, log, limits, uploads) {
   let buffer = ''
   let closed = false
   let writes = false
-  /** channel -> handle (or a pending marker while its watch opens) */
+  let manageMethods = []
+  let ending = false
+  let attachmentGeneration = 0
+  let attachments = false
+  let documents = false
+  let generation = 0
+  const grants = new Map()
+  const closeGrant = (id) => {
+    const grant = grants.get(id)
+    if (grant === undefined) return
+    grant.open = false
+    grants.delete(id)
+    for (const controller of grant.controllers) controller.abort(new ScheduleAdmissionRefusal('revoked'))
+  }
+  const revoke = () => {
+    for (const id of grants.keys()) closeGrant(id)
+  }
+  // A pending watch and each reuse of the channel number have distinct tokens.
   const subs = new Map()
-  /** channel -> the terminal it watches */
-  const terminals = new Map()
+  const unsubscribe = (channel) => {
+    const sub = subs.get(channel)
+    subs.delete(channel)
+    sub?.handle?.close()
+  }
+  const clearSubs = () => { for (const channel of subs.keys()) unsubscribe(channel) }
+  const finish = () => {
+    ending = true
+    manageMethods = []
+    revoke()
+    if (attachments) clearSubs()
+  }
   const write = (message) => {
     if (closed || socket.destroyed) return
     if (socket.writableLength > MAX_UNSENT) { end(); return }
@@ -185,79 +263,319 @@ function serve(socket, source, log, limits) {
   const close = () => {
     if (closed) return
     closed = true
-    for (const handle of subs.values()) handle?.close?.()
-    subs.clear()
-    terminals.clear()
+    finish()
+    clearSubs()
   }
   const end = () => { close(); socket.destroy() }
+
+  async function memoryRequest(id, method, params) {
+    const reply = (result) => { if (!ending) write({ id, result }) }
+    const grant = grants.get(params.grant)
+    if (!grant?.open) return reply(refusedWrite('revoked'))
+    const { terminal, text, id: entryId, rev } = params
+    const reading = method === 'memory-read'
+    const editing = method === 'memory-edit'
+    if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+      || (!reading && (typeof text !== 'string' || Buffer.byteLength(text) > MAX_MANAGE_TEXT))
+      || (editing && (typeof entryId !== 'string' || !MEMORY_ID.test(entryId) || typeof rev !== 'string' || !MANAGE_REV.test(rev)))) {
+      return reply(refusedWrite('invalid'))
+    }
+    const botId = terminal.slice(4)
+    const key = `manage\0${grant.phone}\0${terminal}`
+    if (limits.busy(key)) return reply(refusedWrite('busy'))
+    if (!(reading ? limits.takeRead(grant.phone) : limits.take(grant.phone, terminal, false))) return reply(refusedWrite('rate'))
+    const allowed = () => {
+      if (!grant.open) return 'revoked'
+      try { return source.memoryAllowed(botId) } catch { return 'unavailable' }
+    }
+    limits.begin(key)
+    try {
+      // Count the id, envelope and newline, leaving the result's bytes to the projector.
+      const overhead = Buffer.byteLength(JSON.stringify({ id, result: null })) - 4 + 1
+      const result = await source.manageMemory(method.slice(7), { botId, id: entryId, rev, text, allowed, overhead })
+      // Nothing asynchronous can run between the final check and the socket write.
+      if (result.memory !== undefined || result.state === 'saved') {
+        const reason = allowed()
+        if (reason !== undefined) return reply(refusedWrite(reason, result.state === 'saved' ? { applied: true } : undefined))
+      }
+      return reply(result)
+    } catch {
+      log('pocket memory: unavailable')
+      return reply(refusedWrite('unavailable'))
+    } finally {
+      limits.end(key)
+    }
+  }
+
+  async function scheduleRequest(id, method, params) {
+    const reply = (result) => { if (!ending) write({ id, result }) }
+    let applied
+    try {
+      const grant = grants.get(params.grant)
+      if (!grant?.open) return reply(refusedWrite('revoked'))
+      const { terminal, id: taskId, rev, title } = params
+      const reading = method === 'schedule-list'
+      if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+        || ((!reading || taskId !== undefined) && (typeof taskId !== 'string' || (!SCHEDULE_ID.test(taskId) && !SCHEDULE_ALIAS.test(taskId))))
+        || (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev)))
+        || (method === 'schedule-rename' && (typeof title !== 'string' || Buffer.byteLength(title) > MAX_MANAGE_TEXT))) {
+        return reply(refusedWrite('invalid'))
+      }
+      const botId = terminal.slice(4)
+      const key = `manage\0${grant.phone}\0${terminal}`
+      if (limits.busy(key)) return reply(refusedWrite('busy'))
+      if (!(reading ? limits.takeRead(grant.phone) : limits.take(grant.phone, terminal, false))) return reply(refusedWrite('rate'))
+      const allowed = (scheduleAvailable = true) => {
+        if (!grant.open) return 'revoked'
+        try { return source.schedulesAllowed(botId, scheduleAvailable) } catch { return 'unavailable' }
+      }
+      const controller = new AbortController()
+      if (!reading) grant.controllers.add(controller)
+      limits.begin(key)
+      try {
+        const overhead = Buffer.byteLength(JSON.stringify({ id, result: null })) - 4 + 1
+        const { [scheduleReplyCheck]: check, ...result } = await source.manageSchedules(method.slice(9), { botId, id: taskId, rev, title, allowed, controller, overhead })
+        // An unconfirmed edit can still have landed after authority was lost.
+        if (result.state === 'unknown') return reply(result)
+        if (result.state === 'saved') applied = { applied: true }
+        const reason = allowed()
+        if (reason !== undefined) return reply(refusedWrite(reason, applied))
+        return reply(check ? check(result) : result)
+      } finally {
+        grant.controllers.delete(controller)
+        limits.end(key)
+      }
+    } catch {
+      log('pocket schedules: unavailable')
+      return reply(refusedWrite('unavailable', applied))
+    }
+  }
+
+  async function settingsRequest(id, method, params) {
+    const reply = (result) => { if (!ending) write({ id, result }) }
+    let applied
+    let pending
+    try {
+      const grant = grants.get(params.grant)
+      if (!grant?.open) return reply(refusedWrite('revoked'))
+      const { terminal, rev, name, model } = params
+      const reading = method === 'settings-read'
+      if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+        || (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev)))
+        || (method === 'settings-name' && (typeof name !== 'string' || Buffer.byteLength(name) > MAX_MANAGE_TEXT))
+        || (method === 'settings-model' && !MODEL_REF_OK(model))) return reply(refusedWrite('invalid'))
+      const botId = terminal.slice(4)
+      const key = `manage\0${grant.phone}\0${terminal}`
+      if (limits.busy(key)) return reply(refusedWrite('busy'))
+      if (!(reading ? limits.takeRead(grant.phone) : limits.take(grant.phone, terminal, false))) return reply(refusedWrite('rate'))
+      const allowed = () => {
+        if (!grant.open) return 'revoked'
+        try { return source.settingsAllowed(botId) } catch { return 'unavailable' }
+      }
+      limits.begin(key)
+      try {
+        const overhead = Buffer.byteLength(JSON.stringify({ id, result: null })) - 4 + 1
+        const { [settingsReply]: build, applied: changed, ...result } = await source.manageSettings(method.slice(9),
+          { botId, terminal, rev, name, model, allowed })
+        if (changed) applied = { applied: true }
+        if (result.state === 'unknown') pending = result
+        // The authority check, live projection and socket write share one turn.
+        const reason = allowed()
+        if (reason !== undefined) return reply(pending ?? refusedWrite(reason, applied))
+        return reply(build ? build(overhead) : result)
+      } finally {
+        limits.end(key)
+      }
+    } catch {
+      log('pocket settings: unavailable')
+      return reply(pending ?? refusedWrite('unavailable', applied))
+    }
+  }
+
+  const isAttachment = message => ATTACH_METHODS.includes(message?.method)
+    || (message?.method === 'send' && message.params && Object.hasOwn(message.params, 'uploads'))
+  const pairedPhone = phone => typeof phone === 'string' && PHONE_KEY.test(phone)
+  const scopeFor = (phone, sub) => ({
+    phone, phoneHash: sha256(phone), watch: sub, generation: attachmentGeneration,
+  })
+
+  async function attachmentRequest(id, method, params) {
+    if (!attachments || ending) return readOnly(id)
+    const reading = method === 'attachment-read'
+    const ref = !reading && typeof params.upload === 'string' ? { upload: params.upload } : {}
+    const refuse = reason => ({ id, result: refusedWrite(reason, ref) })
+    if (!pairedPhone(params.phone)) return refuse('read-only')
+    if (Object.hasOwn(params, 'name') && !(method === 'upload-begin' && isDocumentType(params.mediaType))) return refuse('invalid')
+    const sub = subs.get(params.channel)
+    const handle = sub?.handle
+    if (!sub?.attachments || typeof handle?.attach !== 'function') return refuse(reading || method === 'upload-begin' ? 'not-watching' : 'invalid')
+    if (!reading && !validId(params.upload)) return refuse('invalid')
+    if (reading && !limits.takeRead(params.phone)) return refuse('rate')
+    const staleRead = () => reading && (ending || subs.get(params.channel) !== sub)
+    const reply = (result) => {
+      if (staleRead()) return write(refuse('not-watching'))
+      const envelope = { id, result }
+      if (reading && result.ok && Buffer.byteLength(JSON.stringify(envelope)) + 1 > READ_LINE_BYTES) {
+        write(refuse('too-large'))
+      } else write(envelope)
+    }
+    try {
+      const result = await handle.attach(method, params, uploads, scopeFor(params.phone, sub), reply)
+      if (result !== undefined) reply(result)
+    } catch (error) {
+      if (!staleRead()) throw error
+      return refuse('not-watching')
+    }
+  }
 
   async function request(message) {
     const id = message?.id ?? null
     const params = message?.params && typeof message.params === 'object' ? message.params : {}
     switch (message?.method) {
-      case 'hello':
+      case 'hello': {
         // Writes only for a bridge that asks, and only when the source takes them: an older
         // bridge, which drops any socket that is not `readOnly: true`, gets today's answer.
         writes = params.write === 1 && source.writable === true
+        const offer = !ending && writes && params.attachments === 1 && source.attachments === true ? source.attachmentOffer?.() : undefined
+        const { documents: documentOffer, ...imageOffer } = offer ?? {}
+        const nextDocuments = Boolean(documentOffer) && params.documents === 1 && !uploads?.filesUnsupported
+        if (Boolean(offer) !== attachments || nextDocuments !== documents) {
+          attachments = Boolean(offer)
+          documents = nextDocuments
+          attachmentGeneration += 1
+          clearSubs()
+        }
+        revoke()
+        generation += 1
+        manageMethods = []
+        if (!ending && writes && params.manage === 1) {
+          if (source.manages === true) manageMethods.push(...MEMORY_METHODS)
+          if (source.listsSchedules === true) manageMethods.push('schedule-list')
+          if (source.writesSchedules === true) manageMethods.push(...SCHEDULE_WRITES)
+          if (source.managesSettings === true) manageMethods.push(...SETTINGS_METHODS)
+          if (manageMethods.length > 0) manageMethods.unshift('manage-open', 'manage-close')
+        }
         return writes
-          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS], dedupe: 'log' } }
+          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS, ...(offer ? ATTACH_METHODS : [])], dedupe: 'log', ...(manageMethods.length > 0 ? { manage: 1, manageMethods } : {}), ...(offer ? { attachments: documents ? offer : imageOffer } : {}) } }
           : { id, result: { protocol: PROTOCOL, readOnly: true, methods: METHODS } }
+      }
+      case 'upload-begin':
+      case 'upload-chunk':
+      case 'upload-finish':
+      case 'upload-cancel':
+      case 'attachment-read':
+        return attachmentRequest(id, message.method, params)
+      case 'manage-close':
+        closeGrant(params.grant)
+        return { id, result: {} }
+      case 'manage-open': {
+        if (!manageMethods.includes('manage-open')) return readOnly(id)
+        const { grant, phone } = params
+        if (typeof grant !== 'string' || !MANAGE_GRANT.test(grant) || typeof phone !== 'string' || !PHONE_KEY.test(phone)) {
+          return { id, error: { kind: 'invalid_params', message: 'grant, phone' } }
+        }
+        if (grants.has(grant)) return { id, error: { kind: 'invalid_params', message: 'grant in use' } }
+        if (grants.size >= MAX_GRANTS) return { id, error: { kind: 'too_many', message: `at most ${MAX_GRANTS} grants` } }
+        grants.set(grant, { id: grant, phone, generation, open: true, controllers: new Set() })
+        return { id, result: { grant } }
+      }
+      case 'memory-read':
+      case 'memory-edit':
+      case 'memory-add':
+        if (!manageMethods.includes(message.method)) return readOnly(id)
+        return memoryRequest(id, message.method, params)
+      case 'schedule-list':
+      case 'schedule-pause':
+      case 'schedule-resume':
+      case 'schedule-rename':
+        if (!manageMethods.includes(message.method)) return readOnly(id)
+        return scheduleRequest(id, message.method, params)
+      case 'settings-read':
+      case 'settings-name':
+      case 'settings-model':
+        if (!manageMethods.includes(message.method)) return readOnly(id)
+        return settingsRequest(id, message.method, params)
       case 'list':
         return { id, result: { terminals: await source.list() } }
       case 'subscribe': {
+        if (ending) return { id, error: { kind: 'closed', message: 'closed' } }
         const { terminal, channel, after } = params
         if (typeof terminal !== 'string' || !Number.isSafeInteger(channel) || channel <= 0) return { id, error: { kind: 'invalid_params', message: 'terminal, channel' } }
         if (subs.has(channel)) return { id, error: { kind: 'invalid_params', message: 'channel in use' } }
         if (subs.size >= MAX_SUBSCRIPTIONS) return { id, error: { kind: 'too_many', message: `at most ${MAX_SUBSCRIPTIONS} subscriptions` } }
-        subs.set(channel, null)
-        const handle = await source.watch(terminal, event => write({ channel, event }), { after: typeof after === 'string' ? after : undefined })
-        if (!handle.ok) { subs.delete(channel); return { id, error: { kind: handle.reason, message: handle.reason } } }
-        if (closed || !subs.has(channel)) { handle.close(); return { id, error: { kind: 'closed', message: 'closed' } } }
-        subs.set(channel, handle)
-        terminals.set(channel, terminal)
+        const sub = { terminal, attachments: params.attachments === 1 && attachments }
+        const documentGrant = sub.attachments && documents && params.documents === 1
+        subs.set(channel, sub)
+        const current = () => !ending && subs.get(channel) === sub
+        let handle
+        try {
+          handle = await source.watch(terminal, event => { if (current()) write({ channel, event }) },
+            { after: typeof after === 'string' ? after : undefined, attachments: sub.attachments, documents: documentGrant })
+        } catch (error) {
+          if (!current()) return { id, error: { kind: 'closed', message: 'closed' } }
+          unsubscribe(channel)
+          throw error
+        }
+        if (!current()) { handle.close?.(); return { id, error: { kind: 'closed', message: 'closed' } } }
+        if (!handle.ok) { unsubscribe(channel); return { id, error: { kind: handle.reason, message: handle.reason } } }
+        sub.handle = handle
         return { id, result: { channel } }
       }
-      case 'unsubscribe': {
-        const handle = subs.get(params.channel)
-        subs.delete(params.channel)
-        terminals.delete(params.channel)
+      case 'unsubscribe':
         // Ends the channel's writes too: one in flight is aborted, a later one is `not-watching`.
-        handle?.close()
+        unsubscribe(params.channel)
         return { id, result: {} }
-      }
       case 'send':
       case 'interrupt':
       case 'answer': {
-        if (!writes) return readOnly(id)
         const method = message.method
+        const withUploads = method === 'send' && Object.hasOwn(params, 'uploads')
         const ref = method === 'send' && typeof params.id === 'string' ? { id: params.id } : {}
+        const sub = subs.get(params.channel)
+        if (withUploads && (!attachments || (sub && !sub.attachments) || Object.hasOwn(params, 'name'))) {
+          return { id, result: refusedWrite('invalid', ref) }
+        }
+        if (!writes) return readOnly(id)
         // No paired phone's key, no write: never counted per connection, never by name.
-        if (typeof params.phone !== 'string' || !PHONE_KEY.test(params.phone)) return { id, result: refusedWrite('read-only', ref) }
+        if (!pairedPhone(params.phone)) return { id, result: refusedWrite('read-only', ref) }
         const phone = params.phone
-        const handle = subs.get(params.channel)
+        const handle = sub?.handle
         if (!handle || typeof handle[method] !== 'function') return { id, result: refusedWrite('not-watching', ref) }
         const by = typeof params.by === 'string' && params.by !== '' ? params.by : undefined
-        const chat = terminals.get(params.channel)
+        const chat = sub.terminal
         const key = `${phone}\0${chat}`
         if (limits.busy(key)) return { id, result: refusedWrite('busy', ref) }
         if (!limits.take(phone, chat, method === 'interrupt')) return { id, result: refusedWrite('rate', ref) }
         limits.begin(key)
         try {
           const args = method === 'send'
-            ? { text: params.text, id: params.id, ...(by ? { by } : {}) }
+            ? { text: params.text, id: params.id, ...(withUploads ? { uploads: params.uploads } : {}), ...(by ? { by } : {}) }
             : method === 'answer'
               ? { row: params.row, choice: params.choice, ...(params.text === undefined ? {} : { text: params.text }), ...(by ? { by } : {}) }
               : undefined
-          return { id, result: await handle[method](args) }
+          const result = withUploads
+            ? await handle.send(args, uploads, scopeFor(phone, sub))
+            : await handle[method](args)
+          return { id, result }
         } finally {
           limits.end(key)
         }
       }
       case 'backfill': {
-        const handle = subs.get(params.channel)
+        // A later hello can change the offer while the page is loading.
+        const negotiated = attachments
+        const sub = subs.get(params.channel)
+        const handle = sub?.handle
         if (!handle) return { id, error: { kind: 'not_watching', message: 'not_watching' } }
         if (typeof params.before !== 'string') return { id, error: { kind: 'invalid_params', message: 'before' } }
-        return { id, result: { rows: await handle.backfill(params.before, params.limit) } }
+        const stale = () => negotiated && (ending || subs.get(params.channel) !== sub)
+        let rows
+        try { rows = await handle.backfill(params.before, params.limit) } catch (error) {
+          if (!stale()) throw error
+        }
+        if (stale()) return { id, error: { kind: 'closed', message: 'closed' } }
+        write({ id, result: { rows } })
+        return
       }
       default:
         return readOnly(id)
@@ -276,12 +594,15 @@ function serve(socket, source, log, limits) {
       if (!line.trim()) continue
       let message
       try { message = JSON.parse(line) } catch { end(); return }
-      request(message).then(write, (error) => {
-        log('pocket chat: %s', error?.message ?? error)
+      const hideError = isAttachment(message) || (attachments && ['subscribe', 'backfill'].includes(message?.method))
+      request(message).then(reply => { if (reply !== undefined) write(reply) }, (error) => {
+        if (hideError) log('pocket attachment: failed')
+        else log('pocket chat: %s', error?.message ?? error)
         write({ id: message?.id ?? null, error: { kind: 'failed', message: 'failed' } })
       })
     }
   })
+  socket.on('end', finish)
   socket.on('error', () => close())
-  return { close, end: () => socket.end(), destroy: () => socket.destroy() }
+  return { close, end: () => { finish(); socket.end() }, destroy: () => socket.destroy() }
 }

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (delivery 2: #184; delivery 4 in part: #179; slices 1, 3, 5 and 6 not found) |
+| Status | In delivery (delivery 2: #184; delivery 4 in part: #179; slice 3 measured with no gain, not built; slices 1, 5 and 6 not found) |
 | Milestone | 1 (marks, stable port, toward the #141 fix); 5. The app opens fast |
 | Lanes | desktop (3.N) |
 | Created | 2026-10-30 |
@@ -90,7 +90,12 @@ the fix for #141; the marks go first so the fix has a before number. The rest ar
 2. **Stable port.** Fixes #141. Check: a draft survives a restart; warm `page in` improves.
    Rollback: the next release picks a random port again.
 3. **Compile cache.** Check: warm `dsh ready` improves; the folder is 0700. Rollback: revert;
-   delete the folder.
+   delete the folder. *Measured, no gain* (`docs/perf/dsh-startup-2026-11-02.md:185-194`):
+   eight interleaved warm rounds, spawn to ready, Electron 44.5.0 as Node, median 1,071 ms
+   without the cache and 1,198 ms with `NODE_COMPILE_CACHE` (1,767 entries written). Compiling
+   is about 110 ms of DSH's boot, and the cache does not touch module resolution or file reads.
+   So the check cannot pass as things stand, and the slice is not built. A later DSH pin can be
+   measured again the same way before any code.
 4. **Early start and async copy.** Check: `window shown` after an update no longer waits for the
    copy. Rollback: revert.
 5. **Smaller bundles.** Check: bundle bytes and `team drawn` both drop. Rollback: revert.

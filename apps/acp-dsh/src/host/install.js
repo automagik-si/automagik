@@ -18,13 +18,14 @@
 // lags its CLI breaks first. What is checked is what npm publishes: the exact package name, the
 // registry's integrity for every tarball, no install scripts, and no bundled CLI.
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { findCommand, isExecutable } from './agents.js'
 import { batchSafe } from './batch-spawn.js'
 
 const REGISTRY = 'https://registry.npmjs.org'
+const EXACT_SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
 // npm is asked again once the last check is this old. The timer that asks runs every
 // CHECK_TICK_MS: a 24-hour timer beside a 24-hour window skipped every other day, because the
 // check a tick starts lands a moment after the tick, so the next tick still found it fresh.
@@ -121,13 +122,13 @@ function noteUnreachable(error, timeout) {
 }
 
 /** The newest version npm publishes for `pkg`. */
-export async function latestVersion(pkg, { fetch = globalThis.fetch, timeoutMs = 15_000, signal } = {}) {
+export async function latestVersion(pkg, { fetch = globalThis.fetch, timeoutMs = 15_000, signal, registry = REGISTRY } = {}) {
   const timeout = AbortSignal.timeout(timeoutMs)
   let res
   try {
-    res = await fetch(`${REGISTRY}/${pkg.replace('/', '%2F')}/latest`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headers: { accept: 'application/json' } })
+    res = await fetch(`${registry.replace(/\/+$/, '')}/${pkg.replace('/', '%2F')}/latest`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headers: { accept: 'application/json' } })
   } catch (error) {
-    noteUnreachable(error, timeout)
+    if (registry === REGISTRY) noteUnreachable(error, timeout)
     throw error
   }
   if (!res.ok) throw new Error(`npm answered ${res.status} for ${pkg}`)
@@ -136,11 +137,21 @@ export async function latestVersion(pkg, { fetch = globalThis.fetch, timeoutMs =
     body = await res.json()
   } catch (error) {
     // The connection can still drop, or the deadline pass, while the answer is read.
-    noteUnreachable(error, timeout)
+    if (registry === REGISTRY) noteUnreachable(error, timeout)
     throw error
   }
   const { version } = body
-  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+/.test(version)) throw new Error(`npm gave no version for ${pkg}`)
+  const pattern = registry === REGISTRY ? /^\d+\.\d+\.\d+/ : EXACT_SEMVER
+  if (typeof version !== 'string' || !pattern.test(version)) throw new Error(`npm gave no version for ${pkg}`)
+  return version
+}
+
+// The registry npm is configured with, tried first: any failure of its own is dropped and the
+// public registry is asked as before; only the caller's stop ends the lookup here.
+async function customLatest(pkg, base, { signal }) {
+  let version
+  try { version = await latestVersion(pkg, { signal, registry: base }) } catch {}
+  if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
   return version
 }
 
@@ -201,7 +212,7 @@ export function killTree(pid) {
 
 // One install command: rejects with its last output when it fails, and kills its whole tree
 // when `signal` aborts or it runs past INSTALL_TIMEOUT_MS.
-export function runInstall(command, args, { cwd, env, signal: abort, timeoutMs = INSTALL_TIMEOUT_MS, kill = killTree, onSpawn }) {
+export function runInstall(command, args, { cwd, env, signal: abort, timeoutMs = INSTALL_TIMEOUT_MS, kill = killTree, onSpawn, onStdout }) {
   return new Promise((resolve, reject) => {
     if (abort?.aborted) return reject(new Error('install stopped: DSH is quitting'))
     // On Windows the package manager is a batch file (the app's pnpm.cmd, npm.cmd): through
@@ -213,7 +224,10 @@ export function runInstall(command, args, { cwd, env, signal: abort, timeoutMs =
     let output = ''
     let stopped
     const keep = (chunk) => { output = (output + chunk).slice(-16_384) }
-    child.stdout.on('data', keep)
+    child.stdout.on('data', (chunk) => {
+      keep(chunk)
+      onStdout?.(chunk)
+    })
     child.stderr.on('data', keep)
     const stop = (why) => {
       if (stopped !== undefined) return
@@ -253,14 +267,88 @@ export async function defaultInstall(dir, pkg, version, env, { signal, frozen = 
   else await runInstall(manager.command, [frozen ? 'ci' : 'install', '--omit=optional', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error', ...(frozen ? ['--prefer-offline'] : [])], options)
 }
 
+const LOOKUP_TIMEOUT_MS = 30_000
+const LOOKUP_ROOT = 'automagik-acp-latest'
+// Only the connector's own version matters here. The real install resolves its dependency tree.
+const LOOKUP_HOOK = `module.exports = { hooks: {
+  readPackage(pkg) {
+    if (pkg.name !== '${LOOKUP_ROOT}') {
+      delete pkg.dependencies
+      delete pkg.devDependencies
+      delete pkg.optionalDependencies
+      delete pkg.peerDependencies
+    }
+    return pkg
+  },
+} }
+`
+
+function pnpmLookupFailure(error, output, command, signal) {
+  if (signal.aborted) return new Error('install stopped: DSH is quitting')
+  let code
+  let reason
+  if (error.message === `install timed out after ${LOOKUP_TIMEOUT_MS / 1000}s`) {
+    reason = 'timeout'
+  } else {
+    // The reporter's error record may contain registry credentials. Keep only closed codes.
+    for (const line of output.split('\n').reverse()) {
+      let record
+      try { record = JSON.parse(line) } catch { continue }
+      const reported = record?.err?.code
+      if (reported === 'ERR_PNPM_META_FETCH_FAIL') {
+        code = reported
+        const errno = record.err.errno
+        if (NETWORK_CODES.has(errno)) reason = errno
+        else if (typeof record.err.message === 'string') {
+          const errnoInMessage = /, reason: (?:[a-z][a-z0-9]* )?([A-Z][A-Z0-9_]+)\b/.exec(record.err.message)?.[1]
+          if (NETWORK_CODES.has(errnoInMessage)) reason = errnoInMessage
+        }
+        break
+      }
+      if (typeof reported === 'string' && /^ERR_PNPM_FETCH_[1-5]\d{2}$/.test(reported)) {
+        code = reported
+        break
+      }
+    }
+  }
+  const prefix = `${command} add failed (`
+  const exit = error.message.startsWith(prefix) ? /^exit \d+/.exec(error.message.slice(prefix.length))?.[0] : undefined
+  const detail = reason ?? code ?? exit
+  const failure = new Error(detail ? `Connector registry lookup failed (${detail}).` : 'Connector registry lookup failed.')
+  if (reason !== undefined) unreachable.set(failure, reason)
+  return failure
+}
+
+function registryBase(output, scoped) {
+  let value = output.trim()
+  if (scoped !== undefined) {
+    const values = new Map()
+    for (const line of output.split('\n')) {
+      const equals = line.indexOf('=')
+      if (equals !== -1) values.set(line.slice(0, equals).trim(), line.slice(equals + 1).trim())
+    }
+    value = values.get(scoped)
+    if (!value || value === 'undefined') value = values.get('registry')
+  }
+  try {
+    const { protocol, username, password, search, hash, origin, pathname } = new URL(value)
+    if ((protocol !== 'http:' && protocol !== 'https:') || username || password || search || hash) return null
+    const base = `${origin}${pathname}`.replace(/\/+$/, '')
+    return base === REGISTRY ? null : base
+  } catch {
+    return null
+  }
+}
+
 export class AdapterStore {
   /**
    * @param {{ home?: string, env?: NodeJS.ProcessEnv, latest?: typeof latestVersion, install?: typeof defaultInstall, now?: () => number, log?: (message: string) => void, check?: (pkg: string, staged: { path: string, version: string }) => Promise<void> }} [options]
    *   `check` starts a staged adapter and rejects when it does not answer; it may also be set
    *   later (`store.check = ...`), once the caller knows how to spawn each adapter.
    */
-  constructor({ home = adaptersHome(), env = process.env, latest = latestVersion, install = defaultInstall, now = Date.now, log = () => {}, check } = {}) {
-    Object.assign(this, { home, env, latest, install, now, log, check })
+  constructor({ home = adaptersHome(), env = process.env, latest, install = defaultInstall, now = Date.now, log = () => {}, check } = {}) {
+    Object.assign(this, { home, env, install, now, log, check })
+    this.latest = latest ?? ((pkg, options) => this.lookupLatest(pkg, options))
     this.running = new Map()
     this.repairing = new Set()
     this.failures = new Map()
@@ -549,6 +637,82 @@ export class AdapterStore {
         if (!keep.has(name)) rmSync(join(folder, name), { recursive: true, force: true })
       }
     } catch {}
+  }
+
+  async npmRegistry(pkg, manager, { signal }) {
+    const scoped = pkg.startsWith('@') ? `${pkg.split('/')[0]}:registry` : undefined
+    const args = ['config', 'get', 'registry', ...(scoped ? [scoped] : [])]
+    const env = { ...this.env, npm_config_update_notifier: 'false', npm_config_fund: 'false', npm_config_audit: 'false' }
+    let cwd
+    let output = ''
+    try {
+      const folder = join(this.home, folderOf(pkg))
+      mkdirSync(folder, { recursive: true })
+      this.dropStale(folder)
+      cwd = mkdtempSync(join(folder, `.install-${process.pid}-${this.now()}-registry-`))
+      this.installing.add(cwd)
+      writeJson(join(cwd, 'package.json'), { name: LOOKUP_ROOT, private: true })
+      await runInstall(manager.command, args, {
+        cwd, env, signal, timeoutMs: 10_000,
+        onStdout: chunk => { if (output.length <= 65_536) output += chunk },
+      })
+    } catch {
+      output = ''
+    } finally {
+      if (cwd !== undefined) {
+        try { rmSync(cwd, { recursive: true, force: true }) } catch {}
+        this.installing.delete(cwd)
+      }
+    }
+    if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
+    return output.length > 65_536 ? null : registryBase(output, scoped)
+  }
+
+  async lookupLatest(pkg, { signal }) {
+    const manager = packageManagerOf(this.env)
+    if (manager?.kind === 'npm') {
+      const base = await this.npmRegistry(pkg, manager, { signal })
+      if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
+      if (base !== null) {
+        const version = await customLatest(pkg, base, { signal })
+        if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
+        if (version !== undefined) return version
+      }
+    }
+    if (manager?.kind !== 'pnpm') return latestVersion(pkg, { signal })
+
+    const folder = join(this.home, folderOf(pkg))
+    mkdirSync(folder, { recursive: true })
+    this.dropStale(folder)
+    const cwd = mkdtempSync(join(folder, `.install-${process.pid}-${this.now()}-latest-`))
+    this.installing.add(cwd)
+    try {
+      const manifest = join(cwd, 'package.json')
+      writeJson(manifest, { name: LOOKUP_ROOT, private: true })
+      writeFileSync(join(cwd, '.pnpmfile.cjs'), LOOKUP_HOOK)
+      // A new cache forces the latest tag to be read from the configured registry on each check.
+      const args = ['add', `${pkg}@latest`, '--save-exact', '--lockfile-only', '--ignore-scripts',
+        '--config.ignore-workspace=true', '--config.fetch-retries=0', `--config.cache-dir=${join(cwd, 'cache')}`, '--reporter=ndjson']
+      const env = { ...this.env, npm_config_update_notifier: 'false', npm_config_fund: 'false', npm_config_audit: 'false' }
+      let output = ''
+      try {
+        await runInstall(manager.command, args, {
+          cwd, env, signal, timeoutMs: LOOKUP_TIMEOUT_MS,
+          onStdout: chunk => { output = (output + chunk).slice(-65_536) },
+        })
+      } catch (error) {
+        throw pnpmLookupFailure(error, output, manager.command, signal)
+      }
+      if (signal.aborted) throw new Error('install stopped: DSH is quitting')
+      const version = readJson(manifest)?.dependencies?.[pkg]
+      if (typeof version !== 'string' || !EXACT_SEMVER.test(version)) {
+        throw new Error('Connector registry lookup returned no exact version.')
+      }
+      return version
+    } finally {
+      try { rmSync(cwd, { recursive: true, force: true }) } catch {}
+      this.installing.delete(cwd)
+    }
   }
 
   async updateNow(pkg, bin, force) {

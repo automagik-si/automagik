@@ -10,13 +10,13 @@ import { ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 const FAKE = join(import.meta.dirname, '../dev/fake-image-agent.mjs')
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
 for (const [kind, expected] of [
-  ['unavailable', 'the Codex image run is not isolated (profile unavailable); falling back to read-only'],
+  ['unavailable', 'the Codex image run is not isolated (profile unavailable); the image was refused'],
   ['not-started', 'the Codex image run was not started (unsupported): Codex does not know the feature shell_tool'],
-  ['wider', 'the Codex image run is not isolated (profile wider than requested); falling back to read-only'],
-  ['changed', 'the Codex image run is not isolated (profile config changed); falling back to read-only'],
-  ['not-offered', 'the Codex image run is not isolated (profile mode not offered); falling back to read-only'],
-  ['rejected', 'the Codex image run is not isolated (profile mode selection rejected); falling back to read-only'],
-  ['config-refused', 'the Codex image run is not isolated (profile config refused); falling back to read-only'],
+  ['wider', 'the Codex image run is not isolated (profile wider than requested); the image was refused'],
+  ['changed', 'the Codex image run is not isolated (profile config changed); the image was refused'],
+  ['not-offered', 'the Codex image run is not isolated (profile mode not offered); the image was refused'],
+  ['rejected', 'the Codex image run is not isolated (profile mode selection rejected); the image was refused'],
+  ['config-refused', 'the Codex image run is not isolated (profile config refused); the image was refused'],
 ]) test(`image ${kind} warning reaches logger and stderr without private content through apply`, async t => {
   const home = mkdtempSync(join(tmpdir(), 'image-stderr-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))

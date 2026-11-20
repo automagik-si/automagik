@@ -6,12 +6,19 @@
 // packs am and checks am's key before it tags.
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import * as amLane from './am-lane';
+import * as meterLane from './meter-lane';
+import { KEY_ID } from './lane';
 import { pluginNames } from './release-plugins';
 
 const workflow = (name: string) => readFileSync(join(import.meta.dir, '..', '.github', 'workflows', name), 'utf8').split('\n');
+// The cut's lane decision and gates moved into scripts/ (#668), so the cut can re-run them on a
+// moved dev; the shell is still tested as written.
+const script = (name: string) => readFileSync(join(import.meta.dir, name), 'utf8').split('\n');
 
 function bash(script: string, args: string[] = [], env: Record<string, string> = {}, cwd = process.cwd()) {
   const run = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`, 'bash', ...args], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...env } });
@@ -796,25 +803,30 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     expect(lines[at('The meter lane\'s signing key') + 1].trim()).toBe('id: meterkey');
     expect(lines[at('The meter lane\'s signing key') + 2].trim()).toBe("if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'");
     const key = lines.slice(at('The meter lane\'s signing key'), at('The meter lane\'s signing key') + 6).join('\n');
-    expect(key).toContain("METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}");
-    expect(key).toContain('run: bun scripts/meter-lane.ts check-key');
+    expect(key).toContain("METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || vars.METER_LANE_SIGNER != 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY || '' }}");
+    expect(key).toContain('run: bash scripts/release-gates.sh meter-key');
+    // The gate script holds the command, so a re-cut on a moved dev runs it again (#1653).
+    expect(script('release-gates.sh').join('\n')).toContain('bun scripts/meter-lane.ts check-key');
     const cut = job('cut').map(line => line.trim());
-    expect(cut).toContain('meter: ${{ steps.lane.outputs.meter }}');
+    expect(cut).toContain('meter: ${{ steps.cut.outputs.meter }}');
     expect(cut).toContain('meter_sign: ${{ steps.meterkey.outputs.sign }}');
   });
 
-  test('the meter is signed with its own key alone, in two places only; the posting job holds no key', () => {
+  test('the meter is signed with its own key alone, in three places only; the posting job holds no key', () => {
     const attach = job('meter-attach').join('\n');
     expect(attach).toContain('METER_LANE_KEY:');
     for (const other of ['PLUGIN_LANE_KEY', 'HERDR_PACK_KEY', 'AM_LANE_KEY']) expect(attach).not.toContain(other);
     expect(job('meter-lane').join('\n')).not.toMatch(/LANE_KEY|PACK_KEY/);
-    // The meter's key reaches no other step: only the key check and the attach step name it.
+    // The meter's key reaches only the key check, the cut step (which re-runs the check on a moved
+    // dev, #1653) and the attach step.
     const named = lines.map((line, i) => [line, i] as const).filter(([line]) => /secrets\.METER_LANE_KEY/.test(line)).map(([, i]) => i);
-    expect(named.length).toBe(2);
+    expect(named.length).toBe(3);
     expect(named[0]).toBeGreaterThan(at('The meter lane\'s signing key'));
     expect(named[0]).toBeLessThan(at('The meter lane\'s signing key') + 5);
-    expect(named[1]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
-    expect(named[1]).toBeLessThan(jobEnds('meter-attach'));
+    expect(named[1]).toBeGreaterThan(at('Version, commit and tag'));
+    expect(named[1]).toBeLessThan(at('Pack am'));
+    expect(named[2]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
+    expect(named[2]).toBeLessThan(jobEnds('meter-attach'));
     // The attach job is gated on the key too, and signs before anything goes up.
     expect(job('meter-attach').map(line => line.trim())).toContain("if: needs.cut.outputs.version != '' && needs.cut.outputs.meter == 'yes' && needs.cut.outputs.meter_sign == 'yes'");
     expect(attach.indexOf('bun scripts/meter-lane.ts verify')).toBeLessThan(attach.indexOf('gh release upload'));
@@ -822,12 +834,15 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
 
   // The Reviewer's L2: the prerelease list is read (never guessed) and passed to meter-since.
   test('meter-since is told which releases are prereleases, and a failure to list them stops the run', () => {
-    const first = lines.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
-    const call = lines.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
+    // The lane decision is release-gates.sh's now, so the cut can re-run it on a new dev (#668).
+    expect(lines.join('\n')).toContain('run: bash scripts/release-gates.sh lane');
+    const gates = script('release-gates.sh');
+    const first = gates.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
+    const call = gates.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
     expect(first).toBeGreaterThan(-1);
     expect(call).toBe(first + 2);
-    expect(lines[first]).toContain('select(.isPrerelease)');
-    const block = lines.slice(first, call + 1).join('\n');
+    expect(gates[first]).toContain('select(.isPrerelease)');
+    const block = gates.slice(first, call + 1).join('\n');
     expect(block).not.toContain('|| true');
     const run = (gh: string) => {
       const dir = mkdtempSync(join(tmpdir(), 'meter-since-'));
@@ -875,8 +890,10 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     // Wherever a herdr patch is told apart, a meter patch is too.
     const herdrOnly = lines.filter(line => /kind != 'herdr'|lane != 'herdr'|LANE != 'herdr'/.test(line));
     for (const line of herdrOnly) expect(line).toMatch(/!= 'meter'/);
-    // And it is a patch: 3.N.P on the newest 3.N.
-    expect(text).toContain('|| "${KIND}" == "meter" ]]; then version=$(bun scripts/lane.ts next-patch)');
+    // And it is a patch: 3.N.P on the newest 3.N (release-cut.sh, where the cut decides).
+    const cut = script('release-cut.sh').join('\n');
+    expect(cut).toContain('" plugins " | " herdr " | " pocket " | " am " | " meter ") bun scripts/lane.ts next-patch');
+    expect(cut).toContain('*) bun scripts/version.ts next');
   });
 
   // The dry run: the attach step as written, with the four binaries the matrix uploads, part.json and
@@ -1123,5 +1140,392 @@ describe("the release's plugin set", () => {
     expect(packed).toEqual(named);
     // No release asset names an Unfold plugin (they left with RFC 0020).
     expect(packed.filter((name) => name.startsWith('unfold-'))).toEqual([]);
+  });
+});
+
+// #1703: an empty selected signing slot never falls back to the other one. The am and meter keys
+// reach their three steps through one expression each; GitHub evaluates it, so this file holds a
+// small model of the expression semantics those bindings use (==, !=, &&, ||, string literals,
+// vars.* and secrets.*), applied to the text release.yml carries. It is a model, not GitHub.
+type ExprValue = string | boolean | null;
+interface ExprContext { vars: Record<string, string>; secrets: Record<string, string> }
+
+function evaluateExpression(source: string, context: ExprContext): ExprValue {
+  const tokens: string[] = [];
+  const lexer = /\s*(==|!=|&&|\|\||'(?:[^']|'')*'|[A-Za-z_][\w.-]*)/y;
+  while (lexer.lastIndex < source.trimEnd().length) {
+    const match = lexer.exec(source);
+    if (!match) throw new Error(`expression: cannot read ${source.slice(lexer.lastIndex)}`);
+    tokens.push(match[1]);
+  }
+  let at = 0;
+  const truthy = (value: ExprValue) => value !== '' && value !== false && value !== null;
+  const number = (value: ExprValue) => value === null ? 0 : typeof value === 'boolean' ? Number(value) : value.trim() === '' ? 0 : Number(value);
+  const equal = (a: ExprValue, b: ExprValue) => {
+    if (typeof a === 'string' && typeof b === 'string') return a.toLowerCase() === b.toLowerCase();
+    if (a === null && b === null) return true;
+    return number(a) === number(b);
+  };
+  const primary = (): ExprValue => {
+    const token = tokens[at++];
+    if (token === undefined) throw new Error('expression: ends early');
+    if (token.startsWith("'")) return token.slice(1, -1).replace(/''/g, "'");
+    if (token === 'true' || token === 'false') return token === 'true';
+    if (token === 'null') return null;
+    const [scope, name, ...rest] = token.split('.');
+    if (rest.length > 0 || !name || (scope !== 'vars' && scope !== 'secrets')) throw new Error(`expression: the model does not read ${token}`);
+    // An unset variable or secret reads as the empty string.
+    return context[scope][name] ?? '';
+  };
+  const comparison = (): ExprValue => {
+    const left = primary();
+    const op = tokens[at];
+    if (op !== '==' && op !== '!=') return left;
+    at++;
+    const same = equal(left, primary());
+    return op === '==' ? same : !same;
+  };
+  const conjunction = (): ExprValue => {
+    let value = comparison();
+    while (tokens[at] === '&&') { at++; const right = comparison(); value = truthy(value) ? right : value; }
+    return value;
+  };
+  const disjunction = (): ExprValue => {
+    let value = conjunction();
+    while (tokens[at] === '||') { at++; const right = conjunction(); value = truthy(value) ? value : right; }
+    return value;
+  };
+  const value = disjunction();
+  if (at !== tokens.length) throw new Error(`expression: left over ${tokens.slice(at).join(' ')}`);
+  return value;
+}
+
+// What an `env:` value becomes: null is empty, a boolean its word.
+const asEnv = (value: ExprValue) => value === null ? '' : String(value);
+
+describe('an empty selected signing slot never falls back to the other one (#1703)', () => {
+  const lines = workflow('release.yml');
+  const text = lines.join('\n');
+  const at = (name: string) => lines.findIndex(line => line.trim() === `- name: ${name}`);
+  // The expression a step binds `name` to, from that step's own lines.
+  const binding = (step: string, name: string) => {
+    const start = at(step);
+    expect(start).toBeGreaterThan(-1);
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim().startsWith('- name:') || /^  [a-z-]+:$/.test(line)) break;
+      const match = new RegExp(`^\\s+${name}: \\$\\{\\{ (.*) \\}\\}$`).exec(line);
+      if (match) return match[1];
+    }
+    throw new Error(`${step} binds no ${name}`);
+  };
+  // Throwaway keys, made for this run only: no private key is ever committed.
+  const pair = () => {
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    return { pub: publicKey.export({ type: 'spki', format: 'pem' }).toString(), priv: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() };
+  };
+  const lanes = [
+    { secret: 'AM_LANE_KEY', signer: 'AM_LANE_SIGNER', steps: ['The am lane\'s signing key', 'Version, commit and tag', 'Sign and post the am lane'] },
+    { secret: 'METER_LANE_KEY', signer: 'METER_LANE_SIGNER', steps: ['The meter lane\'s signing key', 'Version, commit and tag', 'Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'] },
+  ] as const;
+  const strict = (secret: string, signer: string) => `vars.${signer} == '${secret}_NEXT' && secrets.${secret}_NEXT || vars.${signer} != '${secret}_NEXT' && secrets.${secret} || ''`;
+  const fallback = (secret: string, signer: string) => `vars.${signer} == '${secret}_NEXT' && secrets.${secret}_NEXT || secrets.${secret}`;
+  const run = (expression: string, lane: (typeof lanes)[number], selector: string | undefined, primary: string, next: string) =>
+    asEnv(evaluateExpression(expression, {
+      vars: selector === undefined ? {} : { [lane.signer]: selector },
+      secrets: { [lane.secret]: primary, [`${lane.secret}_NEXT`]: next },
+    }));
+
+  test('each lane\'s three steps bind its key with the same strict expression, and the old fallback is gone', () => {
+    for (const lane of lanes) {
+      const bound = lane.steps.map(step => binding(step, lane.secret));
+      expect(bound).toEqual([0, 1, 2].map(() => strict(lane.secret, lane.signer)));
+      expect(lines.filter(line => new RegExp(`^\\s+${lane.secret}: \\$\\{\\{`).test(line)).length).toBe(3);
+      expect(text).not.toContain(`|| secrets.${lane.secret} }}`);
+    }
+    expect(binding('Version, commit and tag', 'HERDR_PACK_KEY')).toBe(strict('HERDR_PACK_KEY', 'HERDR_PACK_SIGNER'));
+  });
+
+  test('the selector picks one slot, whether or not either secret is filled', () => {
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        const expression = binding(step, lane.secret);
+        for (const selector of [undefined, '', lane.secret, `${lane.secret}_NEXT`]) {
+          for (const primary of ['primary-pem', '']) {
+            for (const next of ['next-pem', '']) {
+              const want = selector === `${lane.secret}_NEXT` ? next : primary;
+              const label = `${step} [${selector}] [${primary}] [${next}]`;
+              expect(`${label}: ${run(expression, lane, selector, primary, next)}`).toBe(`${label}: ${want}`);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test('the issue\'s case: NEXT selected and empty, the primary listed and filled, gives an empty key, which am skips and the meter refuses', () => {
+    const primary = pair();
+    const amKeys = [{ keyId: amLane.KEY_ID, publicKey: primary.pub }];
+    const meterKeys = [{ keyId: meterLane.KEY_ID, publicKey: primary.pub }];
+    // The control: the primary itself is a key each lane would sign with.
+    expect(amLane.keyVerdict(primary.priv, amKeys).verdict).toBe('sign');
+    expect(meterLane.keyVerdict(primary.priv, meterKeys).verdict).toBe('sign');
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        const got = run(binding(step, lane.secret), lane, `${lane.secret}_NEXT`, primary.priv, '');
+        expect(got).toBe('');
+        expect(got).not.toBe('false');
+        expect(got).not.toBe(primary.priv);
+        // No signature comes from an empty key.
+        expect(() => amLane.signPointer(Buffer.from('{}'), got)).toThrow();
+        expect(() => meterLane.signPointer(Buffer.from('{}'), got)).toThrow();
+      }
+      // The old expression fell back to the primary here: the case this test tells apart.
+      expect(run(fallback(lane.secret, lane.signer), lane, `${lane.secret}_NEXT`, primary.priv, '')).toBe(primary.priv);
+    }
+    expect(amLane.keyVerdict('', amKeys)).toEqual({ verdict: 'skip', message: 'AM_LANE_KEY is not set: this release attaches automagik-am-<v>.tgz but posts no am-lane pointer, so installed ams do not update to it. Add the key (bun scripts/am-lane.ts keygen; RFC 0012)' });
+    expect(meterLane.keyVerdict('', meterKeys)).toEqual({ verdict: 'fail', message: 'METER_LANE_KEY is not set (the slot METER_LANE_SIGNER names): a meter build is never attached unsigned' });
+  });
+
+  test('NEXT selected and filled signs with NEXT: its public key verifies the pointer and the primary\'s does not', () => {
+    const primary = pair();
+    const next = pair();
+    const dir = mkdtempSync(join(tmpdir(), 'signing-slot-'));
+    try {
+      const commit = 'a'.repeat(40);
+      const tgz = join(dir, 'automagik-am-3.109.1.tgz');
+      writeFileSync(tgz, 'the am');
+      const meterDir = join(dir, 'meter');
+      mkdirSync(meterDir);
+      const sums = Object.values(meterLane.ARTIFACTS).map(name => {
+        writeFileSync(join(meterDir, name), `the ${name}`);
+        return `${createHash('sha256').update(`the ${name}`).digest('hex')}  ${name}\n`;
+      });
+      writeFileSync(join(meterDir, meterLane.SUMS), sums.join(''));
+      const pointers = {
+        AM_LANE_KEY: { keyId: amLane.KEY_ID, bytes: Buffer.from(JSON.stringify(amLane.pointer(tgz, { version: '3.109.1', commit, issuedAt: 'x' }))), sign: amLane.signPointer, verify: amLane.verify, keyVerdict: amLane.keyVerdict },
+        METER_LANE_KEY: { keyId: meterLane.KEY_ID, bytes: Buffer.from(JSON.stringify(meterLane.pointer(meterDir, { version: '3.109.1', commit, issuedAt: 'x' }))), sign: meterLane.signPointer, verify: meterLane.verify, keyVerdict: meterLane.keyVerdict },
+      };
+      for (const lane of lanes) {
+        const p = pointers[lane.secret];
+        // During a rotation both public keys are listed; the pointer names the keyId it is signed under.
+        const listed = [{ keyId: 'old-slot', publicKey: primary.pub }, { keyId: p.keyId, publicKey: next.pub }];
+        for (const step of lane.steps) {
+          const got = run(binding(step, lane.secret), lane, `${lane.secret}_NEXT`, primary.priv, next.priv);
+          expect(got).toBe(next.priv);
+          expect(p.keyVerdict(got, listed).verdict).toBe('sign');
+          const sig = p.sign(p.bytes, got);
+          expect(p.verify(p.bytes, sig, listed).version).toBe('3.109.1');
+          expect(() => p.verify(p.bytes, sig, [{ keyId: p.keyId, publicKey: primary.pub }])).toThrow(/signature does not match/);
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('no selector, or the primary named, signs with the primary', () => {
+    const primary = pair();
+    const next = pair();
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        for (const selector of [undefined, lane.secret]) {
+          expect(run(binding(step, lane.secret), lane, selector, primary.priv, next.priv)).toBe(primary.priv);
+          expect(run(binding(step, lane.secret), lane, selector, primary.priv, '')).toBe(primary.priv);
+        }
+      }
+    }
+  });
+
+  test('before any key is listed, am skips and the meter stays held, whatever the slot gives', () => {
+    const primary = pair();
+    const next = pair();
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        for (const selector of [undefined, lane.secret, `${lane.secret}_NEXT`]) {
+          for (const [p, n] of [[primary.priv, next.priv], [primary.priv, ''], ['', next.priv], ['', '']]) {
+            const got = run(binding(step, lane.secret), lane, selector, p, n);
+            if (lane.secret === 'AM_LANE_KEY') expect(amLane.keyVerdict(got, []).verdict).toBe('skip');
+            else expect(meterLane.keyVerdict(got, []).verdict).toBe('fail');
+          }
+        }
+      }
+    }
+  });
+});
+
+describe('the cut publishing a signed role catalog', () => {
+  const lines = workflow('release.yml');
+  const { jobs: { cut: { steps } } } = Bun.YAML.parse(lines.join('\n')) as {
+    jobs: { cut: { steps: { name?: string; if?: string; env?: Record<string, string>; run?: string }[] } };
+  };
+  const write = 'Write the role catalog';
+  const sign = 'Sign the role catalog';
+  const check = 'Check the role catalog';
+  const publish = 'Publish the release';
+  const notes = '`roles.json` (signed, `roles.json.sig`) lists the official role packages.';
+
+  test('derives stable issuedAt bytes from the selected cut commit in UTC', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-roles-time-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'release'));
+      writeFileSync(join(dir, 'bin/git'), [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        '[[ "$TZ" == UTC ]]',
+        '[[ "$1 $2 $3 $4" == "show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd" ]]',
+        'case "$5" in',
+        '  cut-one) printf "%s\\n" 2026-11-20T03:00:00Z ;;',
+        '  cut-two) printf "%s\\n" 2026-11-21T04:05:06Z ;;',
+        '  *) exit 64 ;;',
+        'esac',
+      ].join('\n'), { mode: 0o755 });
+      writeFileSync(join(dir, 'bin/bun'), [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        '[[ "$1 $2" == "scripts/lane.ts roles-manifest" ]]',
+        'exec "$BUN_BIN" "$LANE_CLI" "$2" "$3" "$4"',
+      ].join('\n'), { mode: 0o755 });
+      const env = {
+        PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`,
+        BUN_BIN: process.execPath,
+        LANE_CLI: join(import.meta.dir, 'lane.ts'),
+        VERSION: '9.9.9',
+      };
+      const run = (sha: string, tz: string) => {
+        const result = bash(runOf(lines, write), [], { ...env, SHA: sha, TZ: tz }, dir);
+        expect(result.status).toBe(0);
+        return readFileSync(join(dir, 'release/roles.json'), 'utf8');
+      };
+      const first = run('cut-one', 'Pacific/Honolulu');
+      expect(run('cut-one', 'Asia/Tokyo')).toBe(first);
+      expect(JSON.parse(first).issuedAt).toBe('2026-11-20T03:00:00Z');
+      expect(JSON.parse(run('cut-two', 'Pacific/Honolulu')).issuedAt).toBe('2026-11-21T04:05:06Z');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('writes, signs and checks the catalog in order with the same guard as packing', () => {
+    const names = ['Pack the plugins', write, sign, check, publish];
+    expect(steps.map(step => step.name).filter(name => name && names.includes(name))).toEqual(names);
+    const step = (name: string) => steps.find(step => step.name === name)!;
+    for (const name of [write, sign, check]) expect(step(name).if).toBe(step('Pack the plugins').if);
+    expect(step(write).env).toEqual({ VERSION: '${{ steps.cut.outputs.version }}', SHA: '${{ steps.cut.outputs.sha }}' });
+    expect(step(sign).env).toEqual({ PLUGIN_LANE_KEY: '${{ secrets.PLUGIN_LANE_KEY }}' });
+    expect(step(sign).run?.trim()).toBe('bun scripts/lane.ts sign release/roles.json > release/roles.json.sig');
+    expect(step(check).env).toEqual({ VERSION: '${{ steps.cut.outputs.version }}' });
+    expect(step(publish).env).not.toHaveProperty('PLUGIN_LANE_KEY');
+  });
+
+  test('keeps plugin checksums and the rolling lane separate from the catalog pair', () => {
+    const pack = steps.find(step => step.name === 'Pack the plugins')!;
+    const lane = steps.find(step => step.name === 'Sign and post the plugin lane')!;
+    expect(pack.run).toContain('(cd release && sha256sum -- * > PLUGINS.SHA256SUMS)');
+    expect(pack.run).not.toContain('roles.json');
+    expect(steps.indexOf(pack)).toBeLessThan(steps.findIndex(step => step.name === write));
+    expect(lane.if).toBe(pack.if);
+    expect(lane.run).toContain('gh release upload plugin-lane lane/lane.json lane/lane.json.sig --clobber');
+    expect(lane.run).not.toContain('roles.json');
+  });
+
+  test('creates the release with both assets only after verification', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-roles-'));
+    try {
+      for (const folder of ['bin', 'plugin-lane', 'release']) mkdirSync(join(dir, folder));
+      for (const file of ['scripts/lane.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json']) {
+        const dest = join(dir, file);
+        mkdirSync(dirname(dest), { recursive: true });
+        copyFileSync(join(import.meta.dir, '..', file), dest);
+      }
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+      const key = { keyId: KEY_ID, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() };
+      writeFileSync(join(dir, 'plugin-lane/keys.json'), JSON.stringify({ keys: [key] }));
+      writeFileSync(join(dir, 'release/plugins.json'), '{}');
+      const sha = '0123456789012345678901234567890123456789';
+      const issuedAt = '2026-11-20T03:00:00Z';
+      const fake = (command: string, body: string) => writeFileSync(join(dir, 'bin', command), `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`, { mode: 0o755 });
+      fake('git', [
+        '[[ ! -v PLUGIN_LANE_KEY && "$TZ" == UTC ]]',
+        `[[ "$*" == 'show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd ${sha}' ]]`,
+        `printf '%s\\n' '${issuedAt}'`,
+      ].join('\n'));
+      fake('bun', 'if [[ "$2" != sign ]]; then [[ ! -v PLUGIN_LANE_KEY ]]; fi\nexec "$BUN_BIN" "$@"');
+      fake('gh', `[[ ! -v PLUGIN_LANE_KEY && "$1 $2" == "release create" ]]
+printf '%s\\n' "$@" > gh.log`);
+      const env = {
+        PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`, BUN_BIN: process.execPath,
+        VERSION: '9.9.9', SHA: sha, KIND: 'plugins', PRERELEASE: 'true', HERDR: 'no', POCKET: 'no', METER: 'no',
+        GITHUB_REPOSITORY: 'owner/repo', GITHUB_OUTPUT: join(dir, 'output'),
+      };
+      const run = (step: string, overrides: Record<string, string> = {}) => bash(step, [], { ...env, ...overrides }, dir);
+      const written = run(runOf(lines, write));
+      expect(written.err).toBe('');
+      expect(written.status).toBe(0);
+      expect(JSON.parse(readFileSync(join(dir, 'release/roles.json'), 'utf8')).issuedAt).toBe(issuedAt);
+      expect(run(runOf(lines, sign), { PLUGIN_LANE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }).status).toBe(0);
+      const checkThenPublish = `${runOf(lines, check)}\n${runOf(lines, publish)}`;
+      const refused = run(checkThenPublish, { VERSION: '9.9.8' });
+      expect(refused.status).toBe(1);
+      expect(refused.err).toContain('catalog version does not match 9.9.8');
+      expect(existsSync(join(dir, 'gh.log'))).toBe(false);
+
+      const published = run(checkThenPublish);
+      expect(published.status).toBe(0);
+      expect(published.out).toContain(`roles.json for 9.9.9 is signed by ${KEY_ID}`);
+      const args = readFileSync(join(dir, 'gh.log'), 'utf8').trimEnd().split('\n');
+      expect(args.slice(0, 8)).toEqual([
+        'release', 'create', 'v9.9.9', 'release/plugins.json', 'release/roles.json', 'release/roles.json.sig', '--prerelease', '--latest=false',
+      ]);
+      expect(args[args.indexOf('--notes') + 1]).toContain(notes);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a patch without plugins has no role catalog in its release notes', () => {
+    const gh = fakeGh();
+    try {
+      const run = gh.run(runOf(lines, publish), { KIND: 'am', HERDR: 'no', POCKET: 'no', METER: 'no' });
+      expect(run.status).toBe(0);
+      expect(gh.calls()).toHaveLength(1);
+      expect(gh.calls()[0]).not.toContain(notes);
+    } finally {
+      gh.cleanup();
+    }
+  });
+});
+
+describe('the versioned role catalog release contract', () => {
+  test('documents both assets on plugin releases and keeps the rolling lane limited to its own pair', () => {
+    const releaseHeader = workflow('release.yml').slice(0, 120).join('\n');
+    const parts = readFileSync(join(import.meta.dir, '../docs/rfcs/0011-monorepo-parts-and-releases.md'), 'utf8');
+    const laneReadme = readFileSync(join(import.meta.dir, '../plugin-lane/README.md'), 'utf8');
+    expect(releaseHeader).toContain('Every versioned release that packs bots-dsh, including prereleases, also carries roles.json and roles.json.sig.');
+    expect(parts).toMatch(/\| Plugins \|[^\n]*Every versioned release that packs `bots-dsh`, including prereleases, also carries `roles\.json` and `roles\.json\.sig`\./);
+    expect(laneReadme).toContain('Every versioned release that packs `bots-dsh`, including prereleases, also carries the official\nrole catalog `roles.json` and its detached signature `roles.json.sig`, signed with the same key.');
+    expect(laneReadme).toContain('The rolling `plugin-lane` release holds only `lane.json` and `lane.json.sig`.');
+  });
+});
+
+describe('the desktop asset sweep preserving a release\'s role catalog', () => {
+  test('adds the catalog exception immediately after the original cut asset exception', () => {
+    const lines = workflow('desktop-build.yml');
+    const original = 'case "${name}" in automagik-*.tgz|plugins.json|PLUGINS.SHA256SUMS|lane.json|lane.json.sig|automagik-pocket-*.apk|latest.json|usagemeter-*|usagemeter.SHA256SUMS|meter.json|meter.json.sig|server-image.json) continue ;; esac';
+    const at = lines.findIndex(line => line.trim() === original);
+    expect(at).toBeGreaterThan(-1);
+    expect(lines[at + 1].trim()).toBe('case "${name}" in roles.json|roles.json.sig) continue ;; esac');
+  });
+
+  test('keeps the catalog and its signature and deletes a stale catalog backup', () => {
+    const gh = fakeGh({ assets: ['lane.json', 'roles.json', 'roles.json.sig', 'roles.json.old'] });
+    try {
+      expect(gh.run(runOf(workflow('desktop-build.yml'), 'Add the builds to the release'), { REPLACE: 'true' }).status).toBe(0);
+      expect(gh.calls().filter(call => call.startsWith('release delete-asset'))).toEqual([
+        'release delete-asset v9.9.9 roles.json.old --yes --repo owner/repo',
+      ]);
+    } finally {
+      gh.cleanup();
+    }
   });
 });

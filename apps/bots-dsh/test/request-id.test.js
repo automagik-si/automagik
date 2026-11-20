@@ -293,7 +293,8 @@ test('a name whose receipt is no longer kept is not used again', async (t) => {
   // The receipt falls out of what is kept; the name itself stays taken.
   for (const record of Object.values(rt.state.requests)) record.receipt = undefined
   const out = await tool('message_bot', { to: 'Writer', message: 'do the thing', request_id: 'r-1' }, 'a')
-  assert.match(out, /Nothing was sent again: request_id "r-1" was admitted before/)
+  assert.match(out.text, /Nothing was sent again: request_id "r-1" was admitted before/)
+  assert.equal(out.sent, false)
   assert.equal(agents.get('b').calls.length, 1)
 })
 

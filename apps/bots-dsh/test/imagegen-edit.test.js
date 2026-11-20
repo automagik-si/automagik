@@ -81,7 +81,7 @@ test('Codex edits carry exact input and generation zero, with no generateImage c
 test('legacy grants refuse edits without even refreshing an expired grant', async t => {
   const images = createImageGen({ folder: folder(t), credentials: () => credentials({
     [CODEX_RECORD]: { kind: 'grant', payload: { access: 'test', refresh: 'test', expires: 1 } },
-  }), codex: () => ({ authScope: 'shared', imageAccess: async () => ({ ready: false }), generateImage: () => assert.fail('no draw') }),
+  }), codex: () => ({ authScope: 'shared', imageAccess: async () => ({ ready: false, signedIn: false }), generateImage: () => assert.fail('no draw') }),
   fetch: () => assert.fail('no request') })
   await assert.rejects(images.generate({ prompt: 'edit', input, callId: 'legacy' }), /Editing a picture needs Codex signed in/)
   assert.equal(images.progress('legacy').phase, 'failed')
@@ -113,6 +113,35 @@ test('the tool exposes editing, resolves before service calls, and returns edite
   const text = await tool.execute({ prompt: 'edit', image: 'picture.png' }, exec)
   assert.match(text, /^Edited the image with Codex.*img-.*original picture is unchanged\.$/)
   assert.equal(calls, 1)
+})
+
+test('generate_image returns the Codex draw isolation refusal and saves nothing', async t => {
+  const teamFolder = folder(t)
+  const message = 'The Codex image run could not be isolated, so the image was not started. Update Automagik and try again.'
+  let draws = 0
+  const acpAgents = {
+    authScope: 'isolated',
+    imageAccess: async () => ({ ready: true }),
+    generateImage: async () => {
+      draws++
+      throw Object.assign(new Error(message), { code: 'acp/image-unavailable' })
+    },
+  }
+  const rt = {
+    teamTools: [], teamFolder,
+    sharedUploads: { save: () => assert.fail('a refused draw cannot hand off a copy') },
+    ctx: { inject() {}, get: name => ({ credentials: credentials({}), acpAgents })[name] },
+  }
+  install(rt)
+  const tool = rt.teamTools.find(tool => tool.name === 'generate_image')
+  const callId = 'draw-isolation'
+  assert.equal(await tool.execute({ prompt: 'A clay fox' }, { callId }), message)
+  assert.equal(draws, 1)
+  const progress = rt.images.progress(callId)
+  assert.equal(progress.phase, 'failed')
+  assert.equal(progress.error, message)
+  assert.equal(progress.id, undefined)
+  assert.deepEqual(readdirSync(teamFolder()), [])
 })
 
 test('each edit keeps a distinct output without modifying the uploaded bytes', async t => {

@@ -1,9 +1,14 @@
 // The Bot team's side of a CLI sign-in (cli-login.js, plan v3 2.3): the route to acp-dsh's
 // attempt, the model chosen with the entry (rule 5) and the code guard. acp-dsh is a fake here.
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { RESERVATION_FILE } from '../src/host/account-reservations.js'
 import { CODE_HINT, cliLoginUrl, cliLoginView, install } from '../src/host/cli-login.js'
+import { CLAUDE, CODEX, reservationAcp } from './fixtures/account-reservations.js'
 
 const ATTEMPT = randomUUID()
 const CODEX_URL = 'https://auth.openai.com/codex/device'
@@ -11,7 +16,7 @@ const CLAUDE_URL = 'https://claude.com/cai/oauth/authorize?code=true&state=expec
 const settle = () => new Promise(resolve => setImmediate(resolve))
 const nativeError = code => Object.assign(new Error('private-cli-output code#state and token-secret'), { code })
 
-function fixture() {
+function fixture(reservationDeps) {
   const listeners = new Map()
   const warnings = []
   const updates = []
@@ -63,7 +68,7 @@ function fixture() {
       return bots[id]
     },
   }
-  install(rt)
+  install(rt, reservationDeps)
   const emit = (name, ...args) => (listeners.get(name) ?? []).map(({ listener }) => listener(...args))
   const actions = rt.cliLoginActions
   return { rt, acp, bots, calls, updates, warnings, listeners, emit, actions, matches, ready: async (id) => { emit('acp-dsh/login-ready', { id }); await settle() } }
@@ -102,6 +107,60 @@ test('isolated account controls use owner actions, sanitize identities and valid
     assert.deepEqual(h.updates, [])
   })
 
+test('the account view names this installation, so a person can tell whose Bot sign-in it is', async () => {
+  const h = fixture()
+  h.acp.authScope = 'isolated'
+  h.acp.account = async () => ({ signedIn: true, account: { email: 'bot@example.test' } })
+  h.acp.terminalAccount = async () => undefined
+  const read = () => h.actions['cli-login-accounts']({})
+  // A host that does not say which installation it is keeps the old answer.
+  assert.equal(Object.hasOwn(await read(), 'installation'), false)
+  const get = h.rt.ctx.get
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: ' desktop ' } : get(name))
+  assert.equal((await read()).installation, 'desktop')
+  // A name is a name: control characters go, an empty one is not shown at all.
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: '\u0000 private\n' } : get(name))
+  assert.equal((await read()).installation, 'private')
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: ' \u0000 ' } : get(name))
+  assert.equal((await read()).installation, undefined)
+  // Asking the host for its profile must never fail the account read or echo why.
+  h.rt.ctx.get = name => {
+    if (name === 'profileContext') throw new Error('private-profile-path')
+    return get(name)
+  }
+  const unnamed = await read()
+  assert.equal(unnamed.installation, undefined)
+  assert.doesNotMatch(JSON.stringify(unnamed), /private-profile-path/)
+})
+
+test('a refused account change says which refusal it was, never the CLI text', async () => {
+  const h = fixture()
+  h.acp.authScope = 'isolated'
+  // acp-dsh's own fixed sentence is the more precise one: another live session holds it.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('Close other Automagik sessions before changing the Bot account.'), { code: 'acp-account/busy' })
+  }
+  await assert.rejects(h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }), {
+    code: 'bot/refused',
+    message: 'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.',
+  })
+  // A host that carries only the code still names the reason, and the CLI's text never fits.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('private-cli-output token-secret'), { code: 'acp-account/busy' })
+  }
+  const error = await h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }).catch(failure => failure)
+  assert.equal(error.message, 'The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.')
+  assert.doesNotMatch(JSON.stringify({ message: error.message, code: error.code }), /private-cli-output|token-secret/)
+  // A refusal this side has no sentence for keeps the card's own line.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('private-cli-output'), { code: 'acp-account/not-a-known-refusal' })
+  }
+  await assert.rejects(h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }), {
+    code: 'bot/refused',
+    message: 'Account change failed. Close other app windows and try again.',
+  })
+})
+
 test('any Bot view gets the live attempt back; the opener is only its label, and no owner capability exists', async () => {
   const h = fixture()
   const first = await h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex' })
@@ -118,6 +177,93 @@ test('any Bot view gets the live attempt back; the opener is only its label, and
   // The experiment's per-tab owner capability is gone: the key is refused, not honoured.
   await assert.rejects(h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex', owner: randomUUID() }), { code: 'bot/invalid' })
   assert.equal(h.calls.some(call => call[0] === 'cancel'), false, 'reading never cancels')
+})
+
+test('ready start and status name the account from one extra read without changing current', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  h.acp.loginCurrent = async () => ready
+  const reads = []
+  h.acp.account = async id => {
+    reads.push(id)
+    return {
+      id, signedIn: true, consent: 'given', authScope: 'isolated', ref: 'ref-work', token: 'private',
+      account: { email: ' dev@example.test\n', org: 'Example', plan: 'team', token: 'private' },
+    }
+  }
+  const result = {
+    ...ready,
+    signedInAs: { ref: 'ref-work', kind: 'account', email: 'dev@example.test', org: 'Example', plan: 'team' },
+  }
+  assert.deepEqual(await h.actions['cli-login-start'](body), result)
+  assert.deepEqual(reads.splice(0), [provider, provider], 'the pre-start consent check and the ready read')
+  assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), result)
+  assert.deepEqual(reads.splice(0), [provider])
+  assert.deepEqual(await h.actions['cli-login-current'](body), { id: provider, attempt: ready })
+  assert.deepEqual(reads, [])
+})
+
+test('the extra ready read uses the confirm shape when the account has pending consent', async () => {
+  const h = fixture()
+  const provider = 'acp-claude'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  h.acp.loginCurrent = async () => ready
+  const confirm = {
+    id: provider, status: 'confirm',
+    account: { authScope: 'isolated', ref: 'ref-work', kind: 'account', email: 'dev@example.test' },
+  }
+  let consent = 'given'
+  h.acp.account = async id => {
+    const seen = { id, signedIn: true, authScope: 'isolated', consent, ref: 'ref-work', account: { email: 'dev@example.test' } }
+    consent = 'needed'
+    return seen
+  }
+  assert.deepEqual(await h.actions['cli-login-start'](body), confirm)
+  assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), confirm)
+  h.acp.status = async () => ({ agents: [{ id: provider, signedIn: true, consent }] })
+  assert.deepEqual(await h.actions['cli-login-current'](body), { id: provider, attempt: null, account: confirm.account })
+})
+
+test('a failed, mismatched or signed-out account read keeps the original ready view', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  for (const read of [
+    async () => { throw new Error('private account error') },
+    async () => ({ id: 'acp-claude', signedIn: true, consent: 'needed' }),
+    async () => ({ id: 'acp-claude', signedIn: true, consent: 'given' }),
+    async () => ({ id: provider, signedIn: false }),
+  ]) {
+    h.acp.account = read
+    assert.deepEqual(await h.actions['cli-login-start'](body), ready)
+    assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), ready)
+  }
+  assert.deepEqual(h.warnings, [])
+})
+
+test('starting, waiting and failed status polls never read the account', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider, attemptId: ATTEMPT }
+  let reads = 0
+  h.acp.account = async () => { reads++ }
+  for (const status of ['starting', 'waiting', 'waiting', 'failed']) {
+    h.acp.loginStatus = async () => ({ id: provider, attemptId: ATTEMPT, status })
+    const view = await h.actions['cli-login-status'](body)
+    assert.equal(view.status, status)
+    assert.equal(Object.hasOwn(view, 'signedInAs'), false)
+  }
+  assert.equal(reads, 0)
 })
 
 test('the model chosen in Bot A is applied to A alone when the sign-in completes, even from B’s view', async () => {
@@ -314,4 +460,160 @@ test('a delivery that carries a shown code is refused before it is noted or sent
   assert.equal(await h.rt.deliver({ toId: 'b', role: 'room', text: 'hello' }), 'exchange')
   assert.equal(h.rt.delivered.length, 1)
   assert.doesNotMatch(JSON.stringify(h.warnings), /expected_state|code-abc/)
+})
+
+function reservationHost(t, { authScope = 'isolated' } = {}) {
+  const home = fs.mkdtempSync(join(tmpdir(), 'automagik-reservation-host-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const path = join(home, RESERVATION_FILE)
+  let instance = 'test-instance'
+  const h = fixture({
+    path, fs, pid: process.pid,
+    random: (size, encoding) => randomBytes(size).toString(encoding),
+    decodeKey: key => Buffer.from(key, 'base64url'),
+    instanceId: () => instance,
+  })
+  h.rt.holdsLock = () => true
+  h.rt.readOnly = () => undefined
+  const fake = reservationAcp({ authScope })
+  Object.assign(h.acp, fake.service)
+  return { ...h, ...fake, path,
+    setInstance: value => { instance = value },
+    list: () => h.actions['cli-login-accounts']({ reservations: true }),
+    reserve: (offer, label) => h.actions['cli-login-reserve']({ ...offer, label }),
+  }
+}
+
+test('the start-up notice list asks for no reservation evidence; only the card does', async t => {
+  for (const authScope of ['isolated', 'consent']) {
+    const h = reservationHost(t, { authScope })
+    const plain = await h.actions['cli-login-accounts']({})
+    assert.equal(h.calls.filter(([kind]) => kind === 'evidence').length, 0, authScope)
+    for (const entry of Object.values(plain.accounts)) assert.equal(entry.reservation, undefined, authScope)
+    await assert.rejects(h.actions['cli-login-accounts']({ reservations: false }), { code: 'bot/invalid' })
+    await assert.rejects(h.actions['cli-login-accounts']({ reservations: true, other: 1 }), { code: 'bot/invalid' })
+  }
+})
+
+test('only complete, coherent vendor observations produce opaque offers', async t => {
+  const h = reservationHost(t)
+  const read = h.acp.accountEvidence
+  const keyAndDigests = []
+  h.acp.accountEvidence = async (id, options) => {
+    const seen = await read(id, options)
+    keyAndDigests.push(options.key.toString('base64url'), seen.exact, seen.loose)
+    return seen
+  }
+  const complete = await h.list()
+  assert.deepEqual(h.calls, [
+    ['account', CODEX, { fresh: true }], ['evidence', CODEX],
+    ['account', CLAUDE, { fresh: true }], ['evidence', CLAUDE],
+  ])
+  const codex = complete.accounts[CODEX]
+  assert.equal(codex.account.email, 'private-codex@example.test')
+  assert.deepEqual(codex.reservation, { state: 'complete', claims: [], scope: 'personal',
+    offer: { offerId: codex.reservation.offer.offerId } })
+  assert.match(codex.reservation.offer.offerId, /^[\w-]{22}$/)
+  assert.doesNotMatch(JSON.stringify(codex.reservation), /email|org|plan|digest|key|private|ref/)
+  for (const value of keyAndDigests) assert.equal(JSON.stringify(complete).includes(value), false)
+
+  for (const override of [
+    { id: CLAUDE }, { vendor: 'claude' }, { ref: 'other-ref' }, { ref: 'unknown' },
+    { exact: 'short' }, { loose: '*'.repeat(43) }, { reservable: false }, { class: 'workspace' },
+  ]) {
+    h.acp.accountEvidence = async (id, options) => ({
+      ...await read(id, options), ...(id === CODEX ? override : {}),
+    })
+    const { accounts } = await h.list()
+    assert.deepEqual(accounts[CODEX].reservation, { state: 'changed', claims: [] })
+    assert.ok(accounts[CLAUDE].reservation.offer, 'a failed Codex read leaves Claude available')
+  }
+  assert.equal(fs.existsSync(h.path), false)
+})
+
+test('reservation card states bound R2 outcomes and show consent-mode sign-ins', async t => {
+  const h = reservationHost(t, { authScope: 'consent' })
+  h.accounts[CLAUDE].consent = 'carried'
+  h.accounts[CLAUDE].notice = true
+  const read = h.acp.accountEvidence
+  const first = (await h.list()).accounts
+  assert.equal(first[CLAUDE].notice, true)
+  assert.equal(first[CLAUDE].consent, 'carried')
+  assert.equal(first[CODEX].consent, 'given')
+  assert.ok(first[CLAUDE].reservation.offer)
+  assert.ok(first[CODEX].reservation.offer)
+  await h.reserve(first[CLAUDE].reservation.offer, 'Account project')
+
+  for (const [answer, state, why] of [
+    [{ supported: false }, 'unsupported'],
+    [{ signedIn: false }, 'signed-out'],
+    [{}, 'unknown'],
+    [{ recoveryRequired: true }, 'recovery'],
+    [{ signedIn: true, outcome: 'changed' }, 'changed'],
+    [{ signedIn: true, outcome: 'unread' }, 'unread'],
+    [{ signedIn: true, outcome: 'ambiguous', why: 'no-organisation' }, 'not-reservable', 'no-organisation'],
+    [{ signedIn: true, outcome: 'ambiguous', why: 'unknown-plan' }, 'not-reservable', 'unknown-plan'],
+    [{ signedIn: true, outcome: 'none', why: 'not-a-subscription' }, 'not-reservable', 'not-a-subscription'],
+    [{ signedIn: true, outcome: 'none', why: 'no-email' }, 'not-reservable', 'no-email'],
+    [{ signedIn: true, outcome: 'none', why: 'private-token' }, 'not-reservable'],
+    [new Error('private CLI output'), 'unread'],
+  ]) {
+    h.acp.accountEvidence = async (id, options) => {
+      if (id !== CLAUDE) return read(id, options)
+      if (answer instanceof Error) throw answer
+      return { id, ...answer }
+    }
+    const { accounts } = await h.list()
+    const { reservation } = accounts[CLAUDE]
+    assert.deepEqual(reservation, { state,
+      claims: [{ ...firstClaim(reservation), label: 'Account project', current: false, mine: true }],
+      ...(why ? { why } : {}),
+    })
+    assert.doesNotMatch(JSON.stringify(reservation), /private-token|private CLI output/)
+    assert.equal(accounts[CLAUDE].notice, true)
+    assert.ok(accounts[CODEX].reservation.offer)
+  }
+  delete h.acp.accountEvidence
+  assert.equal((await h.list()).accounts[CLAUDE].reservation.state, 'unsupported')
+})
+
+const firstClaim = ({ claims: [{ claimId, rev }] }) => ({ claimId, rev })
+
+test('fresh refusals leave the record untouched and Plus to Pro still reserves the same account', async t => {
+  const h = reservationHost(t)
+  const read = h.acp.accountEvidence
+  const initial = (await h.list()).accounts
+  await h.reserve(initial[CLAUDE].reservation.offer, 'Claude project')
+  const original = fs.readFileSync(h.path, 'utf8')
+  const { offer } = (await h.list()).accounts[CODEX].reservation
+
+  for (const instance of [undefined, '', 'x'.repeat(4097), '\u0000', '\ud800']) {
+    h.setInstance(instance)
+    assert.equal((await h.list()).accounts[CODEX].reservation.state, 'no-instance')
+    await assert.rejects(h.reserve(offer, 'Codex project'), { code: 'bot/reservation-no-instance' })
+    assert.equal(fs.readFileSync(h.path, 'utf8'), original)
+  }
+  h.setInstance('test-instance')
+  for (const [answer, state] of [
+    [{ signedIn: false }, 'signed-out'],
+    [{ signedIn: true, outcome: 'ambiguous', why: 'unknown-plan' }, 'not-reservable'],
+    [{ signedIn: true, outcome: 'unread' }, 'unread'],
+    [{ signedIn: true, outcome: 'changed' }, 'changed'],
+  ]) {
+    h.acp.accountEvidence = async id => ({ id, ...answer })
+    await assert.rejects(h.reserve(offer, 'Codex project'), { code: `bot/reservation-${state}` })
+    assert.equal(fs.readFileSync(h.path, 'utf8'), original)
+  }
+  h.acp.accountEvidence = read
+  h.accounts[CODEX].plan = 'team'
+  h.accounts[CODEX].class = 'workspace'
+  await assert.rejects(h.reserve(offer, 'Codex project'), { code: 'bot/reservation-changed' })
+  assert.equal(fs.readFileSync(h.path, 'utf8'), original)
+
+  h.accounts[CODEX].plan = 'pro'
+  h.accounts[CODEX].class = 'personal'
+  const result = await h.reserve(offer, 'Codex project')
+  assert.equal(result.claims[0].label, 'Codex project')
+  assert.equal(result.scope, 'personal')
+  assert.deepEqual(h.calls.filter(([method]) => ['switch', 'signout', 'reset'].includes(method)), [])
 })

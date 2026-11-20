@@ -24,6 +24,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, write
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scrubBuildPaths } from '../src/dsh.js'
+import { writeShippedProfilePatch } from '../src/profile-patch.mjs'
 import { prepareSharpWasm, pruneNodeModules } from './prune-runtime.mjs'
 import { acceptsHarness } from './follow-dsh.mjs'
 import { patchRuntime } from './runtime-patches.mjs'
@@ -191,13 +192,14 @@ for (const plugin of packed) {
   profile.dependencies[plugin.name] = `file:${VENDOR}/${basename(plugin.tarball)}`
 }
 writeFileSync(join(installDir, 'package.json'), `${JSON.stringify(profile, null, 2)}\n`)
-for (const file of ['cordis.patch.yml', 'pnpm-workspace.yaml']) cpSync(join(APP, 'profile', file), join(installDir, file))
+cpSync(join(APP, 'profile', 'pnpm-workspace.yaml'), join(installDir, 'pnpm-workspace.yaml'))
 say(`installing the profile with dsh plugin (${Object.keys(ADDONS).map(name => `${name}@${ADDONS[name]}`).join(', ') || 'no add-ons'})`)
 execFileSync(process.execPath, [join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), 'plugin', '--profile', 'omni', 'install', '--prod', '--ignore-scripts'], {
   cwd: installDir,
   env: { ...env, DSH_HOME: dshHome, PATH: [join(runtimeDir, 'node_modules', '.bin'), env.PATH].filter(Boolean).join(process.platform === 'win32' ? ';' : ':') },
   stdio: ['ignore', 'inherit', 'inherit'],
 })
+writeShippedProfilePatch(join(APP, 'profile'), installDir, runtimeDir, { requireAdapters: true })
 for (const [name, version] of Object.entries(ADDONS)) {
   const installed = readJson(join(installDir, 'node_modules', ...name.split('/'), 'package.json')).version
   if (installed !== version) throw new Error(`${name} installed at ${installed}, not the vetted ${version}`)

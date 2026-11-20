@@ -31,7 +31,7 @@ const MAX_MODES = 16
 const OTHER = 'other'
 /** What a preset this codebase does not name becomes: its key and label are a person's own. */
 export const CUSTOM = 'custom'
-const LEVELS = new Set(['read-only', 'workspace-write', 'danger-full-access', AUTO])
+export const LEVELS = new Set(['read-only', 'workspace-write', 'danger-full-access', AUTO])
 
 /** What became of a Session whose saved level DSH no longer offers (permissions.js applyGone). */
 const GONE = new Set(['narrowed', 'kept', 'unknown', 'held'])
@@ -44,6 +44,7 @@ const REVIEW_CODES = new Set(['AUTO_REVIEW_NO_STEP', 'AUTO_REVIEW_NO_ROUTE', 'AU
 const FAILURE_CODES = new Set([
   'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'NO_ADAPTER', 'EMPTY_RESPONSE', 'UNSUPPORTED', 'ABORTED',
   'MODEL_ACCESS_REQUIRED', 'ACP_AGENT',
+  'ACP_CLAUDE_USAGE_LIMIT', 'ACP_CODEX_USAGE_LIMIT',
   'AUTH', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'QUOTA', 'ACCOUNT_QUOTA', 'CONTEXT_WINDOW_EXCEEDED',
   'IMAGE_OFFLOAD_REQUIRED', 'PI_AI_ERROR',
 ])

@@ -12,9 +12,25 @@
 //                                  the bot-identity section (prompt.js)
 //   botModels(kind, source)        the model menu of the Bots of one kind, owned by the
 //                                  plugin that hosts them (host-models.js has the shape)
+//   genui.publish(batchId, row)    one row of a live kit card, merged into the slice every
+//                                  state answer carries (genui.js has the shape and the cap)
+//   media.register(name, fn)       bytes a kit card shows, served by the kit's media route
 //
 // Each returns its disposer, so a plugin that stops takes what it added with it. Hooks
 // are read at run time, never during install.
+//
+// The team's own window-only endpoints (the seat chat's reads, the Code tree, automations)
+// register through `windowEndpoint`, which is not on `rt`: only those get the route's proof of
+// the desktop window (desktop-window.js). An endpoint added through `rt.hooks` never does.
+const registrars = new WeakMap()
+const windowEntries = new WeakSet()
+export const isWindowEndpoint = entry => typeof entry === 'object' && entry !== null && windowEntries.has(entry)
+export function windowEndpoint(rt, name, fn, { read = false } = {}) {
+  const register = registrars.get(rt)
+  // A test's stand-in runtime has no table of its own; its entries get no proof from the route.
+  return register ? register(name, fn, read, true) : rt.hooks.endpoint(name, fn, { read })
+}
+
 export function install(rt) {
   const endpoints = new Map()
   const views = []
@@ -41,13 +57,17 @@ export function install(rt) {
     }
   }))
 
+  // Frozen, so the entry another plugin gets from `endpointOf` cannot be given a new function.
+  const register = (name, fn, read, window) => {
+    if (endpoints.has(name)) throw new Error(`ds-bot: endpoint ${name} is already served`)
+    const entry = Object.freeze({ fn, read: read === true })
+    if (window) windowEntries.add(entry)
+    endpoints.set(name, entry)
+    return () => { if (endpoints.get(name) === entry) endpoints.delete(name) }
+  }
+  registrars.set(rt, register)
   rt.hooks = {
-    endpoint(name, fn, { read = false } = {}) {
-      if (endpoints.has(name)) throw new Error(`ds-bot: endpoint ${name} is already served`)
-      const entry = { fn, read: read === true }
-      endpoints.set(name, entry)
-      return () => { if (endpoints.get(name) === entry) endpoints.delete(name) }
-    },
+    endpoint: (name, fn, { read = false } = {}) => register(name, fn, read, false),
     view: fn => add(views, fn),
     sessionOwner: fn => add(sessionOwners, fn),
     live: fn => add(lives, fn),

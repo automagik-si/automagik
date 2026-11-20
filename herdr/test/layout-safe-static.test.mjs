@@ -22,7 +22,7 @@ const CALL = new RegExp([
   String.raw`\b(?:rmSync|renameSync|unlinkSync|cpSync|rmdirSync|removePath)\s*\(`,
   String.raw`\b(?:fs|fsp|promises)\s*\.\s*(?:rm|rename|unlink|cp|rmdir)\s*\(`,
   String.raw`(?<![\w.$])(?:rm|rename|unlink)\s*\(`,
-  String.raw`\b(?:run\s*\(\s*io\s*,|(?:io\.)?exec\s*\()\s*["'\`](?:rm|mv|cp|find|rmdir|unlink)["'\`]`,
+  String.raw`\b(?:run\s*\(\s*io\s*,|(?:io\.)?exec\s*\()\s*["'\`](?:/bin/)?(?:rm|mv|cp|find|rmdir|unlink)["'\`]`,
 ].join("|"), "g");
 
 /** The call starting at `at` in `text`, up to its closing parenthesis, whitespace folded. */
@@ -150,14 +150,17 @@ export const ALLOWLIST = [
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(lock, aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(lock)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 1, "the CLI's own files: .herdr/bots.json, its lock and temp files, and the failed refresh's own Antigravity cache temp file under <app home>/automagik-herdr/ (#809)"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(unit)", 1, "the revive login service's own systemd user unit under ~/.config/systemd/user (#939), only when its first line is the pack's mark: never mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 2, "the queued-restarts.json temp in <app home>/automagik-herdr and the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, file)", 4, "queued-restarts.json and linked-updates.json (the linked machines' update record, #954) and their sibling temp files under <app home>/automagik-herdr, never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(plist)", 1, "the revive login service's own launchd agent under ~/Library/LaunchAgents (#939), only after launchd let go of its label and only when the plist's second line is the pack's mark: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 4, "the queued-restarts.json and handoff-failures.json temp files in <app home>/automagik-herdr and the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, file)", 6, "queued-restarts.json, handoff-failures.json (#1556) and linked-updates.json (the linked machines' update record, #954) and their sibling temp files under <app home>/automagik-herdr, never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, path)", 2, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; and a bot's launch briefing file under <app home>/automagik-herdr/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(from, to)", 1, "the Antigravity model cache's temp file under <app home>/automagik-herdr/ (antigravity-models.json.tmp-<time>) renamed onto its cache: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(from, to)", 1, "the refresh's own Antigravity model cache temp file under <app home>/automagik-herdr/ renamed onto its cache: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, settings.path)", 1, "the Antigravity launch permission file under <app home>/automagik-herdr/agy-settings, written 0600 and renamed onto its deterministic path: never under mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/modelCache.js", "rename(tmp, path)", 2, "the injected rename of the Antigravity model cache's temp file under <app home>/automagik-herdr/ (antigravity-models.json.tmp-<time>) onto its cache: never under mods/ or layouts/; the caller supplies rename"],
+  ["herdr/mods/am-sidebar/modelCache.js", "rename(tmp, path)", 2, "the injected rename of the refresh's own Antigravity model cache temp file under <app home>/automagik-herdr/ onto its cache: never under mods/ or layouts/; the caller supplies rename"],
+  ["herdr/mods/am-sidebar/create.js", "exec(\"/bin/mv\", [from, to])", 1, "the Antigravity model cache's temp file under <app home>/automagik-herdr/ renamed onto its cache (the form's fs API has no rename): never under mods/ or layouts/ (#809)"],
+  ["herdr/mods/am-sidebar/create.js", "fs.unlink(path)", 1, "a failed model-cache write or rename removes only its own temp file beside the cache under <app home>/automagik-herdr/: never under mods/ or layouts/ (#809)"],
   ["herdr/mods/am-sidebar/main.js", "fs.unlink(file)", 1, "a pasted image in <app home>/paste-tmp/"],
   ["herdr/mods/am-sidebar/spaceIcon.js", "fs.unlink(scratch)", 1, "a space icon the sidebar wrote under <app home>/space-icons/ (spaceIconModel.js leftover) or its scratch file"],
   ["herdr/mods/am-sidebar/spaceIcon.js", "fs.unlink(`${appHome()}/${drop}`)", 2, "a space icon the sidebar wrote under <app home>/space-icons/ (spaceIconModel.js leftover) or its scratch file"],
@@ -196,6 +199,7 @@ export const ALLOWLIST = [
   ["am/runner/main.mjs", "unlinkSync(resolved.socket)", 2, "the member runner's own socket, removed when listen fails and when it stops: never mods/ or layouts/"],
   ["am/runner/spawn.mjs", "renameSync(tmp, config.state)", 1, "the member runner's own member-to-uid state: a temp file beside the state path its template config names is renamed onto it, never mods/ or layouts/"],
   ["am/runner/spawn.mjs", "unlinkSync(tmp)", 1, "the member runner's own state temp file, removed after a failed write or sync: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/hc-socket-mask.mjs", "rmSync(egress.dir, { recursive: true, force: true })", 1, "the sandbox wrapper's own 0700 egress temp folder (makeEgressDir under XDG_RUNTIME_DIR or HOME), holding one pane's egress socket and relay; never mods/ or layouts/"],
 ];
 
 test("every rm, rename, unlink and cp outside layoutSafe.mjs is one the allowlist names", () => {

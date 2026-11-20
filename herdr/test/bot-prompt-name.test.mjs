@@ -1,6 +1,7 @@
 // Golden hashes from origin/dev, with #805 restart advice in the briefing; re-recorded for #955,
 // whose briefing ends a worker with `am worker kill` (the text and its five carriers), and again
-// when the briefing took the command's name, am (the fixture's base is the dev commit under it).
+// when the briefing took the command's name, am (the fixture's base is the dev commit under it),
+// and for #1556, whose briefing tells a seat with a context threshold how to hand off.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

@@ -65,12 +65,16 @@ export function install(rt) {
   })
 
   ctx.on('session/event', (session, event) => {
-    if (!listening()) return
-    const botId = rt.chatOwners.get(session.id)
-    if (botId === undefined) return
-    for (const item of rt.displayItems(session.id, [event])) publish('message', { botId, sessionId: session.id, item })
-    if (event.type === 'tool/call') live()
+    if (event.type === 'tool/call' && rt.chatOwners.has(session?.id)) live()
   })
+
+  // The channel publishes chat entries after its role runtime observes the event.
+  rt.publishChatEvent = (sessionId, event) => {
+    if (!listening()) return
+    const botId = rt.chatOwners.get(sessionId)
+    if (botId === undefined) return
+    for (const item of rt.displayItems(sessionId, [event])) publish('message', { botId, sessionId, item })
+  }
 
   // Attempts being streamed, by id. A turn that answers another Bot is hidden from the
   // chat (turns.js marks it before the model is called), so its text is not streamed.

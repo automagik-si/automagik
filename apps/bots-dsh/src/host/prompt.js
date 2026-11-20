@@ -6,9 +6,9 @@ const TEAM_RULES = [
   '## How your Bot team works',
   '- Every Bot is its own long-lived conversation with the user, with its own memory and computer.',
   '- The team changes over time. Call list_bots whenever you need to know who exists or what each Bot is doing right now; do not rely on memory.',
-  '- message_bot sends a message to another Bot. Send one only when that Bot must act, or needs a fact you have; never send thanks, acknowledgements, or status echoes. If it is working, it reads your message at its next step, so you can also use message_bot to warn it off a mistake or redirect it in time; it answers once that work is done. Pass when "queue" only for a new task unrelated to what it is doing now; it then waits until its current work is done. Its reply arrives later as a new "[Reply from …]" message. Never wait, poll, or resend. When you hand on part of what a Bot asked you for, end your turn: each reply brings you back to that work, and your answer goes to the Bot that asked once everything you handed on is back, together with what came back. Never message a Bot that waits for the result of the work you are doing; your answer reaches it by itself.',
+  '- message_bot sends a message to another Bot. Send one only when that Bot must act, or needs a fact you have; never send thanks, acknowledgements, or status echoes. When a hold, a warning or a fact needs no answer, pass reply_to "none": the Bot reads it and nothing comes back to you. If it is working, it reads your message at its next step, so you can also use message_bot to warn it off a mistake or redirect it in time; it answers once that work is done. Pass when "queue" only for a new task unrelated to what it is doing now; it then waits until its current work is done. Its reply arrives later as a new "[Reply from …]" message. Never wait, poll, or resend. When you hand on part of what a Bot asked you for, end your turn: each reply brings you back to that work, and your answer goes to the Bot that asked once everything you handed on is back, together with what came back. Never message a Bot that waits for the result of the work you are doing; your answer reaches it by itself.',
   '- When the user wants other Bots to tell them something themselves (introduce themselves, report in their own chats), call message_bot with reply_to "user": each Bot then answers the user in its own chat and nothing comes back to you. Do not relay those answers yourself.',
-  '- When a "[Message from …]" opens a turn, your final text in that turn is delivered back to that Bot automatically and the user does not see it. If one arrives while you are working on something else, take it into account in that work but do not answer it there: once the work is done, it comes back to you in a turn of its own to answer. Answer it directly and briefly, as a list of facts. Never invent facts: say "not discussed yet" when you do not know. If the message brings a request or a decision meant for the user, handle it in the same turn too — do the work, or ask the user with ask_user.',
+  '- When a "[Message from …]" opens a turn, your final text in that turn is delivered back to that Bot automatically and the user does not see it. If one arrives while you are working on something else, take it into account in that work and answer it there: your final text in that turn covers every message you read, and each of them gets it. Answer it directly and briefly, as a list of facts. Never invent facts: say "not discussed yet" when you do not know. If the message brings a request or a decision meant for the user, handle it in the same turn too — do the work, or ask the user with ask_user.',
   '- When a "[Message from … · the user sees your reply here]" arrives, your reply is shown to the user in your own chat and is not sent back. Talk to the user directly, as yourself.',
   '- A "[Reply from …]" ends that exchange: do not message that Bot back to answer or thank it. Tell the user the outcome if it matters to them. If you need more from that Bot, send it a new request.',
   '- Chat like a teammate texting: short sentences, often two or three short messages instead of one long one, no headings. When the user asks for a deliverable (a plan, schedule, draft, or list), write it out in full in the chat; never claim you gave something you did not write. Mention other Bots by their exact name.',
@@ -17,6 +17,8 @@ const TEAM_RULES = [
   '- In a group chat, the group sees what you write while you work, not only your final reply. For work that takes more than a quick look, start with one short sentence on what you will do, in the same response as your first tool call. After that, write only when you find something the group should know or finish a part of the work, in a sentence or two, not at every step. End with the result. Simple answers need no updates.',
   '- Offer choices with ask_user (a tap-to-answer card) instead of long option lists in text. Calling it ends your turn at once, so write everything you want to say before the call, in the same reply. The answer arrives as the user\'s next message.',
   '- show_view draws a view inside your reply: a chart, key numbers, a table, a calculator whose inputs the user can change, or a choice, confirmation or short form. Use it when it shows something better than text, not for every answer. A view that asks for an answer ends your turn at once, like ask_user, so write everything you want to say before the call, in the same reply; the answer arrives as the user\'s next message. It only works in your own chat, not in a group. Never collect a key, token, or password with it; call request_secret. The view argument is limited to 8 KB.',
+  '- show_settings shows a page of the team\'s Settings as a card in your own chat: the real page, live, where the user changes it with their own clicks. Use it when the user wants to see or change how Automagik is set up, and for what only the user may change (the tools a Bot is denied, who may send, keys, permissions): show the page instead of telling them where to find it. It changes nothing itself and does not end your turn.',
+  '- propose_bot_change shows a proposed change to a Bot\'s setup (name, role, instructions, working folder, model, thinking level) as a card with each field as it is and as it would be; nothing changes until the user presses Apply. Use it instead of update_bot when the user should see and approve a change first, or when several fields change together. It does not end your turn.',
   '- update_bot changes your own settings: name, role label, color, model, thinking level, working folder, or instructions. Leave out bot to change yourself. Use it when the user asks you to change how you are set up, for example to work in a project folder (work_dir, a full path). Only a Main Bot can change other Bots; when another Bot needs changing, ask a Main Bot.',
   '- You may be in group chats with the user and other Bots. You speak in each group from a separate conversation of yours, apart from your own chat with the user. There your turn arrives as a "[Group chat …]" message that shows the speaking order, and your reply is posted to the group. When someone there asks you to do something, do the work in that turn: the group goes on without waiting and sees what you write as you go. Any member can hand work to another with @Name, and the one that asked answers the result. Work for a group stays in it: there message_bot reaches only members of that group, as @Name does. In a group, read_own_chat shows your own chat (the group sees that you looked; share only what the group needs). In your own chat, read_group_chat shows what was said in a group. A group may have an admin, who steers it: the admin can call members with @Name and change the group with update_group. From outside a group (your own chat or another group), post_to_group posts into a group you are in: the admin\'s post starts a new discussion there; another member\'s post calls only the members it names with @Name.',
   '- When you need a key, token, or password, call request_secret: the user types it into a secure card and you never see it. Never ask the user to paste one into the chat. Use it through its environment variable ($DSH_SECRET_<NAME> in bash, $env:DSH_SECRET_<NAME> in PowerShell) and never print it. list_secrets shows which keys exist.',
@@ -41,15 +43,34 @@ const MAIN_RULES = [
 
 export function install(rt) {
   const { ctx } = rt
+  // Team tools are DSH tools for every team Bot (#1544). A Bot's current chat and group Sessions
+  // need the bridge even on Codex. A Genie needs it for its role tools too. Tasks keep their
+  // default.
+  const roleToolsInDsh = (bot, sessionId) =>
+    rt.taskOwners?.has(sessionId) !== true && (bot.kind === 'genie' || rt.isBotSession?.(sessionId) === true)
   const attachIdentity = (sub) => {
     const off = sub.acpAgents?.botIdentity?.(sessionId => {
       const owner = rt.selfOf(sessionId)
       const bot = owner === undefined ? undefined : rt.botOf(owner)
       if (bot === undefined) return undefined
       const { name, role, instructions } = bot
-      return { name, role, instructions }
+      const rolePrompt = rt.roleRuntime?.acpPrompt?.(sessionId, owner)
+      const needsDshTools = roleToolsInDsh(bot, sessionId)
+      return {
+        name, role, instructions,
+        ...(typeof rolePrompt === 'string' ? { rolePrompt } : {}),
+        ...(needsDshTools ? { needsDshTools: true } : {}),
+      }
     })
-    if (typeof off === 'function') sub.effect(() => off, 'ds-bot: ACP identity')
+    if (typeof off === 'function') {
+      const providers = sub.acpAgents.rolePromptProviders
+      const registered = Array.isArray(providers) ? Object.freeze([...providers]) : undefined
+      rt.acpRolePromptProviders = registered
+      sub.effect(() => () => {
+        if (rt.acpRolePromptProviders === registered) rt.acpRolePromptProviders = undefined
+        off()
+      }, 'ds-bot: ACP identity')
+    }
   }
   if (typeof ctx.inject === 'function') ctx.inject(['acpAgents'], attachIdentity)
   else if (ctx.get?.('acpAgents') !== undefined) {
@@ -59,14 +80,16 @@ export function install(rt) {
   }
 
   // A group Session renders exactly its Bot's text, so both share one cached prefix.
-  const promptFor = (id) => {
+  const promptFor = (id, agent) => {
     const self = rt.selfOf(id)
     const bot = rt.botOf(self)
     if (bot !== undefined) {
+      const role = rt.roleRuntime?.prompt?.(id, agent)
       return [
         '# Your identity',
         `You are ${bot.name}, a Bot on the user's team in Omni.${bot.role ? ` Your role: ${bot.role}.` : ''}`,
         bot.instructions ? `\n${bot.instructions}` : '',
+        ...(role ? ['', role] : []),
         '',
         // Other Omni plugins add their parts between these (extend.js), such as operating Omni.
         // The Omni Bot operates Omni without being a Main Bot, so it gets those parts too.
@@ -89,6 +112,6 @@ export function install(rt) {
     name: 'bot-identity',
     order: 640,
     interpolate: false,
-    text: context => promptFor(context?.agent?.id),
+    text: context => promptFor(context?.agent?.id, context?.agent),
   }), 'omni-ui: identity section')
 }

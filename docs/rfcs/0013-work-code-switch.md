@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-6: #211, #237, #238, #259, #265, #272; 7 (one install) and 8 (shared Bots) open; owner's answers in: D27 and Decided; D27 replaced by the owner 2026-11-10, #1007, designed in [RFC 0030](0030-code-mode-in-the-app.md), Queued: deliveries 7 and 8 re-scoped there) |
+| Status | In delivery (deliveries 1-6: #211, #237, #238, #259, #265, #272; 7 (one install) and 8 (shared Bots) open; owner's answers in: D27 and Decided; D27 replaced by the owner 2026-11-10, #1007, designed in [RFC 0030](0030-code-mode-in-the-app.md), accepted 2026-11-19: deliveries 7 and 8 re-scoped there) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | desktop (3.N), plugin (3.N.P), herdr (3.N.P, [RFC 0011](0011-monorepo-parts-and-releases.md)) |
 | Created | 2026-11-03 |

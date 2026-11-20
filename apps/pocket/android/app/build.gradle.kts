@@ -24,8 +24,8 @@ val bundleGenie = tasks.register<BundlePet>("bundleGeniePet") {
 }
 androidComponents { onVariants { it.sources.assets?.addGeneratedSourceDirectory(bundleGenie, BundlePet::output) } }
 
-// The release key. CI passes it in the environment; a maintainer's machine keeps it in ~/.config/herdr-pocket/signing.properties.
-// Without it, builds are debug-signed and can't update, or be updated by, the published releases.
+// The GitHub release key. CI passes it in the environment; a maintainer's machine keeps it in
+// ~/.config/herdr-pocket/signing.properties. Without it, GitHub builds are debug-signed.
 val signing = Properties().apply {
     val local = File(System.getProperty("user.home"), ".config/herdr-pocket/signing.properties")
     if (local.isFile) local.inputStream().use(::load)
@@ -35,9 +35,29 @@ val signing = Properties().apply {
 }
 // One shared debug key for debug APKs (docs/decisions/shared-debug-signing-key.md): CI passes
 // POCKET_DEBUG_STORE, a local build can pass -Ppocket.debugStore, and without either AGP's own
-// debug key stays. Debug only: the release signing config and the release build type are untouched.
+// debug key stays. The environment variable wins over the Gradle property, and a relative path
+// resolves against this app module's folder. Debug only: the release signing config and the
+// release build type are untouched.
 val sharedDebugStore: String? = System.getenv("POCKET_DEBUG_STORE")?.takeIf { it.isNotBlank() }
     ?: providers.gradleProperty("pocket.debugStore").orNull?.takeIf { it.isNotBlank() }
+// The Play bundle takes an explicitly supplied upload key. GitHub releases use their own config above.
+val playStore = providers.environmentVariable("POCKET_PLAY_SIGNING_STORE").orNull?.takeIf { it.isNotBlank() }
+val playAlias = providers.environmentVariable("POCKET_PLAY_SIGNING_ALIAS").orNull?.takeIf { it.isNotBlank() }
+val playStorePassword = providers.environmentVariable("POCKET_PLAY_SIGNING_PASSWORD").orNull?.takeIf { it.isNotBlank() }
+val playKeyPassword = providers.environmentVariable("POCKET_PLAY_SIGNING_KEY_PASSWORD").orNull?.takeIf { it.isNotBlank() }
+val hasPlaySigning = playStore != null && playAlias != null && playStorePassword != null
+val requirePlaySigning = tasks.register("requirePlaySigning") {
+    doLast {
+        check(hasPlaySigning) {
+            "Set POCKET_PLAY_SIGNING_STORE, POCKET_PLAY_SIGNING_ALIAS and POCKET_PLAY_SIGNING_PASSWORD to sign the Play bundle."
+        }
+    }
+}
+tasks.configureEach {
+    if (name == "packagePlayReleaseBundle" || name == "bundlePlayRelease") {
+        dependsOn(requirePlaySigning)
+    }
+}
 // The release version is the monorepo's one version (AGENTS.md): the root package.json, three levels above this
 // Gradle project, set by bun scripts/version.ts on each release. Never edited here.
 val appVersion: String = (groovy.json.JsonSlurper().parse(rootProject.file("../../../package.json")) as Map<*, *>)["version"] as String
@@ -54,28 +74,49 @@ val versionCodeOverride = providers.gradleProperty("pocket.versionCode").map { i
 
 android {
     namespace = "ai.namastex.automagik"
-    compileSdk = 35
-    defaultConfig { applicationId = "ai.namastex.automagik"; minSdk = 26; targetSdk = 35; versionCode = versionCodeOverride.orElse(versionFromName).get().toInt(); versionName = appVersion; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    compileSdk = 36
+    defaultConfig { applicationId = "ai.namastex.automagik"; minSdk = 26; versionCode = versionCodeOverride.orElse(versionFromName).get().toInt(); versionName = appVersion; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // iroh ships a 9–14 MB library per ABI: phones, and x86_64 for Intel emulators. 32-bit x86 and MIPS phones are long gone.
         ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a", "x86_64") }
-        // Where installed copies look for updates: latest.json on the monorepo's rolling pocket-lane release, which only a
-        // Pocket release replaces (the APK stays on its vX.Y.Z release). A fork, or a local test server, points this at
-        // its own with -Ppocket.updateUrl=.
-        val updates = providers.gradleProperty("pocket.updateUrl").orElse("https://github.com/automagik-si/automagik/releases/download/pocket-lane/latest.json")
-        buildConfigField("String", "UPDATE_URL", "\"${updates.get()}\"") }
+    }
     signingConfigs {
-        // The shared debug key is a debug signing config of its own: the release build type never selects it.
+        // Only debug builds select the shared PR debug key.
         sharedDebugStore?.let { store -> create("sharedDebug") {
             storeFile = file(store); storePassword = "android"; keyAlias = "androiddebugkey"; keyPassword = "android" } }
         if (signing.getProperty("storeFile") != null && signing.getProperty("password") != null) create("pocket") {
             storeFile = file(signing.getProperty("storeFile")); storePassword = signing.getProperty("password")
-            keyAlias = signing.getProperty("alias", "pocket"); keyPassword = signing.getProperty("password") } }
+            keyAlias = signing.getProperty("alias", "pocket"); keyPassword = signing.getProperty("password") }
+        if (hasPlaySigning) create("playUpload") {
+            storeFile = file(requireNotNull(playStore))
+            storePassword = playStorePassword
+            keyAlias = playAlias
+            keyPassword = playKeyPassword ?: playStorePassword
+        }
+    }
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("github") {
+            dimension = "distribution"
+            targetSdk = 35
+            signingConfig = signingConfigs.findByName("pocket") ?: signingConfigs.getByName("debug")
+            // Installed GitHub APKs check the rolling pocket-lane. Forks and local tests can override the URL.
+            val updates = providers.gradleProperty("pocket.updateUrl").orElse("https://github.com/automagik-si/automagik/releases/download/pocket-lane/latest.json")
+            buildConfigField("String", "UPDATE_URL", "\"${updates.get()}\"")
+        }
+        create("play") {
+            dimension = "distribution"
+            targetSdk = 36
+            signingConfig = signingConfigs.findByName("playUpload")
+        }
+    }
     buildFeatures { compose = true; buildConfig = true }
     buildTypes {
         // Debug builds use the release key too when it's here, so a build from Android Studio and the published ones
         // update each other. Else the shared debug key when one is provided, else AGP's own debug key.
         debug { (signingConfigs.findByName("pocket") ?: signingConfigs.findByName("sharedDebug"))?.let { signingConfig = it } }
-        release { isMinifyEnabled = false; signingConfig = signingConfigs.findByName("pocket") ?: signingConfigs.getByName("debug") } }
+        // Release signing comes from the selected flavor.
+        release { isMinifyEnabled = false }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += setOf("META-INF/versions/9/OSGI-INF/MANIFEST.MF", "META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*",
@@ -112,12 +153,12 @@ android {
 // it against the project while the task resolves it against the daemon's working directory. On a
 // read-only home, pin the debug keystore (and the task's default location, so AGP still creates it)
 // to the stable folder settings.gradle.kts uses when no name is adopted. A named folder, a writable
-// home, the release key or a shared debug key keeps AGP's own location.
+// home or the release key keeps AGP's own location.
 val stableDebugKeystore = File(gradle.gradleUserHomeDir, "android-user-home/debug.keystore")
 val emptyAndroidPrefsExport = listOf("ANDROID_USER_HOME", "ANDROID_SDK_HOME", "ANDROID_PREFS_ROOT")
     .any { System.getenv(it)?.isEmpty() == true || System.getProperty(it)?.isEmpty() == true }
 if (emptyAndroidPrefsExport && !File(System.getProperty("user.home")).canWrite() &&
-    android.signingConfigs.findByName("pocket") == null && sharedDebugStore == null) {
+    android.signingConfigs.findByName("pocket") == null) {
     android.signingConfigs.getByName("debug").storeFile = stableDebugKeystore
     tasks.withType(com.android.build.gradle.internal.tasks.ValidateSigningTask::class.java).configureEach {
         val validateTask = this

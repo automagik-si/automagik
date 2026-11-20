@@ -1003,3 +1003,31 @@ test('an adapter event during the first status read leaves the next catalog dirt
   assert.equal((await h.rt.catalog())[0].needsSignIn, true)
   assert.equal(h.reads(), 1)
 })
+
+
+test('validating a model pick leaves blocked Bots alone; a remembered catalog still lifts them', async () => {
+  const { rt } = bench()
+  const lifted = []
+  rt.unblockBots = fix => lifted.push([...fix.keyed])
+  assert.equal(await rt.resolveModel('deepseek/v4-flash', { remember: false }), 'deepseek/v4-flash')
+  assert.deepEqual(lifted, [])
+  await rt.catalog({ fresh: true })
+  assert.equal(lifted.length, 1)
+  assert.ok(lifted[0].includes('deepseek'))
+})
+
+test('a passive catalog miss leaves enumeration, saves and unblocking to the desktop', async t => {
+  const rt = runtime(undefined)
+  const list = t.mock.method(rt.ctx.llm, 'listModels')
+  rt.save = t.mock.fn(async () => {})
+  rt.unblockBots = t.mock.fn()
+  assert.deepEqual(await rt.quietCatalog(() => rt.catalog({ fresh: true })), [])
+  assert.deepEqual(rt.cachedCatalog(), [])
+  assert.equal(list.mock.callCount(), 0)
+  assert.equal(rt.save.mock.callCount(), 0)
+  assert.equal(rt.unblockBots.mock.callCount(), 0)
+  assert.ok((await rt.catalog()).length > 0)
+  assert.equal(list.mock.callCount(), Object.keys(PROVIDERS).length)
+  assert.equal(rt.save.mock.callCount(), 1)
+  assert.equal(rt.unblockBots.mock.callCount(), 1)
+})

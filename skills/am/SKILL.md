@@ -43,6 +43,14 @@ am restart <bot> --fresh  # the same, on a new conversation
 - A Bot that is working or blocked is queued until it is next idle. `am restart --queued` lists the
   queue, and `am restart --cancel <bot>` takes a Bot off it.
 - It does not run from inside the pane it restarts. If you are the Bot, ask the person to run it.
+- A seat over its context threshold can restart from a handoff: `am restart --due` asks it to write
+  `<app home>/automagik-herdr/handoff/<bot>.md` and end its turn, then restarts it fresh from that
+  file (its first new message). `--dry-run` lists the seats without touching them; `--all` covers
+  the projects this CLI remembers. Set the threshold with `am edit <bot> --restart-at N` (a main
+  bot defaults to 250000; `--no-restart-at` clears it). A working or blocked seat is queued. A
+  handoff restart that fails or is dropped is kept in
+  `<app home>/automagik-herdr/handoff-failures.json` and listed by `am restart --queued`; a queued
+  watcher also tells the project's main bot.
 - A Bot that is not running is started.
 - It refuses while helpers run under the Bot's pane, because they would end with it. `--tree` runs
   them again under the new pane; `--force` lets them end.
@@ -57,6 +65,11 @@ am restart <bot> --agent <agent> --model <model> --save  # this run, and the def
 
 `--agent` or `--model` alone works in all three. `am edit <bot> --no-model` clears the model, so
 the agent's own default applies.
+
+A Claude Code Bot's permission mode is its own: `am edit <bot> --permission-mode <mode>` (one of
+`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`; `auto` is the default
+and an empty value restores it). Every start, restart and revive passes it, independent of the
+model. Any other agent has no per-bot permission mode, so a value for one is refused.
 
 ## Workers
 

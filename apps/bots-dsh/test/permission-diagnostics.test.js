@@ -498,6 +498,13 @@ test('acpView keeps the states that say a mode or a bridge does not hold now', (
   assert.equal(acpView(record({ reviewer: { provider: 'acp-codex', model: 'default', ok: true, at: 5 } })).reviewer.route, 'agent')
 })
 
+test('acpView preserves either coding agent usage limit as a reviewer failure code', () => {
+  for (const code of ['ACP_CLAUDE_USAGE_LIMIT', 'ACP_CODEX_USAGE_LIMIT']) {
+    const view = acpView(record({ reviewer: { provider: 'acp-codex', model: 'default', ok: false, code, at: 5 } }))
+    assert.deepEqual(view.reviewer, { route: 'agent', ok: false, code, at: 5 })
+  }
+})
+
 test('acpView lets nothing free-form through, whatever the record holds', () => {
   const SECRETS = ['sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', '/home/someone/project/.env', 'someone@example.com', 'my-own-provider/my-model', 'please delete every file']
   for (const secret of SECRETS) {

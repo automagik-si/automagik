@@ -1,6 +1,6 @@
 {
   "name": "@automagik/bots-dsh",
-  "version": "3.155.0",
+  "version": "3.160.2",
   "description": "Omni for DeepSeek Harness: a team of long-lived Bots with Omni as the Main Bot; its channels and canvases come with @automagik/omni-channels-dsh and @automagik/omni-canvas-dsh",
   "keywords": [
     "dsh-plugin",
@@ -25,7 +25,10 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./read-scope-files": "./src/host/read-scope-files.js",
+    "./read-scope-search": "./src/host/read-scope-search.js",
     "./web-search": "./web-search.js",
+    "./member-wall/fs": "./src/host/member-wall/fs.js",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
@@ -67,10 +70,40 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-fs-local": "*",
+    "@deepseek-ai/dsh-fs-patch": "*",
+    "@deepseek-ai/dsh-fs-sandbox": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-scope": "*",
+    "@deepseek-ai/dsh-subprocess-local": "*",
+    "@deepseek-ai/dsh-tool-fs": "*",
+    "@deepseek-ai/dsh-tool-fs-search": "*",
     "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-util-ripgrep": "*",
     "@deepseek-ai/dsh-web": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-fs-local": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-fs-patch": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-fs-sandbox": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subprocess-local": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-fs": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-fs-search": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-util-ripgrep": {
+      "optional": true
+    }
   },
   "dsh": {
     "client": {

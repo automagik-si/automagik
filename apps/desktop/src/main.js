@@ -8,24 +8,27 @@
 // window too (bot-views.js), over the Bot browser panel, and the Bot drives it through a
 // loopback CDP relay (bot-relay.js) that dsh asks for over its IPC channel, with its cursor
 // drawn in a click-through window over the tab (bot-cursor.js).
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, powerMonitor, session, shell, systemPreferences, WebContentsView } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, powerMonitor, safeStorage, session, shell, systemPreferences, WebContentsView } from 'electron'
 import updaterModule from 'electron-updater'
 import { appendFileSync, createWriteStream, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { linkInArgs, parseDeepLink, registerSchemes } from './deeplink.js'
+import { startAccount as beginAccount } from './account-wiring.js'
+import { readSignInSettings, settingsFileOf as signInFileOf } from './sign-in.js'
 import { fade, PAGE_IN_CSS } from './motion.js'
 import { noteRestart, restartLine, steps } from './timeline.js'
 import { startUp } from './startup.js'
 import { dismissSplash, markSplashStep, showUpdateSplash } from './splash.js'
 import { PUBLISHERS, TRIAL_MS, beforeStart, checkLane, confirm as confirmLane, installedVersions, laneMemory, stage as stageLane, stagedOf, stagedVersion, trialFailed } from './lane.js'
 import {
-  ANONYMOUS_ID, appHome, automagikHome, backupSettingsOrLog, busyFileOf, dshEnv, dshRun,
+  ANONYMOUS_ID, appHome, automagikHome, backupSettingsOrLog, busyFileOf, dshEnv, dshRun, dshWindowMarker,
   forgetDshLogins, launchUrlFileOf, privacyFileOf, privacyPatchOf, guardContents, installProfile,
   launchPort, pageUrlOf, pinProfileStore, portFileOf, preloadOf, resourcesOf, serveDsh,
   storeLayoutOf, writeTools,
 } from './dsh.js'
+import { launchInstance } from './owner-record.js'
 import { BotCursor } from './bot-cursor.js'
 import { BotRelay } from './bot-relay.js'
 import { BotViews, isBotId, isTabId } from './bot-views.js'
@@ -63,7 +66,8 @@ let dsh = null
 // The dsh this start runs, whichever process that is now (a retry on another port replaces the
 // first): every way out stops it, and one that spawns after that is stopped at once. A restart of
 // DSH alone, for plugins the lane staged (auto-apply.js), stops it and makes a new one.
-let dshProcess = dshRun()
+const windowMarker = dshWindowMarker()
+let dshProcess = dshRun({ beforeStop: windowMarker.clear })
 let window = null
 let page = null
 let quitting = false
@@ -75,6 +79,10 @@ let ready = false
 // The update the title bar shows ({ version, state, percent }), once there is one.
 let update = null
 let updates = null
+// The person's Automagik ID sign-in (RFC 0024 delivery 1; sign-in.js, account.js). Off unless
+// <home>/signin.json turns it on, and the app ships no issuer or client id of its own. The
+// access token stays in this process; only status crosses the page's bridge.
+let account = null
 // The plugin lane (lane.js): plugins staged for the next start, this start's trial, and where
 // the profile and DSH's own version are.
 let laneReady = null
@@ -260,6 +268,7 @@ async function launch() {
   mkdirSync(join(home, 'logs'), { recursive: true })
   started.mark(`${app.getVersion()} ready`)
   openWindow()
+  startAccount()
   nativeTheme.on('updated', followTheme)
   const resources = resourcesOf({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() })
   // dsh's boot is the long wait of a start: only what dsh reads as it starts comes before it, and
@@ -286,7 +295,10 @@ async function launch() {
     // Then the plugins the lane staged go in, and this start is their trial (lane.js).
     lane: () => { if (app.isPackaged) laneTrial = beforeStart({ home, target: laneProfile, log: laneLog }) },
     // Electron's own binary runs dsh as Node, so the app ships one runtime.
-    tools: () => { dshTools = { resources, binDir: writeTools({ dir: join(home, 'bin'), node: process.execPath, pnpm: resources.pnpm }) } },
+    tools: () => {
+      dshTools = { resources, binDir: writeTools({ dir: join(home, 'bin'), node: process.execPath, pnpm: resources.pnpm }) }
+      instance ??= launchInstance({ home, log: reason => startLog(`${new Date().toISOString()} start: ${reason}\n`) })
+    },
     spawn: port => spawnDsh(port, started),
     // Earlier starts' dsh logins would pile up until dsh refuses the page (dsh.js forgetDshLogins).
     // dsh's page has the default session, and cookies ignore the port.
@@ -313,9 +325,43 @@ async function launch() {
   })
 }
 
+// The person's sign-in (sign-in.js, account.js): constructed once, after app ready. With the
+// setting off (the default) no store is opened, no browser is opened, no listener is made and no
+// request leaves; the page only ever sees a status. A secure-token store is created when the
+// setting is on, so Linux's fixed-key fallback is detected by C1.1 and the person is told why
+// they will sign in again at each launch.
+const signInLog = line => { try { appendFileSync(join(home, 'logs', 'signin.log'), `${new Date().toISOString()} ${line}\n`) } catch {} }
+function startAccount() {
+  let settings
+  try {
+    settings = readSignInSettings(signInFileOf(home))
+  } catch {
+    settings = { enabled: false, issuer: null, clientId: null, problem: null }
+  }
+  // account-wiring.js makes the store and the flow only when the setting is on and complete, so
+  // with the default (off) nothing here reads safeStorage, binds a port or opens a browser.
+  account = beginAccount({
+    settings,
+    safeStorage,
+    userData: app.getPath('userData'),
+    platform: process.platform,
+    fetch: globalThis.fetch,
+    openExternal: url => shell.openExternal(url),
+    log: signInLog,
+    onDirty: publishAccount,
+  }).account
+  void account.start().catch(error => signInLog(`account: start failed (${error?.message ?? error})`))
+}
+
+// The status the page may show, pushed whenever it changes (preload.cjs `omniDesktop.account`).
+function publishAccount(status) {
+  if (page && !page.webContents.isDestroyed()) page.webContents.send('automagik-account', status)
+}
+
 // What dsh is started with (the app's resources, and the tools on its PATH), for a start and for
 // each restart of DSH alone.
 let dshTools = null
+let instance
 let dshLog = null
 
 // A start that waited for dsh's last port (dsh.js launchPort) notes it in `steps` (start.log).
@@ -341,7 +387,13 @@ function spawnDsh(port, steps) {
   }
   // Only a port dsh bound and served on is kept for the next launch (dsh.js serveDsh).
   const onUnkept = error => startLog(`${new Date().toISOString()} start: port not kept (${error.message})\n`)
-  const env = dshEnv({ home, electronAsNode: true, binDir, preload, privacy })
+  const run = dshProcess
+  let marker
+  // Called for each child, including a retry if the first port was taken.
+  const env = () => {
+    marker = windowMarker.start()
+    return dshEnv({ home, electronAsNode: true, binDir, preload, privacy, windowDigest: marker.digest, instanceId: instance?.instanceId })
+  }
   // dsh's web app records its launch URL here (runtime patch web-launch-token-persistence); the
   // launcher reads it when dsh's output is unavailable.
   const urlFile = launchUrlFileOf(join(home, 'dsh'))
@@ -358,6 +410,7 @@ function spawnDsh(port, steps) {
     },
   })
     .then((running) => {
+      if (run === dshProcess && !run.stopped) marker.ready(running, dshOrigin)
       dsh = running
       steps.mark('dsh ready')
       // Only the dsh that runs now: one stopped for a restart of DSH alone exits on purpose.
@@ -382,6 +435,7 @@ function makePage() {
       spellcheck: process.platform === 'darwin' || readChoices(privacyFileOf(home)).spellcheck === true,
     },
   })
+  windowMarker.bind(page.webContents)
   page.setBackgroundColor(tableColor(nativeTheme.shouldUseDarkColors))
   page.webContents.on('before-input-event', (event, input) => shortcut(event, input))
   // dsh's page loads again: its browser panel is gone until it draws again.
@@ -549,7 +603,7 @@ function restartForLane({ away = false, why } = {}) {
 }
 
 // What a plugin is called in the app's own words (the update log, the frame's status).
-const PLUGIN_NAMES = { '@automagik/bots-dsh': 'Bot team', '@automagik/welcome-dsh': 'Welcome', '@automagik/acp-dsh': 'ACP agents', '@automagik/genie-dsh': 'Genie', '@automagik/locale-pt-br-dsh': 'Português (Brasil)' }
+const PLUGIN_NAMES = { '@automagik/bots-dsh': 'Bot team', '@automagik/welcome-dsh': 'Welcome', '@automagik/acp-dsh': 'ACP agents', '@automagik/genie-dsh': 'Genie', '@automagik/locale-pt-br-dsh': 'Português (Brasil)', '@automagik/vault-dsh': 'Vault (Bitwarden)' }
 const changeText = changes => changes.map(({ name, from, to }) => `${PLUGIN_NAMES[name] ?? name.replace(/^@[^/]+\//, '')} ${from ? `${from} → ` : ''}${to}`).join(', ')
 
 // Put the staged plugins in now, with DSH restarted alone (auto-apply.js): the window stays, the
@@ -634,7 +688,7 @@ async function cycleDsh(prepare, status, reason = forcing ? 'force' : 'lane') {
     await prepareAndStop(reason)
     out.mark('dsh stopped')
     if (quitting) throw appStopped('the app is quitting')
-    dshProcess = dshRun()
+    dshProcess = dshRun({ beforeStop: windowMarker.clear })
     const prepared = prepare()
     const running = await spawnDsh(await launchPort(portFileOf(home), undefined, { onWaited: portWaited(out) }), out)
     await forgetDshLogins(session.defaultSession.cookies, dshOrigin).catch(() => {})
@@ -818,6 +872,14 @@ ipcMain.handle('automagik-updates-auto-apply', (event, on) => {
   publishUpdate()
   return saved
 })
+
+// The person's account, for the page's bridge (preload.cjs `omniDesktop.account`). The status
+// carries no token; signing in opens the system browser from here and waits for its one
+// loopback request; signing out clears the stored refresh token. The access token never crosses
+// this boundary, and `account.accessToken()` is called only from main.js itself.
+ipcMain.handle('automagik-account-status', event => (fromPage(event) && account ? account.status() : null))
+ipcMain.handle('automagik-account-signin', async event => (fromPage(event) && account ? await account.signIn() : null))
+ipcMain.handle('automagik-account-signout', async event => (fromPage(event) && account ? await account.signOut() : null))
 
 // Code mode (RFC 0013, deliveries 1, 2 and 4): Herdr's state, and its window brought forward on
 // a click in the page (preload.cjs `omniDesktop.herdr`). The page sends a Bot id and, to an
@@ -1163,7 +1225,7 @@ function harden(origin) {
 }
 
 app.on('window-all-closed', () => app.quit())
-app.once('will-quit', () => { botRelay.dispose(); botViews.dispose(); botCursor.dispose() })
+app.once('will-quit', () => { account?.close(); botRelay.dispose(); botViews.dispose(); botCursor.dispose() })
 // Cmd+Q, the window's close button and window-all-closed all come through here: a running bot
 // is asked about first. The quit is held while the guard answers; Cancel leaves the app and dsh
 // running, and clean/Quit runs the clean stop (stopAndQuit). A busy file that is missing or

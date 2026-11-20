@@ -192,7 +192,7 @@ the Genie pet bundling task reads, plus the root `package.json`) into a scratch 
 `git archive`, put the test in its `app/src/test/java/ai/namastex/automagik/`, give it a
 `local.properties` with the SDK path, and set `pocket.updateUrl` in its `gradle.properties` to a
 closed loopback address so the updater sends nothing. Then, with `POCKET_SHOTS` naming an
-output folder, run `./gradlew --no-daemon :app:testDebugUnitTest --tests
+output folder, run `./gradlew --no-daemon :app:testGithubDebugUnitTest --tests
 'ai.namastex.automagik.PocketDemoShotsTest'` there. The test never goes into `apps/pocket`.
 Checkout, renderer and digests are under `pocketCapture` and `images` in the manifest.
 
@@ -206,7 +206,9 @@ rectangle of the same view's dark capture, which the page shows to a visitor who
 is dark. On phone-width screens the home and Desktop pages show the phone-width capture
 instead of a shrunken window. `assets/art/manifest.json` records each file's source, the
 source's SHA-256, the rectangle and the output's SHA-256; the page test checks all of them,
-and that every capture-derived file's source digest matches this manifest.
+re-derives every committed file from its source rectangle so a stale crop cannot pass on a
+self-consistent manifest, and checks that every capture-derived file's source digest matches
+this manifest.
 
 ## Re-capture, 2026-11-12
 

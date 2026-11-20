@@ -11,7 +11,7 @@
 // someone's edit since, is never lost. A project on a linked machine (props.machine, or the
 // focused space's) is read there and written there through herdr-core (bots.js writeBots),
 // by the same rule, and its bots start, restart, attach and detach there (the CLI's --machine);
-// What happened stays this computer's for now (automagik#206). Apache-2.0.
+// What happened shows the events this computer recorded for the bot (automagik#206). Apache-2.0.
 
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Popover, Button, Scrollbar } from "gpui-base";
@@ -71,6 +71,10 @@ export class BotForm {
     if (this.mode === "menu") {
       // The sections opened in place ("prompt", "inspect"), the prompt as read (its file's
       // text is the save's snapshot) and the history as the CLI answered it.
+      // #1172: the stored pairing, from the sidebar's roster snapshot (a linked machine's may be
+      // stale): a paired Hermes bot has no fresh-session or swap restart to offer, only Configure.
+      this.paired = Boolean(this.p.hermes && typeof this.p.hermes === "object");
+      this.hermesProfile = this.paired && typeof this.p.hermes.profile === "string" ? this.p.hermes.profile : null;
       this.shown = new Set();
       this.prompt = TextareaState.new({ placeholder: "What it does, how it works, whom it reports to" });
       this.prompt.set_auto_grow(4, 10);
@@ -219,6 +223,8 @@ export class BotForm {
           const r = await exec("/bin/mv", [from, to]);
           if (r?.code !== 0) throw new Error(`mv failed (${r?.stderr || `exit ${r?.code}`})`);
         },
+        // #809: clean up this refresh's own temp file after a failed write or move.
+        remove: (path) => fs.unlink(path),
         exec: async (command, args, options) => {
           const file = await this.programFile(command);
           if (!file) throw new Error(`${command} isn't installed`);
@@ -617,7 +623,7 @@ export class BotForm {
     }
     if (section === "inspect" && !this.history) {
       cx.spawn(async (cx) => {
-        const r = await runCli(["history", this.p.bot, "--project", this.p.project]);
+        const r = await runCli(["history", this.p.bot, "--project", this.p.project, ...(this.machine ? ["--machine", this.machine] : [])]);
         this.history = r.code === 0 && r.out ? r.out : { error: r.err || `am history failed (exit ${r.code}).` };
         cx.notify();
       });
@@ -764,6 +770,8 @@ export class BotForm {
     const local = (x) => (typeof x === "string" && x && (this.machine ? x.startsWith(`${this.machine}/`) : !x.includes("/")) ? x : null);
     const pane = local(this.p.terminal), live = local(this.p.live);
     const items = new Set(menuItems({ planned: Boolean(this.p.planned), live, pane }));
+    // #1172: both contradict an explicit Bot Chat binding; the CLI would only refuse them.
+    if (this.paired) { items.delete("restart-fresh"); items.delete("restart-on"); }
     const item = (id, label, onClick) => h_flex().id(id).h(30).px(10).items_center().rounded(7).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => onClick(cx)).child(label);
     const label = (s) => div().px(10).pt(8).pb(2).text_size(10).font_semibold().text_color(t.dim).child(s);
@@ -771,7 +779,10 @@ export class BotForm {
     const note = (s) => div().px(10).text_size(12).text_color(t.muted).child(s);
     const fresh = items.has("restart-fresh") || this.freshable;
     return v_flex().p(6).gap(2)
-      .child(item("menu-configure", "Configure…", () => this.edit(project, bot)))
+      .child(item("menu-configure", this.paired ? "Configure… (unpair)" : "Configure…", () => this.edit(project, bot)))
+      .when(this.paired, (el) => el.child(div().id("menu-paired-note").px(10).pt(4).pb(6).text_size(12).text_color(t.muted)
+        .child(`Paired to its Hermes Bot Chat${this.hermesProfile ? ` (profile ${this.hermesProfile})` : ""}. `
+          + "A new conversation or another agent needs that pairing cleared first: Configure… clears it.")))
       .child(item("menu-prompt", `Prompt ${fold("prompt")}`, (cx) => this.toggle("prompt", cx)))
       .when(this.shown.has("prompt"), (el) => el.child(this.promptView(t)))
       .when(items.has("start") || items.has("focus"), (el) => el.child(label("RUN")))
@@ -801,19 +812,21 @@ export class BotForm {
         : this.swapAgents.map((a) => item(`menu-restart-on-${a.key}`, `    ${a.name ?? a.key}`, (cx) => this.restart(project, bot, cx, { agent: a.key })))))
       .when(items.has("attach"), (el) => el.child(item("menu-attach", this.busy === "attach" ? "Attaching…" : `Attach to the focused pane (${pane})`, (cx) => this.attach(project, bot, cx))))
       .when(items.has("detach"), (el) => el.child(item("menu-detach", this.busy === "detach" ? "Detaching…" : `Detach from ${live}`, (cx) => this.detach(cx))))
-      // What happened reads this computer's ledgers; a linked machine's comes with part (c).
-      .when(!this.machine, (el) => el.child(label("INSPECT"))
-        .child(item("menu-inspect", `What happened ${fold("inspect")}`, (cx) => this.toggle("inspect", cx)))
-        .when(this.shown.has("inspect"), (el) => el.child(this.historyView(t, note))))
-      .when(Boolean(this.machine), (el) => el.child(div().id("menu-remote-note").px(10).pt(6).pb(4).text_size(12).text_color(t.muted)
-        .child(`On ${this.machine}. What happened isn't shown for its bots yet.`)));
+      .child(label("INSPECT"))
+      .child(item("menu-inspect", `What happened ${fold("inspect")}`, (cx) => this.toggle("inspect", cx)))
+      .when(Boolean(this.machine), (el) => el.child(note(`Attach, detach and end events recorded by this computer for ${this.machine}.`)
+        .id("menu-remote-note").pt(6).pb(4)))
+      .when(this.shown.has("inspect"), (el) => el.child(this.historyView(t, note)));
   }
 
   // A linked machine that isn't answering (its rows drawn from the last run of Herdr,
   // props.stale): nothing to press until it is back.
   remoteMenu(t) {
+    const paired = this.paired
+      ? ` It is paired to its Hermes Bot Chat${this.hermesProfile ? ` (profile ${this.hermesProfile})` : ""}: Configure… unpairs it once ${this.machine} is back.`
+      : "";
     return v_flex().p(6).child(div().id("menu-remote-note").px(10).pt(6).pb(4).text_size(12).text_color(t.muted)
-      .child(`${this.machine} isn't answering, so ${this.p.name} shows as last seen. Its menu works once it is back.`));
+      .child(`${this.machine} isn't answering, so ${this.p.name} shows as last seen. Its menu works once it is back.${paired}`));
   }
 
   // The prompt in place: the bot's instructions, Save writes them as the Edit form would.
@@ -842,8 +855,9 @@ export class BotForm {
     if (this.history.error) return box.child(div().px(10).text_size(12).text_color(t.ansi1).child(this.history.error));
     const { timeline, workers, transcript } = historyLines(this.history);
     const line = (id, s) => div().id(id).px(10).min_w(0).truncate().text_color(t.foreground).child(s);
+    const empty = this.machine ? `Nothing recorded by this computer for ${this.machine} yet.` : "Nothing recorded on this computer yet.";
     return box
-      .children(timeline.length ? timeline.map((e, i) => line(`menu-history-${i}`, e.text)) : [note("Nothing recorded on this computer yet.")])
+      .children(timeline.length ? timeline.map((e, i) => line(`menu-history-${i}`, e.text)) : [note(empty)])
       .when(Boolean(transcript), (el) => el.child(h_flex().id("menu-transcript").px(10).gap(6).items_center().rounded(6).cursor_pointer()
         .hover((s) => s.bg(t.hover)).tooltip(transcript)
         .on_click((_e, cx) => { cx.write_to_clipboard(transcript); this.copiedTranscript = true; cx.notify(); })

@@ -15,6 +15,17 @@ import { useLinger } from './motion.js'
 const DIALOG_EXIT_MS = 160
 const MENU_EXIT_MS = 120
 
+// Every openMenu() makes a new menu object. Keying the menu by that object remounts it on
+// every open — including a reopen at the same kind, id and place inside the 120ms exit
+// linger — so a confirmation from the closed menu cannot answer a click in the new one.
+const menuKeys = new WeakMap()
+let nextMenuKey = 0
+function menuKey(menu) {
+  let key = menuKeys.get(menu)
+  if (key === undefined) { key = ++nextMenuKey; menuKeys.set(menu, key) }
+  return key
+}
+
 export function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity, useWork, useRegistry, useBrowserPages, useBrowserTabs, useBrowserHolds, useComputer, useUpdate, useFrame, actions }) {
   const roster = useRoster(value => value)
   const ui = useUi(value => value)
@@ -29,6 +40,7 @@ export function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useA
   useEffect(() => {
     if (previous.current === current) return
     previous.current = current
+    if (ui.voice && ui.voice !== current) actions.closeVoice()
     if (current) actions.followPanel?.(current)
   }, [current])
   const open = ui.details ? { id: ui.details, view: ui.view ?? 'details', renaming: ui.renaming, tab: ui.tab, side: ui.side } : null
@@ -64,7 +76,7 @@ export function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useA
     ui.palette ? createPortal(h(CommandPalette, { key: ui.palette.token, start: ui.palette.query, token: ui.palette.token, roster, actions, useSessions }), document.body) : null,
     ui.exchange ? createPortal(h(ExchangeDialog, { pair: ui.exchange, roster, actions }), document.body) : null,
     ui.voice ? createPortal(h(VoiceMode, { key: ui.voice, sessionId: ui.voice, roster, actions, useSessions, useSessionStatus }), document.body) : null,
-    menu ? createPortal(h(ContextMenu, { key: `${menu.kind ?? ''}:${menu.id}:${menu.x}:${menu.y}`, menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
+    menu ? createPortal(h(ContextMenu, { key: menuKey(menu), menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
     settings ? createPortal(h(SettingsDialog, { page: settings.page, id: settings.id, roster, actions, useUpdate, leaving: settingsLeaving }), document.body) : null,
     owner ? createPortal(h(MemoryDialog, { key: owner.id, owner, actions, leaving: memoryLeaving }), document.body) : null)
 }

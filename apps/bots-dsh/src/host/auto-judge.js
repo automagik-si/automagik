@@ -53,7 +53,7 @@ const secretPath = raw => {
   const parts = value.replace(/\\/g, '/').split('/')
   const name = parts.at(-1)
   if (value.includes('<') && !value.startsWith('<')) return value.split('<').some(part => part !== '' && secretPath(part))
-  if (name === '.envrc' || /^\/proc\/(self|\d+)\/environ$/.test(value)) return true
+  if (name === '.envrc' || name.toLowerCase() === '.vault-token' || /^\/proc\/(self|\d+)\/environ$/.test(value)) return true
   if (/^\.env(?:\..+)?$/.test(name) && !/^\.env\.(example|sample|template|dist)$/.test(name) && !/\.(d\.ts|[cm]?[jt]s|py|go|rs|md)$/.test(name)) return true
   if (['.netrc', '.git-credentials', '.npmrc', '.pypirc', 'application_default_credentials.json'].includes(name)) return true
   if (parts.includes('.ssh') && !name.endsWith('.pub') && /^(id_.+|.+\.(pem|key))$/.test(name)) return true
@@ -61,11 +61,52 @@ const secretPath = raw => {
 }
 const filePaths = (value, depth = 0) => depth < 4 && value && typeof value === 'object'
   ? Object.entries(value).flatMap(([key, item]) => /^(file_path|filePath|file|path|paths)$/.test(key) ? strings(item) : filePaths(item, depth + 1)) : []
+const MANAGER_READS = new Map([
+  ['bw', ['get', 'list', 'export', 'unlock', 'serve']],
+  ['bws', ['secret get', 'secret list', 'run']],
+  ['op', ['read', 'run', 'inject', 'item get']],
+  ['vault', ['read', 'kv get', 'kv list', 'list', 'token lookup', 'token create', 'print token']],
+  ['pass-cli', ['item view', 'item get', 'item run', 'run', 'item show', 'item totp', 'inject', 'export',
+    'item attachment', 'pat create', 'pat renew', 'personal-access-token create', 'personal-access-token renew', 'agent create', 'agent renew']],
+  ['keepassxc-cli', ['show', 'export']],
+  ['secret-tool', ['lookup', 'search']],
+])
+const MANAGER_OPTIONS = new Map([
+  ['bw', ['--session']],
+  ['op', ['--account', '--config', '--encoding', '--format', '--session']],
+  ['bws', ['--access-token', '--config-file', '--profile', '--server-url', '--output', '-t', '-o', '--color']],
+])
+// Read past global options first, then also ask when an unfamiliar option may have shifted the verbs.
+function managerRead(words) {
+  const executable = words[0]?.split(/[/\\]/).at(-1).toLowerCase().replace(/\.(exe|cmd)$/, '')
+  const args = words.slice(1)
+  if (executable === 'dbus-monitor') return true
+  if (['gdbus', 'busctl', 'dbus-send'].includes(executable)) {
+    if (args.some(word => /(?:^|[^\w.])org\.freedesktop\.secrets(?![\w.])|\bGetSecret\b/.test(word))) return true
+    if (executable !== 'dbus-send' && args.includes('monitor')) return true
+    if (executable === 'busctl' && args.includes('capture')) return true
+  }
+  if (/^python(?:[23](?:\.\d+)?)?$/.test(executable) && /\b(?:secretstorage|keyring)\b/.test(args.join(' '))) return true
+  if (executable === 'keyring' && args.includes('get')) return true
+  const verbs = MANAGER_READS.get(executable)
+  if (!verbs) return false
+  const options = MANAGER_OPTIONS.get(executable) ?? []
+  if (executable === 'pass-cli' && args.includes('--show-secrets')) return true
+  const operands = []
+  for (let at = 0; at < args.length && operands.length < 2; at++) {
+    const word = args[at]
+    if (options.includes(word)) at++
+    else if (!word.startsWith('-')) operands.push(word)
+  }
+  const matches = (first, next) => verbs.includes(first) || verbs.includes(`${first} ${next}`)
+  return matches(...operands) || args.some((word, at) => matches(word, args[at + 1]))
+}
 function secretCommand(words) {
+  if (managerRead(words)) return true
   const text = words.join(' ')
   if (/^(export|declare -[a-z]*x[a-z]*)( -p)?$/.test(text)) return true
   if (/^git credential fill\b/.test(text) || (/^gh auth status\b/.test(text) && words.some(word => /^(-t|--show-token)$/.test(word)))) return true
-  if (/^(gh auth token|gcloud auth print-(access|identity)-token|op read|vault (kv get|read)|aws secretsmanager get-secret-value|kubectl get secrets?)\b/.test(text)) return true
+  if (/^(gh auth token|gcloud auth print-(access|identity)-token|op read|aws secretsmanager get-secret-value|kubectl get secrets?)\b/.test(text)) return true
   if (/^security find-(generic|internet)-password\b/.test(text) && words.some(word => /^-[wg]$/.test(word))) return true
   if (/^aws ssm get-parameters?\b/.test(text) || /^aws ssm get-parameters-by-path\b/.test(text)) return words.includes('--with-decryption')
   return /^(env|printenv)$/.test(words[0]) && (words.length === 1 || words.slice(1).some(word => /TOKEN|SECRET|PASSWORD|API_KEY|KEY$/i.test(word)))
@@ -192,6 +233,8 @@ function withoutHeredocs(text) {
   return { text: kept.join('\n'), ran }
 }
 export const COMMAND_MAX = 32_000
+const powerShell = /^(?:.*[/\\])?(?:pwsh|powershell)(?:\.exe)?$/i
+const powerShellFlag = (word, at) => at > 0 && /^-(command|c)$/i.test(word)
 function hardCommand(raw, context, workdir, depth = 0) {
   // Too long to read with care in the step's own time: the person decides.
   if (raw.length > COMMAND_MAX) return true
@@ -236,10 +279,10 @@ function hardCommand(raw, context, workdir, depth = 0) {
       return false
     }
     if (['pushd', 'popd'].includes(command[0])) { cwd = null; return false }
-    if (/^(bash|sh|zsh|dash|ksh)$/.test(command[0])) {
-      const flag = command.findIndex((word, at) => at > 0 && /^-[^-]*c/.test(word))
-      if (flag !== -1 && command[flag + 1] !== undefined && (depth >= 3 || hardCommand(command[flag + 1], context, cwd, depth + 1))) return true
-    }
+    // PowerShell's command body goes through the same checks as bash -c.
+    const flag = powerShell.test(command[0]) ? command.findIndex(powerShellFlag)
+      : /^(bash|sh|zsh|dash|ksh)$/.test(command[0]) ? command.findIndex((word, at) => at > 0 && /^-[^-]*c/.test(word)) : -1
+    if (flag !== -1 && command[flag + 1] !== undefined && (depth >= 3 || hardCommand(command[flag + 1], context, cwd, depth + 1))) return true
     return command.some(secretPath) || secretCommand(command) || sendsMessage(command) || sharedPush(command) || outsideDelete(command, context.root, cwd)
   }
   for (const token of tokens) {
@@ -249,7 +292,12 @@ function hardCommand(raw, context, workdir, depth = 0) {
   return check()
 }
 // An argv `['bash', '-lc', 'git push origin main']` is the command its shell runs, quoted as one word.
-const argvShell = value => Array.isArray(value) && /^(?:.*\/)?(bash|sh|zsh|dash|ksh)$/.test(value[0]) && /^-[a-z]*c[a-z]*$/.test(value[1]) && typeof value[2] === 'string' ? [value[2]] : []
+function argvShell(value) {
+  if (!Array.isArray(value)) return []
+  const flag = powerShell.test(value[0]) ? value.findIndex(powerShellFlag)
+    : /^(?:.*\/)?(bash|sh|zsh|dash|ksh)$/.test(value[0]) && /^-[a-z]*c[a-z]*$/.test(value[1]) ? 1 : -1
+  return flag !== -1 && typeof value[flag + 1] === 'string' ? [value[flag + 1]] : []
+}
 const argvShells = (value, depth = 0) => depth < 4 && value && typeof value === 'object' ? [...argvShell(value), ...Object.values(value).flatMap(item => argvShells(item, depth + 1))] : []
 export function hardToUndo(step, context = {}) {
   const named = teamToolOf(step.tool)
@@ -261,8 +309,12 @@ export function hardToUndo(step, context = {}) {
   // The step's tool too: a mirror step's is the call's title, where an agent may send the whole command.
   const title = typeof step.tool === 'string' ? [step.tool] : []
   const workdir = step.args?.workdir ?? step.args?.cwd
+  const commands = commandArgs(step.args)
+  // Terminal input can run a command whether the tool submits it now or leaves it at the prompt.
+  const terminalText = tool === 'terminal_send' && typeof step.args?.text === 'string' ? [step.args.text] : []
   return [...commandTexts(step.args), ...title].some(text => HARD.some(pattern => pattern.test(text)))
-    || [...commandTexts(commandArgs(step.args), 0, false), ...argvShells(commandArgs(step.args)), ...title].some(text => hardCommand(text, context, typeof workdir === 'string' ? workdir : undefined))
+    || commands.some(command => Array.isArray(command) && command.every(word => typeof word === 'string') && managerRead(command))
+    || [...commandTexts(commands, 0, false), ...argvShells(commands), ...title, ...terminalText].some(text => hardCommand(text, context, typeof workdir === 'string' ? workdir : undefined))
 }
 // A missing folder stays conservative; a broken sender hook asks the person.
 export function hardContext(rt, sessionId, step, session) {

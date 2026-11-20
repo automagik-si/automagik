@@ -82,6 +82,32 @@
       ]
     },
     {
+      "id": "acp-real-login-claude",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-login.test.js"],
+      "select": "real Claude Code:",
+      "env": ["AUTOMAGIK_TEST_LIVE_LOGIN", "AUTOMAGIK_TEST_CLAUDE"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Claude Code sign-in link-start check in an isolated home.",
+      "details": [
+        "PR CI installs no Claude Code and does not opt in.",
+        "Scheduled acp-drift.yml enables the check and requires it to run."
+      ]
+    },
+    {
+      "id": "acp-real-login-codex",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-login.test.js"],
+      "select": "real Codex:",
+      "env": ["AUTOMAGIK_TEST_LIVE_LOGIN", "AUTOMAGIK_TEST_CODEX"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Codex sign-in link-start check in an isolated home.",
+      "details": [
+        "PR CI installs no Codex and does not opt in.",
+        "Scheduled acp-drift.yml enables the check and requires it to run."
+      ]
+    },
+    {
       "id": "id-pages-browser",
       "cwd": "apps/id",
       "files": ["test/pages.test.ts"],

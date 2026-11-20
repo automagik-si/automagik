@@ -6,6 +6,8 @@
 !build/versions.json
 !build/dsh-launch
 !src/dsh.js
+!src/owner-record.js
+!src/profile-patch.mjs
 !src/child-paths.js
 !src/close-inherited.cjs
 !src/close-inherited-preload.cjs

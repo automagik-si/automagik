@@ -195,7 +195,7 @@ const lostSession = error => error?.code === 'session/not-found' || /\bis corrup
 const fileLine = file => `[File "${file.name}" (${file.bytes} bytes) attached]`
 
 export function install(rt) {
-  const { ctx } = rt
+  const { ctx, state } = rt
 
   // Everything said in a group is in the group's book of the ledger (books.js), whole,
   // before anything reads it. The room's own log in state.json keeps the latest lines,
@@ -382,6 +382,7 @@ export function install(rt) {
   // a fresh look at the log and a brief of the member's own chat; the brief is the
   // first message, so it stays fixed and the prefix stays cacheable.
   async function groupSessionFor(room, member) {
+    rt.assertShellChoice?.(undefined, member.id)
     room.sessions ??= {}
     const known = room.sessions[member.id]
     if (known !== undefined) {
@@ -391,7 +392,10 @@ export function install(rt) {
     // A saved level DSH no longer offers refuses the member's first turn here before a
     // Session is made for it.
     rt.assertLevelOffered?.(room.permission ?? member.permission)
-    const id = await rt.createSession(`${member.name} · ${room.name}`, { dir: rt.workDirOf({ botId: member.id, roomId: room.id }), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}) })
+    const id = await rt.createSession(`${member.name} · ${room.name}`, {
+      dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true, botId: member.id,
+      readScopeSource: rt.sessionOfRoom(room), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}),
+    })
     // Its level first, before the Session is the member's: one whose level did not hold is
     // not kept, so the member takes no turn on it and its next turn here makes another.
     try {
@@ -1074,6 +1078,10 @@ export function install(rt) {
       // The greeting round leaves the user's messages for a round of their own.
       if (turns.size === 0 && !round.slots.some(slot => slot.status === 'waiting') && (round.kickoff || waitingLines(agent).length === 0)) break
     }
+    // The loop is over: it takes no more calls. Marked before the first await, so a relay
+    // that waited for this round's `ready` (settled just before the loop ran) always sees
+    // it and sends its call to the group's next round, not into a loop that has ended.
+    round.closed = true
     await Promise.allSettled([...turns])
     delete round.nudge
     // The admin was alone with the user's message and passed: the round ends with
@@ -1245,6 +1253,16 @@ export function install(rt) {
     const round = running.starting ? await running.ready : running
     if (round === undefined) {
       startRound(room, posts, await rt.resolveAgent(rt.sessionOfRoom(room)))
+      return
+    }
+    // The round ended before this call was taken in. What it brought waits for the
+    // group's next round, the same place a call that lands while a round finishes waits;
+    // it is never appended to a loop that is over.
+    if (round.closed === true) {
+      if (posts.length > 0) {
+        if (rt.roomActive(room.id)) laterPosts.set(room.id, [...(laterPosts.get(room.id) ?? []), ...posts])
+        else startRound(room, posts, await rt.resolveAgent(rt.sessionOfRoom(room)))
+      }
       return
     }
     const members = room.members.map(rt.botOf).filter(Boolean)
@@ -1453,6 +1471,23 @@ export function install(rt) {
       finalizing.add(room.id)
       rt.roomProgress.delete(key)
       round.to = room.seq
+      const rows = groupRows(room.id, round.from, round.to)
+      round.prepared = []
+      for (const post of open) {
+        if (post.reportBack && rt.botOf(post.botId)) {
+          round.prepared.push(prepareReport(room, { post, rows, passed: round.passed, failed: round.failed }))
+        }
+      }
+      // A post this round took in while it ran gets the replies of the members it called.
+      for (const { post, ids, from } of round.reports ?? []) {
+        if (!rt.botOf(post.botId)) continue
+        const names = ids.map(id => rt.botOf(id)?.name).filter(Boolean)
+        round.prepared.push(prepareReport(room, { post,
+          rows: groupRows(room.id, from, round.to).filter(row => ids.includes(row.botId)),
+          passed: round.passed.filter(name => names.includes(name)),
+          failed: round.failed.filter(name => names.includes(name)),
+        }))
+      }
       // How the round ended, beside what was said in it.
       rt.ledger.append(bookOf(room.id), { event: 'round', from: round.from, to: round.to, passed: round.passed, failed: round.failed, ...(signal.aborted ? { stopped: true } : {}), time: Date.now() })
     }
@@ -1471,20 +1506,12 @@ export function install(rt) {
         }
       }
       await rt.save()
-      const rows = groupRows(room.id, round.from, round.to)
-      for (const post of open) {
-        if (post.reportBack && rt.botOf(post.botId)) void reportRound(room, post, { rows, passed: round.passed, failed: round.failed })
+      for (const prepared of round.prepared) {
+        if (!prepared.skip) void sendReport(room, prepared)
       }
-      // A post this round took in while it ran gets the replies of the members it called.
-      for (const { post, ids, from } of round.reports ?? []) {
-        if (!rt.botOf(post.botId)) continue
-        const names = ids.map(id => rt.botOf(id)?.name).filter(Boolean)
-        void reportRound(room, post, {
-          rows: groupRows(room.id, from, round.to).filter(row => ids.includes(row.botId)),
-          passed: round.passed.filter(name => names.includes(name)),
-          failed: round.failed.filter(name => names.includes(name)),
-        })
-      }
+    } catch (error) {
+      for (const prepared of round.prepared ?? []) if (prepared.written) rt.wakeLog.firstFinished(prepared.id)
+      throw error
     } finally {
       // What came in while it ran or while it finished opens the next round, in the same
       // step that frees the group. After a stop it waits for the group's next message.
@@ -1678,7 +1705,7 @@ export function install(rt) {
     if (wake !== undefined) giveResults(round, extra.askedBy, wake)
     if (rt.isAdminOf(room, sender.id)) for (const peer of speakers) rt.goalTaskWorking?.(room.id, peer.id)
     if (extra.reportBack) {
-      (round.reports ??= []).push({ post: { botId: sender.id, name: sender.name, reportBack: true, ...(extra.sub ? { sub: extra.sub } : {}), ...(extra.fromRoomId ? { fromRoomId: extra.fromRoomId } : {}) }, ids: speakers.map(peer => peer.id), from: room.seq + 1 })
+      (round.reports ??= []).push({ post: { botId: sender.id, name: sender.name, reportBack: true, ...(extra.postId ? { postId: extra.postId } : {}), ...(extra.sub ? { sub: extra.sub } : {}), ...(extra.fromRoomId ? { fromRoomId: extra.fromRoomId } : {}) }, ids: speakers.map(peer => peer.id), from: room.seq + 1 })
     }
     return true
   }
@@ -1701,7 +1728,8 @@ export function install(rt) {
         say(room, { who: sender.name, botId: sender.id, text: line, ...(files.length > 0 ? { files } : {}) })
         if (extra.batch !== undefined && line !== '') recordResult(extra.batch, sender.name, room.seq)
       }
-      callPost(room, running, sender, text, extra)
+      const postId = extra.postId ?? randomUUID()
+      callPost(room, running, sender, text, { ...extra, postId })
       if (extra.batchEnd) closeBatch(extra.batch)
       await rt.save()
       return
@@ -1940,28 +1968,59 @@ export function install(rt) {
   }
   rt.greetRoom = greetRoom
 
-  async function reportRound(room, post, round) {
+  function reportText(round) {
     const lines = round.rows.filter(row => row.kind === undefined).map(row => `${row.name}: ${row.text}`)
     const waiting = round.rows.filter(row => row.kind === 'approval').map(row => row.name)
     const working = round.rows.filter(row => row.kind === 'working').map(row => row.name)
-    const text = [
+    return [
       lines.length > 0 ? `Replies to your post (oldest first):\n${lines.join('\n')}` : 'Nobody replied to your post.',
       working.length > 0 ? `Still working on it: ${working.join(', ')}. Each posts its result in the group when done, not to you; read_group_chat shows it.` : '',
       waiting.length > 0 ? `Waiting for the user's approval: ${waiting.join(', ')}. What they say afterwards is posted in the group, not sent to you; read_group_chat shows it.` : '',
       round.passed.length > 0 ? `Stayed silent: ${round.passed.join(', ')}.` : '',
       round.failed.length > 0 ? `Could not answer because their model call failed: ${round.rows.filter(row => row.kind === 'failed').map(row => `${row.name} (${failureLine({ code: row.code, status: row.status, message: row.text })})`).join(', ')}.` : '',
     ].filter(Boolean).join('\n\n')
-    // Replies the poster waited for go on with the work it posted for.
-    const work = post.sub === undefined ? undefined : rt.closeWork(post.sub, `Group "${room.name}"`, text)
-    // The wait may already have been given up: the replies still reach the poster,
-    // marked as the late answer they are, and open no work.
-    const late = work === undefined && post.sub !== undefined ? rt.abandonedWork?.(post.sub) : undefined
-    const body = late === undefined ? text : LATE_ANSWER + text
-    // The report goes back to the conversation the post was written from: its
-    // Session in that group when the post came from one, else the own chat.
+  }
+
+  function prepareReport(room, { post, rows, passed, failed }) {
+    const text = reportText({ rows, passed, failed })
+    const key = post.postId ? `group:${room.id}:${post.postId}` : undefined
+    if (key && rt.wakeLog?.byKey(key)) return { skip: true }
+    const id = randomUUID()
+    const sub = post.sub
+    const child = state.works?.[sub]
+    const work = child && state.works[child.parent] ? child.parent : undefined
+    const late = work === undefined && sub !== undefined && state.abandonedWorks?.[sub] !== undefined
+    const body = late ? LATE_ANSWER + text : text
     const back = rt.roomOf(post.fromRoomId)?.sessions?.[post.botId]
-    await rt.deliver({ toId: post.botId, ...(back ? { sessionId: back } : {}), role: 'report', roomId: room.id, text: body, ...(work ? { work, replyTo: post.sub } : {}) })
-      .catch(error => rt.warn('omni-ui: group report to %s failed: %s', post.name, error))
+    const sessionId = back ?? rt.chatOf(post.botId)
+    const written = rt.wakeLog?.intent({
+      id, kind: 'group-report', botId: post.botId, key: key ?? `group:${room.id}:${id}`,
+      sessionId, roomId: room.id, ...(post.fromRoomId !== undefined ? { returnRoomId: post.fromRoomId } : {}),
+      report: { role: 'report', note: room.name, text: body, ...(work ? { work, replyTo: sub } : {}) },
+      ...(sub ? { sub } : {}), ...(late ? { late: true } : {}),
+    }) === 'written'
+    const closed = sub === undefined ? undefined : rt.closeWork(sub, `Group "${room.name}"`, text)
+    if (closed === undefined && late) rt.abandonedWork?.(sub)
+    if (closed !== work) rt.warn('omni-ui: group report %s closed %s, expected %s', id, closed, work)
+    return { id, written, post, sessionId, body, work, sub }
+  }
+
+  async function sendReport(room, p) {
+    const sessionId = rt.roomOf(p.post.fromRoomId)?.sessions?.[p.post.botId] ?? rt.chatOf(p.post.botId)
+    const options = p.written ? rt.wakeLog.firstOptions(p.id) : undefined
+    try {
+      if (options && !options.shouldSend()) return
+      if (p.written && sessionId !== p.sessionId && sessionId !== undefined) rt.wakeLog.moved(p.id, sessionId)
+      await rt.deliver(
+        { toId: p.post.botId, sessionId, role: 'report', roomId: room.id, text: p.body,
+          ...(p.work ? { work: p.work, replyTo: p.sub } : {}), exchangeId: p.id, ...(p.written ? { wake: true } : {}) },
+        options,
+      )
+    } catch (error) {
+      rt.warn('omni-ui: group report to %s failed: %s', p.post.name, error)
+    } finally {
+      if (p.written) rt.wakeLog.firstFinished(p.id)
+    }
   }
 
   // A group chat's own Session never consults the model: models drift from "only call

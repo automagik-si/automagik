@@ -106,7 +106,7 @@ const exists = async (path) => { try { await access(path); return true; } catch 
  * own live terminal, whose unlabelled children are its helpers (null: no helpers counted).
  * Shared with the CLI's `am brief`.
  */
-export async function gatherBriefing({ file, bot, address, ask, locate = (id) => paneOf(id, ask), guard = null, isGit = true, project = null, projects = null }) {
+export async function gatherBriefing({ file, bot, address, ask, locate = (id) => paneOf(id, ask), guard = null, isGit = true, project = null, projects = null, ownPane = false }) {
   const team = directMembers(file, bot.id, { project, projects });
   const eff = bot.kind === "member" || bot.leadProject
     ? effectiveLead(file, bot.id, { project, projects })
@@ -133,7 +133,7 @@ export async function gatherBriefing({ file, bot, address, ask, locate = (id) =>
   const lead = leadBot
     ? { bot: leadBot, terminal: leadPane?.get?.address ?? "", status: leadPane?.get?.status?.state, permission: waitsOnPermission(leadPane?.get?.status), unreachable: Boolean(leadPane?.unreachable) }
     : undefined;
-  return briefingText({ self: bot, file, members, lead, helpers, guard, isGit });
+  return briefingText({ self: bot, file, members, lead, helpers, guard, isGit, ownPane });
 }
 
 /**
@@ -232,7 +232,7 @@ async function main(mePending, inputPending, appHome) {
     if (decision.hash !== null || (seen && transcript && scan.size !== seen.offset)) record();
     return null;
   }
-  const text = await gatherBriefing({ file, bot, address: terminal, ask: hcJson, guard, isGit, project: key, projects, ...(ledger ? { locate: ledger.locate } : {}) });
+  const text = await gatherBriefing({ file, bot, address: terminal, ask: hcJson, guard, isGit, project: key, projects, ownPane: true, ...(ledger ? { locate: ledger.locate } : {}) });
   return { text, record };
 }
 

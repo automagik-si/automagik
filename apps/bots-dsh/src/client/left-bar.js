@@ -8,10 +8,40 @@ import { DSH_LOOK } from './characters.js'
 import { t } from './i18n.js'
 import { openStops } from './stops.js'
 import { isMainOf } from './sources.js'
+import { botChannels, botChannelSource, useEntries } from './extend.js'
 import { agentRowSessions } from './task-card.js'
 import { ProjectRail } from './left-bar-rail.js'
 import { TeamRows, drawBot } from './left-bar-team.js'
 import { LEFT_BAR_SKIN } from './left-bar-css.js'
+import { mock1540On } from './self-update-flag.js'
+import { roleTagOf } from '../shared/roles.js'
+
+// A channel's glyph in its kind's shape, in one colour: colour in the bar only ever means a
+// status, so the glyph says what kind of channel a row is. Anything unknown wears a chat bubble.
+const CHANNEL_GLYPHS = {
+  whatsapp: () => [
+    h('path', { key: 'bubble', d: 'M12 3.8a8.2 8.2 0 0 0-7 12.5L3.8 20.2l4-1.1A8.2 8.2 0 1 0 12 3.8z' }),
+    h('path', { key: 'phone', d: 'M9.3 8.4c-.3 0-.6.1-.8.4-.3.5-.5 1.1-.2 1.9.5 1.7 2.1 3.2 3.8 3.8.8.2 1.5.1 1.9-.2.3-.2.4-.5.4-.8l-.1-.4-1.4-.7-.8.9c-.9-.4-1.7-1.1-2.1-2l.9-.8-.7-1.5z' }),
+  ],
+  telegram: () => [
+    h('path', { key: 'plane', d: 'M20.5 4.5 3.5 11.2l5.2 1.9 2 6.1 3-3.3 4.4 3.3z' }),
+    h('path', { key: 'fold', d: 'M8.7 13.1 16.8 8' }),
+  ],
+  slack: () => [h('path', { key: 'hash', d: 'M9 4.5 7.5 19.5M16.5 4.5 15 19.5M4.5 9h15M3.5 15h15' })],
+  discord: () => [
+    h('path', { key: 'face', d: 'M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 16V8A1.5 1.5 0 0 1 5 6.5z' }),
+    h('path', { key: 'eyes', d: 'M9.5 10.5v1.5M14.5 10.5v1.5' }),
+    h('path', { key: 'smile', d: 'M9.5 14.5c1.5 1 3.5 1 5 0' }),
+  ],
+  chat: () => [h('path', { key: 'bubble', d: 'M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8.5A1.5 1.5 0 0 1 19 17h-9l-4.5 3.5V17H5A1.5 1.5 0 0 1 3.5 15.5V7A1.5 1.5 0 0 1 5 5.5z' })],
+}
+
+/** A channel's glyph: its kind's shape, the chat bubble for any other kind. */
+export function channelGlyph(channel) {
+  const kind = String(channel?.kind ?? '')
+  const shape = kind.startsWith('whatsapp') ? 'whatsapp' : Object.hasOwn(CHANNEL_GLYPHS, kind) ? kind : 'chat'
+  return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, CHANNEL_GLYPHS[shape]())
+}
 
 // -------------------------------------------------------------------------
 // The new left bar in the Bot team's sidebar (RFC 0022 (i), direction C on the themed ground):
@@ -22,7 +52,7 @@ import { LEFT_BAR_SKIN } from './left-bar-css.js'
 // Read, never run: every row comes from what the team already has (the roster, the Sessions'
 // status, the work the host reports), and a press only opens what today's rows open. The "+"
 // makes nothing yet: creating or joining a space comes with Automagik Cloud, and the "+" says
-// so in a note. The Code side, sign-in and Cloud's own tiles are not part of this bar yet.
+// so in a note. Sign-in and Cloud's own tiles are separate.
 
 /** The one tile the rail has today: this computer, the local team. */
 export const LOCAL_SPACE = 'local'
@@ -37,6 +67,22 @@ export function botStatus({ question, pending, approval, failed, running, away }
   if (failed) return 'error'
   if (running || away) return 'working'
   return 'idle'
+}
+
+// The bar is narrow in the phone's drawer (DSH keeps it at 280): a status keeps its mark there,
+// with its word in the tooltip and the accessible name, so the name on the row keeps the room.
+const NARROW = 620
+const NO_WORDS = Object.freeze([])
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < NARROW)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+    const read = () => setNarrow(window.innerWidth < NARROW)
+    read()
+    window.addEventListener('resize', read)
+    return () => window.removeEventListener('resize', read)
+  }, [])
+  return narrow
 }
 
 function useTeamStatus({ roster, useSessionStatus, useWork }) {
@@ -89,7 +135,7 @@ function currentKey(roster, shownId) {
  * the DSH bots in today's order, then the group chats. `order` is the sidebar's own order of
  * everything but the Main Bot ({ kind: 'bot' | 'room' | 'agent', item }).
  */
-export function teamOf({ roster, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
+export function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
   const main = roster.byId?.[roster.mainBotId]
   const shown = key => key === current
   const unread = (id, key, own) => !shown(key) && (own || marked[id] === true)
@@ -97,8 +143,11 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
     const key = `bot:${item.id}`
     if (item.hidden && !shown(key) && !isMainOf(roster, item.id)) return null
     const seen = status.bots.get(item.id) ?? { status: 'idle', unread: false }
-    // Channels hang under a Bot through other plugins (renderAfter), not as the bar's rows.
-    return { ...item, channels: [], status: seen.status, unread: unread(item.id, key, seen.unread) }
+    // A Bot's channels come from the one plugin that serves it (extend.js's botChannels): with
+    // a source the bar draws them under its row, and while there is none the team's own
+    // botChildren rows stay exactly as today. Never both.
+    const roleTag = roleTagOf(roster.byId?.[item.id] ?? item, roster.prefs, roster, t)
+    return { ...item, ...(roleTag ? { roleTag } : {}), channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
   }
   const agent = (item) => {
     const tasks = item.kind === 'tasks'
@@ -177,12 +226,18 @@ function SpaceNote({ anchor, onClose }) {
 /**
  * The bar. `order` and the stores are the sidebar's (sidebar.js TeamSidebar); `tools` are the
  * head's other buttons (the update button, other plugins' tools); `notice` is a line above
- * the list (a read-only team, the Main Bot being set up); `foot` sits under the list (the Work
- * and Code switch, where the app has Herdr). `open(row)` opens a row as today's rows do,
+ * the list (a read-only team, the Main Bot being set up); `foot` sits under the list (the Herdr
+ * action, where the app has it). `open(row)` opens a row as today's rows do,
  * `menu(row, event)` its context menu, `renderAfter(row)` draws what hangs under a row and
  * `renderEnd(row)` what other plugins add at the end of a Bot's row.
+ *
+ * The owner's new top row (Search and New, every other tool at the foot) is the approved
+ * self-update mock's layout, so it sits behind the mock's own flag (`?mock-1540`, #1546): without
+ * it the bar draws exactly what dev draws, with the wordmark and the tools up top.
  */
-export function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
+export function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown, sideSwitch, codeList }) {
+  // Read at render time, so the flag turns the new layout on and off in a running page.
+  const mock = mock1540On()
   const shownId = useSessions(list => list.ids.find(id => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? '')
   const current = currentKey(roster, shownId)
   const status = useTeamStatus({ roster, useSessionStatus, useWork })
@@ -192,7 +247,27 @@ export function LeftBar({ roster, order, marked, seats = [], useSessions, useSes
   useEffect(() => {
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId)
   }, [currentId, marked?.[currentId]])
+  const narrow = useNarrow()
   const [note, setNote] = useState(null)
+  // Sources may load after the bar is up (a plugin's shell installer); draw their rows then.
+  useEntries(botChannels)
+  // A channel is unfolded by default once its chats are known; a person's fold is kept here. A
+  // person unfolding one asks its Bot's chats to load, as opening the Bot's Session does.
+  const [folded, setFolded] = useState(() => new Set())
+  const [wanted, setWanted] = useState(() => new Set())
+  const loads = id => current === `bot:${id}` || wanted.has(id)
+  const fold = (row, next) => {
+    const key = `${row.botId}/${row.id}`
+    setFolded((before) => {
+      const after = new Set(before)
+      if (next) after.add(key)
+      else after.delete(key)
+      return after
+    })
+    if (!next) setWanted(before => (before.has(row.botId) ? before : new Set(before).add(row.botId)))
+  }
+  // A channel folds and unfolds here; every other row opens as today.
+  const press = row => (row.kind === 'channel' ? fold(row, !row.folded) : open(row))
   const spaces = [{ id: LOCAL_SPACE, name: t('This computer'), icon: h(OmniMark, { size: 26 }) }]
   return h('div', { className: 'bt-side lb-host', onKeyDown },
     h('div', { className: 'lb-bar', 'data-lb-host': '', 'data-lb-skin': LEFT_BAR_SKIN },
@@ -206,13 +281,18 @@ export function LeftBar({ roster, order, marked, seats = [], useSessions, useSes
         collapse ?? null),
       h('div', { className: 'lb-list' },
         h('div', { className: 'lb-head' },
-          h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
-          tools,
+          // Without the flag: the wordmark and the tools, exactly where dev draws them. With it:
+          // Search and New only, and the tools move to the foot below.
+          mock ? null : h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
+          mock ? null : tools,
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
+        sideSwitch ?? null,
         notice,
-        team.bots.length === 0 && empty ? empty
-          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t('Bot list') }),
-        foot ? h('div', { className: 'lb-foot' }, foot) : null)),
+        codeList ?? (team.bots.length === 0 && empty ? empty
+          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : undefined, label: t('Bot list') })),
+        mock
+          ? h('div', { className: 'lb-foot' }, tools, foot ?? null)
+          : foot ? h('div', { className: 'lb-foot' }, foot) : null)),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }

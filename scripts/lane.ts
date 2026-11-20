@@ -24,8 +24,12 @@
  *   bun scripts/lane.ts next-patch                               the next patch release: 3.N.(P+1) on the newest 3.N
  *   bun scripts/lane.ts pack-addons <dir>                          pack the add-ons the lane carries into dir, with addons.json
  *   bun scripts/lane.ts manifest <plugins.json> <base> <issuedAt> [addons.json]  print lane.json for a release's plugins.json
- *   bun scripts/lane.ts sign <lane.json>                         print its signature (the key in PLUGIN_LANE_KEY, PEM)
+ *   bun scripts/lane.ts roles-manifest <version> <issuedAt> [dir]  print roles.json for a versioned release
+ *   bun scripts/lane.ts pack-roles <dir> <version> <sha> <history>  pack roles with an explicit predecessor decision
+ *   bun scripts/lane.ts check-roles [sha]                         validate the selected role sources
+ *   bun scripts/lane.ts sign <file>                             print its signature (the key in PLUGIN_LANE_KEY, PEM)
  *   bun scripts/lane.ts verify <lane.json> <lane.json.sig>       check it against plugin-lane/keys.json
+ *   bun scripts/lane.ts verify-roles <roles.json> <roles.json.sig> <version>  check the catalog against plugin-lane/keys.json and the release version
  *
  * The herdr pack (herdr/, docs/rfcs/0011-monorepo-parts-and-releases.md) is a part of its own: no
  * desktop build or plugin reads it, and Herdr installs it from its own tarball. A release whose
@@ -64,9 +68,10 @@
  */
 import { createHash, createPrivateKey, createPublicKey, sign as signBytes, verify as verifyBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { ReleasePlugins } from './release-plugins';
 import { CRATES, FIELDS, MAX_PART, VERSION, cargoVersionLine } from './version';
 
@@ -74,11 +79,16 @@ export const ROOT = join(import.meta.dir, '..');
 export const LANE_RELEASE = 'plugin-lane';
 export const SCHEMA_VERSION = 1;
 export const KEY_ID = 'automagik-2026-10';
+export const ROLES_REPOSITORY = 'https://github.com/automagik-si/automagik';
 const DOWNLOADS = 'https://github.com/automagik-si/automagik/releases/download/';
+const ROLE_ROOT = 'apps/bots-dsh/roles';
+const ROLE_SOURCE = /^apps\/bots-dsh\/roles\/[^/]+\/[^/]+$/;
+const MAX_ROLE_CATALOG = 256 * 1024;
+const MAX_ROLE_COUNT = 200;
 // The plugins this release lane ships and updates. None of Unfold's is one: they left this
 // repository for Unfold's own, whose release ships them (RFC 0020); this repository's releases
 // attach no tarball of any and its lane names none. Whoever installed one keeps it.
-const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'welcome-dsh'];
+const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'];
 const PROFILE = 'apps/desktop/profile/package.json';
 // The add-ons the desktop profile pins that the lane carries too, so a pin move is a patch: each
 // a reviewed fork with no dependencies of its own (its folder alone is the add-on) that declares
@@ -130,6 +140,8 @@ const INSTALL_FIELDS = ['name', 'dependencies', 'peerDependencies', 'optionalDep
 // the last release, deleted ones included, so without it the removal's deleted folders would count as
 // shipping and cut a full release; and an Unfold folder that came back by mistake still cuts none.
 // The server image (server/) ships from no release.
+// The project-toolchain manifest (.automagik-toolchain.json) is read by a checkout's own
+// bootstrap, never by a release: a change to it alone cuts no release.
 // The sandbox runner (apps/dsh-sandbox/: the hc socket-mask wrapper, its profile row snippet and
 // the install/check helper) rides the herdr pack's release, copied byte-equal by the pack at
 // enablement; no release here carries it, so a change to it alone cuts no release, and it must
@@ -145,10 +157,10 @@ const INSTALL_FIELDS = ['name', 'dependencies', 'peerDependencies', 'optionalDep
 // alters what a release builds and ships. Every other file under herdr/scripts/ is tooling the pack
 // never carries (the blanket rule below).
 export const HERDR_SHIPPING_SCRIPTS = /^herdr\/scripts\/pack\.mjs$/;
-const NEVER_SHIPPED = [/^am\/[^/]+\.md$/, /^\.github\//, /^scripts\//, /^plugin-lane\//, /(^|\/)test\//, /^[^/]+\.md$/, /^\.gitignore$/, /^apps\/automagik-pets\//, /^docs\//, /^apps\/unfold-[^/]+\//,
+const NEVER_SHIPPED = [/^am\/[^/]+\.md$/, /^\.github\//, /^scripts\//, /^plugin-lane\//, /(^|\/)test\//, /^[^/]+\.md$/, /^\.gitignore$/, /^\.automagik-toolchain\.json$/, /^apps\/automagik-pets\//, /^docs\//, /^apps\/unfold-[^/]+\//,
   /^herdr\/[^/]+\.md$/, /^herdr\/NOTICE$/, /^herdr\/(\.genie|docs|mockup|catalog)\//, /^herdr\/scheduler\//, /^herdr\/scripts\//,
   /^herdr-layout\/(RECIPE\.md|preview\.png)$/,
-  /^apps\/pocket\/[^/]+\.md$/, /^apps\/pocket\/(docs|android\/scripts)\//, /^apps\/desktop\/wslc\//,
+  /^apps\/pocket\/[^/]+\.md$/, /^apps\/pocket\/(docs|android\/scripts|android\/app\/src\/testGithub)\//, /^apps\/desktop\/wslc\//,
   /^meter\/(statusline|schema)\//, /^meter\/usagemeter\/[^/]+\.md$/, /^meter\/usagemeter\/tests\//,
   /^apps\/landing\//, /^apps\/id\//, /^server\//, /^apps\/dsh-sandbox\//, /^\.genie\//, /^\.claude\//,
   /^skills\//];
@@ -313,6 +325,8 @@ const neverShipped = (path: string) => !HERDR_SHIPPING_SCRIPTS.test(path) && (pa
  */
 export function unpackedIn(files: Record<string, string[]>) {
   return (path: string) => {
+    // The release packs these as separate role tarballs.
+    if (ROLE_SOURCE.test(path)) return false;
     const plugin = PLUGINS.find(name => path.startsWith(`apps/${name}/`));
     const carried = plugin ? files[plugin] : undefined;
     if (!plugin || !carried || carried.some(entry => /[*?![{]/.test(entry))) return false;
@@ -536,6 +550,111 @@ export function manifest(plugins: ReleasePlugins, { base, issuedAt, dir, engines
 
 export const signLane = (bytes: Buffer, privatePem: string) => signBytes(null, bytes, createPrivateKey(privatePem)).toString('base64');
 
+/** roles.json on the versioned release (RFC 0037). */
+export function rolesManifest({ version, issuedAt }: { version: string; issuedAt: string }, roles: unknown[] = []) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('roles.json: version must have the form major.minor.patch');
+  return {
+    schemaVersion: 1,
+    publisher: 'automagik',
+    keyId: KEY_ID,
+    issuedAt,
+    repository: ROLES_REPOSITORY,
+    version,
+    roles,
+  };
+}
+
+/** Verify the signed catalog against the version selected by the release cut. */
+export function verifyRoles(bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[], expectedVersion: string) {
+  checkCatalogSize(bytes.length);
+  let catalog: Record<string, unknown> | null;
+  try {
+    catalog = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error('roles.json: invalid UTF-8 JSON');
+  }
+  const key = keys.find(entry => entry.keyId === catalog?.keyId);
+  if (!key) throw new Error('roles.json: unknown signing key');
+  const encoded = signature.trim();
+  if (!/^[A-Za-z0-9+/]{86}==$/.test(encoded)) throw new Error('roles.json: invalid base64 signature');
+  let publicKey;
+  try {
+    publicKey = createPublicKey(key.publicKey);
+  } catch {
+    throw new Error('roles.json: invalid signing public key');
+  }
+  if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('roles.json: signing key must be Ed25519');
+  if (!verifyBytes(null, bytes, publicKey, Buffer.from(encoded, 'base64'))) throw new Error('roles.json: the signature does not match');
+  if (!catalog || catalog.schemaVersion !== 1) throw new Error('roles.json: unsupported schema version');
+  if (catalog.publisher !== 'automagik') throw new Error('roles.json: unexpected publisher');
+  if (catalog.repository !== ROLES_REPOSITORY) throw new Error('roles.json: unexpected repository');
+  if (catalog.version !== expectedVersion) throw new Error(`roles.json: catalog version does not match ${expectedVersion}`);
+  if (!Array.isArray(catalog.roles) || catalog.roles.length > MAX_ROLE_COUNT) throw new Error('roles.json: roles must be an array of at most 200 entries');
+  return catalog as Record<string, unknown> & { roles: unknown[] };
+}
+
+function checkCatalogSize(size: number) {
+  if (size > MAX_ROLE_CATALOG) throw new Error('roles.json: exceeds the 256 KiB size limit');
+}
+
+function serializeRoles(version: string, issuedAt: string, roles: unknown[]) {
+  if (roles.length > MAX_ROLE_COUNT) throw new Error('roles.json: roles must be an array of at most 200 entries');
+  const json = JSON.stringify(rolesManifest({ version, issuedAt }, roles), null, 2);
+  checkCatalogSize(Buffer.byteLength(json) + 1);
+  return json;
+}
+
+function roleDirectory(dir: string) {
+  try { return readdirSync(dir, { withFileTypes: true }); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+function roleArtifactNames(dir: string) {
+  return roleDirectory(dir).map(entry => entry.name).filter(name => name.startsWith('automagik-role-'));
+}
+
+function roleInventory() {
+  const root = join(ROOT, ROLE_ROOT);
+  return roleDirectory(root)
+    .filter(entry => entry.isDirectory() && statSync(join(root, entry.name, 'role.json'), { throwIfNoEntry: false })?.isFile())
+    .map(entry => entry.name);
+}
+
+const roleRelease = (version: string) => `${DOWNLOADS}v${version}/`;
+
+async function stagedRoles(dir: string, version: string, expected: string[]) {
+  const names = roleArtifactNames(dir);
+  const rows = names.length ? (await import('./role-pack')).readPackedRoles(dir, names, roleRelease(version)) : [];
+  const ids = new Set(rows.map(row => row.id));
+  if (ids.size !== expected.length || expected.some(id => !ids.has(id))) {
+    throw new Error('roles.json: packed role ids do not match the role source inventory');
+  }
+  return rows;
+}
+
+function readBounded(file: string, limit: number) {
+  const fd = openSync(file, 'r');
+  try {
+    const bytes = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(fd, bytes, length, bytes.length - length, null);
+      if (count === 0) return bytes.subarray(0, length);
+      length += count;
+    }
+    throw new Error(`${file}: exceeds the ${limit / 1024} KiB size limit`);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function verifyRoleFiles(file: string, signature: string, version: string) {
+  const keys = JSON.parse(readFileSync(join(ROOT, 'plugin-lane', 'keys.json'), 'utf8')).keys;
+  return verifyRoles(readBounded(file, MAX_ROLE_CATALOG), readBounded(signature, 1024).toString('utf8'), keys, version);
+}
+
 /** The keys a consumer trusts: plugin-lane/keys.json, { keys: [{ keyId, publicKey (PEM) }] }. */
 export function verifyLane(bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[]): Lane {
   const lane = JSON.parse(bytes.toString('utf8')) as Lane;
@@ -562,7 +681,16 @@ if (import.meta.main) {
       process.exit(0);
     }
     if (!last) { console.log(command === 'kind' ? 'full' : 'yes'); process.exit(0); }
-    const diff = (from: string) => git('diff', '--name-only', `${from}..HEAD`).split('\n').filter(Boolean);
+    const diff = (from: string) => {
+      const paths = git('diff', '--name-only', `${from}..HEAD`).split('\n').filter(Boolean);
+      if (command === 'ships' || command === 'kind') {
+        // A detected rename out of roles/ would otherwise report only its destination.
+        const rolePaths = git('diff', '--name-only', '--no-renames', '-z', `${from}..HEAD`, '--', `${ROLE_ROOT}/`)
+          .split('\0').filter(path => ROLE_SOURCE.test(path));
+        return [...new Set([...paths, ...rolePaths])];
+      }
+      return paths;
+    };
     const changed = diff(last);
     const before = (path: string) => git('show', `${last}:${path}`);
     const read = (get: () => string) => { try { return get(); } catch { return undefined; } };
@@ -617,6 +745,36 @@ if (import.meta.main) {
       return range;
     };
     console.log(JSON.stringify(manifest(plugins, { base, issuedAt, dir: join(file, '..'), engines, addons }), null, 2));
+  } else if (command === 'pack-roles'
+    && ((args.length === 4 && args[3] === '--no-predecessor') || (args.length === 7 && args[3] === '--predecessor'))) {
+    const [dir, version, sha, , file, signature, previousVersion] = args;
+    if (git('rev-parse', 'HEAD').trim() !== sha) throw new Error('pack-roles: HEAD must equal the cut SHA');
+    if (roleArtifactNames(dir).length) throw new Error('pack-roles: output directory already holds a role artifact');
+    const { packRoleSources, predecessorRoles } = await import('./role-pack');
+    let predecessor;
+    if (file !== undefined) {
+      const catalog = verifyRoleFiles(file, signature, previousVersion);
+      predecessor = predecessorRoles(catalog.roles, roleRelease(previousVersion), previousVersion);
+    }
+    for (const role of packRoleSources({ root: ROOT, dir, version, sha, release: roleRelease(version), neverShipped, predecessor })) {
+      console.log(`${role.id} ${role.version} ${role.sha256}`);
+    }
+  } else if (command === 'check-roles' && args.length <= 1) {
+    const { packRoleSources } = await import('./role-pack');
+    const dir = mkdtempSync(join(tmpdir(), 'check-roles-'));
+    // Budget for the longest version components and the release's full UTC timestamp.
+    const version = `${MAX_PART}.${MAX_PART}.${MAX_PART}`;
+    const issuedAt = '2000-01-01T00:00:00Z';
+    try {
+      const roles = packRoleSources({ root: ROOT, dir, version, sha: args[0] ?? 'HEAD', release: roleRelease(version), neverShipped });
+      serializeRoles(version, issuedAt, await stagedRoles(dir, version, roles.map(role => role.id)));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } else if (command === 'roles-manifest' && (args.length === 2 || args.length === 3)) {
+    const [version, issuedAt, dir] = args;
+    const roles = dir === undefined ? [] : await stagedRoles(dir, version, roleInventory());
+    console.log(serializeRoles(version, issuedAt, roles));
   } else if (command === 'sign' && args.length === 1) {
     const key = process.env.PLUGIN_LANE_KEY;
     if (!key) throw new Error('PLUGIN_LANE_KEY is not set');
@@ -625,8 +783,23 @@ if (import.meta.main) {
     const keys = JSON.parse(readFileSync(join(ROOT, 'plugin-lane', 'keys.json'), 'utf8')).keys;
     const lane = verifyLane(readFileSync(args[0]), readFileSync(args[1], 'utf8'), keys);
     console.log(`lane ${lane.version} (sequence ${lane.sequence}) is signed by ${lane.keyId}`);
+  } else if (command === 'verify-roles' && args.length === 3) {
+    const [file, signature, version] = args;
+    const catalog = verifyRoleFiles(file, signature, version);
+    const rows = await stagedRoles(dirname(file), version, roleInventory());
+    const byId = new Map(rows.map(row => [row.id, row]));
+    for (const entry of catalog.roles) {
+      const id = (entry as { id?: string } | null)?.id;
+      if (!id || !byId.has(id)) throw new Error('roles.json: missing tarball or duplicate role id');
+      if (!isDeepStrictEqual(entry, byId.get(id))) {
+        throw new Error(`roles.json: staged package metadata does not match entry ${id}`);
+      }
+      byId.delete(id);
+    }
+    if (byId.size) throw new Error('roles.json: catalog omits a staged role package');
+    console.log(`roles.json for ${catalog.version} is signed by ${catalog.keyId}`);
   } else {
-    console.error('usage: bun scripts/lane.ts kind <last-full-tag> [<last-tag>] | ships <last-tag> | herdr <last-tag> | pocket <tag> | pocket-since <last-tag> [<lane-version>] | meter <tag> | meter-since <last-tag> [<lane-version> [<prerelease-tag>...]] | next-patch | pack-addons <dir> | manifest <plugins.json> <base> <issuedAt> [addons.json] | sign <lane.json> | verify <lane.json> <sig>');
+    console.error('usage: bun scripts/lane.ts kind <last-full-tag> [<last-tag>] | ships <last-tag> | herdr <last-tag> | pocket <tag> | pocket-since <last-tag> [<lane-version>] | meter <tag> | meter-since <last-tag> [<lane-version> [<prerelease-tag>...]] | next-patch | pack-addons <dir> | manifest <plugins.json> <base> <issuedAt> [addons.json] | pack-roles <dir> <version> <sha> [--predecessor <roles.json> <roles.json.sig> <tag-version> | --no-predecessor] | check-roles [<sha>] | roles-manifest <version> <issuedAt> [<dir>] | sign <file> | verify <lane.json> <lane.json.sig> | verify-roles <roles.json> <roles.json.sig> <version>');
     process.exit(2);
   }
 }

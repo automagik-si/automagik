@@ -131,6 +131,7 @@ async function start(t, room, services, extraRooms, bots, llm, top, files = {}) 
   return { home, ctx, agentOf, emit, tool, call, begin, finish, round, say, takePost, restricted, selected }
 }
 
+const wakeRecords = home => readFileSync(join(home, 'wake.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
 const settle = check => until(check, { poll: immediate })
 const text = message => message.content.map(block => block.text ?? '').join('\n')
 const kinds = result => result.replies.map(reply => [reply.kind ?? 'message', reply.name])
@@ -435,6 +436,10 @@ test('a report-back post a Bot wrote from another group comes back to that conve
   await settle(() => host.agentOf('ga').calls.length === 1)
   assert.equal(host.agentOf('a').calls.length, 0)
   assert.match(text(host.agentOf('ga').calls[0]), /^\[Group chat "Design" · replies to your post\]/)
+  const { exchangeId } = host.agentOf('ga').calls[0].source
+  const [intent, sent] = wakeRecords(host.home).filter(record => record.id === exchangeId)
+  assert.deepEqual([intent.event, intent.roomId, intent.returnRoomId, intent.sessionId, sent.event],
+    ['intent', 'r2', 'r1', 'ga', 'sent'])
 })
 
 test('a member called while still at earlier work lets the round go on at once', async (t) => {
@@ -616,6 +621,9 @@ test('a post during a running round is in the log at once, calls its members in 
 test('a post during a running round with report_back gets the replies of the members it called', async (t) => {
   const { host, first } = await busyRound(t)
   await host.tool('post_to_group', { group: 'Ops', message: '@Tester 看一下文档', report_back: true }, 'a')
+  const [running] = rt.roomProgress.values()
+  const [{ post: { postId } }] = running.reports
+  assert.ok(postId)
   assert.deepEqual(host.agentOf('r1').calls, [])
   await settle(() => host.agentOf('gc').calls.length === 1)
   host.begin('gc')
@@ -626,6 +634,8 @@ test('a post during a running round with report_back gets the replies of the mem
   const report = host.agentOf('a').calls[0]
   assert.match(text(report), /Tester: 看过了。/)
   assert.doesNotMatch(text(report), /看一下文档|Writer/)
+  const intent = wakeRecords(host.home).find(record => record.event === 'intent' && record.id === report.source.exchangeId)
+  assert.equal(intent.key, `group:r1:${postId}`)
 })
 
 test('a late reply during a running round is logged at once, called in that round and not repeated', async (t) => {

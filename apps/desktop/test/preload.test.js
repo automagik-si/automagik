@@ -20,7 +20,7 @@ function loadPreload({ activation }) {
     console,
   })
   vm.runInContext(readFileSync(new URL('../src/preload.cjs', import.meta.url), 'utf8'), context)
-  return { herdr: exposed.omniDesktop.herdr, invoked }
+  return { herdr: exposed.omniDesktop.herdr, account: exposed.omniDesktop.account, invoked }
 }
 
 test('the preload refuses open() without a click, and sends nothing to main', async () => {
@@ -60,4 +60,26 @@ test('an answer to the update offer: only a boolean update reaches main, still o
   const idle = loadPreload({ activation: false })
   await assert.rejects(idle.herdr.open({ botId: 'b1', update: true }), /only on a click/)
   assert.deepEqual(idle.invoked, [])
+})
+
+test('the account bridge: a sign-in needs a click, and status/sign-out send nothing of the page', async () => {
+  for (const activation of [undefined, false]) {
+    const { account, invoked } = loadPreload({ activation })
+    await assert.rejects(account.signIn(), /starts from a click/)
+    assert.deepEqual(invoked, [])
+  }
+  const { account, invoked } = loadPreload({ activation: true })
+  assert.equal(await account.signIn(), 'answered')
+  assert.equal(await account.status(), 'answered')
+  assert.equal(await account.signOut(), 'answered')
+  assert.equal(typeof account.subscribe(() => {}), 'function')
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked)), [
+    ['automagik-account-signin'],
+    ['automagik-account-status'],
+    ['automagik-account-signout'],
+  ])
+  // Nothing the page can hand the bridge reaches main: the calls take no arguments.
+  assert.equal(account.signIn.length, 0)
+  assert.equal(account.status.length, 0)
+  assert.equal(account.signOut.length, 0)
 })

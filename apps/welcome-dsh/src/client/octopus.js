@@ -43,7 +43,7 @@ body[data-ds-dark-theme] .oai-overlay::before{background:radial-gradient(1100px 
 .oai-clay-omni{--oai-clay-atlas:var(--oai-omni)}
 .oai-clay-genie{--oai-clay-atlas:var(--oai-genie)}
 .oai-clay-unfold{--oai-clay-atlas:var(--oai-unfold)}
-.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
+path.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
 .oai-octo:hover .oai-cyan,.oai-glitch .oai-cyan{opacity:.55;transform:translate(-2.5px,0);animation:oai-glitch 2.4s steps(1) infinite}
 .oai-octo:hover .oai-magenta,.oai-glitch .oai-magenta{opacity:.55;transform:translate(2.5px,0);animation:oai-glitch 2.4s steps(1) infinite reverse}
 .oai-eyes{transform-origin:50px 36px;animation:oai-blink 5s infinite}

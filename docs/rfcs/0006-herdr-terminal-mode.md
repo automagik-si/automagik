@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Superseded (D27: herdr-app as the code window, RFC 0013; its Workers section, a herdr subagents provider for DSH, is replaced by [RFC 0028](0028-code-workers.md), Draft) |
+| Status | Superseded (D27: herdr-app as the code window, RFC 0013; its Workers section, a herdr subagents provider for DSH, is replaced by [RFC 0028](0028-code-workers.md), Accepted 2026-11-19) |
 | Milestone | not scheduled |
 | Lanes | plugin (3.N.P), desktop (3.N) for the pinned binary |
 | Created | 2026-10-30 |

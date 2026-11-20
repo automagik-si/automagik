@@ -1,0 +1,3 @@
+- insert:
+    - id: vault-dsh
+      name: '@automagik/vault-dsh'

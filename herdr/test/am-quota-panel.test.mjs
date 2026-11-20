@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bounded } from "./bounded.mjs";
 
 const here = (f) => new URL(f, import.meta.url).href;
 const FAKE_SWITCH = "data:text/javascript," + encodeURIComponent(`
@@ -32,6 +33,7 @@ const { installs } = await import(FAKE_SWITCH);
 const { default: Panel, plain, records } = await import("../mods/am-quota/main.js");
 const { all, index, nodes, textOf } = await import(stubs["gpui-kit"]);
 const { AUTH_SCRIPT, FOLDER_SCRIPT, PRESENT_SCRIPT } = await import("../mods/am-quota/logins.js");
+const { layoutPopup } = await import("./popup-layout.mjs");
 
 const NOW = Date.now();
 const H = 3600000;
@@ -180,6 +182,61 @@ test("no cliproxy.json: a setup line, the generic name, no Open button and no re
   assert.match(text(root), /Accounts come from your CLIProxyAPI\. To add one/);
   assert.equal(nodes.has("am-open-proxy"), false);
   assert.deepEqual(asked, []);
+});
+
+// #929 G4: the footer's Accounts tab opens this panel as a popup as tall as its content
+// (am-footer PANEL_POPUP, 0.6 of the window), and a body built with overflow_y_scrollbar measures
+// 0 there: the installed app drew the title, the tool switch and the footer, and no setup line.
+// Laid out through popup-layout.mjs (its rule held to live frames by popup-layout.test.mjs); the
+// model clips a scroll area and has no scroll offset, so "scrolls" here means clipped, not moved.
+const POPUP_H = 492; // 0.6 of the 820 px window, as popup-layout.test.mjs
+const FIXED_H = 470; // a layout block of a set height: the control that drew the line
+const setupRow = (root) => all(root).find((n) => n.kids.some((k) => typeof k === "string" && /your own CLIProxyAPI/.test(k)));
+
+test("no cliproxy.json, as the footer's popup and in a fixed block: the setup line is drawn in the body, the same in both (#929 G4)", async () => {
+  for (const tool of ["claude", "codex"]) {
+    const { view, draw } = await panel({ config: null, claude: {} });
+    view.tool = tool;
+    const root = draw();
+    const row = setupRow(root);
+    assert.ok(row, `${tool}: the setup line is in the tree`);
+    const popOut = layoutPopup(root, { height: POPUP_H }, nodes);
+    const pop = popOut.box(row);
+    assert.ok(pop.h > 0 && pop.visible === pop.h, `${tool}: as the popup, the setup line has its height, none of it clipped (got ${JSON.stringify(pop)})`);
+    assert.ok(pop.y + pop.h <= popOut.height, `${tool}: inside the popup's own height (${popOut.height})`);
+    const fixedOut = layoutPopup(root, { height: FIXED_H, fixed: true }, nodes);
+    const fixed = fixedOut.box(row);
+    assert.ok(fixed.visible > 0 && fixed.y + fixed.h <= fixedOut.height, `${tool}: in a fixed block too`);
+    assert.equal(pop.visible, fixed.visible, `${tool}: the popup shows what the fixed block shows`);
+  }
+});
+
+test("a list taller than the popup: the popup takes its full height, the body clips, the footer stays whole (#929 G4)", async () => {
+  // Test-only accounts: forty more Codex accounts on the fake proxy, so the list overflows.
+  const accounts = QUOTAS.accounts.slice(), files = CREDENTIALS.files;
+  for (let i = 0; i < 40; i += 1) {
+    QUOTAS.accounts.push({ name: `codex-9${i}-x${i}-pro.json`, provider: "codex", email: `x${i}@example.com`, plan: "pro",
+      windows: [{ id: "primary", used_percent: 5, reset_at: iso(NOW + 6 * H) }] });
+  }
+  CREDENTIALS.files = QUOTAS.accounts.map((a) => ({ name: a.name, provider: a.provider, email: a.email, status: "active" }));
+  try {
+    const { view, draw } = await panel();
+    view.tool = "codex";
+    const root = draw();
+    const rows = all(root).filter((n) => /^acct-/.test(n.id ?? ""));
+    assert.ok(rows.length >= 40, `the long list is drawn (${rows.length} rows)`);
+    const out = layoutPopup(root, { height: POPUP_H }, nodes);
+    assert.equal(out.height, POPUP_H, "the body's rows size the popup up to its cap");
+    const first = out.box(rows[0]), last = out.box(rows.at(-1));
+    assert.ok(first.visible > 0, `the first account row is in view (got ${JSON.stringify(first)})`);
+    assert.equal(last.visible, 0, "the last is clipped by the scroll area, below the fold");
+    const foot = all(root).find((n) => n.kind === "h_flex" && n.calls.some(([m]) => m === "border_t"));
+    const f = out.box(foot);
+    assert.ok(f.h > 0 && f.visible === f.h && f.y + f.h <= out.height, "the footer stays whole at the bottom");
+  } finally {
+    QUOTAS.accounts.splice(0, Infinity, ...accounts);
+    CREDENTIALS.files = files;
+  }
 });
 
 test("Switch to <email>, then the bots still on the old account, and Restart after a confirmation", async () => {
@@ -1245,16 +1302,43 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
   const { view, cx, draw } = await panel({ record: { use: "default", logins: [{ id: "2", dir: TWO }] }, settle: false,
     claude: { status: { default: signedIn("cy@example.com", DEFAULT_DIR), [TWO]: () => held.then(() => signedIn("dee@example.com", TWO)) } } });
   const asks = () => state.calls.filter((c) => c[0] === "/usr/bin/env" && c.at(-1) === "status").length;
-  for (const until = Date.now() + 5000; asks() < 2 && Date.now() < until;) await new Promise((go) => setTimeout(go, 1));
+  for (const until = Date.now() + 10_000; asks() < 2 && Date.now() < until;) await new Promise((go) => setTimeout(go, 1));
   assert.equal(asks(), 2, "the first round: both logins, side by side");
   view.forceLogins = true;
   view.reload(cx);
   view.forceLogins = true;
   view.reload(cx);
-  await new Promise((go) => setTimeout(go, 5));
+  // Both reloads arrive while the round is held: the panel queues them (`probeAgain`) instead
+  // of starting a round beside it. The queue marker is the proof; bounded() only turns a panel
+  // that never handled the reload into a named failure instead of a hang. A panel that starts
+  // the round anyway is named by the asks assertion. The wait ends on either outcome so a
+  // broken panel fails on that assertion, not on the queue marker's 10 s net.
+  //
+  // One immediate at a time, cleared in `finally`: when bounded() gives up, the poll stops with
+  // it. A poll that kept scheduling would keep the event loop alive, so the row would report its
+  // failure and the file would still not exit.
+  let pollHandle;
+  try {
+    await bounded(new Promise((resolve) => {
+      const seen = () => {
+        if (view.probeAgain || asks() > 2) return resolve();
+        pollHandle = setImmediate(seen);
+      };
+      seen();
+    }), "the reloads asked for while a round runs to reach its queue", {
+      where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row',
+    });
+  } finally {
+    clearImmediate(pollHandle);
+  }
   assert.equal(asks(), 2, "no round beside the one running");
+  assert.equal(view.probeAgain, true, "the reload is queued behind the held round");
+  assert.equal(view.probing, true, "the held round is still the one running");
   release();
-  await cx.settle();
+  // The released round's own state is the proof; bounded() only fails the row, naming the
+  // release, if the held status never settles and the queued round therefore never runs.
+  await bounded(cx.settle(), "the released login round (and the one queued after it) to settle",
+    { where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row' });
   assert.equal(asks(), 4, "one queued round after it, not two");
   assert.match(text(draw()), /dee@example\.com · login 2 Use/);
 });

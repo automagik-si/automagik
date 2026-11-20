@@ -1,4 +1,4 @@
-import { Component, createElement as h, useCallback, useEffect, useRef, useState } from 'react'
+import { Component, Fragment, createElement as h, useCallback, useEffect, useRef, useState } from 'react'
 import { ACCENT_INKS, INKS } from './inks.js'
 import { isMainOf } from './sources.js'
 import { MESSAGE_WIDTH, allThemes, flatWidthOf, layoutOf, thinkingShown, widthOf } from './themes.js'
@@ -17,6 +17,7 @@ import { CapabilitiesPage } from './capability-settings.js'
 import { BrowserPage } from './browser-settings.js'
 import { ComputerPage } from './computer.js'
 import { SchedulesPage } from './schedules.js'
+import { AutomationsPage } from './automations-page.js'
 import { FeedbackIcon, FeedbackPage } from './feedback.js'
 import { AgentAccessPage } from './agent-access.js'
 import { PrivacyPage } from './privacy.js'
@@ -31,6 +32,7 @@ import { ModelMenu } from './model-menu.js'
 import { PermissionExplanations, PermissionFallback, PermissionPicker } from './permission-picker.js'
 import { AUTO, AUTO_FALLBACK } from '../shared/permission-levels.js'
 import { routeOf } from '../shared/routes.js'
+import { SETTINGS_PAGES } from '../shared/settings-pages.js'
 import { t } from './i18n.js'
 
 const capitalize = word => word[0].toUpperCase() + word.slice(1)
@@ -38,14 +40,7 @@ const capitalize = word => word[0].toUpperCase() + word.slice(1)
 // Settings dialog: a 198px page list beside the page. Bots and group chats each list
 // their members, and one opens on its own settings form. Usage widens the dialog.
 // Models is there only in a window without DSH's own settings, which carry the providers.
-const SETTINGS_PAGES = [
-  ['general', 'General'], ['models', 'Models'], ['bots', 'Bots'], ['groups', 'Group chats'],
-  ['connectors', 'Connectors'], ['capabilities', 'Capabilities'], ['browser', 'Browser'],
-  ['computer', 'Computer use'], ['schedules', 'Scheduled tasks'], ['usage', 'Usage'], ['secrets', 'Secrets'],
-  ['agent-access', 'Agent access'], ['privacy', 'Privacy'], ['feedback', 'Feedback'],
-  ['about', 'About Automagik'],
-]
-const PAGE_ICONS = {
+export const PAGE_ICONS = {
   ...SETTINGS_ICONS, models: SlidersIcon, 'hermes-remote': HermesMark, connectors: ConnectorIcon, capabilities: PlugIcon,
   browser: GlobeIcon, computer: MonitorIcon, schedules: ClockIcon, secrets: KeyIcon, 'agent-access': KeyIcon,
   privacy: ShieldIcon, feedback: FeedbackIcon, about: InfoIcon,
@@ -330,7 +325,7 @@ function GroupsPage({ roster, actions, run }) {
 // error takes down the plugin's whole overlay, and no dialog opens again until
 // the window reloads. The page's key resets it; Usage stays mounted, so its
 // boundary resets when the shown page changes.
-class PageBoundary extends Component {
+export class PageBoundary extends Component {
   state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
   componentDidUpdate(previous) { if (this.state.failed && previous.reset !== this.props.reset) this.setState({ failed: false }) }
@@ -352,6 +347,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
   const extra = actions.pluginSettings?.() ?? []
   // Before About: what the plugins add sits with the team's pages, not after the app's.
   const own = SETTINGS_PAGES.filter(([key]) => key !== 'models' || actions.providers !== undefined)
+  own.splice(own.findIndex(([key]) => key === 'schedules') + 1, 0, ['automations', 'Automations'])
   const pluginPages = extra.map(section => [`plugin:${section.id}`, section.label])
   // Keep remote agents together, independent of the current display language.
   const agents = pluginPages.findIndex(([key]) => key === 'plugin:acp-agents')
@@ -385,7 +381,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
         h('span', { ref: nav.thumb, className: 'bt-thumb', 'aria-hidden': true }),
         pages.map(([key, text]) => h('button', {
           key, type: 'button', className: 'bt-settings-item', 'aria-current': shown === key ? 'page' : undefined, onClick: () => actions.openSettings(key),
-        }, h(PAGE_ICONS[key] ?? PlugIcon), key.startsWith('plugin:') ? text : t(text))),
+        }, h(key === 'automations' ? ClockIcon : PAGE_ICONS[key] ?? PlugIcon), key.startsWith('plugin:') ? text : t(text))),
         actions.openHarnessSettings ? h('button', {
           type: 'button', className: 'bt-settings-item bt-settings-shell', title: t('Models, providers, and the rest of DeepSeek Harness'),
           onClick: () => { close(); actions.openHarnessSettings() },
@@ -397,28 +393,41 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
           pluginPage ? null : h('h2', { key: bot?.id ?? room?.id ?? shown }, bot?.name ?? room?.name ?? label)),
         shown === 'usage' ? null : h('div', { key: pageKey, className: 'bt-settings-scroll bt-settings-page', 'data-move': last.current.move },
           errorLine,
-          h(PageBoundary, null,
-          shown === 'general' ? h(GeneralPage, { roster, actions, run }) : null,
-          shown === 'models' ? h(ProvidersPage, { actions, run, Section: SetSection }) : null,
-          shown === 'hermes-remote' ? h(HermesRemoteSettings, { run, Section: SetSection, actions }) : null,
-          bot ? h('div', { className: 'bt-settings-form' }, h(BotSettingsForm, { key: bot.id, bot, roster, actions, run })) : null,
-          shown === 'bots' && !bot ? h(BotsPage, { roster, actions, run }) : null,
-          room ? h('div', { className: 'bt-settings-form' }, h(GroupSettingsForm, { key: room.id, room, roster, actions, run })) : null,
-          shown === 'groups' && !room ? h(GroupsPage, { roster, actions, run }) : null,
-          shown === 'connectors' ? h(ConnectorsPage, { roster, actions }) : null,
-          shown === 'capabilities' ? h(CapabilitiesPage, { roster, actions, run }) : null,
-          shown === 'browser' ? h(BrowserPage, { roster, actions, run, Section: SetSection, Row: SetRow }) : null,
-          shown === 'computer' ? h(ComputerPage, { roster, actions, run, Section: SetSection, Row: SetRow, Switch }) : null,
-          shown === 'schedules' ? h(SchedulesPage, { roster, actions, start: id ?? undefined }) : null,
-          shown === 'secrets' ? h(SecretsPage, { roster, actions, run, Section: SetSection }) : null,
-          shown === 'agent-access' ? h(AgentAccessPage, { roster, actions, run, Section: SetSection }) : null,
-          shown === 'privacy' ? h(PrivacyPage, { actions, run, Section: SetSection, Row: SetRow }) : null,
-          shown === 'feedback' ? h(FeedbackPage, { actions, run, roster, Section: SetSection, Row: SetRow }) : null,
-          shown === 'about' ? h(AboutPage, { useUpdate, actions, run, Section: SetSection, Row: SetRow }) : null,
-          // A page another plugin added, drawn as DSH's settings draws it (with `close`).
-          pluginPage ? h('div', { className: 'bt-settings-plugin' }, h(pluginPage.Component, { close })) : null)),
+          // Called, not mounted: it holds no state, and the dialog's tree stays as it was.
+          h(PageBoundary, null, shown === 'automations' ? h(AutomationsPage, { Section: SetSection })
+            : SettingsPage({ shown, id, bot, room, pluginPage, roster, actions, run, useUpdate, close }))),
         usageOpened ? h('div', { key: 'usage', className: 'bt-settings-scroll bt-settings-usage', 'data-off': shown === 'usage' ? undefined : '', 'aria-hidden': shown === 'usage' ? undefined : true },
           shown === 'usage' ? errorLine : null,
           h(PageBoundary, { reset: shown }, h(UsagePage, { roster, actions, focusId: usageFocus }))) : null),
       h('button', { type: 'button', className: 'bt-settings-close', 'aria-label': t('Close settings'), onClick: close }, h(CloseIcon))))
+}
+
+// One Settings page, as the dialog draws it and as a chat card shows it (settings-card.js):
+// the same components, saving through the same actions. `bot` and `room` open the Bots and
+// Group chats pages on one Bot's or one group's own form.
+export function SettingsPage({ shown, id, bot, room, pluginPage, roster, actions, run, useUpdate, close }) {
+  return h(Fragment, null,
+    shown === 'general' ? h(GeneralPage, { roster, actions, run }) : null,
+    shown === 'models' ? h(ProvidersPage, { actions, run, Section: SetSection }) : null,
+    shown === 'hermes-remote' ? h(HermesRemoteSettings, { run, Section: SetSection, actions }) : null,
+    bot ? h('div', { className: 'bt-settings-form' }, h(BotSettingsForm, { key: bot.id, bot, roster, actions, run })) : null,
+    shown === 'bots' && !bot ? h(BotsPage, { roster, actions, run }) : null,
+    room ? h('div', { className: 'bt-settings-form' }, h(GroupSettingsForm, { key: room.id, room, roster, actions, run })) : null,
+    shown === 'groups' && !room ? h(GroupsPage, { roster, actions, run }) : null,
+    shown === 'connectors' ? h(ConnectorsPage, { roster, actions }) : null,
+    shown === 'capabilities' ? h(CapabilitiesPage, { roster, actions, run }) : null,
+    shown === 'browser' ? h(BrowserPage, { roster, actions, run, Section: SetSection, Row: SetRow }) : null,
+    shown === 'computer' ? h(ComputerPage, { roster, actions, run, Section: SetSection, Row: SetRow, Switch }) : null,
+    shown === 'schedules' ? h(SchedulesPage, { roster, actions, start: id ?? undefined }) : null,
+    // The dialog keeps Usage mounted across its own levels (it is drawn beside this page), but
+    // the chat card has no dialog around it, so the page goes through here too. Its route id
+    // is `owner:<key>` or `model:<key>`, as the dialog's is.
+    shown === 'usage' ? h(UsagePage, { roster, actions, focusId: id ?? undefined }) : null,
+    shown === 'secrets' ? h(SecretsPage, { roster, actions, run, Section: SetSection }) : null,
+    shown === 'agent-access' ? h(AgentAccessPage, { roster, actions, run, Section: SetSection }) : null,
+    shown === 'privacy' ? h(PrivacyPage, { actions, run, Section: SetSection, Row: SetRow }) : null,
+    shown === 'feedback' ? h(FeedbackPage, { actions, run, roster, Section: SetSection, Row: SetRow }) : null,
+    shown === 'about' ? h(AboutPage, { useUpdate, actions, run, Section: SetSection, Row: SetRow }) : null,
+    // A page another plugin added, drawn as DSH's settings draws it (with `close`).
+    pluginPage ? h('div', { className: 'bt-settings-plugin' }, h(pluginPage.Component, { close })) : null)
 }

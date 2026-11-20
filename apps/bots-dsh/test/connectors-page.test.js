@@ -5,6 +5,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { CATALOG } from '../src/host/connectors/catalog.js'
+import { genieLampCream, genieLampInk, lamp, omniExpressions, omniMarkCream32, omniMarkInk32, triskleThreeColours32 } from '../src/client/art/inline.js'
+import { OFFICIAL_APPS } from '../src/host/connectors/official.js'
 
 // jsdom comes from the harness that test/harness-resolve.mjs found, like the dsh packages.
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -59,11 +62,13 @@ const opened = []
 const clipboard = { writeText: () => Promise.resolve() }
 const dom = new JSDOM('<!doctype html><body></body>')
 const module = { exports: {} }
+// The page reads the ?mock-apps flag from window.location; the tests set it on the vm's window.
+const pageWindow = { matchMedia: () => ({ matches: false }), dshDesktop: {}, open: (url) => { opened.push(url); return null } }
 runInNewContext(outputFiles[0].text, {
   module, exports: module.exports,
   document: dom.window.document,
   navigator: { clipboard },
-  window: { matchMedia: () => ({ matches: false }), dshDesktop: {}, open: (url) => { opened.push(url); return null } },
+  window: pageWindow,
   require: name => (name === 'react' ? react : name === 'react-dom' ? { createPortal: node => node } : {}),
 })
 const { MailCatalogRow, MailToolCell, ConnectorsPage } = module.exports
@@ -315,7 +320,7 @@ test('a refused clipboard write shows no copied hint and the Copy button can sti
   const pending = github(devicePending('REFU-SED1'))
   const page = pageWith(github(), { connectorConnect: () => Promise.resolve({ connectors: [pending] }) })
   renderPage(page)
-  sectionButton('Recommended', 'Connect').props.onClick()
+  sectionButton('Developer', 'Connect').props.onClick()
   await flush()
   page.roster = pageWith(pending).roster
   await flush()
@@ -333,8 +338,319 @@ test('a sign-in found after a reload is drawn once, and a browser sign-in says w
   slots.length = 0
   renderPage(pageWith(github(devicePending('RELO-ADED'))))
   assert.equal(has('bt-connector-code').length, 1)
-  assert.equal(sectionOf(has('bt-connector-code')[0]), 'Recommended')
+  assert.equal(sectionOf(has('bt-connector-code')[0]), 'Developer')
   slots.length = 0
   renderPage(pageWith(github({ state: 'connecting', pending: { kind: 'browser', url: 'https://github.com/login/oauth' } })))
   assert.equal(pageText().split('Finish signing in in your browser.').length - 1, 1)
+})
+
+// --- the real Apps page: the Automagik overlay on top of upstream ----------
+// The official rows come from official.js, the upstream rows from catalog.js as the host sends
+// them, and the states and actions are what the page already knows.
+const UPSTREAM = CATALOG.filter(entry => entry.id !== 'mail').map(entry => ({
+  id: entry.id, name: entry.name, category: entry.category, about: entry.about, auth: entry.auth, state: 'off',
+}))
+const CATEGORY_LABEL = { dev: 'Developer', docs: 'Docs & files', work: 'Work', design: 'Design', data: 'Data', commerce: 'Commerce', search: 'Search' }
+const officialPage = ({ bots = [], models = [], mainBotId = bots[0]?.id ?? null, connectors = UPSTREAM, actions = {} } = {}) => ({
+  roster: {
+    ready: true, bots, byId: Object.fromEntries(bots.map(bot => [bot.id, bot])),
+    mainBotId, mainBotIds: mainBotId === null ? [] : [mainBotId], models,
+    connectors: { connectors, mail: { accounts: [] } },
+  },
+  actions,
+})
+const within = (root, match) => {
+  const out = []
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (match(node)) out.push(node)
+    walk(node.props?.children)
+  }
+  walk(root)
+  return out
+}
+const officialTile = name => collect(n => n.props?.className === 'bt-app' && flatten(n).join('').startsWith(name))[0]
+const actionIn = (tile, label) => within(tile, n => n.type === 'button' && flatten(n).join('') === label)[0]
+const mainButton = name => collect(n => n.type === 'button' && n.props?.className === 'bt-app-main' && flatten(n).join('').startsWith(name))[0]
+
+test('the Automagik overlay comes first and only its rows carry the Official tag', () => {
+  slots.length = 0
+  renderPage(officialPage())
+  const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
+  assert.equal(titles[0], 'Automagik official')
+  const names = collect(n => n.props?.className === 'bt-app-name').map(n => (Array.isArray(n.props.children) ? n.props.children[0] : n.props.children))
+  assert.deepEqual(names.slice(0, OFFICIAL_APPS.length), OFFICIAL_APPS.map(app => app.name))
+  for (const app of OFFICIAL_APPS) {
+    const tile = officialTile(app.name)
+    assert.ok(tile, app.name)
+    assert.match(flatten(tile).join(' '), /Official/, `${app.name} carries the tag`)
+  }
+  assert.doesNotMatch(flatten(officialTile('GitHub')).join(' '), /Official/)
+  assert.equal((pageText().match(/Official/g) ?? []).length, OFFICIAL_APPS.length, 'one tag per official row, none upstream')
+})
+
+test('the upstream categories render from catalog.js, after the overlay', () => {
+  slots.length = 0
+  renderPage(officialPage())
+  const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
+  assert.deepEqual(titles, ['Automagik official', ...Object.values(CATEGORY_LABEL)])
+  for (const [id, label] of Object.entries(CATEGORY_LABEL)) {
+    const entries = CATALOG.filter(row => row.id !== 'mail' && row.category === id)
+    // Work's preview starts with the mailbox, so one fewer catalog row fits there.
+    for (const entry of entries.slice(0, id === 'work' ? 5 : 6)) {
+      const tile = officialTile(entry.name)
+      assert.ok(tile, `${entry.name} is drawn from the catalog`)
+      assert.ok(sectionOf(tile).startsWith(label), `${entry.name} stays in its own category`)
+    }
+    if (entries.length > 6) assert.ok(collect(n => n.type === 'button' && flatten(n).join('') === 'See all')[0], `${label} offers the rest`)
+  }
+  // Each section's preview hides its last rows; See all shows them from the same catalog.
+  const seeAllIn = label => collect(n => n.type === 'button' && flatten(n).join('') === 'See all').find(n => sectionOf(n).startsWith(label))
+  seeAllIn('Work').props.onClick()
+  for (const entry of CATALOG.filter(row => row.category === 'work')) assert.ok(officialTile(entry.name), `${entry.name} comes with the rest of Work`)
+})
+
+test('a Bot on the roster is Installed and a kind with no Bot is not installed', () => {
+  slots.length = 0
+  renderPage(officialPage({ bots: [{ id: 'omni-1', kind: 'omni', name: 'Omni' }], actions: { openHarnessOnboarding: () => {} } }))
+  assert.match(flatten(officialTile('Omni')).join(' '), /Installed/)
+  assert.match(flatten(officialTile('Genie')).join(' '), /Not installed/)
+  assert.ok(actionIn(officialTile('Genie'), 'Install'), 'a missing Genie offers the team-step install')
+  for (const name of ['Claude', 'Codex']) {
+    const tile = officialTile(name)
+    assert.match(flatten(tile).join(' '), /Not installed/)
+    assert.equal(actionIn(tile, 'Install'), undefined, `${name} has no install flow here`)
+  }
+})
+
+test('an install opens the team setup, and an installed Bot opens its chat', () => {
+  const calls = []
+  const actions = {
+    closeSettings: () => calls.push(['closeSettings']),
+    openSession: id => calls.push(['openSession', id]),
+    openHarnessOnboarding: id => calls.push(['openHarnessOnboarding', id]),
+  }
+  slots.length = 0
+  renderPage(officialPage({ bots: [{ id: 'omni-1', kind: 'omni', name: 'Omni' }], actions }))
+  actionIn(officialTile('Omni'), 'Installed').props.onClick()
+  actionIn(officialTile('Genie'), 'Install').props.onClick()
+  assert.deepEqual(calls, [['closeSettings'], ['openSession', 'omni-1'], ['closeSettings'], ['openHarnessOnboarding', 'omni-team']])
+})
+
+test('Claude and Codex follow the ACP routes, open the sign-in the app already uses, and offer no install', () => {
+  const calls = []
+  const actions = {
+    closeSettings: () => calls.push(['closeSettings']),
+    openCliLogin: (botId, provider) => calls.push(['openCliLogin', botId, provider]),
+  }
+  const models = [
+    { ref: 'acp-claude/sonnet', provider: 'acp-claude', needsSignIn: true },
+    { ref: 'acp-codex/gpt-5', provider: 'acp-codex' },
+  ]
+  slots.length = 0
+  renderPage(officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], mainBotId: 'main', models, actions }))
+  assert.match(flatten(officialTile('Claude')).join(' '), /Sign-in needed/)
+  assert.match(flatten(officialTile('Codex')).join(' '), /Installed/)
+  actionIn(officialTile('Claude'), 'Sign in').props.onClick()
+  actionIn(officialTile('Codex'), 'Installed').props.onClick()
+  assert.deepEqual(calls, [
+    ['closeSettings'], ['openCliLogin', 'main', 'acp-claude'],
+    ['closeSettings'], ['openCliLogin', 'main', 'acp-codex'],
+  ])
+})
+
+test('the expanded official row keeps what the app is, its state and its one action', () => {
+  slots.length = 0
+  renderPage(officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], models: [] }))
+  mainButton('Claude').props.onClick()
+  const detail = has('bt-app-expanded')[0]
+  assert.ok(detail, 'the row expands')
+  const text = flatten(detail).join(' ')
+  assert.match(text, /Claude/)
+  assert.match(text, /Claude Code through the Agent Client Protocol/)
+  assert.match(text, /Not installed/)
+  assert.equal(within(detail, n => n.type === 'button').length, 0, 'a missing agent has no action')
+})
+
+test('the Omni and Genie rows wear their own brand mark, ink or cream, at 32px', () => {
+  const markIn = name => within(officialTile(name), n => n.type === 'img' && n.props?.className === 'bt-official-brand-mark')[0]
+  const pin = (name, expected, forbidden) => {
+    const mark = markIn(name)
+    assert.ok(mark, `${name} draws its own mark`)
+    assert.equal(mark.props.src, expected, `${name} draws the brand's own drawing`)
+    assert.deepEqual([mark.props.width, mark.props.height], [32, 32], `${name}'s mark is drawn at 32px`)
+    for (const other of forbidden) assert.notEqual(mark.props.src, other, `${name} never falls back to the triskle or the pet`)
+  }
+  slots.length = 0
+  renderPage(officialPage({ bots: [], models: [] }))
+  pin('Omni', omniMarkInk32, [triskleThreeColours32, omniExpressions, lamp])
+  pin('Genie', genieLampInk, [triskleThreeColours32, omniExpressions, lamp])
+  // The mark follows DSH's Appearance setting while the page is open.
+  dom.window.document.body.setAttribute('data-ds-dark-theme', '')
+  try {
+    slots.length = 0
+    renderPage(officialPage({ bots: [], models: [] }))
+    pin('Omni', omniMarkCream32, [omniMarkInk32, triskleThreeColours32, omniExpressions, lamp])
+    pin('Genie', genieLampCream, [genieLampInk, triskleThreeColours32, omniExpressions, lamp])
+  } finally {
+    dom.window.document.body.removeAttribute('data-ds-dark-theme')
+  }
+  // The expanded row wears the same mark, in the same colour, not the ACP agents' look.
+  slots.length = 0
+  renderPage(officialPage({ bots: [], models: [] }))
+  mainButton('Genie').props.onClick()
+  const detail = has('bt-app-expanded')[0]
+  const inDetail = within(detail, n => n.type === 'img' && n.props?.className === 'bt-official-brand-mark')[0]
+  assert.equal(inDetail.props.src, genieLampInk, 'the expanded Genie row draws the lamp')
+  assert.deepEqual([inDetail.props.width, inDetail.props.height], [32, 32], 'the expanded row does not shrink the mark')
+})
+
+// --- the ?mock-apps preview ----------------------------------------------
+// The preview is a clickable mock of the page: sample rows, a SAMPLE DATA banner, no roster
+// read and no host action. The flag alone selects it; every other query value is the real page.
+const withFlag = (value, run) => {
+  pageWindow.location = { search: value }
+  try { return run() } finally { delete pageWindow.location }
+}
+const expandedRows = () => collect(n => n.type === 'button' && n.props?.className === 'bt-app-main' && n.props?.['aria-expanded'] === true).map(n => flatten(n)[0])
+
+test('?mock-apps alone selects the sample preview, and its rows open in place', () => {
+  slots.length = 0
+  withFlag('?mock-apps', () => {
+    const actions = new Proxy({}, { get: () => () => { throw new Error('the mock calls no host action') } })
+    const roster = {
+      ready: true,
+      connectors: { connectors: [{ id: 'roster-only', name: 'Roster Only', category: 'dev', state: 'off' }], mail: { accounts: [] } },
+    }
+    renderPage({ roster, actions })
+    assert.match(pageText(), /SAMPLE DATA/)
+    assert.match(pageText(), /A mock of the Apps page\. Nothing here installs; click a row to expand it\./)
+    assert.match(pageText(), /Sample row: nothing is installed from this preview\./)
+    assert.doesNotMatch(pageText(), /Roster Only/, 'the mock reads no catalog')
+    const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
+    assert.equal(titles[0], 'Automagik official')
+    for (const name of ['Omni', 'Genie', 'Claude', 'Codex', 'GitHub', 'Notion']) assert.ok(pageText().includes(name), name)
+    assert.deepEqual(expandedRows(), ['Genie'], 'one sample row starts open')
+    mainButton('Claude').props.onClick()
+    assert.deepEqual(expandedRows(), ['Claude'], 'a click opens that row only')
+    assert.equal((pageText().match(/Sample row: nothing is installed from this preview\./g) ?? []).length, 1, 'one sample row open at a time')
+    click('Install')
+    assert.deepEqual(expandedRows(), ['Genie'], 'a sample control opens its own row and calls no host action')
+  })
+})
+
+test('the real page has no sample marker without the flag', () => {
+  const page = officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], models: [] })
+  slots.length = 0
+  renderPage(page)
+  const without = pageText()
+  assert.match(without, /Automagik official/)
+  assert.match(without, /Not installed/)
+  assert.doesNotMatch(without, /SAMPLE DATA|A mock of the Apps page|Sample row:/)
+  for (const search of ['', '?', '?foo=1', '?mock=apps', '?mock-apps-other=1', '?not-mock-apps=1']) {
+    slots.length = 0
+    withFlag(search, () => renderPage(page))
+    assert.equal(pageText(), without, `"${search}" shows the real page`)
+  }
+})
+
+test('an unrelated query value is the real page, not the preview', () => {
+  const page = officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], models: [] })
+  slots.length = 0
+  withFlag('?settings=apps', () => renderPage(page))
+  assert.match(pageText(), /Automagik official/)
+  assert.match(pageText(), /Not installed/)
+  assert.doesNotMatch(pageText(), /SAMPLE DATA/)
+})
+
+test('Apps puts the Roles chip and search results between official apps and the upstream catalog', () => {
+  slots.length = 0
+  const page = officialPage({ bots: [{ id: 'genie-fixture', kind: 'genie' }] })
+  page.roster.roles = { genie: { version: '1.0.0', status: 'broken' }, 'installed-fixture': { version: '2.0.0', status: 'ok' } }
+  page.roster.roleCatalog = { available: true, roles: [
+    { id: 'community', name: 'Community fixture', publisher: 'Fixture', version: '1.0.0', installable: false },
+    { id: 'mail', name: 'Role fixture', publisher: 'automagik', version: '1.0.0', installable: true },
+  ] }
+  renderPage(page)
+  const chip = label => collect(node => node.type === 'button' && node.props['aria-pressed'] !== undefined && flatten(node).join('') === label)[0]
+  const titles = () => collect(node => node.type === 'h3').map(node => flatten(node).join(''))
+  const search = value => collect(node => node.type === 'input' && node.props.type === 'search')[0].props.onChange({ target: { value } })
+  assert.deepEqual(titles().slice(0, 3), ['Automagik official', 'Roles', 'Developer'])
+  assert.ok(pageText().indexOf('Role fixture') < pageText().indexOf('Community fixture'))
+  chip('Roles').props.onClick()
+  assert.deepEqual(titles(), ['Roles'])
+  assert.doesNotMatch(pageText(), /Mailbox|Automagik official/)
+  assert.match(pageText(), /installed-fixture/)
+  assert.ok(mainButton('genie'), 'a legacy installed package has its own row')
+  assert.ok(mainButton('Genie'), 'the built-in has its own row')
+  mainButton('Genie').props.onClick()
+  assert.match(pageText(), /Attach it from a Genie Bot's settings/)
+  assert.doesNotMatch(pageText(), /SHA-256/)
+  collect(node => node.props?.['aria-label'] === 'Back')[0].props.onClick()
+  mainButton('genie').props.onClick()
+  assert.match(pageText(), /Uninstall/)
+  collect(node => node.props?.['aria-label'] === 'Back')[0].props.onClick()
+  search('unmatched text')
+  assert.match(pageText(), /Nothing matches/)
+  assert.ok(chip('Roles'), 'the chip uses unfiltered rows')
+  search('automagik')
+  assert.ok(mainButton('Role fixture'))
+  assert.equal(mainButton('Community fixture'), undefined)
+  mainButton('Role fixture').props.onClick()
+  assert.deepEqual(titles(), ['Role fixture'], 'a role named mail has its own subview')
+  page.roster.prefs = { roles: false }
+  renderPage(page)
+  assert.equal(chip('All').props['aria-pressed'], true)
+  assert.equal(chip('Roles'), undefined)
+})
+
+test('package cards distinguish installed and catalog digests and keep declarations literal', () => {
+  slots.length = 0
+  const page = officialPage()
+  const id = 'sample-role'
+  const installed = { version: '2.9.0', sha256: 'a'.repeat(64), name: '<b>Fixture</b>', description: '<img> sample',
+    verified: true, attachable: true, tools: ['sample_tool'], capabilities: ['audio-out'] }
+  page.roster.roles = { [id]: { id, version: installed.version, status: 'ok', publisher: 'automagik' } }
+  page.roster.roleCatalog = { available: true, roles: [{ id, name: 'Latest fixture', version: '2.10.0', installable: true, publisher: 'automagik' }] }
+  page.roster.roleDetails = { [id]: { installed, catalog: { version: '2.10.0', sha256: 'b'.repeat(64), tools: ['unrelated_tool'] } } }
+  renderPage(page)
+  mainButton(installed.name).props.onClick()
+  assert.deepEqual(collect(node => node.type === 'code').map(node => flatten(node).join('')), [installed.sha256, 'b'.repeat(64)])
+  for (const text of [installed.name, installed.description, '2.9.0', '2.10.0',
+    'Update available', 'sample_tool', 'audio-out', 'Runs in the Bot team', 'What it may not change']) assert.ok(pageText().includes(text), text)
+  assert.doesNotMatch(pageText(), /unrelated_tool/)
+  assert.equal(collect(node => node.props?.dangerouslySetInnerHTML !== undefined).length, 0)
+  delete page.roster.roleDetails[id].installed.verified
+  renderPage(page)
+  assert.match(pageText(), /Details unavailable/)
+  assert.doesNotMatch(pageText(), /sample_tool|unrelated_tool/)
+  page.roster.roleCatalog.roles[0] = { id, name: 'Matching fixture', version: installed.version, installable: true, publisher: 'automagik', capabilities: ['audio-out'] }
+  page.roster.roleDetails[id].catalog = { version: installed.version, sha256: installed.sha256, tools: ['catalog_tool'] }
+  renderPage(page)
+  assert.match(pageText(), /catalog_tool/)
+  assert.match(pageText(), /From the catalog/)
+  page.roster.roleCatalog.roles = []
+  page.roster.roles = {}
+  renderPage(page)
+  assert.doesNotMatch(pageText(), /Matching fixture/)
+  assert.match(pageText(), /Automagik official/)
+})
+
+test('the active Roles chip falls back to All when its last role row disappears', () => {
+  slots.length = 0
+  const page = officialPage()
+  page.roster.roleCatalog = { available: true, roles: [
+    { id: 'fixture-role', name: 'Fixture role', publisher: 'automagik', version: '1.0.0', installable: true },
+  ] }
+  const chip = label => collect(node => node.type === 'button' && node.props['aria-pressed'] !== undefined
+    && flatten(node).join('') === label)[0]
+  renderPage(page)
+  chip('Roles').props.onClick()
+  assert.equal(chip('Roles').props['aria-pressed'], true)
+  page.roster.roleCatalog.roles = []
+  renderPage(page)
+  assert.equal(chip('Roles'), undefined)
+  assert.equal(chip('All').props['aria-pressed'], true)
+  assert.match(pageText(), /Automagik official/)
 })

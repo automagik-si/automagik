@@ -10,6 +10,8 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { DICTIONARY, hostText, hostTemplateOf, installLocale } from '../src/client/i18n.js'
 
+import { fill, MACHINE_MESSAGES as machine } from '../src/shared/machine-reservations.js'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const ptBR = JSON.parse(readFileSync(join(here, '..', '..', 'locale-pt-br-dsh', 'src', 'client', 'locales', 'pt-BR', 'omni-ui.json'), 'utf8'))
 
@@ -35,6 +37,10 @@ const SENTENCES = [
   'Signing out of the Bot account could not be verified. Try again.',
   'The Bot account was reset. Press Sign in again.',
   'This sign-in is not available for this Bot.',
+  // Whose sign-in is whose (#1399): the account card names this installation and says the Bot
+  // sign-in may be shared with another one on this computer.
+  'This installation: {installation}',
+  'Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.',
 ]
 
 // The two sentences that carry a failure class: the host words them with the class in them, so the
@@ -98,4 +104,68 @@ test('a sentence from this list that the packs do not know would fall back to En
   // The guard against a stale pack: the count both sides carry is the list above, so a new sentence
   // added to the host without its two entries fails the first test, not the interface.
   for (const sentence of SENTENCES) assert.notEqual(DICTIONARY.zh[sentence], undefined, sentence)
+})
+
+const RESERVATION_SENTENCES = [
+  'The reservation record cannot be read here; nothing was changed.',
+  'The reservation record has unsafe permissions.',
+  'This installation has no instance id; reservations are off.',
+  'This version cannot read the account evidence needed for reservations.',
+  'Sign in to reserve this account.',
+  'The sign-in could not be read; reservations wait.',
+  'Recover the Bot sign-in before reserving this account.',
+  'This reservation changed. Look again.',
+  'The account could not be read for reservations. Try again.',
+  'This account cannot be reserved.',
+  'Update Claude Code: this version does not name the organisation.',
+  'This Codex plan is not known to this version.',
+  'Only a subscription sign-in can be reserved.',
+  'The CLI did not show an email for this account.',
+  'Give the project a name, up to 60 characters.',
+  'This reservation request is no longer valid. Look again.',
+  'The reservation could not be saved. Try again.',
+  'This window cannot change the Bot team.',
+]
+const FOREIGN_RESERVATION = 'This account is reserved for {label} by another installation that shares this team.'
+
+test('reservation refusals and states have zh and pt-BR host copy', () => {
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    for (const sentence of RESERVATION_SENTENCES) {
+      for (const dictionary of [DICTIONARY.zh, ptBR]) {
+        assert.ok(dictionary[sentence]?.trim(), sentence)
+        assert.notEqual(dictionary[sentence], sentence, sentence)
+      }
+      assert.equal(hostText(sentence), DICTIONARY.zh[sentence])
+    }
+    const label = 'Example {project}'
+    const message = FOREIGN_RESERVATION.replace('{label}', label)
+    assert.equal(hostTemplateOf(message), FOREIGN_RESERVATION)
+    assert.equal(hostText(message), DICTIONARY.zh[FOREIGN_RESERVATION].replace('{label}', label))
+    assert.match(ptBR[FOREIGN_RESERVATION], /\{label\}/)
+  } finally {
+    off()
+  }
+})
+
+
+test('machine refusal copy is translated and interpolates project labels only once', () => {
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    for (const sentence of [
+      machine.refused, machine['no-organisation'], machine['unknown-plan'],
+      machine['unreadable-file'], machine.conflict, machine['not-own-file'], machine.failed,
+    ]) {
+      for (const dictionary of [DICTIONARY.zh, ptBR]) {
+        assert.ok(dictionary[sentence]?.trim(), sentence)
+        assert.notEqual(dictionary[sentence], sentence)
+        const placeholders = text => (text.match(/\{\w+\}/g) ?? []).sort()
+        assert.deepEqual(placeholders(dictionary[sentence]), placeholders(sentence))
+      }
+      const values = { label: 'Example {project}' }
+      const message = fill(sentence, values)
+      if (message !== sentence) assert.equal(hostTemplateOf(message), sentence)
+      assert.equal(hostText(message), fill(DICTIONARY.zh[sentence], values))
+    }
+  } finally { off() }
 })

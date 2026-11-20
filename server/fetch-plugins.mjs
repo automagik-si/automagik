@@ -14,7 +14,7 @@
 // route served them.
 //
 //   node fetch-plugins.mjs --version 3.90.1 --out vendor
-//     [--repository https://github.com/automagik-dev/automagik]
+//     [--repository https://github.com/automagik-si/automagik]
 //     [--packages @automagik/bots-dsh,@automagik/welcome-dsh,@automagik/acp-dsh]
 import { createHash } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 export const DEFAULT_PACKAGES = ['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh']
 
-const DEFAULT_REPOSITORY = 'https://github.com/automagik-dev/automagik'
+const DEFAULT_REPOSITORY = 'https://github.com/automagik-si/automagik'
 const PUBLIC_ROUTE = 'public release download'
 const API_ROUTE = 'REST API asset route'
 

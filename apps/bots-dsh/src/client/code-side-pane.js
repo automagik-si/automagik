@@ -3,13 +3,14 @@
 // serves it as `client.pane.js` beside `client.js`; code-side.js asks the module loader for it
 // on the first render of the pane.
 //
-// It draws the team tree the host read from the registry and the two ledgers, and one
-// herdr-core terminal watched in the app instead of the Herdr window. View only: the host
-// attaches with `observe: true`, this page never sends a key or a resize.
+// It draws the team tree the host read from the registry and the two ledgers, and the
+// herdr-core terminals watched in the app. The watch stream is observe-only, and typing
+// uses a separate session.
 import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { t } from './i18n.js'
 import { installStyles } from './styles.js'
-import { botRowOf, statusKey } from './code-side-model.js'
+import { ChevronRightIcon } from './icons.js'
+import { MAX_PANES, paneDetails, paneFor, statusKey, validGrid } from './code-side-model.js'
 import { pasteBytes } from './code-side-paste.js'
 import XTERM_CSS from '@xterm/xterm/css/xterm.css'
 
@@ -35,10 +36,16 @@ function groundOf(element) {
   return getComputedStyle(document.body).backgroundColor || 'Canvas'
 }
 
-// One viewer per window: the id that says which window holds a pane's typing.
-const VIEWER = (() => {
+// Each pane has a distinct viewer within the window.
+const WINDOW_VIEWER = (() => {
   try { return crypto.randomUUID() } catch { return `viewer-${Math.random().toString(36).slice(2)}` }
 })()
+let hubCount = 0
+let typingIntent = 0
+let cancelTyping = null
+const MIN_FONT_SIZE = 7
+const MAX_FONT_SIZE = 12
+const OVERLAY_SCROLLBAR_ALLOWANCE = 12
 
 const base64Of = (bytes) => {
   let binary = ''
@@ -59,322 +66,482 @@ async function post(path, payload) {
   return { status: answer.status, body }
 }
 
+/** One EventSource for a view. Each shown pane keeps its viewer through stream changes. */
+function createPaneHub() {
+  const id = `${WINDOW_VIEWER}.${++hubCount}`
+  const listeners = new Map()
+  let panes = []
+  let viewerCount = 0
+  let source = null
+
+  const close = () => {
+    const previous = source
+    source = null
+    previous?.close()
+  }
+  const fail = () => {
+    close()
+    for (const { key } of panes) listeners.get(key)?.end('failed')
+  }
+  const start = () => {
+    if (source || !panes.length || panes.some(({ key }) => !listeners.has(key))) return
+    const multi = panes.length > 1
+    const params = new URLSearchParams()
+    for (const { botId, worker, viewer } of panes) {
+      params.append('bot', botId)
+      if (multi || worker) params.append('worker', worker ?? '')
+      params.append('viewer', viewer)
+    }
+    const watch = new EventSource(`api/omni-ui/code/stream?${params}`)
+    source = watch
+    const ended = new Set()
+    for (const name of ['pane', 'data', 'reset', 'close']) {
+      watch.addEventListener(name, (event) => {
+        if (source !== watch || (!event.data && name !== 'close')) return
+        let data = event.data
+        if (multi || (name !== 'data' && name !== 'close')) {
+          try { data = JSON.parse(data) } catch {
+            if (multi || name !== 'pane') return
+            data = null
+          }
+        }
+        const p = multi ? data?.p : 0
+        if (!Number.isInteger(p) || !panes[p] || ended.has(p)) return
+        const listener = listeners.get(panes[p].key)
+        if (name === 'close') {
+          ended.add(p)
+          listener?.end('ended')
+          if (ended.size === panes.length) close()
+        } else {
+          listener?.[name](multi && name === 'data' ? data.d : data)
+        }
+      })
+    }
+    // EventSource would retry on its own. Leave recovery to Reconnect.
+    watch.onerror = () => { if (source === watch) fail() }
+  }
+  const reset = () => {
+    for (const { key, viewer } of panes) listeners.get(key)?.streamReset(viewer)
+    start()
+  }
+  return {
+    setPanes(next) {
+      const viewers = new Map(panes.map(({ key, viewer }) => [key, viewer]))
+      if (next.length === panes.length && next.every(({ key }) => viewers.has(key))) return
+      close()
+      panes = next.map(pane => ({ ...pane, viewer: viewers.get(pane.key) ?? `${id}.${++viewerCount}` }))
+      reset()
+    },
+    subscribe(key, listener) {
+      listeners.set(key, listener)
+      const pane = panes.find(pane => pane.key === key)
+      if (pane) listener.streamReset(pane.viewer)
+      start()
+      return () => {
+        listeners.delete(key)
+        if (panes.some(pane => pane.key === key)) close()
+      }
+    },
+    reconnect() { close(); reset() },
+    fail,
+  }
+}
+
 /**
- * The terminal pane: one EventSource of the host's `pane`/`data`/`close` events, drawn by
- * xterm.js. It watches by default; a click into it takes the pane, and then its keys go to the
- * host in small batches until Escape, a click outside, another Bot or an ended session lets go.
+ * The terminal pane draws events from its hub in xterm.js. It watches by default. A click
+ * takes the pane, and its keys go to the host in small batches until typing ends.
  * No key, batch or paste is ever written to a log or a record here.
  */
-export function TerminalPane({ botId, worker, title }) {
+export function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${botId}:${worker ?? 'seat'}` }) {
   const host = useRef(null)
-  const [phase, setPhase] = useState({ kind: 'connecting' })
-  const [attempt, setAttempt] = useState(0)
+  const [standaloneHub] = useState(() => hub ? null : createPaneHub())
+  const stream = hub ?? standaloneHub
+  const [phase, setPhase] = useState('connecting')
   const [mode, setMode] = useState('view')
   const [pasteNote, setPasteNote] = useState(false)
-  // 'paused': the lease ended typing (or a batch was lost); 'back': a retake succeeded.
+  // 'paused': an input batch hit a lost session; 'back': a take succeeded.
   const [resumeNote, setResumeNote] = useState(false)
-  const modeRef = useRef('view')
-  const sessionRef = useRef(null)
-  const termRef = useRef(null)
   const takeRef = useRef(null)
-  const takingRef = useRef(false)
-  const queueRef = useRef([])
-  const timerRef = useRef(0)
-  const flushingRef = useRef(null)
-  const setModeNow = (next) => { modeRef.current = next; setMode(next) }
   useEffect(() => {
     const element = host.current
     if (!element) return undefined
     let disposed = false
     let term = null
-    let fit = null
-    let source = null
+    let unsubscribe
+    let viewer
+    let generation = 0
+    let pendingPaint = null
     let observer = null
     let fitFrame = 0
-    let outside = null
     let cleanupPaste = null
+    let intent = null
+    let streamPhase = 'connecting'
+    let typingMode = 'view'
+    let session = null
+    let queue = []
+    let timer = 0
+    let flushing = Promise.resolve()
+    const setModeNow = (next) => { typingMode = next; setMode(next) }
+    const setPhaseNow = (next) => { streamPhase = next; setPhase(next) }
 
     const fitNow = () => {
-      if (!fit || disposed) return
-      cancelAnimationFrame(fitFrame)
-      fitFrame = requestAnimationFrame(() => { try { fit.fit() } catch { /* the pane is between layouts */ } })
-    }
-    const encodeQueue = () => {
-      const queued = queueRef.current
-      queueRef.current = []
-      let size = 0
-      for (const chunk of queued) size += chunk.length
-      if (size === 0) return null
-      const bytes = new Uint8Array(size)
-      let at = 0
-      for (const chunk of queued) { bytes.set(chunk, at); at += chunk.length }
-      return base64Of(bytes)
-    }
-    const sendQueue = async () => {
-      const data = encodeQueue()
-      if (!data) return true
-      const session = sessionRef.current
-      if (!session) return false
-      const answer = await post('input', { session, data }).catch(() => ({ status: 0 }))
-      if (answer.status === 204) return true
-      if (answer.status === 401) {
-        sessionRef.current = null
-        setModeNow('ended')
-        setResumeNote('paused')
-        // A batch the host refused (a signed-out page) means this watch stream is the only
-        // thing left to tell the host to let the typing attach go: close it.
-        if (source) { source.close(); source = null }
-        return false
-      }
-      if (answer.status === 409) {
-        // The batch that hit the end is lost on purpose (nothing is replayed); the note tells
-        // the owner to type again.
-        sessionRef.current = null
-        setModeNow('ended')
-        setResumeNote('paused')
-        return false
-      }
-      return true
-    }
-    const flush = () => {
-      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = 0 }
-      flushingRef.current = (flushingRef.current ?? Promise.resolve(true)).then(sendQueue, sendQueue)
-      return flushingRef.current
-    }
-    const stopTyping = (reason = 'released') => {
-      const session = sessionRef.current
-      sessionRef.current = null
-      if (modeRef.current === 'typing') setModeNow(reason === 'ended' ? 'ended' : 'view')
-      setPasteNote(false)
-      setResumeNote(reason === 'ended' ? 'paused' : false)
-      if (term) term.options.disableStdin = true
-      if (outside) { document.removeEventListener('pointerdown', outside, true); outside = null }
-      return flush().then(() => (session ? post('release', { session }).catch(() => {}) : undefined))
-    }
-    // A take, and a retake after the idle lease ended typing: the same watch, no navigating.
-    // Nothing typed before the take is confirmed is ever sent: the waking key or paste only
-    // asks for typing back, and the owner types again after the confirmation.
-    const take = async () => {
-      if (takingRef.current || modeRef.current === 'typing') return
-      takingRef.current = true
-      setModeNow('taking')
-      const answer = await post('take', { bot: botId, worker: worker ?? null, viewer: VIEWER }).catch(() => ({ status: 0 }))
-      takingRef.current = false
       if (disposed) return
-      if (answer.status === 200 && answer.body?.session) {
-        sessionRef.current = answer.body.session
-        setModeNow('typing')
-        setResumeNote('back')
-        if (term) { term.options.disableStdin = false; term.focus() }
-        if (!outside) {
-          outside = (event) => { if (!element.contains(event.target)) void stopTyping('left') }
-          document.addEventListener('pointerdown', outside, true)
-        }
+      cancelAnimationFrame(fitFrame)
+      const measure = (pass) => {
+        const screen = element.querySelector('.xterm-screen')?.getBoundingClientRect()
+        if (!screen?.width || !screen.height) return
+        const style = getComputedStyle(element)
+        // clientWidth/clientHeight already exclude any layout space used by scrollbars.
+        let width = element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+        let height = element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+        // Overlay scrollbars take no layout space but can cover the grid's trailing cells.
+        if (screen.height > height && element.offsetWidth === element.clientWidth) width -= OVERLAY_SCROLLBAR_ALLOWANCE
+        if (screen.width > width && element.offsetHeight === element.clientHeight) height -= OVERLAY_SCROLLBAR_ALLOWANCE
+        if (width <= 0 || height <= 0) return
+        const scale = Math.min(width / screen.width, height / screen.height)
+        const size = term.options.fontSize
+        if (pass > 0 && (scale >= 1 || size === MIN_FONT_SIZE)) return
+        let next = Math.round(size * scale * 10) / 10
+        if (scale < 1 && next >= size) next = (Math.round(size * 10) - 1) / 10
+        next = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, next))
+        if (next === size) return
+        term.options.fontSize = next
+        if (pass < 2) fitFrame = requestAnimationFrame(() => measure(pass + 1))
+      }
+      fitFrame = requestAnimationFrame(() => measure(0))
+    }
+    const sendQueue = async (current) => {
+      if (session !== current || queue.length === 0) return
+      const chunks = queue
+      queue = []
+      const bytes = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0))
+      let at = 0
+      for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.length }
+      const answer = await post('input', { session: current, data: base64Of(bytes) }).catch(() => ({ status: 0 }))
+      if (disposed || session !== current) return
+      if (answer.status === 401 || answer.status === 409) {
+        // The lost batch is never replayed.
+        session = null
+        // A signed-out page closes its watcher to tell the host to release the attaches.
+        if (answer.status === 401) stream.fail()
+        else void stopTyping('ended')
+      }
+    }
+    const enqueue = (bytes) => {
+      if (bytes.length === 0) return
+      queue.push(bytes)
+      if (timer) return
+      const current = session
+      timer = setTimeout(() => {
+        timer = 0
+        flushing = flushing.then(() => sendQueue(current))
+      }, 20)
+    }
+    const clearIntent = () => {
+      document.removeEventListener('pointerdown', onOutside, true)
+      document.removeEventListener('keydown', onEscape, true)
+      if (cancelTyping === stopTyping) cancelTyping = null
+      intent = null
+    }
+    const release = id => post('release', { session: id }).catch(() => {})
+    const stopTyping = (next = 'view') => {
+      if (intent === typingIntent) typingIntent += 1
+      clearIntent()
+      const current = session
+      session = null
+      clearTimeout(timer)
+      timer = 0
+      queue = []
+      flushing = Promise.resolve()
+      if (!disposed) {
+        setModeNow(next)
+        setPasteNote(false)
+        setResumeNote(next === 'ended' ? 'paused' : false)
+      }
+      if (term) term.options.disableStdin = true
+      if (current) return release(current)
+    }
+    const onOutside = (event) => { if (!element.contains(event.target)) void stopTyping() }
+    const onEscape = (event) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      void stopTyping()
+    }
+    // The waking key/paste is dropped. A late reply cannot enable input or steal focus.
+    const take = async () => {
+      if (streamPhase !== 'open' || typingMode === 'taking' || typingMode === 'typing') return
+      const requested = ++typingIntent
+      void cancelTyping?.()
+      intent = requested
+      cancelTyping = stopTyping
+      document.addEventListener('pointerdown', onOutside, true)
+      document.addEventListener('keydown', onEscape, true)
+      setModeNow('taking')
+      const answer = await post('take', { bot: botId, worker: worker ?? null, viewer }).catch(() => ({ status: 0 }))
+      const accepted = answer.status === 200 && answer.body?.session
+      if (disposed || requested !== typingIntent || streamPhase !== 'open' || intent !== requested) {
+        if (accepted) void release(accepted)
+        if (!disposed && intent === requested) void stopTyping()
         return
       }
-      setModeNow(answer.status === 409 ? 'elsewhere' : 'ended')
-      setResumeNote('paused')
+      if (accepted) {
+        session = accepted
+        setModeNow('typing')
+        setResumeNote('back')
+        term.options.disableStdin = false
+        term.focus()
+        return
+      }
+      void stopTyping(answer.status === 409 && answer.body?.error === 'typing-elsewhere' ? 'elsewhere' : 'view')
     }
     takeRef.current = take
+
+    const resize = ({ cols, rows }) => {
+      term.resize(cols, rows)
+      fitNow()
+    }
     const start = async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')])
+      const { Terminal } = await import('@xterm/xterm')
       if (disposed) return
       const background = groundOf(element)
       const foreground = getComputedStyle(element).color || 'inherit'
       term = new Terminal({
+        cols: 80,
+        rows: 24,
         convertEol: false,
         cursorBlink: false,
         disableStdin: true,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-        fontSize: 12,
+        fontSize: MAX_FONT_SIZE,
         lineHeight: 1.25,
         scrollback: 5000,
         theme: { background, foreground },
       })
-      termRef.current = term
-      fit = new FitAddon()
-      term.loadAddon(fit)
       term.open(element)
       fitNow()
       observer = new ResizeObserver(fitNow)
       observer.observe(element)
-      // Escape ends typing and is never sent; every other key is one batch.
       term.attachCustomKeyEventHandler((event) => {
-        if (event.type === 'keydown' && event.key === 'Escape' && modeRef.current === 'typing') {
-          event.preventDefault()
-          void stopTyping('escape')
-          return false
-        }
-        return true
+        if (event.type !== 'keydown' || typingMode !== 'ended' || streamPhase !== 'open') return true
+        if (['Control', 'Shift', 'Alt', 'Meta', 'Escape'].includes(event.key)) return true
+        event.preventDefault()
+        void take()
+        return false
       })
       term.onData((data) => {
-        if (modeRef.current === 'typing' && sessionRef.current) {
-          setResumeNote(false)
-          queueRef.current.push(new TextEncoder().encode(data))
-          if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
-        } else if (modeRef.current === 'ended') {
-          // The lease ended typing; the waking key only takes typing back, it is never sent
-          // (Enter included).
-          void takeRef.current?.()
-        }
+        if (typingMode !== 'typing' || !session) return
+        setResumeNote(false)
+        enqueue(new TextEncoder().encode(data))
       })
-      // A paste never goes through xterm's own paste path (which turns newlines into Enter):
-      // the clipboard text is queued with no CR and no LF at all, so nothing in a paste can
-      // press Enter, whatever the program's bracketed-paste state.
+      // Bypass xterm's paste handling, which turns line breaks into Enter.
       const onPaste = (event) => {
         event.preventDefault()
         event.stopImmediatePropagation()
-        if (modeRef.current === 'ended') {
-          // A paste in the ended state asks for typing back too; it is not sent.
-          void takeRef.current?.()
-          return
-        }
-        if (modeRef.current !== 'typing' || !sessionRef.current) return
+        if (typingMode === 'ended') { void take(); return }
+        if (typingMode !== 'typing' || !session) return
         const pasted = pasteBytes(event.clipboardData?.getData('text/plain') ?? '')
         setPasteNote(pasted.note ?? false)
         setResumeNote(false)
-        if (pasted.bytes.length === 0) return
-        queueRef.current.push(pasted.bytes)
-        if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
+        enqueue(pasted.bytes)
       }
       element.addEventListener('paste', onPaste, true)
       cleanupPaste = () => element.removeEventListener('paste', onPaste, true)
-      setPhase({ kind: 'connecting' })
-      const query = `api/omni-ui/code/stream?bot=${encodeURIComponent(botId)}${worker ? `&worker=${encodeURIComponent(worker)}` : ''}&viewer=${encodeURIComponent(VIEWER)}`
-      source = new EventSource(query)
-      source.addEventListener('pane', (event) => {
-        if (!event.data) return
-        setPhase({ kind: 'open' })
-      })
-      source.addEventListener('data', (event) => {
-        if (disposed || !event.data) return
-        const bytes = decode(event.data)
-        if (term) term.write(bytes)
-      })
-      source.addEventListener('close', () => {
-        if (source) { source.close(); source = null }
-        if (modeRef.current === 'typing') void stopTyping('ended')
-        setPhase({ kind: 'ended' })
-      })
-      source.onerror = () => {
-        // EventSource would retry by itself and attach a second stream: let the person ask.
-        if (source) { source.close(); source = null }
-        if (modeRef.current === 'typing') void stopTyping('ended')
-        setPhase({ kind: 'failed' })
+
+      const paint = (apply) => {
+        if (pendingPaint) pendingPaint.push(apply)
+        else apply()
       }
+      if (!hub) stream.setPanes([{ key: paneKey, botId, worker }])
+      unsubscribe = stream.subscribe(paneKey, {
+        streamReset(nextViewer) {
+          generation += 1
+          setPhaseNow('connecting')
+          void stopTyping()
+          if (viewer) {
+            // Finish old writes before clearing the screen and applying the new history.
+            const pending = []
+            pendingPaint = pending
+            term.write(new Uint8Array(0), () => {
+              if (disposed || pendingPaint !== pending) return
+              pendingPaint = null
+              term.reset()
+              resize({ cols: 80, rows: 24 })
+              for (const apply of pending) apply()
+            })
+          } else {
+            term.reset()
+          }
+          viewer = nextViewer
+        },
+        pane: size => paint(() => {
+          if (validGrid(size)) resize(size)
+          if (streamPhase === 'connecting') setPhaseNow('open')
+        }),
+        data: data => paint(() => { if (data) term.write(decode(data)) }),
+        reset: size => paint(() => {
+          if (!validGrid(size)) return
+          const current = generation
+          term.write(new Uint8Array(0), () => {
+            if (disposed || current !== generation) return
+            term.reset()
+            resize(size)
+          })
+        }),
+        end(next) {
+          setPhaseNow(next)
+          void stopTyping()
+        },
+      })
     }
     void start()
     return () => {
       disposed = true
-      void stopTyping('left')
+      takeRef.current = null
+      void stopTyping()
       cancelAnimationFrame(fitFrame)
       cleanupPaste?.()
       observer?.disconnect()
-      source?.close()
+      unsubscribe?.()
       try { term?.dispose() } catch { /* already gone */ }
       element.replaceChildren()
     }
-  }, [botId, worker, attempt])
-  const watching = phase.kind === 'open' ? t('Watching · view only') : phase.kind === 'ended' ? t('This terminal ended') : phase.kind === 'failed' ? t('The terminal could not be reached') : t('Opening the terminal…')
+  }, [botId, worker, hub, stream, paneKey])
+  const watching = phase === 'open' ? t('Watching · view only') : phase === 'ended' ? t('This terminal ended') : phase === 'failed' ? t('The terminal could not be reached') : t('Opening the terminal…')
   const stateWord = mode === 'typing' ? t('Typing · Esc to stop')
     : mode === 'taking' ? t('Taking the pane…')
-      : mode === 'elsewhere' ? t('Typing is open in another window · view only')
+      : mode === 'elsewhere' ? t('Typing elsewhere · view only')
         : mode === 'ended' ? t('Your session ended · view only')
-          : phase.kind === 'open' ? t('View only · click to type') : watching
-  const retryable = phase.kind === 'ended' || phase.kind === 'failed'
+          : phase === 'open' ? t('View only · click to type') : watching
+  const retryable = phase === 'ended' || phase === 'failed'
   return h('div', { className: 'cs-pane' },
     h('div', { className: 'cs-pane-head' },
       h('span', { className: 'cs-pane-title', title }, title),
       h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
-      resumeNote === 'paused' ? h('span', { className: 'cs-paste-note', role: 'status' }, t('Typing paused after 60 s idle. Press any key to resume'))
+      refusal ? h('span', { className: 'cs-paste-note', role: 'status', 'data-wrap': '' }, refusal)
+        : resumeNote === 'paused' ? h('span', { className: 'cs-paste-note', role: 'status' }, t('Typing paused after 60 s idle. Press any key to resume'))
         : resumeNote === 'back' ? h('span', { className: 'cs-paste-note', role: 'status' }, t('Typing is back: type again'))
           : pasteNote ? h('span', { className: 'cs-paste-note', role: 'status' }, pasteNote === 'controls-stripped' ? t('Control characters were removed from the paste') : t('Line breaks were removed from the paste')) : null,
-      retryable ? h('button', { type: 'button', className: 'cs-btn', onClick: () => { setPhase({ kind: 'connecting' }); setAttempt(value => value + 1) } }, t('Reconnect')) : null),
-    h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere' || modeRef.current === 'ended') void takeRef.current?.() } }))
+      retryable ? h('button', { type: 'button', className: 'cs-btn', onClick: stream.reconnect }, t('Reconnect')) : null),
+    h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, style: { overflow: 'auto' }, onClick: () => { void takeRef.current?.() } }))
 }
 
-const TreeRow = ({ label, status, depth = 0, current, note, title, onClick }) => h('button', {
-  type: 'button', className: 'cs-row', 'data-depth': depth, 'aria-current': current ? 'true' : undefined, title, onClick,
-},
+const onMac = () => /^mac/i.test(globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || '')
+const besideKey = event => event.ctrlKey || event.metaKey
+
+export function TreeRow({ label, status, depth = 0, current, note, title, onClick }) {
+  const keyboardPick = useRef(false)
+  const hint = onMac() ? t('⌘-click to show beside') : t('Ctrl-click to show beside')
+  return h('button', {
+    type: 'button', className: 'cs-row', 'data-depth': depth, 'aria-current': current ? 'true' : undefined,
+    title: title ? `${title}\n${hint}` : hint,
+    onClick: (event) => {
+      const duplicate = keyboardPick.current && event.detail === 0
+      keyboardPick.current = false
+      if (!duplicate) onClick({ beside: besideKey(event) })
+    },
+    onKeyDown: (event) => {
+      if (event.key !== 'Enter' || !besideKey(event)) { keyboardPick.current = false; return }
+      event.preventDefault()
+      keyboardPick.current = true
+      if (!event.repeat) onClick({ beside: true })
+    },
+  },
   h('span', { className: 'cs-row-label' }, label),
   note ? h('span', { className: 'cs-row-note' }, note) : null,
   h('span', { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, h('span', { className: 'cs-mark-word' }, statusLabel(status))))
+}
 
-/**
- * The Code body: the team tree on the left (projects, their Bots, the workers under them) and
- * the chosen terminal on the right. Every row and every click reads what the host sent; no
- * row starts, stops or types into anything.
- * `code` is the main client's store surface: { subscribe, snapshot, loadTree, selectPane }.
- */
+const TreeFold = ({ label, title, open, onClick }) => h('button', {
+  type: 'button', className: 'lb-row', title, 'aria-expanded': open, onClick,
+},
+  h('span', { className: 'lb-name' }, label),
+  h('span', { className: open ? 'lb-chev lb-chev-open' : 'lb-chev' }, h(ChevronRightIcon)))
+
+export function CodeTree({ current, onSelect, sidebar = false }) {
+  const { tree, loading, error, selected, beside = [] } = current
+  const shown = [selected, ...beside].filter(Boolean)
+  const isCurrent = (botId, worker = null) => shown.some(pane => pane.botId === botId && (pane.worker ?? null) === worker)
+  const [folded, setFolded] = useState(() => new Set())
+  const toggle = key => setFolded((before) => {
+    const next = new Set(before)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    return next
+  })
+  const machine = tree?.machine?.name || t('This computer')
+  const projects = tree?.projects ?? []
+  const machineOpen = !folded.has(null)
+  const treeRows = machineOpen ? projects.map((project) => {
+    const label = project.global === true ? t('Global Bots') : project.name ?? project.folder
+    const key = project.global === true ? 'global' : project.folder
+    const title = project.global === true ? label : project.folder
+    const open = !folded.has(key)
+    return h('section', { key, className: 'cs-project' },
+      sidebar ? h(TreeFold, { label, title, open, onClick: () => toggle(key) })
+        : h('div', { className: 'cs-project-name', title }, label),
+      open ? project.bots.map(bot => h('div', { key: bot.id, className: 'cs-bot' },
+        h(TreeRow, {
+          label: bot.name,
+          status: bot.status,
+          current: isCurrent(bot.id),
+          note: sidebar ? bot.agent ?? (bot.main ? t('lead') : null) : bot.main ? t('lead') : null,
+          onClick: options => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options),
+        }),
+        bot.workers.map(worker => h(TreeRow, {
+          key: worker.terminal,
+          label: worker.role ?? worker.agent ?? worker.terminal,
+          status: worker.status,
+          depth: 1,
+          current: isCurrent(bot.id, worker.terminal),
+          title: [worker.role, worker.branch?.replace(/^refs\/heads\//, '')].filter(Boolean).join(' · '),
+          onClick: options => onSelect({ botId: bot.id, worker: worker.terminal }, options),
+        })))) : null)
+  }) : null
+  return h('nav', { className: sidebar ? 'lb-rows' : 'cs-tree', 'aria-label': t('Code team') },
+    sidebar && tree?.machine ? h(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }) : null,
+    error || (sidebar && tree?.reason === 'no-core') ? h('p', { className: 'cs-empty' }, t('The Code side could not read this computer’s team.')) : null,
+    !error && projects.length === 0 && !loading && (!sidebar || tree?.reason !== 'no-core') ? h('p', { className: 'cs-empty' }, t('No project has a Bot on this computer yet.')) : null,
+    loading && !tree ? h('p', { className: 'cs-empty' }, t('Reading this computer’s team…')) : null,
+    treeRows)
+}
+
+/** The chosen terminals, shared by the seat face and the bar's main Code panel. */
+export function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
+  const [hub] = useState(createPaneHub)
+  const panes = []
+  for (const pane of [selected, ...beside].slice(0, MAX_PANES)) {
+    const details = paneDetails(pane, tree)
+    if (details) panes.push({ ...pane, ...details, key: `${pane.botId}:${pane.worker ?? 'seat'}:${details.terminal}` })
+  }
+  useEffect(() => { hub.setPanes(panes) })
+  useEffect(() => () => hub.setPanes([]), [hub])
+  if (panes.length === 0) return h('div', { className: 'cs-empty cs-empty-view' },
+    loading ? t('Reading this computer’s team…') : t('No terminal for this Bot yet'))
+
+  const refusal = refused && (onMac()
+    ? t('Four terminals are shown: {names}. ⌘-click one of them to close it, then add another.', { names: refused.join(', ') })
+    : t('Four terminals are shown: {names}. Ctrl-click one of them to close it, then add another.', { names: refused.join(', ') }))
+  return h('div', { className: 'cs-panes', 'data-count': panes.length }, panes.map(({ botId, worker, key, title }, index) =>
+    h(TerminalPane, { key, paneKey: key, hub, botId, worker, title, refusal: index === 0 ? refusal : null })))
+}
+
+/** The seat's Terminal face: keep its own tree next to its terminal. */
 export function CodeBody({ code }) {
   const current = useSyncExternalStore(code.subscribe, code.snapshot, code.snapshot)
-  const tree = current.tree
-  useEffect(() => { if (!current.tree && !current.loading) void code.loadTree() }, [code, current.tree, current.loading])
-  const chosen = selecting(tree, current.selected)
-  const title = chosen
-    ? (chosen.worker ? `${chosen.bot.name} · ${chosen.worker.role ?? chosen.worker.agent ?? chosen.worker.terminal}` : chosen.bot.name)
-    : t('No terminal chosen')
-  const choose = (botId, worker = null) => {
-    const bot = botRowOf(tree, botId)
-    if (!bot) return
-    if (worker) code.selectPane({ botId, worker })
-    else if (bot.terminal) code.selectPane({ botId, worker: null })
-    else if (bot.workers.length > 0) code.selectPane({ botId, worker: bot.workers[0].terminal })
-    else code.selectPane({ botId, worker: null })
-  }
-  const projects = tree?.projects ?? []
-  // A project-less group is RFC 0014's global Bots: they are seats and carry their own label.
-  const realProjects = projects.filter(project => project.global !== true)
+  const { tree, loading, error, selected, beside, refused } = current
+  useEffect(() => {
+    if (!tree && !loading && !error) void code.loadTree()
+  }, [code, tree, loading, error])
+  const realProjects = (tree?.projects ?? []).filter(project => project.global !== true)
   const projectCount = realProjects.length === 1 ? t('1 project') : t('{n} projects', { n: realProjects.length })
-  const treeRows = projects.map((project) => {
-    const label = project.global === true ? t('Global Bots') : project.name ?? project.folder
-    return h('section', { key: project.global === true ? 'global' : project.folder, className: 'cs-project' },
-      h('div', { className: 'cs-project-name', title: project.global === true ? label : project.folder }, label),
-      project.bots.map(bot => h('div', { key: bot.id, className: 'cs-bot' },
-      h(TreeRow, {
-        label: bot.name,
-        status: bot.status,
-        current: current.selected?.botId === bot.id && !current.selected?.worker,
-        note: bot.main ? t('lead') : null,
-        onClick: () => choose(bot.id),
-      }),
-      bot.workers.map(worker => h(TreeRow, {
-        key: worker.terminal,
-        label: worker.role ?? worker.agent ?? worker.terminal,
-        status: worker.status,
-        depth: 1,
-        current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
-        title: [worker.role, worker.branch?.replace(/^refs\/heads\//, '')].filter(Boolean).join(' · '),
-        onClick: () => choose(bot.id, worker.terminal),
-      })))))
-  })
   return h('div', { className: 'cs-host' },
     h('div', { className: 'cs-top' },
       h('span', { className: 'cs-machine' }, tree?.machine?.name ?? t('This computer')),
       h('span', { className: 'cs-count' }, projectCount)),
     h('div', { className: 'cs-body' },
-      h('nav', { className: 'cs-tree', 'aria-label': t('Code team') },
-        current.error ? h('p', { className: 'cs-empty' }, t('The Code side could not read this computer’s team.')) : null,
-        !current.error && projects.length === 0 && !current.loading ? h('p', { className: 'cs-empty' }, t('No project has a Bot on this computer yet.')) : null,
-        current.loading && !tree ? h('p', { className: 'cs-empty' }, t('Reading this computer’s team…')) : null,
-        treeRows),
-      h('section', { className: 'cs-view' },
-        chosen
-          ? h(TerminalPane, { key: `${chosen.bot.id}:${chosen.worker?.terminal ?? 'seat'}`, botId: chosen.bot.id, worker: chosen.worker?.terminal ?? null, title })
-          : h('div', { className: 'cs-empty cs-empty-view' },
-              current.loading ? t('Reading this computer’s team…') : t('No terminal for this Bot yet')))))
-}
-
-/** The selected row, with its Bot and worker: from the store, or from the row just pressed. */
-function selecting(tree, selected) {
-  if (!tree || !selected) return null
-  const bot = botRowOf(tree, selected.botId)
-  if (!bot) return null
-  if (selected.worker) {
-    const worker = bot.workers.find(candidate => candidate.terminal === selected.worker)
-    return worker ? { bot, worker } : null
-  }
-  return bot.terminal ? { bot, worker: null } : null
+      h(CodeTree, { current, onSelect: code.selectPane }),
+      h('section', { className: 'cs-view' }, h(CodeTerminal, { tree, selected, beside, refused, loading }))))
 }
 
 // The pane's sheet: the bar's own sizes and type (left-bar-css.js tokens), so the tree reads
@@ -412,10 +579,14 @@ export const CODE_SIDE_CSS = `
 .cs-mark-not-running::before{background:transparent;box-shadow:inset 0 0 0 1px currentColor}
 .cs-mark-word{overflow:hidden;text-overflow:ellipsis}
 .cs-view{display:flex;flex:1;min-width:0;flex-direction:column;background:var(--bt-card)}
+.cs-panes{display:grid;flex:1;min-height:0;min-width:0;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+.cs-panes:not([data-count='1']){grid-template-columns:repeat(2,minmax(0,1fr))}
+.cs-panes[data-count='3'],.cs-panes[data-count='4']{grid-template-rows:repeat(2,minmax(0,1fr))}
 .cs-pane{display:flex;flex:1;flex-direction:column;min-height:0}
 .cs-pane-head{display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--lb-line,var(--bt-line));flex:none}
 .cs-pane-title{font:var(--bt-weight-title,600) 13.5px/1.3 var(--bt-head-font,var(--bt-font));min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cs-paste-note{color:var(--lb-needs-ink,var(--st-warn,var(--bt-ink)));font:400 12px/1.3 var(--bt-font);white-space:nowrap}
+.cs-paste-note[data-wrap]{white-space:normal}
 .cs-pane-note{margin-left:auto;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font);white-space:nowrap}
 .cs-screen{flex:1;min-height:0;padding:6px 8px 0;background:var(--bt-card);contain:strict;cursor:text}
 .cs-screen[data-code-mode='typing']{cursor:text}

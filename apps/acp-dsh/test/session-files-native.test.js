@@ -16,6 +16,24 @@ const skip = !['linux', 'darwin'].includes(process.platform) || !binary || !acp
 if (process.env.AUTOMAGIK_REQUIRE_SESSION_FILE_TEST === '1') assert.equal(skip, false, 'supply real native Codex and codex-acp paths')
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
 
+function imageOutput(rows, path) {
+  const argument = JSON.stringify(path)
+  const call = rows.find(row => row.type === 'custom_tool_call' && row.input.includes(argument))
+  assert.ok(call, 'actual tool call for ' + path)
+  const result = rows.findLast(row => row.type === 'custom_tool_call_output' && row.call_id === call.call_id)
+  const output = JSON.stringify(result?.output)
+  assert.ok(output, 'actual tool output for ' + path)
+  return output
+}
+
+function assertDeniedImage(rows, path) {
+  const output = imageOutput(rows, path)
+  const missing = output.includes('unable to locate image at') && /No such file|ENOENT|not found/.test(output)
+  const macDenied = process.platform === 'darwin' && output.includes('unable to read image at') && output.includes('Operation not permitted (os error 1)')
+  assert.ok(output.includes(path) && (missing || macDenied), `expected denial for ${path}, got ${output}`)
+  assert.equal(output.includes(PNG.toString('base64')), false, 'denied image bytes for ' + path)
+}
+
 test('real native image: denied before consent, exact bytes on next user turn, sibling/sentinel denied', { skip, timeout: 60000 }, async t => {
   const root = realpathSync(mkdtempSync(join(process.env.AUTOMAGIK_TEST_SESSION_FILE_ROOT ?? tmpdir(), 'native-session-file-')))
   const runs = []
@@ -83,8 +101,8 @@ test('real native image: denied before consent, exact bytes on next user turn, s
   first.run.prompt([{ type: 'text', text: 'Open the outside image.' }]).catch(() => {})
   await drain(first)
   assert.equal(questions, 1, JSON.stringify({ calls: [...first.run.tools.values()].map(tool => ({ id: tool.id, name: tool.structuredName, input: tool.rawInput, locations: tool.locations, result: tool.sessionFileResult })), input: inputs.at(-1)?.filter(row => row.type === 'custom_tool_call_output') }).slice(-7000)); assert.equal(owner.grant.staged, true)
-  const before = JSON.stringify(inputs)
-  assert.match(before, /ENOENT|not found|No such file/); assert.equal(before.includes(PNG.toString('base64')), false)
+  assertDeniedImage(inputs.flat(), approved)
+  assert.equal(JSON.stringify(inputs).includes(PNG.toString('base64')), false)
   await owner.grant.ready
   assert.equal(runs.length, 1, 'consent never starts a replacement')
   const files = await grants.activate(owner, { role: 'user', source: { kind: 'user' } })
@@ -93,38 +111,30 @@ test('real native image: denied before consent, exact bytes on next user turn, s
   steps = [image(approved), image(sibling), image(sentinel)]
   next.run.prompt([{ type: 'text', text: 'Open only the approved image now.' }]).catch(() => {})
   await drain(next)
-  const outputs = new Map(inputs.slice(at).flat().filter(row => row.type === 'custom_tool_call_output').map(row => [row.call_id, JSON.stringify(row.output)]))
-  const toolCalls = new Map(inputs.slice(at).flat().filter(row => row.type === 'custom_tool_call').map(row => [row.call_id, row.input]))
-  for (const path of [approved, sibling, sentinel]) {
-    const call = [...toolCalls].find(([, input]) => input.includes(path))
-    assert.ok(call, 'actual tool call for ' + path)
-    const output = outputs.get(call[0])
-    assert.ok(output, 'actual tool output for ' + path)
-    if (path === approved) assert.ok(output.includes(PNG.toString('base64')), 'approved exact bytes')
-    else { assert.match(output, /No such file|ENOENT|not found/); assert.equal(output.includes(PNG.toString('base64')), false) }
-  }
+  const grantedTurn = inputs.slice(at).flat()
+  assert.ok(imageOutput(grantedTurn, approved).includes(PNG.toString('base64')), 'approved exact bytes')
+  for (const path of [sibling, sentinel]) assertDeniedImage(grantedTurn, path)
   const after = JSON.stringify(inputs.slice(at))
   assert.ok(after.includes(PNG.toString('base64')), 'native view_image must return the fixture bytes, not merely acknowledge a profile')
-  for (const path of [sibling, sentinel]) {
-    assert.ok(after.includes(path)); assert.ok(after.includes(`unable to locate image at`), after.slice(-1800))
-  }
   assert.equal(questions, 1)
   assert.equal(readFileSync(join(env.CODEX_HOME, 'config.toml'), 'utf8'), disk, 'granted process must not change shared config bytes')
   // Same shared home and same offered id, separate live ACP process: no inherited read.
   const other = await start([])
   assert.equal(next.run.alive, true, 'the authorized process is still alive during the other-process control')
-  let from = inputs.length
+  const otherFrom = inputs.length
   steps = [image(approved)]
   other.run.prompt([{ type: 'text', text: 'Separate chat without consent.' }]).catch(() => {})
   await drain(other)
-  let body = JSON.stringify(inputs.slice(from).flat().filter(row => row.type === 'custom_tool_call_output'))
-  assert.match(body, /No such file|ENOENT|not found/); assert.equal(body.includes(PNG.toString('base64')), false)
+  const otherTurn = inputs.slice(otherFrom).flat()
+  assertDeniedImage(otherTurn, approved)
+  assert.equal(JSON.stringify(otherTurn.filter(row => row.type === 'custom_tool_call_output')).includes(PNG.toString('base64')), false)
   await other.run.stop(); await next.run.stop(); grants.clear(agent.session.id)
   const base = await start([])
-  from = inputs.length; steps = [image(approved)]
+  const baseFrom = inputs.length; steps = [image(approved)]
   base.run.prompt([{ type: 'text', text: 'Base process after revocation.' }]).catch(() => {})
   await drain(base)
-  body = JSON.stringify(inputs.slice(from).flat().filter(row => row.type === 'custom_tool_call_output'))
-  assert.match(body, /No such file|ENOENT|not found/); assert.equal(body.includes(PNG.toString('base64')), false)
+  const baseTurn = inputs.slice(baseFrom).flat()
+  assertDeniedImage(baseTurn, approved)
+  assert.equal(JSON.stringify(baseTurn.filter(row => row.type === 'custom_tool_call_output')).includes(PNG.toString('base64')), false)
   assert.equal(readFileSync(join(env.CODEX_HOME, 'config.toml'), 'utf8'), disk, 'all phases preserve shared config bytes')
 })

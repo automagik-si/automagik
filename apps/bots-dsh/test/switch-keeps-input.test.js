@@ -5,6 +5,9 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
+import { SOURCE_KIND } from '../src/host/constants.js'
+import { RESUME_DELAY_MS } from '../src/host/resume.js'
+import { io } from '../src/host/wake-log.js'
 import { until } from './until.js'
 
 let rt
@@ -334,6 +337,58 @@ test('a marked part that stayed current is woken for its kept input, once, in or
   assert.deepEqual(second.state().switching, {})
 })
 
+test('astra-code #3: destination replay shares the startup plan while another Bot switches', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const host = await start({ services })
+  t.after(host.stop)
+  t.mock.timers.tick(RESUME_DELAY_MS)
+  await host.rt.heldBack()
+  await host.rt.resumesDone
+
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const create = host.ctx.sessionController.create
+  host.ctx.sessionController.create = async (options) => {
+    entered.resolve()
+    await release.promise
+    return create(options)
+  }
+  const old = host.agentOf('b')
+  old.inbox.nextTurn.push(said('h1', 'waiting input', 'e-held'))
+  await moveWriter(host, [])
+  await entered.promise
+  const [job] = host.rt.switchJobs()
+  try {
+    assert.deepEqual(host.state().switching, { b: { botId: 'b' } })
+    // A marker created after startup belongs to a later recovery pass.
+    const later = { botId: 'a' }
+    host.rt.state.switching.a = later
+    await host.rt.heldBackFor('a')
+    assert.equal(host.rt.state.switching.a, later)
+    delete host.rt.state.switching.a
+    // Also verify that an explicit recovery pass leaves the live job alone.
+    await host.rt.heldBack()
+    assert.deepEqual(host.state().switching, { b: { botId: 'b' } })
+    assert.deepEqual(inboxTexts(old), ['waiting input'])
+    assert.equal(old.calls.some(([kind]) => kind === 'send'), false)
+  } finally {
+    release.resolve()
+    await job.done
+  }
+})
+
+test('astra-code #7: restart archives an earlier part pending its replacement’s first answer', async (t) => {
+  const state = structuredClone(TEAM)
+  state.bots.b.sessionId = 'replacement'
+  state.bots.b.segments = [{ sessionId: 'b', endedAt: 5, archivePending: true }]
+  const host = await start({ state, services })
+  t.after(host.stop)
+  await host.rt.heldBack()
+  assert.deepEqual(host.archived, [['b', { stopActivity: true }]])
+  assert.equal(host.state().bots.b.segments[0].archivePending, undefined)
+  assert.deepEqual(host.state().switching, {})
+})
+
 // #571: archiving with stopActivity drops the tasks the earlier part still owns, so
 // the archive waits for the task move the switch started.
 test('an earlier part is stopped only after its tasks moved to the fresh part', async (t) => {
@@ -504,3 +559,55 @@ test('a group conversation cut off with nothing written moves on too', async (t)
   await until(() => host.archived.length > 0)
   assert.deepEqual(host.archived, [['gb', { stopActivity: true }]])
 })
+
+for (const failMove of [false, true]) {
+  test(`kept wake input forwards with ${failMove ? 'a failed moved append' : 'moved recorded before dispatch'}`, async (t) => {
+    const seed = structuredClone(TEAM)
+    seed.bots.b.sessionId = 'b-new'
+    seed.bots.b.segments = [{ sessionId: 'b', number: 1 }]
+    seed.switching = { b: { botId: 'b' } }
+    const host = await start({ state: seed, services })
+    t.after(host.stop)
+    const path = join(host.home, 'wake.jsonl')
+    const wake = () => readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    const id = 'wake-report'
+    assert.equal(host.rt.wakeLog.intent({
+      id, kind: 'task-report', botId: 'b', key: 'task:t1', sessionId: 'b',
+      report: { role: 'task-done', note: 'Draft', text: 'Done', taskSessionId: 't1' },
+      outcome: { status: 'done', endedAt: Date.now(), summary: 'Done' },
+    }), 'written')
+    const original = said('queued-report', 'Done', id)
+    original.source.kind = SOURCE_KIND
+    host.agentOf('b').inbox.nextTurn.push(original)
+    const oldInbox = host.agentOf('b').inbox
+    const remove = oldInbox.remove
+    t.mock.method(oldInbox, 'remove', (messageId) => {
+      if (!remove(messageId)) return false
+      host.ctx.emit('agent/inbox/discarded', { agent: host.agentOf('b'), message: original })
+      return true
+    })
+    const write = io.writeSync
+    if (failMove) {
+      t.mock.method(io, 'writeSync', (fd, bytes, ...args) => {
+        if (bytes.toString().includes('"event":"moved"')) throw Object.assign(new Error('full'), { code: 'ENOSPC' })
+        return write(fd, bytes, ...args)
+      })
+    }
+    let atForward
+    const fresh = host.agentOf('b-new')
+    const followup = fresh.followup
+    t.mock.method(fresh, 'followup', (message) => {
+      if (message.source.exchangeId === id) atForward = wake()
+      followup(message)
+    })
+    const diagnostics = []
+    t.mock.method(host.rt, 'noteFailure', entry => diagnostics.push(entry))
+    await host.rt.heldBack()
+    assert.equal(fresh.calls.filter(([, message]) => message.source.exchangeId === id).length, 1)
+    assert.deepEqual(atForward.map(entry => entry.event), failMove ? ['intent'] : ['intent', 'moved'])
+    if (!failMove) assert.equal(atForward.at(-1).sessionId, 'b-new')
+    assert.deepEqual(oldInbox.nextTurn, [])
+    assert.ok(host.rt.wakeLog.owns(id))
+    assert.equal(diagnostics.filter(note => note.source === 'wake' && note.text.includes('could not write moved')).length, Number(failMove))
+  })
+}

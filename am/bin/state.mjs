@@ -4,6 +4,7 @@
 // about each folder on this computer (tidy.js `folders`). Reads only; the I/O is given, so
 // the CLI and the tests share it. Apache-2.0.
 import { readFileSync, realpathSync, statSync } from "node:fs";
+import { verdictOf } from "../attach.js";
 import { BOTS_PATH, PROJECTS_FILE, listedProjects, projectOf } from "../model.js";
 import { labelWordsOf } from "../tidy.js";
 
@@ -54,7 +55,8 @@ export function spacesOf(ls) {
  * (the CLI's runProgram); `io.home` and `io.appHome` are folders. `window: false` skips
  * `herdr-app ls` (spaces: []), for the fixes that never touch the window. A failed hc or
  * herdr-app call rejects: a plan from half a picture would be wrong (except no hc at all with
- * `window: false`: no terminals, so only the registry is checked).
+ * `window: false`: no terminals, so only the registry is checked). With live local terminals,
+ * `io.ledger()` gives this core's bindings and the IDs ever recorded locally, or null.
  */
 export async function readState(io, { window = true } = {}) {
   const json = async (command, args) => {
@@ -66,13 +68,19 @@ export async function readState(io, { window = true } = {}) {
   // With no hc there are no labels to fix: the window-free read goes on without terminals.
   const ls = await json("hc", ["ls", "--json"]).catch((e) => { if (!window && /is not on PATH/.test(e.message)) return { terminals: [] }; throw e; });
   const rows = (Array.isArray(ls?.terminals) ? ls.terminals : Array.isArray(ls) ? ls : []).filter((r) => r?.address && r.state === "live");
+  const gets = new Map();
   const terminals = await Promise.all(rows.map(async (row) => {
     if (!local(row.address)) return terminalOf(row, null);
     const r = await io.run("hc", ["get", row.address, "--json"]);
     let get = null;
     try { get = r.code === 0 ? JSON.parse(r.stdout) : null; } catch { get = null; }
+    gets.set(row.address, get);
     return terminalOf(row, get);
   }));
+  const recorded = gets.size && typeof io.ledger === "function" ? await io.ledger() : null;
+  // An unanswered get can't confirm the binding, but its bot is still known to the ledger.
+  const ledger = recorded && { bound: recorded.bindings.filter((b) => verdictOf(b, gets.get(b.terminal)) === "live")
+    .map(({ terminal, bot, project }) => ({ terminal, bot, project })), known: recorded.known };
   const spaces = window ? spacesOf(await json("herdr-app", ["ls"])) : [];
   const registry = listedProjects(readText(`${io.appHome}/${PROJECTS_FILE}`));
 
@@ -106,16 +114,16 @@ export async function readState(io, { window = true } = {}) {
       if (file?.version === 1 && Array.isArray(file.bots)) projects.push({ key, machine: null, file });
     } catch { /* not JSON: the sidebar and the CLI say so; tidy leaves it out */ }
   }
-  return { terminals, spaces, projects, registry, folders };
+  return { terminals, spaces, projects, registry, folders, ledger };
 }
 
 /**
  * Carries out a plan's non-visual actions: the registry prune (`io.prune(keys)`, which
  * rewrites PROJECTS_FILE and returns the keys it took off) and role=/category= relabels
- * (`hc label`). Resolves with the lines to print: a note per key taken off (unless `notes` is
- * false), and the warnings; nothing here fails the command it runs after.
+ * (`hc label`). Returns lines to print, with prune notes when `notes` is true. With
+ * `onRelabelFailure`, passes each failed label write's details to the caller instead.
  */
-export async function fixNonVisual(actions, io, { notes = true } = {}) {
+export async function fixNonVisual(actions, io, { notes = true, onRelabelFailure } = {}) {
   const warnings = [];
   const keys = actions.filter((a) => a.kind === "prune-registry").map((a) => a.key);
   if (keys.length) {
@@ -124,10 +132,19 @@ export async function fixNonVisual(actions, io, { notes = true } = {}) {
       for (const key of notes && Array.isArray(taken) ? taken : []) warnings.push(`tidy: ${key} taken off the project list: its folder is gone.`);
     } catch (e) { warnings.push(`tidy: couldn't take ${keys.join(", ")} off ${PROJECTS_FILE}: ${e?.message ?? e}`); }
   }
-  for (const a of actions.filter((x) => x.kind === "relabel" && !x.visual)) {
-    const words = labelWordsOf(a.set);
-    const r = await io.run("hc", ["label", a.terminal, ...words]);
-    if (r.code !== 0) warnings.push(`tidy: ${a.terminal}'s labels ${words.join(" ")} weren't set: ${(r.stderr || r.stdout || "").trim()}`);
+  for (const { terminal, set } of actions.filter((x) => x.kind === "relabel" && !x.visual)) {
+    const words = labelWordsOf(set);
+    let result;
+    try {
+      result = await io.run("hc", ["label", terminal, ...words]);
+    } catch (error) {
+      if (!onRelabelFailure) throw error;
+      onRelabelFailure({ terminal, words, error });
+      continue;
+    }
+    if (result.code === 0) continue;
+    if (onRelabelFailure) onRelabelFailure({ terminal, words, result });
+    else warnings.push(`tidy: ${terminal}'s labels ${words.join(" ")} weren't set: ${(result.stderr || result.stdout || "").trim()}`);
   }
   return warnings;
 }

@@ -654,6 +654,8 @@ test('a task a restart cut stays running and reports only when it really ends', 
   host.emit('cut', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
   await settle(() => host.agentOf('a').calls.length === 1)
   assert.match(text(host.agentOf('a').calls[0]), /^\[Task "Ranking" finished/)
+  const { exchangeId } = host.agentOf('a').calls[0].source
+  await settle(() => notes(home).queued.a?.some(({ args }) => args.exchangeId === exchangeId && args.wake === true))
 })
 
 // #164. A task the restart pass does not set going has no other way to end: nothing is
@@ -693,6 +695,48 @@ test('a task the restart pass leaves cut reads stopped from the time it was cut;
   // Its Session stays where it was, and no Bot is woken at the start for an old task.
   assert.equal(stateOf(home).agents.t.sessions.length, 13)
   assert.equal(host.agentOf('a').calls.length, 0)
+})
+
+test('an ACP task cut by a restart stays working and is resumed, not failed and reported', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  const now = Date.now()
+  taskTeam(home, { tasks: { cut: working('Reviewer #1570', now - 60_000) } })
+  // What acp-dsh records when the host's SIGTERM reaches its agent before DSH stops the turn.
+  const interrupted = { kind: 'error', error: { message: 'Claude Code was interrupted before it finished.', code: 'AGENT_INTERRUPTED' } }
+  const first = await start(home)
+  first.emit('cut', 'turn/end', { turn: 1, reason: interrupted })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual([stateOf(home).tasks.cut.status, first.agentOf('a').calls.length], ['working', 0])
+  await first.stop()
+
+  const second = await start(home)
+  withLog(second, 'cut', [{ type: 'turn/start', time: now - 60_000 }, { type: 'turn/end', time: now - 1000, data: { reason: interrupted } }])
+  t.mock.timers.tick(3000)
+  const done = await second.ctx.get('omniTeam').resumesDone
+  assert.deepEqual(done.resumed, ['cut'])
+  const note = second.agentOf('cut').calls[0]
+  assert.deepEqual([note.source.kind, note.source.resumed], ['user', true])
+  assert.match(text(note), /^\[DeepSeek Harness restarted\]\n/)
+  assert.equal(stateOf(home).tasks.cut.status, 'working')
+})
+
+test('an ACP task the person stopped reads stopped, not failed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  taskTeam(home, { tasks: { cut: working('Reviewer', Date.now() - 60_000) } })
+  const host = await start(home)
+  // The task's Session runs on an ACP agent: a prompt cancelled there ends as the ABORTED error.
+  host.agentOf('cut').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'opus' } })
+  host.emit('cut', 'turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'Stopped', code: 'ABORTED' } } })
+  await settleState(t, home, () => stateOf(home).tasks.cut.status === 'stopped')
+  await settle(() => host.agentOf('a').calls.length === 1)
+  assert.deepEqual(
+    [stateOf(home).tasks.cut.status, stateOf(home).tasks.cut.summary],
+    ['stopped', 'Stopped before it finished.'],
+  )
+  assert.match(text(host.agentOf('a').calls[0]), /was stopped before it finished/)
+  assert.doesNotMatch(text(host.agentOf('a').calls[0]), /It failed:/)
 })
 
 test('a task that really ends while the pass opens its Session keeps its real end', async (t) => {
@@ -1169,4 +1213,54 @@ test('a written tool call is told apart from text about one', () => {
   assert.equal(stripWrittenCalls('plain <text> with an angle or two'), 'plain <text> with an angle or two')
   assert.equal(writesToolCall('plain <text> with an angle or two'), false)
   assert.equal(stripWrittenCalls('a < b or c > d'), 'a < b or c > d')
+})
+
+// A handed-back batch cut by a restart keeps every request it answers: the batch message
+// was taken up already, so the note of the turn is the only place the others are kept.
+test('a handed-back batch cut by a restart goes on with every request, and each gets the answer', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  const first = await start(home)
+  const joined = [{ info: { kind: 'bot', form: 'relay', role: 'request', exchangeId: 'x2', senderName: 'Omni', senderSessionId: 'a' }, text: 'and the second' }]
+  run(first, 'b', 1, { content: [{ type: 'text', text: '[Messages from Omni · you read them during your last task; answer them now]\nOmni:\nthe first\n\nOmni:\nand the second' }], source: { kind: 'bot', form: 'relay', role: 'request', exchangeId: 'x1', senderName: 'Omni', senderSessionId: 'a', deferred: true, joined } })
+  await settle(() => inflight(home).b?.trigger !== undefined)
+  assert.deepEqual(inflight(home).b.trigger.joined.map(item => item.info.exchangeId), ['x2'])
+  await first.stop()
+
+  const second = await start(home)
+  t.mock.timers.tick(3000)
+  await settle(() => second.agentOf('b').calls.length === 1)
+  const resumed = second.agentOf('b').calls[0]
+  assert.deepEqual([resumed.source.role, resumed.source.exchangeId, resumed.source.resumed], ['request', 'x1', true])
+  assert.deepEqual(resumed.source.joined.map(item => item.info.exchangeId), ['x2'])
+  assert.match(text(resumed), /^\[Messages from Omni · DeepSeek Harness restarted while you were working on them\]/)
+  run(second, 'b', 1, resumed)
+  second.emit('b', 'assistant/message', { message: { content: [{ type: 'text', text: 'both done' }] } })
+  second.emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await settle(() => second.agentOf('a').calls.length === 2)
+  assert.deepEqual(second.agentOf('a').calls.map(message => message.source.replyTo).sort(), ['x1', 'x2'])
+})
+
+// A message that owes no reply owes none after a restart either.
+test('a no-reply turn cut by a restart goes on owing no reply', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  const first = await start(home)
+  run(first, 'b', 1, { content: [{ type: 'text', text: '[Message from Omni · no reply needed]\nhold the deploy' }], source: { kind: 'bot', form: 'relay', role: 'request', exchangeId: 'x3', senderName: 'Omni', senderSessionId: 'a', noReply: true } })
+  await settle(() => inflight(home).b?.trigger !== undefined)
+  assert.equal(inflight(home).b.trigger.noReply, true)
+  await first.stop()
+
+  const second = await start(home)
+  t.mock.timers.tick(3000)
+  await settle(() => second.agentOf('b').calls.length === 1)
+  const resumed = second.agentOf('b').calls[0]
+  assert.deepEqual([resumed.source.role, resumed.source.exchangeId, resumed.source.noReply, resumed.source.resumed], ['request', 'x3', true, true])
+  assert.match(text(resumed), /^\[Message from Omni · no reply needed · DeepSeek Harness restarted while you were working on it\]/)
+  run(second, 'b', 1, resumed)
+  second.emit('b', 'assistant/message', { message: { content: [{ type: 'text', text: 'holding' }] } })
+  second.emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await immediate()
+  await realDelay(30)
+  assert.equal(second.agentOf('a').calls.length, 0)
 })

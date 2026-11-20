@@ -161,18 +161,24 @@ export function readRegistryTree({ env = process.env, readFile = readFileSync, w
   const home = join(automagikHome.replace(/\/+$/, ''), HOME_PATH)
   const readHome = readRegistry(home, 'home', readFile)
   if (readHome.error) { warn(`the Bot registry ${home} could not be read`); return { bots: [], projects: [] } }
+  // A local shown[] entry grants the project on this computer. Global Bots need no project.
+  const shown = new Set((readHome.file.shown ?? [])
+    .filter(entry => entry.machine === undefined && entry.project !== null && isAbsolute(entry.project))
+    .map(entry => resolve(entry.project)))
   const bots = []
   const seen = new Set()
   for (const bot of readHome.file.bots ?? []) {
     if (bot.machine !== undefined) continue
     if (seen.has(bot.id)) continue
     seen.add(bot.id)
+    if (bot.folder && (!isAbsolute(bot.folder) || !shown.has(resolve(bot.folder)))) continue
     // A home-file Bot with no folder is a global Bot (RFC 0014), and a seat (RFC 0022).
     bots.push({ id: bot.id, name: bot.name, role: bot.role, agent: bot.agent, main: bot.main === true, folder: typeof bot.folder === 'string' && bot.folder !== '' ? bot.folder : undefined })
   }
   const folders = new Set()
   for (const project of readHome.file.projects ?? []) {
-    if (typeof project?.folder === 'string' && isAbsolute(project.folder)) folders.add(resolve(project.folder))
+    if (project?.machine !== undefined) continue
+    if (typeof project?.folder === 'string' && isAbsolute(project.folder) && shown.has(resolve(project.folder))) folders.add(resolve(project.folder))
   }
   for (const bot of bots) if (typeof bot.folder === 'string') folders.add(resolve(bot.folder))
   const projects = [...folders].map(folder => ({ folder }))

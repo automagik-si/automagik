@@ -158,4 +158,12 @@ class ChatRenderTest {
         assertEquals(28f, ChatStyle.COMPOSER_RADIUS.value)
         assertEquals(17f, ChatStyle.COMPOSER_TEXT.value)
     }
+
+    /**
+     * The token stays at the 48dp minimum (#1040). This pins the number only; [ChatSwitchTargetTest] measures the
+     * rendered switch's node, so removing the size from the screen turns that test red.
+     */
+    @Test fun theModeSwitchIsAtLeast48Dp() {
+        assertTrue(ChatStyle.SWITCH_HEIGHT.value >= 48f)
+    }
 }

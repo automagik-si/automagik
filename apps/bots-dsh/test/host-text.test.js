@@ -130,3 +130,22 @@ test('Auto\'s refusals are worded with the Bot\'s name in Chinese and in the pt-
     assert.equal(hostText(person), 'Só a pessoa ativa o Automático, na escolha de permissão do Bot.')
   } finally { off() }
 })
+
+test('route policy refusals translate the route and preserve the Bot name in zh and pt-BR', () => {
+  const message = 'Model cannot use the Native route.'
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const [active, words, expected] of [
+    ['zh-CN', undefined, 'Model 无法使用“原生”路线。'],
+    ['pt-BR', pt, 'Model não pode usar a rota “Nativo”.'],
+  ]) {
+    let dictionary = words
+    const off = installLocale({
+      register: (_ns, locale, entries) => { if (locale === 'zh') dictionary ??= entries; return () => {} },
+      bind: () => (key, params) => (dictionary?.[key] ?? key).replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match),
+      getLocale: () => ({ active }),
+    })
+    try {
+      assert.equal(hostText(message), expected)
+    } finally { off() }
+  }
+})
