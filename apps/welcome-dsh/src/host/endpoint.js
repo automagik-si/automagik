@@ -1,10 +1,11 @@
-import { CliproxyPayload, DonePayload, MigrateOmniPayload, MigrateStartPayload, MigrateStatusPayload, OmniServerPayload, RequestBody, Secret, parse } from './payloads.js'
+import { CliproxyPayload, DonePayload, MigrateOmniPayload, MigrateStartPayload, MigrateStatusPayload, OmniGithubAckPayload, OmniGithubCancelPayload, OmniGithubInstallPayload, OmniGithubStatusPayload, OmniServerPayload, RequestBody, Secret, parse } from './payloads.js'
 import { createMigrateActions } from './hermes-migrate.js'
 import { createAiActions } from './ais.js'
 import { createProviderActions, saveRoute, unsetRoute } from './providers.js'
 import { createCompanionActions } from './companion.js'
 import { createBotTypeActions } from './bot-types.js'
 import { createOmniServerCheck } from './release-resolve.js'
+import { createOmniInstaller, omniInstallAvailable } from './omni-github.js'
 import { createAcpActions } from './acp.js'
 import { hostOf, machineOf } from './host.js'
 import { preloadOf } from './preload.js'
@@ -35,8 +36,9 @@ import { UNFOLD_BOT } from './companion.js'
 //   unfold-plugin, unfold-plugin-install, bot-type
 //                      the Omni plugins, Genie's and Unfold's, installed through DSH's plugin
 //                      manager, and what a Bot type starts with (src/host/bot-types.js)
-//   omni-server-check { version }
-//                      whether the Omni installer can run here and npm has its version
+//   omni-server-check { version, fallback? }, omni-github-install, omni-github-status,
+//   omni-github-cancel, omni-github-ack
+//                      the route to install Omni and the welcome's installer job
 //   acp, acp-switch, acp-retry
 //                      Claude Code and Codex through @automagik/acp-dsh: its acpAgents
 //                      service's status, and its claude/codex settings (src/host/acp.js)
@@ -248,16 +250,33 @@ export function install(ctx, deps = {}) {
       }), 'omni-ai: Add Omni')
     })
   }
+  const readOnly = () => team()?.readOnly?.()
+  const omniOptions = { fetch: deps.fetch, env: deps.env ?? process.env, ...deps.omniServer, ...deps.omniInstaller }
+  const omniInstaller = createOmniInstaller({ ...omniOptions, readOnly })
   const botTypes = createBotTypeActions(ctx, {
     team, omniProjectOf, env: deps.env, checkGit: deps.checkGit, genieSkills: deps.genieSkills, genieCli: deps.genieCli,
-    release: deps.release, releases: deps.releases, offersUnfold: deps.offersUnfold,
+    release: deps.release, releases: deps.releases, offersUnfold: deps.offersUnfold, omniInstaller,
   })
   const actions = { ...createActions(ctx, { ...deps, anyOn }), ...createProviderActions(ctx), ...aiEndpoints, ...createAcpActions(ctx), ...companion, ...botTypes }
-  const checkOmniServer = deps.releases?.checkOmniServer ?? createOmniServerCheck({ fetch: deps.fetch, env: deps.env, ...deps.omniServer })
+  const checkOmniServer = deps.releases?.checkOmniServer ?? createOmniServerCheck(omniOptions)
   actions['omni-server-check'] = (payload) => {
     const fields = parse(OmniServerPayload, payload)
     if (fields === undefined) throw invalid('Name an Omni server version.')
-    return checkOmniServer(fields.version)
+    if (fields.fallback !== true) return checkOmniServer(fields.version)
+    return checkOmniServer(fields.version, true, (login, version) => readOnly() === undefined
+      && omniInstallAvailable({ env: omniOptions.env, kill: omniOptions.kill, login, version }))
+  }
+  for (const [action, schema, run] of [
+    ['omni-github-install', OmniGithubInstallPayload, omniInstaller.start],
+    ['omni-github-status', OmniGithubStatusPayload, omniInstaller.status],
+    ['omni-github-cancel', OmniGithubCancelPayload, omniInstaller.cancel],
+    ['omni-github-ack', OmniGithubAckPayload, omniInstaller.ack],
+  ]) {
+    actions[action] = (payload) => {
+      const fields = parse(schema, payload === undefined ? {} : payload)
+      if (fields === undefined) throw invalid('Check the Omni install request.')
+      return run(fields)
+    }
   }
   const migrate = createMigrateActions(ctx, deps.migrate ?? {})
   // The move's own payloads are parsed here, as every other endpoint's are.

@@ -189,7 +189,7 @@ COPY --from=builder /build/out/offline-store /opt/automagik/offline-store
 COPY --from=builder /build/out/am /opt/automagik/am
 COPY server/entrypoint.mjs server/native-worker-login.mjs server/healthcheck.mjs server/lib.mjs \
      server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs \
-     server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs \
+     server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs server/omni-supervisor.mjs \
      /opt/automagik/
 COPY apps/desktop/src/profile-patch.mjs /opt/apps/desktop/src/
 COPY am/runner/locks.mjs am/runner/proto.mjs /opt/am/runner/

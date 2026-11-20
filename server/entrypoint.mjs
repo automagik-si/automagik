@@ -17,13 +17,14 @@ import {
   ensureDataDirs,
   gateViewDir,
   launchUrlOf,
+  omniRoot,
+  pipeRedacted,
   PORT,
   prepareDshHome,
   prepareWorkspace,
   privateMode,
   PROFILE,
   publicUrlArgs,
-  redactTokens,
   RUN_SECRETS_MODEL_KEY_FILE,
   writeMeasurementMarker,
 } from './lib.mjs'
@@ -32,7 +33,10 @@ import { multiuserConfigChecks, multiuserMode, multiuserReadiness, startupDecisi
 import { followImage } from './profile-follow.mjs'
 import { nativeWorkerEnv, panelCliHomes } from './native-worker-login.mjs'
 import { installVendorClis, runFirstBoot } from './first-boot.mjs'
+import { createOmniSupervisor } from './omni-supervisor.mjs'
 import { HC_SESSION, XDG_RUNTIME_DIR, herdrCoreSocket, onSharedVolume, toolchainChildEnv } from './toolchain.mjs'
+
+export { pipeRedacted, safeDshLine } from './lib.mjs'
 
 const ROOT = '/opt/automagik'
 const DSH_BIN = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -81,40 +85,21 @@ export function recordLaunch(dshHome, gateView, url) {
   return target
 }
 
-const SAFE_LINE_MAX = 4096
 const CORE_STDERR_TAIL = 16 * 1024
-export const safeDshLine = (line) => {
-  const redacted = redactTokens(line)
-  return redacted.length > SAFE_LINE_MAX ? `${redacted.slice(0, SAFE_LINE_MAX)}…` : redacted
+
+function isRunning(child) {
+  return !!child?.pid && child.exitCode === null && child.signalCode === null
 }
-export function pipeRedacted(stream, into, onLine, onRawLine, maxPending = Infinity) {
-  let pending = ''
-  let overlong = false
-  stream.setEncoding('utf8')
-  const emit = (line) => {
-    const complete = !overlong && line.length <= maxPending
-    const safe = complete ? safeDshLine(line) : '[overlong line omitted]'
-    overlong = false
-    onLine?.(safe)
-    if (complete) onRawLine?.(line)
-    into.write(`${safe}\n`)
-  }
-  stream.on('data', (chunk) => {
-    pending += chunk
-    let end = pending.indexOf('\n')
-    while (end !== -1) {
-      const line = pending.slice(0, end)
-      pending = pending.slice(end + 1)
-      emit(line)
-      end = pending.indexOf('\n')
-    }
-    if (pending.length > maxPending) {
-      pending = ''
-      overlong = true
-    }
-  })
-  stream.on('end', () => {
-    if (pending || overlong) emit(pending)
+
+async function stopChild(child, signal) {
+  if (!isRunning(child)) return
+  await new Promise((resolve) => {
+    const force = setTimeout(() => child.kill('SIGKILL'), 10_000)
+    child.once('exit', () => {
+      clearTimeout(force)
+      resolve()
+    })
+    child.kill(signal)
   })
 }
 
@@ -160,6 +145,7 @@ async function main() {
   const botsHome = resolve(env.AUTOMAGIK_BOTS_HOME || join(home, 'bots'))
   const workspace = resolve(env.AUTOMAGIK_WORKSPACE || join(home, 'workspace'))
   const appHome = resolve(env.HERDR_APP_HOME || join(home, 'herdr-app'))
+  const omniHome = omniRoot(env)
   const runtimeDir = resolve(env.XDG_RUNTIME_DIR || XDG_RUNTIME_DIR)
   const session = env.HC_SESSION ?? HC_SESSION
   const socketPath = herdrCoreSocket(session, runtimeDir)
@@ -172,7 +158,7 @@ async function main() {
   try {
     prepareGateView(gateView, dirname(gateView), {
       AUTOMAGIK_HOME: home, DSH_HOME: dshHome, AUTOMAGIK_BOTS_HOME: botsHome,
-      AUTOMAGIK_WORKSPACE: workspace, HERDR_APP_HOME: appHome, secrets,
+      AUTOMAGIK_WORKSPACE: workspace, HERDR_APP_HOME: appHome, secrets, omni: omniHome,
       // ACP's store and the agents' sign-in homes (acp-dsh: <AUTOMAGIK_HOME>/acp, cli-homes).
       acp: join(home, 'acp'), 'acp cli-homes': panelCliHomes(join(home, 'acp'), dshHome),
     })
@@ -197,6 +183,7 @@ async function main() {
   env.AUTOMAGIK_HOME = home
   env.AUTOMAGIK_WORKSPACE = workspace
   env.HERDR_APP_HOME = appHome
+  if (env.OMNI_HOME) env.OMNI_HOME = omniHome
   // Use the same session socket for core readiness, hc and pane validation.
   env.HC_SOCKET = socketPath
   env.HC_TERMINAL_SOCKET = socketPath
@@ -226,12 +213,32 @@ async function main() {
     return multiuserReadiness({ env, dshHome, profile: seeded.target, imageProfile: SEED, build, installAnchor: INSTALL_ANCHOR, appBoot })
   }
 
-  // If either supervised child exits, stop the other.
-  let core, child = null, coreExit = null, stopping = false
-  const stopCore = (signal = 'SIGTERM') => {
-    if (core.exitCode === null && core.signalCode === null) core.kill(signal)
+  const supervisor = createOmniSupervisor({ env, log, warn })
+  let core, child, stopping = false
+  const shutdown = (code, signal = 'SIGTERM') => {
+    if (stopping) return
+    stopping = true
+    // Let Omni drain for up to 60s, then allow force-kill and core cleanup.
+    setTimeout(() => {
+      for (const proc of [child, core]) if (isRunning(proc)) proc.kill('SIGKILL')
+      process.exit(code)
+    }, 70_000).unref()
+    void (async () => {
+      const drained = await Promise.allSettled([supervisor.stop(), stopChild(child, signal)])
+      if (drained.some(result => result.status === 'rejected')) {
+        warn('Could not finish shutting down Omni or dsh.')
+      }
+      await stopChild(core, signal)
+      process.exit(code)
+    })().catch(() => {
+      warn('Could not finish shutting down the image processes.')
+    })
+  }
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.on(signal, () => shutdown(0, signal))
   }
   const launchCore = async () => {
+    if (stopping) return
     let key
     try {
       key = modelKey(env)
@@ -253,27 +260,22 @@ async function main() {
       warn(`herdr-core did not start: ${error.message}`)
       process.exit(1)
     }
+    let coreReady = false
+    let exitedBeforeReady = false
     core.on('error', (error) => {
       warn(`herdr-core did not start: ${error.message}`)
-      stopping = true
-      child?.kill('SIGTERM')
-      process.exit(1)
+      shutdown(1)
     })
     core.on('exit', (code, signal) => {
       if (stopping) return
-      stopping = true
-      coreExit = code ?? 1
+      if (!coreReady) {
+        // Let the readiness path report the socket, directory listing and stderr tail.
+        exitedBeforeReady = true
+        return
+      }
       warn(`herdr-core exited (${signal ?? code}); stopping dsh so the container restart policy applies`)
-      child?.kill('SIGTERM')
-      setTimeout(() => process.exit(coreExit ?? 1), 10_000).unref?.()
+      shutdown(code ?? 1)
     })
-    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
-      process.on(signal, () => {
-        stopping = true
-        stopCore(signal)
-        child?.kill(signal)
-      })
-    }
     pipeRedacted(core.stdout, process.stdout)
     let coreStderr = ''
     pipeRedacted(core.stderr, process.stderr, (line) => {
@@ -282,17 +284,18 @@ async function main() {
     try {
       const started = Date.now()
       while (true) {
-        if (coreExit !== null) {
-          throw new Error(`herdr-core exited before its socket ${socketPath} appeared`)
+        if (stopping) return
+        if (exitedBeforeReady) throw new Error(`herdr-core exited before its socket ${socketPath} appeared`)
+        if (lstatSync(socketPath, { throwIfNoEntry: false })?.isSocket()) {
+          coreReady = true
+          break
         }
-        if (lstatSync(socketPath, { throwIfNoEntry: false })?.isSocket()) break
         if (Date.now() - started > 15_000) {
           throw new Error(`herdr-core did not create a Unix socket at ${socketPath} within 15s`)
         }
         await new Promise((done) => setTimeout(done, 50))
       }
     } catch (error) {
-      stopping = true
       warn(error.message)
       // List while the core is still alive: its own socket (if it used a different name) is
       // visible here, and SIGTERM cannot erase it before the diagnostic is printed.
@@ -301,8 +304,8 @@ async function main() {
       }
       warn(`herdr-core exitCode=${core.exitCode ?? 'null'} signal=${core.signalCode ?? 'none'}`)
       warn(`herdr-core stderr:\n${coreStderr || '(empty)'}`)
-      stopCore()
-      process.exit(1)
+      shutdown(1)
+      return
     }
     log(`herdr-core: serving on ${socketPath}`)
 
@@ -311,13 +314,10 @@ async function main() {
     } catch (error) {
       warn(`first boot: ${error?.message ?? error}; the server starts and am retries on restart`)
     }
-    if (coreExit !== null) {
-      stopping = true
-      throw new Error('herdr-core exited during the first boot')
-    }
   }
 
   const launchDsh = () => {
+    if (stopping) return
     const dshVendorFailures = new Map()
     const noteDsh = (line) => {
       if (!/(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) return
@@ -327,13 +327,15 @@ async function main() {
       warn(`vendor CLIs: DSH reported (${vendor}): ${line}`)
     }
     child = spawn(process.execPath, dshArgs(publicArgs), {
-      env,
+      env: { ...env, AUTOMAGIK_OMNI_SUPERVISOR: '1' },
       stdio: ['inherit', 'pipe', 'pipe'],
     })
     child.on('error', (error) => {
       warn(`dsh did not start: ${error.message}`)
-      stopCore()
-      process.exit(1)
+      shutdown(1)
+    })
+    child.once('spawn', () => {
+      if (!stopping) supervisor.start()
     })
     if (installClis) {
       log('vendor CLIs: observing the ACP store and refreshing the launch bridge in the background')
@@ -364,17 +366,15 @@ async function main() {
     pipeRedacted(child.stderr, process.stderr, onSafeLine, onLaunchLine)
 
     child.on('exit', (code, signal) => {
-      const exitCode = coreExit ?? code ?? (signal ? 0 : 1)
-      if (core.exitCode !== null || core.signalCode !== null) process.exit(exitCode)
-      core.once('exit', () => process.exit(exitCode))
-      stopCore()
-      setTimeout(() => {
-        core.kill('SIGKILL')
-        process.exit(exitCode)
-      }, 10_000).unref?.()
+      shutdown(code ?? (signal ? 0 : 1))
     })
   }
-  await runStartup({ env, readiness, launchCore, launchDsh, exit: process.exit, warn })
+  try {
+    await runStartup({ env, readiness, launchCore, launchDsh, exit: process.exit, warn })
+  } catch (error) {
+    warn(`failed to start: ${error?.stack ?? error}`)
+    shutdown(1)
+  }
 }
 
 const launchedFromCli = (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url)

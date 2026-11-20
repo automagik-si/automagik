@@ -193,9 +193,9 @@ is outside the volume.
 The entrypoint starts `herdr-core serve` before DSH. It prints `herdr-core: serving on <path>`
 once the expected endpoint is a Unix socket. On failure it prints the directory listing, the
 tail of the core's stderr and its exit code. The core and am installer receive an allowlist
-of runtime settings. DSH receives the model key. If either supervised child exits, the
-entrypoint stops the other so the container's restart policy applies to both. `SIGTERM`,
-`SIGINT` and `SIGHUP` stop both.
+of runtime settings. DSH receives the model key. When DSH or the core exits, or the container
+receives `SIGTERM`, `SIGINT` or `SIGHUP`, the entrypoint stops Omni and DSH together and
+then stops the core. The container's restart policy applies to the whole workspace.
 
 The optional am hc proxy requires core 0.1.14. It refuses this image's core 0.1.18.
 
@@ -235,6 +235,12 @@ Omni through the welcome, then updates the same volume offline. It checks the fo
 the enabled adapter row, preserved owner settings and the three-plugin backup. It restarts the
 candidate and then starts the older companion with mode off to check `newer-than-image` and the
 adapter's loopback 401.
+
+After the image scan, the Omni smoke uses an authenticated Welcome session to install the
+pinned GitHub release for a published npm version behind the pin. It checks that Welcome's
+plugin and job endpoints agree, then checks the sandbox health and version before and after
+`docker restart -t 90`. The image path for a published npm version at or above the pin is
+covered by Welcome's unit tests.
 
 ## Run
 
@@ -471,9 +477,26 @@ the image reports `update-rolled-back`.
 Owner-managed profiles are left alone.
 The desktop patch merger can place a new adapter row between a comment and the owner
 override it describes during migration. The override remains in effect.
-The image itself stays archive-free and carries no Omni installation. Omni's plugin downloads
-and verifies its own Bun runtime using Node; its sandbox installer uses the image's `tar`,
-`gzip` and `find` to unpack its verified Postgres and NATS downloads.
+### Omni in the image
+
+In the Welcome, power on Omni and choose **Install Omni here**. Welcome selects the install
+source and can build the pinned Omni release from its verified GitHub tree when npm is behind.
+The image installs a fresh sandbox once. An interrupted install can be retried from the Welcome.
+The sandbox and its data live in `/data/.omni/sandbox` by default. With `OMNI_HOME` set, they
+live under `$OMNI_HOME/sandbox`. The volume also holds the content-addressed Bun and GitHub
+package builds under the Omni root.
+
+The image starts Omni after Welcome publishes the install marker. Its supervisor holds a
+kernel lease in the Omni root, verifies Bun's checksum before each spawn, and restarts Omni
+after a crash. Omni receives runtime, proxy and CA settings through an environment allowlist.
+Use `docker stop -t 90` so Omni has up to 60 seconds to drain before the supervisor kills
+its process group. The gated Compose file allows the same 90 seconds.
+
+DSH, Bots and Omni share the workspace uid. Omni's build and installed runtime can read files
+that uid can access. Welcome refuses local Omni installs in multiuser mode, and the gate view
+must stay outside the Omni root. The installer uses the image's `tar`, `gzip` and `find` for
+its verified Postgres and NATS downloads. Omni's inner package install drops proxy variables,
+so a proxy-only network can fail at that step. The GitHub image smoke covers Linux x64 glibc.
 
 ### Restore
 

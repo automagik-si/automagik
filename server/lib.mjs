@@ -24,6 +24,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { cp } from 'node:fs/promises'
 import { markSeed, readJson, releaseVersion, SEED_MARKER } from './profile-state.mjs'
@@ -39,6 +40,8 @@ export const RUN_SECRETS_DIR = '/run/secrets'
 export const RUN_SECRETS_MODEL_KEY_FILE = `${RUN_SECRETS_DIR}/deepseek_api_key`
 export const MEASUREMENT_DIR = '.automagik-measurement'
 export const MEASUREMENT_MARKER = `${MEASUREMENT_DIR}/.automagik-server-profile`
+
+export const omniRoot = (env = process.env) => resolve(env.OMNI_HOME || join(homedir(), '.omni'))
 
 /**
  * The folder DSH publishes the gate's view into: always the volume's own gate-view, the exact
@@ -230,8 +233,92 @@ export function prepareWorkspace(dir, { uid = process.getuid?.() ?? 1000 } = {})
   return true
 }
 
-/** One log line with any `token=` credential replaced. Everything else is kept verbatim. */
-export const redactTokens = (text) => String(text).replace(/(?<![A-Za-z0-9_])token=[^\s&"'<>]+/g, 'token=<redacted>')
+const SECRET_FIELD = String.raw`(?:api[_-]?key|authorization|x-api-key|x-auth-token|x-amz-security-token|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret|token|_authToken|_auth|_password)`
+const SECRET_PREFIX = String.raw`(?:[a-z0-9]+[-_.])*`
+const SECRET_NAME = `${SECRET_PREFIX}${SECRET_FIELD}`
+const QUOTED_SECRET = new RegExp(
+  String.raw`((?<![\w.\-])["']?${SECRET_NAME}["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`, 'gi',
+)
+const SIMPLE_SECRET = new RegExp(
+  String.raw`((?<![\w.\-])(?:token|${SECRET_PREFIX}(?:api[_-]?key|authorization|password|secret|npm_token|auth_token|_authToken|_auth|_password))\s*[=:]\s*)[^\s&"'<>]+`, 'gi',
+)
+const UNQUOTED_SECRET = new RegExp(
+  String.raw`((?<![\w.\-])${SECRET_NAME}\s*[:=]\s*)[^\s&"'<>]{6,}`, 'gi',
+)
+const CREDENTIAL_SHAPES = [
+  /\bsk-[A-Za-z0-9_*.-]{6,}/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{16,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{8,}/g,
+  /\bAIza[A-Za-z0-9_-]{20,}/g,
+  /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g,
+  /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g,
+  /\bwhsec_[A-Za-z0-9+/=]{12,}/g,
+  /\bhf_[A-Za-z0-9]{16,}/g,
+  /\bgl(?:pat|oas|rt)-[A-Za-z0-9_-]{12,}/g,
+  /\bgsk_[A-Za-z0-9_-]{16,}/g,
+  /\br8_[A-Za-z0-9]{16,}/g,
+  /\bdop_v1_[a-f0-9]{24,}/gi,
+  /\bshp(?:at|ca|pa|ss)_[a-f0-9]{24,}/gi,
+  /\bSG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}/g,
+  /\bya29\.[A-Za-z0-9_-]{16,}/g,
+  /\bnfp_[A-Za-z0-9]{16,}/g,
+  /\bvercel_[A-Za-z0-9_]{16,}/g,
+  /\bsbp_[a-f0-9]{24,}/gi,
+  /\bATBB[A-Za-z0-9]{16,}/g,
+  /\bnpm_[A-Za-z0-9]{8,}/g,
+]
+
+/** Mask credentials in DSH and Omni diagnostics, including installer and proxy output. */
+export function redactTokens(text) {
+  let safe = String(text)
+    .replace(/(\bhttps?:\/\/)[^/\s"'<>]+@/gi, '$1<redacted>@')
+    .replace(/([?&#](?:token|access[_-]?token|api[_-]?key|key|secret|password|passwd|auth|authorization|client[_-]?secret|x-api-key|signature|sig|code|ticket)=)[^&#\s"'<>]+/gi, '$1<redacted>')
+    .replace(QUOTED_SECRET, (match, key) => `${key}${match[key.length]}<redacted>${match.at(-1)}`)
+    .replace(/\b(Bearer|Basic)[ \t]+[A-Za-z0-9._~+/=*-]+/gi, '$1 <redacted>')
+    .replace(SIMPLE_SECRET, '$1<redacted>')
+    .replace(UNQUOTED_SECRET, '$1<redacted>')
+  for (const pattern of CREDENTIAL_SHAPES) safe = safe.replace(pattern, '<redacted>')
+  return safe
+}
+
+const SAFE_LINE_MAX = 4096
+export const safeDshLine = (line) => {
+  const redacted = redactTokens(line)
+  return redacted.length > SAFE_LINE_MAX ? `${redacted.slice(0, SAFE_LINE_MAX)}…` : redacted
+}
+
+export function pipeRedacted(stream, into, onLine, onRawLine, maxPending = Infinity) {
+  let pending = ''
+  let overlong = false
+  stream.setEncoding('utf8')
+  const emit = (line) => {
+    const complete = !overlong && Buffer.byteLength(line) <= maxPending
+    const safe = complete ? safeDshLine(line) : '[overlong line omitted]'
+    overlong = false
+    onLine?.(safe)
+    if (complete) onRawLine?.(line)
+    into.write(`${safe}\n`)
+  }
+  stream.on('data', (chunk) => {
+    pending += chunk
+    let end = pending.indexOf('\n')
+    while (end !== -1) {
+      const line = pending.slice(0, end)
+      pending = pending.slice(end + 1)
+      emit(line)
+      end = pending.indexOf('\n')
+    }
+    if (Buffer.byteLength(pending) > maxPending) {
+      pending = ''
+      overlong = true
+    }
+  })
+  stream.on('end', () => {
+    if (pending || overlong) emit(pending)
+  })
+}
 
 /** The launch URL (with dsh's per-launch token) in a line of dsh's output, or null. */
 export const launchUrlOf = (text) => /dsh web: (https?:\/\/\S*token=\S+)/.exec(String(text))?.[1] ?? null

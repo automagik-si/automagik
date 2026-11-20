@@ -3,6 +3,7 @@
 services:
   dsh:
     image: ${AUTOMAGIK_SERVER_IMAGE:?set a server image digest}
+    stop_grace_period: 90s
     environment:
       AUTOMAGIK_GATE_CLOUD_WORKSPACE: ${AUTOMAGIK_GATE_CLOUD_WORKSPACE:-}
       AUTOMAGIK_MULTIUSER: ${AUTOMAGIK_MULTIUSER:-0}
