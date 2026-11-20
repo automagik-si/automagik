@@ -41,7 +41,11 @@ export function pendingDialog(screenText) {
       seen += 1;
       if (DIALOG_HEADER.test(lines[j])) return { question: lines[j].trim().slice(0, 200), who: "the owner" };
     }
-    if (CONFIRM_FOOTER.test(lines[i])) return { question: lines[i].trim().slice(0, 200), who: "the owner" };
+    // A footer is the one evidence Claude Code's permission and rate-limit dialogs share
+    // (`Esc to cancel`, `Press enter to confirm`). Mark it so a caller that knows the
+    // rate-limit options shape can let that shape decide, while every guard still treats the
+    // pane as held (the dialog is a person's to answer either way).
+    if (CONFIRM_FOOTER.test(lines[i])) return { question: lines[i].trim().slice(0, 200), who: "the owner", footer: true };
   }
   return null;
 }
