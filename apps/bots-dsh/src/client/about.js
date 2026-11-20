@@ -17,6 +17,9 @@ import { Switch } from './bot-settings.js'
 
 // The length of the mark's `done` hop (bt-done in styles.js).
 const CHEER_MS = 1800
+const CHECK_POLL_MS = 2000
+// Up to five tarballs can each take a minute to download.
+const MAX_CHECK_POLLS = 180
 
 const starCount = count => new Intl.NumberFormat(dateLocale(), { notation: 'compact', maximumFractionDigits: 1 }).format(count)
 
@@ -166,23 +169,47 @@ function selfUpdateReason(reason) {
     case 'hash-mismatch': return t('a downloaded plugin package did not match the signed release.')
     case 'registry-unreachable': return t('the package registry could not be reached.')
     case 'bot/read-only': return t('this window does not hold the team lock.')
+    case 'check-timeout': return t('the update check is taking too long. Try again.')
     default: return t('the update check could not be completed.')
   }
 }
 
-function SelfUpdateRow({ Row, check }) {
-  const [checking, setChecking] = useState(false)
+const failedCheck = error => ({ reason: error?.code === 'bot/read-only' ? error.code : null })
+
+function SelfUpdateRow({ Row, check, readResult }) {
+  const [starting, setStarting] = useState(false)
   const [result, setResult] = useState(null)
+  const waiting = result?.state === 'checking'
+  const checking = starting || waiting
+  useEffect(() => {
+    if (!waiting) return
+    let stopped = false
+    let timer
+    let polls = 0
+    const poll = async () => {
+      try {
+        const value = await readResult()
+        if (stopped) return
+        if (value.state !== 'checking') setResult(value)
+        else if (++polls >= MAX_CHECK_POLLS) setResult({ reason: 'check-timeout' })
+        else timer = setTimeout(poll, CHECK_POLL_MS)
+      } catch (error) {
+        if (!stopped) setResult(failedCheck(error))
+      }
+    }
+    timer = setTimeout(poll, CHECK_POLL_MS)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [waiting, readResult])
   const onCheck = async () => {
-    setChecking(true)
+    setStarting(true)
     setResult(null)
     try { setResult(await check()) } catch (error) {
-      setResult({ reason: error?.code === 'bot/read-only' ? error.code : null })
+      setResult(failedCheck(error))
     } finally {
-      setChecking(false)
+      setStarting(false)
     }
   }
-  const message = result === null ? null
+  const message = result === null || waiting ? null
     : result.state === 'available' ? t('Automagik {version} is available, signed and checked.', { version: result.laneVersion })
     : result.state === 'current' ? t('Up to date.')
     : t('Cannot update: {reason}', { reason: selfUpdateReason(result.reason) })
@@ -291,7 +318,8 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
       stars === null ? null : h('span', { className: 'bt-star-count' }, starCount(stars))) : null),
     repo ? h('p', { key: 'ask', className: 'bt-about-ask' }, t('If Omni helps you, a star on GitHub helps more people find it.')) : null,
     h(Section, { key: 'updates', title: t('Updates') },
-      ours ? null : h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate }),
+      !ours && update.source && update.source !== 'unknown'
+        ? h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
       h(Row, { label: ours ? 'Automagik' : 'Omni', hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)
         // With the plugin's own check off, the app still knows the runtime it carries.

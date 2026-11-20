@@ -1454,6 +1454,7 @@ const pack = createPack({
     "a downloaded plugin package did not match the signed release.": "um pacote baixado não corresponde à versão assinada.",
     "the package registry could not be reached.": "não foi possível acessar o registro de pacotes.",
     "this window does not hold the team lock.": "esta janela não tem o controle da equipe.",
+    "the update check is taking too long. Try again.": "a verificação de atualizações está demorando demais. Tente novamente.",
     "the update check could not be completed.": "não foi possível concluir a verificação de atualizações.",
     "Checked {time}": "Verificado em {time}",
     "Could not check for updates.": "Não foi possível verificar atualizações.",

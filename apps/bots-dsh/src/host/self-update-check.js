@@ -1,16 +1,22 @@
-import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
 import { inDesktopApp } from './constants.js'
 import { currentDsh } from './dsh-update.js'
 import { compareVersions, satisfies, verifyLane } from './lane-verify.js'
 import { boundedGet, ROLE_KEYS } from './role-catalog.js'
-import { prepareStore, selfUpdateDetails, supervisorOf, writeJsonAtomic } from './self-update.js'
+import { refusal } from './refusal.js'
+import { prepareStore, readCheckRecord, REASON_CODES, selfUpdateDetails, supervisorOf, writeJsonAtomic } from './self-update.js'
 import { FETCH_TIMEOUT_MS, OFFICIAL_REGISTRY } from './update.js'
 
 const LANE_URL = 'https://github.com/automagik-si/automagik/releases/download/plugin-lane/lane.json'
 const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'].map(name => `@automagik/${name}`)
 const MAX_TARBALL = 64 * 1024 * 1024
+const REPLY_WAIT_MS = 5000
+const MARKER = 'check.running.json'
+export const CHECK_READ_ONLY = 'This window does not hold the team, so it cannot report updates.'
+const readOnly = () => refusal(CHECK_READ_ONLY, { code: 'bot/read-only' })
 const isVersion = value => typeof value === 'string' && value.trim() === value && compareVersions(value, value) === 0
 const readJson = path => JSON.parse(readFileSync(path, 'utf8'))
 
@@ -29,6 +35,8 @@ function installedPlugins(profileDir) {
 }
 
 function profileRegistry(profileDir) {
+  const override = process.env.npm_config_registry || process.env.NPM_CONFIG_REGISTRY
+  if (override) return override
   let npmrc
   try {
     npmrc = readFileSync(join(profileDir, '.npmrc'), 'utf8')
@@ -37,12 +45,19 @@ function profileRegistry(profileDir) {
     throw error
   }
   const entries = [...npmrc.matchAll(/^[ \t]*registry[ \t]*=[ \t]*([^\r\n]*)/gm)]
-  return entries.at(-1)?.[1].split(/[ \t]+[;#]/, 1)[0].trim().replace(/^(['"])(.*)\1$/, '$2') || OFFICIAL_REGISTRY
+  const setting = entries.at(-1)?.[1].split(/[ \t]+[;#]/, 1)[0].trim().replace(/^(['"])(.*)\1$/, '$2')
+  let missing = false
+  const expanded = setting?.replace(/\$\{([^}]+)\}/g, (_, name) => {
+    const value = process.env[name]
+    if (value === undefined) missing = true
+    return value ?? ''
+  })
+  return missing || !expanded ? OFFICIAL_REGISTRY : expanded
 }
 
 function registryPing(registry) {
   const url = new URL(registry)
-  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw new Error('Invalid package registry URL')
   }
   url.pathname = `${url.pathname.replace(/\/+$/, '')}/-/ping`
@@ -55,114 +70,258 @@ function githubTarball(value) {
   if (url?.origin === 'https://github.com' && !url.username && !url.password) return url.href
 }
 
-async function verifyTarballs(plugins, store, fetch) {
-  let temp
-  try {
-    temp = mkdtempSync(join(store, 'check-'))
-    for (const plugin of plugins) {
-      const url = githubTarball(plugin.url)
-      if (!url || !Number.isSafeInteger(plugin.size) || plugin.size < 1 || plugin.size > MAX_TARBALL) return 'download-failed'
-      let bytes
-      try {
-        bytes = await boundedGet(fetch, url, { label: 'Plugin package', limit: plugin.size, signal: AbortSignal.timeout(60_000) })
-      } catch {
-        return 'download-failed'
-      }
-      writeFileSync(join(temp, `${plugin.name.split('/')[1]}.tgz`), bytes, { flag: 'wx', mode: 0o600 })
-      const sha256 = typeof plugin.sha256 === 'string' ? plugin.sha256.toLowerCase() : null
-      if (bytes.length !== plugin.size
-        || createHash('sha256').update(bytes).digest('hex') !== sha256
-        || `sha512-${createHash('sha512').update(bytes).digest('base64')}` !== plugin.integrity) return 'hash-mismatch'
+const identity = path => lstatSync(path, { bigint: true })
+const sameEntry = (a, b) => a.dev === b.dev && a.ino === b.ino
+
+function reclaimChecks(store) {
+  for (const entry of readdirSync(store, { withFileTypes: true })) {
+    if (entry.name === MARKER || (entry.name.startsWith('check-') && (entry.isDirectory() || entry.isSymbolicLink()))) {
+      rmSync(join(store, entry.name), { recursive: true, force: true })
     }
-    return null
-  } finally {
-    if (temp !== undefined) rmSync(temp, { recursive: true, force: true })
   }
 }
 
-async function runCheck({
-  profileDir, env = process.env, inDesktop = inDesktopApp(), readMountInfo,
-  ctx, getDshVersion = () => currentDsh(ctx), fetch = globalThis.fetch, keys = ROLE_KEYS, registry = profileRegistry,
-}) {
-  const view = { laneVersion: null, sequence: null, plugins: [], supervisor: supervisorOf(env) !== null }
-  const result = (state, reason) => ({ version: 1, checkedAt: new Date().toISOString(), state, reason, ...view })
-  if (inDesktop) return result('unavailable', 'desktop-app')
-
-  const { storeDir, current, currentInvalid, supervisor } = selfUpdateDetails(profileDir, env, readMountInfo)
-  view.supervisor = supervisor !== null
-  if (storeDir === undefined) return result('unavailable', 'no-store')
-  const finish = (state, reason) => {
-    const record = result(state, reason)
-    try {
-      writeJsonAtomic(join(storeDir, 'check.json'), record, { profileDir, readMountInfo })
-      return record
-    } catch {
-      return result('unavailable', 'no-store')
-    }
+function checkFolder(folder) {
+  mkdirSync(folder, { mode: 0o700 })
+  const created = identity(folder)
+  if (!created.isDirectory()) throw new Error('Invalid check directory')
+  return () => {
+    const entry = identity(folder)
+    if (!entry.isDirectory() || !sameEntry(entry, created)) throw new Error('Check directory changed')
   }
-  if (currentInvalid) return finish('unavailable', 'store-invalid')
+}
 
+async function verifyTarballs(plugins, folder, fetch, requireTeam) {
+  for (const plugin of plugins) {
+    const url = githubTarball(plugin.url)
+    if (!url || !Number.isSafeInteger(plugin.size) || plugin.size < 1 || plugin.size > MAX_TARBALL) return 'download-failed'
+    let bytes
+    try {
+      bytes = await boundedGet(fetch, url, { label: 'Plugin package', limit: plugin.size, signal: AbortSignal.timeout(60_000) })
+    } catch {
+      return 'download-failed'
+    }
+    requireTeam()
+    folder.assertIdentity()
+    writeFileSync(join(folder.path, `${plugin.name.split('/')[1]}.tgz`), bytes, { flag: 'wx', mode: 0o600 })
+    const sha256 = typeof plugin.sha256 === 'string' ? plugin.sha256.toLowerCase() : null
+    if (bytes.length !== plugin.size
+      || createHash('sha256').update(bytes).digest('hex') !== sha256
+      || `sha512-${createHash('sha512').update(bytes).digest('base64')}` !== plugin.integrity) return 'hash-mismatch'
+  }
+  return null
+}
+
+async function inspectRelease({
+  profileDir, current, view, result, getDshVersion, fetch, laneUrl, keys, registry, folder, requireTeam,
+}) {
+  const laneFetch = laneUrl.protocol === 'file:'
+    ? (url, { signal }) => new Response(Readable.toWeb(createReadStream(new URL(url), { signal })))
+    : fetch
   let bytes, signature
   try {
     const signal = AbortSignal.timeout(15_000)
-    bytes = await boundedGet(fetch, LANE_URL, { label: 'lane.json', limit: 256 * 1024, signal })
-    signature = await boundedGet(fetch, `${LANE_URL}.sig`, { label: 'lane.json.sig', limit: 1024, signal })
+    bytes = await boundedGet(laneFetch, laneUrl.href, { label: 'lane.json', limit: 256 * 1024, signal })
+    signature = await boundedGet(laneFetch, `${laneUrl.href}.sig`, { label: 'lane.json.sig', limit: 1024, signal })
   } catch {
-    return finish('refused', 'download-failed')
+    return result('refused', 'download-failed')
   }
   let lane
   try {
     lane = verifyLane(bytes, signature.toString('utf8'), keys)
   } catch {
-    return finish('refused', 'signature-invalid')
+    return result('refused', 'signature-invalid')
   }
   if (!isVersion(lane.version) || !Number.isSafeInteger(lane.sequence) || lane.sequence < 0 || !Array.isArray(lane.plugins)) {
-    return finish('refused', 'lane-invalid')
+    return result('refused', 'lane-invalid')
   }
   view.laneVersion = lane.version
   view.sequence = lane.sequence
-  if (lane.sequence < (current?.lastSequence ?? 0)) return finish('refused', 'sequence-lower')
+  if (lane.sequence < (current?.lastSequence ?? 0)) return result('refused', 'sequence-lower')
 
   let installed
   try {
     installed = installedPlugins(profileDir)
   } catch {
-    return finish('refused', 'profile-invalid')
+    return result('refused', 'profile-invalid')
   }
   const plugins = lane.plugins.filter(plugin => installed.has(plugin?.name))
   if (plugins.length !== installed.size || new Set(plugins.map(plugin => plugin.name)).size !== installed.size
-    || plugins.some(plugin => plugin.version !== lane.version)) return finish('refused', 'lane-invalid')
+    || plugins.some(plugin => plugin.version !== lane.version)) return result('refused', 'lane-invalid')
   view.plugins = plugins.map(({ name, version }) => ({ name, from: installed.get(name), to: version }))
   const versions = view.plugins.map(({ from, to }) => compareVersions(to, from))
-  if (!versions.some(order => order > 0)) return finish('current', 'not-newer')
-  if (versions.some(order => order < 0)) return finish('refused', 'not-newer')
+  if (!versions.some(order => order > 0)) return result('current', 'not-newer')
+  if (versions.some(order => order < 0)) return result('refused', 'not-newer')
 
   let dshVersion
-  try { dshVersion = await getDshVersion() } catch { return finish('refused', 'engines-dsh') }
-  if (plugins.some(plugin => !satisfies(dshVersion, plugin.engines?.dsh))) return finish('refused', 'engines-dsh')
+  try { dshVersion = await getDshVersion() } catch { return result('refused', 'engines-dsh') }
+  if (plugins.some(plugin => !satisfies(dshVersion, plugin.engines?.dsh))) return result('refused', 'engines-dsh')
 
-  let tarballFailure
-  try {
-    tarballFailure = await verifyTarballs(plugins, prepareStore(profileDir, readMountInfo), fetch)
-  } catch {
-    return finish('unavailable', 'no-store')
-  }
-  if (tarballFailure !== null) return finish('refused', tarballFailure)
+  const tarballFailure = await verifyTarballs(plugins, folder, fetch, requireTeam)
+  if (tarballFailure !== null) return result('refused', tarballFailure)
   try {
     const url = registryPing(await registry(profileDir))
     await boundedGet(fetch, url, { label: 'Package registry', limit: 1024, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), allowEmpty: true })
   } catch {
-    return finish('refused', 'registry-unreachable')
+    return result('refused', 'registry-unreachable')
   }
-  return finish('available', null)
+  return result('available', null)
 }
 
-let running
+function checkResult(env, state, reason) {
+  return {
+    version: 1, checkedAt: new Date().toISOString(), state, reason,
+    laneVersion: null, sequence: null, plugins: [], supervisor: supervisorOf(env) !== null,
+  }
+}
+
+async function runCheck({
+  profileDir, env, inDesktop = inDesktopApp(), readMountInfo,
+  ctx, getDshVersion = () => currentDsh(ctx), fetch = globalThis.fetch, laneUrl, keys, registry = profileRegistry,
+}, run) {
+  const { runId, ownsTeam } = run
+  const requireTeam = () => { if (!ownsTeam()) throw readOnly() }
+  requireTeam()
+  const unavailable = reason => (run.unpublished = checkResult(env, 'unavailable', reason))
+  if (inDesktop) return unavailable('desktop-app')
+
+  const { storeDir, current, currentInvalid, supervisor } = selfUpdateDetails(profileDir, env, readMountInfo)
+  if (storeDir === undefined) return unavailable('no-store')
+  const view = { laneVersion: null, sequence: null, plugins: [], supervisor: supervisor !== null }
+  const result = (state, reason) => ({
+    version: 1, checkedAt: new Date().toISOString(), state, reason, ...view,
+  })
+  const storeOptions = { profileDir, readMountInfo }
+  let record = result('unavailable', 'store-invalid')
+  let marker, markerIdentity, folder
+  try {
+    const store = prepareStore(profileDir, readMountInfo)
+    reclaimChecks(store)
+    if (!currentInvalid) {
+      const path = join(store, `check-${runId}`)
+      folder = { path, assertIdentity: checkFolder(path) }
+      marker = join(store, MARKER)
+      folder.assertIdentity()
+      writeJsonAtomic(marker, { version: 1, runId, folder: path }, storeOptions)
+      markerIdentity = identity(marker)
+      record = await inspectRelease({ profileDir, current, view, result, getDshVersion, fetch, laneUrl, keys, registry, folder, requireTeam })
+    }
+  } catch {
+    record = result('unavailable', 'no-store')
+  } finally {
+    // A new holder will reclaim anything we leave after losing the lock.
+    if (ownsTeam()) {
+      try {
+        if (folder) {
+          folder.assertIdentity()
+          rmSync(folder.path, { recursive: true, force: true })
+        }
+      } catch {
+        record = result('unavailable', 'no-store')
+      }
+      try {
+        // A marker that changed under us is not ours to remove.
+        if (markerIdentity && sameEntry(identity(marker), markerIdentity)) rmSync(marker)
+        else if (markerIdentity) record = result('unavailable', 'no-store')
+      } catch {
+        record = result('unavailable', 'no-store')
+      }
+    }
+  }
+  requireTeam()
+  try {
+    writeJsonAtomic(join(storeDir, 'check.json'), record, storeOptions)
+    return record
+  } catch {
+    return unavailable('no-store')
+  }
+}
+
+const running = new Map()
+const unchecked = () => ({ state: 'unavailable', reason: null })
+
+function startCheck(options, ownsTeam = () => true) {
+  const laneUrl = URL.parse(options.laneUrl ?? LANE_URL)
+  const isFile = laneUrl?.protocol === 'file:' && !laneUrl.host && !laneUrl.search && !laneUrl.hash
+  if (!isFile && (laneUrl?.href !== LANE_URL || options.keys !== undefined)) {
+    return { promise: Promise.resolve(checkResult(options.env, 'refused', 'signature-invalid')) }
+  }
+
+  const { profileDir } = options
+  const keys = isFile ? options.keys ?? ROLE_KEYS : ROLE_KEYS
+  const active = running.get(profileDir)
+  if (active?.ownsTeam()) {
+    if (active.lane === laneUrl.href && active.keys === keys) return active
+    return { promise: Promise.resolve(checkResult(options.env, 'refused', 'signature-invalid')) }
+  }
+
+  const run = { runId: randomUUID(), ownsTeam, lane: laneUrl.href, keys }
+  const inputs = { ...options, laneUrl, keys }
+  run.promise = Promise.resolve().then(async () => {
+    try {
+      const result = await runCheck(inputs, run)
+      run.completed = true
+      return result
+    } finally {
+      if (running.get(profileDir) === run) running.delete(profileDir)
+    }
+  })
+  running.set(profileDir, run)
+  return run
+}
+
 export function selfUpdateCheck(options) {
-  running ??= Promise.resolve().then(() => runCheck(options)).finally(() => { running = undefined })
-  return running
+  return startCheck(options).promise
+}
+
+function savedResult(profileDir) {
+  const record = readCheckRecord(profileDir)
+  if (record?.version !== 1) return unchecked()
+  const { checkedAt, state, reason, laneVersion, sequence, supervisor, plugins } = record
+  if (typeof checkedAt !== 'string' || !Number.isFinite(Date.parse(checkedAt))
+    || new Date(checkedAt).toISOString() !== checkedAt
+    || !['available', 'current', 'refused', 'unavailable'].includes(state)
+    || (reason !== null && !REASON_CODES.includes(reason))
+    || (laneVersion !== null && !isVersion(laneVersion))
+    || (sequence !== null && (!Number.isSafeInteger(sequence) || sequence < 0))
+    || typeof supervisor !== 'boolean' || !Array.isArray(plugins) || plugins.length > PLUGINS.length
+    || plugins.some(plugin => !PLUGINS.includes(plugin?.name) || !isVersion(plugin.from) || !isVersion(plugin.to))) return unchecked()
+  return {
+    version: 1, checkedAt, state, reason, laneVersion, sequence, supervisor,
+    plugins: plugins.map(({ name, from, to }) => ({ name, from, to })),
+  }
 }
 
 export function install(rt) {
-  rt.selfUpdateCheck = () => selfUpdateCheck({ profileDir: rt.ctx.get?.('profileContext')?.dir, ctx: rt.ctx })
+  const profileOf = () => rt.ctx.get?.('profileContext')?.dir
+  let lastRun
+  rt.selfUpdateCheck = async () => {
+    const profileDir = profileOf()
+    const generation = rt.teamGeneration()
+    const run = startCheck({ profileDir, ctx: rt.ctx }, () => rt.sameTeam(generation))
+    lastRun = { profileDir, run }
+    const { promise, runId } = run
+    let timer
+    try {
+      const pending = new Promise(resolve => {
+        timer = setTimeout(() => resolve({ state: 'checking', runId }), REPLY_WAIT_MS)
+      })
+      const reply = await Promise.race([promise, pending])
+      if (!run.ownsTeam() || !rt.sameTeam(generation)) throw readOnly()
+      return reply
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  rt.selfUpdateCheckResult = () => {
+    const profileDir = profileOf()
+    const previous = lastRun?.profileDir === profileDir ? lastRun?.run : undefined
+    const active = running.get(profileDir)
+    if (active) {
+      if (!active.ownsTeam()) throw readOnly()
+      return { state: 'checking' }
+    }
+    if (previous && !previous.ownsTeam() && !previous.completed) throw readOnly()
+    return previous?.unpublished ?? savedResult(profileDir)
+  }
 }

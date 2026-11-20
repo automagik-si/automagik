@@ -11418,6 +11418,7 @@ var ZH = {
   "a downloaded plugin package did not match the signed release.": "下载的插件包与已签名的发行版本不符。",
   "the package registry could not be reached.": "无法连接软件包仓库。",
   "this window does not hold the team lock.": "此窗口未持有团队锁。",
+  "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
   "the update check could not be completed.": "无法完成更新检查。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",

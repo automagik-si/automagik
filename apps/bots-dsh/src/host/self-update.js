@@ -259,6 +259,11 @@ function readJson(checkStore, storeDir, file, io) {
   return null
 }
 
+export function readCheckRecord(profileDir) {
+  const checkStore = () => usableStore(profileDir)
+  return readJson(checkStore, checkStore(), 'check.json', fs)
+}
+
 function readStore(profileDir, io = fs, readMountInfo) {
   const checkStore = () => usableStore(profileDir, readMountInfo)
   const storeDir = checkStore()

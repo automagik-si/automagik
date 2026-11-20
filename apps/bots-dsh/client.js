@@ -2513,6 +2513,7 @@ var ZH = {
   "a downloaded plugin package did not match the signed release.": "下载的插件包与已签名的发行版本不符。",
   "the package registry could not be reached.": "无法连接软件包仓库。",
   "this window does not hold the team lock.": "此窗口未持有团队锁。",
+  "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
   "the update check could not be completed.": "无法完成更新检查。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
@@ -22206,6 +22207,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     diagnosticsPermissions: () => call2("diagnostics-permissions"),
     repoStars: () => call2("repo-stars"),
     checkSelfUpdate: () => call2("self-update-check"),
+    selfUpdateResult: () => call2("self-update-check-result"),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = "action") => {
       noteClientError(where, error);
@@ -34938,6 +34940,8 @@ var FEEDBACK_CSS = `
 // src/client/about.js
 var import_react89 = require("react");
 var CHEER_MS = 1800;
+var CHECK_POLL_MS = 2e3;
+var MAX_CHECK_POLLS = 180;
 var starCount = (count) => new Intl.NumberFormat(dateLocale(), { notation: "compact", maximumFractionDigits: 1 }).format(count);
 var inApp = (update, app) => Boolean(app.bridge) || update.source === "app";
 var updatesOff = (versions) => versions?.updates === false;
@@ -35099,25 +35103,52 @@ function selfUpdateReason(reason) {
       return t("the package registry could not be reached.");
     case "bot/read-only":
       return t("this window does not hold the team lock.");
+    case "check-timeout":
+      return t("the update check is taking too long. Try again.");
     default:
       return t("the update check could not be completed.");
   }
 }
-function SelfUpdateRow({ Row: Row3, check }) {
-  const [checking, setChecking] = (0, import_react89.useState)(false);
+var failedCheck = (error) => ({ reason: error?.code === "bot/read-only" ? error.code : null });
+function SelfUpdateRow({ Row: Row3, check, readResult }) {
+  const [starting, setStarting] = (0, import_react89.useState)(false);
   const [result, setResult] = (0, import_react89.useState)(null);
+  const waiting = result?.state === "checking";
+  const checking = starting || waiting;
+  (0, import_react89.useEffect)(() => {
+    if (!waiting) return;
+    let stopped = false;
+    let timer;
+    let polls = 0;
+    const poll = async () => {
+      try {
+        const value = await readResult();
+        if (stopped) return;
+        if (value.state !== "checking") setResult(value);
+        else if (++polls >= MAX_CHECK_POLLS) setResult({ reason: "check-timeout" });
+        else timer = setTimeout(poll, CHECK_POLL_MS);
+      } catch (error) {
+        if (!stopped) setResult(failedCheck(error));
+      }
+    };
+    timer = setTimeout(poll, CHECK_POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [waiting, readResult]);
   const onCheck = async () => {
-    setChecking(true);
+    setStarting(true);
     setResult(null);
     try {
       setResult(await check());
     } catch (error) {
-      setResult({ reason: error?.code === "bot/read-only" ? error.code : null });
+      setResult(failedCheck(error));
     } finally {
-      setChecking(false);
+      setStarting(false);
     }
   };
-  const message = result === null ? null : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
+  const message = result === null || waiting ? null : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
   return (0, import_react89.createElement)(
     Row3,
     { label: "Automagik", hint: (0, import_react89.createElement)("span", { role: "status" }, message) },
@@ -35242,7 +35273,7 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
     (0, import_react89.createElement)(
       Section3,
       { key: "updates", title: t("Updates") },
-      ours ? null : (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate }),
+      !ours && update.source && update.source !== "unknown" ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
       (0, import_react89.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react89.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),

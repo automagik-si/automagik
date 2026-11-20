@@ -20,6 +20,7 @@ import { isWindowEndpoint } from './extend.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
+import { CHECK_READ_ONLY } from './self-update-check.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -511,11 +512,12 @@ export function install(rt) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
       await rt.refresh()
-      if (endpoint === 'self-update-status' || endpoint === 'self-update-check') {
-        if (rt.holdsLock() !== true) {
-          return fail('This window does not hold the team, so it cannot report updates.', 'bot/read-only')
-        }
-        return ok(endpoint === 'self-update-status' ? rt.selfUpdateStatus() : await rt.selfUpdateCheck())
+      if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result') {
+        if (rt.holdsLock() !== true) return fail(CHECK_READ_ONLY, 'bot/read-only')
+        const generation = rt.teamGeneration()
+        const result = endpoint === 'self-update-status' ? rt.selfUpdateStatus()
+          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult() : await rt.selfUpdateCheck()
+        return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
       }
       const readOnly = rt.readOnly()
       // An endpoint another Omni plugin serves (extend.js) says itself whether it only reads.

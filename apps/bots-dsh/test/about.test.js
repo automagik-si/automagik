@@ -367,3 +367,101 @@ test('#1029: the hold reads the app\'s own `check` and the plugins\' own part, e
   held.buttons.Automagik[0].props.onClick()
   assert.deepEqual(bridge.asked, [])
 })
+
+function findWebUpdate(about, update, actions) {
+  delete sandbox.omniDesktop
+  states = []
+  asked = 0
+  let checkRow
+  walk(about({ useUpdate: () => update, actions, run: () => Promise.resolve(true), Section, Row }), node => {
+    if (typeof node.type === 'function' && node.props.check === actions.checkSelfUpdate) checkRow = node
+  })
+  return checkRow
+}
+
+test('the desktop loading without its bridge and the identified desktop have no web check row', () => {
+  const actions = { checkSelfUpdate: async () => assert.fail('unexpected web check') }
+  for (const update of [{}, { source: 'unknown' }, HOST_IN_APP]) {
+    assert.equal(findWebUpdate(AboutPage, update, actions), undefined)
+  }
+})
+
+test('the web check row starts one check and polls the result every two seconds', async () => {
+  let stateIndex = 0
+  let drawingRow = false
+  let startEffect
+  const rowState = []
+  const timers = new Map()
+  let nextTimer = 0
+  const web = {
+    ...sandbox,
+    module: { exports: {} },
+    require(name) {
+      const platform = sandbox.require(name)
+      if (name !== 'react') return platform
+      return {
+        ...platform,
+        useState(initial) {
+          if (!drawingRow) return platform.useState(initial)
+          const index = stateIndex++
+          if (!(index in rowState)) rowState[index] = initial
+          return [rowState[index], value => { rowState[index] = value }]
+        },
+        useEffect(effect) { if (drawingRow) startEffect = effect },
+      }
+    },
+    setTimeout(callback, ms) {
+      timers.set(++nextTimer, { callback, ms })
+      return nextTimer
+    },
+    clearTimeout(id) { timers.delete(id) },
+  }
+  web.exports = web.module.exports
+  web.globalThis = web
+  runInNewContext(bundle.outputFiles[0].text, web)
+  const calls = []
+  const actions = {
+    checkSelfUpdate: async () => {
+      calls.push('check')
+      return { state: 'checking', runId: 'fixture-run' }
+    },
+    selfUpdateResult: async () => {
+      calls.push('result')
+      return calls.length === 2 ? { state: 'checking' } : { state: 'available', laneVersion: '3.160.3' }
+    },
+  }
+  const component = findWebUpdate(web.module.exports.AboutPage, { source: 'path' }, actions)
+  assert.ok(component)
+  const render = () => {
+    stateIndex = 0
+    drawingRow = true
+    try { return component.type(component.props) } finally { drawingRow = false }
+  }
+  const tick = async () => {
+    assert.equal(timers.size, 1)
+    const [[id, { callback, ms }]] = timers
+    assert.equal(ms, 2000)
+    timers.delete(id)
+    await callback()
+  }
+
+  const row = render()
+  assert.equal(row.props.label, 'Automagik')
+  assert.equal(textOf(row.children[0]), 'Check for updates')
+  await row.children[0].props.onClick()
+  assert.deepEqual(calls, ['check'])
+  const busy = render()
+  assert.equal(busy.children[0].props.disabled, true)
+  assert.equal(textOf(busy.children[0]), 'Checking…')
+  assert.equal(textOf(busy.props.hint), '')
+  const cleanup = startEffect()
+  await tick()
+  assert.equal(render().children[0].props.disabled, true)
+  await tick()
+  cleanup()
+  const finished = render()
+  assert.equal(finished.children[0].props.disabled, false)
+  assert.equal(textOf(finished.props.hint), 'Automagik 3.160.3 is available, signed and checked.')
+  assert.deepEqual(calls, ['check', 'result', 'result'])
+  assert.equal(timers.size, 0)
+})

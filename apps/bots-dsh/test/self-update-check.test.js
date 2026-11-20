@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { pathToFileURL } from 'node:url'
 import { selfUpdateCheck } from '../src/host/self-update-check.js'
 import { REASON_CODES, storeDirOf, writeJsonAtomic } from '../src/host/self-update.js'
 
@@ -21,7 +22,19 @@ const requiresStore = { skip: constants.O_NOFOLLOW === undefined && 'O_NOFOLLOW 
 const digest = (algorithm, bytes, encoding) => createHash(algorithm).update(bytes).digest(encoding)
 const writeJson = (path, value) => writeFileSync(path, JSON.stringify(value))
 
+function setEnv(t, name, value) {
+  const before = process.env[name]
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
+  t.after(() => {
+    if (before === undefined) delete process.env[name]
+    else process.env[name] = before
+  })
+}
+
 function fixture(t, { installed = { [BOTS]: CURRENT }, changeLane, changeSignature, replies = new Map() } = {}) {
+  setEnv(t, 'npm_config_registry', undefined)
+  setEnv(t, 'NPM_CONFIG_REGISTRY', undefined)
   const home = mkdtempSync(join(tmpdir(), 'bots-update-check-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
   const profileDir = join(home, 'profiles', 'web')
@@ -50,19 +63,21 @@ function fixture(t, { installed = { [BOTS]: CURRENT }, changeLane, changeSignatu
   changeLane?.(lane)
   const bytes = Buffer.from(JSON.stringify(lane, null, 2) + '\n')
   const signature = sign(null, bytes, privateKey).toString('base64')
+  const lanePath = join(home, 'lane.json')
+  writeFileSync(lanePath, bytes)
+  writeFileSync(lanePath + '.sig', ` ${changeSignature?.(signature) ?? signature}\n`)
+  const laneUrl = pathToFileURL(lanePath).href
   const calls = []
   const fetch = async (url, options) => {
     calls.push(url)
     assert.equal(options.redirect, 'manual')
     assert.ok(options.signal instanceof AbortSignal)
     if (replies.has(url)) return replies.get(url)()
-    if (url === LANE_URL) return new Response(bytes)
-    if (url === `${LANE_URL}.sig`) return new Response(` ${changeSignature?.(signature) ?? signature}\n`)
     if (tarballs.has(url)) return new Response(tarballs.get(url))
     if (url === PING) return new Response('{}')
     assert.fail(`Unexpected fetch to ${url}`)
   }
-  const options = { profileDir, env: {}, inDesktop: false, fetch, keys, getDshVersion: () => '0.2.1-rc.10' }
+  const options = { profileDir, env: {}, inDesktop: false, fetch, laneUrl, keys, getDshVersion: () => '0.2.1-rc.10' }
   return { profileDir, store, checkPath, calls, lane, tarballs, replies, options }
 }
 
@@ -74,6 +89,7 @@ function assertCheck(f, result, state, reason) {
   if (reason !== null) assert.ok(REASON_CODES.includes(reason))
   assert.deepEqual(JSON.parse(readFileSync(f.checkPath, 'utf8')), result)
   assert.equal(readdirSync(f.store).some(entry => entry.startsWith('check-')), false)
+  assert.equal(existsSync(join(f.store, 'check.running.json')), false)
 }
 
 test('checks every installed lane plugin without a supervisor and records only public fields', requiresStore, async t => {
@@ -84,7 +100,10 @@ test('checks every installed lane plugin without a supervisor and records only p
   f.replies.set(cdn, () => new Response(f.tarballs.get(bot.url)))
   f.replies.set(welcome.url, () => {
     const [temp] = readdirSync(f.store).filter(name => name.startsWith('check-'))
-    assert.ok(temp)
+    const marker = JSON.parse(readFileSync(join(f.store, 'check.running.json'), 'utf8'))
+    assert.match(marker.runId, /^[\da-f-]{36}$/)
+    assert.equal(temp, `check-${marker.runId}`)
+    assert.equal(marker.folder, join(realpathSync(f.store), temp))
     assert.deepEqual(readFileSync(join(f.store, temp, 'bots-dsh.tgz')), f.tarballs.get(bot.url))
     return new Response(f.tarballs.get(welcome.url))
   })
@@ -95,7 +114,7 @@ test('checks every installed lane plugin without a supervisor and records only p
     version: 1, checkedAt: result.checkedAt, state: 'available', reason: null, laneVersion: TARGET, sequence: SEQUENCE,
     plugins: [{ name: BOTS, from: CURRENT, to: TARGET }, { name: WELCOME, from: TARGET, to: TARGET }], supervisor: false,
   })
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`, bot.url, cdn, welcome.url, PING])
+  assert.deepEqual(f.calls, [bot.url, cdn, welcome.url, PING])
   assert.deepEqual(readFileSync(join(f.profileDir, 'package.json')), before)
   assert.deepEqual(readdirSync(f.store), ['check.json'])
 })
@@ -110,20 +129,20 @@ for (const [label, modifications] of [
     const result = await selfUpdateCheck(f.options)
     assertCheck(f, result, 'refused', 'signature-invalid')
     assert.deepEqual([result.laneVersion, result.sequence, result.plugins], [null, null, []])
-    assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+    assert.deepEqual(f.calls, [])
   })
 }
 
 test('is current when none of the installed plugins would be updated', requiresStore, async t => {
   const f = fixture(t, { installed: { [BOTS]: TARGET } })
   assertCheck(f, await selfUpdateCheck(f.options), 'current', 'not-newer')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+  assert.deepEqual(f.calls, [])
 })
 
 test('refuses the whole set if updating one installed plugin would downgrade another', requiresStore, async t => {
   const f = fixture(t, { installed: { [BOTS]: CURRENT, [WELCOME]: '3.160.4' } })
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'not-newer')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+  assert.deepEqual(f.calls, [])
 })
 
 test('refuses a sequence below the trusted current record even without a supervisor', requiresStore, async t => {
@@ -132,7 +151,7 @@ test('refuses a sequence below the trusted current record even without a supervi
   const result = await selfUpdateCheck(f.options)
   assertCheck(f, result, 'refused', 'sequence-lower')
   assert.equal(result.sequence, SEQUENCE)
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+  assert.deepEqual(f.calls, [])
 })
 
 test('a corrupt current record cannot disable the sequence guard', requiresStore, async t => {
@@ -147,20 +166,20 @@ test('refuses if any plugin requires another running DSH version', requiresStore
     lane.plugins[1].engines.dsh = '>=0.2.2'
   } })
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'engines-dsh')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+  assert.deepEqual(f.calls, [])
 })
 
 test('refuses an installed dependency missing from the signed release', requiresStore, async t => {
   const f = fixture(t, { installed: { [BOTS]: CURRENT, [WELCOME]: CURRENT }, changeLane: lane => { lane.plugins.splice(1, 1) } })
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'lane-invalid')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+  assert.deepEqual(f.calls, [])
 })
 
 for (const field of ['sha256', 'integrity']) {
   test(`refuses a ${field} mismatch and removes the temporary folder`, requiresStore, async t => {
     const f = fixture(t, { changeLane: lane => { lane.plugins[0][field] = 'bad' } })
     assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'hash-mismatch')
-    assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`, f.lane.plugins[0].url])
+    assert.deepEqual(f.calls, [f.lane.plugins[0].url])
   })
 }
 
@@ -169,19 +188,19 @@ test('caps the stream at the signed size, including responses without a content-
   const [{ url, size }] = f.lane.plugins
   f.replies.set(url, () => new Response(Buffer.alloc(size + 1)))
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'download-failed')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`, url])
+  assert.deepEqual(f.calls, [url])
 })
 
 test('refuses a signed size larger than the hard cap before requesting the tarball', requiresStore, async t => {
   const f = fixture(t, { changeLane: lane => { lane.plugins[0].size = 64 * 1024 * 1024 + 1 } })
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'download-failed')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+  assert.deepEqual(f.calls, [])
 })
 
 test('refuses a non-GitHub tarball URL before sending a request', requiresStore, async t => {
   const f = fixture(t, { changeLane: lane => { lane.plugins[0].url = 'https://github.com.example.invalid/bots.tgz' } })
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'download-failed')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`])
+  assert.deepEqual(f.calls, [])
 })
 
 test('refuses a redirect outside the GitHub release asset CDN', requiresStore, async t => {
@@ -189,7 +208,7 @@ test('refuses a redirect outside the GitHub release asset CDN', requiresStore, a
   const [{ url }] = f.lane.plugins
   f.replies.set(url, () => Response.redirect('https://elsewhere.invalid/package.tgz'))
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'download-failed')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`, url])
+  assert.deepEqual(f.calls, [url])
 })
 
 test('pings the profile registry and refuses if it cannot be reached', requiresStore, async t => {
@@ -198,7 +217,7 @@ test('pings the profile registry and refuses if it cannot be reached', requiresS
   writeFileSync(join(f.profileDir, '.npmrc'), '# Different registry\nregistry = "https://registry.example.invalid/npm/"\n')
   f.replies.set(ping, () => new Response('{}', { status: 503 }))
   assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'registry-unreachable')
-  assert.deepEqual(f.calls, [LANE_URL, `${LANE_URL}.sig`, f.lane.plugins[0].url, ping])
+  assert.deepEqual(f.calls, [f.lane.plugins[0].url, ping])
 })
 
 test('a successful empty registry ping is reachable and supervisor presence is a boolean', requiresStore, async t => {
@@ -233,9 +252,85 @@ test('concurrent calls share the same promise and a later call checks again', re
   const result = await first
   assertCheck(f, result, 'available', null)
   assert.equal(await again, result)
-  assert.equal(f.calls.length, 4)
+  assert.equal(f.calls.length, 2)
   const next = selfUpdateCheck(f.options)
   assert.notEqual(next, first)
   assertCheck(f, await next, 'available', null)
-  assert.equal(f.calls.length, 8)
+  assert.equal(f.calls.length, 4)
+})
+
+
+test('an HTTPS lane refuses override keys before making a request', requiresStore, async t => {
+  const f = fixture(t)
+  const result = await selfUpdateCheck({ ...f.options, laneUrl: LANE_URL })
+  assert.equal(result.state, 'refused')
+  assert.equal(result.reason, 'signature-invalid')
+  assert.deepEqual(f.calls, [])
+  assert.equal(existsSync(f.checkPath), false)
+})
+
+test('expands the registry in the profile npmrc using the process environment', requiresStore, async t => {
+  const f = fixture(t)
+  setEnv(t, 'AM_TEST_CHECK_REGISTRY', 'https://registry.example.invalid')
+  const ping = 'https://registry.example.invalid/npm/-/ping'
+  writeFileSync(join(f.profileDir, '.npmrc'), 'registry="${AM_TEST_CHECK_REGISTRY}/npm/"\n')
+  f.replies.set(ping, () => new Response(null, { status: 204 }))
+  assertCheck(f, await selfUpdateCheck(f.options), 'available', null)
+  assert.deepEqual(f.calls, [f.lane.plugins[0].url, ping])
+})
+
+test('uses the default registry when a profile npmrc variable is unset', requiresStore, async t => {
+  const f = fixture(t)
+  setEnv(t, 'AM_TEST_CHECK_REGISTRY', undefined)
+  writeFileSync(join(f.profileDir, '.npmrc'), 'registry=${AM_TEST_CHECK_REGISTRY}\n')
+  assertCheck(f, await selfUpdateCheck(f.options), 'available', null)
+  assert.deepEqual(f.calls, [f.lane.plugins[0].url, PING])
+})
+
+test('does not contact a registry over HTTP', requiresStore, async t => {
+  const f = fixture(t)
+  writeFileSync(join(f.profileDir, '.npmrc'), 'registry=http://registry.example.invalid/\n')
+  assertCheck(f, await selfUpdateCheck(f.options), 'refused', 'registry-unreachable')
+  assert.deepEqual(f.calls, [f.lane.plugins[0].url])
+})
+
+test('reclaims leftover folders and the previous process marker before downloading', requiresStore, async t => {
+  const f = fixture(t)
+  const leftover = join(f.store, 'check-previous-process')
+  mkdirSync(leftover, { recursive: true })
+  writeFileSync(join(leftover, 'bots-dsh.tgz'), 'old bytes')
+  const marker = join(f.store, 'check.running.json')
+  writeJsonAtomic(marker, { version: 1, runId: 'previous-process', folder: leftover }, f.options)
+  const [{ url }] = f.lane.plugins
+  f.replies.set(url, () => {
+    assert.equal(existsSync(leftover), false)
+    assert.notEqual(JSON.parse(readFileSync(marker, 'utf8')).runId, 'previous-process')
+    return new Response(f.tarballs.get(url))
+  })
+  assertCheck(f, await selfUpdateCheck(f.options), 'available', null)
+  assert.deepEqual(readdirSync(f.store), ['check.json'])
+})
+
+test('refuses a replaced check folder and leaves the replacement target intact', requiresStore, async t => {
+  const f = fixture(t)
+  const [{ url }] = f.lane.plugins
+  const marker = join(f.store, 'check.running.json')
+  const moved = join(f.store, 'check-moved')
+  f.replies.set(url, () => {
+    const { folder } = JSON.parse(readFileSync(marker, 'utf8'))
+    renameSync(folder, moved)
+    symlinkSync(f.profileDir, folder, 'dir')
+    return new Response(f.tarballs.get(url))
+  })
+  const result = await selfUpdateCheck(f.options)
+  assert.equal(result.state, 'unavailable')
+  assert.equal(result.reason, 'no-store')
+  assert.deepEqual(JSON.parse(readFileSync(f.checkPath, 'utf8')), result)
+  assert.deepEqual(readdirSync(moved), [])
+  assert.equal(existsSync(join(f.profileDir, 'bots-dsh.tgz')), false)
+  assert.equal(existsSync(marker), false)
+  assert.deepEqual(f.calls, [url])
+  f.replies.delete(url)
+  assertCheck(f, await selfUpdateCheck(f.options), 'available', null)
+  assert.equal(existsSync(join(f.profileDir, 'package.json')), true)
 })
