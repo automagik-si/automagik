@@ -181,6 +181,115 @@ coverage as applicable. Check older peers, revocation and zero follow-up reads a
 For each feature, record the tested SHA, phone action and resulting value on the paired phone and
 installed desktop. No installed-app verification was performed for this draft.
 
+## Delivery 1: memory contract
+
+These are the implementer's proposals. D1 to D6 did not pick these details.
+
+The owner socket keeps protocol 1 and its current line format. A writable source with memory
+management adds `manage: 1` and `manageMethods` when hello asks for both `write: 1` and
+`manage: 1`. The `methods` list stays the same. A bridge may manage a Bot with its chat closed.
+
+```jsonl
+{"id":1,"method":"hello","params":{"write":1,"manage":1}}
+{"id":1,"result":{"protocol":1,"readOnly":false,"write":1,"methods":["hello","list","subscribe","unsubscribe","backfill","send","interrupt","answer"],"dedupe":"log","manage":1,"manageMethods":["manage-open","manage-close","memory-read","memory-edit","memory-add"]}}
+{"id":2,"method":"manage-open","params":{"grant":"g1","phone":"paired-key"}}
+{"id":2,"result":{"grant":"g1"}}
+{"id":3,"method":"memory-read","params":{"grant":"g1","terminal":"dsh:worker"}}
+{"id":3,"result":{"ok":true,"state":"read","memory":{"terminal":"dsh:worker","entries":[],"size":0,"limit":8000,"truncated":false}}}
+{"id":4,"method":"memory-add","params":{"grant":"g1","terminal":"dsh:worker","text":"Use the staging fixture."}}
+{"id":4,"result":{"ok":true,"state":"saved","entry":{"id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the staging fixture.","topic":null,"added":"2026-11-19","until":null,"pinned":false,"expired":false},"memory":{"terminal":"dsh:worker","entries":[{"id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the staging fixture.","topic":null,"added":"2026-11-19","until":null,"pinned":false,"expired":false}],"size":24,"limit":8000,"truncated":false}}}
+{"id":5,"method":"memory-edit","params":{"grant":"g1","terminal":"dsh:worker","id":"a1b2","rev":"649c4d43fea4d9f9","text":"Use the current fixture."}}
+{"id":6,"method":"manage-close","params":{"grant":"g1"}}
+{"id":6,"result":{}}
+{"id":5,"result":{"ok":false,"state":"refused","reason":"revoked","applied":true}}
+```
+
+Read returns `{ok:true, state:'read', memory}`. Add and edit return
+`{ok:true, state:'saved'|'unchanged', entry, memory}`. Memory contains `terminal`, `entries`,
+`size`, `limit` and `truncated`. Each entry has `id`, `rev`, `text`, `topic`, `added`,
+`until`, `pinned` and `expired`. It comes only from the selected Bot's own scope.
+
+An entry's wire id is its stored id if it matches `/^[A-Za-z0-9_-]{1,32}$/`. Otherwise it is
+`x` plus the first 16 hex digits of the SHA-256 of the stored id. Edit uses the same mapping
+and keeps the stored id. The revision is the first 16 hex digits of the SHA-256 of the UTF-8
+`JSON.stringify([fileName, rawLine])`. Edit needs both id and revision. An absent id is
+`gone`. A present id with no matching revision is `stale`. Multiple matches are `ambiguous`.
+These replies carry current memory. Edit keeps the entry's pin, expiry and added date and
+sets `by: 'user'` and `source: 'pocket'` when it changes the text. The same canonical edit text
+or an add of text already present returns `unchanged` and writes no journal row.
+
+Without negotiation every management method except close returns the existing `read-only`
+error. Close always returns an empty result. Open needs no host authority and returns the
+grant id. Its errors use the error envelope. A bad grant or phone key returns
+`invalid_params`. An open id returns `invalid_params` with `grant in use`. A seventeenth
+open grant on one connection returns `too_many`.
+
+Memory refusals use `{ok:false, state:'refused', reason}` in the result envelope. Check in
+this order.
+
+1. An unknown or closed grant returns `revoked`.
+2. Bad fields return `invalid`. A grant matches `/^[A-Za-z0-9._:-]{1,64}$/`. The terminal
+   names a `dsh:<botId>`. Text is a string of at most 4 KiB in UTF-8. Edit requires a valid
+   wire id and 16 lowercase hex digits for the revision.
+3. One memory call per phone and Bot may be in flight. Another returns `busy`.
+4. The phone key counts across connections. Reads get 60 per minute. Writes share chat's
+   20 per minute. Past either cap the reason is `rate`.
+5. The job refreshes the shell choice. It needs the team's lock and a writable host with
+   memory on. Failure returns `unavailable`.
+6. A Bot must still be the team's own Bot with a current Session. Otherwise it is
+   `not-found`. Use one fresh home file read for its binding and shown pick. A failed read,
+   duplicate Bot rows or a malformed machine gives `not-shown`. A row with a folder sets
+   the project and machine. With no row, use the Bot's runtime project. No project gives
+   `global`. An absent pick for that project, machine and Bot gives `not-shown`. A private
+   Bot gives `private`.
+7. Load only the Bot's own scope. A linked or non-regular file, or an unsafe directory,
+   gives `unavailable`. Check sizes before loading. More than 64 Markdown files or more
+   than 2 MiB gives `too-large`. A write also checks the resulting scope's 2 MiB cap.
+8. Apply the operation's selector and entry rules. `invalid` may carry the memory entry
+   rule's message about the supplied text, which has a 300-character limit.
+
+The whole reply line, including the envelope and the affected entry, has a 1 MiB UTF-8
+cap. Reserve room for the affected entry, then include up to 4,000 entries that fit.
+Set `truncated: true` when entries are left out.
+
+A request holds the grant it started with. Closing the grant, another hello, closing the
+connection or starting server shutdown revokes it permanently. Reopening an id makes a
+new grant. Check the grant, lock and Bot consent in the job, just before accepting a write
+and just before replying. The Unix host accepts a write by renaming its temporary pending
+file in the same synchronous turn as that check. A refusal before the rename leaves no
+accepted write. If a check fails after acceptance, the change stays accepted and the
+refusal carries `applied:true` with no memory.
+
+A failure in the steps or journal after acceptance returns
+`{ok:false, state:'unknown', reason:'pending'}`. Memory recovery finishes it. A confirmed
+write whose projection fails returns `{ok:true, state:'saved', entry:null, memory:null}`.
+This is the only saved reply that needs a read. After a lost or unknown reply the phone
+must never resend the write on its own. It calls `memory-read` and shows the resulting
+state. Only a fresh user action sends another write. Writes have no durable receipts.
+Durable receipts keyed by phone, Bot, operation and fingerprint were considered.
+
+| Peer | Result |
+|---|---|
+| Old bridge, new host | A hello without `write: 1` gets the old read-only answer. A hello with only `write: 1` keeps the old chat write answer. |
+| New bridge, old host | Hello has no `manage`. The bridge advertises no management. |
+| New bridge, new host | Both hello flags and a writable source with memory enable management. Otherwise the bridge advertises no management. |
+| Old phone or old bridge | Chat continues and no management methods are negotiated. |
+
+For the Pocket Link PR, the phone sends chat hello with any subset of
+`manage: ['memory.read', 'memory.edit', 'memory.add']`. The bridge replies with the
+intersection of the phone's request, the bridge's methods and the host's `manageMethods`.
+It maps socket names such as `memory-read` to `memory.read`. A phone that requests
+`['memory.read']` gets only `['memory.read']` when all peers support it. If the phone asks
+for read, edit and add and the host offers only read and add, the reply is
+`['memory.read', 'memory.add']`. The bridge forwards only negotiated methods.
+
+Open and close exist only on the owner socket. The bridge opens one grant on hello per
+phone chat connection using the authenticated phone key. It closes the grant when the
+connection ends, on forget or when the 2-second check revokes the phone. If the close
+is not acknowledged within the 2-second revocation deadline, the bridge destroys the
+socket. It drops a reply if its phone connection is no longer live and renegotiates on
+reconnect.
+
 ## Open questions
 
 None. See Decided for D1 to D6.
