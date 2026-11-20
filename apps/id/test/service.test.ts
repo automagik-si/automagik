@@ -942,6 +942,243 @@ describe('passkey site name', () => {
   });
 });
 
+// Passkeys on an existing account: add behind a fresh sign-in, list, delete.
+describe('passkeys on an existing account', () => {
+  const PUBLIC_FIELDS = ['backedUp', 'createdAt', 'deviceType', 'id', 'name'];
+
+  async function count(sql: string, ...values: string[]) {
+    const db = await runtime.getD1Database('DB');
+    return (await db.prepare(sql).bind(...values).first<{ n: number }>())!.n;
+  }
+
+  async function addPasskey(name = 'Second key') {
+    const authenticator = new SoftwareAuthenticator();
+    const options = await jsonOK(await request('/api/auth/passkey/add/generate-register-options'));
+    const added = await jsonOK(await request('/api/auth/passkey/add/verify-registration', {
+      response: authenticator.register(options, origin), name, createSession: true,
+    }));
+    return { authenticator, options, added };
+  }
+
+  async function signIn(authenticator: SoftwareAuthenticator) {
+    cookie = '';
+    const options = await jsonOK(await request('/api/auth/passkey/generate-authenticate-options'));
+    return jsonOK(await request('/api/auth/passkey/verify-authentication', {
+      response: authenticator.authenticate(options, origin),
+    }));
+  }
+
+  async function idTokenSubject() {
+    const tokens = await jsonOK(await exchange(await code()));
+    const metadata = await jsonOK(await request('/.well-known/openid-configuration'));
+    const jwks = await jsonOK(await request(new URL(metadata.jwks_uri).pathname));
+    const verified = await jwtVerify(tokens.id_token, createLocalJWKSet(jwks), {
+      issuer: metadata.issuer, audience: 'automagik-desktop',
+    });
+    return verified.payload.sub;
+  }
+
+  async function ageSessions(ms: number) {
+    const db = await runtime.getD1Database('DB');
+    const row = await db.prepare('SELECT createdAt FROM session LIMIT 1').first<{ createdAt: string | number }>();
+    const past = Date.now() - ms;
+    await db.prepare('UPDATE session SET createdAt = ?')
+      .bind(typeof row!.createdAt === 'number' ? past : new Date(past).toISOString()).run();
+  }
+
+  function jarWith(jar: string, overrides: Record<string, string>) {
+    const entries = new Map(jar.split('; ').filter(Boolean).map(entry => {
+      const at = entry.indexOf('=');
+      return [entry.slice(0, at), entry.slice(at + 1)] as [string, string];
+    }));
+    for (const [name, value] of Object.entries(overrides)) entries.set(name, value);
+    return [...entries].map(([name, value]) => `${name}=${value}`).join('; ');
+  }
+  const sessionCookie = (jar: string) => jar.split('; ')
+    .find(entry => entry.startsWith('__Secure-better-auth.session_token='))!.split('=').slice(1).join('=');
+
+  async function expectError(response: Awaited<ReturnType<typeof request>>, status: number, code: string) {
+    const text = await response.text();
+    expect(response.status, text).toBe(status);
+    expect(JSON.parse(text).code).toBe(code);
+    return text;
+  }
+
+  test('a second passkey added after a fresh sign-in signs in to the same account and sub', async () => {
+    const { authenticator: first, userId } = await signup();
+    const before = await jsonOK(await request('/api/auth/get-session'));
+    expect(before.session.signInMethod).toBe('passkey');
+    const { authenticator: second, options, added } = await addPasskey();
+    expect(options.user.name).toBe('Automagik user');
+    expect(Object.keys(added).sort()).toEqual(PUBLIC_FIELDS);
+    expect(added.name).toBe('Second key');
+    // Adding keeps the current session and never starts another one.
+    expect((await jsonOK(await request('/api/auth/get-session'))).session.id).toBe(before.session.id);
+    expect(await count('SELECT count(*) AS n FROM session')).toBe(1);
+    expect(await count('SELECT count(*) AS n FROM user')).toBe(1);
+    expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', userId)).toBe(2);
+    for (const authenticator of [first, second]) {
+      const signedIn = await signIn(authenticator);
+      expect(signedIn.user.id).toBe(userId);
+      expect(await idTokenSubject()).toBe(userId);
+    }
+  });
+
+  test('adding a passkey without a session is refused and creates no account', async () => {
+    for (const jar of ['', '__Secure-better-auth.session_token=not-a-session.fixture']) {
+      cookie = jar;
+      await expectError(await request('/api/auth/passkey/add/generate-register-options'), 401, 'UNAUTHORIZED');
+      await expectError(await request('/api/auth/passkey/add/verify-registration', {
+        response: new SoftwareAuthenticator().register({
+          challenge: 'unused', rp: { id: siteName }, user: { id: 'unused' },
+        }, origin),
+      }), 401, 'UNAUTHORIZED');
+    }
+    expect(await count('SELECT count(*) AS n FROM user')).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM passkey')).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM verification')).toBe(0);
+  });
+
+  test('a stale session cannot add or delete a passkey', async () => {
+    const { userId } = await signup();
+    const { added } = await addPasskey();
+    const pending = await jsonOK(await request('/api/auth/passkey/add/generate-register-options'));
+    await ageSessions(5 * 60_000 + 1_000);
+    await expectError(await request('/api/auth/passkey/add/generate-register-options'), 403, 'SESSION_NOT_FRESH');
+    await expectError(await request('/api/auth/passkey/add/verify-registration', {
+      response: new SoftwareAuthenticator().register(pending, origin),
+    }), 403, 'SESSION_NOT_FRESH');
+    await expectError(await request('/api/auth/passkey/account/delete', { id: added.id }), 403, 'SESSION_NOT_FRESH');
+    expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', userId)).toBe(2);
+    // The session still works for everything else, listing included.
+    expect(await jsonOK(await request('/api/auth/passkey/account/list'))).toHaveLength(2);
+  });
+
+  test('a WhatsApp sign-in session cannot add a passkey', async () => {
+    const mf = await instance(true);
+    const started = await startWhatsApp(mf);
+    expect((await deliver(mf, started.code)).status).toBe(200);
+    await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf }));
+    const session = await jsonOK(await request('/api/auth/get-session', undefined, { mf }));
+    expect(session.session.signInMethod).toBe('whatsapp');
+    await expectError(await request('/api/auth/passkey/add/generate-register-options', undefined, { mf }),
+      403, 'SESSION_NOT_FRESH');
+    expect(await count('SELECT count(*) AS n FROM passkey')).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM user')).toBe(1);
+  });
+
+  test('the add ceremony is bound to the session that started it', async () => {
+    const first = await signup();
+    const options = await jsonOK(await request('/api/auth/passkey/add/generate-register-options'));
+    const firstJar = cookie;
+    cookie = '';
+    const second = await signup();
+    const otherSession = jarWith(firstJar, { '__Secure-better-auth.session_token': sessionCookie(cookie) });
+    const refused = await request('/api/auth/passkey/add/verify-registration', {
+      response: new SoftwareAuthenticator().register(options, origin),
+    }, { cookie: otherSession });
+    expect(refused.status).toBe(401);
+    for (const userId of [first.userId, second.userId]) {
+      expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', userId)).toBe(1);
+    }
+  });
+
+  test('the list shows only your own passkeys, without secret material, and rename', async () => {
+    const { authenticator, userId } = await signup();
+    await signIn(authenticator); // A passkey sign-in session is as fresh as a new account's.
+    const { added } = await addPasskey('Laptop');
+    const listed = await jsonOK(await request('/api/auth/passkey/account/list'));
+    expect(listed).toHaveLength(2);
+    for (const entry of listed) expect(Object.keys(entry).sort()).toEqual(PUBLIC_FIELDS);
+    expect(listed.map((entry: { name: string | null }) => entry.name)).toEqual([null, 'Laptop']);
+    const db = await runtime.getD1Database('DB');
+    const stored = await db.prepare('SELECT * FROM passkey WHERE userId = ?').bind(userId).all<any>();
+    const text = JSON.stringify(listed);
+    for (const row of stored.results) {
+      for (const secret of [row.publicKey, row.credentialID, row.userId]) expect(text).not.toContain(secret);
+    }
+    const renamed = await jsonOK(await request('/api/auth/passkey/account/rename', { id: added.id, name: ' Work ' }));
+    expect(renamed.passkey).toEqual({ ...added, name: 'Work' });
+    await expectError(await request('/api/auth/passkey/account/rename', { id: added.id, name: ' ' }),
+      400, 'INVALID_REQUEST');
+    cookie = '';
+    await signup();
+    expect(await jsonOK(await request('/api/auth/passkey/account/list'))).toHaveLength(1);
+    await expectError(await request('/api/auth/passkey/account/rename', { id: added.id, name: 'Mine' }),
+      404, 'PASSKEY_NOT_FOUND');
+    cookie = '';
+    await expectError(await request('/api/auth/passkey/account/list'), 401, 'UNAUTHORIZED');
+  });
+
+  test('deleting one of two passkeys works; the last one is refused without a phone number', async () => {
+    const { userId } = await signup();
+    const { added } = await addPasskey();
+    expect(await jsonOK(await request('/api/auth/passkey/account/delete', { id: added.id })))
+      .toEqual({ status: true });
+    const [last] = await jsonOK(await request('/api/auth/passkey/account/list'));
+    await expectError(await request('/api/auth/passkey/account/delete', { id: last.id }), 409, 'LAST_PASSKEY');
+    expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', userId)).toBe(1);
+  });
+
+  test.each([
+    { scenario: 'WhatsApp disabled', enabled: false, phone: '+15555550160', verified: 1 },
+    { scenario: 'an unverified phone', enabled: true, phone: '+15555550160', verified: 0 },
+    { scenario: 'an unusable phone', enabled: true, phone: '+1555bad0160', verified: 1 },
+  ])('keeps the last passkey with $scenario', async ({ enabled, phone, verified }) => {
+    const { userId } = await signup();
+    const [last] = await jsonOK(await request('/api/auth/passkey/account/list'));
+    const mf = enabled ? await instance(true) : runtime;
+    const db = await mf.getD1Database('DB');
+    await db.prepare('UPDATE user SET phoneNumber = ?, phoneNumberVerified = ? WHERE id = ?')
+      .bind(phone, verified, userId).run();
+    await expectError(await request('/api/auth/passkey/account/delete', { id: last.id }, { mf }),
+      409, 'LAST_PASSKEY');
+    expect(await jsonOK(await request('/api/auth/passkey/account/list', undefined, { mf }))).toEqual([last]);
+  });
+
+  test('the owner can sign in with WhatsApp after deleting the last passkey', async () => {
+    const { userId } = await signup();
+    const [last] = await jsonOK(await request('/api/auth/passkey/account/list'));
+    const mf = await instance(true);
+    const db = await runtime.getD1Database('DB');
+    await db.prepare('UPDATE user SET phoneNumber = ?, phoneNumberVerified = 1 WHERE id = ?')
+      .bind('+15555550160', userId).run();
+    expect(await jsonOK(await request('/api/auth/passkey/account/delete', { id: last.id }, { mf })))
+      .toEqual({ status: true });
+    expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', userId)).toBe(0);
+
+    cookie = '';
+    const started = await startWhatsApp(mf);
+    expect((await deliver(mf, started.code, { from: '15555550160' })).status).toBe(200);
+    const signedIn = await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf }));
+    expect(signedIn.user.id).toBe(userId);
+  });
+
+  test("someone else's passkey cannot be deleted and answers like a missing one", async () => {
+    const victim = await signup();
+    await addPasskey();
+    const victimPasskey = (await jsonOK(await request('/api/auth/passkey/account/list')))[0].id;
+    cookie = '';
+    await signup();
+    await addPasskey(); // Two passkeys, so the last-passkey guard cannot be what refuses.
+    const foreign = await request('/api/auth/passkey/account/delete', { id: victimPasskey });
+    const missing = await request('/api/auth/passkey/account/delete', { id: 'no-such-passkey' });
+    expect(foreign.status).toBe(404);
+    expect(await foreign.text()).toBe(await missing.text());
+    expect(missing.status).toBe(404);
+    expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', victim.userId)).toBe(2);
+  });
+
+  test('an add request never creates an account, even past the session check', async () => {
+    const { passkeyAccountPlugin, ADD_PASSKEY_HEADER } = await import('../src/passkeys');
+    const plugin = passkeyAccountPlugin({} as never);
+    const hooks = (plugin.init!({} as never) as any).options.databaseHooks;
+    const create = (headers: Record<string, string>) => hooks.user.create.before({}, { headers: new Headers(headers) });
+    await expect(create({ [ADD_PASSKEY_HEADER]: '1' })).rejects.toThrow('Unauthorized');
+    await expect(create({})).resolves.toBeUndefined();
+  });
+});
+
 describe('session management', () => {
   // Signs in again with an existing passkey, returning the new session's cookie jar.
   async function signIn(authenticator: SoftwareAuthenticator) {

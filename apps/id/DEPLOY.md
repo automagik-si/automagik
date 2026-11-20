@@ -176,8 +176,10 @@ store; it does not change later.
 
 Test a real passkey, desktop loopback sign-in with S256 and Cloud confidential
 sign-in on `https://id.automagik.si`. Confirm D1 migrations and seed records, secure cookies, correct
-issuer/audience/nonce checks in each client, and WhatsApp-disabled behavior. Apply both migrations, including
-`0002_whatsapp.sql`, before enabling the new configuration. Existing phone-account
+issuer/audience/nonce checks in each client, and WhatsApp-disabled behavior. Apply every migration, including
+`0002_whatsapp.sql` and `0004_session_sign_in_method.sql`, before enabling the new configuration.
+Sessions issued before `0004` carry no sign-in method, so they can never add or delete a passkey;
+a new passkey sign-in can. Existing phone-account
 fields remain intact; the service does not migrate or link identities automatically. Never
 share operational identifiers or current deployment details in public evidence.
 
