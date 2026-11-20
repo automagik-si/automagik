@@ -80,7 +80,12 @@ test('the export reads no record, pointer or home: it names a path that need not
 const LIB = new URL('../lib.mjs', import.meta.url).href
 const FOLLOW = new URL('../profile-follow.mjs', import.meta.url).href
 const harness = `
-  import { registerHooks } from 'node:module'
+  import { registerHooks, syncBuiltinESMExports } from 'node:module'
+  const fs = process.getBuiltinModule('node:fs')
+  const lstat = fs.lstatSync
+  fs.lstatSync = (path, options) => path === globalThis.testCoreSocket
+    ? { isSocket: () => true } : lstat(path, options)
+  syncBuiltinESMExports()
   const lib = await import(${JSON.stringify(`${LIB}?test-original`)})
   globalThis.serverTestLib = {
     ...lib,
@@ -101,12 +106,19 @@ const harness = `
         source: \`
           import { EventEmitter } from 'node:events'
           import { PassThrough } from 'node:stream'
+          export function execFileSync() { return '' }
           export function spawn(command, args, options) {
             const env = options.env ?? process.env
-            console.log('SPAWNENV ' + JSON.stringify({ pointer: env.${BOT_CLI_POINTER_ENV}, marker: env.${NATIVE_WORKER_LOGIN_ENV} }))
             const child = new EventEmitter()
             child.stdout = new PassThrough()
             child.stderr = new PassThrough()
+            if (args[0] === 'serve') {
+              globalThis.testCoreSocket = env.HC_TERMINAL_SOCKET
+              return child
+            }
+            console.log('DSH SPAWNENV ' + JSON.stringify({
+              pointer: env.${BOT_CLI_POINTER_ENV}, marker: env.${NATIVE_WORKER_LOGIN_ENV},
+            }))
             setImmediate(() => {
               child.stdout.end('dsh web: http://127.0.0.1:3081/?token=test-launch-value\\\\n')
               child.stderr.end()
@@ -122,16 +134,20 @@ const harness = `
 `
 
 function entrypointSpawnEnv(s) {
-  const env = { ...process.env, AUTOMAGIK_HOME: s.home, DSH_HOME: s.dsh, AUTOMAGIK_WORKSPACE: s.home, DEEPSEEK_API_KEY: 'test-only' }
+  const env = {
+    ...process.env, HOME: s.home, AUTOMAGIK_HOME: s.home, DSH_HOME: s.dsh,
+    AUTOMAGIK_WORKSPACE: s.home, DEEPSEEK_API_KEY: 'test-only', HC_SESSION: 'test-worker-login',
+    XDG_RUNTIME_DIR: join(s.home, 'run'), HERDR_APP_HOME: join(s.home, 'herdr-app'),
+  }
   delete env.AUTOMAGIK_PUBLIC_URL
   delete env[BOT_CLI_POINTER_ENV]
   delete env[NATIVE_WORKER_LOGIN_ENV]
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], { env, encoding: 'utf8', timeout: 30_000 })
   assert.ifError(result.error)
   assert.equal(result.status, 0, result.stderr)
-  const line = result.stdout.split('\n').find(row => row.startsWith('SPAWNENV '))
+  const line = result.stdout.split('\n').find(row => row.startsWith('DSH SPAWNENV '))
   assert.ok(line, result.stdout)
-  return JSON.parse(line.slice('SPAWNENV '.length))
+  return JSON.parse(line.slice('DSH SPAWNENV '.length))
 }
 
 test('the real entrypoint spawns DSH with the pointer and the marker (the shared root it owns)', t => {

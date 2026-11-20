@@ -16,7 +16,9 @@ async function imageVersion(image) {
   return r.stdout.trim()
 }
 async function start(image, online = false) {
-  await docker(['run','--detach',...online ? [] : ['--network','none'],'--name',container,'--volume',`${volume}:/data`,'--health-interval','2s','--health-start-period','0s',image])
+  await docker(['run', '--detach', ...(online ? [] : ['--network', 'none']),
+    '--env', 'AUTOMAGIK_CLI_INSTALL=off', '--name', container, '--volume', `${volume}:/data`,
+    '--health-interval', '2s', '--health-start-period', '0s', image])
   const deadline = Date.now() + 240_000
   while (Date.now() < deadline) {
     check((await docker(['inspect',container,'--format','{{.State.Status}}'])).stdout.trim() === 'running', 'update workspace stopped')

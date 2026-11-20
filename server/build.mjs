@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CHECKOUT_REPOSITORY, validateInput, verifyCheckoutDirectory } from './checkout-input.mjs'
+import { HERDR_CORE_SHA256, HERDR_CORE_VERSION } from './toolchain.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -57,6 +58,8 @@ const command = ['build', '--file', 'server/Dockerfile', '--tag', tag,
   '--build-arg', `IMAGE_VERSION=${imageVersion}`,
   '--build-arg', `IMAGE_REVISION=${revision}`,
   '--build-arg', `DSH_VERSION=${dsh}`,
+  '--build-arg', `HERDR_CORE_VERSION=${HERDR_CORE_VERSION}`,
+  '--build-arg', `HERDR_CORE_SHA256=${HERDR_CORE_SHA256}`,
   '--build-arg', `AUTOMAGIK_REPOSITORY=${repository}`,
   '--build-arg', `INPUT_KIND=${kind}`,
   '--build-arg', `INPUT_EVENT=${event}`,

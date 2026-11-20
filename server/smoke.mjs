@@ -8,6 +8,7 @@
 //   node server/smoke.mjs [automagik-server:local]
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { herdrCoreSocket, SMOKE_HC_SESSION } from './toolchain.mjs'
 
 const run = promisify(execFile)
 const image = process.argv[2] || 'automagik-server:local'
@@ -73,10 +74,15 @@ async function main() {
   // Nothing baked into /data: no profile, and the image runs as the non-root uid. Distroless
   // carries no coreutils, so the uid check is node's own.
   await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c', 'test ! -e /data/dsh/profiles'])
+  await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c',
+    'test ! -e /data/acp'])
   await docker(['run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e', 'process.exit(process.getuid() === 1000 ? 0 : 1)'])
 
   await docker(['volume', 'create', volume])
-  await docker(['run', '--detach', '--name', name, '--volume', `${volume}:/data`,
+  // First boot must prepare the profile and am without network access.
+  await docker(['run', '--detach', '--name', name, '--network', 'none',
+    '--env', `HC_SESSION=${SMOKE_HC_SESSION}`, '--env', 'AUTOMAGIK_CLI_INSTALL=off',
+    '--volume', `${volume}:/data`,
     '--health-interval', '2s', '--health-timeout', '2s', '--health-retries', '60', '--health-start-period', '0s', image])
 
   const startTo401 = await waitForFence()
@@ -85,8 +91,11 @@ async function main() {
 
   const logs = await logsOf()
   check(/automagik-web: startup: http:\/\/127\.0\.0\.1:3081\//.test(logs), 'no startup line')
+  const socket = herdrCoreSocket(SMOKE_HC_SESSION)
+  check(logs.includes(`automagik-web: herdr-core: serving on ${socket}`), `herdr-core did not start on ${socket}`)
   check(!/(?<![A-Za-z0-9_])token=(?!<redacted>)\S+/.test(logs), 'the launch token is in the log')
   check(/automagik-web: seeded \/data\/dsh\/profiles\/automagik-web/.test(logs), 'the first start did not seed the profile')
+  check(!/gets no per-turn briefing/.test(logs), 'the first boot still warns about the briefing hook')
   check(/automagik-web: profile automagik-web: automagik \d+\.\d+\.\d+, dsh \d+\.\d+\.\d+/.test(logs), 'no version line')
   check(!/failed to import|ERR_MODULE_NOT_FOUND/.test(logs), 'a composed plugin failed to import')
   // The real token from the 0600 launch file must not be in the log, not merely a pattern.
@@ -120,6 +129,22 @@ async function main() {
     check(config.includes(`name: '${plugin}'`) || config.includes(`name: "${plugin}"`), `${plugin} is not composed`)
   }
   say(`seeded profile, three plugins, 600 launch URL, uid 1000, ${entries} composed entries`)
+  for (const line of logs.split('\n').filter((line) => /first boot:|am self install:/.test(line))) {
+    say(line.replace(/^automagik-web: /, ''))
+  }
+
+  // The toolchain smoke checks the shipped commands, private socket, briefing and CLI store.
+  let inImage
+  try {
+    inImage = (await docker(['exec', name, '/nodejs/bin/node', '/opt/automagik/in-image-smoke.mjs'])).stdout.trim()
+  } catch (error) {
+    // Capturing the shape is useless if the failed path hides it; print both streams first.
+    for (const line of `${error.stdout ?? ''}${error.stderr ?? ''}`.split('\n').filter(Boolean)) {
+      say(line.replace(/^\[in-image\] /, ''))
+    }
+    throw error
+  }
+  for (const line of inImage.split('\n').filter(Boolean)) say(line.replace(/^\[in-image\] /, ''))
 
   // The distroless base is older glibc than the builder: exercise both native modules.
   const native = "const k=require('/opt/automagik/runtime/node_modules/koffi');const p=require('/opt/automagik/runtime/node_modules/node-pty');const t=p.spawn('/bin/sh',['-c','echo native-ok'],{name:'xterm',cols:80,rows:24,cwd:'/tmp',env:process.env});let o='';t.onData((d)=>{o+=d});t.onExit(()=>process.exit(o.includes('native-ok')&&typeof k.version==='string'?0:1));setTimeout(()=>process.exit(1),5000)"
