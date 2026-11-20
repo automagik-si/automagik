@@ -59,6 +59,8 @@ import * as memory from './src/host/memory.js'
 import * as parts from './src/host/parts.js'
 import * as callerAccess from './src/host/caller-access.js'
 import * as callerView from './src/host/caller-view.js'
+import * as callerFeed from './src/host/caller-feed.js'
+import * as callerRoutes from './src/host/caller-routes.js'
 import * as images from './src/host/images.js'
 import * as avatarLibrary from './src/host/avatar-library.js'
 import * as browser from './src/host/browser.js'
@@ -128,7 +130,7 @@ const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
   turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
-  parts, callerAccess, callerView, fallback, modelState,
+  parts, callerAccess, callerView, callerFeed, callerRoutes, fallback, modelState,
   { install: rt => modelAccessHooks.install(rt, { machine: machineOf(rt), instanceId }) },
   { install: rt => cliLogin.install(rt, {
     path: join(rt.home, RESERVATION_FILE), fs, pid: process.pid,

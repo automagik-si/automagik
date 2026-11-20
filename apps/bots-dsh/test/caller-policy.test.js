@@ -60,9 +60,8 @@ test('R1 every current owner endpoint has a recorded caller decision and unknown
   assert.deepEqual(CALLER_READS, inventory.reads)
   const f = fixture(t)
   const names = ownerEndpoints()
-  // whoami belongs to the caller read contract and has no owner switch case.
   const checkInventory = () => assert.deepEqual(
-    [...new Set([...names, ...f.rt.extended.endpointNames(), 'whoami'])].sort(), recorded.sort(),
+    [...new Set([...names, ...f.rt.extended.endpointNames()])].sort(), recorded.sort(),
   )
   checkInventory()
   const dispose = f.rt.hooks.endpoint('fixture-extension', () => assert.fail('an extension was dispatched'))

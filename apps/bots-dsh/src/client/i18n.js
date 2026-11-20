@@ -3621,6 +3621,46 @@ export function addStrings(zh) {
   }
 }
 
+Object.assign(ZH, {
+  "No Bots are shared with you yet.": "还没有任何 Bot 与你共享。",
+  "Nothing to read here yet.": "这里还没有可阅读的消息。",
+  "You can read this chat, but not send messages.": "你可以阅读这段对话，但不能发送消息。",
+  "This Bot is no longer shared with you.": "这个 Bot 已停止与你共享。",
+  "Who can talk to this Bot": "谁可以与这个 Bot 对话",
+  "Only you and admins": "仅你和管理员",
+  "People you choose": "你选择的人",
+  "Anyone in the workspace": "工作区中的任何人",
+  "Sharing starts a new part of this chat; earlier parts stay yours.": "共享会开启新的对话段落；较早的段落仍归你所有。",
+  "People you add can read this Bot's chat; they can't send messages yet.": "你添加的人可以阅读这个 Bot 的对话，暂时不能发送消息。",
+  "Guests and named people": "访客和指定人员",
+  "Member": "成员",
+  "Guest": "访客",
+  "Last seen {time}": "上次在线：{time}",
+  "Not signed in since the last restart": "自上次重启后未登录",
+  "Remove": "移除",
+  "Add person": "添加人员",
+  "No one has signed in since the last restart.": "自上次重启后还没有人登录。",
+  "Who may talk to this Bot changed in another window; check it and save again.": "另一个窗口修改了此 Bot 的共享设置；请检查后重新保存。",
+  "Starting a new part of this chat for sharing…": "正在开启新的对话段落以供共享…",
+  "Shared: people you add read this chat from its new part on.": "已共享：你添加的人可以从新的段落开始阅读对话。",
+  "Sharing did not start because something moved into the new part; stop sharing and share again.": "有内容进入了新段落，未能开始共享；请停止共享后再重新共享。",
+  "{name} is already moving to a new conversation.": "{name} 正在切换到新对话。",
+  "{name} is still handing on earlier messages; try again shortly.": "{name} 仍在转交较早的消息；请稍后重试。",
+  "Answer or dismiss {name}'s open card first.": "请先回答或关闭 {name} 打开的卡片。",
+  "Pause {name}'s goal first.": "请先暂停 {name} 的目标。",
+  "Wait for {name} to finish, then share it.": "请等待 {name} 完成后再共享。",
+  "{name} has messages waiting; let them run or remove them, then share it.": "{name} 有待处理的消息；请等它处理完或移除这些消息后再共享。",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}": "{issuer} {subject} 自上次重启后未登录，或未以 {role} 身份登录",
+  "Who may talk to {name} changed in another window; check it and save again.": "另一个窗口修改了 {name} 的共享设置；请检查后重新保存。",
+  "A Main Bot is shared only with people you name": "主 Bot 只能与指定人员共享",
+  "Sharing needs multiuser mode": "共享需要多用户模式",
+  "Save who may talk to a Bot on its own": "请单独保存 Bot 的共享设置",
+  "Name at most 100 people": "最多可指定 100 人",
+  "Each person needs a valid issuer, subject and role": "每个人都需要有效的签发者、主体和角色",
+  "Name each person only once": "每个人只能指定一次",
+  "Your sign-in changed; reload this page.": "你的登录状态已更改；请重新加载此页面。",
+})
+
 export function t(key, params) {
   return bound ? bound(key, params) : fill(key, params)
 }
@@ -3630,6 +3670,14 @@ export function t(key, params) {
 // the values the message carried.
 const HOST_TEMPLATES = [
   'Detach {name} first.',
+  "{name} is already moving to a new conversation.",
+  "{name} is still handing on earlier messages; try again shortly.",
+  "Answer or dismiss {name}'s open card first.",
+  "Pause {name}'s goal first.",
+  "Wait for {name} to finish, then share it.",
+  "{name} has messages waiting; let them run or remove them, then share it.",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}",
+  "Who may talk to {name} changed in another window; check it and save again.",
   'A folder is in the way: {folder}',
   '{name} does not have the {tool} tool: its Genie role is off.',
   'This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.',

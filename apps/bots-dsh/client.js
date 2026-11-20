@@ -3686,11 +3686,58 @@ function addStrings(zh) {
     if (added.length > 0) publish();
   };
 }
+Object.assign(ZH, {
+  "No Bots are shared with you yet.": "还没有任何 Bot 与你共享。",
+  "Nothing to read here yet.": "这里还没有可阅读的消息。",
+  "You can read this chat, but not send messages.": "你可以阅读这段对话，但不能发送消息。",
+  "This Bot is no longer shared with you.": "这个 Bot 已停止与你共享。",
+  "Who can talk to this Bot": "谁可以与这个 Bot 对话",
+  "Only you and admins": "仅你和管理员",
+  "People you choose": "你选择的人",
+  "Anyone in the workspace": "工作区中的任何人",
+  "Sharing starts a new part of this chat; earlier parts stay yours.": "共享会开启新的对话段落；较早的段落仍归你所有。",
+  "People you add can read this Bot's chat; they can't send messages yet.": "你添加的人可以阅读这个 Bot 的对话，暂时不能发送消息。",
+  "Guests and named people": "访客和指定人员",
+  "Member": "成员",
+  "Guest": "访客",
+  "Last seen {time}": "上次在线：{time}",
+  "Not signed in since the last restart": "自上次重启后未登录",
+  "Remove": "移除",
+  "Add person": "添加人员",
+  "No one has signed in since the last restart.": "自上次重启后还没有人登录。",
+  "Who may talk to this Bot changed in another window; check it and save again.": "另一个窗口修改了此 Bot 的共享设置；请检查后重新保存。",
+  "Starting a new part of this chat for sharing…": "正在开启新的对话段落以供共享…",
+  "Shared: people you add read this chat from its new part on.": "已共享：你添加的人可以从新的段落开始阅读对话。",
+  "Sharing did not start because something moved into the new part; stop sharing and share again.": "有内容进入了新段落，未能开始共享；请停止共享后再重新共享。",
+  "{name} is already moving to a new conversation.": "{name} 正在切换到新对话。",
+  "{name} is still handing on earlier messages; try again shortly.": "{name} 仍在转交较早的消息；请稍后重试。",
+  "Answer or dismiss {name}'s open card first.": "请先回答或关闭 {name} 打开的卡片。",
+  "Pause {name}'s goal first.": "请先暂停 {name} 的目标。",
+  "Wait for {name} to finish, then share it.": "请等待 {name} 完成后再共享。",
+  "{name} has messages waiting; let them run or remove them, then share it.": "{name} 有待处理的消息；请等它处理完或移除这些消息后再共享。",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}": "{issuer} {subject} 自上次重启后未登录，或未以 {role} 身份登录",
+  "Who may talk to {name} changed in another window; check it and save again.": "另一个窗口修改了 {name} 的共享设置；请检查后重新保存。",
+  "A Main Bot is shared only with people you name": "主 Bot 只能与指定人员共享",
+  "Sharing needs multiuser mode": "共享需要多用户模式",
+  "Save who may talk to a Bot on its own": "请单独保存 Bot 的共享设置",
+  "Name at most 100 people": "最多可指定 100 人",
+  "Each person needs a valid issuer, subject and role": "每个人都需要有效的签发者、主体和角色",
+  "Name each person only once": "每个人只能指定一次",
+  "Your sign-in changed; reload this page.": "你的登录状态已更改；请重新加载此页面。"
+});
 function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
   "Detach {name} first.",
+  "{name} is already moving to a new conversation.",
+  "{name} is still handing on earlier messages; try again shortly.",
+  "Answer or dismiss {name}'s open card first.",
+  "Pause {name}'s goal first.",
+  "Wait for {name} to finish, then share it.",
+  "{name} has messages waiting; let them run or remove them, then share it.",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}",
+  "Who may talk to {name} changed in another window; check it and save again.",
   "A folder is in the way: {folder}",
   "{name} does not have the {tool} tool: its Genie role is off.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
@@ -3764,6 +3811,115 @@ function language() {
 }
 var dateLocale = () => language().startsWith("zh") ? "zh-CN" : "en-US";
 var DICTIONARY = { zh: ZH };
+
+// src/client/viewer.js
+var VIEWER_KEY = "automagik.viewer";
+var RELOAD_KEY = "automagik.retired";
+var ROLES = /* @__PURE__ */ new Set(["owner", "member", "guest", "none"]);
+var guard;
+function bootView() {
+  const boot = globalThis.__AUTOMAGIK_VIEW__;
+  if (boot === void 0) return;
+  return boot?.version === 1 && ROLES.has(boot.role) ? boot : { role: "none" };
+}
+var mountedViewer = () => guard?.retired ? void 0 : guard?.viewer;
+var isRetired = () => guard?.retired === true;
+function requestViewer(endpoint) {
+  if (isRetired() || endpoint !== "whoami" && !guard?.viewer && bootView() !== void 0) {
+    throw Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+  }
+  return guard?.viewer?.id;
+}
+function viewerRefused(code) {
+  if (guard && ["bot/viewer-changed", "HTTP_401", "HTTP_403"].includes(code)) retire();
+}
+function onRetire(hook) {
+  if (!guard) return () => {
+  };
+  const hooks = guard.hooks;
+  if (guard.retired) hook();
+  else hooks.add(hook);
+  return () => hooks.delete(hook);
+}
+function retire() {
+  if (!guard || guard.retired) return;
+  guard.retired = true;
+  if (document.body) document.body.inert = true;
+  for (const hook of guard.hooks) {
+    try {
+      hook();
+    } catch {
+    }
+  }
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key?.startsWith("dsh.conversation.")) localStorage.removeItem(key);
+    }
+  } catch {
+  }
+  try {
+    if (sessionStorage.getItem(RELOAD_KEY) === "1") return;
+    sessionStorage.setItem(RELOAD_KEY, "1");
+  } catch {
+    return;
+  }
+  location.reload();
+}
+function confirmed(answer, boot) {
+  const viewer = answer?.viewer;
+  return boot.role !== "none" && answer?.multiuser === true && answer.role === boot.role && (viewer?.role === boot.role || boot.role === "owner" && viewer?.role === "admin") && typeof viewer.id === "string" && viewer.id.length > 0 && viewer.id.length <= 64;
+}
+async function startViewer(boot, signal) {
+  if (guard) throw new Error("Viewer already started");
+  const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false };
+  signal?.addEventListener("abort", () => {
+    active2.stop?.();
+    if (guard === active2) guard = void 0;
+  }, { once: true });
+  const answer = await call("whoami", void 0, signal);
+  if (guard !== active2 || active2.retired) throw new Error("Viewer unavailable");
+  if (!confirmed(answer, boot)) {
+    retire();
+    throw new Error("Viewer role changed");
+  }
+  const viewer = active2.viewer = answer.viewer;
+  try {
+    localStorage.setItem(VIEWER_KEY, viewer.id);
+    sessionStorage.removeItem(RELOAD_KEY);
+  } catch {
+  }
+  let checking = false;
+  const check = async () => {
+    if (checking || active2.retired || guard !== active2) return;
+    checking = true;
+    try {
+      const next = await call("whoami", void 0, signal);
+      if (guard === active2 && (!confirmed(next, boot) || next.viewer.id !== viewer.id || next.viewer.role !== viewer.role)) retire();
+    } catch {
+    } finally {
+      checking = false;
+    }
+  };
+  const visibility = () => {
+    if (document.visibilityState === "visible") void check();
+  };
+  const storage = (event) => {
+    if ((event.key === VIEWER_KEY || event.key === null) && event.newValue !== viewer.id) retire();
+  };
+  window.addEventListener("focus", check);
+  window.addEventListener("storage", storage);
+  document.addEventListener("visibilitychange", visibility);
+  const timer = setInterval(check, 15e3);
+  active2.stop = () => {
+    clearInterval(timer);
+    window.removeEventListener("focus", check);
+    window.removeEventListener("storage", storage);
+    document.removeEventListener("visibilitychange", visibility);
+  };
+  active2.hooks.add(active2.stop);
+  return viewer;
+}
 
 // src/client/diagnostics.js
 var MAX = 30;
@@ -3849,9 +4005,10 @@ ${REST_NOTE}`);
 
 // src/client/api.js
 var ROUTE = "api/omni-ui";
-var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
+var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/stale", "bot/viewer-changed", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
 var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-") || code.startsWith("bot/reservation-");
 var call = async (endpoint, payload, signal) => {
+  const viewer = requestViewer(endpoint);
   const vault = endpoint.startsWith("vault-");
   let response;
   try {
@@ -3859,7 +4016,7 @@ var call = async (endpoint, payload, signal) => {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ endpoint, payload: payload ?? null }),
+      body: JSON.stringify({ endpoint, payload: payload ?? null, ...viewer === void 0 ? {} : { viewer } }),
       signal
     });
   } catch (error) {
@@ -3871,6 +4028,7 @@ var call = async (endpoint, payload, signal) => {
     }));
   }
   if (!response.ok) {
+    viewerRefused(`HTTP_${response.status}`);
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` });
     if (!vault) noteClientError(endpoint, error);
     throw error;
@@ -3878,6 +4036,7 @@ var call = async (endpoint, payload, signal) => {
   const result = await response.json();
   if (!result.ok) {
     const code = result.error?.code ?? "bot/error";
+    viewerRefused(code);
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
     if (code === "bot/refused" && result.error?.reason === "needs-new-conversation") error.reason = result.error.reason;
@@ -4611,7 +4770,7 @@ function plainText(markdown) {
   let text2 = markdown.replace(/[\uE000\uE001]/g, "");
   text2 = text2.replace(/(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*((?:\n(?![ \t]*\2)[^\n]*)*)(?:\n[ \t]*\2[`~]*[ \t]*(?=\n|$))?/g, (_all, start2, _fence, code) => `${start2}${hold(code.slice(1))}`);
   text2 = text2.replace(/(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g, (_all, _ticks, code) => hold(code.replace(/^ ([\s\S]*) $/, "$1")));
-  text2 = text2.replace(/\\([!-/:-@[-`{-~])/g, (_all, mark2) => hold(mark2));
+  text2 = text2.replace(/\\([!-/:-@[-`{-~])/g, (_all, mark3) => hold(mark3));
   text2 = text2.replace(/!?\[((?:[^\][]|\[[^\][]*\])*)\]\((?:[^()\s]|\([^()\s]*\))*(?:[ \t]+(?:"[^"]*"|'[^']*'))?\)/g, "$1");
   text2 = text2.replace(/!?\[((?:[^\][]|\[[^\][]*\])+)\]\[[^\]]*\]/g, "$1");
   text2 = text2.replace(/<((?:https?:\/\/|mailto:)[^<>\s]+)>/g, (_all, address) => hold(address));
@@ -4972,10 +5131,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h100, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h100 / 2}" width="${w}" height="${h100}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h100 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h100 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h100, tilt]) => `<ellipse cx="${cx}" cy="${cy + h100 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h100, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h100 / 2}" width="${w}" height="${h100}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h100, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h100 * 0.14}Q0 ${-h100 * 0.42} ${w * 0.62} ${h100 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h102, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h102 / 2}" width="${w}" height="${h102}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h102 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h102 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h102, tilt]) => `<ellipse cx="${cx}" cy="${cy + h102 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h102, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h102 / 2}" width="${w}" height="${h102}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h102, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h102 * 0.14}Q0 ${-h102 * 0.42} ${w * 0.62} ${h102 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -5090,12 +5249,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h100 = dt / steps;
+    const h102 = dt / steps;
     let moving = false;
     for (const [key, value] of values) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h100;
-        value.x += value.v * h100;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h102;
+        value.x += value.v * h102;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -7539,8 +7698,8 @@ function errorFor(error, draft, detail, minimum) {
   if (!facts.minimum) facts.minimum = release(minimum);
   const base = screenFor(code, draft, facts);
   if (code === "bot/hermes-attach-profile" && !detail && !facts.profile && typeof error?.message === "string" && error.message) {
-    const plain = "This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.";
-    if (error.message !== plain && error.message !== hostText(plain)) base.text = error.message;
+    const plain2 = "This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.";
+    if (error.message !== plain2 && error.message !== hostText(plain2)) base.text = error.message;
   }
   if (!base.ssh) return base;
   const host = shortText(draft?.ssh?.host?.trim?.() ?? "");
@@ -12735,8 +12894,8 @@ function ConfirmInput({ node, onSubmit, busy = false, footStart = null }) {
 }
 function SettledConfirm({ node, answer }) {
   const ui2 = useViewUi();
-  const confirmed = answerValues(answer, node)?.confirmed;
-  if (confirmed !== true && confirmed !== false) {
+  const confirmed2 = answerValues(answer, node)?.confirmed;
+  if (confirmed2 !== true && confirmed2 !== false) {
     return (0, import_react26.createElement)(
       "div",
       { className: "dv-q-foot" },
@@ -12744,7 +12903,7 @@ function SettledConfirm({ node, answer }) {
       (0, import_react26.createElement)("button", { type: "button", className: "dv-q-submit", disabled: true }, node.confirmLabel ?? ui2.t("Confirm"))
     );
   }
-  const label = confirmed ? node.confirmLabel ?? ui2.t("Confirm") : node.cancelLabel ?? ui2.t("Cancel");
+  const label = confirmed2 ? node.confirmLabel ?? ui2.t("Confirm") : node.cancelLabel ?? ui2.t("Cancel");
   return (0, import_react26.createElement)("span", { className: "dv-q-badge" }, label);
 }
 function FormInput({ node, onSubmit, busy = false, footStart = null }) {
@@ -16939,6 +17098,187 @@ function roleOutletVisible(outlet, id, bot, roster) {
   return owner === void 0 || effectiveRoleIds(bot, roster.prefs).includes(owner.id);
 }
 
+// src/client/people-model.js
+var personKey = ({ issuer, subject }) => JSON.stringify([issuer, subject]);
+var shortSubject = (subject) => subject.length <= 16 ? subject : subject.slice(0, 13) + "…";
+var issuerLabel = (issuer) => {
+  try {
+    return new URL(issuer).host || issuer;
+  } catch {
+    return issuer;
+  }
+};
+function personLabels(people) {
+  const unique = new Map(people.map((person) => [personKey(person), person]));
+  const short = (person) => issuerLabel(person.issuer) + " · " + shortSubject(person.subject);
+  const counts2 = /* @__PURE__ */ new Map();
+  for (const person of unique.values()) counts2.set(short(person), (counts2.get(short(person)) ?? 0) + 1);
+  return new Map([...unique].map(([key, person]) => [
+    key,
+    counts2.get(short(person)) > 1 ? issuerLabel(person.issuer) + " · " + person.subject : short(person)
+  ]));
+}
+function availablePeople(seen, allow) {
+  const listed = new Set(allow.map(personKey));
+  return seen.flatMap(({ roles, issuer, subject }) => {
+    if (listed.has(personKey({ issuer, subject })) || roles.includes("owner") || roles.includes("admin")) return [];
+    const role = roles.includes("member") ? "member" : roles.includes("guest") ? "guest" : void 0;
+    return role ? [{ issuer, subject, role }] : [];
+  });
+}
+
+// src/client/people-card.js
+var PeopleReact = __toESM(require("react"), 1);
+var { createElement: h37, useEffect: useEffect27, useRef: useRef26, useState: useState29 } = PeopleReact;
+var modes = [
+  ["owners", "Only you and admins"],
+  ["allowlist", "People you choose"],
+  ["workspace", "Anyone in the workspace"]
+];
+var shareNotes = {
+  opening: "Starting a new part of this chat for sharing…",
+  open: "Shared: people you add read this chat from its new part on.",
+  spoiled: "Sharing did not start because something moved into the new part; stop sharing and share again."
+};
+var stale = "Who may talk to this Bot changed in another window; check it and save again.";
+var roleWord = (role) => role === "member" ? t("Member") : t("Guest");
+function PeopleCard({ bot, roster }) {
+  const role = mountedViewer()?.role;
+  return role === "owner" || role === "admin" ? h37(OwnerPeopleCard, { key: bot.id, id: bot.id, main: isMainOf(roster, bot.id) }) : null;
+}
+function OwnerPeopleCard({ id, main }) {
+  const [seen, setSeen] = useState29(null);
+  const [share, setShare] = useState29(null);
+  const [saving, setSaving] = useState29(false);
+  const [error, setError] = useState29(null);
+  const lifetime = useRef26(null);
+  const busy = useRef26(false);
+  const readShare = (signal) => call("people-share", { id }, signal).then((value) => {
+    if (!signal.aborted) setShare(value);
+  });
+  useEffect27(() => {
+    const scope = new AbortController();
+    lifetime.current = scope;
+    void Promise.all([call("people-seen", void 0, scope.signal), call("people-share", { id }, scope.signal)]).then(([people2, value]) => {
+      if (!scope.signal.aborted) {
+        setSeen(people2);
+        setShare(value);
+      }
+    }, () => {
+    });
+    return () => scope.abort();
+  }, [id]);
+  useEffect27(() => {
+    if (saving || share?.state !== "opening") return;
+    const scope = new AbortController();
+    const timer = setTimeout(() => {
+      void readShare(scope.signal).catch((failure) => {
+        if (!scope.signal.aborted) {
+          setError(failure.message);
+          setShare((value) => ({ ...value }));
+        }
+      });
+    }, 3e3);
+    return () => {
+      scope.abort();
+      clearTimeout(timer);
+    };
+  }, [id, share, saving]);
+  if (!seen || !share) return null;
+  const { people } = share;
+  async function save(next) {
+    const signal = lifetime.current.signal;
+    if (busy.current || signal.aborted) return;
+    busy.current = true;
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await call("update-bot", { id, people: next, expect: people }, signal);
+      if (!signal.aborted) setShare((value) => ({ ...value, people: result.people }));
+    } catch (failure) {
+      if (!signal.aborted) setError(failure.code === "bot/stale" ? t(stale) : failure.message);
+    } finally {
+      try {
+        if (!signal.aborted) await readShare(signal);
+      } catch {
+      }
+      busy.current = false;
+      if (!signal.aborted) setSaving(false);
+    }
+  }
+  const title = t("Who can talk to this Bot");
+  const choices = availablePeople(seen, people.allow);
+  const labels = personLabels([...people.allow, ...choices]);
+  const seenById = new Map(seen.map((person) => [personKey(person), person.lastSeen]));
+  return h37(
+    Card2,
+    { title },
+    h37(
+      "div",
+      { className: "bt-set-row bt-bs-row bt-bs-stack" },
+      h37("span", { className: "bt-set-hint" }, t("Sharing starts a new part of this chat; earlier parts stay yours.")),
+      h37(Segmented, { label: title, value: people.mode }, modes.filter(([mode]) => !main || mode !== "workspace").map(([mode, label]) => h37("button", {
+        key: mode,
+        type: "button",
+        "aria-pressed": people.mode === mode,
+        disabled: saving,
+        onClick: () => {
+          if (people.mode !== mode) void save({ ...people, mode });
+        }
+      }, t(label))))
+    ),
+    h37("div", { className: "bt-set-row bt-bs-row" }, h37(
+      "span",
+      { className: "bt-set-hint" },
+      t("People you add can read this Bot's chat; they can't send messages yet.")
+    )),
+    people.mode !== "owners" ? h37(
+      "div",
+      null,
+      h37(
+        Row,
+        {
+          label: t("Guests and named people"),
+          stack: true,
+          hint: seen.length === 0 ? t("No one has signed in since the last restart.") : null
+        },
+        choices.length > 0 ? h37("select", {
+          className: "bt-soft",
+          "aria-label": t("Add person"),
+          disabled: saving,
+          value: "",
+          onChange: (event) => {
+            const person = choices.find((entry) => personKey(entry) === event.target.value);
+            if (person) void save({ ...people, allow: [...people.allow, person] });
+          }
+        }, h37("option", { value: "" }, t("Add person")), choices.map((person) => h37("option", { key: personKey(person), value: personKey(person) }, labels.get(personKey(person)) + " · " + roleWord(person.role)))) : null
+      ),
+      people.allow.map((person) => {
+        const key = personKey(person);
+        const lastSeen = seenById.get(key);
+        return h37(
+          "div",
+          { key, className: "bt-set-row bt-bs-row" },
+          h37(
+            "span",
+            { className: "bt-set-copy" },
+            labels.get(key) + " · " + roleWord(person.role),
+            h37("span", { className: "bt-set-hint" }, Number.isFinite(lastSeen) ? t("Last seen {time}", { time: relativeShort(lastSeen) }) : t("Not signed in since the last restart"))
+          ),
+          h37("button", {
+            type: "button",
+            className: "bt-soft",
+            disabled: saving,
+            onClick: () => void save({ ...people, allow: people.allow.filter((entry) => personKey(entry) !== key) })
+          }, t("Remove"))
+        );
+      })
+    ) : null,
+    Object.hasOwn(shareNotes, share.state) ? h37("p", { className: "bt-set-hint", role: "status" }, t(shareNotes[share.state])) : null,
+    error ? h37("p", { className: "bt-set-hint", role: "alert" }, error) : null
+  );
+}
+
 // src/client/bot-settings.js
 var import_react41 = require("react");
 var capitalize2 = (word2) => word2[0].toUpperCase() + word2.slice(1);
@@ -17439,6 +17779,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         onChange: (value) => save({ private: value })
       })
     ),
+    (0, import_react41.createElement)(PeopleCard, { bot, roster }),
     (0, import_react41.createElement)(
       Card2,
       { title: t("Instructions") },
@@ -27438,7 +27779,7 @@ function markOf(ref) {
   if (OWN_MODE_MARKS.includes(provider) || TEAM_MARKS.includes(provider)) return provider;
   return slash > 0 && ref.slice(slash + 1) && ["native", "pi-ai"].includes(routeOf(provider).connectedBy) ? `api:${ref}` : void 0;
 }
-var judgeOf = (mark2) => mark2 === "acp-codex" ? "codex" : mark2 === "acp-claude" ? "claude" : TEAM_MARKS.includes(mark2) ? "team" : typeof mark2 === "string" && mark2.startsWith("api:") ? "own" : void 0;
+var judgeOf = (mark3) => mark3 === "acp-codex" ? "codex" : mark3 === "acp-claude" ? "claude" : TEAM_MARKS.includes(mark3) ? "team" : typeof mark3 === "string" && mark3.startsWith("api:") ? "own" : void 0;
 
 // src/client/permission-picker.js
 var import_react64 = require("react");
@@ -27526,9 +27867,9 @@ function usePermissionPick({ saved, onPick, askedOf, repick = false, confirmFull
   };
   const current = pending ?? saved;
   const asks = (value) => value === AUTO_ROW || value === AUTO || confirmFull && presetDanger(value);
-  const pick2 = (value, confirmed = false) => {
+  const pick2 = (value, confirmed2 = false) => {
     if (value === current && !repick) return;
-    if (asks(value) && !confirmed) {
+    if (asks(value) && !confirmed2) {
       asked2.current = askedOf?.();
       setConfirming(value);
       return;
@@ -27772,10 +28113,10 @@ function autoMissingText(bot, roster) {
   if (roster?.hostModels?.[bot.id] !== void 0) return t("This Bot runs on its plugin's own engine, so Auto is not offered.");
   if (typeof bot.model !== "string" || bot.model === "") return t("Auto needs a model chosen for this Bot.");
   if (bot.model.startsWith("hermes-remote/")) return t("Auto is not offered on Remote Hermes.");
-  const mark2 = markOf(bot.model);
-  if (mark2 === void 0) return t("Auto is not offered for this Bot's model.");
-  if (markOf(bot.appliedModel) !== mark2) return t("Auto is offered once this Bot's chat runs on the model saved for it.");
-  if (judgeOf(mark2) === "team" && !roster?.backgroundModel) return t("On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.");
+  const mark3 = markOf(bot.model);
+  if (mark3 === void 0) return t("Auto is not offered for this Bot's model.");
+  if (markOf(bot.appliedModel) !== mark3) return t("Auto is offered once this Bot's chat runs on the model saved for it.");
+  if (judgeOf(mark3) === "team" && !roster?.backgroundModel) return t("On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.");
   return t("Auto is not available for this Bot right now.");
 }
 function AutoMissingNote({ bot, roster }) {
@@ -28169,7 +28510,7 @@ function sessionMention(sessionId, label) {
   let binary2 = "";
   for (const byte of new TextEncoder().encode(JSON.stringify(sessionId))) binary2 += String.fromCharCode(byte);
   const payload = btoa(binary2).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return `@[${label.replace(/[\\\]]/g, (mark2) => `\\${mark2}`)}](dsh-session:${payload})`;
+  return `@[${label.replace(/[\\\]]/g, (mark3) => `\\${mark3}`)}](dsh-session:${payload})`;
 }
 function atSources({ roster, sessions, launched, iconFor }) {
   const bots = {
@@ -29738,8 +30079,8 @@ var TEAM_APPROVAL_CSS = `
 `;
 
 // src/client/surface.js
-function groupsFor({ mode, plain = false }) {
-  return { shell: mode === "bot", conversation: mode === "bot" && !plain };
+function groupsFor({ mode, plain: plain2 = false }) {
+  return { shell: mode === "bot", conversation: mode === "bot" && !plain2 };
 }
 var GROUPS = ["shell", "conversation"];
 function disposeAll(disposers, label) {
@@ -30422,8 +30763,8 @@ function agentAvatar(engine) {
   const badge = badgeOf(engine);
   if (badge === void 0) return void 0;
   const [glyph, ink] = badge;
-  const mark2 = logo?.kind === "path" ? `<rect width="64" height="64" rx="16" fill="${INKS.black[1]}"/><g transform="translate(14 14) scale(1.5)"><path d="${logo.d}" fill="#${logo.hex}"/></g>` : `<rect width="64" height="64" rx="16" fill="${INKS[ink][0]}"/><text x="32" y="41" text-anchor="middle" font-size="26" font-weight="700" fill="${INKS.black[1]}" font-family="system-ui,sans-serif">${glyph}</text>`;
-  const svg2 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">${mark2}</svg>`;
+  const mark3 = logo?.kind === "path" ? `<rect width="64" height="64" rx="16" fill="${INKS.black[1]}"/><g transform="translate(14 14) scale(1.5)"><path d="${logo.d}" fill="#${logo.hex}"/></g>` : `<rect width="64" height="64" rx="16" fill="${INKS[ink][0]}"/><text x="32" y="41" text-anchor="middle" font-size="26" font-weight="700" fill="${INKS.black[1]}" font-family="system-ui,sans-serif">${glyph}</text>`;
+  const svg2 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">${mark3}</svg>`;
   return { image: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg2)))}` };
 }
 
@@ -33509,11 +33850,11 @@ var watchDark2 = (changed) => {
   return () => watch.disconnect();
 };
 var useDarkGround = () => (0, import_react84.useSyncExternalStore)(watchDark2, isDark2, () => false);
-function BrandMark2({ mark: mark2 }) {
+function BrandMark2({ mark: mark3 }) {
   const dark2 = useDarkGround();
   return (0, import_react84.createElement)("img", {
     className: "bt-official-brand-mark",
-    src: PRODUCT_MARK_ART[mark2][dark2 ? "cream" : "ink"],
+    src: PRODUCT_MARK_ART[mark3][dark2 ? "cream" : "ink"],
     width: 32,
     height: 32,
     alt: "",
@@ -34499,11 +34840,11 @@ function levelName(level) {
 var NO_ASK = /* @__PURE__ */ new Set(["bypassPermissions", "agent-full-access"]);
 function noAskMissed(acp) {
   if (acp === null || typeof acp !== "object" || acp.active !== true) return void 0;
-  const modes = acp.modes;
-  if (modes === null || typeof modes !== "object" || !Array.isArray(modes.wanted)) return void 0;
-  const asked2 = modes.wanted[0];
+  const modes2 = acp.modes;
+  if (modes2 === null || typeof modes2 !== "object" || !Array.isArray(modes2.wanted)) return void 0;
+  const asked2 = modes2.wanted[0];
   if (typeof asked2 !== "string" || !NO_ASK.has(asked2)) return void 0;
-  const current = permText(modes.current);
+  const current = permText(modes2.current);
   if (current === void 0 || current === "other" || NO_ASK.has(current)) return void 0;
   return { mode: current };
 }
@@ -34545,17 +34886,17 @@ function agentFacts(acp) {
     out.push(t("For the last prompt {name} was put in its strict mode: {why}.", { name, why: t(why, { name }) }));
   }
   out.push(acp.active === true ? name : t("{name}, not running now: this is from its last run", { name }));
-  const modes = acp.modes;
-  if (modes && typeof modes === "object") {
-    const chosen = permText(modes.chosen);
-    const current = permText(modes.current);
+  const modes2 = acp.modes;
+  if (modes2 && typeof modes2 === "object") {
+    const chosen = permText(modes2.chosen);
+    const current = permText(modes2.current);
     if (chosen === void 0) out.push(t("The agent offers none of the modes asked for"));
-    else if (current !== void 0 && modes.applied === false) out.push(t('The agent is in its mode "{current}", not the one asked for, "{mode}"', { current, mode: chosen }));
-    else if (current !== void 0 && modes.applied === true) out.push(t('The agent is in its mode "{mode}"', { mode: current }));
+    else if (current !== void 0 && modes2.applied === false) out.push(t('The agent is in its mode "{current}", not the one asked for, "{mode}"', { current, mode: chosen }));
+    else if (current !== void 0 && modes2.applied === true) out.push(t('The agent is in its mode "{mode}"', { mode: current }));
     else out.push(t('Mode asked of the agent: "{mode}", not confirmed now', { mode: chosen }));
-    if (modes.fellToStrict === true && modes.applied === true && current !== void 0) out.push(t("It took its strictest mode, because the agent does not offer the wider ones"));
-    const wanted = modeList(modes.wanted);
-    const offered = modeList(modes.offered);
+    if (modes2.fellToStrict === true && modes2.applied === true && current !== void 0) out.push(t("It took its strictest mode, because the agent does not offer the wider ones"));
+    const wanted = modeList(modes2.wanted);
+    const offered = modeList(modes2.offered);
     if (wanted.length > 0) out.push(t("Modes asked for, in order: {list}", { list: wanted.join(", ") }));
     if (offered.length > 0) out.push(t("Modes the agent offers: {list}", { list: offered.join(", ") }));
   }
@@ -38716,7 +39057,7 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
       ghostEl.className = "bt-panel-ghost";
       ghostEl.style.width = `${outgoing.offsetWidth}px`;
       ghostEl.append(outgoing.cloneNode(true));
-      if (source && next !== "details") for (const mark2 of ghostEl.querySelectorAll(".bt-drawer-id .bt-mark")) mark2.style.visibility = "hidden";
+      if (source && next !== "details") for (const mark3 of ghostEl.querySelectorAll(".bt-drawer-id .bt-mark")) mark3.style.visibility = "hidden";
       outgoing.parentElement.append(ghostEl);
       void ghostEl.animate([
         { opacity: 1, transform: "scale(1)" },
@@ -39481,7 +39822,7 @@ function readPage(limits) {
   const started = performance.now();
   const SKIP = /* @__PURE__ */ new Set(["script", "style", "noscript", "template", "head", "title", "meta", "link", "svg", "object", "embed", "audio", "video", "source", "track", "map", "datalist", "option", "optgroup"]);
   const ITEM = 'a[href], button, input:not([type=hidden]), textarea, select, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [role=switch], [role=radio], [contenteditable=""], [contenteditable=true]';
-  const ROLES = { a: "link", button: "button", select: "select", textarea: "textbox", summary: "button" };
+  const ROLES2 = { a: "link", button: "button", select: "select", textarea: "textbox", summary: "button" };
   const INPUT_ROLES = { checkbox: "checkbox", radio: "radio", submit: "button", button: "button", reset: "button", image: "button", search: "searchbox", range: "slider", file: "button", color: "button" };
   const NO_VALUE_TYPES = /* @__PURE__ */ new Set(["checkbox", "radio", "submit", "button", "reset", "image", "file", "color"]);
   const SECRET_HINT = /(^|[-_\s])(cvv|cvc|csc|cc-?(num|number|csc|exp)|card-?(num|number)|otp|one-?time-?code|pin)([-_\s]|$)/i;
@@ -39528,7 +39869,7 @@ function readPage(limits) {
     else if (stats.nodes % 512 === 0 && performance.now() - started > limits.ms) stop3 = `reading took longer than ${limits.ms} ms`;
     return stop3 !== "";
   };
-  const roleOf = (el) => el.getAttribute("role") || ROLES[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
+  const roleOf = (el) => el.getAttribute("role") || ROLES2[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
   const sized = (el) => {
     const box = el.getBoundingClientRect();
     return box.width > 0 && box.height > 0;
@@ -39719,10 +40060,10 @@ ${body2 || "(no text)"}
       return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el, next);
     }
     const found = itemFor(el, style);
-    const mark2 = found ? `[#${found.number}]` : "";
+    const mark3 = found ? `[#${found.number}]` : "";
     if (tag === "input" || tag === "textarea" || tag === "select") {
       if (found) found.item.name = nameOf3(el, tag === "select" ? "" : el.labels?.[0] ? collapse(el.labels[0].textContent) : "", found.secret);
-      return mark2 ? ` ${mark2} ` : "";
+      return mark3 ? ` ${mark3} ` : "";
     }
     let body2;
     if (tag === "pre") {
@@ -39745,22 +40086,22 @@ ${body2 || "(no text)"}
       const title = oneLine(body2);
       return title ? `
 
-${"#".repeat(Math.min(6, Number(level) || 2))} ${title}${mark2}
+${"#".repeat(Math.min(6, Number(level) || 2))} ${title}${mark3}
 
-` : mark2;
+` : mark3;
     }
     if (tag === "code" && !ctx.pre) {
       const code = oneLine(body2);
-      if (!code) return mark2;
+      if (!code) return mark3;
       const ticks = code.includes("`") ? "``" : "`";
-      return `${ticks}${code}${ticks}${mark2}`;
+      return `${ticks}${code}${ticks}${mark3}`;
     }
     if (tag === "blockquote") {
       const quoted2 = block(body2);
       return quoted2 ? keep(quoted2.split("\n").map((line) => line ? `> ${line}` : ">").join("\n")) : "";
     }
     const end = body2.trimEnd().length;
-    const marked = mark2 ? `${body2.slice(0, end)}${mark2}${body2.slice(end)}` : body2;
+    const marked = mark3 ? `${body2.slice(0, end)}${mark3}${body2.slice(end)}` : body2;
     if (ctx.pre && !BLOCK_DISPLAY.test(display)) return marked;
     if (keepsSpace && BLOCK_DISPLAY.test(display) && tag !== "pre") {
       return keep(expand(marked).replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").replace(/^\n+|\s+$/g, ""), "");
@@ -43670,10 +44011,10 @@ function progress(body, run3, offline, connectionLost, el) {
       const row = el("div", "su-step");
       row.dataset.step = key;
       row.dataset.state = i < phase ? "done" : i === phase ? "active" : "waiting";
-      const mark2 = el("span", "su-mark", i < phase ? "✓" : i === phase ? "•" : String(i + 1));
-      mark2.setAttribute("aria-hidden", "true");
+      const mark3 = el("span", "su-mark", i < phase ? "✓" : i === phase ? "•" : String(i + 1));
+      mark3.setAttribute("aria-hidden", "true");
       if (i === phase) row.setAttribute("aria-current", "step");
-      row.append(mark2, el("span", null, t(label)));
+      row.append(mark3, el("span", null, t(label)));
       list.append(row);
     }
     body.append(list);
@@ -44042,6 +44383,265 @@ function createDocumentUpdate(doc, storage = (() => {
   };
 }
 
+// src/client/member-model.js
+var initialMember = {
+  bots: [],
+  byId: /* @__PURE__ */ Object.create(null),
+  botId: null,
+  pages: [],
+  cursor: null,
+  generation: 0,
+  loading: false,
+  failed: false,
+  withdrawn: false
+};
+function selectBot(view, botId, withdrawn = false) {
+  return {
+    ...view,
+    botId,
+    withdrawn,
+    generation: view.generation + 1,
+    pages: [],
+    cursor: null,
+    loading: false,
+    failed: false
+  };
+}
+function updateRoster(view, bots) {
+  const byId = Object.fromEntries(bots.map((bot) => [bot.id, bot]));
+  const next = { ...view, bots, byId };
+  if (view.botId !== null && Object.hasOwn(byId, view.botId)) return next;
+  if (view.botId !== null) return selectBot(next, null, true);
+  return view.withdrawn || bots.length === 0 ? next : selectBot(next, bots[0].id);
+}
+var requestView = ({ generation, botId }) => ({ generation, botId });
+var isCurrent = (view, request) => view.generation === request.generation && view.botId === request.botId;
+var changedBot = (view, request, botId) => isCurrent(view, request) && view.botId === botId;
+function applyPage(view, request, page, earlier) {
+  if (!isCurrent(view, request)) return view;
+  const items = Array.isArray(page.items) ? page.items : [];
+  return {
+    ...view,
+    pages: earlier ? [...view.pages, items] : [items],
+    cursor: page.cursor,
+    loading: false,
+    failed: false
+  };
+}
+var feedEnded = (view) => selectBot(view, view.botId, view.withdrawn);
+var pageRows = (pages2) => pages2.map((items, page) => items.map((row, index) => ({ row, key: `${page}:${index}` }))).reverse().flat();
+function botLabels(bots) {
+  const counts2 = /* @__PURE__ */ new Map();
+  for (const { name } of bots) counts2.set(name, (counts2.get(name) ?? 0) + 1);
+  return new Map(bots.map(({ id, name }) => [id, counts2.get(name) > 1 ? `${name} · ${id}` : name]));
+}
+
+// src/client/member-root.js
+var import_react106 = require("react");
+var mark2 = (bot) => (0, import_react106.createElement)(BotMark, { bot, look: { ...lookOf(bot), pet: void 0 }, live: false, size: 28 });
+var plain = (text2) => (text2 ?? "").split("\n").flatMap((line, index) => index === 0 ? [line] : [(0, import_react106.createElement)("br", { key: index }), line]);
+function MemberRows({ pages: pages2, roster, botId }) {
+  const bot = Object.hasOwn(roster.byId, botId) ? roster.byId[botId] : void 0;
+  return pageRows(pages2).map(({ row, key }) => {
+    if (row.kind === "divider") {
+      return (0, import_react106.createElement)(
+        "div",
+        { key, className: "bt-part-line", role: "separator" },
+        Number.isFinite(row.time) ? (0, import_react106.createElement)("span", null, dayLabel(row.time)) : null
+      );
+    }
+    if (row.kind === "user") {
+      return (0, import_react106.createElement)("div", { key, className: "bt-urow" }, (0, import_react106.createElement)(
+        "div",
+        { className: "bt-ububble" },
+        plain(row.text),
+        row.images ? (0, import_react106.createElement)("span", { className: "bt-uimages" }, row.images === 1 ? t("1 image") : t("{count} images", { count: row.images })) : null
+      ));
+    }
+    if (row.kind === "bot") {
+      return (0, import_react106.createElement)(
+        "div",
+        { key, className: "bt-msg-line" },
+        bot ? mark2(bot) : null,
+        (0, import_react106.createElement)("div", { className: "bt-bubble" }, plain(row.text))
+      );
+    }
+    return null;
+  });
+}
+function MemberRoot({ source, load }) {
+  const view = (0, import_react106.useSyncExternalStore)(source.subscribe, source.getSnapshot);
+  const bot = view.botId !== null && Object.hasOwn(view.byId, view.botId) ? view.byId[view.botId] : void 0;
+  return (0, import_react106.createElement)(
+    "main",
+    { className: "bt-earlier", style: { height: "100%", overflowY: "auto" } },
+    bot ? (0, import_react106.createElement)("header", { className: "bt-msg-line" }, mark2(bot), (0, import_react106.createElement)("strong", null, bot.name)) : null,
+    (0, import_react106.createElement)("div", { className: "bt-earlier-top" }, view.loading ? (0, import_react106.createElement)(Shimmer, null, t("Loading earlier messages…")) : view.failed ? (0, import_react106.createElement)("button", { type: "button", className: "bt-soft", onClick: () => load(view.cursor) }, t("Couldn’t load earlier messages · Retry")) : view.cursor ? (0, import_react106.createElement)("button", { type: "button", className: "bt-soft", onClick: () => load(view.cursor) }, t("Load earlier")) : null),
+    (0, import_react106.createElement)(MemberRows, { pages: view.pages, roster: view, botId: view.botId }),
+    view.withdrawn ? (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("This Bot is no longer shared with you.")) : bot && !view.loading && !view.failed && !view.pages.some((items) => items.length > 0) ? (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("Nothing to read here yet.")) : null,
+    (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("You can read this chat, but not send messages."))
+  );
+}
+function MemberSidebar({ source, select }) {
+  const view = (0, import_react106.useSyncExternalStore)(source.subscribe, source.getSnapshot);
+  const labels = botLabels(view.bots);
+  return (0, import_react106.createElement)("div", { className: "bt-side" }, view.bots.length === 0 ? (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("No Bots are shared with you yet.")) : view.bots.map((bot) => (0, import_react106.createElement)("button", {
+    key: bot.id,
+    type: "button",
+    className: "bt-soft",
+    "aria-pressed": view.botId === bot.id,
+    onClick: () => select(bot.id)
+  }, mark2(bot), labels.get(bot.id))));
+}
+function applyMember(ctx) {
+  const source = createSource(initialMember);
+  let stopped = false;
+  let connected = true;
+  let needsChat = false;
+  let feed, retry, pageRequest, rosterRequest;
+  const current = source.getSnapshot;
+  const active2 = () => !stopped && !isRetired();
+  const accepts = (request) => active2() && connected && isCurrent(current(), request);
+  const cancelReads = () => {
+    pageRequest?.abort();
+    rosterRequest?.abort();
+    pageRequest = rosterRequest = void 0;
+  };
+  const clear = () => {
+    cancelReads();
+    source.set(feedEnded);
+  };
+  function load(cursor) {
+    const request = requestView(current());
+    if (!accepts(request) || request.botId === null) return;
+    if (cursor && pageRequest) return;
+    pageRequest?.abort();
+    const pending = pageRequest = new AbortController();
+    source.set((view) => ({ ...view, loading: true, failed: false }));
+    void call(cursor ? "earlier" : "chat", { botId: request.botId, ...cursor ? { cursor } : {} }, pending.signal).then((page) => {
+      if (accepts(request) && pageRequest === pending) source.set((view) => applyPage(view, request, page, Boolean(cursor)));
+    }, (error) => {
+      if (!accepts(request) || pageRequest !== pending) return;
+      if (error?.code === "bot/not-found") {
+        clear();
+        source.set((view) => selectBot(view, null, true));
+        refresh();
+      } else source.set((view) => ({ ...view, loading: false, failed: true, cursor: cursor ?? null }));
+    }).finally(() => {
+      if (pageRequest === pending) pageRequest = void 0;
+    });
+  }
+  function refresh({ chat = false } = {}) {
+    if (!active2() || !connected) return;
+    needsChat ||= chat;
+    rosterRequest?.abort();
+    const request = requestView(current());
+    const pending = rosterRequest = new AbortController();
+    void call("state", void 0, pending.signal).then((answer) => {
+      if (!accepts(request) || rosterRequest !== pending) return;
+      const next = updateRoster(current(), Array.isArray(answer.bots) ? answer.bots : []);
+      if (!isCurrent(next, request)) {
+        pageRequest?.abort();
+        pageRequest = void 0;
+      }
+      source.set(next);
+      if (needsChat || next.botId !== request.botId) load();
+      needsChat = false;
+    }, () => {
+      if (accepts(request) && rosterRequest === pending) clear();
+    }).finally(() => {
+      if (rosterRequest === pending) rosterRequest = void 0;
+    });
+  }
+  function select(id) {
+    if (!active2() || current().botId === id || !Object.hasOwn(current().byId, id)) return;
+    const refreshing = rosterRequest !== void 0;
+    cancelReads();
+    source.set((view) => selectBot(view, id));
+    if (refreshing) refresh({ chat: true });
+    else load();
+  }
+  function connect() {
+    if (!active2()) return;
+    const stream = feed = new EventSource("api/omni-ui/feed");
+    const live = () => active2() && feed === stream;
+    stream.addEventListener("hello", () => {
+      if (!live()) return;
+      connected = true;
+      refresh({ chat: true });
+    });
+    stream.addEventListener("revision", () => {
+      if (live()) refresh();
+    });
+    stream.addEventListener("changed", (event) => {
+      if (!live() || !connected) return;
+      const request = requestView(current());
+      let id;
+      try {
+        id = JSON.parse(event.data)?.botId;
+      } catch {
+        return;
+      }
+      if (changedBot(current(), request, id)) load();
+    });
+    stream.addEventListener("error", () => {
+      if (!live()) return;
+      connected = false;
+      clear();
+      if (stream.readyState === EventSource.CLOSED) {
+        stream.close();
+        feed = void 0;
+        retry = setTimeout(connect, 1e4);
+      }
+    });
+  }
+  const stop3 = () => {
+    stopped = true;
+    feed?.close();
+    clearTimeout(retry);
+    clear();
+    source.set(initialMember);
+  };
+  ctx.effect(() => {
+    const off = onRetire(stop3);
+    refresh({ chat: true });
+    connect();
+    return () => {
+      off();
+      stop3();
+    };
+  }, "ds-bot: shared chats");
+  ctx.effect(() => installCompiledStyles(
+    SHELL_CSS + SIDEBAR_CSS + LEFT_BAR_CSS + CONVERSATION_CSS,
+    "shared-chats"
+  ), "ds-bot: shared chat styles");
+  ctx.effect(() => {
+    const style = installStyles(themeCss(allThemes().deepseek), "shared-chat-theme");
+    return () => style.remove();
+  }, "ds-bot: shared chat theme");
+  const shadow = (name, options, component) => ctx.slots.inject(name, () => ctx.slots.register({
+    name,
+    ...options,
+    priority: freePriority(ctx.slots.entries(name), { priority: -100, ...options })
+  }, component));
+  ctx.effect(() => shadow("main", { key: "conversation", inject: () => ({ source, load }) }, MemberRoot), "ds-bot: shared chat");
+  ctx.effect(() => shadow("sidebar.workspaces", { inject: () => ({ source, select }) }, MemberSidebar), "ds-bot: shared Bots");
+  for (const name of ["settings.trigger", "settings.launcher"]) {
+    ctx.effect(() => shadow(name, {}, Nothing), "ds-bot: hide " + name);
+  }
+  ctx.effect(() => shadow("sidebar.brand.mark", {}, BrandMark), "ds-bot: brand mark");
+  ctx.effect(() => shadow("sidebar.brand.name", {}, BrandName), "ds-bot: brand name");
+  ctx.effect(() => {
+    const info = ctx.layout.panelInfo;
+    const reset = () => {
+      if (info.getSnapshot().activePanelId != null) ctx.layout.selectPanel(null);
+    };
+    const off = info.subscribe(reset);
+    reset();
+    return off;
+  }, "ds-bot: keep shared chat selected");
+}
+
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 var LIVE_OWN = /* @__PURE__ */ new Set(["revision", "unchanged", "activity", "work", "memoryNews", "memoryReviews", "liveKey", "computerLive"]);
@@ -44116,7 +44716,20 @@ var omni = Object.freeze({
 });
 var DSH_SETTINGS = /* @__PURE__ */ new Set(["general", "account", "models", "agent-presets", "plugins"]);
 function apply(ctx) {
-  ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
+  const boot = bootView();
+  if (boot === void 0) return applyOwner(ctx);
+  const lifetime = new AbortController();
+  ctx.effect(() => () => lifetime.abort(), "ds-bot: gated viewer");
+  ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy (gated)");
+  startViewer(boot, lifetime.signal).then((viewer) => {
+    if (lifetime.signal.aborted || ctx.fiber && ctx.fiber.state !== 2 || isRetired()) return;
+    if (viewer.role === "member" || viewer.role === "guest") applyMember(ctx);
+    else applyOwner(ctx, { skipLocale: true });
+  }, () => {
+  });
+}
+function applyOwner(ctx, { skipLocale = false } = {}) {
+  if (!skipLocale) ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
   const hostHolds = createSource({});
   migrateStorage();
   const PREFS_KEY = STORAGE.prefs;
@@ -44155,7 +44768,7 @@ function apply(ctx) {
   let expected2 = null;
   let navigationRevision = 0;
   let chosen = null;
-  const setPlain = (plain) => surface.set((state2) => state2.plain === plain ? state2 : { ...state2, plain });
+  const setPlain = (plain2) => surface.set((state2) => state2.plain === plain2 ? state2 : { ...state2, plain: plain2 });
   const dropPanels = () => ui2.set((state2) => state2.details || state2.renaming ? { ...state2, details: null, view: "details", renaming: false, tab: null } : state2);
   const seenKey = (id) => roster.getSnapshot().byId?.[id]?.id ?? roster.getSnapshot().roomsById?.[id]?.id ?? id;
   const leaveVisits = (ids) => {
@@ -44401,9 +45014,9 @@ function apply(ctx) {
         const chip = /\s/.test(bot.name) ? "" : `[class*="_userRow"] [data-ref-chip="file"][title="@${bot.name.replace(/["\\]/g, "\\$&")}" i]`;
         const look = lookOf(bot);
         const marks = chip ? `${anchor}::before,${chip}::before` : `${anchor}::before`;
-        const mark2 = look.image ? `${marks}{background:center/cover url("${look.image}");-webkit-mask:none;mask:none;border-radius:50%}` : `${marks}{background:${paintCss(look.color)};-webkit-mask-image:${maskOf(look.shape)};mask-image:${maskOf(look.shape)}}`;
+        const mark3 = look.image ? `${marks}{background:center/cover url("${look.image}");-webkit-mask:none;mask:none;border-radius:50%}` : `${marks}{background:${paintCss(look.color)};-webkit-mask-image:${maskOf(look.shape)};mask-image:${maskOf(look.shape)}}`;
         const chipBase = chip ? `${chip}{color:inherit;font-weight:600}${chip}>svg{display:none}${chip}::before{content:"";display:inline-block;flex:none;width:16px;height:16px;margin-right:3px;vertical-align:-3px;-webkit-mask:${DEFAULT_MASK} center/contain no-repeat;mask:${DEFAULT_MASK} center/contain no-repeat}` : "";
-        return `${anchor}{color:${inkText(look.color)}}${chipBase}${mark2}`;
+        return `${anchor}{color:${inkText(look.color)}}${chipBase}${mark3}`;
       }).join("\n");
       if (next !== last) style.textContent = last = next;
     };
@@ -45373,9 +45986,9 @@ function apply(ctx) {
       const destination = list.byId[main];
       const parentId = destination?.parentId ?? destination?.parentSessionId;
       const nativeCandidate = main !== void 0 && main !== expected2 && surface.getSnapshot().mode === "bot" && botId !== void 0 && snapshot2.byId[main] === void 0 && snapshot2.roomsById[main] === void 0 && agentOfSession(main) === void 0 && destination?.origin !== "subagent" && (destination?.blank === true || parentId === previous);
-      const plain = isAgentSessionId(main) || nativeCandidate;
-      setPlain(plain);
-      if (plain) dropPanels();
+      const plain2 = isAgentSessionId(main) || nativeCandidate;
+      setPlain(plain2);
+      if (plain2) dropPanels();
       if (main !== observed) {
         navigationRevision += 1;
         observed = main;

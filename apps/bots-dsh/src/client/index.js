@@ -1,5 +1,6 @@
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
+import { bootView, isRetired, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
@@ -105,6 +106,7 @@ import { listedOpener } from './open-listed.js'
 import { agentSessionToReuse, singleFlight } from './agent-new.js'
 import { ReadScopeControl } from './read-scope.js'
 import { installSelfUpdate } from './self-update.js'
+import { applyMember } from './member-root.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -146,7 +148,20 @@ export const omni = Object.freeze({
 const DSH_SETTINGS = new Set(['general', 'account', 'models', 'agent-presets', 'plugins'])
 
 export function apply(ctx) {
-  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
+  const boot = bootView()
+  if (boot === undefined) return applyOwner(ctx)
+  const lifetime = new AbortController()
+  ctx.effect(() => () => lifetime.abort(), 'ds-bot: gated viewer')
+  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy (gated)')
+  startViewer(boot, lifetime.signal).then(viewer => {
+    if (lifetime.signal.aborted || (ctx.fiber && ctx.fiber.state !== 2) || isRetired()) return
+    if (viewer.role === 'member' || viewer.role === 'guest') applyMember(ctx)
+    else applyOwner(ctx, { skipLocale: true })
+  }, () => {})
+}
+
+function applyOwner(ctx, { skipLocale = false } = {}) {
+  if (!skipLocale) ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
   // A Bot's own browser hold, from the team view, where no browser bridge reports holds.
   const hostHolds = createSource({})
   migrateStorage()

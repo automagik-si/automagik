@@ -94,7 +94,7 @@ export function install(rt) {
     }
   }
 
-  async function setPeople(botId, input) {
+  async function setPeople(botId, input, { expect } = {}) {
     if (!callerService(ctx)) throw unavailable()
     return peopleQueue(async () => {
       if (!enabled()) throw unavailable()
@@ -105,6 +105,13 @@ export function install(rt) {
       const main = rt.isMain(botId)
       const prev = peopleOf(bot, { main })
       const next = cleanPeople(input, { main, current: prev, seen: service.seen() })
+      const widens = (prev.mode === 'owners' && next.mode !== 'owners') ||
+        (next.mode === 'workspace' && prev.mode !== 'workspace') ||
+        next.allow.some(entry => !prev.allow.some(person => person.issuer === entry.issuer &&
+          person.subject === entry.subject && person.role === entry.role))
+      if (widens && expect !== undefined && JSON.stringify(peopleOf({ people: expect })) !== JSON.stringify(prev)) {
+        throw refusal('Who may talk to ' + bot.name + ' changed in another window; check it and save again.', { code: 'bot/stale' })
+      }
       // A spoiled or withdrawn share can be reopened only by an explicit owners-to-shared edit.
       if (prev.mode !== 'owners' || next.mode === 'owners') {
         await commit(botId, bot, next, next.mode === 'owners' ? () => shares.delete(botId) : undefined)

@@ -139,9 +139,9 @@ export function fixture(t, { service = serviceStub(), seed, inflight, beforeLoad
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   })
-  const call = async (endpoint, payload) => {
+  const call = async (endpoint, payload, { headers, viewer } = {}) => {
     const route = routes.get('/api/omni-ui')
-    const request = new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) })
+    const request = new Request('http://localhost/api/omni-ui', { method: 'POST', headers, body: JSON.stringify({ endpoint, payload, viewer }) })
     return (await route.fetch(request)).json()
   }
   const emitService = async next => {
