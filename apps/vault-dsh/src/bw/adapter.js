@@ -1,6 +1,7 @@
 import { classifySync, envelope, isAuthFailure, supportedVersion } from './classify.js'
 import { guid, itemFields } from './fields.js'
 import { runBw, tracing } from './run.js'
+import { createLifecycle, untilAbort } from '../lifecycle.js'
 
 const fail = code => ({ ok: false, code })
 const unavailable = () => new Error('The vault did not answer.')
@@ -9,15 +10,6 @@ const validField = field => ['login.username', 'login.password', 'notes'].includ
   || (typeof field === 'string' && field.startsWith('field:') && field.length > 6 && field.length <= 512)
 const isoDate = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
 const timeouts = { version: 5000, status: 5000, sync: 10000, get: 10000, list: 10000, unlock: 30000, lock: 5000 }
-
-function serial() {
-  let tail = Promise.resolve()
-  return work => {
-    const job = tail.then(work)
-    tail = job.catch(() => {})
-    return job
-  }
-}
 
 function raw(result) {
   if (result.failure === undefined && result.code === 0 && result.stderr === '') return result.stdout.replace(/\r?\n$/, '')
@@ -29,71 +21,17 @@ function sessionKey(result) {
   if (Buffer.from(key, 'base64').toString('base64') === key) return key
 }
 
-// The queue retains the work until its child closes. Its caller can stop waiting as
-// soon as canceled, including while the work is still queued.
-async function untilAbort(job, signal, fallback) {
-  if (signal.aborted) return fallback
-  let abort
-  try {
-    return await Promise.race([job, new Promise(resolve => {
-      abort = () => resolve(fallback)
-      signal.addEventListener('abort', abort, { once: true })
-    })])
-  } finally {
-    signal.removeEventListener('abort', abort)
-  }
-}
-
 export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers = globalThis } = {}) {
-  const idleMs = (Number.isFinite(idleLockMinutes) ? Math.min(480, Math.max(1, idleLockMinutes)) : 5) * 60000
-  const lifecycle = serial()
-  const reads = serial()
-  const children = new Set()
-  let generation = new AbortController()
-  let session
-  let connection
   let needsLock = false
-  let idle
-  let disposed = false
+  const lifetime = createLifecycle({ idleLockMinutes, timers, run, timeouts, cleanup })
+  const { child, invalidate, finish, lock: lockSession, lifecycle, reads, renewIdle } = lifetime
 
-  function invalidate() {
-    const previous = generation
-    generation = new AbortController()
-    session = undefined
-    connection = undefined
-    timers.clearTimeout(idle)
-    idle = undefined
-    const closing = [...children]
-    previous.abort()
-    return Promise.allSettled(closing)
-  }
-
-  function child(args, kind, signal, options = {}) {
-    const job = run(args, { ...options, timeout: timeouts[kind], signal })
-    children.add(job)
-    const forget = () => children.delete(job)
-    void job.then(forget, forget)
-    return job
-  }
-
-  async function cleanup(closing) {
-    await closing
+  async function cleanup() {
     if (!needsLock) return true
     const result = await run(['lock'], { timeout: timeouts.lock })
     if (result.failure !== undefined || result.code !== 0) return false
     needsLock = false
     return true
-  }
-
-  function lockSession() {
-    const closing = invalidate()
-    return lifecycle(() => cleanup(closing))
-  }
-
-  function renewIdle() {
-    timers.clearTimeout(idle)
-    idle = timers.setTimeout(() => { void lockSession() }, idleMs)
-    idle.unref?.()
   }
 
   async function version(signal) {
@@ -104,7 +42,7 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
   }
 
   async function cliStatus(signal) {
-    const result = await child(['status'], 'status', signal, { session })
+    const result = await child(['status'], 'status', signal, { session: lifetime.credential })
     if (result.failure !== undefined) return fail(result.failure)
     const answer = envelope(result)
     if (isAuthFailure(answer)) return fail('auth')
@@ -113,17 +51,17 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
     if (!['unlocked', 'locked', 'unauthenticated'].includes(state)) return fail('unavailable')
     const lastSync = typeof data.lastSync === 'string' && isoDate.test(data.lastSync) ? Date.parse(data.lastSync) : NaN
     return {
-      ok: true, state: state === 'unlocked' && session === undefined ? 'locked' : state,
+      ok: true, state: state === 'unlocked' && lifetime.credential === undefined ? 'locked' : state,
       ...(Number.isFinite(lastSync) ? { lastSync } : {}),
     }
   }
 
   async function status() {
     const deadline = new AbortController()
-    const signal = AbortSignal.any([generation.signal, deadline.signal])
+    const signal = AbortSignal.any([lifetime.signal, deadline.signal])
     const timer = timers.setTimeout(() => deadline.abort(), 4500)
     const probe = async () => {
-      if (disposed) return undefined
+      if (lifetime.disposed) return undefined
       const checked = await version(signal)
       if (signal.aborted) return undefined
       if (!checked.ok) {
@@ -137,7 +75,7 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
         return undefined
       }
       const { ok, ...answer } = result
-      if (answer.state !== 'unlocked' && session !== undefined) void lockSession()
+      if (answer.state !== 'unlocked' && lifetime.credential !== undefined) void lockSession()
       return answer
     }
     try {
@@ -149,26 +87,29 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
     }
   }
 
-  function unlock({ password, connection: label } = {}) {
+  function unlock({ password, connection: label, signal: caller } = {}) {
     if (!validConnection(label) || typeof password !== 'string' || password.length === 0 || password.includes('\0')) {
       return Promise.resolve(fail('refused'))
     }
-    const requested = generation.signal
+    const withCaller = signal => caller === undefined ? signal : AbortSignal.any([signal, caller])
+    const requested = lifetime.signal
     return lifecycle(async () => {
-      let signal = requested
-      if (disposed || signal.aborted) return fail('locked')
+      let current = requested
+      let signal = withCaller(current)
+      if (lifetime.disposed || signal.aborted) return fail('locked')
       if (tracing()) return fail('refused')
       const checked = await version(signal)
       if (signal.aborted) return fail('locked')
       if (!checked.ok) {
-        await cleanup(invalidate())
+        await finish(invalidate())
         return fail(checked.code === 'version' ? 'version' : 'unavailable')
       }
       if (needsLock) {
-        const switchConnection = label !== connection
+        const switchConnection = label !== lifetime.connection
         const closing = invalidate()
-        signal = generation.signal
-        if (switchConnection && !await cleanup(closing)) return fail('unlock')
+        current = lifetime.signal
+        signal = withCaller(current)
+        if (switchConnection && !await finish(closing)) return fail('unlock')
         await closing
         if (signal.aborted) return fail('locked')
       }
@@ -176,28 +117,29 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
       needsLock = true
       const result = await child(['unlock', '--raw', '--passwordenv', 'BW_PASSWORD'], 'unlock', signal, { password, response: false })
       password = undefined
-      if (signal.aborted) return fail('locked')
+      if (signal.aborted) {
+        if (!current.aborted) await finish(invalidate())
+        return fail('locked')
+      }
       const key = sessionKey(result)
       if (key === undefined) {
-        await cleanup(invalidate())
+        await finish(invalidate())
         return fail(result.failure === 'refused' ? 'refused' : 'unlock')
       }
-      session = key
-      connection = label
-      renewIdle()
+      lifetime.set(key, label)
       return { ok: true }
-    })
+    }).finally(() => { password = undefined })
   }
 
   const failedChild = result => fail(result.failure === 'refused' ? 'refused' : 'unavailable')
   async function read(ref, { signal: caller } = {}) {
     if (ref?.provider !== 'bitwarden' || !validConnection(ref.connection) || !guid(ref.item)) return fail('refused')
-    if (session === undefined) return fail('locked')
-    if (ref.connection !== connection) return fail('refused')
+    if (lifetime.credential === undefined) return fail('locked')
+    if (ref.connection !== lifetime.connection) return fail('refused')
     if (!validField(ref.field)) return fail('field')
     const id = ref.item.toLowerCase()
     const selector = ref.field
-    const current = generation.signal
+    const current = lifetime.signal
     const signal = caller === undefined ? current : AbortSignal.any([current, caller])
     const cancelled = () => fail(current.aborted ? 'locked' : 'refused')
     const work = async () => {
@@ -219,14 +161,14 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
         await lockSession()
         return fail('locked')
       }
-      const sync = await child(['sync', '--force'], 'sync', signal, { session })
+      const sync = await child(['sync', '--force'], 'sync', signal, { session: lifetime.credential })
       if (signal.aborted) return cancelled()
       const freshness = classifySync(checked.value, sync)
       if (freshness !== 'ok' && freshness !== 'stale-network') {
         await lockSession()
         return fail(freshness === 'auth' ? 'auth' : 'refused')
       }
-      const got = await child(['get', 'item', id], 'get', signal, { session })
+      const got = await child(['get', 'item', id], 'get', signal, { session: lifetime.credential })
       if (signal.aborted) return cancelled()
       const result = envelope(got)
       if (isAuthFailure(result)) {
@@ -251,9 +193,9 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
   }
 
   async function listItems({ connection: label, search = '' } = {}) {
-    if (session === undefined) return fail('locked')
-    if (label !== connection || typeof search !== 'string' || search.includes('\0')) return fail('refused')
-    const signal = generation.signal
+    if (lifetime.credential === undefined) return fail('locked')
+    if (label !== lifetime.connection || typeof search !== 'string' || search.includes('\0')) return fail('refused')
+    const signal = lifetime.signal
     const checked = await version(signal)
     if (signal.aborted) return fail('locked')
     if (!checked.ok) {
@@ -261,7 +203,7 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
       return fail(checked.code === 'version' ? 'version' : 'unavailable')
     }
     const args = ['list', 'items', ...(search ? ['--search=' + search] : [])]
-    const result = await child(args, 'list', signal, { session })
+    const result = await child(args, 'list', signal, { session: lifetime.credential })
     if (signal.aborted) return fail('locked')
     const answer = envelope(result)
     if (isAuthFailure(answer)) {
@@ -281,13 +223,9 @@ export function createVault({ idleLockMinutes = 5 } = {}, { run = runBw, timers 
     return { ok: true, items }
   }
 
-  function prepareQuit() {
-    disposed = true
-    return lockSession().then(ok => ({ ok }))
-  }
-
   return {
     version: 1, status, unlock, async lock() { await lockSession() }, read, listItems,
-    prepareQuit, dispose: prepareQuit,
+    retire: lockSession, get connection() { return lifetime.connection },
+    prepareQuit: lifetime.dispose, dispose: lifetime.dispose,
   }
 }

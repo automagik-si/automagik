@@ -2084,6 +2084,22 @@ var ZH = {
   "Who may ask": "谁可以请求",
   "The vault plugin is not on.": "保管库插件未启用。",
   "Enter your Bitwarden master password.": "请输入 Bitwarden 主密码。",
+  "Vault provider": "保管库提供方",
+  "Bitwarden": "Bitwarden",
+  "1Password": "1Password",
+  "1Password service account token": "1Password 服务账号令牌",
+  "Set token": "设置令牌",
+  "Replace token": "替换令牌",
+  "Clear token": "清除令牌",
+  "The token is cleared when the vault locks or the app quits.": "保管库锁定或应用退出时，令牌会被清除。",
+  "1Password is unavailable in Automagik Cloud.": "Automagik Cloud 中无法使用 1Password。",
+  "{label} ({section})": "{label}（{section}）",
+  "Enter your 1Password service account token.": "请输入 1Password 服务账号令牌。",
+  "Install 1Password CLI 2.39.0 or a later 2.x version.": "请安装 1Password CLI 2.39.0 或更高的 2.x 版本。",
+  "The 1Password service account token could not be set.": "无法设置 1Password 服务账号令牌。",
+  "The 1Password service account token could not be cleared.": "无法清除 1Password 服务账号令牌。",
+  "Choose a vault provider.": "请选择保管库提供方。",
+  "The first cut supports one vault connection. Remove the other vault's mappings first.": "首个版本仅支持一个保管库连接。请先移除另一个保管库的映射。",
   "The vault could not be unlocked.": "无法解锁保管库。",
   "The vault could not be locked.": "无法锁定保管库。",
   "The vault items could not be listed.": "无法列出保管库条目。",
@@ -6163,7 +6179,7 @@ function AddSecret({ actions, run: run3, onDone }) {
     )
   );
 }
-function AddVaultKey({ actions, connection, roster, run: run3, onDone }) {
+function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone }) {
   const [name, setName] = (0, import_react10.useState)("");
   const [purpose, setPurpose] = (0, import_react10.useState)("");
   const [search, setSearch] = (0, import_react10.useState)("");
@@ -6173,6 +6189,21 @@ function AddVaultKey({ actions, connection, roster, run: run3, onDone }) {
   const [scope, setScope] = (0, import_react10.useState)("all");
   const [busy, setBusy] = (0, import_react10.useState)(false);
   const item = items?.find((row) => row.id === itemId);
+  const onePassword = provider === "onepassword";
+  const itemOption = (row) => (0, import_react10.createElement)("option", { key: row.id, value: row.id }, row.name);
+  const vaults = /* @__PURE__ */ new Map();
+  if (onePassword) for (const row of items ?? []) {
+    const id = row.id.split("/")[0];
+    if (!vaults.has(id)) vaults.set(id, { name: row.vault, options: [] });
+    vaults.get(id).options.push(itemOption(row));
+  }
+  const fieldLabel = (row) => {
+    if (!onePassword) return row.selector.startsWith("field:") ? row.label : t(row.label);
+    if (!item.fields.some((other) => other !== row && other.label === row.label)) return row.label;
+    const section = row.section ?? row.selector;
+    const suffix = item.fields.some((other) => other !== row && other.label === row.label && other.section === section) ? row.selector : section;
+    return t("{label} ({section})", { label: row.label, section: suffix });
+  };
   const ready = !busy && typedKeyName.test(name.trim()) && item?.fields.some((row) => row.selector === field);
   const find = async (event) => {
     event.preventDefault();
@@ -6182,7 +6213,8 @@ function AddVaultKey({ actions, connection, roster, run: run3, onDone }) {
     setItemId("");
     setField("");
     try {
-      await run3(actions.vaultItems(search).then((answer) => setItems(answer.items)));
+      const listed = onePassword ? actions.vaultItems(search, provider) : actions.vaultItems(search);
+      await run3(listed.then((answer) => setItems(answer.items)));
     } finally {
       setBusy(false);
     }
@@ -6192,6 +6224,7 @@ function AddVaultKey({ actions, connection, roster, run: run3, onDone }) {
     setBusy(true);
     try {
       const mapping = { name: name.trim().replace(/-/g, "_"), purpose, connection, item: itemId, field, scope };
+      if (onePassword) mapping.provider = provider;
       if (await run3(actions.secretSourceSet(mapping))) onDone();
     } finally {
       setBusy(false);
@@ -6221,7 +6254,7 @@ function AddVaultKey({ actions, connection, roster, run: run3, onDone }) {
         }
       },
       (0, import_react10.createElement)("option", { value: "" }, t("Choose an item")),
-      items.map((row) => (0, import_react10.createElement)("option", { key: row.id, value: row.id }, row.name))
+      onePassword ? [...vaults].map(([id, { name: name2, options }]) => (0, import_react10.createElement)("optgroup", { key: id, label: name2 }, options)) : items.map(itemOption)
     ) : null,
     item ? (0, import_react10.createElement)(
       "select",
@@ -6232,11 +6265,7 @@ function AddVaultKey({ actions, connection, roster, run: run3, onDone }) {
         onChange: (event) => setField(event.target.value)
       },
       (0, import_react10.createElement)("option", { value: "" }, t("Choose a field")),
-      item.fields.map((row) => (0, import_react10.createElement)(
-        "option",
-        { key: row.selector, value: row.selector },
-        row.selector.startsWith("field:") ? row.label : t(row.label)
-      ))
+      item.fields.map((row) => (0, import_react10.createElement)("option", { key: row.selector, value: row.selector }, fieldLabel(row)))
     ) : null,
     (0, import_react10.createElement)(ScopeEditor, { secret: { scope: "all" }, roster, onChange: setScope }),
     (0, import_react10.createElement)(
@@ -6253,8 +6282,10 @@ var vaultStates = {
   unauthenticated: "Not signed in to Bitwarden CLI",
   unavailable: "The vault did not answer."
 };
+var vaultProviders = { bitwarden: "Bitwarden", onepassword: "1Password" };
 function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const [status, setStatus] = (0, import_react10.useState)(null);
+  const [choice, setChoice] = (0, import_react10.useState)(void 0);
   const [busy, setBusy] = (0, import_react10.useState)(false);
   const [adding, setAdding] = (0, import_react10.useState)(false);
   const [refreshKey, setRefreshKey] = (0, import_react10.useState)(0);
@@ -6262,16 +6293,19 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const readOnly = roster.readOnly != null;
   const state2 = readOnly ? "unavailable" : status?.state;
   const connection = status?.connection;
+  const provider = status?.provider ?? choice ?? "bitwarden";
+  const onePassword = provider === "onepassword";
+  const local = !insecure();
   (0, import_react10.useEffect)(() => {
     if (readOnly || busy || typeof actions.vaultStatus !== "function") return;
     const control2 = new AbortController();
     let timer;
     const refresh = async () => {
       try {
-        const answer = await actions.vaultStatus(control2.signal);
+        const answer = await actions.vaultStatus(control2.signal, choice);
         if (!control2.signal.aborted) setStatus(answer);
       } catch {
-        if (!control2.signal.aborted) setStatus({ state: "unavailable" });
+        if (!control2.signal.aborted) setStatus((previous) => ({ ...previous, state: "unavailable", reason: void 0 }));
       }
       if (!control2.signal.aborted) timer = setTimeout(refresh, 5e3);
     };
@@ -6280,23 +6314,31 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
       control2.abort();
       clearTimeout(timer);
     };
-  }, [actions, busy, readOnly, refreshKey]);
+  }, [actions, busy, readOnly, refreshKey, choice]);
   (0, import_react10.useEffect)(() => {
     if (state2 !== "unlocked") setAdding(false);
   }, [state2]);
   const changed = () => {
-    setStatus(null);
+    setStatus((previous) => ({ ...previous, state: void 0 }));
     setBusy(false);
     setRefreshKey((key) => key + 1);
+  };
+  const choose = (event) => {
+    const next = event.target.value;
+    if (password.current) password.current.value = "";
+    setAdding(false);
+    setStatus((previous) => ({ ...previous, provider: next, state: void 0, reason: void 0 }));
+    setChoice(next);
   };
   const unlock = async () => {
     const input = password.current;
     if (busy || !input?.value) return;
     setBusy(true);
+    const credential = input.value;
+    input.value = "";
     try {
-      await run3(actions.vaultUnlock(input.value));
+      await run3(onePassword ? actions.vaultTokenSet(provider, credential, connection) : actions.vaultUnlock(credential, connection));
     } finally {
-      input.value = "";
       changed();
     }
   };
@@ -6305,7 +6347,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
     setBusy(true);
     setAdding(false);
     try {
-      await run3(actions.vaultLock());
+      await run3(onePassword ? actions.vaultTokenClear(provider) : actions.vaultLock());
     } finally {
       changed();
     }
@@ -6313,26 +6355,51 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   return (0, import_react10.createElement)(
     Section3,
     { title: t("Vault") },
+    status?.providers?.length > 1 ? (0, import_react10.createElement)(
+      "div",
+      { className: "bt-set-row" },
+      (0, import_react10.createElement)(
+        "select",
+        {
+          className: "bt-input",
+          "aria-label": t("Vault provider"),
+          value: provider,
+          disabled: readOnly || busy || (roster.secretSources?.rows?.length ?? 0) > 0,
+          onChange: choose
+        },
+        status.providers.map((id) => (0, import_react10.createElement)("option", { key: id, value: id }, t(vaultProviders[id])))
+      )
+    ) : null,
     (0, import_react10.createElement)(
       "div",
       { className: "bt-set-row", role: "status" },
-      (0, import_react10.createElement)("span", { className: "bt-tag" }, t(vaultStates[state2] ?? "Checking vault status…")),
-      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t("The vault locks after the idle time set in the plugin’s settings.")),
-      state2 === "unlocked" ? (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: lock }, t("Lock")) : null
+      (0, import_react10.createElement)("span", { className: "bt-tag" }, t(status?.reason ?? vaultStates[state2] ?? "Checking vault status…")),
+      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
+      state2 === "unlocked" && (!onePassword || local) ? (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: lock }, t(onePassword ? "Clear token" : "Lock")) : null
     ),
-    state2 === "locked" && insecure() ? (0, import_react10.createElement)(
+    (state2 === "locked" || onePassword && state2 === "unlocked") && !local ? (0, import_react10.createElement)(
       "div",
       { className: "bt-secret-warn", role: "note" },
       (0, import_react10.createElement)(WarnIcon),
       t("Unlock the vault in Settings on this computer.")
     ) : null,
-    state2 === "locked" && !insecure() && !roster.secretSources?.broken ? (0, import_react10.createElement)(
+    (state2 === "locked" || onePassword && state2 === "unlocked") && local && !roster.secretSources?.broken ? (0, import_react10.createElement)(
       "div",
       { className: "bt-set-row bt-set-paste" },
-      (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, { inputRef: password, disabled: busy, onEnter: unlock, label: t("Bitwarden master password") })),
-      (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: unlock }, t("Unlock"))
+      (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, {
+        key: JSON.stringify([provider, connection]),
+        inputRef: password,
+        disabled: busy,
+        onEnter: unlock,
+        label: t(onePassword ? "1Password service account token" : "Bitwarden master password")
+      })),
+      (0, import_react10.createElement)(
+        "button",
+        { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: unlock },
+        t(onePassword ? state2 === "unlocked" ? "Replace token" : "Set token" : "Unlock")
+      )
     ) : null,
-    state2 === "unlocked" && !roster.secretSources?.broken ? adding ? (0, import_react10.createElement)(AddVaultKey, { key: connection, actions, connection, roster, run: run3, onDone: () => setAdding(false) }) : (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => setAdding(true) }, t("Add a vault key"))) : null
+    state2 === "unlocked" && !roster.secretSources?.broken ? adding ? (0, import_react10.createElement)(AddVaultKey, { key: provider + "/" + connection, actions, provider, connection, roster, run: run3, onDone: () => setAdding(false) }) : (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => setAdding(true) }, t("Add a vault key"))) : null
   );
 }
 function SecretsPage({ roster, actions, run: run3, Section: Section3 }) {
@@ -20966,10 +21033,12 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     secretSet: (payload) => after(call2("secret-set", payload)),
     secretAllow: (requestId, approval) => after(call2("secret-allow", { ...approval, requestId })),
     secretSourceDetail: (requestId) => call2("secret-source-detail", { requestId }),
-    vaultStatus: (signal) => call2("vault-status", void 0, signal),
-    vaultUnlock: (password) => call2("vault-unlock", { password }),
+    vaultStatus: (signal, provider) => call2("vault-status", provider === void 0 ? void 0 : { provider }, signal),
+    vaultUnlock: (password, connection) => call2("vault-unlock", { provider: "bitwarden", password, connection }),
     vaultLock: () => call2("vault-lock"),
-    vaultItems: (search) => call2("vault-items", { search }),
+    vaultItems: (search, provider) => call2("vault-items", { search, ...provider === void 0 ? {} : { provider } }),
+    vaultTokenSet: (provider, token, connection) => call2("vault-token-set", { provider, token, connection }),
+    vaultTokenClear: (provider) => call2("vault-token-clear", { provider }),
     secretSourceSet: (mapping) => after(call2("secret-source-set", mapping)),
     secretCancel: (requestId) => after(call2("secret-cancel", { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call2("secret-update", { name, scope, purpose })),

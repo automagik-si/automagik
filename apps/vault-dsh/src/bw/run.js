@@ -21,12 +21,14 @@ function isFile(path) {
   try { return statSync(path).isFile() } catch { return false }
 }
 
+function windowsPath(env) {
+  const path = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
+  return path.split(';').map(directory => directory.replace(/^"(.*)"$/, '$1')).filter(dir => win32.isAbsolute(dir))
+}
+
 export function resolveBw({ platform = process.platform, env = process.env, exists = isFile, execPath = process.execPath } = {}) {
   if (platform !== 'win32') return { file: 'bw', prefix: [] }
-  const path = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
-  for (const directory of path.split(';')) {
-    const dir = directory.replace(/^"(.*)"$/, '$1')
-    if (!win32.isAbsolute(dir)) continue
+  for (const dir of windowsPath(env)) {
     const standalone = win32.join(dir, 'bw.exe')
     if (exists(standalone)) return { file: standalone, prefix: [] }
     const script = win32.join(dir, 'node_modules', '@bitwarden', 'cli', 'build', 'bw.js')
@@ -34,18 +36,45 @@ export function resolveBw({ platform = process.platform, env = process.env, exis
   }
 }
 
-export function runBw(args, { timeout, signal, password, session, response = true } = {},
-  { platform = process.platform, parent = process.env, spawnChild = spawn, exists = isFile, execPath = process.execPath } = {}) {
-  if (signal?.aborted) return Promise.resolve({ failure: 'cancelled' })
-  if ((password !== undefined || session !== undefined) && tracing()) return Promise.resolve({ failure: 'refused' })
-  const env = childEnv(parent)
-  const launch = resolveBw({ platform, env, exists, execPath })
-  if (launch === undefined) return Promise.resolve({ failure: 'unavailable' })
-  if (response) env.BW_RESPONSE = 'true'
-  if (launch.node) env.ELECTRON_RUN_AS_NODE = '1'
-  if (password !== undefined) env.BW_PASSWORD = password
-  if (session !== undefined) env.BW_SESSION = session
+export function runBw(args, { password, session, response = true, ...limits } = {}, options) {
+  return runChild(args, limits, options, childEnv, resolveBw, {
+    ...(password === undefined ? {} : { BW_PASSWORD: password }),
+    ...(session === undefined ? {} : { BW_SESSION: session }),
+  }, (env, launch) => {
+    if (response) env.BW_RESPONSE = 'true'
+    if (launch.node) env.ELECTRON_RUN_AS_NODE = '1'
+  })
+}
 
+function opEnv(parent) {
+  return Object.fromEntries(Object.entries(childEnv(parent)).filter(([name]) => !name.toUpperCase().startsWith('OP_')))
+}
+
+function resolveOp({ platform, env, exists }) {
+  if (platform !== 'win32') return { file: 'op', prefix: [] }
+  const file = windowsPath(env).map(dir => win32.join(dir, 'op.exe')).find(exists)
+  if (file !== undefined) return { file, prefix: [] }
+}
+
+export function runOp(args, { token, ...limits } = {}, options) {
+  const version = args.length === 1 && args[0] === '--version'
+  if (!version && token === undefined) return Promise.resolve({ failure: 'refused' })
+  const command = version ? args : args[0] === 'read'
+    ? [...args.slice(0, -1), '--cache=false', args.at(-1)] : [...args, '--cache=false']
+  return runChild(command, limits, options, opEnv, resolveOp,
+    version ? {} : { OP_SERVICE_ACCOUNT_TOKEN: token })
+}
+
+function runChild(args, { timeout, signal },
+  { platform = process.platform, parent = process.env, spawnChild = spawn, exists = isFile, execPath = process.execPath } = {},
+  cleanEnv, resolveCli, credentials, configureEnv) {
+  if (signal?.aborted) return Promise.resolve({ failure: 'cancelled' })
+  if (Object.keys(credentials).length > 0 && tracing()) return Promise.resolve({ failure: 'refused' })
+  const env = cleanEnv(parent)
+  const launch = resolveCli({ platform, env, exists, execPath })
+  if (launch === undefined) return Promise.resolve({ failure: 'unavailable' })
+  configureEnv?.(env, launch)
+  Object.assign(env, credentials)
   return new Promise(resolve => {
     let child
     try {
@@ -70,7 +99,7 @@ export function runBw(args, { timeout, signal, password, session, response = tru
       const command = root ? win32.join(root, 'System32', 'taskkill.exe') : 'taskkill.exe'
       try {
         const killer = spawnChild(command, ['/PID', String(child.pid), '/T', '/F'], {
-          env: childEnv(parent), shell: false, windowsHide: true, stdio: 'ignore',
+          env: cleanEnv(parent), shell: false, windowsHide: true, stdio: 'ignore',
         })
         killer.on('error', killChild)
         killer.once('close', code => { if (code !== 0) killChild() })

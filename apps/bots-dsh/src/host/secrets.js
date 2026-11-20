@@ -35,6 +35,8 @@ const MAX_REQUESTS = 20
 const USED_SAVE_MS = 5000
 const VAULT_STATUS_MS = 5000
 const VAULT_ITEM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const OP_ITEM_ID = /^[a-z0-9]{26}\/[a-z0-9]{26}$/
+const OP_FIELD_ID = /^(?:[A-Za-z0-9_-]{1,128}\/)?[A-Za-z0-9_-]{1,128}$/
 const GRANT_MS = 10 * 60_000
 const AUDIT_LIMIT = 1024 * 1024
 
@@ -59,8 +61,21 @@ const heldReason = name => `Secret ${name} is held: its saved value is shorter t
 const brokenSources = 'The vault mapping file could not be read; no secret can be used until it is fixed.'
 const dualSource = name => `${name} is defined both in secrets.json and in vault-sources.json, so it cannot be used. The user must delete one of them in Settings › Secrets.`
 const mappedWrite = name => `The name ${name} is mapped to a vault item. A typed value cannot share it; delete the mapping first or use another name.`
-const secondConnection = 'The first cut supports one Bitwarden connection.'
+const secondConnection = "The first cut supports one vault connection. Remove the other vault's mappings first."
+const legacyConnection = 'The first cut supports one Bitwarden connection.'
+const cloudVault = '1Password is unavailable in Automagik Cloud.'
 const validReference = value => typeof value === 'string' && value.length > 0 && value.length <= 512
+const validProvider = provider => provider === 'bitwarden' || provider === 'onepassword'
+const validVaultReference = ({ provider, connection, item, field }) =>
+  validProvider(provider) && [connection, item, field].every(validReference)
+  && (provider !== 'onepassword' || (OP_ITEM_ID.test(item) && OP_FIELD_ID.test(field)))
+const sameConnection = (a, b) => a.provider === b.provider && a.connection === b.connection
+const matchesLiveConnection = (service, mapping) => {
+  const active = service.activeConnection?.()
+  return active === undefined || sameConnection(active, mapping)
+}
+const supportedProvider = (service, provider) => Array.isArray(service?.providers)
+  ? service.providers.includes(provider) : provider === 'bitwarden'
 const validScope = scope => scope === 'all' || (Array.isArray(scope) && scope.every(id => typeof id === 'string'))
 const plainObject = value => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
 const purposeOf = purpose => typeof purpose === 'string' ? purpose.trim().slice(0, 300) : ''
@@ -78,12 +93,13 @@ const fingerprintOf = ({ provider, connection, item, field, scope }) => hash({ p
 const shellTool = name => name === 'bash' || name === 'pwsh'
 const grantKey = (botId, sessionId) => JSON.stringify([botId, sessionId])
 
-async function probeVault(service) {
+async function probeVault(service, provider, settings = false) {
+  if (!supportedProvider(service, provider)) return undefined
   let timer
   try {
     const answer = await Promise.race([
       new Promise(resolve => { timer = setTimeout(resolve, VAULT_STATUS_MS) }),
-      service.status(),
+      Array.isArray(service.providers) ? service.status({ provider }) : service.status(),
     ])
     if (!plainObject(answer) || Object.keys(answer).some(key => key !== 'state' && key !== 'lastSync')) return undefined
     const { state, lastSync } = answer
@@ -91,11 +107,26 @@ async function probeVault(service) {
     if (state === 'unlocked' || state === 'locked' || state === 'unauthenticated') {
       return { state, ...(lastSync !== undefined ? { lastSync } : {}) }
     }
-  } catch {
+  } catch (error) {
+    if (settings && provider === 'onepassword' && error?.code === 'cloud') {
+      return { state: 'unavailable', reason: cloudVault }
+    }
     // The adapter's error may name its account or a vault reference.
   } finally { clearTimeout(timer) }
 }
-const vaultStatus = async service => (await probeVault(service))?.state
+const vaultStatus = async (service, mapping) => {
+  if (matchesLiveConnection(service, mapping)) return (await probeVault(service, mapping.provider))?.state
+}
+
+function onePasswordPickerFields(rows) {
+  const fields = new Map()
+  for (const row of rows) {
+    if (typeof row?.id !== 'string' || !OP_FIELD_ID.test(row.id) || typeof row.label !== 'string' || !row.label) continue
+    fields.set(row.id, { selector: row.id, label: row.label,
+      ...(typeof row.section === 'string' && row.section ? { section: row.section } : {}) })
+  }
+  return [...fields.values()]
+}
 
 function pickerField(selector) {
   switch (selector) {
@@ -674,6 +705,8 @@ export function install(rt) {
   let sourcesBroken = false
   let sourcesPresent = false
   let secretSources
+  let credentialGeneration = new AbortController()
+  let credentialSelection
   let vaultExecutionInstalled = false
   const vaultRequests = new Map()
   const snapshots = new Map()
@@ -722,8 +755,18 @@ export function install(rt) {
   const refuseTypedWrite = (name) => {
     if (unavailable(name)) throw refusal(sourcesBroken ? brokenSources : mappedWrite(name))
   }
+  function advanceCredentialGeneration() {
+    const previous = credentialGeneration
+    credentialGeneration = new AbortController()
+    previous.abort()
+  }
+
   function attachVault(service) {
     if (service === undefined) return
+    if (secretSources !== service) {
+      advanceCredentialGeneration()
+      credentialSelection = service.providerSelection
+    }
     secretSources = service
     sourcesPresent = true
     // Keep the handoff on the host once a grant can be issued, even if the adapter
@@ -739,6 +782,7 @@ export function install(rt) {
       attachVault(service)
       sub.effect(() => () => {
         if (secretSources !== service) return
+        advanceCredentialGeneration()
         secretSources = undefined
         sourcesPresent = false
       })
@@ -781,16 +825,15 @@ export function install(rt) {
     try { parsed = JSON.parse(file.bytes.toString('utf8')) } catch { return { error: 'INVALID_JSON' } }
     if (parsed?.version !== 1 || !plainObject(parsed.sources)) return { error: 'INVALID_FORMAT' }
     const rows = new Map()
-    let connection
+    let first
     for (const [name, row] of Object.entries(parsed.sources)) {
-      if (!SECRET_NAME.test(name) || !plainObject(row) || row.provider !== 'bitwarden'
-        || !validReference(row.connection) || !validReference(row.item) || !validReference(row.field)
+      if (!SECRET_NAME.test(name) || !plainObject(row) || !validVaultReference(row)
         || !validScope(row.scope) || Object.hasOwn(row, 'value')) return { error: 'INVALID_ROW' }
-      if (connection !== undefined && connection !== row.connection) return { error: 'MULTIPLE_CONNECTIONS' }
-      connection = row.connection
+      if (first !== undefined && !sameConnection(first, row)) return { error: 'MULTIPLE_CONNECTIONS' }
+      first ??= row
       rows.set(name, {
         provider: row.provider,
-        connection,
+        connection: row.connection,
         item: row.item,
         field: row.field,
         scope: row.scope,
@@ -1184,15 +1227,16 @@ export function install(rt) {
       if (!rt.holdsLock()) throw refusal(rt.readOnly() ?? 'This host cannot approve vault requests.')
       if (blocked !== undefined) throw blockedWrite(blocked)
       if (rt.botOf(botId) === undefined || rt.chatOf(botId) !== sessionId) throw refusal(earlierChat)
-      return binding
+      if (!matchesLiveConnection(service, mapping)) throw refusal(vaultUnavailable)
+      return { binding, mapping }
     }
     let recorded = false
     try {
       if (typeof body.commandDigest !== 'string' || typeof body.snapshot !== 'string') {
         throw refusal('Update the app to approve this request; the card must show the command and the vault item.')
       }
-      check('pending')
-      const status = await vaultStatus(service)
+      const { mapping } = check('pending')
+      const status = await vaultStatus(service, mapping)
       check('pending')
       if (status === undefined) throw refusal(vaultUnavailable)
       if (status !== 'unlocked') throw refusal(vaultLocked)
@@ -1210,7 +1254,7 @@ export function install(rt) {
         throw refusal(approvalFailed)
       }
       recorded = true
-      const binding = check('allowed')
+      const { binding } = check('allowed')
       const key = grantKey(botId, sessionId)
       try {
         await appendVaultAudit(binding, 'allowed', 'ok')
@@ -1367,14 +1411,20 @@ export function install(rt) {
         throw refusal(`The name ${name} is already a typed secret. Delete it in Settings › Secrets first, or map the vault item under another name.`)
       }
       const { connection, item, field } = body
-      if (![connection, item, field].every(validReference)) throw refusal('Choose a valid vault reference.')
+      const legacy = !Array.isArray(secretSources.providers)
+      const provider = legacy && !validProvider(body.provider) ? 'bitwarden' : body.provider ?? 'bitwarden'
+      const reference = { provider, connection, item, field }
+      if (!validVaultReference(reference) || !supportedProvider(secretSources, provider)) throw refusal('Choose a valid vault reference.')
+      if (!matchesLiveConnection(secretSources, reference)) throw refusal(secondConnection)
       for (const [other, row] of sources) {
-        if (other !== name && row.connection !== connection) throw refusal(secondConnection)
+        if (!sameConnection(row, reference) && (!legacy || other !== name || row.provider !== provider)) {
+          throw refusal(legacy && row.provider === provider ? legacyConnection : secondConnection)
+        }
       }
       const previous = sources.get(name)
       const now = Date.now()
       const row = {
-        provider: 'bitwarden', connection, item, field, scope: cleanScope(body.scope),
+        ...reference, scope: cleanScope(body.scope),
         purpose: purposeOf(body.purpose), requestedBy: previous?.requestedBy ?? null,
         createdAt: previous?.createdAt ?? now, updatedAt: now,
       }
@@ -1432,52 +1482,158 @@ export function install(rt) {
     return endpoints[endpoint](body ?? {})
   })
 
-  // Only the person-facing channel calls these operations. The password goes
-  // directly to the service and adapter errors are reduced to fixed messages.
-  async function vaultEndpoint(endpoint, body) {
-    await loadSecrets()
-    const readOnly = rt.readOnly()
-    if (readOnly !== undefined) throw refusal(readOnly)
-    const service = secretSources
-    if (service === undefined) throw refusal('The vault plugin is not on.')
-    const connection = sources.values().next().value?.connection ?? 'bitwarden'
-    const stillPresent = () => {
-      if (secretSources !== service) throw refusal('The vault plugin is not on.')
-    }
-    if (endpoint === 'vault-status') {
-      const answer = await probeVault(service)
-      stillPresent()
-      return { present: true, ...(answer ?? { state: 'unavailable' }), connection }
-    }
-    if (endpoint === 'vault-unlock') {
-      if (sourcesBroken) throw refusal(brokenSources)
+  const connectionOf = (service, provider) => {
+    const mapped = sources.values().next().value
+    if (mapped !== undefined) return mapped.connection
+    const active = service.activeConnection?.()
+    return active?.provider === provider ? active.connection : provider
+  }
+  const entryConnection = (service, provider, connection) => {
+    if (connection === undefined) return connectionOf(service, provider)
+    if (!validReference(connection)) throw refusal('Choose a valid vault reference.')
+    const mapped = sources.values().next().value
+    if (mapped !== undefined && mapped.connection !== connection) throw refusal(secondConnection)
+    return connection
+  }
+  const activeProvider = choice => sources.values().next().value?.provider ?? choice
+  const matchingProvider = provider => {
+    if (sourcesBroken) throw refusal(brokenSources)
+    if (activeProvider(provider) !== provider) throw refusal(secondConnection)
+  }
+  const providerArgs = (service, provider, options) => Array.isArray(service.providers)
+    ? { ...options, provider } : options
+
+  const vaultRoutes = {
+    async 'vault-status'(service, body) {
+      const provider = activeProvider(body.provider ?? 'bitwarden')
+      const connection = connectionOf(service, provider)
+      const answer = await probeVault(service, provider, true)
+      return {
+        present: true, ...(answer ?? { state: 'unavailable' }), connection,
+        ...(Array.isArray(service.providers) ? { provider, providers: ['bitwarden', 'onepassword']
+          .filter(choice => supportedProvider(service, choice)) } : {}),
+      }
+    },
+    async 'vault-unlock'(service, body, enter) {
+      matchingProvider('bitwarden')
+      if (body.provider !== undefined && body.provider !== 'bitwarden') throw refusal('Choose a vault provider.')
       if (typeof body.password !== 'string' || body.password.length === 0 || body.password.includes('\0')) {
         throw refusal('Enter your Bitwarden master password.')
       }
+      // The legacy route ignored a connection sent without a provider.
+      const connection = entryConnection(service, 'bitwarden', body.provider === undefined ? undefined : body.connection)
       let answer
-      try { answer = await service.unlock({ password: body.password, connection }) } catch {}
-      stillPresent()
+      try { answer = await enter('bitwarden', { password: body.password, connection }) } catch {}
       if (answer?.ok !== true) throw refusal('The vault could not be unlocked.')
       return true
-    }
-    if (endpoint === 'vault-lock') {
-      try { await service.lock() } catch { throw refusal('The vault could not be locked.') }
+    },
+    async 'vault-lock'(service) {
+      let locked
+      try {
+        const result = await service.lock()
+        locked = result === true || (!Array.isArray(service.providers) && result === undefined)
+      } catch {}
+      if (!locked) throw refusal('The vault could not be locked.')
       return true
+    },
+    async 'vault-token-set'(service, body, enter) {
+      if (body.provider !== 'onepassword') throw refusal('Choose a vault provider.')
+      matchingProvider(body.provider)
+      if (!supportedProvider(service, body.provider)) throw refusal('The vault did not answer.')
+      if (typeof body.token !== 'string' || body.token.length === 0 || /[\s\0]/.test(body.token)) {
+        throw refusal('Enter your 1Password service account token.')
+      }
+      const connection = entryConnection(service, body.provider, body.connection)
+      let answer
+      try { answer = await enter(body.provider, { token: body.token, connection }) } catch {}
+      if (answer?.code === 'cloud') throw refusal(cloudVault)
+      if (answer?.code === 'version') throw refusal('Install 1Password CLI 2.39.0 or a later 2.x version.')
+      if (answer?.ok !== true) throw refusal('The 1Password service account token could not be set.')
+      return true
+    },
+    async 'vault-token-clear'(service, body) {
+      if (body.provider !== 'onepassword') throw refusal('Choose a vault provider.')
+      if (!supportedProvider(service, body.provider)) throw refusal('The vault did not answer.')
+      let cleared
+      try { cleared = await service.lock({ provider: body.provider }) }
+      catch { cleared = false }
+      if (cleared === false) throw refusal('The 1Password service account token could not be cleared.')
+      return true
+    },
+    async 'vault-items'(service, body) {
+      const provider = activeProvider(body.provider ?? 'bitwarden')
+      matchingProvider(body.provider ?? provider)
+      if (!supportedProvider(service, provider)) throw refusal('The vault did not answer.')
+      const search = typeof body.search === 'string' ? body.search.trim().slice(0, 512) : ''
+      let result
+      try { result = await service.listItems(providerArgs(service, provider, { connection: connectionOf(service, provider), search })) } catch {}
+      if (result?.code === 'cloud' && provider === 'onepassword') throw refusal(cloudVault)
+      if (result?.ok !== true || !Array.isArray(result.items)) throw refusal('The vault items could not be listed.')
+      const items = []
+      const onePassword = provider === 'onepassword'
+      for (const item of result.items.slice(0, 50)) {
+        if (typeof item?.id !== 'string' || !(onePassword ? OP_ITEM_ID : VAULT_ITEM_ID).test(item.id)
+          || typeof item.name !== 'string' || !Array.isArray(item.fields)) continue
+        const fields = onePassword ? onePasswordPickerFields(item.fields) : [...new Set(item.fields)].map(pickerField).filter(Boolean)
+        if (fields.length > 0) items.push({ id: item.id, name: item.name, fields,
+          ...(onePassword && typeof item.vault === 'string' ? { vault: item.vault } : {}) })
+      }
+      return { items }
+    },
+  }
+
+  // Credential entry shares the mapping write queue. Lock and clear can still cancel
+  // a credential check in progress.
+  let tokenRevision = 0
+  function vaultEndpoint(endpoint, body = {}, refresh = false) {
+    const entry = endpoint === 'vault-unlock' || endpoint === 'vault-token-set'
+    const clear = endpoint === 'vault-token-clear'
+    const admitted = secretSources
+    if (endpoint === 'vault-lock' || (clear && body.provider === 'onepassword' && supportedProvider(admitted, body.provider))) {
+      advanceCredentialGeneration()
     }
-    if (sourcesBroken) throw refusal(brokenSources)
-    const search = typeof body.search === 'string' ? body.search.trim().slice(0, 512) : ''
-    let result
-    try { result = await service.listItems({ connection, search }) } catch {}
-    stillPresent()
-    if (result?.ok !== true || !Array.isArray(result.items)) throw refusal('The vault items could not be listed.')
-    const items = []
-    for (const item of result.items.slice(0, 50)) {
-      if (typeof item?.id !== 'string' || !VAULT_ITEM_ID.test(item.id) || typeof item.name !== 'string'
-        || !Array.isArray(item.fields)) continue
-      const fields = [...new Set(item.fields)].map(pickerField).filter(Boolean)
-      if (fields.length > 0) items.push({ id: item.id, name: item.name, fields })
+    let generation = credentialGeneration
+    const revision = endpoint === 'vault-token-set' ? ++tokenRevision : tokenRevision
+    const checkEntry = () => {
+      if (generation !== credentialGeneration || admitted !== secretSources) throw refusal(vaultLocked)
     }
-    return { items }
+    const dispatch = async () => {
+      if (refresh) await rt.refresh()
+      await loadSecrets()
+      const readOnly = rt.readOnly()
+      if (readOnly !== undefined) throw refusal(readOnly, { code: 'bot/read-only' })
+      if (entry) checkEntry()
+      const service = entry || clear ? admitted : secretSources
+      if (service === undefined || service !== secretSources) throw refusal('The vault plugin is not on.')
+      if (!Object.hasOwn(vaultRoutes, endpoint)) throw refusal('Unknown vault operation.')
+      if (body.provider !== undefined && !validProvider(body.provider)) throw refusal('Choose a vault provider.')
+      if (endpoint === 'vault-token-set' && revision !== tokenRevision) throw refusal('The 1Password service account token could not be set.')
+      const enter = async (provider, options) => {
+        checkEntry()
+        try {
+          return await service.unlock(providerArgs(service, provider, Array.isArray(service.providers)
+            ? { ...options, signal: generation.signal } : options))
+        } finally {
+          if (admitted === secretSources) {
+            const selection = service.providerSelection
+            if (selection?.generation !== credentialSelection?.generation) {
+              credentialSelection = selection
+              // An explicit lock or clear may already have invalidated this entry.
+              if (generation === credentialGeneration) {
+                advanceCredentialGeneration()
+                generation = credentialGeneration
+              }
+            }
+          }
+        }
+      }
+      let answer
+      try { answer = await vaultRoutes[endpoint](service, body, enter) }
+      finally { if (entry) checkEntry() }
+      if (secretSources !== service) throw refusal('The vault plugin is not on.')
+      return answer
+    }
+    return entry ? mutate(dispatch) : dispatch()
   }
 
   // Internal cleanup only: the comparison and existing endpoint's map.delete run
@@ -1626,14 +1782,14 @@ export function install(rt) {
     if (hasSecretMaterial(mapping)) return refuse(unsafe)
     const fingerprint = fingerprintOf(mapping)
     entry.commandDigest = commandDigestOf(shell, workdir, command)
-    const status = await vaultStatus(service)
+    const status = await vaultStatus(service, mapping)
     void loadSecrets()
     message = check()
     if (message !== undefined) return refuse(message)
     if (fingerprintOf(sources.get(name)) !== fingerprint) return refuse(changedMapping(name))
     if (sessionFolder(session) !== workdir) return refuse('No working folder is set for this chat; nothing was asked.')
     if (hasSecretMaterial(sources.get(name))) return refuse(unsafe)
-    if (status === undefined) return refuse(vaultUnavailable)
+    if (status === undefined || !matchesLiveConnection(service, mapping)) return refuse(vaultUnavailable)
 
     const now = Date.now()
     const pending = status === 'unlocked'
@@ -1751,10 +1907,14 @@ export function install(rt) {
       for (const [name, row] of sources) if (!secrets.has(name)) listed.push(sourceView(name, row))
       if (listed.length === 0) return 'No keys are saved yet. Ask for one with request_secret.'
       const service = secretSources
+      const mapping = sources.values().next().value
       const status = service !== undefined && [...sources.keys()].some(name => !secrets.has(name))
-        ? await vaultStatus(service) : undefined
+        ? await vaultStatus(service, mapping) : undefined
+      const currentMapping = sources.values().next().value
       const vaultUse = secretSources === undefined ? 'unavailable: it comes from a vault, and the vault plugin is off'
-        : secretSources !== service || status === undefined ? 'unavailable: the vault did not answer'
+        : secretSources !== service || status === undefined || currentMapping === undefined
+          || !sameConnection(mapping, currentMapping) || !matchesLiveConnection(service, currentMapping)
+          ? 'unavailable: the vault did not answer'
           : status === 'unlocked' ? 'available: ask with request_secret, naming the exact command and shell'
             : 'locked: the user must unlock the vault'
       return [

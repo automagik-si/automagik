@@ -319,7 +319,8 @@ export function install(rt) {
     'cli-login-noticed', 'cli-login-switch', 'cli-login-signout', 'cli-login-reset',
     'cli-login-reserve', 'cli-login-release',
   ])
-  const VAULT = new Set(['vault-status', 'vault-unlock', 'vault-lock', 'vault-items'])
+  const VAULT_LOCAL = new Set(['vault-unlock', 'vault-token-set', 'vault-token-clear'])
+  const VAULT = new Set(['vault-status', 'vault-lock', 'vault-items', ...VAULT_LOCAL])
   // The endpoints whose text reaches a Bot or a model: one that carries a Claude sign-in state
   // acp-dsh showed is refused before anything is queued (cli-login.js, loginTextMatches).
   const CODE_GUARDED = new Set(['send', 'side-ask', 'answer-question', 'view-reply', 'memory-ask'])
@@ -492,6 +493,9 @@ export function install(rt) {
       // from memory before the refresh below, which may load the team or take its lock. It
       // takes no input.
       if (endpoint === 'diagnostics-permissions') return ok(rt.permissionDiagnostics())
+      if (endpoint === 'vault-unlock' || endpoint === 'vault-token-set') {
+        return ok(await rt.vaultEndpoint(endpoint, body, true))
+      }
       await rt.refresh()
       const readOnly = rt.readOnly()
       // An endpoint another Omni plugin serves (extend.js) says itself whether it only reads.
@@ -1374,7 +1378,7 @@ export function install(rt) {
       const endpoint = String(body?.endpoint ?? '')
       const desktopWindow = appBrowserBridge() && verifiedWindow(request)
       const dispatch = () => {
-        if (endpoint === 'vault-unlock') {
+        if (VAULT_LOCAL.has(endpoint)) {
           // DSH rebuilds the request on an internal URL (http://dsh.internal), so the page's own
           // origin is read from what the browser sent: Origin, else Host. Neither means refuse.
           let page
@@ -1385,7 +1389,9 @@ export function install(rt) {
           } catch { page = undefined }
           // RFC 0034 Q10: Pocket and remote may approve but never unlock, so HTTPS from another host is
           // refused too; only the desktop's own window or a page on this computer unlocks.
-          if (!desktopWindow && (page === undefined || !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(page.hostname))) {
+          // The server gate rewrites its upstream Origin and Host to loopback.
+          if (request.headers.has('x-automagik-principal')
+            || (!desktopWindow && (page === undefined || !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(page.hostname)))) {
             return fail('Unlock the vault in Settings on this computer.', 'bot/refused')
           }
         }
