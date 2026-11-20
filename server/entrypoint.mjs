@@ -19,6 +19,7 @@ import {
   redactTokens,
 } from './lib.mjs'
 import { followImage } from './profile-follow.mjs'
+import { nativeWorkerEnv } from './native-worker-login.mjs'
 
 const ROOT = '/opt/automagik'
 const DSH_BIN = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -108,6 +109,7 @@ async function main() {
   env.DSH_HOME = dshHome
   env.AUTOMAGIK_BOTS_HOME = botsHome
   env.AUTOMAGIK_HOME = env.AUTOMAGIK_HOME || '/data'
+  nativeWorkerEnv(env)
 
   const build = versions()
   log(`profile ${PROFILE}: automagik ${build.automagik ?? 'unknown'}, dsh ${build.dsh ?? 'unknown'}`)
