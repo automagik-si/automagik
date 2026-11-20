@@ -71,6 +71,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-fs-local": "*",
+    "@deepseek-ai/dsh-fs-patch": "*",
     "@deepseek-ai/dsh-fs-sandbox": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-scope": "*",
@@ -83,6 +84,9 @@
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-fs-local": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-fs-patch": {
       "optional": true
     },
     "@deepseek-ai/dsh-fs-sandbox": {
