@@ -1,0 +1,4 @@
+[install]
+# The same install settings as the sibling plugins: Bun installs no peers. The pack has no
+# dependencies of its own, so it has no lockfile either.
+peer = false
