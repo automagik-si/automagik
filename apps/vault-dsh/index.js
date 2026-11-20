@@ -1,6 +1,8 @@
 import Schema from '@deepseek-ai/schemastery'
 import { createVault } from './src/bw/adapter.js'
 import { createOnePassword } from './src/onepassword/adapter.js'
+import { cloudProfile, createHashicorpVault } from './src/hashicorp-vault/adapter.js'
+import { endpointOf, provider as hashicorp, validMount, validToken } from './src/hashicorp-vault/parse.js'
 
 export const name = 'vault-dsh'
 export const Config = Schema.object({
@@ -9,7 +11,11 @@ export const Config = Schema.object({
 })
 
 export function apply(ctx, config = {}) {
-  const adapters = new Map([['bitwarden', createVault(config)], ['onepassword', createOnePassword(config)]])
+  const adapters = new Map([
+    ['bitwarden', createVault(config)],
+    ['onepassword', createOnePassword(config)],
+    [hashicorp, createHashicorpVault(config)],
+  ])
   let selection = Object.freeze({ provider: 'bitwarden', generation: 0 })
   let generation = 0
   let retiring
@@ -26,6 +32,11 @@ export function apply(ctx, config = {}) {
       const adapter = adapters.get(provider)
       if (adapter === undefined || disposed) return refused()
       if (options.signal?.aborted) return { ok: false, code: 'locked' }
+      if (provider === hashicorp) {
+        if (cloudProfile()) return { ok: false, code: 'cloud' }
+        if (!validToken(options.token) || !endpointOf(options.address, options.namespace)
+          || (options.mount !== undefined && !validMount(options.mount))) return refused()
+      }
       const switching = provider !== selection.provider
       const current = switching || retiring !== undefined ? ++generation : generation
       if (switching) {
@@ -67,6 +78,11 @@ export function apply(ctx, config = {}) {
     const connection = adapters.get(provider).connection
     return connection === undefined ? undefined : { provider, connection }
   } })
+  Object.defineProperties(service, {
+    connectionFor: { value: ({ provider, address, namespace }) =>
+      provider === hashicorp ? endpointOf(address, namespace)?.connection : undefined },
+    listFields: { value: ({ provider, ...options }) => adapters.get(provider)?.listFields?.(options) ?? refused() },
+  })
   ctx.provide('secretSources', service)
   ctx.effect(() => service.prepareQuit)
 }

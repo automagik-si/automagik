@@ -21,7 +21,7 @@ function isFile(path) {
   try { return statSync(path).isFile() } catch { return false }
 }
 
-function windowsPath(env) {
+export function windowsPath(env) {
   const path = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
   return path.split(';').map(directory => directory.replace(/^"(.*)"$/, '$1')).filter(dir => win32.isAbsolute(dir))
 }
@@ -65,7 +65,7 @@ export function runOp(args, { token, ...limits } = {}, options) {
     version ? {} : { OP_SERVICE_ACCOUNT_TOKEN: token })
 }
 
-function runChild(args, { timeout, signal },
+export function runChild(args, { timeout, signal },
   { platform = process.platform, parent = process.env, spawnChild = spawn, exists = isFile, execPath = process.execPath } = {},
   cleanEnv, resolveCli, credentials, configureEnv) {
   if (signal?.aborted) return Promise.resolve({ failure: 'cancelled' })

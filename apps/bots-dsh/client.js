@@ -2119,6 +2119,20 @@ var ZH = {
   "Add a vault key": "添加保管库密钥",
   "Search the vault": "搜索保管库",
   "No matching vault items.": "未找到匹配的保管库条目。",
+  "HashiCorp Vault": "HashiCorp Vault",
+  "Vault address": "Vault 地址",
+  "Vault token": "Vault 令牌",
+  "Vault namespace (optional)": "Vault 命名空间（可选）",
+  "Vault mount": "Vault 挂载点",
+  "Vault folder (optional)": "Vault 文件夹（可选）",
+  "Browse": "浏览",
+  "The address, namespace and token are cleared when the vault locks or the app quits.": "保管库锁定或退出应用后，地址、命名空间和令牌会清除。",
+  "HashiCorp Vault is unavailable in Automagik Cloud.": "Automagik Cloud 不支持 HashiCorp Vault。",
+  "This mapping belongs to another Vault server; connect to that server or map again.": "此映射属于另一个 Vault 服务器。请连接该服务器或重新映射。",
+  "Enter your Vault token.": "请输入 Vault 令牌。",
+  "Enter a valid Vault address and namespace.": "请输入有效的 Vault 地址和命名空间。",
+  "Install Vault CLI 2.0, 2.1 or 2.2.": "请安装 Vault CLI 2.0、2.1 或 2.2。",
+  "The Vault connection could not be set.": "无法设置 Vault 连接。",
   "Vault item": "保管库条目",
   "Choose an item": "选择条目",
   "Vault field": "保管库字段",
@@ -5704,16 +5718,17 @@ var scopeLabel = (scope, roster) => {
   return names.length === 0 ? t("No Bot") : names.join(t(" and "));
 };
 var when = (time) => Number.isFinite(time) ? new Date(time).toLocaleString(dateLocale(), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
-function MaskedInput({ value, onChange, onEnter, label, inputRef, autoFocus = false, disabled = false }) {
+function MaskedInput({ value, onChange, onEnter, label, inputRef, autoFocus = false, disabled = false, passwordType = false }) {
+  const maskByCss = MASK_BY_CSS && !passwordType;
   return (0, import_react10.createElement)("input", {
     className: "bt-secret-input",
-    type: MASK_BY_CSS ? "text" : "password",
+    type: maskByCss ? "text" : "password",
     disabled,
-    "data-masked": MASK_BY_CSS ? "" : void 0,
+    "data-masked": maskByCss ? "" : void 0,
     value,
     ref: inputRef,
     autoFocus,
-    autoComplete: MASK_BY_CSS ? "off" : "new-password",
+    autoComplete: maskByCss ? "off" : "new-password",
     autoCorrect: "off",
     autoCapitalize: "off",
     spellCheck: false,
@@ -5815,8 +5830,18 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
     Promise.resolve().then(() => fetchDetail(id)).then((value2) => {
       if (!active) return;
       const { commandDigest, snapshot: snapshot2, provider, item, field } = value2 ?? {};
-      const verified = commandDigest === digest && [commandDigest, snapshot2, provider, item, field].every((part) => typeof part === "string");
-      setVaultDetail(verified ? { key, value: { commandDigest, snapshot: snapshot2, provider, item, field } } : { key, error: vaultDetailUnavailable });
+      let verified = commandDigest === digest && [commandDigest, snapshot2, provider, item, field].every((part) => typeof part === "string");
+      let displayItem = item;
+      if (verified && provider === "hashicorp-vault") {
+        try {
+          const parts = JSON.parse(item);
+          verified = Array.isArray(parts) && parts.length === 2 && parts.every((part) => typeof part === "string" && part !== "");
+          if (verified) displayItem = parts.join("/");
+        } catch {
+          verified = false;
+        }
+      }
+      setVaultDetail(verified ? { key, value: { commandDigest, snapshot: snapshot2, provider, item: displayItem, field } } : { key, error: vaultDetailUnavailable });
     }, () => {
       if (active) setVaultDetail({ key, error: vaultDetailUnavailable });
     });
@@ -5839,6 +5864,7 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
   const cancel = () => run3(() => actions.secretCancel(request.id));
   if (vault) {
     const item = detail?.value;
+    const hashicorp = item?.provider === "hashicorp-vault";
     const allow2 = () => {
       if (item && !busy) void run3(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }));
     };
@@ -5856,7 +5882,7 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
       item ? (0, import_react10.createElement)(
         "div",
         { className: "bt-secret-note" },
-        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: item.provider })),
+        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: hashicorp ? t("HashiCorp Vault") : item.provider })),
         (0, import_react10.createElement)("div", null, t("Item: {item}", { item: item.item })),
         (0, import_react10.createElement)("div", null, t("Field: {field}", { field: item.field }))
       ) : null,
@@ -6236,9 +6262,14 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
   const [field, setField] = (0, import_react10.useState)("");
   const [scope, setScope] = (0, import_react10.useState)("all");
   const [busy, setBusy] = (0, import_react10.useState)(false);
-  const item = items?.find((row) => row.id === itemId);
+  const [mount, setMount] = (0, import_react10.useState)("");
+  const [folder, setFolder] = (0, import_react10.useState)("");
+  const [fields, setFields] = (0, import_react10.useState)([]);
+  const item = items?.find((row) => row.id === itemId && !row.folder);
   const onePassword = provider === "onepassword";
-  const itemOption = (row) => (0, import_react10.createElement)("option", { key: row.id, value: row.id }, row.name);
+  const hashicorp = provider === "hashicorp-vault";
+  const optionId = (row) => hashicorp && row.folder ? row.id + "/" : row.id;
+  const itemOption = (row) => (0, import_react10.createElement)("option", { key: optionId(row), value: optionId(row) }, row.name);
   const vaults = /* @__PURE__ */ new Map();
   if (onePassword) for (const row of items ?? []) {
     const id = row.id.split("/")[0];
@@ -6252,17 +6283,40 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
     const suffix = item.fields.some((other) => other !== row && other.label === row.label && other.section === section) ? row.selector : section;
     return t("{label} ({section})", { label: row.label, section: suffix });
   };
-  const ready = !busy && typedKeyName.test(name.trim()) && item?.fields.some((row) => row.selector === field);
-  const find = async (event) => {
-    event.preventDefault();
-    if (busy) return;
-    setBusy(true);
+  const ready = !busy && typedKeyName.test(name.trim()) && (hashicorp ? fields.includes(field) : item?.fields.some((row) => row.selector === field));
+  const resetItems = () => {
     setItems(null);
     setItemId("");
     setField("");
+    setFields([]);
+  };
+  const find = async (nextFolder = folder) => {
+    if (busy) return;
+    setBusy(true);
+    resetItems();
     try {
-      const listed = onePassword ? actions.vaultItems(search, provider) : actions.vaultItems(search);
+      const listed = hashicorp ? actions.vaultItems({ mount, folder: nextFolder }, provider) : onePassword ? actions.vaultItems(search, provider) : actions.vaultItems(search);
       await run3(listed.then((answer) => setItems(answer.items)));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const selectItem = async (event) => {
+    const id = event.target.value;
+    setItemId(id);
+    setField("");
+    if (!hashicorp) return;
+    setFields([]);
+    const row = items.find((item2) => optionId(item2) === id);
+    if (!row) return;
+    if (row.folder) {
+      setFolder(row.id);
+      await find(row.id);
+      return;
+    }
+    setBusy(true);
+    try {
+      await run3(actions.vaultFields(provider, mount, id).then((answer) => setFields(answer.fields)));
     } finally {
       setBusy(false);
     }
@@ -6271,8 +6325,15 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
     if (!ready) return;
     setBusy(true);
     try {
-      const mapping = { name: name.trim().replace(/-/g, "_"), purpose, connection, item: itemId, field, scope };
-      if (onePassword) mapping.provider = provider;
+      const mapping = {
+        name: name.trim().replace(/-/g, "_"),
+        purpose,
+        connection,
+        item: hashicorp ? JSON.stringify([mount, itemId]) : itemId,
+        field,
+        scope
+      };
+      if (onePassword || hashicorp) mapping.provider = provider;
       if (await run3(actions.secretSourceSet(mapping))) onDone();
     } finally {
       setBusy(false);
@@ -6285,9 +6346,42 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
     (0, import_react10.createElement)("input", { className: "bt-input", "aria-label": t("What it is for"), placeholder: t("What it is for"), value: purpose, autoComplete: "off", onChange: (event) => setPurpose(event.target.value) }),
     (0, import_react10.createElement)(
       "form",
-      { className: "bt-secret-inline", onSubmit: find },
-      (0, import_react10.createElement)("input", { className: "bt-input", type: "search", "aria-label": t("Search the vault"), placeholder: t("Search the vault"), value: search, autoComplete: "off", onChange: (event) => setSearch(event.target.value) }),
-      (0, import_react10.createElement)("button", { type: "submit", className: "bt-soft bt-soft-sm", disabled: busy }, t("Search"))
+      { className: "bt-secret-inline", onSubmit: (event) => {
+        event.preventDefault();
+        return find();
+      } },
+      hashicorp ? [
+        (0, import_react10.createElement)("input", {
+          key: "mount",
+          className: "bt-input",
+          "aria-label": t("Vault mount"),
+          placeholder: t("Vault mount"),
+          value: mount,
+          disabled: busy,
+          spellCheck: false,
+          autoComplete: "off",
+          onChange: (event) => {
+            setMount(event.target.value);
+            setFolder("");
+            resetItems();
+          }
+        }),
+        (0, import_react10.createElement)("input", {
+          key: "folder",
+          className: "bt-input",
+          "aria-label": t("Vault folder (optional)"),
+          placeholder: t("Vault folder (optional)"),
+          value: folder,
+          disabled: busy,
+          spellCheck: false,
+          autoComplete: "off",
+          onChange: (event) => {
+            setFolder(event.target.value);
+            resetItems();
+          }
+        })
+      ] : (0, import_react10.createElement)("input", { className: "bt-input", type: "search", "aria-label": t("Search the vault"), placeholder: t("Search the vault"), value: search, autoComplete: "off", onChange: (event) => setSearch(event.target.value) }),
+      (0, import_react10.createElement)("button", { type: "submit", className: "bt-soft bt-soft-sm", disabled: busy || hashicorp && !mount }, t(hashicorp ? "Browse" : "Search"))
     ),
     items?.length === 0 ? (0, import_react10.createElement)("span", { className: "bt-set-hint", role: "status" }, t("No matching vault items.")) : null,
     items?.length > 0 ? (0, import_react10.createElement)(
@@ -6296,10 +6390,8 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
         className: "bt-input",
         "aria-label": t("Vault item"),
         value: itemId,
-        onChange: (event) => {
-          setItemId(event.target.value);
-          setField("");
-        }
+        disabled: hashicorp ? busy : void 0,
+        onChange: selectItem
       },
       (0, import_react10.createElement)("option", { value: "" }, t("Choose an item")),
       onePassword ? [...vaults].map(([id, { name: name2, options }]) => (0, import_react10.createElement)("optgroup", { key: id, label: name2 }, options)) : items.map(itemOption)
@@ -6313,7 +6405,11 @@ function AddVaultKey({ actions, provider, connection, roster, run: run3, onDone 
         onChange: (event) => setField(event.target.value)
       },
       (0, import_react10.createElement)("option", { value: "" }, t("Choose a field")),
-      item.fields.map((row) => (0, import_react10.createElement)("option", { key: row.selector, value: row.selector }, fieldLabel(row)))
+      hashicorp ? fields.map((id) => (0, import_react10.createElement)(
+        "option",
+        { key: id, value: id },
+        /^\s|\s$|[\t\r\n]| {2}/.test(id) ? JSON.stringify(id).replace(/ /g, " ") : id
+      )) : item.fields.map((row) => (0, import_react10.createElement)("option", { key: row.selector, value: row.selector }, fieldLabel(row)))
     ) : null,
     (0, import_react10.createElement)(ScopeEditor, { secret: { scope: "all" }, roster, onChange: setScope }),
     (0, import_react10.createElement)(
@@ -6330,7 +6426,7 @@ var vaultStates = {
   unauthenticated: "Not signed in to Bitwarden CLI",
   unavailable: "The vault did not answer."
 };
-var vaultProviders = { bitwarden: "Bitwarden", onepassword: "1Password" };
+var vaultProviders = { bitwarden: "Bitwarden", onepassword: "1Password", "hashicorp-vault": "HashiCorp Vault" };
 function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const [status, setStatus] = (0, import_react10.useState)(null);
   const [choice, setChoice] = (0, import_react10.useState)(void 0);
@@ -6338,11 +6434,15 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const [adding, setAdding] = (0, import_react10.useState)(false);
   const [refreshKey, setRefreshKey] = (0, import_react10.useState)(0);
   const password = (0, import_react10.useRef)(null);
+  const address = (0, import_react10.useRef)(null);
+  const namespace = (0, import_react10.useRef)(null);
   const readOnly = roster.readOnly != null;
   const state2 = readOnly ? "unavailable" : status?.state;
   const connection = status?.connection;
   const provider = status?.provider ?? choice ?? "bitwarden";
   const onePassword = provider === "onepassword";
+  const hashicorp = provider === "hashicorp-vault";
+  const canEnter = state2 === "locked" || (onePassword || hashicorp) && state2 === "unlocked";
   const local = !insecure();
   (0, import_react10.useEffect)(() => {
     if (readOnly || busy || typeof actions.vaultStatus !== "function") return;
@@ -6364,8 +6464,8 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
     };
   }, [actions, busy, readOnly, refreshKey, choice]);
   (0, import_react10.useEffect)(() => {
-    if (state2 !== "unlocked") setAdding(false);
-  }, [state2]);
+    if (state2 !== "unlocked" || status?.mismatch) setAdding(false);
+  }, [state2, status?.mismatch]);
   const changed = () => {
     setStatus((previous) => ({ ...previous, state: void 0 }));
     setBusy(false);
@@ -6380,12 +6480,19 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   };
   const unlock = async () => {
     const input = password.current;
-    if (busy || !input?.value) return;
+    if (busy || !input?.value || hashicorp && !address.current?.value) return;
     setBusy(true);
     const credential = input.value;
     input.value = "";
     try {
-      await run3(onePassword ? actions.vaultTokenSet(provider, credential, connection) : actions.vaultUnlock(credential, connection));
+      if (hashicorp) {
+        const endpoint = { address: address.current.value, namespace: namespace.current.value };
+        address.current.value = "";
+        namespace.current.value = "";
+        await run3(actions.vaultTokenSet(provider, credential, endpoint));
+      } else {
+        await run3(onePassword ? actions.vaultTokenSet(provider, credential, connection) : actions.vaultUnlock(credential, connection));
+      }
     } finally {
       changed();
     }
@@ -6395,7 +6502,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
     setBusy(true);
     setAdding(false);
     try {
-      await run3(onePassword ? actions.vaultTokenClear(provider) : actions.vaultLock());
+      await run3(onePassword ? actions.vaultTokenClear(provider) : hashicorp ? actions.vaultLock(provider) : actions.vaultLock());
     } finally {
       changed();
     }
@@ -6422,32 +6529,55 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
       "div",
       { className: "bt-set-row", role: "status" },
       (0, import_react10.createElement)("span", { className: "bt-tag" }, t(status?.reason ?? vaultStates[state2] ?? "Checking vault status…")),
-      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
+      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(hashicorp ? "The address, namespace and token are cleared when the vault locks or the app quits." : onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
       state2 === "unlocked" && (!onePassword || local) ? (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: lock }, t(onePassword ? "Clear token" : "Lock")) : null
     ),
-    (state2 === "locked" || onePassword && state2 === "unlocked") && !local ? (0, import_react10.createElement)(
+    canEnter && !local ? (0, import_react10.createElement)(
       "div",
       { className: "bt-secret-warn", role: "note" },
       (0, import_react10.createElement)(WarnIcon),
       t("Unlock the vault in Settings on this computer.")
     ) : null,
-    (state2 === "locked" || onePassword && state2 === "unlocked") && local && !roster.secretSources?.broken ? (0, import_react10.createElement)(
+    canEnter && local && !roster.secretSources?.broken ? (0, import_react10.createElement)(
       "div",
-      { className: "bt-set-row bt-set-paste" },
+      { className: "bt-set-row bt-set-paste", key: hashicorp ? JSON.stringify([provider, connection]) : void 0 },
+      hashicorp ? [
+        (0, import_react10.createElement)("input", {
+          key: "address",
+          ref: address,
+          className: "bt-input",
+          "aria-label": t("Vault address"),
+          placeholder: t("Vault address"),
+          disabled: busy,
+          autoComplete: "off",
+          spellCheck: false
+        }),
+        (0, import_react10.createElement)("input", {
+          key: "namespace",
+          ref: namespace,
+          className: "bt-input",
+          "aria-label": t("Vault namespace (optional)"),
+          placeholder: t("Vault namespace (optional)"),
+          disabled: busy,
+          autoComplete: "off",
+          spellCheck: false
+        })
+      ] : null,
       (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, {
         key: JSON.stringify([provider, connection]),
         inputRef: password,
         disabled: busy,
         onEnter: unlock,
-        label: t(onePassword ? "1Password service account token" : "Bitwarden master password")
+        passwordType: hashicorp,
+        label: t(hashicorp ? "Vault token" : onePassword ? "1Password service account token" : "Bitwarden master password")
       })),
       (0, import_react10.createElement)(
         "button",
         { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: unlock },
-        t(onePassword ? state2 === "unlocked" ? "Replace token" : "Set token" : "Unlock")
+        t(hashicorp ? "Connect" : onePassword ? state2 === "unlocked" ? "Replace token" : "Set token" : "Unlock")
       )
     ) : null,
-    state2 === "unlocked" && !roster.secretSources?.broken ? adding ? (0, import_react10.createElement)(AddVaultKey, { key: provider + "/" + connection, actions, provider, connection, roster, run: run3, onDone: () => setAdding(false) }) : (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => setAdding(true) }, t("Add a vault key"))) : null
+    state2 === "unlocked" && !status?.mismatch && !roster.secretSources?.broken ? adding ? (0, import_react10.createElement)(AddVaultKey, { key: provider + "/" + connection, actions, provider, connection, roster, run: run3, onDone: () => setAdding(false) }) : (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => setAdding(true) }, t("Add a vault key"))) : null
   );
 }
 function SecretsPage({ roster, actions, run: run3, Section: Section3 }) {
@@ -21126,9 +21256,10 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     secretSourceDetail: (requestId) => call2("secret-source-detail", { requestId }),
     vaultStatus: (signal, provider) => call2("vault-status", provider === void 0 ? void 0 : { provider }, signal),
     vaultUnlock: (password, connection) => call2("vault-unlock", { provider: "bitwarden", password, connection }),
-    vaultLock: () => call2("vault-lock"),
-    vaultItems: (search, provider) => call2("vault-items", { search, ...provider === void 0 ? {} : { provider } }),
-    vaultTokenSet: (provider, token, connection) => call2("vault-token-set", { provider, token, connection }),
+    vaultLock: (provider) => provider === void 0 ? call2("vault-lock") : call2("vault-lock", { provider }),
+    vaultItems: (search, provider) => call2("vault-items", provider === "hashicorp-vault" ? { provider, ...search } : { search, ...provider === void 0 ? {} : { provider } }),
+    vaultFields: (provider, mount, path2) => call2("vault-fields", { provider, mount, path: path2 }),
+    vaultTokenSet: (provider, token, connection) => call2("vault-token-set", provider === "hashicorp-vault" ? { provider, token, ...connection } : { provider, token, connection }),
     vaultTokenClear: (provider) => call2("vault-token-clear", { provider }),
     secretSourceSet: (mapping) => after(call2("secret-source-set", mapping)),
     secretCancel: (requestId) => after(call2("secret-cancel", { requestId })),

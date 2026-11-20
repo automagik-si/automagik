@@ -13,6 +13,10 @@ import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { GITHUB_TOKEN_DAYS, GITHUB_WORK, cleanGitHubWork, githubPermissions, isGitHubTokenName } from '../shared/github-token.js'
 import { replaceFile } from './files.js'
 import { output } from './tools.js'
+import {
+  hashicorp, hashicorpCloud, hashicorpItem, hashicorpItems, hashicorpMismatch,
+  validHashicorpConnection, validHashicorpField, validHashicorpMount, validHashicorpPath,
+} from './vault-hashicorp.js'
 
 export const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/
 export const ENV_PREFIX = 'DSH_SECRET_'
@@ -65,10 +69,12 @@ const secondConnection = "The first cut supports one vault connection. Remove th
 const legacyConnection = 'The first cut supports one Bitwarden connection.'
 const cloudVault = '1Password is unavailable in Automagik Cloud.'
 const validReference = value => typeof value === 'string' && value.length > 0 && value.length <= 512
-const validProvider = provider => provider === 'bitwarden' || provider === 'onepassword'
+const vaultProviders = ['bitwarden', 'onepassword', hashicorp]
+const validProvider = provider => vaultProviders.includes(provider)
 const validVaultReference = ({ provider, connection, item, field }) =>
   validProvider(provider) && [connection, item, field].every(validReference)
   && (provider !== 'onepassword' || (OP_ITEM_ID.test(item) && OP_FIELD_ID.test(field)))
+  && (provider !== hashicorp || (validHashicorpConnection(connection) && hashicorpItem(item) !== undefined && validHashicorpField(field)))
 const sameConnection = (a, b) => a.provider === b.provider && a.connection === b.connection
 const matchesLiveConnection = (service, mapping) => {
   const active = service.activeConnection?.()
@@ -111,11 +117,20 @@ async function probeVault(service, provider, settings = false) {
     if (settings && provider === 'onepassword' && error?.code === 'cloud') {
       return { state: 'unavailable', reason: cloudVault }
     }
+    if (settings && provider === hashicorp && error?.code === 'cloud') return { state: 'unavailable', reason: hashicorpCloud }
     // The adapter's error may name its account or a vault reference.
   } finally { clearTimeout(timer) }
 }
 const vaultStatus = async (service, mapping) => {
   if (matchesLiveConnection(service, mapping)) return (await probeVault(service, mapping.provider))?.state
+}
+const hashicorpConnection = service => {
+  const active = service?.activeConnection?.()
+  return active?.provider === hashicorp ? active.connection : undefined
+}
+const wrongHashicorpConnection = (service, mapping) => {
+  const active = mapping?.provider === hashicorp ? hashicorpConnection(service) : undefined
+  return active !== undefined && active !== mapping.connection
 }
 
 function onePasswordPickerFields(rows) {
@@ -1217,12 +1232,15 @@ export function install(rt) {
     const { name, sessionId } = request
     const entry = vaultAuditOf(botId, request)
     const service = secretSources
+    const generation = credentialGeneration
     const check = (status) => {
       const { binding, mapping } = checkVaultBinding(botId, request, status)
       if (binding.commandDigest !== body.commandDigest || snapshots.get(body.snapshot) !== binding) {
         throw refusal(changedMapping(name))
       }
       if (service === undefined || service !== secretSources) throw refusal(`${name} is unavailable because the vault plugin is off.`)
+      if (wrongHashicorpConnection(service, mapping)) throw refusal(hashicorpMismatch)
+      if (mapping.provider === hashicorp && generation !== credentialGeneration) throw refusal(vaultLocked)
       if (!canUse(mapping, botId)) throw refusal(outsideScope(name))
       if (!rt.holdsLock()) throw refusal(rt.readOnly() ?? 'This host cannot approve vault requests.')
       if (blocked !== undefined) throw blockedWrite(blocked)
@@ -1239,7 +1257,7 @@ export function install(rt) {
       const status = await vaultStatus(service, mapping)
       check('pending')
       if (status === undefined) throw refusal(vaultUnavailable)
-      if (status !== 'unlocked') throw refusal(vaultLocked)
+      if (status !== 'unlocked' || (mapping.provider === hashicorp && hashicorpConnection(service) === undefined)) throw refusal(vaultLocked)
 
       approving.add(request)
       request.status = 'allowed'
@@ -1349,6 +1367,10 @@ export function install(rt) {
       return secretView(secrets.get(name))
     },
     async 'secret-allow'(body) {
+      const found = findRequest(String(body.requestId ?? ''))?.request
+      if (found?.source === 'vault' && found.status === 'canceled' && wrongHashicorpConnection(secretSources, sources.get(found.name))) {
+        throw refusal(hashicorpMismatch)
+      }
       const { botId, request } = pendingRequest(body.requestId)
       if (request.source === 'vault') return allowVault(botId, request, body)
       const unavailableReason = sourceReason(request.name)
@@ -1486,7 +1508,7 @@ export function install(rt) {
     const mapped = sources.values().next().value
     if (mapped !== undefined) return mapped.connection
     const active = service.activeConnection?.()
-    return active?.provider === provider ? active.connection : provider
+    return active?.provider === provider ? active.connection : provider === hashicorp ? undefined : provider
   }
   const entryConnection = (service, provider, connection) => {
     if (connection === undefined) return connectionOf(service, provider)
@@ -1503,15 +1525,48 @@ export function install(rt) {
   const providerArgs = (service, provider, options) => Array.isArray(service.providers)
     ? { ...options, provider } : options
 
+  async function hashicorpPicker(service, body, fields) {
+    matchingProvider(hashicorp)
+    if (!supportedProvider(service, hashicorp)) throw refusal('The vault did not answer.')
+    const { mount, path, folder = '' } = body
+    const candidate = fields ? path : folder
+    if (!validHashicorpMount(mount) || ((fields || candidate !== '') && !validHashicorpPath(mount, candidate))) {
+      throw refusal('Choose a valid vault reference.')
+    }
+    const mapping = sources.values().next().value
+    if (wrongHashicorpConnection(service, mapping)) throw refusal(hashicorpMismatch)
+    const connection = connectionOf(service, hashicorp)
+    const signal = credentialGeneration.signal
+    let result
+    try {
+      result = fields
+        ? await service.listFields({ provider: hashicorp, connection, mount, path, signal })
+        : await service.listItems({ provider: hashicorp, connection, mount, folder, signal })
+    } catch {}
+    if (result?.code === 'cloud') throw refusal(hashicorpCloud)
+    if (result?.code === 'connection' || wrongHashicorpConnection(service, sources.values().next().value)) throw refusal(hashicorpMismatch)
+    if (signal.aborted || (result?.ok === true && (connection === undefined || hashicorpConnection(service) !== connection))) {
+      throw refusal(vaultLocked)
+    }
+    if (fields) {
+      if (result?.ok !== true || !Array.isArray(result.fields)) throw refusal('The vault item details could not be loaded.')
+      return { fields: [...new Set(result.fields.slice(0, 50).filter(validHashicorpField))] }
+    }
+    if (result?.ok !== true || !Array.isArray(result.items)) throw refusal('The vault items could not be listed.')
+    return { items: hashicorpItems(mount, folder, result.items) }
+  }
+
   const vaultRoutes = {
     async 'vault-status'(service, body) {
-      const provider = activeProvider(body.provider ?? 'bitwarden')
+      const provider = activeProvider(body.provider ?? (hashicorpConnection(service) === undefined ? 'bitwarden' : hashicorp))
       const connection = connectionOf(service, provider)
       const answer = await probeVault(service, provider, true)
+      const mismatch = answer?.state === 'unlocked' && wrongHashicorpConnection(service, sources.values().next().value)
       return {
-        present: true, ...(answer ?? { state: 'unavailable' }), connection,
-        ...(Array.isArray(service.providers) ? { provider, providers: ['bitwarden', 'onepassword']
-          .filter(choice => supportedProvider(service, choice)) } : {}),
+        present: true, ...(answer ?? { state: 'unavailable' }),
+        ...(mismatch ? { reason: hashicorpMismatch, mismatch: true } : {}),
+        connection,
+        ...(Array.isArray(service.providers) ? { provider, providers: vaultProviders.filter(choice => supportedProvider(service, choice)) } : {}),
       }
     },
     async 'vault-unlock'(service, body, enter) {
@@ -1527,16 +1582,37 @@ export function install(rt) {
       if (answer?.ok !== true) throw refusal('The vault could not be unlocked.')
       return true
     },
-    async 'vault-lock'(service) {
+    async 'vault-lock'(service, body) {
       let locked
       try {
-        const result = await service.lock()
+        const provider = body.provider === hashicorp ? { provider: hashicorp } : undefined
+        const result = provider === undefined ? await service.lock() : await service.lock(provider)
         locked = result === true || (!Array.isArray(service.providers) && result === undefined)
       } catch {}
       if (!locked) throw refusal('The vault could not be locked.')
       return true
     },
     async 'vault-token-set'(service, body, enter) {
+      if (body.provider === hashicorp) {
+        matchingProvider(hashicorp)
+        if (!supportedProvider(service, hashicorp)) throw refusal('The vault did not answer.')
+        if (typeof body.token !== 'string' || body.token === '' || /[\s\u0000-\u001f\u007f]/.test(body.token)) throw refusal('Enter your Vault token.')
+        const { address, namespace } = body
+        const connection = service.connectionFor?.({ provider: hashicorp, address, namespace })
+        if (!validHashicorpConnection(connection)) throw refusal('Enter a valid Vault address and namespace.')
+        const mapped = sources.values().next().value
+        const previous = hashicorpConnection(service) ?? mapped?.connection
+        const [mount] = hashicorpItem(mapped?.item) ?? []
+        let answer
+        try {
+          answer = await enter(hashicorp, { token: body.token, address, namespace, mount },
+            previous !== undefined && previous !== connection)
+        } catch {}
+        if (answer?.code === 'cloud') throw refusal(hashicorpCloud)
+        if (answer?.code === 'version') throw refusal('Install Vault CLI 2.0, 2.1 or 2.2.')
+        if (answer?.ok !== true) throw refusal('The Vault connection could not be set.')
+        return true
+      }
       if (body.provider !== 'onepassword') throw refusal('Choose a vault provider.')
       matchingProvider(body.provider)
       if (!supportedProvider(service, body.provider)) throw refusal('The vault did not answer.')
@@ -1552,6 +1628,10 @@ export function install(rt) {
       return true
     },
     async 'vault-token-clear'(service, body) {
+      if (body.provider === hashicorp) {
+        if (!supportedProvider(service, hashicorp)) throw refusal('The vault did not answer.')
+        return vaultRoutes['vault-lock'](service, body)
+      }
       if (body.provider !== 'onepassword') throw refusal('Choose a vault provider.')
       if (!supportedProvider(service, body.provider)) throw refusal('The vault did not answer.')
       let cleared
@@ -1563,6 +1643,7 @@ export function install(rt) {
     async 'vault-items'(service, body) {
       const provider = activeProvider(body.provider ?? 'bitwarden')
       matchingProvider(body.provider ?? provider)
+      if (provider === hashicorp) return hashicorpPicker(service, body, false)
       if (!supportedProvider(service, provider)) throw refusal('The vault did not answer.')
       const search = typeof body.search === 'string' ? body.search.trim().slice(0, 512) : ''
       let result
@@ -1580,6 +1661,10 @@ export function install(rt) {
       }
       return { items }
     },
+    'vault-fields'(service, body) {
+      if (body.provider !== hashicorp) throw refusal('Choose a vault provider.')
+      return hashicorpPicker(service, body, true)
+    },
   }
 
   // Credential entry shares the mapping write queue. Lock and clear can still cancel
@@ -1589,9 +1674,11 @@ export function install(rt) {
     const entry = endpoint === 'vault-unlock' || endpoint === 'vault-token-set'
     const clear = endpoint === 'vault-token-clear'
     const admitted = secretSources
-    if (endpoint === 'vault-lock' || (clear && body.provider === 'onepassword' && supportedProvider(admitted, body.provider))) {
-      advanceCredentialGeneration()
-    }
+    const locking = endpoint === 'vault-lock' || (clear && (body.provider === 'onepassword' || body.provider === hashicorp)
+      && supportedProvider(admitted, body.provider))
+    if (locking) advanceCredentialGeneration()
+    // A HashiCorp clear also outdates a queued connection entry.
+    if (locking && body.provider === hashicorp) tokenRevision++
     let generation = credentialGeneration
     const revision = endpoint === 'vault-token-set' ? ++tokenRevision : tokenRevision
     const checkEntry = () => {
@@ -1607,12 +1694,24 @@ export function install(rt) {
       if (service === undefined || service !== secretSources) throw refusal('The vault plugin is not on.')
       if (!Object.hasOwn(vaultRoutes, endpoint)) throw refusal('Unknown vault operation.')
       if (body.provider !== undefined && !validProvider(body.provider)) throw refusal('Choose a vault provider.')
-      if (endpoint === 'vault-token-set' && revision !== tokenRevision) throw refusal('The 1Password service account token could not be set.')
-      const enter = async (provider, options) => {
+      if (endpoint === 'vault-token-set' && revision !== tokenRevision) {
+        throw refusal(body.provider === hashicorp ? 'The Vault connection could not be set.' : 'The 1Password service account token could not be set.')
+      }
+      const enter = async (provider, options, replacing = false) => {
         checkEntry()
+        if (replacing) {
+          // A changed Vault address or namespace is a new connection: it owns a new generation.
+          advanceCredentialGeneration()
+          generation = credentialGeneration
+          tokenRevision++
+        }
         try {
-          return await service.unlock(providerArgs(service, provider, Array.isArray(service.providers)
+          const pending = service.unlock(providerArgs(service, provider, Array.isArray(service.providers)
             ? { ...options, signal: generation.signal } : options))
+          if (!replacing) return await pending
+          const [answer] = await Promise.all([pending, ...[...sources].filter(([, row]) => row.provider === hashicorp)
+            .map(([name]) => revokeVault(name))])
+          return answer
         } finally {
           if (admitted === secretSources) {
             const selection = service.providerSelection
@@ -1633,7 +1732,7 @@ export function install(rt) {
       if (secretSources !== service) throw refusal('The vault plugin is not on.')
       return answer
     }
-    return entry ? mutate(dispatch) : dispatch()
+    return entry || (locking && body.provider === hashicorp) ? mutate(dispatch) : dispatch()
   }
 
   // Internal cleanup only: the comparison and existing endpoint's map.delete run
@@ -1779,6 +1878,8 @@ export function install(rt) {
       || text.includes(row.item))
     const unsafe = 'That request cannot be shown on a card; ask again without secret material in it.'
     const mapping = sources.get(name)
+    const generation = credentialGeneration
+    if (wrongHashicorpConnection(service, mapping)) return refuse(vaultUnavailable)
     if (hasSecretMaterial(mapping)) return refuse(unsafe)
     const fingerprint = fingerprintOf(mapping)
     entry.commandDigest = commandDigestOf(shell, workdir, command)
@@ -1787,9 +1888,14 @@ export function install(rt) {
     message = check()
     if (message !== undefined) return refuse(message)
     if (fingerprintOf(sources.get(name)) !== fingerprint) return refuse(changedMapping(name))
+    if (wrongHashicorpConnection(service, mapping)) return refuse(vaultUnavailable)
+    if (mapping.provider === hashicorp && generation !== credentialGeneration) return refuse(vaultLocked)
     if (sessionFolder(session) !== workdir) return refuse('No working folder is set for this chat; nothing was asked.')
     if (hasSecretMaterial(sources.get(name))) return refuse(unsafe)
-    if (status === undefined || !matchesLiveConnection(service, mapping)) return refuse(vaultUnavailable)
+    if (status === undefined || !matchesLiveConnection(service, mapping)
+      || (status === 'unlocked' && mapping.provider === hashicorp && hashicorpConnection(service) === undefined)) {
+      return refuse(vaultUnavailable)
+    }
 
     const now = Date.now()
     const pending = status === 'unlocked'
@@ -1818,6 +1924,7 @@ export function install(rt) {
     audits.push(auditVault(entry, pending ? 'asked' : 'locked', pending ? 'ok' : 'locked'))
     await rt.save()
     await Promise.all(audits)
+    if (mapping.provider === hashicorp && generation !== credentialGeneration) return vaultLocked
     if (!pending) {
       await tell(botId, vaultLocked)
       return vaultLocked
