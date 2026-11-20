@@ -50,6 +50,8 @@ import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
+import { DEFAULT_HOLDER_LIMIT, HOLDERS_FILE, HOLDER_NAME, LOCAL_HOLDER, MAX_HOLDER_LIMIT, chooseHolder, holderNameProblem, holderRows, holdersText,
+  lossEvent, lossLine, parseHolders, sameLoss } from "../holderSpread.mjs";
 import { readMeterLane } from "../meterLane.mjs";
 import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, entryLine, linkedUpdate, meterResults, parseState, probeOn, stateAfter, stateLines, updateOn } from "../machineUpdates.js";
 import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
@@ -1111,6 +1113,13 @@ export function attachView({ readOnly = false } = {}) {
     const machines = await machinesNow();
     const { byKey } = foldAttach(rows);
     const { live, ended, unknown } = await confirmBindings([...byKey.values()], core, lookup, UNANSWERED, machines);
+    // #1432 item 2: when the pack notices a holder's loss (hc ended its terminals with
+    // `holder_lost`) or a holder machine's line is down, say what it took, once, where the lead
+    // can read it back (`am holders losses`). Read-only callers record nothing.
+    if (!readOnly && (ended.length || unknown.length)) {
+      const losses = [...holderLossEvents({ ended, core }), ...holderUnreachableEvents({ unknown, machines, core })];
+      if (losses.length) recordHolderLosses(losses);
+    }
     if (ended.length && !readOnly) await sweep(path, ended);
     // live: this computer's bindings by bot. liveAt / unknownAt: every binding by place and bot
     // (atKey; a linked machine's place is its core id, and a project's checkouts on two
@@ -1383,6 +1392,9 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
     : auto;
   const out = {
     id: bot.id, name: bot.name, kind: bot.kind, ...placeOf(project),
+    // #1432: a pane on a holder is on another core; name that holder where a linked project
+    // names its machine, so the row says where the bot plays.
+    ...(held?.binding?.machine ? { machine: held.binding.machine } : {}),
     lead: lead.lead || null, leadName,
     ...(lead.leadProject ? { leadProject: lead.leadProject } : (bot.leadProject ? { leadProject: bot.leadProject } : {})),
     ...(bot.crossMembers?.length ? { crossMembers: bot.crossMembers } : {}),
@@ -1650,6 +1662,7 @@ const OPTIONS = {
   cwd: { type: "string" },
   revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" }, last: { type: "boolean" },
   machine: { type: "string" }, linked: { type: "boolean" }, local: { type: "boolean" },
+  holder: { type: "string" }, limit: { type: "string" }, losses: { type: "boolean" }, up: { type: "boolean" },
   "from-hc": { type: "boolean" }, "squad-label": { type: "string" }, apply: { type: "boolean" },
 };
 
@@ -1727,7 +1740,9 @@ Usage: am <command> [options]                   (every command takes --json and 
   rm <bot>
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
-  start <bot> [--space ID] [--tab ID]   a new pane on this computer (prints its terminal)
+  start <bot> [--space ID] [--tab ID] [--holder NAME]
+                                a new pane on this computer (prints its terminal); with more
+                                than one holder, the least loaded one (am holders)
   revive [--dry-run] [--boot] [--wait SECONDS] | revive --last
                                 after a restart of this computer: every bot the attach ledger
                                 binds here whose pane is gone, or is the bare shell herdr-core
@@ -1913,6 +1928,17 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 Herdr: on unless it was switched off; off, nothing is run there.
                                 This is the linked updater's switch, not the machine's own pack
                                 auto setting (am update --auto off, which holds the pack alone)
+  holders [--json]              the holder pool: this computer's hc core and each local holder
+                                session, the agents each holds now, the per-holder limit and the
+                                losses recorded. One holder (the default) is one loss that ends
+                                every agent; \`holders add --local NAME\` spreads new starts
+  holders limit N               the most agents one holder takes before new starts move on
+                                (default ${DEFAULT_HOLDER_LIMIT}; 1-${MAX_HOLDER_LIMIT})
+  holders add --local NAME      add a holder: an hc session (am-holder-NAME) exposed as a
+                                linked machine on this computer; it starts no pane itself
+  holders remove NAME           remove a holder that holds no agent (its core stops if empty)
+  holders losses [--all]        what each holder loss or dropped link took, newest last
+  holders up                    start the hc session of each local holder that isn't running
   meter uninstall               remove it from the linked machines the pack put it on (the
                                 install record says which), only where it is still that version
   dsh-tui install | update      DSH as a Herdr agent: the pinned dsh-TUI ${DSH_TUI.version} in its
@@ -2949,7 +2975,8 @@ function lsLines(projects) {
       const agy = b.agyMode ? `  agy-mode ${b.agyMode}` : "";
       const perms = b.agyPermissions || b.workerAgyPermissions
         ? `  agy-allow ${(b.agyPermissions ?? b.workerAgyPermissions).allow.length} deny ${(b.agyPermissions ?? b.workerAgyPermissions).deny.length}` : "";
-      const status = b.planned ? `planned, wave ${b.planned.wave}` : b.terminal ? `${b.status} in ${p.machine ? `${p.machine}/` : ""}${b.terminal}` : b.status;
+      const playing = b.machine || p.machine;
+      const status = b.planned ? `planned, wave ${b.planned.wave}` : b.terminal ? `${b.status} in ${playing ? `${playing}/` : ""}${b.terminal}` : b.status;
       const code = b.code === false ? "  code false" : "";
       const duplicate = b.duplicate ? "  ! duplicate live labels" : "";
       const wake = b.wakeStatus;
@@ -3671,8 +3698,337 @@ async function windowDo(command, args) {
   return r.code === 0 ? null : (r.stderr || r.stdout || `exit ${r.code}`).trim();
 }
 
+// ---- holders (#1432 item 3): more than one hc core on this computer ----
+//
+// A holder is an hc session's core. The pool is `local` (the core this CLI talks to) plus the
+// local sessions the lead adds with `am holders add --local <name>`; `hc machine add --via`
+// exposes one on this host, so a start there uses the pack's existing linked-machine launch
+// path. `hc server status` lists one holder per core, and a core's holder loss ends every
+// terminal it held, so a new start goes to the holder with the fewest of the pack's agents
+// (holderSpread.mjs). Default: one local holder, exactly as before (#1432 keeps its switch
+// conservative); adding a holder is what turns spreading on.
+
+const holdersPath = () => join(appHome(), HOLDERS_FILE);
+const holderLossPath = () => join(appHome(), "automagik-herdr", "holder-loss.log");
+const HOLDER_LOSSES_KEPT = 50;
+/** How long one delegated start on a holder may take: a linked-machine start's own worst case. */
+const HOLDER_START_MS = 15 * 60 * 1000;
+
+/** The pool from its file, or the conservative default when there is none. */
+function readHolders() {
+  let text = null;
+  try { text = readFileSync(holdersPath(), "utf8"); } catch (e) {
+    if (e?.code !== "ENOENT") throw new CliError(`holders: ${HOLDERS_FILE} can't be read: ${e?.message ?? e}`);
+  }
+  return parseHolders(text);
+}
+
+/** Writes the pool 0600 in a 0700 folder, never through a symlink. */
+function writeHolders(config) {
+  const path = holdersPath(), dir = dirname(path);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a symlink`);
+    try { if (lstatSync(path).isSymbolicLink()) throw new Error(`${path} is a symlink`); } catch (e) { if (e?.code !== "ENOENT") throw e; }
+    const tmp = `${path}.${randomUUID()}.tmp`;
+    writeFileSync(tmp, holdersText(config), { mode: 0o600, flag: "wx" });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+    chmodSync(path, 0o600);
+  } catch (e) {
+    throw new CliError(`holders: the setting was not saved: ${e?.message ?? e}`);
+  }
+}
+
+/** The pool, its live agent counts (by holder), and whether each holder's core answers now. */
+async function holderView() {
+  const config = readHolders();
+  const view = await attachView();
+  const counts = new Map(config.holders.map((h) => [h.name, 0]));
+  for (const { binding } of view.liveAt.values()) {
+    const place = placeOfRow(binding);
+    const name = place === null ? LOCAL_HOLDER : view.machines.get(place)?.name;
+    if (name && counts.has(name)) counts.set(name, counts.get(name) + 1);
+  }
+  const connected = new Map();
+  for (const m of view.machines.values()) if (m?.name) connected.set(m.name, Boolean(m.connected));
+  return { config, view, counts, connected };
+}
+
+/**
+ * The binding that plays `botId` in any place (this computer or a holder), or null. By id
+ * alone, as the local start's check is: a clone's pane elsewhere still means the bot runs.
+ * `elsewhere`: the project that binding names, when it isn't `key`.
+ */
+function holderHeld(view, botId, key) {
+  for (const { binding, get } of view.liveAt.values()) {
+    if (binding.bot !== botId) continue;
+    const place = placeOfRow(binding);
+    return { binding, get: get ?? null, holder: place === null ? LOCAL_HOLDER : (view.machines.get(place)?.name ?? null),
+      elsewhere: binding.project && binding.project !== key ? binding.project : null };
+  }
+  return null;
+}
+
+/** `hc <args>` in hc session `session` (only `am holders up|remove` need another core). */
+function hcInSession(session, args, { timeout = 15000 } = {}) {
+  const file = hcExecutable(programPath("hc"));
+  if (!file) return { code: 127, stdout: "", stderr: "hc (herdr-core) is not on PATH." };
+  const env = { ...process.env, HC_SESSION: session, HC_SOCKET: "", HC_TERMINAL_SOCKET: "", HC_TERMINAL_ID: "" };
+  const r = spawnSync(file, args, { env, encoding: "utf8", timeout, maxBuffer: 16 * 1024 * 1024 });
+  return { code: r.status ?? (r.error ? 127 : 1), stdout: r.stdout ?? "",
+    stderr: r.stderr ?? (r.error ? String(r.error.message) : "") };
+}
+
+/** Starts the hc session of each local holder that isn't answering (`server status` starts it). */
+async function holdersUp() {
+  const config = readHolders();
+  const started = [];
+  for (const h of config.holders) {
+    if (!h.session) continue;
+    const r = hcInSession(h.session, ["server", "status", "--json"]);
+    started.push({ name: h.name, session: h.session, up: r.code === 0 });
+  }
+  return started;
+}
+
+function readLosses(limit = HOLDER_LOSSES_KEPT) {
+  let text = "";
+  try { text = readFileSync(holderLossPath(), "utf8"); } catch { return []; }
+  const out = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e && typeof e.holder === "string" && Array.isArray(e.agents)) out.push(e);
+    } catch { /* a torn line is left out, the rest is kept */ }
+  }
+  return out.slice(-limit);
+}
+
+/**
+ * Appends the holder losses this run saw, once each, and says each one line. Bots and holder
+ * names only: no path, socket, environment value or machine address.
+ */
+function recordHolderLosses(events) {
+  if (!events.length) return;
+  const known = readLosses(200);
+  const fresh = events.filter((e) => !known.some((k) => sameLoss(k, e)));
+  if (!fresh.length) return;
+  const path = holderLossPath();
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    for (const e of fresh) appendFileSync(path, `${JSON.stringify(e)}\n`, { mode: 0o600 });
+    chmodSync(path, 0o600);
+  } catch { /* a log that can't be written must not break the command; the line below still says it */ }
+  for (const e of fresh) report([lossLine(e)]);
+}
+
+/**
+ * The holder losses the sweep just found: bindings hc ended whose terminal's `reason` is
+ * `holder_lost`, grouped by the holder that held them. A machine's holder is named by its
+ * machine; this computer's by `local`.
+ */
+function holderLossEvents({ ended = [], core, at = new Date().toISOString() }) {
+  const groups = new Map();
+  for (const e of ended) {
+    if (e?.get?.reason !== "holder_lost") continue;
+    const b = e.binding;
+    const holder = b?.machine ? b.machine : (b?.core === core ? LOCAL_HOLDER : null);
+    if (!holder) continue;
+    if (!groups.has(holder)) groups.set(holder, []);
+    groups.get(holder).push(b.bot);
+  }
+  return [...groups.entries()].map(([holder, agents]) => lossEvent({ at, holder, agents, reason: "holder_lost" }));
+}
+
+/**
+ * A holder machine whose line is down, with bindings the ledger still holds: a link drop. The
+ * event is dated by the machine's own `since_ms`, so repeated runs dedup it.
+ */
+function holderUnreachableEvents({ unknown = [], machines = new Map(), core }) {
+  const groups = new Map();
+  for (const b of unknown) {
+    if (!b?.machine) continue;
+    const m = machines.get(b.core);
+    if (!m || m.connected) continue;
+    const at = Number.isSafeInteger(m.since_ms) ? new Date(m.since_ms).toISOString() : "unknown";
+    if (!groups.has(b.machine)) groups.set(b.machine, { at, agents: [] });
+    groups.get(b.machine).agents.push(b.bot);
+  }
+  return [...groups.entries()].map(([holder, g]) => lossEvent({ at: g.at, holder, agents: g.agents, reason: "holder_unreachable" }));
+}
+
+/**
+ * Starts a bot on a holder through the pack's own linked-machine path, as a child CLI with the
+ * pane's hc variables removed (the holder is on this host, so there is no return route to
+ * verify). The child writes the attach and seat rows with `machine`; the holder's name is added
+ * to the answer. A failed child's stderr is the refusal, as if it had run here.
+ */
+function startOnHolder(project, bot, holder) {
+  const env = { ...process.env };
+  for (const k of ["HC_SESSION", "HC_SOCKET", "HC_TERMINAL_SOCKET", "HC_TERMINAL_ID", "HC_SCOPE"]) delete env[k];
+  const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "start", bot.id, "--machine", holder.machine,
+    "--project", project.key, "--json"], { cwd: project.key, env, encoding: "utf8", timeout: HOLDER_START_MS, maxBuffer: 16 * 1024 * 1024 });
+  if (r.error) throw new CliError(`${bot.name} wasn't started on holder "${holder.name}": ${r.error.message}`);
+  if (r.status !== 0) throw new CliError(`holder "${holder.name}": ${(r.stderr || "").trim() || `start failed (exit ${r.status})`}`);
+  if ((r.stderr || "").trim()) process.stderr.write(r.stderr);
+  let out;
+  try { out = JSON.parse(r.stdout); } catch { out = null; }
+  if (!out || typeof out.terminal !== "string") throw new CliError(`holder "${holder.name}": the start gave no terminal.`);
+  return { ...out, holder: holder.name, machine: holder.machine };
+}
+
+/** `am restart` for a bot whose live pane is on a holder: the child CLI's own machine restart. */
+function restartOnHolder(opts, project, bot, held) {
+  if (opts.cwd !== undefined) {
+    throw new CliError(`${bot.name} runs on holder "${held.holder}"; --cwd is a folder on this computer. `
+      + `Restart it there with --machine ${held.holder} and let it keep its folder.`);
+  }
+  const words = [];
+  for (const [flag, value] of [["--tree", opts.tree], ["--force", opts.force], ["--fresh", opts.fresh], ["--save", opts.save],
+    ["--fresh-shared", opts["fresh-shared"]], ["--agent", opts.agent], ["--model", opts.model]]) {
+    if (value === undefined || value === false) continue;
+    words.push(flag);
+    if (value !== true) words.push(value);
+  }
+  const env = { ...process.env };
+  for (const k of ["HC_SESSION", "HC_SOCKET", "HC_TERMINAL_SOCKET", "HC_TERMINAL_ID", "HC_SCOPE"]) delete env[k];
+  const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "restart", bot.id, "--machine", held.holder,
+    "--project", project.key, ...words, ...(opts.json ? ["--json"] : [])], { cwd: project.key, env, encoding: "utf8",
+    timeout: HOLDER_START_MS, maxBuffer: 16 * 1024 * 1024 });
+  if (r.error) throw new CliError(`${bot.name} wasn't restarted on holder "${held.holder}": ${r.error.message}`);
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr) process.stderr.write(r.stderr);
+  exitAfter.code = r.status ?? 1;
+  return PRINTED;
+}
+
+/** `am holders`: the pool, the live count, the limit, and the losses it recorded. */
+export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
+  if (rest.length) throw new CliError("holders takes one name at a time.", 2);
+  const usage = "usage: am holders [--json] | holders limit <n> | holders add --local <name> | holders remove <name>"
+    + " | holders losses [--all] | holders up";
+  if (verb === undefined) {
+    if (arg !== undefined) throw new CliError(usage, 2);
+    const { config, counts, connected } = await holderView();
+    const rows = holderRows({ config, counts, connected });
+    const losses = readLosses(opts.all ? 1000 : 5);
+    if (opts.json) return { limit: config.limit, holders: rows, losses };
+    const lines = [`holders: limit ${config.limit} agents each${rows.length === 1 ? " (one holder: a holder loss ends every agent in it)" : ""}`];
+    for (const h of rows) {
+      const where = h.local ? "this computer" : `machine ${h.machine}${h.connected ? "" : " (away)"}`;
+      const budget = `${h.count}/${h.limit}${h.overLimit ? " over limit" : h.atLimit ? " at limit" : ""}`;
+      lines.push(`  ${h.name}  ${budget}  ${where}${h.session ? `  session ${h.session}` : ""}`);
+    }
+    if (rows.length === 1 && rows[0].count > 0) {
+      lines.push(`A single holder's loss ends all ${rows[0].count}; spread new starts with: am holders add --local <name>`);
+    }
+    if (losses.length) {
+      lines.push("recent losses:");
+      for (const e of losses) lines.push(`  ${e.at}  ${lossLine(e)}`);
+    }
+    return lines.join("\n");
+  }
+  if (verb === "losses") {
+    if (arg !== undefined) throw new CliError("holders losses takes no name.", 2);
+    const losses = readLosses(opts.all ? 1000 : HOLDER_LOSSES_KEPT);
+    return opts.json ? { losses } : (losses.length ? losses.map((e) => `${e.at}  ${lossLine(e)}`).join("\n") : "no holder loss recorded");
+  }
+  if (verb === "limit") {
+    if (arg === undefined) throw new CliError("holders limit needs a number.", 2);
+    const n = Number(arg);
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_HOLDER_LIMIT) throw new CliError(`the limit is a whole number from 1 to ${MAX_HOLDER_LIMIT}.`, 2);
+    const config = readHolders();
+    config.limit = n;
+    writeHolders(config);
+    return opts.json ? { limit: n } : `holders: limit ${n} agents each`;
+  }
+  if (verb === "up") {
+    const started = await holdersUp();
+    return opts.json ? { holders: started } : (started.length
+      ? started.map((s) => `${s.name} (${s.session}): ${s.up ? "core is up" : "core didn't answer"}`).join("\n")
+      : "no local holder to start: the pool is this computer's core");
+  }
+  if (verb === "add") {
+    if (arg === undefined) throw new CliError("holders add needs a name.", 2);
+    if (!opts.local) throw new CliError("holders add makes a local holder: give --local <name> (a machine linked elsewhere is not a holder the pack starts).", 2);
+    const config = readHolders();
+    const why = holderNameProblem(arg, config.holders);
+    if (why) throw new CliError(why, 2);
+    if (!HOLDER_NAME.test(arg)) throw new CliError(`"${arg}" isn't a holder name.`, 2);
+    const session = `am-holder-${arg}`;
+    const machines = await machinesNow();
+    for (const m of machines.values()) if (m?.name === arg) throw new CliError(`the hc machine name "${arg}" is taken; pick another holder name.`);
+    const via = `sh -c 'exec hc connect --session ${session}'`;
+    const r = await hc(["machine", "add", "--name", arg, "--via", via, "--json"]);
+    if (r.code !== 0) throw new CliError(`holder "${arg}" wasn't added: ${hcSaid((r.stderr || r.stdout).trim())}`);
+    config.holders = [...config.holders, { name: arg, machine: arg, session }];
+    writeHolders(config);
+    // The line answers in a second or two; say when it hasn't, but keep the holder: a start
+    // falls back to a connected holder until it does.
+    let connected = false;
+    for (let i = 0; i < 20 && !connected; i += 1) {
+      const now = await hcJson(["machine", "ls"]).catch(() => null);
+      connected = Boolean(now && [...machinesById(now).values()].some((m) => m.name === arg && m.connected));
+      if (!connected) await later(250);
+    }
+    return opts.json ? { added: arg, session, connected, limit: config.limit }
+      : `holder ${arg} added${connected ? "" : " (its core hasn't answered yet; am holders up starts it)"}: ${config.holders.length} holders, limit ${config.limit} each`;
+  }
+  if (verb === "remove" || verb === "rm") {
+    if (arg === undefined) throw new CliError("holders remove needs a name.", 2);
+    const { config, counts } = await holderView();
+    const h = config.holders.find((x) => x.name === arg);
+    if (!h) throw new CliError(`no holder "${arg}" (am holders lists them).`, 2);
+    if (h.name === LOCAL_HOLDER) throw new CliError("local is this computer's holder; it stays.", 2);
+    const count = counts.get(h.name) ?? 0;
+    if (count > 0) throw new CliError(`holder "${h.name}" holds ${count} ${count === 1 ? "agent" : "agents"}; move them off before removing it.`);
+    const r = await hc(["machine", "rm", h.machine, "--json"]);
+    if (r.code !== 0) throw new CliError(`holder "${h.name}" wasn't removed: ${hcSaid((r.stderr || r.stdout).trim())}`);
+    let stopped = null;
+    if (h.session) {
+      const ls = hcInSession(h.session, ["ls", "--json"]);
+      let live = null;
+      try { live = rowsOf(JSON.parse(ls.stdout)).filter((x) => x?.state === "live").length; } catch { live = null; }
+      if (live === 0) {
+        const stop = hcInSession(h.session, ["server", "stop", "--json"]);
+        stopped = stop.code === 0;
+      }
+    }
+    config.holders = config.holders.filter((x) => x.name !== h.name);
+    writeHolders(config);
+    return opts.json ? { removed: h.name, stopped } : `holder ${h.name} removed${stopped ? " (its core stopped)" : ""}`;
+  }
+  throw new CliError(usage, 2);
+}
+/**
+ * The start path's holder decision: { holder } to start there, { local: true } for this
+ * computer, or { held } when the bot already plays somewhere in the pool. Only a pool with more
+ * than one holder spreads; `--holder` names one explicitly; `--space` is this computer's.
+ */
+async function holderForStart(opts, project, bot) {
+  const config = readHolders();
+  if (config.holders.length < 2 && opts.holder === undefined) return { local: true };
+  const { view, counts, connected } = await holderView();
+  const held = holderHeld(view, bot.id, project.key);
+  if (held) return { held };
+  if (opts.space !== undefined) return { local: true };
+  const pick = chooseHolder({ config, counts, connected, holder: opts.holder });
+  if (pick.error) throw new CliError(pick.error, 2);
+  if (pick.local) return { local: true };
+  if (!pick.connected) {
+    if (opts.holder !== undefined) throw new CliError(`holder "${pick.name}" isn't connected (am holders up starts a local holder's core).`);
+    return { local: true };
+  }
+  return { holder: pick };
+}
+
 async function cmdStart(opts, [ref], warnedRelabels) {
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
+  if (opts.holder !== undefined && opts.machine !== undefined) {
+    throw new CliError("--holder picks one of this computer's holders; --machine starts on a linked machine (give one).", 2);
+  }
   const project = await projectFor(opts);
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
@@ -3684,6 +4040,24 @@ async function cmdStart(opts, [ref], warnedRelabels) {
   // keyOf(projectKey)). Here that folder is `key`, which keyOf already returned, and a key
   // keys to itself, so the check can't refuse: it is left out, not forgotten.
   if (project.machine) return startOnMachine(opts, project, bot);
+  // #1432: a pool with more than one holder puts the new pane on the least loaded one; the
+  // holder is a local hc session exposed as a linked machine, so its launch is the pack's own
+  // linked-machine start, delegated to a child CLI. One holder (the default) changes nothing.
+  if (opts.holder !== undefined && readHolders().holders.length < 2) {
+    const why = opts.holder === LOCAL_HOLDER ? null : `no holder "${opts.holder}": the pool is this computer's core (am holders add --local <name>)`;
+    if (why) throw new CliError(why, 2);
+  }
+  const decision = await holderForStart(opts, project, bot);
+  if (decision.held) {
+    const where = decision.held.holder && decision.held.holder !== LOCAL_HOLDER ? ` on holder ${decision.held.holder}` : "";
+    const elsewhere = decision.held.elsewhere ? `, for ${decision.held.elsewhere}` : "";
+    return opts.json ? { id: bot.id, running: decision.held.binding.terminal, holder: decision.held.holder }
+      : `${bot.name} is already running in ${decision.held.binding.terminal}${where}${elsewhere}.`;
+  }
+  if (decision.holder) {
+    const out = startOnHolder(project, bot, decision.holder);
+    return opts.json ? out : out.terminal;
+  }
   // One terminal plays a bot: the one the attach ledger names is reported, never a second
   // start (decided again under the ledger's lock, below, with hc run). A bot that lives in the
   // project's own app home is found by the same resolver every read shares (#1128).
@@ -6626,9 +7000,29 @@ async function projectHomeHeld(project, bot) {
  * printing the selected one as the whole truth. `direct` is a binding the caller already read
  * from the view (whois by bare id answers outside a project, where the project filter would
  * hide it). */
+/**
+ * #1432: the same project's bot on a holder's core, when the pool has one. A holder is a local
+ * linked machine, and the local view keeps machine bindings apart (`liveAt`), so a plain
+ * `liveFor` for this computer misses it; ls, show and whois fall back to this.
+ */
+function holderFallback(view, bot, project) {
+  if (!view || project?.machine) return null;
+  let config;
+  try { config = readHolders(); } catch { return null; }
+  if (config.holders.length < 2) return null;
+  for (const l of view.liveAt.values()) {
+    if (l.binding.bot !== bot.id) continue;
+    const place = placeOfRow(l.binding);
+    const name = place === null ? null : view.machines.get(place)?.name;
+    if (name && config.holders.some((h) => h.name === name)) return l;
+  }
+  return null;
+}
+
 async function readHeld(project, bot, view, { refuseTwins = false, direct: chosen = undefined } = {}) {
   if (!view || bot.planned) return null;
-  const direct = chosen !== undefined ? chosen : liveFor(view, bot.id, project);
+  const found = chosen !== undefined ? chosen : liveFor(view, bot.id, project);
+  const direct = found ?? holderFallback(view, bot, project);
   if (!direct || !project || project.machine || Boolean(process.env.HERDR_APP_HOME)) {
     return direct ?? await projectHomeHeld(project, bot);
   }
@@ -6992,6 +7386,12 @@ async function cmdRestart(opts, [ref]) {
   warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
+  // #1432: a bot whose live pane is on a holder restarts there, through the machine path.
+  if (!project.machine && !opts._queuedTarget && readHolders().holders.length > 1) {
+    const held = holderHeld(await attachView(), bot.id, key);
+    // Only this project's binding: a clone's same-id bot on a holder is another checkout's.
+    if (held?.holder && held.holder !== LOCAL_HOLDER && held.binding.project === key) return restartOnHolder(opts, project, bot, held);
+  }
   // Before swap validation, preparation or a delegated tree transaction.
   refuseLinkedCaller(project);
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
@@ -10477,7 +10877,7 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
-  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive };
+  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive, holders: cmdHolders };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */

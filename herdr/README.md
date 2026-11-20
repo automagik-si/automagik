@@ -835,6 +835,40 @@ itself — with the same 113/exact-words rule — before it removes the pack and
 overrules a refusal from a command that answered.
 Panes on a linked machine are that machine's own to bring back.
 
+## More than one holder (#1432)
+
+Every pane belongs to one herdr-core **holder**: the process of the core that started it. When a
+holder is lost, hc ends every terminal it held (issue #1432), so on a computer with one core a
+single loss ends every bot. The pack can spread new starts over more than one holder on the same
+computer: each extra holder is another hc session's core, exposed as a linked machine on this
+host, and a bot started there runs the pack's normal linked-machine launch.
+
+- **Default: one holder, `local`, and a limit of 6 agents per holder.** Nothing is spread and no
+  core is started until the lead adds a holder, so a pack that never runs `am holders` behaves
+  exactly as before. The limit is configurable with `am holders limit N` (1-64).
+- `am holders` shows the pool: each holder's live agent count against the limit, whether its core
+  answers, and the recent losses. `am holders add --local NAME` adds one: it creates the hc
+  session `am-holder-NAME` and links it as the machine `NAME` (`hc machine add --via`), so the
+  holder's panes show in this window in that machine's space on the project. `am holders remove
+  NAME` takes one away once it holds no agent. `am holders up` starts a holder's core after a
+  reboot.
+- A new `am start` goes to the holder with the fewest of the pack's agents, and never to a holder
+  whose core isn't answering while another is. With N agents and a limit L over two or more
+  holders, a start above the limit goes to another holder: one holder's loss cannot take every
+  seat. A start is never refused for the limit; when every holder is full, the least loaded takes
+  it and says so.
+- `am ls`, `am show` and `am whois` name the holder; `am restart` finds the bot's holder and runs
+  the restart there. A worker started from a holder's pane runs in that holder (its `am` talks to
+  that core). `am holders losses` reads back what each loss took; a lost holder and a dropped
+  machine line are recorded in `<app home>/automagik-herdr/holder-loss.log` as the holder's name
+  and the bot ids, never a path, socket or command line.
+- After a reboot, `am holders up` starts the extra holders, then `am restart <bot> --machine
+  NAME --project <folder> --tree` brings a holder's bot back (restart resumes its session as any
+  other restart does); `am revive` still brings back this computer's own bindings.
+- The upstream half of #1432 - the core logging why it closes a holder's link, and a holder
+  whose link is gone not sweeping its programs - belongs to `herdrdev/herdr-core` (#303), not to
+  this pack.
+
 ## The attach ledger
 
 Which pane plays which bot is recorded in one file, `<app home>/automagik-herdr/attach.jsonl`
