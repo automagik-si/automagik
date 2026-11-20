@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); deliveries 1 and 2 under way, none merged; 3a also held until the trial's result has been reviewed) |
+| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); on 2026-11-20 the owner's side left the trial and 3a to the owner and kept Codex on this computer only, Q4's fallback; deliveries 1 and 2 under way, none merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr patches (the pack: am-quota and the sidebar's CLI), each carrying am's generated copies of the CLI |
 | Created | 2026-11-20 |
@@ -159,7 +159,8 @@ moved, so staging would need its own amendment that makes the file private befor
 into place. Such an amendment, a route outside the hc link (for example a separate
 `ssh <target> hc connect`, which the owner's rule of 2026-11-05 keeps credentials out of), or
 Q3's (b) (both test homes on this computer, a preliminary result that cannot open 3a) is the
-owner's decision.
+owner's decision. Until the owner takes it, Codex stays on this computer only, Q4's fallback
+(decided 2026-11-20, see Decided, Q4).
 
 ### Delivery 0b: the Codex grant trial (the owner runs it)
 
@@ -596,7 +597,9 @@ later amendment.
 4. **Q4.** A pass opens 3a, limited to what was tested; a fail or an inconclusive result keeps
    Codex on this computer only. In addition, the delegate holds 3a: the trial is prepared with a
    test home, and its result goes to the coordinator for review before any real credential is
-   copied. No delivery reads or copies a real Codex or Claude home.
+   copied. No delivery reads or copies a real Codex or Claude home. Since 2026-11-20 (after
+   0a's findings) the trial and 3a are left to the owner, and until the owner decides, Codex
+   stays on this computer only, as after a fail; the deliveries go on with 1 and 2.
 5. **Q5.** This computer is `local` in the plan, first in order; its switch stays the panel's.
 6. **Q6.** A Codex credential goes only to machines the person adds to the list; none by default.
 7. **Q7.** A pin change in `spread` moves that machine only; the rest waits for **Spread again**.
