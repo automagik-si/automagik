@@ -13,6 +13,7 @@ import { LAMP_CSS } from './lamp.js'
 import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
+import { installSelfUpdateMock } from './self-update-mock.js'
 import { teamActions } from './team-actions.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
@@ -1614,4 +1615,8 @@ export function apply(ctx) {
       groups.dispose()
     }
   }, 'ds-bot: surface')
+  // The web self-update preview (issue 1540, step 1): a clickable mock behind `?mock-1540`, so a normal
+  // start of the app is untouched and the owner can open it on a running instance without any
+  // updater code. It goes away with this plugin's context.
+  ctx.effect(() => installSelfUpdateMock(), 'ds-bot: self-update preview (issue 1540)')
 }
