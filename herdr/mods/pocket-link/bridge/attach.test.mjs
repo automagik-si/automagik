@@ -579,6 +579,235 @@ test('cancel during finish wins; a lost written finish is unknown and is never r
   }
 })
 
+async function admitUpload(p, upload) {
+  assert.equal((await p.begin(upload)).state, 'open')
+  assert.deepEqual(await p.chunk(upload), { ok: true, received: 1 })
+  assert.deepEqual(await p.call('chat.attachFinish', { terminal, upload }), admitted(upload))
+}
+
+test('two admitted uploads cancel once each on their watch', async (t) => {
+  const w = await world(t)
+  const p = await rich(w)
+  const sub = w.dsh.subs.get(1)
+  for (const upload of ['first', 'second']) await admitUpload(p, upload)
+  assert.deepEqual([...w.dsh.admitted.get(sub).keys()], ['first', 'second'])
+  for (const upload of ['first', 'second', 'first']) {
+    assert.deepEqual(await p.call('chat.attachCancel', { terminal, upload }), { ok: true })
+  }
+  assert.deepEqual(w.socket.calls('upload-cancel').map((m) => m.params), [
+    { channel: sub.channel, phone: 'paired-key', upload: 'first' },
+    { channel: sub.channel, phone: 'paired-key', upload: 'second' },
+  ])
+  assert.equal(w.dsh.admitted.get(sub)?.size ?? 0, 0)
+})
+
+test('a refused send from another watch preserves the owner’s cancel', async (t) => {
+  const w = await world(t, { host: { answer: (m) => m.method === 'send' ? reply(refuse('invalid')) : undefined } })
+  const a = await rich(w)
+  const b = await rich(w)
+  await admitUpload(a, 'u1')
+  const fields = { terminal, id: 'message', uploads: ['u1'] }
+  assert.deepEqual(await b.call('chat.send', fields), { ...refuse('invalid'), id: fields.id })
+  assert.deepEqual(w.socket.calls('send').map((m) => m.params), [
+    { channel: 2, phone: 'paired-key', text: '', id: fields.id, uploads: fields.uploads, by: 'Test phone' },
+  ])
+  assert.deepEqual(await a.call('chat.attachCancel', { terminal, upload: 'u1' }), { ok: true })
+  assert.deepEqual(w.socket.calls('upload-cancel').map((m) => m.params), [{ channel: 1, phone: 'paired-key', upload: 'u1' }])
+})
+
+test('a written send removes every named admission before its reply', async (t) => {
+  const w = await world(t, { host: { answer: (m) => m.method === 'send' ? null : undefined } })
+  const p = await rich(w)
+  const sub = w.dsh.subs.get(1)
+  for (const upload of ['first', 'second', 'kept']) await admitUpload(p, upload)
+  const id = p.feed('chat.send', { terminal, id: 'message', uploads: ['first', 'second'] })
+  await tick()
+  const [send] = w.socket.calls('send')
+  assert.ok(send)
+  assert.equal(p.answers(id).length, 0)
+  assert.deepEqual([...w.dsh.admitted.get(sub).keys()], ['kept'])
+  for (const upload of ['first', 'second']) {
+    assert.deepEqual(await p.call('chat.attachCancel', { terminal, upload }), { ok: true })
+  }
+  assert.equal(w.socket.calls('upload-cancel').length, 0)
+  w.socket.answer(send)
+  await tick()
+  assert.deepEqual(p.answer(id).result, { ok: true, state: 'sent', id: 'message' })
+})
+
+test('an oversized or thrown send preserves the admitted cancel', async (t) => {
+  for (const reason of ['too-long', 'offline']) {
+    const w = await world(t, { host: { throwWrite: (m) => m.method === 'send' && reason === 'offline' } })
+    const p = await rich(w)
+    await admitUpload(p, 'u1')
+    const text = reason === 'too-long' ? '\0'.repeat(16000) : ''
+    assert.deepEqual(await p.call('chat.send', { terminal, id: 'message', uploads: ['u1'], text }), { ...refuse(reason), id: 'message' })
+    assert.equal(w.socket.calls('send').length, 0)
+    assert.deepEqual(await p.call('chat.attachCancel', { terminal, upload: 'u1' }), { ok: true })
+    assert.deepEqual(w.socket.calls('upload-cancel').map((m) => m.params), [{ channel: 1, phone: 'paired-key', upload: 'u1' }])
+  }
+})
+
+test('a fresh send is forwarded unchanged after cancel forgets its upload', async (t) => {
+  const w = await world(t, { host: { answer: (m) => m.method === 'send' ? reply(refuse('expired')) : undefined } })
+  const p = await rich(w)
+  await admitUpload(p, 'u1')
+  assert.deepEqual(await p.call('chat.attachCancel', { terminal, upload: 'u1' }), { ok: true })
+  const fields = { id: 'message', uploads: ['u1'], text: 'caption' }
+  assert.deepEqual(await p.call('chat.send', { terminal, ...fields }), { ...refuse('expired'), id: fields.id })
+  assert.deepEqual(w.socket.requests.slice(-2).map(({ method, params }) => [method, params]), [
+    ['upload-cancel', { channel: 1, phone: 'paired-key', upload: 'u1' }],
+    ['send', { channel: 1, phone: 'paired-key', ...fields, by: 'Test phone' }],
+  ])
+})
+
+test('a send written during finish makes both cancels local and leaves finish to settle', async (t) => {
+  const w = await world(t, { host: { answer: (m) => m.method === 'upload-finish' ? null : undefined } })
+  const p = await rich(w)
+  await p.begin()
+  await p.chunk()
+  const params = { terminal, upload: 'u1' }
+  const finish = p.feed('chat.attachFinish', params)
+  await tick()
+  const [pending] = w.socket.calls('upload-finish')
+  assert.ok(pending)
+  assert.deepEqual(await p.call('chat.send', { terminal, id: 'message', uploads: ['u1'] }), { ok: true, state: 'sent', id: 'message' })
+  assert.equal(w.socket.calls('send').length, 1)
+  assert.deepEqual(await p.call('chat.attachCancel', params), { ok: true })
+  assert.equal(w.socket.calls('upload-cancel').length, 0)
+  assert.equal(p.answers(finish).length, 0)
+  w.socket.answer(pending)
+  await tick()
+  assert.deepEqual(await p.call('chat.attachCancel', params), { ok: true })
+  assert.deepEqual(p.answer(finish).result, admitted('u1'))
+  assert.equal(w.socket.calls('upload-cancel').length, 0)
+  assert.equal(w.dsh.admitted.get(w.dsh.subs.get(1))?.has('u1') ?? false, false)
+})
+
+test('a refused send of an open upload leaves a later admission cancellable', async (t) => {
+  const w = await world(t, { host: { answer: (m) => m.method === 'send' ? reply(refuse('expired')) : undefined } })
+  const p = await rich(w)
+  assert.equal((await p.begin()).state, 'open')
+  assert.deepEqual(await p.call('chat.send', { terminal, id: 'message', uploads: ['u1'] }), { ...refuse('expired'), id: 'message' })
+  assert.equal(w.socket.calls('send').length, 1)
+  assert.deepEqual(await p.chunk(), { ok: true, received: 1 })
+  const params = { terminal, upload: 'u1' }
+  assert.deepEqual(await p.call('chat.attachFinish', params), admitted('u1'))
+  assert.deepEqual(await p.call('chat.attachCancel', params), { ok: true })
+  assert.deepEqual(w.socket.calls('upload-cancel').map((m) => m.params), [{ channel: 1, phone: 'paired-key', upload: 'u1' }])
+})
+
+test('foreign and unknown admitted cancels stay local', async (t) => {
+  const w = await world(t)
+  const owner = await rich(w)
+  const samePhone = await rich(w)
+  const otherPhone = await rich(w, { device: 'other-key' })
+  await admitUpload(owner, 'u1')
+  for (const p of [samePhone, otherPhone]) {
+    assert.deepEqual(await p.call('chat.attachCancel', { terminal, upload: 'u1' }), { ok: true })
+  }
+  assert.deepEqual(await owner.call('chat.attachCancel', { terminal, upload: 'unknown' }), { ok: true })
+  assert.equal(w.socket.calls('upload-cancel').length, 0)
+  assert.equal(w.dsh.admitted.get(w.dsh.subs.get(1)).has('u1'), true)
+})
+
+test('gone, watch close, revocation and shutdown clear their admitted entries', async (t) => {
+  const w = await world(t)
+  const gone = await rich(w)
+  const closed = await rich(w)
+  const revoked = await rich(w)
+  const kept = await rich(w, { device: 'kept-key' })
+  const subs = [...w.dsh.subs.values()]
+  for (const [i, p] of [gone, closed, revoked, kept].entries()) await admitUpload(p, `u${i}`)
+  assert.deepEqual([...w.dsh.admitted.keys()], subs)
+  w.socket.event(subs[0].channel, { type: 'gone' })
+  await tick()
+  assert.deepEqual([...w.dsh.admitted.keys()], subs.slice(1))
+  closed.closeWatch(1)
+  await tick()
+  assert.deepEqual([...w.dsh.admitted.keys()], subs.slice(2))
+  assert.equal(endRemoved(new Set([revoked.peer, kept.peer]), new Set(['kept-key'])), 1)
+  assert.deepEqual([...w.dsh.admitted.keys()], subs.slice(3))
+  w.dsh.close()
+  assert.equal(w.dsh.admitted.size, 0)
+})
+
+test('a delayed socket close clears old admissions and spares the replacement watch', async (t) => {
+  for (const changedHome of [false, true]) {
+    let home = '/test/team'
+    const w = await world(t, { options: { realpath: () => home } })
+    const stale = await rich(w)
+    await admitUpload(stale, 'old')
+    const oldSub = w.dsh.subs.get(1)
+    const oldSocket = w.socket
+    // Hold the close event until the replacement has admitted an upload.
+    oldSocket.destroy = () => {
+      oldSocket.destroyed = true
+      oldSocket.watches.clear()
+    }
+    oldSocket.destroy()
+    if (changedHome) home = '/test/other-team'
+    const replacement = await w.dsh.open()
+    assert.notEqual(replacement, oldSocket)
+    const params = { terminal, upload: 'old' }
+    assert.deepEqual(await stale.call('chat.attachCancel', params), refuse('read-only'))
+    const fresh = await rich(w)
+    const newSub = w.dsh.subs.get(2)
+    await admitUpload(fresh, 'new')
+    assert.equal(w.dsh.admitted.get(oldSub).has('old'), true)
+    assert.equal(w.dsh.admitted.get(newSub).has('new'), true)
+    oldSocket.emit('close')
+    assert.equal(w.dsh.admitted.has(oldSub), false)
+    assert.equal(w.dsh.admitted.get(newSub).has('new'), true)
+    assert.deepEqual(await fresh.call('chat.attachCancel', params), { ok: true })
+    assert.equal(oldSocket.calls('upload-cancel').length, 0)
+    assert.equal(replacement.calls('upload-cancel').length, 0)
+  }
+})
+
+test('admitted entries expire at 15 minutes on lookup and insertion', async (t) => {
+  const w = await world(t)
+  const p = await rich(w)
+  const sub = w.dsh.subs.get(1)
+  for (const upload of ['lookup', 'insert']) await admitUpload(p, upload)
+  await w.clock.advance(15 * 60_000)
+  assert.deepEqual(await p.call('chat.attachCancel', { terminal, upload: 'lookup' }), { ok: true })
+  assert.equal(w.socket.calls('upload-cancel').length, 0)
+  assert.equal(w.dsh.admitted.get(sub)?.has('lookup') ?? false, false)
+  await admitUpload(p, 'fresh')
+  assert.deepEqual([...w.dsh.admitted.get(sub).keys()], ['fresh'])
+})
+
+test('the 129th admission evicts only the oldest id on that watch', async (t) => {
+  const w = await world(t)
+  const a = await rich(w)
+  const b = await rich(w)
+  const [aSub, bSub] = w.dsh.subs.values()
+  await admitUpload(b, 'kept')
+  for (let i = 0; i < 129; i++) await admitUpload(a, `u${i}`)
+  assert.deepEqual([...w.dsh.admitted.get(aSub).keys()], Array.from({ length: 128 }, (_, i) => `u${i + 1}`))
+  assert.deepEqual([...w.dsh.admitted.get(bSub).keys()], ['kept'])
+  assert.deepEqual(await a.call('chat.attachCancel', { terminal, upload: 'u0' }), { ok: true })
+  assert.equal(w.socket.calls('upload-cancel').length, 0)
+})
+
+test('an unanswered admitted cancel settles at its deadline and leaves the socket open', async (t) => {
+  const w = await world(t, { host: { answer: (m) => m.method === 'upload-cancel' ? null : undefined } })
+  const p = await rich(w)
+  await admitUpload(p, 'u1')
+  const params = { terminal, upload: 'u1' }
+  const cancel = p.feed('chat.attachCancel', params)
+  await tick()
+  assert.equal(w.socket.calls('upload-cancel').length, 1)
+  await w.clock.advance(w.dsh.attachmentMs.cancel - 1)
+  assert.equal(p.answers(cancel).length, 0)
+  await w.clock.advance(1)
+  assert.deepEqual(p.answer(cancel).result, { ok: true })
+  assert.equal(w.socket.destroyed, false)
+  assert.deepEqual(await p.call('chat.attachCancel', params), { ok: true })
+  assert.equal(w.socket.calls('upload-cancel').length, 1)
+})
+
 test('endRemoved waits for rich unsubscribe; an ack preserves the other phone and a missing ack drops the socket', async (t) => {
   for (const ack of [{}, null, { invalid: true }]) {
     let revoking = true
@@ -844,7 +1073,7 @@ test('read validates variant bytes, dimension and media, then shares rate and bu
   const w = await world(t, { host: { answer: (m) => m.method === 'attachment-read' ? answer : undefined } })
   const a = await rich(w)
   const b = await rich(w)
-  for (const patch of [{ mediaType: 'image/gif' }, { height: 513 }, { width: 1.5 }, { data: 'AR==' }, { data: '' }, { data: b64(131073) }]) {
+  for (const patch of [{ mediaType: 'image/svg+xml' }, { height: 513 }, { width: 1.5 }, { data: 'AR==' }, { data: '' }, { data: b64(131073) }]) {
     answer = reply({ ...thumbnail, ...patch, name: secret })
     assert.deepEqual(await a.read(), refuse('failed'))
   }
@@ -869,6 +1098,22 @@ test('read validates variant bytes, dimension and media, then shares rate and bu
   await w.clock.advance(60000)
   answer = reply(thumbnail)
   assert.deepEqual(await b.read(), thumbnail)
+})
+
+test('GIF thumbnails pass through unchanged while the upload offer keeps PNG, JPEG and WebP', async (t) => {
+  const uploadTypes = ['image/png', 'image/jpeg', 'image/webp']
+  const gif = {
+    ok: true, mediaType: 'image/gif', width: 1, height: 1,
+    data: 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+  }
+  const w = await world(t, { host: {
+    offer: () => ({ ...offer(), mediaTypes: [...uploadTypes, 'image/gif'] }),
+    answer: (m) => m.method === 'attachment-read' ? reply(gif) : undefined,
+  } })
+  const p = w.phone()
+  assert.deepEqual((await p.hello()).attachments.mediaTypes, uploadTypes)
+  await p.watch()
+  assert.deepEqual(await p.read(), gif)
 })
 
 test('fake manifest Retry forwards both uploads after reconnect with a one-file offer', async (t) => {
