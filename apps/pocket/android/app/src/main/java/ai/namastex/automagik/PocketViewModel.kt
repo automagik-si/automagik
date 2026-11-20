@@ -1201,27 +1201,34 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
      * it at a fake bridge to drive the chat wiring without a device (#754). The app never sets it.
      */
     private val defaultChatOpener: suspend (String, CoroutineScope, (String) -> Unit) -> ChatLink =
-        { hostId, scope, lost -> connectChatLink(hostId, scope, emptyList(), lost) }
+        { hostId, scope, lost -> connectChatLink(hostId, scope, emptyList(), false, lost) }
     internal var chatOpener: suspend (hostId: String, scope: CoroutineScope, lost: (String) -> Unit) -> ChatLink = defaultChatOpener
     internal var chatOpenerManage: (suspend (String, CoroutineScope, List<String>, (String) -> Unit) -> ChatLink)? = null
+    internal var chatOpenerAttach: (suspend (String, CoroutineScope, List<String>, Boolean, (String) -> Unit) -> ChatLink)? = null
+    internal val attachments = AttachImage(getApplication<Application>().contentResolver).let { images ->
+        AttachSession(viewModelScope, chat = { _chat.value }, ref = { chatRef }, demo = { state.value.demo },
+            link = { chatLink }, notice = { n -> chatUpdate(chatGen) { it.copy(notice = n) } },
+            prepare = { uri, offer -> images.prepare(uri, offer) })
+    }
     /** Automatic reconnects of the open DSH chat since its last snapshot (main thread only); see [Chat.RESUMABLE]. */
     private var resumeAttempt = 0
     private var resumeJob: Job? = null
 
     private suspend fun openChatLink(hostId: String, scope: CoroutineScope, manage: List<String> = emptyList(),
-                                     lost: (String) -> Unit): ChatLink =
-        chatOpenerManage?.invoke(hostId, scope, manage, lost)
-            ?: if (manage.isEmpty() || chatOpener !== defaultChatOpener) chatOpener(hostId, scope, lost)
-            else connectChatLink(hostId, scope, manage, lost)
+                                     attachments: Boolean = false, lost: (String) -> Unit): ChatLink =
+        chatOpenerAttach?.invoke(hostId, scope, manage, attachments, lost)
+            ?: chatOpenerManage?.invoke(hostId, scope, manage, lost)
+            ?: if ((manage.isEmpty() && !attachments) || chatOpener !== defaultChatOpener) chatOpener(hostId, scope, lost)
+            else connectChatLink(hostId, scope, manage, attachments, lost)
 
     /** The production chat route: Iroh to the paired desktop, then Pocket Link's chat version 1 ([ChatClient]). */
-    private suspend fun connectChatLink(hostId: String, scope: CoroutineScope, manage: List<String>, lost: (String) -> Unit): ChatLink {
+    private suspend fun connectChatLink(hostId: String, scope: CoroutineScope, manage: List<String>, attachments: Boolean, lost: (String) -> Unit): ChatLink {
         val profile = state.value.hosts.find { it.id == hostId && it.paired } ?: error("This machine isn’t paired with Pocket Link.")
         val t = try { IrohLink.open(getApplication(), profile.ticket, profile.session, scope, IrohLink.CHAT) }
             catch (e: Exception) { if (e !is CancellationException && ChatClient.refusedRoute(e)) throw ChatUnsupported() else throw e }
         val core = CoreClient(t.input, t.output, t, scope, lost)
         // The transport scope owns the hello read so a timeout can close it while it is still blocked on input.
-        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage) }
+        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage, attachments) }
         try { return withTimeout(20_000) { PocketLinkChat(hello.await()) } }
         catch (e: Exception) { core.close(); hello.cancel(); throw e }
     }
@@ -1262,9 +1269,14 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
             var link: ChatLink? = null
             try {
-                link = openChatLink(ref.hostId, scope) { reason -> chatUpdate(gen) { it.copy(connected = false, error = "Chat disconnected: $reason",
-                    messages = it.messages.map { m -> if (m.state == "sending") m.copy(state = "maybe") else m }) } }
+                link = openChatLink(ref.hostId, scope, attachments = true) { reason ->
+                    attachments.linkClosed(gen)
+                    chatUpdate(gen) { it.copy(connected = false, error = "Chat disconnected: $reason",
+                        messages = it.messages.map { m -> if (m.state == "sending") m.copy(state = "maybe") else m }) }
+                }
+                if (gen != chatGen) return@launch
                 chatLink = link
+                attachments.linkOpened(gen, link.attach)
                 val dshWrite = link.dshWrite
                 chatUpdate(gen) { it.copy(dshWrite = dshWrite) }
                 if (!Chat.isDsh(ref.address) && link.list().none { it.terminal == ref.address }) { chatUpdate(gen) { it.copy(error = Chat.NO_CHAT) }; return@launch }
@@ -1276,7 +1288,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
                 if (resuming && e !is ChatUnsupported) { chatUpdate(gen) { it.copy(connected = false) }; viewModelScope.launch { resumeLater(ref, gen) } }
                 else chatUpdate(gen) { it.copy(connected = false, resuming = false, error = e.message ?: "Chat couldn’t connect") }
             }
-            finally { if (chatLink === link) chatLink = null; link?.close() }
+            finally { attachments.linkClosed(gen); if (chatLink === link) chatLink = null; link?.close() }
         }
     }
 
@@ -1317,7 +1329,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     private suspend fun chatSubscribe(link: ChatLink, terminal: String, after: String?, gen: Int) {
+        val token = attachments.watchStarted(gen)
         link.subscribe(terminal, after, { e ->
+            attachments.event(token, e)
             val before = _chat.value?.takeIf { gen == chatGen }?.receipts.orEmpty()
             chatUpdate(gen) { Chat.reduce(it, e) }
             val type = e.optString("type")
@@ -1330,6 +1344,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             }
             viewModelScope.launch { chatEvent(gen, type) }
         }) { reason ->
+            attachments.watchEnded(token)
             // Too slow to keep up: the bridge closed the stream; come back from the cursor.
             if (reason == "slow" && gen == chatGen) viewModelScope.launch(Dispatchers.IO) {
                 runCatching { chatSubscribe(link, terminal, _chat.value?.cursor, gen) }
@@ -1344,6 +1359,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private fun closeChat(ref: TerminalRef?, keepManagement: Boolean) {
         if (ref != null && ref != chatRef) return
         if (!keepManagement) { closeMemory(); closeSchedules(); closeSettings() }
+        attachments.closed(keep = keepManagement, gen = chatGen)
         // bots-dsh stops following a Bot chat no phone watches: what it lists next is not a finish ([ChatWatch.left]).
         chatRef?.takeIf { Chat.isDsh(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
         ++chatGen
@@ -1361,6 +1377,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
      */
     fun streams(started: Boolean) {
         if (!started) {
+            attachments.linkClosed(chatGen)
             closeMemory()
             closeSchedules()
             closeSettings()
