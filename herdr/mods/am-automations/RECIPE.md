@@ -173,6 +173,9 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   `hc --name` is not caught, and a branch shaped like one (`feat/t3q1`) is warned about too, by design.
 - **Form** re-runs `put --dry-run` on every keystroke or pill (last answer wins), so the previewed
   next runs are the server's; `Save` runs `put` (with `--original` when editing).
+- Entries named `wake-<bot id>-<hash>` are written by `am edit --wake`. The next
+  `am edit --wake` reapplies the roster's schedule, prompt and delivery settings, overwriting
+  panel edits to those fields while the entry still belongs to that bot.
 - **Toasts**: a run that turns `failed` or `missed` after the panel started posts a notification;
   clicking it focuses the run's terminal when live.
 - `bash: put` gets its JSON through `sh -c 'printf %s "$json" | "$bin" put …'` because `exec` has no

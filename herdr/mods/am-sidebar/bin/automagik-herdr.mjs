@@ -22,7 +22,7 @@ import { coreStatus, inTestRoots } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId,
-  botsText, parseBots, plannedOf, projectKeyOf, projectOf, squadOf, withListedProject, writeFolderOf } from "../model.js";
+  botsText, parseBots, plannedOf, projectKeyOf, projectOf, squadOf, wakeAutomationName, wakeCron, wakeProblem, withListedProject, writeFolderOf } from "../model.js";
 import { UNANSWERED, agentInForeground, attachRefusal, attachWords, detachWords, hcName, isClaude, leadIdOf, leadPane, newest,
   paneLabels, paneOf, parentArgs, placementFrom, relabel, relabelPlan, relabelWarning, relabelWords, rowsOf, spaceOnly, spacePlace,
   freshSpare, roleOf, shellIdle, spareTab, startArgs, startRefusal, unwrapKeep } from "../launchArgs.js";
@@ -1631,6 +1631,7 @@ const OPTIONS = {
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
   model: { type: "string" }, "no-model": { type: "boolean" }, rank: { type: "string" }, "hc-proxy": { type: "string" },
   "restart-at": { type: "string" }, "no-restart-at": { type: "boolean" }, due: { type: "boolean" },
+  wake: { type: "string" }, "no-wake": { type: "boolean" },
   "person-features": { type: "string" }, "permission-mode": { type: "string" },
   "agy-mode": { type: "string" }, "worker-agy-mode": { type: "string" },
   "hermes-home": { type: "string" }, "hermes-profile": { type: "string" }, "no-hermes": { type: "boolean" },
@@ -1693,6 +1694,7 @@ Usage: am <command> [options]                   (every command takes --json and 
                                        to their launch's own lists (repeatable; never removes a
                                        fixed deny). An empty value clears that list
          [--planned-wave N [--planned-note T]]          prints the new bot's id
+         [--wake daily@HH:MM | --no-wake]   daily wake in the owning machine's local time
          [--worker-agent A] [--worker-model M] [--worker-effort E]   its workers' defaults
          [--worker-agy-mode accept-edits|auto|plan]                  (Antigravity's --mode)
          [--hc-proxy on|off]            per-bot Linux proxy; default off. Edit, proxy approve
@@ -1702,6 +1704,7 @@ Usage: am <command> [options]                   (every command takes --json and 
              [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
              [--restart-at N | --no-restart-at]   a context threshold in tokens (#1556):
                                        a main bot defaults to 250000, a member has none
+             [--wake daily@HH:MM | --no-wake]   set or clear the bot's daily wake
              [--permission-mode=] [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
              [--person-features on|off]   (Claude Code only; default off)
@@ -2203,6 +2206,14 @@ export function entryFrom(opts, base, project, { creating, listOf = null }) {
     }
     entry.restartAt = Number(tokens);
   }
+  if (opts.wake !== undefined) {
+    if (opts["no-wake"]) throw new CliError("Choose one of --wake and --no-wake.", 2);
+    const problem = wakeProblem(opts.wake);
+    if (problem) throw new CliError(`--${problem}`, 2);
+    entry.wake = opts.wake;
+  } else if (opts["no-wake"]) entry.wake = "";
+  // An unrelated edit leaves a hand-written empty wake in the raw roster.
+  else if (entry.wake === null || entry.wake === "") delete entry.wake;
   if (opts["hc-proxy"] !== undefined) {
     if (!["on", "off"].includes(opts["hc-proxy"])) {
       throw new CliError("--hc-proxy is on or off; nothing was saved.", 2);
@@ -2642,12 +2653,264 @@ async function cmdForget(opts, [ref]) {
   throw new CliError(why, 1, { project: key, forgotten: false });
 }
 
+// ---- daily wakes (#1002) ----
+
+const WAKE_MARKER = /^Scheduled wake \(daily \d\d:\d\d\): /;
+const WAKE_SCHEDULER = [
+  'b=$(command -v herdr-automations 2>/dev/null) || b="$HOME/.local/bin/herdr-automations"',
+  '[ -x "$b" ] || exit 127',
+  'payload=$1; shift',
+  'if [ -n "$payload" ]; then printf \'%s\' "$payload" | "$b" "$@"; else "$b" "$@" </dev/null; fi',
+].join("\n");
+const wakeProblemLine = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+const wakeOwner = (project) => project.machine ?? "this computer";
+
+async function schedulerRun(project, args, stdinText) {
+  const argv = ["-c", WAKE_SCHEDULER, "sh", stdinText ?? "", ...args];
+  try {
+    const r = project.machine
+      ? await remoteIo.exec("sh", argv, project.machine, { timeout: 30 })
+      : await runProgram("sh", argv, { timeout: 30000 });
+    return r.killed ? { ...r, code: -1 } : r;
+  } catch (e) {
+    return { code: -1, stderr: e.message };
+  }
+}
+
+const wakeFailure = (state, problem) => ({ state, problem });
+const wakeRunFailure = (r) => wakeFailure(
+  r.code === 127 ? "missing" : r.code === -1 ? "unreachable" : "unreadable",
+  r.code === 127 ? "herdr-automations is missing (checked PATH and ~/.local/bin)"
+    : wakeProblemLine(hcSaid(r.stderr) || r.stdout) || "herdr-automations did not answer",
+);
+const wakeJson = (text) => {
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch { return null; }
+};
+
+async function readWakeScheduler(project) {
+  const r = await schedulerRun(project, ["ls", "--json"]);
+  if (r.code !== 0) return { failure: wakeRunFailure(r) };
+  const listing = wakeJson(r.stdout);
+  const namedRows = (rows) => Array.isArray(rows) && rows.every((row) => typeof row?.name === "string");
+  if (!listing || !["auto", "hc", "herdr"].includes(listing.backend) || typeof listing.config !== "string"
+    || typeof listing.paused !== "boolean" || !Number.isInteger(listing.scheduler) || listing.scheduler < 0
+    || (listing.targets !== undefined && (!Array.isArray(listing.targets) || !listing.targets.every((target) => typeof target === "string")))
+    || !namedRows(listing.automations) || !namedRows(listing.invalid)
+    || listing.automations.some(({ disabled, next, last }) => typeof disabled !== "boolean" || typeof next !== "string"
+      || (last !== null && (typeof last?.status !== "string" || typeof last?.at !== "string")))) {
+    return { failure: wakeFailure("unreadable", "herdr-automations ls --json returned an unreadable listing") };
+  }
+  return { listing };
+}
+
+function wakeCapability(listing) {
+  if (listing.backend === "herdr") {
+    return wakeFailure("no-bot-targets", "the herdr backend can't wake bots; set backend: hc in " + listing.config);
+  }
+  if (!listing.targets?.includes("bot")) {
+    return wakeFailure("no-bot-targets", "this herdr-automations build can't wake a bot; "
+      + "update to the release after 0.12.1-am.1 with backend hc");
+  }
+  return null;
+}
+
+const wakeRepo = ({ repo }) => typeof repo === "string" && repo.startsWith("/") ? repo.replace(/\/+$/, "") || "/" : null;
+function wakeEntry(listing, project, id) {
+  const name = wakeAutomationName(id, project.key);
+  const target = `${BOT_LABEL}:${id}`;
+  const owns = (entry) => entry.target === target && wakeRepo(entry) === project.key
+    && typeof entry.prompt === "string" && WAKE_MARKER.test(entry.prompt);
+  const named = listing.automations.filter((entry) => entry.name === name);
+  const invalid = listing.invalid.find((entry) => entry.name === name);
+  const [entry] = named;
+  const other = listing.automations.filter((row) => row.name !== name && row.target === target);
+  const renamed = other.find(owns);
+  const conflict = (why) => wakeFailure("conflict", why + `; resolve it in ${listing.config} (automations.yaml)`);
+  const blocked = invalid ? conflict(`${name} is invalid${invalid.line ? ` at line ${invalid.line}` : ""}`)
+    : named.length > 1 ? conflict(`${name} is listed more than once`)
+    : entry && !owns(entry) ? conflict(`${name} fails the wake ownership check `
+      + `(repo ${JSON.stringify(entry.repo ?? null)}, target ${JSON.stringify(entry.target ?? null)})`)
+    : null;
+  return { name, entry, invalid, blocked, other: other.map((row) => row.name),
+    renamed: renamed ? conflict(`${renamed.name} is a wake for this bot under a different name`) : null };
+}
+
+function wakePayload(project, id, spec) {
+  return {
+    name: wakeAutomationName(id, project.key), cron: wakeCron(spec), repo: project.key, target: `${BOT_LABEL}:${id}`,
+    target_when_busy: "skip", catch_up_minutes: 1380, timeout_minutes: 10,
+    prompt: `Scheduled wake (daily ${spec.slice(6)}): check your recurring duties from your instructions and do what is due.`,
+  };
+}
+const wakeMatches = (entry, payload) => entry && Object.entries(payload)
+  .every(([key, value]) => (key === "repo" ? wakeRepo(entry) : entry[key]) === value);
+
+function wakeRunnable(project, bot, listing, entry) {
+  if (bot.planned) return wakeFailure("planned", `the bot is planned; unplan it with ${wakeEditCommand(project, bot.id, null, "--unplanned")}`);
+  if (!listing.scheduler) return wakeFailure("stopped", "the scheduler is stopped; run herdr-automations service install");
+  if (listing.paused) return wakeFailure("paused", "the scheduler is paused; run herdr-automations resume");
+  if (entry.disabled) return wakeFailure("disabled", `${entry.name} is paused; run herdr-automations resume ${shellWord(entry.name)}`);
+  return wakeFailure("active", listing.backend === "auto"
+    ? "the config is verified; whether the running service uses hc is unreadable here" : null);
+}
+
+function wakeStatus(project, bot, { listing, failure }) {
+  const spec = bot.wake;
+  const base = { spec, next: null, last: null };
+  if (failure) return { status: { ...base, ...failure }, other: [] };
+  const found = wakeEntry(listing, project, bot.id);
+  const { entry, invalid, blocked, other, renamed } = found;
+  if (!blocked && entry?.last) {
+    const { status, at, error = null, result = null } = entry.last;
+    base.last = { status, at, error, result };
+  }
+  const problem = (invalid && !entry
+    ? wakeFailure("invalid", `${found.name} is invalid in ${listing.config}${invalid.message ? `: ${invalid.message}` : ""}`)
+    : blocked)
+    ?? wakeCapability(listing)
+    ?? (!entry ? renamed ?? wakeFailure("not-scheduled", "there is no matching scheduler entry")
+      : !wakeMatches(entry, wakePayload(project, bot.id, spec))
+        ? wakeFailure("mismatch", `${entry.name} differs from the roster's wake`)
+        : wakeRunnable(project, bot, listing, entry));
+  return { status: { ...base, ...problem, next: problem.state === "active" ? entry.next || null : null }, other };
+}
+
+const wakeEditCommand = (project, id, spec, flag = spec ? `--wake ${spec}` : "--no-wake") =>
+  ["am", "edit", shellWord(id), "--project", shellWord(project.key),
+    ...(project.machine ? ["--machine", shellWord(project.machine)] : []), flag].join(" ");
+
+async function reconcileWake(project, id, spec, removingBot) {
+  const { listing, failure } = await readWakeScheduler(project);
+  if (failure) return failure;
+  const { entry, name, blocked, renamed } = wakeEntry(listing, project, id);
+  if (blocked) return blocked;
+  const capability = wakeCapability(listing);
+  if (capability && (spec || !removingBot)) return capability;
+  if (spec && !entry && renamed) return renamed;
+  if (!spec && !entry) return wakeFailure("not-scheduled", null);
+
+  const payload = spec ? wakePayload(project, id, spec) : null;
+  const r = await schedulerRun(project, spec ? ["put", ...(entry ? ["--original", name] : [])] : ["rm", name],
+    payload ? JSON.stringify(payload) : undefined);
+  const lost = r.code === -1;
+  if (!lost) {
+    if (r.code === 127) return wakeRunFailure(r);
+    const verb = spec ? "put" : "rm";
+    if (r.code !== 0) return wakeFailure("unverified", `herdr-automations ${verb} failed: ${wakeProblemLine(r.stderr || r.stdout) || `exit ${r.code}`}`);
+    if (spec) {
+      const reply = wakeJson(r.stdout);
+      if (!reply || (reply.problem !== undefined && typeof reply.problem !== "string")
+        || (reply.next !== undefined && (!Array.isArray(reply.next) || !reply.next.every((at) => typeof at === "string")))) {
+        return wakeFailure("unverified", "herdr-automations put returned an unreadable reply");
+      }
+      if (reply.problem) return wakeFailure("unverified", `herdr-automations put refused ${name}: ${wakeProblemLine(reply.problem)}`);
+    } else if (r.stdout.trim()) return wakeFailure("unverified", "herdr-automations rm returned unexpected output");
+  }
+
+  const after = await readWakeScheduler(project);
+  if (after.failure) return wakeFailure(lost ? "unknown" : "unverified",
+    `${name} could not be verified: ${after.failure.problem}${lost ? "; the old wake may still fire" : ""}`);
+  const saved = wakeEntry(after.listing, project, id);
+  if (spec) {
+    if (!saved.blocked && wakeMatches(saved.entry, payload)) return wakeCapability(after.listing) ?? { listing: after.listing };
+    return wakeFailure("unverified", `${name} does not match the saved wake in ${after.listing.config}`
+      + (saved.blocked ? `. ${saved.blocked.problem}` : ""));
+  }
+  if (saved.blocked) return saved.blocked;
+  return saved.entry ? wakeFailure("unverified", `${name} is still present in ${after.listing.config}`)
+    : wakeFailure("not-scheduled", null);
+}
+
+/** Read the roster before and after mirroring it, with one retry for an intervening edit. */
+async function syncWake(project, id, requested, { removingBot = false } = {}) {
+  if (project.dir !== project.key) {
+    return { spec: requested, scheduled: false, state: "saved-only",
+      problem: `wake saved in ${fileName(project)}; it goes live from the main checkout's roster. Run ${wakeEditCommand(project, id, requested)}` };
+  }
+  const readBot = async () => {
+    const owner = project.machine ? await loadRemoteProject(project.key, project.machine) : loadProject(project.key);
+    return owner.file.bots.find((bot) => bot.id === id);
+  };
+  let spec = requested;
+  try {
+    let bot = await readBot();
+    for (let pass = 0; pass < 2; pass += 1) {
+      spec = bot?.wake ?? null;
+      const result = await reconcileWake(project, id, spec, removingBot);
+      bot = await readBot();
+      if (spec !== (bot?.wake ?? null)) continue;
+      if (result.listing) {
+        const { status } = wakeStatus(project, bot, result);
+        return { spec, scheduled: true, state: status.state, problem: status.problem };
+      }
+      return { spec, scheduled: false, ...result };
+    }
+    return { spec: bot?.wake ?? null, scheduled: false, state: "superseded",
+      problem: "the roster changed twice while syncing; check its current wake before retrying" };
+  } catch (e) {
+    return { spec, scheduled: false, state: "unknown",
+      problem: `the owner's roster could not be confirmed: ${wakeProblemLine(e.message)}; the old wake may still fire` };
+  }
+}
+
+async function saveWake(project, id, opts) {
+  if (opts.wake === undefined && !opts["no-wake"]) return {};
+  const wake = await syncWake(project, id, opts.wake ?? null);
+  if (wake.state === "saved-only") report([wake.problem]);
+  else {
+    const saved = wake.spec ? `wake ${wake.spec} saved in ${fileName(project)}` : `wake cleared in ${fileName(project)}`;
+    if (!wake.scheduled && wake.state !== "not-scheduled") {
+      exitAfter.code = 1;
+      report([`${saved}; scheduler sync on ${wakeOwner(project)} failed: ${wake.problem}. Rerun ${wakeEditCommand(project, id, wake.spec)}`]);
+    } else {
+      report([`${saved}; ${wake.scheduled ? "scheduler entry verified" : "scheduler entry absent"} on ${wakeOwner(project)}${wake.problem ? `. Warning: ${wake.problem}` : ""}`]);
+    }
+  }
+  return { wake };
+}
+
+async function removeBotWake(project, id) {
+  const name = wakeAutomationName(id, project.key);
+  const remove = `herdr-automations rm ${shellWord(name)} on ${wakeOwner(project)}`;
+  if (project.dir !== project.key) {
+    report([`once the deletion reaches ${project.key}, ${remove} removes its wake entry`]);
+    return;
+  }
+  const wake = await syncWake(project, id, null, { removingBot: true });
+  if (wake.state === "missing" || wake.state === "not-scheduled" || wake.scheduled) return;
+  report([`bot removed from ${fileName(project)}; wake entry ${name} may remain on ${wakeOwner(project)}: ${wake.problem}`
+    + (wake.state === "conflict" ? "" : `. Check that it belongs to this bot before running ${remove}`)]);
+}
+
+const wakeDisplayTime = (time, linked) => linked ? time : time?.replace(/(T\d\d:\d\d):.*$/, "$1");
+// An active wake carries a problem only when the backend is auto.
+const wakeNextText = (wake, linked) => wake.next
+  ? `next ${wakeDisplayTime(wake.next, linked)}${wake.problem ? " (per the config)" : ""}` : null;
+const wakeLastText = (wake, linked, detail = false) => {
+  if (!wake.last) return null;
+  const oneLine = wakeProblemLine(wake.last.error || wake.last.result);
+  const note = detail || oneLine.length <= 60 ? oneLine : `${oneLine.slice(0, 57)}…`;
+  return `last ${wake.last.status}${detail ? " at" : ""} ${wakeDisplayTime(wake.last.at, linked)}${note ? ` (${note})` : ""}`;
+};
+
+function listedWake(project, bot, scheduler) {
+  if (!bot.wake) return {};
+  return { wake: bot.wake, wakeStatus: wakeStatus(project, bot, scheduler).status };
+}
+
 async function cmdLs(opts) {
+  let scheduler;
+  const schedulerFor = (project) => project.file.bots.some((bot) => bot.wake)
+    ? (scheduler ??= readWakeScheduler(project)) : null;
   if (opts.machine !== undefined) {
     if (opts.all) throw new CliError("ls --all lists this computer's projects; give --machine without --all.", 2);
     const project = await projectFor(opts);
+    const listing = await schedulerFor(project);
     const bots = [];
-    for (const bot of project.file.bots) bots.push(await describeLinked(project, bot));
+    for (const bot of project.file.bots) bots.push({ ...await describeLinked(project, bot), ...listedWake(project, bot, listing) });
     const one = { ...placeOf(project), categories: project.file.categories, warnings: project.warnings, bots };
     return opts.json ? { projects: [one] } : lsLines([one]);
   }
@@ -2659,11 +2922,12 @@ async function cmdLs(opts) {
     let project;
     try { project = loadProject(key); } catch (e) { projects.push({ project: key, error: e.message, categories: [], bots: [], warnings: [] }); continue; }
     if (project.text === null && opts.all && key !== keys[0]) continue; // a remembered project whose file is gone
+    const listing = await schedulerFor(project);
     const ledger = workerLedgerRows();
     const bots = await Promise.all(project.file.bots.map(async (b) => {
       const held = await readHeld(project, b, view);
       return { ...describe(project, b, view, hcError, null, null, held, seatContext(project, b, held?.get ?? null, ledger)),
-        duplicate: await duplicateLabel(project, b, view) };
+        duplicate: await duplicateLabel(project, b, view), ...listedWake(project, b, listing) };
     }));
     projects.push({ project: key, categories: project.file.categories, warnings: project.warnings, bots });
   }
@@ -2688,7 +2952,10 @@ function lsLines(projects) {
       const status = b.planned ? `planned, wave ${b.planned.wave}` : b.terminal ? `${b.status} in ${p.machine ? `${p.machine}/` : ""}${b.terminal}` : b.status;
       const code = b.code === false ? "  code false" : "";
       const duplicate = b.duplicate ? "  ! duplicate live labels" : "";
-      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${duplicate}${b.warning ? `  ! ${b.warning}` : ""}`);
+      const wake = b.wakeStatus;
+      const wakeLine = wake ? ["", `wake ${wake.spec} ${wakeNextText(wake, p.machine) ?? `(${wake.state})`}`,
+        wakeLastText(wake, p.machine)].filter((part) => part !== null).join("  ") : "";
+      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${duplicate}${b.warning ? `  ! ${b.warning}` : ""}${wakeLine}`);
     }
     for (const w of p.warnings ?? []) lines.push(`  ! ${w}`);
     const hcError = p.bots.find((b) => b.hcError)?.hcError;
@@ -2788,6 +3055,8 @@ async function cmdShow(opts, [ref]) {
       duplicate: await duplicateLabel(project, bot, view) }), instructions: bot.instructions };
   info.hcProxyState = project.machine ? await proxyStateOn(project, bot)
     : approvedProxyState({ project: project.key, bot });
+  const wake = bot.wake ? wakeStatus(project, bot, await readWakeScheduler(project)) : null;
+  if (wake) Object.assign(info, { wake: bot.wake, wakeStatus: wake.status });
   if (opts.json) return info;
   const crossProjects = info.crossMembers?.length ? localProjectsFor(project) : null;
   return [
@@ -2823,6 +3092,12 @@ async function cmdShow(opts, [ref]) {
     `  status       ${info.status}${info.terminal ? ` in ${info.terminal} (since ${info.since})` : ""}`,
     `  context      ${info.context_tokens === null ? "-" : `${info.context_tokens} tokens`}`,
     `  restartAt    ${info.restartAt === null ? "-" : `${info.restartAt} tokens${info.pinnedRestartAt ? "" : " (default)"}`}`,
+    ...(wake ? [
+      `  wake         ${[bot.wake, wake.status.state, wakeNextText(wake.status, project.machine),
+        wakeLastText(wake.status, project.machine, true)].filter(Boolean).join(" · ")}`,
+      ...(wake.status.problem ? [`  wake note    ${wakeProblemLine(wake.status.problem)}`] : []),
+      ...(wake.other.length ? [`  wake note    other automations target this bot: ${wake.other.join(", ")}`] : []),
+    ] : []),
     ...(info.duplicate ? ["  warning      duplicate live labels"] : []),
     `  look         ${info.look.character} in ${info.look.colour}`, `  role         ${info.role || "-"}`,
     `  rank         ${info.rank ?? "-"}`, `  code         ${info.code}`,
@@ -2901,7 +3176,8 @@ async function cmdCreate(opts) {
   warnCrossLinkAfterSave(project, raw, id);
   // A lead that becomes a captain; another machine's panes are left as they are.
   const relabelled = project.machine ? [] : await relabelAfter(project.file, raw);
-  return opts.json ? { id, ...placeOf(project), bot: entry, relabelled } : id;
+  const wake = await saveWake(project, id, opts);
+  return opts.json ? { id, ...placeOf(project), bot: entry, relabelled, ...wake } : id;
 }
 
 async function cmdEdit(opts, [ref]) {
@@ -2917,7 +3193,8 @@ async function cmdEdit(opts, [ref]) {
   }
   warnCrossLinkAfterSave(project, raw, bot.id);
   const relabelled = project.machine ? [] : await relabelAfter(project.file, raw);
-  return opts.json ? { id: bot.id, ...placeOf(project), bot: entry, relabelled } : `${entry.name} (${bot.id}) saved.`;
+  const wake = await saveWake(project, bot.id, opts);
+  return opts.json ? { id: bot.id, ...placeOf(project), bot: entry, relabelled, ...wake } : `${entry.name} (${bot.id}) saved.`;
 }
 
 const MAIN_USAGE = "usage: am main <bot> [--old-lead <bot>] [--dry-run] [--project DIR] [--machine M] [--json]";
@@ -3028,6 +3305,7 @@ async function cmdRm(opts, [ref]) {
       + `remove it from ${project.key}.`);
   }
   await saveProject(project, last ? null : raw, { list: false });
+  await removeBotWake(project, bot.id);
   if (!last && !project.machine) await relabelAfter(file, raw); // its lead may stop being a captain
   const notes = [];
   if (last) notes.push(`${bot.name} was the project's last bot: ${fileName(project)} was deleted.`);

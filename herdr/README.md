@@ -458,6 +458,20 @@ kept there as a `send` warning: the seat is restarted and the pass exits 0, and 
 person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
 nothing.
 
+**Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
+`am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
+including for a linked project named with `--machine M --project DIR`. Its scheduler must
+be running, with backend `hc` and bot targets (the `herdr-automations` release after
+0.12.1-am.1). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
+just before the send, hc refuses to type into it and the failed run shows the reason.
+A new wake starts at its next occurrence. An already registered wake missed while the
+scheduler was stopped can catch up once on startup within 1380 elapsed minutes (23 hours).
+Daylight saving time follows the scheduler's cron library.
+
+`am ls` and `am show` report the schedule and the last run. Rerun the same `am edit` with
+`--wake` or `--no-wake` to repair a failed sync. A worktree edit saves to that worktree's
+roster. Run the same edit against the main checkout to change the live schedule.
+
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
