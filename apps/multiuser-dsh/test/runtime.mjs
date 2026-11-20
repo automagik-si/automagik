@@ -94,9 +94,17 @@ export function carrier(t, overrides = {}) {
   const scope = createScope()
   const authority = '127.0.0.1:54321'
   const options = {
-    ...services, keys: key.keys, nonces: createNonces({ startedAtSec: seconds - 6 }), scope,
+    ...services, keys: key.keys, scope,
     multiuser: true, keysConfigured: true, expectedAuthority: () => authority,
     now: () => seconds * 1000, ...overrides,
+  }
+  if (!Object.hasOwn(options, 'nonces')) {
+    const { now = Date.now } = options
+    let mono = -Infinity
+    options.nonces = createNonces({ startedAtSec: seconds - 6, monotonicNow: () => {
+      mono = Math.max(mono, now())
+      return mono
+    } })
   }
   let handler = createCarrier(options)
   const call = (path = target, options = {}) => {
@@ -112,4 +120,17 @@ export function carrier(t, overrides = {}) {
   return { ...services, authority, scope, key, handler, call, observe,
     replaceHandler: () => { handler = createCarrier(options) },
   }
+}
+
+export function webRuntime(t) {
+  const ctx = new Context()
+  const webServer = new WebServer(ctx, { host: '127.0.0.1', port: 0 })
+  t.after(() => ctx.fiber.dispose())
+  return { ctx, webServer }
+}
+
+export function provideConnection(ctx) {
+  return ctx.plugin({ name: 'fixture-connection', apply(ctx) {
+    new HostConnectionService(ctx, [], {})
+  } })
 }

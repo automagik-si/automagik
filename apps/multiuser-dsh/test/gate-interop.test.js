@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import files from 'node:fs/promises'
 import http from 'node:http'
@@ -21,35 +22,36 @@ import { COOKIE, SessionStore } from '../../../server/gate-store.mjs'
 import { appOf, install as installAppManifest, manifestOf } from '../../bots-dsh/src/host/app-manifest.js'
 import { callerOf } from '../../bots-dsh/src/host/multiuser.js'
 import * as adapter from '../index.js'
-import { invoke, localHTTP, prefix, rpc, runtime, send, wire } from './runtime.mjs'
+import { invoke, localHTTP, prefix, provideConnection, rpc, runtime, send, webRuntime, wire } from './runtime.mjs'
 
 const origin = 'https://workspace.invalid'
 const instance = wire.payload.aud
 const webConfig = { openBrowser: false, printUrl: false, surfaceContext: false }
 
-function clientRegistry(ctx, dir, names) {
+function clientRegistry(ctx, dir, names, configurePackage) {
   const entries = names.map((name, index) => {
     const path = join(dir, 'node_modules', name)
     mkdirSync(path, { recursive: true })
     writeFileSync(join(path, 'client.js'), `globalThis.fixtureBundle${index} = true;\n`)
     writeFileSync(join(path, 'client.lazy.js'), `globalThis.fixtureBundle${index} = true;\n`)
     writeFileSync(join(path, 'index.js'), 'export {}')
-    writeFileSync(join(path, 'package.json'), JSON.stringify({
+    const pkg = {
       name, type: 'module',
       exports: { '.': './index.js', './client': './client.js', './package.json': './package.json' },
       dsh: { client: { platform: 'web' } },
-    }))
+    }
+    configurePackage?.(path, pkg)
+    writeFileSync(join(path, 'package.json'), JSON.stringify(pkg))
     return { options: { name }, fiber: {}, parent: { tree: { ctx: { baseUrl: pathToFileURL(join(dir, 'profile.json')).href } } } }
   })
   ctx.provide('loader', { entries: () => entries })
   return new ClientModuleRegistry(ctx)
 }
 
-function callerRuntime(t) {
-  const services = runtime(t)
+function callerRuntime(t, { services = runtime(t), now } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'caller-interop-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
-  const signer = createSigner({ dir, publicDir: dir, instance: () => instance })
+  const signer = createSigner({ dir, publicDir: dir, instance: () => instance, now })
   signer.publish()
   const read = fs.readFileSync
   const mount = t.mock.method(fs, 'readFileSync', (file, ...args) => {
@@ -59,14 +61,14 @@ function callerRuntime(t) {
   })
   syncBuiltinESMExports()
   t.after(() => { mount.mock.restore(); syncBuiltinESMExports() })
-  return { ...services, dir, signer, async activate() {
+  return { ...services, dir, signer, async activate(ctx = services.ctx) {
     const env = { AUTOMAGIK_MULTIUSER: '1', AUTOMAGIK_CALLER_KEYS: join(dir, 'caller-keys.json'), AUTOMAGIK_INSTANCE_ID: instance, DSH_HOME: dir }
     const old = Object.fromEntries(Object.keys(env).map(name => [name, process.env[name]]))
     Object.assign(process.env, env)
     const elapsed = Date.now() - 10_000
     const clock = t.mock.method(Date, 'now', () => elapsed)
     try {
-      const activation = services.ctx.plugin(adapter)
+      const activation = ctx.plugin(adapter)
       await activation
       return () => activation.dispose()
     } finally {
@@ -79,7 +81,7 @@ function callerRuntime(t) {
   } }
 }
 
-async function setup(t, { names = ['fixture-a', 'fixture-b'], fixtureDist = true } = {}) {
+async function setup(t, { names = ['fixture-a', 'fixture-b'], fixtureDist = true, configurePackage } = {}) {
   const { ctx, webServer, connection, dir, signer, activate } = callerRuntime(t)
   const dispatched = []
   const createFetchHandler = connection.createSharedFetchHandler.bind(connection)
@@ -113,7 +115,7 @@ async function setup(t, { names = ['fixture-a', 'fixture-b'], fixtureDist = true
       return readFile(path, ...args)
     })
   }
-  const registry = clientRegistry(ctx, dir, names)
+  const registry = clientRegistry(ctx, dir, names, configurePackage)
   const fetchBundle = registry.fetchBundle.bind(registry)
   t.mock.method(registry, 'fetchBundle', request => {
     dispatched.push(request.url)
@@ -273,11 +275,11 @@ function inProcessGate(t, f, cookie = () => assert.fail('owner credential reques
     })
     return proxy
   })
-  const request = (path, method, principal, body) => {
+  const request = (path, method, principal, body, headers = {}) => {
     const issued = principal && sessions.issue(origin, principal)
     return invoke(gate.listeners('request')[0], { method, url: path, body, waitForEnd: true, headers: {
       host: new URL(origin).host, origin, cookie: issued && `${COOKIE}=${issued.secret}`, 'content-type': 'application/json',
-      'content-length': body ? String(Buffer.byteLength(body)) : undefined,
+      'content-length': body ? String(Buffer.byteLength(body)) : undefined, ...headers,
     } })
   }
   return { request, upstream }
@@ -539,4 +541,571 @@ test('gate interop through the installed private route preserves attribution, po
   const replay = await send(upstream.port, firstHop.path, { method: firstHop.method, headers: firstHop.headers, body: rpc() })
   assert.equal(replay.status, 401)
   await frontendAssertions(f, (path, method = 'GET') => send(port, path, { method, headers: first }))
+})
+
+const fixturePath = '/api/fixture'
+
+function observeFixture(connection) {
+  assert.ok(connection.rpc.intercept('/api', method => method === 'fixture', (_method, _body, _signal, peer) =>
+    ({ ok: true, value: peer.principal.person.subject })))
+}
+
+function countFallback(t, webServer) {
+  const resource = t.mock.fn(() => new Response('public fallback'))
+  webServer.registerFallback({ resource })
+  return resource
+}
+
+test('the reserved carrier refuses before the connection arrives and after it leaves', async t => {
+  const f = callerRuntime(t, { services: webRuntime(t) })
+  const fallback = countFallback(t, f.webServer)
+  await f.activate()
+
+  const path = prefix + '/api/x'
+  const responder = f.webServer.responderFor(path)
+  const refused = await invoke(responder.handler, { url: path, method: 'GET', headers: {} })
+  assert.equal(refused.status, 503)
+  assert.equal(refused.headers['content-length'], '0')
+  assert.equal(refused.bytes.length, 0)
+  assert.equal((await f.webServer.readResource(new Request('http://x' + prefix + '/x'))).status, 404)
+
+  const connection = provideConnection(f.ctx)
+  await connection
+  observeFixture(f.ctx.get('connection'))
+  const { request } = inProcessGate(t, f)
+  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  assert.equal(result(await member()).value, 'first')
+  await connection.dispose()
+  assert.equal((await member()).status, 503)
+  assert.equal(fallback.mock.callCount(), 0)
+})
+
+test('a replacement connection inherits an unpersisted rollback cutoff', async t => {
+  const start = Math.floor(Date.now() / 1000)
+  let wall = start * 1000
+  let mono = 0
+  t.mock.method(Date, 'now', () => wall)
+  t.mock.method(performance, 'now', () => mono)
+  const f = callerRuntime(t, { services: webRuntime(t), now: () => wall })
+  await f.activate()
+  const first = provideConnection(f.ctx)
+  await first
+  observeFixture(f.ctx.get('connection'))
+  const { request } = inProcessGate(t, f)
+  const principal = person('first')
+  const member = () => request(fixturePath, 'POST', principal, rpc())
+  assert.equal((await member()).status, 200)
+
+  wall += 6000
+  const assertion = f.signer.sign({ principal, familyId: 'fixture', method: 'POST', path: fixturePath })
+  const path = prefix + fixturePath
+  const sendUnused = () => invoke(f.webServer.match(path).handler, {
+    url: path, method: 'POST', body: rpc(),
+    headers: { host: '127.0.0.1:54321', 'content-type': 'application/json', 'x-automagik-caller': assertion },
+  })
+  const file = join(f.dir, 'multiuser-dsh', 'caller-watermark')
+  let blocked = true
+  const rename = fs.renameSync
+  const renameMock = t.mock.method(fs, 'renameSync', (from, to) => {
+    if (blocked && to === file) throw Object.assign(new Error('blocked watermark rename'), { code: 'EACCES' })
+    return rename(from, to)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { renameMock.mock.restore(); syncBuiltinESMExports() })
+  wall -= 106_000
+  mono += 40_000
+  assert.equal((await sendUnused()).status, 503)
+  assert.equal(Number(readFileSync(file, 'utf8')), start)
+  await first.dispose()
+  wall = start * 1000
+  await provideConnection(f.ctx)
+  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  observeFixture(f.ctx.get('connection'))
+  const atWatermark = (await member()).status
+  wall += 6000
+  mono += 6000
+  const whileBlocked = (await sendUnused()).status
+  blocked = false
+  const afterRepair = (await sendUnused()).status
+  assert.deepEqual({ atWatermark, whileBlocked, afterRepair }, { atWatermark: 503, whileBlocked: 503, afterRepair: 401 })
+  assert.equal(Number(readFileSync(file, 'utf8')), start + 40)
+  wall += 40_000
+  mono += 40_000
+  assert.equal(result(await member()).value, 'first')
+})
+
+test('a delayed claim projects from its claim time before the first request', async t => {
+  let wall = Date.now()
+  let mono = 0
+  t.mock.method(Date, 'now', () => wall)
+  t.mock.method(performance, 'now', () => mono)
+  const f = callerRuntime(t, { services: webRuntime(t), now: () => wall })
+  await f.activate()
+  assert.equal(f.ctx.get('automagikCaller'), undefined)
+  wall += 100_000
+  mono += 100_000
+  const claimedAt = Math.floor(wall / 1000)
+  await provideConnection(f.ctx)
+  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  observeFixture(f.ctx.get('connection'))
+  inProcessGate(t, f)
+  const principal = person('first')
+  const assertion = f.signer.sign({ principal, familyId: 'fixture', method: 'POST', path: fixturePath })
+
+  // Forty seconds elapse before the wall clock steps back to the issue second.
+  mono += 40_000
+  const path = prefix + fixturePath
+  const reply = await invoke(f.webServer.match(path).handler, {
+    url: path, method: 'POST', body: rpc(),
+    headers: { host: '127.0.0.1:54321', 'content-type': 'application/json', 'x-automagik-caller': assertion },
+  })
+  assert.equal(reply.status, 401)
+  assert.equal(Number(readFileSync(join(f.dir, 'multiuser-dsh', 'caller-watermark'), 'utf8')), claimedAt + 40)
+})
+
+test('a replacement connection refuses an unused assertion on its first request after an unobserved rollback', async t => {
+  let wall = 100_000
+  let mono = 0
+  t.mock.method(Date, 'now', () => wall)
+  t.mock.method(performance, 'now', () => mono)
+  const f = callerRuntime(t, { services: webRuntime(t), now: () => wall })
+  await f.activate()
+  const first = provideConnection(f.ctx)
+  await first
+  observeFixture(f.ctx.get('connection'))
+  f.webServer.listenedPort = 54321
+  const method = 'POST'
+  const path = prefix + fixturePath
+  const sign = () => f.signer.sign({ principal: person('first'), familyId: 'fixture', method, path: fixturePath })
+  const send = assertion => invoke(f.webServer.match(path).handler, {
+    url: path, method, body: rpc(),
+    headers: { host: '127.0.0.1:54321', 'content-type': 'application/json', 'x-automagik-caller': assertion },
+  })
+  const file = join(f.dir, 'multiuser-dsh', 'caller-watermark')
+  assert.equal(result(await send(sign())).value, 'first')
+  assert.equal(Number(readFileSync(file, 'utf8')), 100)
+
+  wall = 110_000
+  mono += 10_000
+  const unused = sign()
+  // After another 40 seconds the wall steps back to the issue second, before any further request.
+  mono += 40_000
+  await first.dispose()
+  await provideConnection(f.ctx)
+  observeFixture(f.ctx.get('connection'))
+  assert.equal((await send(unused)).status, 401)
+  assert.equal(Number(readFileSync(file, 'utf8')), 150)
+})
+
+test('a replacement connection anchors at a forward correction before the first request', async t => {
+  let wall = 100_000
+  let mono = 0
+  t.mock.method(Date, 'now', () => wall)
+  t.mock.method(performance, 'now', () => mono)
+  const f = callerRuntime(t, { services: webRuntime(t), now: () => wall })
+  await f.activate()
+  const first = provideConnection(f.ctx)
+  await first
+  observeFixture(f.ctx.get('connection'))
+  f.webServer.listenedPort = 54321
+  const method = 'POST'
+  const path = prefix + fixturePath
+  const sign = () => f.signer.sign({ principal: person('first'), familyId: 'fixture', method, path: fixturePath })
+  const send = assertion => invoke(f.webServer.match(path).handler, {
+    url: path, method, body: rpc(),
+    headers: { host: '127.0.0.1:54321', 'content-type': 'application/json', 'x-automagik-caller': assertion },
+  })
+  const file = join(f.dir, 'multiuser-dsh', 'caller-watermark')
+  assert.equal(result(await send(sign())).value, 'first')
+  assert.equal(Number(readFileSync(file, 'utf8')), 100)
+
+  wall = 200_000
+  mono += 1000
+  await first.dispose()
+  await provideConnection(f.ctx)
+  observeFixture(f.ctx.get('connection'))
+  const unused = sign()
+  wall += 40_000
+  mono += 40_000
+  wall = 200_000
+  assert.equal((await send(unused)).status, 401)
+  assert.equal(Number(readFileSync(file, 'utf8')), 240)
+})
+
+test('new and retained carrier handlers refuse while a caller dependent holds teardown open', async t => {
+  const f = callerRuntime(t, { services: webRuntime(t) })
+  await f.activate()
+  const connection = provideConnection(f.ctx)
+  await connection
+  observeFixture(f.ctx.get('connection'))
+  const entered = Promise.withResolvers()
+  const hold = Promise.withResolvers()
+  await f.ctx.inject(['automagikCaller'], c => c.effect(() => () => {
+    entered.resolve()
+    return hold.promise
+  }))
+
+  const { request, upstream } = inProcessGate(t, f)
+  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  const { handler } = f.webServer.match(prefix + fixturePath)
+  assert.equal(result(await member()).value, 'first')
+  const { path, method, headers } = upstream.mock.calls[0].arguments[0]
+  const disconnect = connection.dispose()
+  try {
+    await entered.promise
+    assert.equal(f.ctx.get('automagikCaller'), undefined)
+    const fresh = (await member()).status
+    const assertion = f.signer.sign({ principal: person('first'), familyId: 'fixture', method, path: fixturePath })
+    const retained = (await invoke(handler, {
+      url: path, method, body: rpc(), headers: { ...headers, 'x-automagik-caller': assertion },
+    })).status
+    assert.deepEqual({ fresh, retained }, { fresh: 503, retained: 503 })
+  } finally {
+    hold.resolve()
+    await disconnect
+  }
+})
+
+test('adapter disposal leaves the permanent guard ahead of the fallback and later public routes', async t => {
+  const f = callerRuntime(t)
+  const fallback = countFallback(t, f.webServer)
+  const dispose = await f.activate()
+  const { match } = f.webServer
+  observeFixture(f.connection)
+  const { request } = inProcessGate(t, f)
+  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  assert.equal(result(await member()).value, 'first')
+  await dispose()
+  assert.equal(f.webServer.match, match)
+  assert.equal((await member()).status, 503)
+  const handler = t.mock.fn((_req, res) => res.writeHead(200).end())
+  const removeExact = f.webServer.register({ kind: 'exact', path: prefix + fixturePath, handler })
+  const removePrefix = f.webServer.register({ kind: 'prefix', path: prefix + '/api', handler })
+  assert.equal((await member()).status, 503)
+  assert.equal(handler.mock.callCount(), 0)
+  assert.equal(fallback.mock.callCount(), 0)
+  removeExact()
+  removePrefix()
+  await f.activate()
+  assert.equal(f.webServer.match, match)
+  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  assert.equal(f.webServer.match(prefix + fixturePath).path, prefix)
+})
+
+test('adapter disposal while a member POST body is held refuses before RPC dispatch', async t => {
+  const wall = Date.now()
+  t.mock.method(Date, 'now', () => wall)
+  const f = callerRuntime(t, { now: () => wall })
+  const dispose = await f.activate()
+  f.webServer.listenedPort = 54321
+  const interceptor = t.mock.fn(() => ({ ok: true }))
+  assert.ok(f.connection.rpc.intercept('/api', method => method === 'fixture', interceptor))
+
+  const method = 'POST'
+  const path = prefix + fixturePath
+  const assertion = f.signer.sign({ principal: person('first'), familyId: 'fixture', method, path: fixturePath })
+  const entered = Promise.withResolvers()
+  const hold = Promise.withResolvers()
+  const response = invoke(f.webServer.match(path).handler, {
+    url: path, method, body: rpc(),
+    headers: { host: '127.0.0.1:54321', 'content-type': 'application/json', 'x-automagik-caller': assertion },
+    onTransport(req) {
+      const iterator = req.iterator.bind(req)
+      req.iterator = async function* (options) {
+        entered.resolve()
+        await hold.promise
+        yield* iterator(options)
+      }
+    },
+  })
+  try {
+    await Promise.race([entered.promise, response.then(() => assert.fail('request finished before reading the body'))])
+    await dispose()
+    assert.ok(f.ctx.get('connection'))
+  } finally {
+    hold.resolve()
+  }
+  const { status } = await response
+  assert.deepEqual({ status, calls: interceptor.mock.callCount() }, { status: 503, calls: 0 })
+})
+
+for (const event of ['adapter disposal', 'connection loss']) {
+  test(`a dispatched RPC keeps its caller through ${event} while new requests receive 503`, async t => {
+    let wall = Date.now()
+    t.mock.method(Date, 'now', () => wall)
+    const f = callerRuntime(t, { services: webRuntime(t), now: () => wall })
+    const ctx = event === 'connection loss' ? f.ctx.isolate('automagikCaller') : f.ctx
+    const dispose = await f.activate(ctx)
+    const connection = provideConnection(f.ctx)
+    await connection
+    const service = ctx.get('automagikCaller')
+    assert.equal(service.version, 1)
+    if (ctx !== f.ctx) assert.equal(f.ctx.get('automagikCaller'), undefined)
+    const entered = Promise.withResolvers()
+    const hold = Promise.withResolvers()
+    assert.ok(f.ctx.get('connection').rpc.intercept('/api', method => method === 'fixture', async (_method, _body, _signal, peer) => {
+      entered.resolve()
+      await hold.promise
+      const principal = callerOf(ctx)
+      assert.equal(principal, peer.principal)
+      return { ok: true, value: principal.person.subject }
+    }))
+
+    const { request } = inProcessGate(t, f)
+    const member = subject => request(fixturePath, 'POST', person(subject), rpc())
+    const response = member('first')
+    await Promise.race([entered.promise, response.then(() => assert.fail('RPC did not enter the interceptor'))])
+    const stopped = event === 'connection loss' ? connection.dispose() : dispose()
+    try {
+      await setImmediate()
+      assert.equal((await member('second')).status, 503)
+      assert.equal(ctx.get('automagikCaller'), service)
+    } finally {
+      hold.resolve()
+      await stopped
+    }
+    assert.equal(result(await response).value, 'first')
+    assert.equal(ctx.get('automagikCaller'), undefined)
+    assert.equal(callerOf(ctx), undefined)
+
+    wall += 6000
+    if (event === 'connection loss') {
+      await provideConnection(f.ctx)
+      observeFixture(f.ctx.get('connection'))
+    } else {
+      await f.activate(ctx)
+    }
+    assert.equal(ctx.get('automagikCaller').version, 1)
+    assert.notEqual(ctx.get('automagikCaller'), service)
+    assert.equal(result(await member('second')).value, 'second')
+  })
+}
+
+test('adapter disposal aborts a dispatched RPC at the drain deadline and completes while the RPC is held', { timeout: 2000 }, async t => {
+  const f = callerRuntime(t)
+  const dispose = await f.activate()
+  const schedule = globalThis.setTimeout
+  t.mock.method(globalThis, 'setTimeout', (fn, delay, ...args) => schedule(fn, delay === 30_000 ? 10 : delay, ...args))
+  const entered = Promise.withResolvers()
+  const hold = Promise.withResolvers()
+  assert.ok(f.connection.rpc.intercept('/api', method => method === 'fixture', async (_method, _body, signal) => {
+    entered.resolve(signal)
+    await hold.promise
+    return { ok: true }
+  }))
+
+  f.webServer.listenedPort = 54321
+  const method = 'POST'
+  const path = prefix + fixturePath
+  const assertion = f.signer.sign({ principal: person('first'), familyId: 'fixture', method, path: fixturePath })
+  let transport
+  const response = invoke(f.webServer.match(path).handler, {
+    url: path, method, body: rpc(),
+    headers: { host: '127.0.0.1:54321', 'content-type': 'application/json', 'x-automagik-caller': assertion },
+    onTransport(_req, res) { transport = res },
+  })
+  try {
+    const signal = await Promise.race([entered.promise, response.then(() => assert.fail('RPC did not enter the interceptor'))])
+    assert.equal(signal.aborted, false)
+    await dispose()
+    assert.equal(signal.aborted, true)
+    assert.equal(transport.destroyed, true)
+    assert.equal(f.ctx.get('automagikCaller'), undefined)
+  } finally {
+    hold.resolve()
+    await response
+  }
+})
+
+test('an overlapping activation leaves the first owner serving through its disposal', async t => {
+  const f = callerRuntime(t)
+  await f.activate()
+  const original = f.ctx.get('automagikCaller')
+  const log = t.mock.method(console, 'error', () => {})
+  const disposeOverlap = await f.activate()
+  assert.deepEqual(log.mock.calls.map(call => call.arguments), [
+    ['multiuser-dsh: startup refused because /_automagik is already reserved'],
+  ])
+  assert.equal(f.ctx.get('automagikCaller'), original)
+  observeFixture(f.connection)
+  const { request } = inProcessGate(t, f)
+  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  assert.equal(result(await member()).value, 'first')
+  await disposeOverlap()
+  assert.equal(result(await member()).value, 'first')
+})
+
+test('a duplicate caller provider fails the injected child and releases its reservation', async t => {
+  const f = callerRuntime(t)
+  const fallback = countFallback(t, f.webServer)
+  const { register, registerUpgrade } = f.webServer
+  const value = { version: 'fixture' }
+  const fixture = f.ctx.plugin({ name: 'fixture-caller', apply(ctx) {
+    ctx.provide('automagikCaller', value)
+  } })
+  await fixture
+  const dispose = await f.activate()
+  const children = [...f.ctx.registry.values()].flatMap(runtime => [...runtime.fibers])
+  const child = children.find(fiber => fiber.parent?.fiber.name === adapter.name && Object.hasOwn(fiber.inject, 'connection'))
+  assert.ok(child)
+  await assert.rejects(child.await(), /service "automagikCaller" has been registered at <fixture-caller>/)
+  assert.equal(f.ctx.get('automagikCaller'), value)
+  assert.equal(f.webServer.register, register)
+  assert.equal(f.webServer.registerUpgrade, registerUpgrade)
+  observeFixture(f.connection)
+  const { request } = inProcessGate(t, f)
+  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  assert.equal((await member()).status, 503)
+  assert.equal(fallback.mock.callCount(), 0)
+  await dispose()
+  await fixture.dispose()
+  await f.activate()
+  assert.equal(f.ctx.get('automagikCaller').version, 1)
+  assert.equal(result(await member()).value, 'first')
+})
+
+test('a waiting owner reloads the watermark and refuses the previous owner’s signed request', async t => {
+  let wall = Date.now()
+  const f = callerRuntime(t, { now: () => wall })
+  const disposeFirst = await f.activate()
+  const first = f.ctx.get('automagikCaller')
+  const waiting = f.ctx.isolate('connection')
+  await f.activate(waiting)
+  assert.equal(waiting.get('connection'), undefined)
+  assert.equal(f.ctx.get('automagikCaller'), first)
+
+  t.mock.method(Date, 'now', () => wall)
+  observeFixture(f.connection)
+  const { request, upstream } = inProcessGate(t, f)
+  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  assert.equal(result(await member()).value, 'first')
+  const { path, method, headers } = upstream.mock.calls[0].arguments[0]
+  assert.ok(headers['x-automagik-caller'])
+  await disposeFirst()
+  assert.equal(waiting.get('automagikCaller'), undefined)
+
+  await provideConnection(waiting)
+  observeFixture(waiting.get('connection'))
+  assert.equal(waiting.get('automagikCaller').version, 1)
+  const route = f.webServer.match(prefix + fixturePath)
+  assert.equal(route.path, prefix)
+  const replay = await invoke(route.handler, { url: path, method, headers, body: rpc() })
+  assert.equal(replay.status, 401)
+  wall += 6000
+  assert.equal(result(await member()).value, 'first')
+})
+
+test('member indexes use conditional GET and HEAD with a render-specific weak ETag', async t => {
+  const f = await setup(t)
+  const { request, upstream } = inProcessGate(t, f)
+  f.ctx.on('webserver/index-inject', (table, peer) => {
+    table.push({ kind: 'global', name: 'fixtureSubject', value: peer.principal.person.subject })
+  })
+  for (const path of ['/', '/index.html']) {
+    const first = person('first')
+    const get = await request(path, 'GET', first)
+    assert.equal(get.status, 200)
+    assert.equal(get.headers['cache-control'], 'no-cache')
+    assert.match(get.headers.etag, /^W\//)
+    assert.equal(get.headers.etag, `W/"${createHash('sha1').update(get.bytes).digest('base64url')}"`)
+    const headers = { 'if-none-match': get.headers.etag }
+    const head = await request(path, 'HEAD', first)
+    assert.equal(head.status, 200)
+    for (const name of ['content-type', 'cache-control', 'etag']) assert.equal(head.headers[name], get.headers[name])
+    assert.equal(head.bytes.length, 0)
+    for (const method of ['GET', 'HEAD']) {
+      const reply = await request(path, method, first, undefined, headers)
+      assert.equal(reply.status, 304)
+      assert.equal(reply.headers.etag, get.headers.etag)
+      assert.equal(reply.headers['cache-control'], get.headers['cache-control'])
+      assert.equal(reply.bytes.length, 0)
+    }
+    const count = upstream.mock.callCount()
+    assert.equal((await request(path, 'GET', undefined, undefined, headers)).status, 401)
+    assert.equal(upstream.mock.callCount(), count)
+
+    const second = await request(path, 'GET', person('second'), undefined, headers)
+    assert.equal(second.status, 200)
+    assert.notDeepEqual(second.bytes, get.bytes)
+    assert.notEqual(second.headers.etag, get.headers.etag)
+    const untap = f.webServer.tapIndex(html => html.replace('Shell', 'Tapped shell'))
+    const changed = await request(path, 'GET', first, undefined, headers)
+    untap()
+    assert.equal(changed.status, 200)
+    assert.notEqual(changed.headers.etag, get.headers.etag)
+    assert.match(changed.bytes.toString(), /Tapped shell/)
+  }
+})
+
+test('the gate and carrier refuse exported package assets that rc.2 serves directly', async t => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg==', 'base64')
+  const f = await setup(t, { names: ['fixture-asset'], configurePackage(dir, pkg) {
+    pkg.exports['./assets/*'] = './assets/*'
+    mkdirSync(join(dir, 'assets'))
+    writeFileSync(join(dir, 'assets', 'icon.png'), png)
+  } })
+  const path = '/plugins/fixture-asset/assets/icon.png?rev=fixture'
+  const direct = await f.registry.fetchBundle(new Request('http://dsh.internal' + path))
+  assert.equal(direct.status, 200)
+  assert.equal(direct.headers.get('content-type'), 'image/png')
+  assert.deepEqual(Buffer.from(await direct.arrayBuffer()), png)
+
+  const { request, upstream } = inProcessGate(t, f)
+  const principal = person('first')
+  f.dispatched.length = 0
+  assert.equal((await request(path, 'GET', principal)).status, 404)
+  assert.equal(upstream.mock.callCount(), 0)
+  const assertion = f.signer.sign({ principal, familyId: 'fixture', method: 'GET', path })
+  const reply = await invoke(f.route.handler, {
+    url: prefix + path, method: 'GET', headers: { host: '127.0.0.1:54321', 'x-automagik-caller': assertion },
+  })
+  assert.equal(reply.status, 404)
+  assert.deepEqual(f.dispatched, [])
+})
+
+test('packages with .map IDs serve their startup combo and executable chunks through the gate', async t => {
+  const names = ['example.map', '@scope/x.map']
+  const f = await setup(t, { names })
+  const { request, upstream } = inProcessGate(t, f)
+  const get = path => request(path, 'GET', person('first'))
+  const { batches: [batch], entries } = f.registry.graph()
+  assert.deepEqual(batch.entries, names)
+  const comboPath = '/' + batch.url
+  const combo = await get(comboPath)
+  assert.equal(combo.status, 200)
+  for (const [index, { id, rev }] of entries.entries()) {
+    const script = `globalThis.fixtureBundle${index} = true;`
+    assert.ok(combo.bytes.includes(script))
+    const chunk = await get(`/plugins/${id}/client.lazy.js?rev=${rev}`)
+    assert.equal(chunk.status, 200)
+    assert.equal(chunk.bytes.toString(), `${script}\n;\n//# sourceMappingURL=client.lazy.js.map?rev=${rev}\n`)
+    for (const query of ['', `?rev=${rev}`]) assert.equal((await get(`/plugins/${id}/client.js${query}`)).status, 404)
+    const count = upstream.mock.callCount()
+    for (const path of [
+      `/plugins/${id}/client.lazy.js.map?rev=${rev}`,
+      `/plugins/${id}/client.js.map?rev=${rev}`,
+      '/' + batch.url.replace(id + '/client.js', id + '/client.js.map'),
+    ]) assert.equal((await get(path)).status, 404, path)
+    assert.equal(upstream.mock.callCount(), count)
+  }
+  const sourceMap = /\/\/# sourceMappingURL=(\S+)$/.exec(combo.bytes.toString().trimEnd())
+  assert.ok(sourceMap)
+  const mapURL = new URL(sourceMap[1], 'http://dsh.internal' + comboPath)
+  const direct = await f.registry.fetchBundle(new Request(mapURL))
+  assert.equal(direct.status, 200)
+  assert.equal((await direct.json()).sections.length, names.length)
+  const count = upstream.mock.callCount()
+  assert.equal((await get(mapURL.pathname + mapURL.search)).status, 404)
+  assert.equal(upstream.mock.callCount(), count)
+})
+
+test('the revisioned Bot team client.pane.js chunk form passes through the gate', async t => {
+  const f = await setup(t, { names: ['fixture-pane'] })
+  const [{ id, rev }] = f.registry.graph().entries
+  const source = 'globalThis.fixturePane = true;\n'
+  writeFileSync(join(f.dir, 'node_modules', id, 'client.pane.js'), source)
+  const { request } = inProcessGate(t, f)
+  const reply = await request(`/plugins/${id}/client.pane.js?rev=${rev}`, 'GET', person('first'))
+  assert.equal(reply.status, 200)
+  assert.equal(reply.bytes.toString(), `${source};\n//# sourceMappingURL=client.pane.js.map?rev=${rev}\n`)
 })
