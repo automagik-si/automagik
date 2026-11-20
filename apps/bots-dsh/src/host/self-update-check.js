@@ -179,7 +179,7 @@ export function selfUpdateCheck(options) {
   return startCheck(options).promise
 }
 
-function savedResult(profileDir) {
+export function savedResult(profileDir) {
   const record = readCheckRecord(profileDir)
   if (record?.version !== 1) return null
   const { runId, checkedAt, state, reason, laneVersion, sequence, supervisor, plugins } = record

@@ -261,6 +261,8 @@ export function install(rt) {
   }
   const live = (roles) => ({
     activity: rt.activityView(),
+    // The web self-update holds new work (update-hold.js): the composer says so.
+    updateHold: rt.updateHoldView?.() === true,
     work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
     memoryNews: rt.memoryNews(),
     memoryReviews: rt.memoryReviews(),
@@ -523,15 +525,27 @@ export function install(rt) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
       await rt.refresh()
-      if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result') {
+      // The web self-update (RFC 0041): owner routes of the window that holds the team, never READS, never a Bot tool.
+      if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result'
+        || endpoint === 'self-update-start') {
         if (rt.holdsLock() !== true) return fail(CHECK_READ_ONLY, 'bot/read-only')
         if (endpoint === 'self-update-check-result' && (typeof body.runId !== 'string' || body.runId === '')) {
           return fail('An update check run ID is required.', 'bot/invalid')
         }
         const generation = rt.teamGeneration()
-        const result = endpoint === 'self-update-status' ? rt.selfUpdateStatus()
-          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId) : await rt.selfUpdateCheck()
+        const status = endpoint === 'self-update-status' ? rt.selfUpdateStatus() : undefined
+        const result = endpoint === 'self-update-status'
+          // Only an instance whose owner turned in-app updates on (`selfUpdate: true`) offers Update now.
+          ? { ...status, ...(rt.config.selfUpdate === true
+            ? { startEnabled: true, startRefusal: rt.selfUpdateStartRefusal(status) } : {}) }
+          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId)
+            : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation))
+              : await rt.selfUpdateCheck()
         return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
+      }
+      // A plugin install while the web self-update holds the team would race the supervisor's switch.
+      if ((endpoint === 'update-install' || endpoint === 'dsh-update-install') && rt.updateHoldView?.() === true) {
+        return fail('An update is running. Try again when it is done.', 'bot/update-running')
       }
       const readOnly = rt.readOnly()
       // An endpoint another Omni plugin serves (extend.js) says itself whether it only reads.

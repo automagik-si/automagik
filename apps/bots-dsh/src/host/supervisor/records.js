@@ -13,6 +13,8 @@ export const REASON_CODES = Object.freeze([
   'engines-dsh', 'registry-unreachable', 'listener-unknown', 'stage-failed', 'switch-refused', 'health-failed',
   'rollback-failed', 'supervisor-restarted', 'no-writable-home', 'health-check-finished',
   'profile-npmrc', 'desktop-app', 'no-store', 'store-invalid', 'profile-invalid', 'lane-invalid',
+  // Refusals of the owner's start and the plugin's own release of its hold (delivery 5b).
+  'self-update-off', 'update-running', 'check-stale', 'team-home-custom', 'request-unanswered', 'notes-unwritable', 'starting-up',
 ])
 const ISO_TIMESTAMP = /^(?:\d{4}|[+-]\d{6})-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/
 export const isId = value => typeof value === 'string' && ID.test(value)

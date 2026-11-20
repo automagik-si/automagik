@@ -160,7 +160,12 @@ export function writeJsonAtomic(path, value, { profileDir, readMountInfo, durabl
     if (!sameFile(checkedStore(), directory)) throw invalidStore()
     // Same-user processes can still race this rename. RFC 0041 trusts them in the owner-private tree.
     fs.renameSync(temp, target)
-    if (durable) syncDirectory(realDir)
+    if (durable) {
+      try { syncDirectory(realDir) } catch (error) {
+        error.renamed = true
+        throw error
+      }
+    }
   } catch (error) {
     try { if (sameFile(checkedStore(), directory)) fs.rmSync(temp, { force: true }) } catch {}
     throw error

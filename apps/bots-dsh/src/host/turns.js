@@ -4,7 +4,7 @@
 // Turn tracking: which turns were triggered by another Bot, and what they said.
 import { randomUUID } from 'node:crypto'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
-import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT } from './constants.js'
+import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate } from './constants.js'
 import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
 import { splitRef, textOf } from './text.js'
@@ -88,7 +88,7 @@ export const failureLine = failure => `${failure.code}${failure.status ? ` ${fai
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long) {
+export function answerSender(rt, id, source, text, long, shouldSend) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
   const work = rt.closeWork?.(source.exchangeId, name, text)
@@ -109,7 +109,8 @@ export function answerSender(rt, id, source, text, long) {
     replyTo: source.exchangeId,
     exchangeId,
     ...(work ? { work } : {}),
-  }).catch((error) => {
+  }, { shouldSend }).catch((error) => {
+    if (shouldSend?.() === false) return
     rt.warn('omni-ui: reply delivery failed: %s', error)
     // The reply never reached the asker: its note goes — the notice below carries
     // what it answered — the result kept with the work is marked, and the failure
@@ -127,8 +128,45 @@ export function answerSender(rt, id, source, text, long) {
       role: 'reply',
       replyTo: source.exchangeId,
       ...(work ? { work } : {}),
-    }).catch(again => rt.warn('omni-ui: reply failure notice not delivered: %s', again))
+    }, { shouldSend }).catch(again => rt.warn('omni-ui: reply failure notice not delivered: %s', again))
   })
+}
+
+// A turn that cannot answer joined requests hands room calls back separately and Bot requests as one batch.
+export async function handBackRequests(rt, sessionId, toId, joined, deliver = args =>
+  rt.deliver(args).catch(error => rt.warn('omni-ui: deferred request delivery failed: %s', error))) {
+  const send = ({ info, text }, extra = {}) => deliver({
+    fromId: info.senderSessionId,
+    toId,
+    sessionId,
+    text,
+    role: info.role,
+    exchangeId: info.exchangeId,
+    ...(info.roomId ? { roomId: info.roomId } : {}),
+    ...(info.askedBy ? { askedBy: info.askedBy } : {}),
+    ...(info.senderRoomId ? { fromRoomId: info.senderRoomId } : {}),
+    ...(info.work ? { work: info.work } : {}),
+    ...(info.replyTo ? { replyTo: info.replyTo } : {}),
+    deferred: true,
+    ...extra,
+  })
+
+  const calls = joined.filter(request => request.info.role === 'room')
+    .map(request => send(request, { note: 'you read this call during your last task; answer it now' }))
+  const [first, ...rest] = joined.filter(request => request.info.role !== 'room')
+  if (first !== undefined) {
+    if (rest.length === 0) calls.push(send(first))
+    else {
+      const requests = [first, ...rest]
+      const names = [...new Set(requests.map(request => request.info.senderName).filter(name => typeof name === 'string' && name !== ''))]
+      const text = requests.map(request => `${request.info.senderName ?? 'a Bot'}:\n${request.text}`).join('\n\n')
+      calls.push(send({ ...first, text }, {
+        ...(names.length > 0 ? { fromName: names.join(', ') } : {}),
+        joined: rest.map(request => ({ info: request.info, text: request.text })),
+      }))
+    }
+  }
+  return (await Promise.all(calls)).every(Boolean)
 }
 
 // A group's own Session never reaches a model, so the snapshot DSH prepared there
@@ -198,6 +236,10 @@ export const promisesWork = text => typeof text === 'string' && text.trim().leng
 
 export function install(rt) {
   const { ctx, state } = rt
+  rt.turnCutSnapshot = (id) => {
+    const entry = rt.live.get(id)
+    return { info: entry?.info, joined: entry?.joined ?? [], later: entry?.later ?? [] }
+  }
 
   // The retry goes where the turn's trigger came from: a group round's waiter or a
   // Bot's request keeps its exchange; anything else is a nudge in the Bot's own chat.
@@ -921,6 +963,7 @@ export function install(rt) {
             ...(source.quiet ? { quiet: true } : {}),
             ...(source.failed ? { failed: source.failed } : {}),
             ...(source.resumed ? { resumed: true } : {}),
+            ...(source.resumedByUpdate ? { resumedByUpdate: true } : {}),
             ...(source.again ? { again: true } : {}),
             ...(source.stopped ? { stopped: true } : {}),
             ...(source.done ? { done: true } : {}),
@@ -1107,6 +1150,13 @@ export function install(rt) {
         const later = entry.later ?? []
         entry.later = []
         if (steerCut || suppressedSubagent) break
+        // The web self-update stopped this turn at the click (UPDATE_CUT): nothing is answered for it, and resume.js
+        // picks it up after the supervisor's verdict. The requests that joined it go with its note.
+        const updateCut = cutByUpdate(event.data?.reason)
+        if (updateCut) {
+          rt.handBackUpdateResults?.(id)
+          break
+        }
         for (const result of later) {
           void rt.deliver({
             fromId: result.info.senderSessionId,
@@ -1262,53 +1312,7 @@ export function install(rt) {
           }
           finish(request.info, reply)
         }
-        const requests = handedBack.filter(request => request.info.role !== 'room')
-        for (const request of handedBack) {
-          if (request.info.role !== 'room') continue
-          void rt.deliver({
-            fromId: request.info.senderSessionId,
-            toId: rt.selfOf(id),
-            sessionId: id,
-            text: request.text,
-            role: request.info.role,
-            exchangeId: request.info.exchangeId,
-            roomId: request.info.roomId,
-            askedBy: request.info.askedBy,
-            ...(request.info.senderRoomId ? { fromRoomId: request.info.senderRoomId } : {}),
-            note: 'you read this call during your last task; answer it now',
-            deferred: true,
-          }).catch(error => rt.warn('omni-ui: deferred request delivery failed: %s', error))
-        }
-        if (requests.length === 1) {
-          const request = requests[0]
-          void rt.deliver({
-            fromId: request.info.senderSessionId,
-            toId: rt.selfOf(id),
-            sessionId: id,
-            text: request.text,
-            role: request.info.role,
-            exchangeId: request.info.exchangeId,
-            ...(request.info.senderRoomId ? { fromRoomId: request.info.senderRoomId } : {}),
-            deferred: true,
-          }).catch(error => rt.warn('omni-ui: deferred request delivery failed: %s', error))
-        } else if (requests.length > 1) {
-          // One turn with all of them, so its one answer can close every request.
-          const [first, ...rest] = requests
-          const names = [...new Set(requests.map(request => request.info.senderName).filter(name => typeof name === 'string' && name !== ''))]
-          const text = requests.map(request => `${request.info.senderName ?? 'a Bot'}:\n${request.text}`).join('\n\n')
-          void rt.deliver({
-            fromId: first.info.senderSessionId,
-            ...(names.length > 0 ? { fromName: names.join(', ') } : {}),
-            toId: rt.selfOf(id),
-            sessionId: id,
-            text,
-            role: first.info.role,
-            exchangeId: first.info.exchangeId,
-            ...(first.info.senderRoomId ? { fromRoomId: first.info.senderRoomId } : {}),
-            deferred: true,
-            joined: rest.map(request => ({ info: request.info, text: request.text })),
-          }).catch(error => rt.warn('omni-ui: deferred request delivery failed: %s', error))
-        }
+        void handBackRequests(rt, id, rt.selfOf(id), handedBack)
         if (rt.groupOwners.has(id)) void rt.goalSettled?.(rt.roomOf(rt.groupOwners.get(id).roomId)).catch(error => rt.warn('omni-ui: goal settle in %s failed: %s', id, error))
         break
       }
