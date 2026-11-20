@@ -27,7 +27,7 @@ env:
   SCHEDULER_CHANGED_PATHS: '^(herdr/scheduler/|\.github/workflows/ci\.yml$)'
   AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
   POCKET_CHANGED_PATHS: '^(apps/pocket/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
-  POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|\.github/workflows/ci\.yml$)'
+  POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|docs/rfcs/fixtures/0033-document-names\.json$|\.github/workflows/ci\.yml$)'
   METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
   USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
@@ -1616,6 +1616,12 @@ jobs:
         run: |
           bun install --frozen-lockfile
           [ -d dev/harness/node_modules ] || bun run harness
+
+      - name: ACP plugin dependencies for the role identity test
+        # role-runtime.test.js drives acp-dsh's adapter with the Bot team's identity reader.
+        if: matrix.app == 'bots-dsh'
+        working-directory: apps/acp-dsh
+        run: bun install --frozen-lockfile
 
       - name: Desktop dependencies for ACP lifecycle tests
         # The app-build upgrade case calls Desktop's profile merger, which resolves yaml here.

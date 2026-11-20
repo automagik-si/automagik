@@ -32,9 +32,12 @@ function host(t, injected = false) {
   const taskOwners = new Map([['wish-task', { botId: 'genie' }]])
   const botSessions = new Set(['private', 'group-member', 'other', 'wish-chat', 'wish-group'])
   const isBotSession = id => botSessions.has(id) || taskOwners.has(id)
-  install({ ctx, taskOwners, isBotSession, selfOf: id => owners.get(id), botOf: id => bots.get(id) })
+  const rt = {
+    ctx, taskOwners, isBotSession, selfOf: id => owners.get(id), botOf: id => bots.get(id),
+  }
+  install(rt)
   t.after(() => ctx.dispose())
-  return { ctx, bots, read: id => reader?.(id), disposed: () => disposed }
+  return { ctx, rt, bots, read: id => reader?.(id), disposed: () => disposed }
 }
 
 test('identity reader returns only the owning Bot identity and a fresh copy', t => {
@@ -69,6 +72,24 @@ test('a Genie says its role tools live in DSH, and a wish task does not (#1639)'
 test('unowned sessions receive no identity', t => {
   const h = host(t)
   for (const id of ['relay', 'unowned', undefined]) assert.equal(h.read(id), undefined)
+})
+
+test('the identity includes a role part only for its owning Bot chat or group member', t => {
+  const h = host(t)
+  const part = '<role-prompt id="voice-mouth">\nSpeak.\n</role-prompt>'
+  const roleOwners = new Map([
+    ['private', 'ada'], ['group-member', 'ada'], ['wish-group', 'ada'],
+  ])
+  h.rt.roleRuntime = {
+    acpPrompt(sessionId, botId) {
+      if (roleOwners.get(sessionId) === botId) return part
+    },
+  }
+  for (const id of ['private', 'group-member']) assert.equal(h.read(id).rolePrompt, part)
+  for (const id of ['task', 'archived-part', 'wish-task', 'other', 'wish-group']) {
+    assert.equal(Object.hasOwn(h.read(id), 'rolePrompt'), false, id)
+  }
+  for (const id of ['unowned', 'relay']) assert.equal(h.read(id), undefined)
 })
 
 test('registration is disposed on unload for injected and direct services', async t => {

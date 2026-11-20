@@ -1249,6 +1249,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         closeChat(ref = null, keepManagement = chatRef == ref)
         _botManage.update { it - ref.hostId }
         _botSchedules.update { it - ref.hostId }
+        _botSettings.update { it - ref.hostId }
         resumeAttempt = attempt
         val gen = ++chatGen
         chatRef = ref
@@ -1342,7 +1343,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     private fun closeChat(ref: TerminalRef?, keepManagement: Boolean) {
         if (ref != null && ref != chatRef) return
-        if (!keepManagement) { closeMemory(); closeSchedules() }
+        if (!keepManagement) { closeMemory(); closeSchedules(); closeSettings() }
         // bots-dsh stops following a Bot chat no phone watches: what it lists next is not a finish ([ChatWatch.left]).
         chatRef?.takeIf { Chat.isDsh(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
         ++chatGen
@@ -1362,6 +1363,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         if (!started) {
             closeMemory()
             closeSchedules()
+            closeSettings()
             held.stop(activeChannel != null || attachJob?.isActive == true || nativeJob?.isActive == true, chatRef?.takeIf { chatJob?.isActive == true || resumeJob?.isActive == true })
             dropStream()
             chatJob?.cancel(); chatJob = null
@@ -1735,7 +1737,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     private suspend fun readSchedules(token: Long, link: ChatLink) {
         val (terminal, id) = currentSchedules(token, link)?.let { it.terminal to it.uncertain } ?: return
-        val result = scheduleResult { link.scheduleList(terminal, id) }
+        val result = managementResult { link.scheduleList(terminal, id) }
         val current = currentSchedules(token, link) ?: return
         applySchedules(ChatSchedules.afterRead(current, id, result))
     }
@@ -1778,7 +1780,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         val (_, terminal, token) = s
         _schedules.value = s.copy(op = op, opTask = id, outcome = null, status = null)
         viewModelScope.launch(parent) {
-            val result = scheduleResult { call(link, terminal, id, rev) }
+            val result = managementResult { call(link, terminal, id, rev) }
             val current = currentSchedules(token, link) ?: return@launch
             val next = ChatSchedules.afterWrite(current, result)
             applySchedules(next)
@@ -1787,12 +1789,156 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     /** Treat a request timeout as a lost reply while letting dialog cancellation end its work. */
-    private suspend fun scheduleResult(call: suspend () -> JSONObject): Any = withContext(linkDispatcher) {
+    private suspend fun managementResult(call: suspend () -> JSONObject): Any = withContext(linkDispatcher) {
         try { call() } catch (e: Exception) { currentCoroutineContext().ensureActive(); e }
     }
 
     private fun applySchedules(s: ChatSchedules.State) {
         if (s.phase == ChatSchedules.Phase.CLOSED) endSchedules(s) else _schedules.value = s
+    }
+
+    private val _settings = MutableStateFlow<ChatSettings.State?>(null)
+    val settings = _settings.asStateFlow()
+    private val _botSettings = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val botSettings = _botSettings.asStateFlow()
+    private var settingsToken = 0L
+    private var settingsLink: ChatLink? = null
+    private var settingsJob: Job? = null
+    private val settingsNotice = mutableSetOf<TerminalRef>()
+
+    /** Negotiate settings only while its dialog is open. */
+    fun openSettings(ref: TerminalRef) {
+        if (state.value.demo || !ChatSettings.isBot(ref.address)) return
+        if (_settings.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
+        closeSettings()
+        val token = ++settingsToken
+        val notice = ChatSettings.EARLIER_CHANGE.takeIf { settingsNotice.remove(ref) }
+        val connecting = ChatSettings.State(ref.hostId, ref.address, token, op = ChatSettings.Op.READ, notice = notice)
+        _settings.value = connecting
+        settingsJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+            var ownedLink: ChatLink? = null
+            try {
+                val link = try {
+                    withContext(linkDispatcher) {
+                        openChatLink(ref.hostId, scope, ChatClient.SETTINGS) {
+                            viewModelScope.launch { settingsLost(token) }
+                        }.also { ownedLink = it }
+                    }
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (e is ChatUnsupported) settingsUnsupported(connecting)
+                    else endSettings(connecting.closed("Couldn't connect to the computer."))
+                    return@launch
+                }
+                if (token != settingsToken) return@launch
+                val grants = link.manage.intersect(ChatClient.SETTINGS.toSet())
+                if (ChatSettings.Op.READ.method !in grants) { settingsUnsupported(connecting); return@launch }
+                _botSettings.update { it + (ref.hostId to true) }
+                settingsLink = link
+                _settings.value = connecting.copy(phase = ChatSettings.Phase.LOADING, status = ChatSettings.CHECKING, grants = grants)
+                launch { readSettings(token, link) }
+                awaitCancellation()
+            } finally {
+                scope.cancel()
+                ownedLink?.let { link ->
+                    withContext(NonCancellable + linkDispatcher) { runCatching { link.close() } }
+                }
+            }
+        }
+        settingsJob?.start()
+    }
+
+    private fun settingsUnsupported(s: ChatSettings.State) {
+        _botSettings.update { it + (s.hostId to false) }
+        endSettings(s.closed("Bot settings aren't offered on this connection."))
+    }
+
+    private fun settingsLost(token: Long) {
+        val s = _settings.value ?: return
+        if (s.token != token || s.phase == ChatSettings.Phase.CLOSED) return
+        rememberSettingsOutcome(s)
+        endSettings(s.closed(ChatSettings.CONNECTION_CLOSED, ChatSettings.MAY_HAVE_CHANGED.takeIf { s.mayHaveChanged }))
+    }
+
+    private fun currentSettings(token: Long, link: ChatLink): ChatSettings.State? {
+        val s = _settings.value?.takeIf { it.token == token && settingsLink === link } ?: return null
+        // The transport can fail the pending call before its disconnect callback reaches Main.
+        if (link.isClosed) { settingsLost(token); return null }
+        return s
+    }
+
+    private fun endSettings(closed: ChatSettings.State) {
+        releaseSettings()
+        _settings.value = closed
+    }
+
+    private fun releaseSettings() {
+        settingsLink = null
+        settingsJob?.cancel(); settingsJob = null
+    }
+
+    private fun rememberSettingsOutcome(s: ChatSettings.State) {
+        if (s.mayHaveChanged) settingsNotice += TerminalRef(s.hostId, s.terminal)
+    }
+
+    fun closeSettings() {
+        _settings.value?.let(::rememberSettingsOutcome)
+        ++settingsToken
+        releaseSettings()
+        _settings.value = null
+    }
+
+    private suspend fun readSettings(token: Long, link: ChatLink) {
+        val terminal = currentSettings(token, link)?.terminal ?: return
+        val result = managementResult { link.settingsRead(terminal) }
+        val current = currentSettings(token, link) ?: return
+        applySettings(ChatSettings.afterRead(current, result))
+    }
+
+    fun refreshSettings() {
+        val s = _settings.value?.takeIf { it.canRefresh } ?: return
+        val link = settingsLink ?: return
+        val parent = settingsJob ?: return
+        val phase = if (s.uncertain) ChatSettings.Phase.RECONCILING else ChatSettings.Phase.LOADING
+        _settings.value = s.copy(phase = phase, op = ChatSettings.Op.READ, status = ChatSettings.CHECKING)
+        viewModelScope.launch(parent) { readSettings(s.token, link) }
+    }
+
+    fun settingsName(token: Long, rev: String, name: String) =
+        writeSettings(token, rev, ChatSettings.Op.NAME, ChatSettings.trimName(name))
+
+    fun settingsModel(token: Long, rev: String, model: String) = writeSettings(token, rev, ChatSettings.Op.MODEL, model)
+
+    /** Check the editor's token, revision and method grant, then claim the operation on Main. */
+    private fun writeSettings(token: Long, rev: String, op: ChatSettings.Op, value: String) {
+        val s = _settings.value ?: return
+        val snapshot = s.snapshot ?: return
+        if (s.token != token || snapshot.settings.rev != rev || !s.canEdit(op)) return
+        if (op == ChatSettings.Op.MODEL && snapshot.models.entries.none { it.id == value }) return
+        if (op == ChatSettings.Op.NAME) ChatSettings.checkName(value)?.let {
+            _settings.value = s.copy(outcome = it, autoOff = false)
+            return
+        }
+        val link = settingsLink ?: return
+        if (currentSettings(token, link) == null) return
+        val parent = settingsJob ?: return
+        val terminal = s.terminal
+        _settings.value = s.copy(op = op, outcome = null, status = ChatSettings.CHECKING, autoOff = false)
+        viewModelScope.launch(parent) {
+            val result = managementResult {
+                if (op == ChatSettings.Op.NAME) link.settingsName(terminal, rev, value)
+                else link.settingsModel(terminal, rev, value)
+            }
+            val current = currentSettings(token, link) ?: return@launch
+            val next = ChatSettings.afterWrite(current, result)
+            applySettings(next)
+            if (next.phase == ChatSettings.Phase.RECONCILING) readSettings(token, link)
+        }
+    }
+
+    private fun applySettings(s: ChatSettings.State) {
+        if (s.phase == ChatSettings.Phase.CLOSED) endSettings(s) else _settings.value = s
     }
 
     fun startTerminal(hostId: String, cwd: String, command: String) {

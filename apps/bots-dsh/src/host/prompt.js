@@ -54,10 +54,23 @@ export function install(rt) {
       const bot = owner === undefined ? undefined : rt.botOf(owner)
       if (bot === undefined) return undefined
       const { name, role, instructions } = bot
+      const rolePrompt = rt.roleRuntime?.acpPrompt?.(sessionId, owner)
       const needsDshTools = roleToolsInDsh(bot, sessionId)
-      return { name, role, instructions, ...(needsDshTools ? { needsDshTools: true } : {}) }
+      return {
+        name, role, instructions,
+        ...(typeof rolePrompt === 'string' ? { rolePrompt } : {}),
+        ...(needsDshTools ? { needsDshTools: true } : {}),
+      }
     })
-    if (typeof off === 'function') sub.effect(() => off, 'ds-bot: ACP identity')
+    if (typeof off === 'function') {
+      const providers = sub.acpAgents.rolePromptProviders
+      const registered = Array.isArray(providers) ? Object.freeze([...providers]) : undefined
+      rt.acpRolePromptProviders = registered
+      sub.effect(() => () => {
+        if (rt.acpRolePromptProviders === registered) rt.acpRolePromptProviders = undefined
+        off()
+      }, 'ds-bot: ACP identity')
+    }
   }
   if (typeof ctx.inject === 'function') ctx.inject(['acpAgents'], attachIdentity)
   else if (ctx.get?.('acpAgents') !== undefined) {

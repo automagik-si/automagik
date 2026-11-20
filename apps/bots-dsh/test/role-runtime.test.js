@@ -4,12 +4,15 @@ import * as fs from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { apply as applyExecutor, inject as executorInject } from '@deepseek-ai/dsh-tool-executor-native'
+import { createIdentityReaders, IDENTITY_PROVIDERS } from '../../acp-dsh/src/host/identity.js'
 import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { installRoles } from '../src/host/roles.js'
@@ -29,6 +32,10 @@ const source = new URL('../roles/voice-mouth/', import.meta.url)
 const manifest = JSON.parse(await fs.readFile(new URL('role.json', source), 'utf8'))
 const officialScript = await fs.readFile(new URL(manifest.entry, source), 'utf8')
 const officialPrompt = await fs.readFile(new URL(manifest.prompt, source), 'utf8')
+const rolePart = prompt => `<role-prompt id="${ID}">\n${prompt.trimEnd()}\n</role-prompt>`
+const acpService = registry => ({
+  botIdentity: registry.register, rolePromptProviders: IDENTITY_PROVIDERS,
+})
 const fixtureBot = (id, fields = {}) => ({
   id, sessionId: id, name: id, role: 'Description', instructions: 'Follow the fixture instructions.',
   createdAt: 1, permission: 'workspace-write', ...fields,
@@ -39,14 +46,16 @@ function refused(result, message) {
   assert.match(speech(result), message)
 }
 
-async function fixture(t, { script = officialScript, role = manifest, readOnly = false } = {}) {
+async function fixture(t, {
+  script = officialScript, promptText = officialPrompt, role = manifest, readOnly = false,
+} = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), 'ds-bot-role-runtime-'))
   const stateFile = join(home, 'state.json')
   const folder = join(home, 'roles', ID, role.version)
   const packageBytes = archive([
     tarMember('package/role.json', JSON.stringify(role)),
     tarMember(`package/${role.entry}`, script),
-    tarMember(`package/${role.prompt}`, officialPrompt),
+    tarMember(`package/${role.prompt}`, promptText),
   ])
   const entry = entryOf(packageBytes, { id: ID, version: role.version, name: role.name, capabilities: role.capabilities })
   const signed = signer()
@@ -70,7 +79,7 @@ async function fixture(t, { script = officialScript, role = manifest, readOnly =
     await fs.writeFile(join(home, 'state.lock'), JSON.stringify({ pid: process.ppid, host: hostname(), token: 'fixture-lock' }))
   }
 
-  async function start() {
+  async function start({ acpAgents } = {}) {
     const harness = new Context()
     await harness.plugin(SystemPrompt)
     await harness.plugin(ToolRuntime)
@@ -78,10 +87,21 @@ async function fixture(t, { script = officialScript, role = manifest, readOnly =
     let scopeParent
     await harness.inject(['tools'], ctx => { scopeParent = ctx })
     const agents = new Map()
-    const host = fakeContext({ services: { agents: { list: () => [...agents.values()], get: id => agents.get(id) } } })
+    const host = fakeContext({ services: {
+      agents: { list: () => [...agents.values()], get: id => agents.get(id) }, acpAgents,
+    } })
+    let disposeIdentity
+    const effect = host.effect
+    host.effect = (execute, label) => effect(() => {
+      const dispose = execute()
+      if (label !== 'ds-bot: ACP identity') return dispose
+      disposeIdentity = dispose
+      return () => { disposeIdentity?.(); disposeIdentity = undefined }
+    }, label)
     const agentOf = (id, replace = false) => {
       if (!replace && agents.has(id)) return agents.get(id)
-      const session = agents.get(id)?.session ?? Session.create(id)
+      const header = { version: 4, id, createdAt: 0, isSeeded: false, cwd: home }
+      const session = agents.get(id)?.session ?? Session.create(id, undefined, header)
       const agent = { id, session, inbox: { nextStep: [], nextTurn: [], remove: () => false }, cancel() {}, whenIdle: async () => {} }
       agent.ctx = createScope(scopeParent, agent).ctx
       agents.set(id, agent)
@@ -146,6 +166,7 @@ async function fixture(t, { script = officialScript, role = manifest, readOnly =
       return batch.results[0].result
     }
     const context = { rt, host, harness, fetched, warnings, agentOf, events, call, ok, has, pin, prompt, execute,
+      disposeIdentity: () => { disposeIdentity?.(); disposeIdentity = undefined },
       async close() { closed = true; contexts.delete(context); await host.dispose(); await harness.fiber.dispose() } }
     contexts.add(context)
     return context
@@ -286,6 +307,172 @@ test('the reviewed package speaks through DSH to one mounted pane and rolls back
   assert.equal(JSON.stringify({ ...after.bots[SECOND], roles: undefined }), JSON.stringify(asBefore.bots[SECOND]))
   for (const key of ['model', 'permission', 'workDir', 'sessionId']) assert.equal(after.bots[FIRST][key], asBefore.bots[FIRST][key])
   assert.ok(!JSON.stringify(after).includes('fixture-voice'))
+})
+
+test('the ACP identity reader serves the native part only for eligible Bot Sessions', async t => {
+  const registry = createIdentityReaders(() => {})
+  const f = await fixture(t)
+  const h = await f.start({ acpAgents: acpService(registry) })
+  await h.ok('role-install', { id: ID })
+  await h.ok('role-attach', { id: FIRST, role: ID })
+  const part = rolePart(officialPrompt)
+  for (const id of [FIRST, GROUP]) {
+    assert.equal(registry.read(id).rolePrompt, part)
+    assert.ok(h.prompt(id).includes(part))
+  }
+  for (const id of [RELAY, PLAIN, SECOND]) {
+    assert.equal(Object.hasOwn(registry.read(id) ?? {}, 'rolePrompt'), false, id)
+  }
+  await h.ok('role-attach', { id: SECOND, role: ID })
+  h.rt.state.bots[SECOND].model = 'acp-codex/default'
+  assert.equal(registry.read(SECOND).rolePrompt, part)
+  assert.doesNotMatch(h.prompt(SECOND), /role-prompt/)
+  await h.ok('set-prefs', { roles: false })
+  for (const id of [FIRST, GROUP, SECOND]) {
+    assert.equal(Object.hasOwn(registry.read(id), 'rolePrompt'), false, id)
+  }
+})
+
+test('the registered identity delivers per-Session role snapshots to ACP', async t => {
+  const pin = async app => {
+    const manifest = new URL(`../../${app}/dev/harness/package.json`, import.meta.url)
+    return JSON.parse(await fs.readFile(manifest, 'utf8')).dependencies['@deepseek-ai/dsh']
+  }
+  const [acpPin, botsPin] = await Promise.all([pin('acp-dsh'), pin('bots-dsh')])
+  assert.equal(acpPin, botsPin, 'acp-dsh and bots-dsh must pin one DSH harness for B3')
+  const sentinel = 'ROLE-SENTINEL-7f3a'
+  const promptText = `${officialPrompt.trimEnd()}\n${sentinel}`
+  const f = await fixture(t, { promptText })
+  const priorHome = process.env.AUTOMAGIK_HOME
+  process.env.AUTOMAGIK_HOME = f.home
+  t.after(() => {
+    if (priorHome === undefined) delete process.env.AUTOMAGIK_HOME
+    else process.env.AUTOMAGIK_HOME = priorHome
+  })
+  const { AcpAdapter } = await import('../../acp-dsh/src/host/adapter.js')
+  const { AGENTS } = await import('../../acp-dsh/src/host/agents.js')
+  const warnings = []
+  const registry = createIdentityReaders(message => warnings.push(message))
+  const h = await f.start({ acpAgents: acpService(registry) })
+  h.rt.state.bots[FIRST].model = 'acp-codex/default'
+  await h.ok('role-install', { id: ID })
+  const sessions = new Map([FIRST, GROUP].map(id => [id, h.agentOf(id)]))
+  const adapterSession = id => sessions.get(id).session
+  const provider = 'acp-codex'
+  const trace = join(f.home, 'identity-trace.jsonl')
+  const peer = fileURLToPath(
+    new URL('../../acp-dsh/test/fixtures/identity-agent.mjs', import.meta.url))
+  const ctx = {
+    agents: { get: id => sessions.get(id), list: () => [...sessions.values()] },
+    on: () => () => {},
+    get: name => {
+      if (name === 'approval') return { effectivePolicy: () => 'ask' }
+      if (name === 'sandboxPolicy') return { resolve: () => ({ mode: 'read-only' }) }
+      return undefined
+    },
+  }
+  const adapter = new AcpAdapter(ctx, new Map([[provider, {
+    ...AGENTS[provider],
+    spawn: async () => ({
+      command: process.execPath, args: [peer],
+      env: {
+        ...process.env, HOME: f.home, USERPROFILE: f.home,
+        IDENTITY_TRACE: trace, IDENTITY_CAPABILITY: '1',
+      },
+      startMs: 5000, requestMs: 5000,
+    }),
+  }]]), { dshTools: () => undefined, botIdentity: registry.read })
+  t.after(() => adapter.dispose())
+  const startTurn = (id, turn) => {
+    h.events(id, 'turn/start', { turn })
+    adapter.noteEvent(adapterSession(id), { type: 'turn/start', data: { turn } })
+  }
+  const content = text => [{ type: 'text', text }]
+  const history = [
+    { role: 'user', source: { kind: 'user' }, content: content('Earlier request') },
+    { role: 'assistant', source: { kind: 'model', provider }, content: content('Earlier answer') },
+  ]
+  const step = async (id, text, before = []) => {
+    const messages = [...before, { role: 'user', source: { kind: 'user' }, content: content(text) }]
+    const chunks = []
+    for await (const chunk of adapter.stream(markAgentLoopRequest({
+      provider, model: 'default', sessionId: id, messages,
+    }))) chunks.push(chunk)
+    assert.equal(chunks.at(-1)?.reason?.kind, 'stop', JSON.stringify(chunks.at(-1)))
+  }
+  const rows = async method => (await fs.readFile(trace, 'utf8')).trim().split('\n')
+    .map(line => JSON.parse(line)).filter(row => row.method === method).map(row => row.params)
+  const partsOnWire = async () => (await rows('new')).map(row =>
+    row.systemPrompt?.content[0].text.match(/<role-prompt [\s\S]*?<\/role-prompt>/)?.[0])
+
+  startTurn(FIRST, 1)
+  await h.ok('role-attach', { id: FIRST, role: ID })
+  await step(FIRST, 'Earlier request')
+  assert.deepEqual(await partsOnWire(), [undefined])
+
+  h.events(FIRST, 'turn/end', { turn: 1 })
+  startTurn(FIRST, 2)
+  await step(FIRST, 'Next request', history)
+  const part = rolePart(promptText)
+  assert.deepEqual(await partsOnWire(), [undefined, part])
+  const replay = (await rows('prompt'))[1].prompt.map(block => block.text).join('\n')
+  assert.ok(replay.startsWith('The chat so far, before this new Codex (ACP) session:'))
+  assert.match(replay, /User: Earlier request/)
+  assert.match(replay, /Assistant: Earlier answer/)
+
+  h.events(FIRST, 'turn/end', { turn: 2 })
+  startTurn(FIRST, 3)
+  await h.ok('role-detach', { id: FIRST })
+  startTurn(GROUP, 1)
+  await step(GROUP, 'Group request')
+  assert.deepEqual(await partsOnWire(), [undefined, part, undefined])
+  await step(FIRST, 'Steer', history)
+  assert.deepEqual(await partsOnWire(), [undefined, part, undefined])
+  const offConflict = registry.register(() => ({ name: 'Competing Bot' }))
+  await step(FIRST, 'Steer during a reader conflict', history)
+  assert.deepEqual(await partsOnWire(), [undefined, part, undefined])
+  assert.ok(warnings.some(line => line.includes('competing Bot identities')))
+  offConflict()
+
+  h.events(FIRST, 'turn/end', { turn: 3 })
+  startTurn(FIRST, 4)
+  await step(FIRST, 'After detach', history)
+  assert.deepEqual(await partsOnWire(), [undefined, part, undefined, undefined])
+  for (const id of [FIRST, GROUP]) {
+    assert.ok(!JSON.stringify(adapterSession(id).snapshotEvents()).includes(sentinel))
+  }
+})
+
+test('the role card shows unsupported ACP routes and tracks the identity registration', async t => {
+  const registry = createIdentityReaders(() => {})
+  const f = await fixture(t)
+  const h = await f.start({ acpAgents: acpService(registry) })
+  await h.ok('role-install', { id: ID })
+  await h.ok('role-attach', { id: FIRST, role: ID })
+  const bot = h.rt.state.bots[FIRST]
+  const row = /ACP coding agents do not receive this role’s prompt/
+  bot.model = 'acp-codex/default'
+  const card = await mountRoleSettings(t, h, FIRST)
+  assert.match(card.text(), /Active tools\s*speak/)
+  assert.doesNotMatch(card.text(), row)
+  bot.appliedModel = 'acp-claude/default'
+  await card.refresh()
+  assert.doesNotMatch(card.text(), row)
+  bot.appliedModel = 'acp-hermes/default'
+  await card.refresh()
+  assert.match(card.text(), row)
+  delete bot.appliedModel
+  h.disposeIdentity()
+  assert.equal(registry.read(FIRST), undefined)
+  await card.refresh()
+  assert.match(card.text(), row)
+  const oldHome = await fixture(t)
+  const old = await oldHome.start({ acpAgents: { botIdentity: registry.register } })
+  await old.ok('role-install', { id: ID })
+  await old.ok('role-attach', { id: FIRST, role: ID })
+  old.rt.state.bots[FIRST].model = 'acp-codex/default'
+  const oldCard = await mountRoleSettings(t, old, FIRST)
+  assert.match(oldCard.text(), row)
 })
 
 test('open Bot Settings keeps one Roles card through detach, uninstall, install, and reattach', async t => {

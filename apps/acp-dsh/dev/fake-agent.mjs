@@ -213,12 +213,22 @@ const implementation = {
   async initialize() {
     // FAKE_ACP_PROTOCOL answers another protocol version, as an adapter built for a later ACP does.
     const protocolVersion = process.env.FAKE_ACP_PROTOCOL === undefined ? PROTOCOL_VERSION : Number(process.env.FAKE_ACP_PROTOCOL)
-    return { protocolVersion, agentCapabilities: { loadSession: false }, authMethods: [] }
+    const agentCapabilities = {
+      loadSession: false,
+      ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1'
+        ? { sessionCapabilities: { systemPrompt: {} } } : {}),
+    }
+    return { protocolVersion, agentCapabilities, authMethods: [] }
   },
   async newSession(params) {
     if (AUTH === 'session') throw RequestError.authRequired(undefined, 'run the CLI\'s login first')
     const sessionId = `fake-${++created}`
-    trace({ event: 'new-session', sessionId, ...(params._meta === undefined ? {} : { meta: params._meta }), servers: (params.mcpServers ?? []).map(server => server.name) })
+    trace({
+      event: 'new-session', sessionId,
+      ...(params._meta === undefined ? {} : { meta: params._meta }),
+      systemPrompt: params.systemPrompt?.content.map(block => block.text).join('\n'),
+      servers: (params.mcpServers ?? []).map(server => server.name),
+    })
     const session = newSession(sessionId, params.cwd)
     await attach(session, params.mcpServers, sessionId)
     trace({ event: 'new-answer', sessionId, at: Date.now() })
@@ -249,7 +259,11 @@ const implementation = {
     session.effort = source.effort
     session.mode = source.mode
     session.forkedFrom = params.sessionId
-    trace({ event: 'fork', from: params.sessionId, sessionId, servers: (params.mcpServers ?? []).map(server => server.name) })
+    trace({
+      event: 'fork', from: params.sessionId, sessionId,
+      systemPrompt: params.systemPrompt?.content.map(block => block.text).join('\n'),
+      servers: (params.mcpServers ?? []).map(server => server.name),
+    })
     // A fork that cannot offer the bridge: `session/fork` answers with a session whose server
     // never started, as codex-acp does when the person's Codex config defines that name.
     if (process.env.FAKE_ACP_FORK_SKIP_MCP !== '1') await attach(session, params.mcpServers, sessionId)

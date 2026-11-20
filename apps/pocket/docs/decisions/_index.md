@@ -2,7 +2,7 @@
 title: "Decisions"
 type: moc
 created: 2026-11-01
-updated: 2026-11-10
+updated: 2026-11-20
 tags: [moc, decisions]
 ---
 # Decisions
@@ -29,5 +29,6 @@ Write one from [`_Templates/decision.md`](../_Templates/decision.md).
 | [One shared debug signing key for Pocket PR builds](shared-debug-signing-key.md) | Accepted | |
 | [Bot memory opens on its own connection](bot-memory.md) | Implemented | |
 | [Bot schedules open on their own connection](bot-schedules.md) | Implemented | |
+| [Bot settings open from the chat identity pill](bot-settings.md) | Implemented | |
 
 Back to the [docs home](../_index.md).

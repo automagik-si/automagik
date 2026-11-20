@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -148,6 +149,9 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     val botManage = vm.botManage.collectAsStateWithLifecycle().value[ref.hostId]
     val schedules = vm.schedules.collectAsStateWithLifecycle().value
     val botSchedules = vm.botSchedules.collectAsStateWithLifecycle().value[ref.hostId]
+    // The settings dialog drops its contents even when the app stops collecting the chat.
+    val settings = vm.settings.collectAsState().value
+    val botSettings = vm.botSettings.collectAsStateWithLifecycle().value[ref.hostId]
     val botWrites = vm.botWrites.collectAsStateWithLifecycle().value[ref.hostId]
     val chat = vm.botChats.collectAsStateWithLifecycle().value[ref.hostId]?.getOrNull()?.find { it.terminal == ref.address }
     val terminal = app.machines[ref.hostId]?.terminals?.find { it.address == ref.address }
@@ -185,9 +189,11 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
         Column(Modifier.fillMaxSize()) {
             val showMemory = s.dsh && !app.demo && botManage != false && (s.dshWrite || botWrites == true)
             val showSchedules = s.dsh && !app.demo && botSchedules != false && (s.dshWrite || botWrites == true)
+            val showSettings = ChatSettings.isBot(s.terminal) && !app.demo && botSettings != false && (s.dshWrite || botWrites == true)
             ChatBar(s, identity, pinned, onBack, onShowTerminal?.takeIf { ChatActions.canShowTerminal(s) }, vm::chatInterrupt, vm::reconnectChat,
                 onMemory = if (showMemory) ({ vm.openMemory(ref) }) else null,
-                onSchedules = if (showSchedules) ({ vm.openSchedules(ref) }) else null)
+                onSchedules = if (showSchedules) ({ vm.openSchedules(ref) }) else null,
+                onSettings = if (showSettings) ({ vm.openSettings(ref) }) else null)
             Box(Modifier.fillMaxWidth().weight(1f)) {
                 LazyColumn(Modifier.fillMaxSize().alpha(if (s.offline || s.gone) .55f else 1f), state = list,
                     contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -235,16 +241,21 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     }
     if (memory != null && memory.hostId == ref.hostId && memory.terminal == ref.address) ChatMemoryDialog(vm, memory)
     if (schedules != null && schedules.hostId == ref.hostId && schedules.terminal == ref.address) ChatSchedulesDialog(vm, schedules)
+    if (settings != null && settings.hostId == ref.hostId && settings.terminal == ref.address) ChatSettingsDialog(vm, settings)
 }
 
 @Composable private fun ChatBar(s: Chat.State, identity: ChatIdentity, card: Chat.Row?, onBack: () -> Unit, onShowTerminal: (() -> Unit)?,
-                               onInterrupt: () -> Unit, onReconnect: () -> Unit, onMemory: (() -> Unit)?, onSchedules: (() -> Unit)?) {
+                               onInterrupt: () -> Unit, onReconnect: () -> Unit, onMemory: (() -> Unit)?,
+                               onSchedules: (() -> Unit)?, onSettings: (() -> Unit)?) {
     Column(Modifier.fillMaxWidth().background(Chrome)) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to agents") }
             Surface(color = Surface, shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, Border),
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 6.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                val action = if (onSettings == null) Modifier
+                    else Modifier.clickable(onClickLabel = "Bot settings", role = Role.Button, onClick = onSettings)
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).then(action).padding(start = 6.dp, end = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(36.dp)) {
                         PetView(identity.pet, identity.pose, 36.dp)
                         Box(Modifier.align(Alignment.BottomEnd).size(12.dp).background(stateColor(s.status.state), CircleShape)
