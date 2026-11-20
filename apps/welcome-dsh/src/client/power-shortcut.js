@@ -2,7 +2,8 @@ import { createElement as h } from 'react'
 import { call } from './api.js'
 import { t } from './i18n.js'
 import { WORKING, powerOf, startPower, subscribePower, usePowerState } from './power-store.js'
-import { geniePowerOn, genieStatusOf, powerLocked, powerOff, powerOn, statusOf, unfoldPowerOn, unfoldStatusOf } from './team.js'
+import { geniePowerOn, genieStatusOf, powerLocked, powerOff, powerOn, resumeServer, statusOf, unfoldPowerOn, unfoldStatusOf } from './team.js'
+export { resumeServer }
 
 // Omni's, Genie's and Unfold's power, as the welcome's team step and each built-in Bot's
 // settings read it: one state table (powerRow), one set of words, and the kind's own run
@@ -129,7 +130,7 @@ export const installRunning = status => status?.install?.phase === 'installing'
 export function resumeInstall(kind, status, start = startPower) {
   if (!installRunning(status) || (kind !== 'omni' && kind !== 'genie')) return null
   const on = kind === 'omni' ? powerOn : geniePowerOn
-  return start(kind, options => on({ ...options, resume: status }))
+  return start(kind, options => on({ ...options, resume: status, passive: true }))
 }
 
 // What this DSH's plugins have (omni-plugins, genie-plugin), each null when its read failed.
@@ -153,6 +154,8 @@ export function officialRow(kind, power, { roster, read, actions }) {
   let action = null
   if (row.action === 'install' || row.action === 'power' || row.action === 'retry') {
     action = row.action
+  } else if (row.action === 'off' && kind === 'omni' && power?.phase === 'sandbox' && power.detail?.job) {
+    action = 'off'
   } else if (row.action === 'choose' && typeof actions?.openHarnessOnboarding === 'function') {
     action = row.action
   } else if (row.action === 'plugins' && actions?.hasPlugins?.() === true) {
@@ -162,11 +165,13 @@ export function officialRow(kind, power, { roster, read, actions }) {
   return { text, label: actionLabel({ ...row, action }), alert: row.alert, action }
 }
 
-export function actOfficial(kind, row, { actions, start = startPower }) {
+export function actOfficial(kind, row, { actions, start = startPower, stop = powerOff }) {
   if (row.action === 'install' || row.action === 'power' || row.action === 'retry') {
     return start(kind, POWER_ON[kind])
   }
-  if (row.action === 'choose') {
+  if (row.action === 'off') {
+    stop(kind)
+  } else if (row.action === 'choose') {
     actions.closeSettings?.()
     actions.openHarnessOnboarding('omni-team')
   } else if (row.action === 'plugins') {
@@ -232,7 +237,7 @@ export function installPowerSettings(load = () => require('@automagik/bots-dsh/c
 
 export function installOfficialInstall(
   load = () => require('@automagik/bots-dsh/client'),
-  { ask = call, start = startPower } = {},
+  { ask = call, start = startPower, stop = powerOff } = {},
 ) {
   let bots = null
   try {
@@ -272,7 +277,7 @@ export function installOfficialInstall(
       return missing || WORKING.has(phase) || needsAttention || CHOOSE.has(phase)
     },
     row,
-    act: (kind, ctx) => actOfficial(kind, row(kind, ctx), { actions: ctx.actions, start }),
+    act: (kind, ctx) => actOfficial(kind, row(kind, ctx), { actions: ctx.actions, start, stop }),
     refresh() {
       if (inFlight !== null) return inFlight
       inFlight = readPlugins(ask).then(([omni, genie]) => {
@@ -281,6 +286,7 @@ export function installOfficialInstall(
         reads.genie = { checked: true, status: genie }
         changed()
         resumeInstall('omni', omni, start)
+        resumeServer(omni, start, { passive: true })
         resumeInstall('genie', genie, start)
       }).finally(() => { inFlight = null })
       return inFlight
