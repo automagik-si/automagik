@@ -2,7 +2,7 @@ import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useSt
 import { BotMark, lookOf, petOf, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
 import { BODY, CELL, FLOOR } from './pet-poses.js'
-import { t } from './i18n.js'
+import { hostText, t } from './i18n.js'
 import { botChannelSource } from './extend.js'
 import { QUIET, Status, WORDED, stateOfStatus, statusOr, word, worstStatus } from './left-bar-status.js'
 
@@ -261,7 +261,7 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
   const { art, duo } = useArtSizes(ref, skin, rows.length)
   const edges = useScrollEdges(ref, rows.length)
   const press = row => (onOpen ? () => onOpen(row) : undefined)
-  const status = row => h(Status, { status: row.status, worded, quiet })
+  const status = (row, detail = '') => h(Status, { status: row.status, worded, quiet, detail })
   const button = (row, className, extra, ...children) => h('button', {
     key: row.key, type: 'button', className: classes('lb-row', className), 'data-kind': row.kind, 'data-id': row.id,
     'aria-current': row.key === current ? 'page' : undefined, onClick: press(row), onMouseEnter: nameIfCut,
@@ -272,13 +272,18 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
     if (row.kind === 'bot') {
       // The row's own status may be silent (a chat says it); the character still plays the Bot's.
       const state = row.bot.state ?? stateOfStatus(statusOr(row.bot.status))
-      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), null,
+      // A crew Bot whose plugin is missing, switched off or did not load cannot run
+      // (installed.js in the host). The mark says its word; the row's accessible name and the
+      // mark's title say why, so a wide row exposes the reason as the narrow one does.
+      const reason = row.bot?.installed === false && typeof row.bot.reason === 'string' ? hostText(row.bot.reason) : ''
+      const says = reason === '' ? null : { 'aria-label': [row.name, t('Not installed'), reason].join(' · ') }
+      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), says,
         h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
         h('span', { className: 'lb-name' }, row.name),
         row.bot.roleTag ? h('span', { className: 'bt-tag' }, row.bot.roleTag) : null,
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
         renderEnd ? renderEnd(row) : null,
-        status(row))
+        status(row, reason))
     }
     if (row.kind === 'channel') {
       return button(row, classes('lb-row-channel', row.unread && 'lb-row-unread'), { 'aria-expanded': !row.folded },
