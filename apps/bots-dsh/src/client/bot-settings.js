@@ -19,7 +19,7 @@ import { t } from './i18n.js'
 import { cliProviderOf } from './cli-login-model.js'
 import { CliAccounts } from './cli-accounts.js'
 import { AdvancedSettings, ADVANCED_SETTINGS_CSS } from './advanced-settings.js'
-import { BUILTIN_ROLES, GENIE_ATTACH_REFUSAL, roleTagOf, rolesOn } from '../shared/roles.js'
+import { attachedRoleIds, BUILTIN_ROLES, GENIE_ATTACH_REFUSAL, roleTagOf, rolesOn } from '../shared/roles.js'
 
 const capitalize = word => word[0].toUpperCase() + word.slice(1)
 
@@ -119,6 +119,48 @@ export function parseDenyTools(text) {
   return [...new Set(String(text ?? '').split(/[\n,]+/).map(name => name.trim()).filter(Boolean))]
 }
 
+function RolePackagesCard({ roster, actions, run }) {
+  const [result, setResult] = useState(null)
+  const [pending, setPending] = useState(false)
+  const records = roster.roles ?? {}
+  const roles = new Map((roster.roleCatalog?.roles ?? []).map(role => [role.id, role]))
+  for (const id of Object.keys(records)) {
+    if (!roles.has(id)) roles.set(id, { id, name: id })
+  }
+  if (roles.size === 0 && !result && !pending) return null
+
+  const attached = new Set((roster.bots ?? Object.values(roster.byId ?? {})).flatMap(attachedRoleIds))
+  const readOnly = Boolean(roster.readOnly) || roster.roleCatalog?.reason === 'read-only'
+  const change = (action, id) => {
+    setPending(true)
+    setResult(null)
+    return run(action(id).then(value => {
+      if (value?.warnings?.length || value?.leftover) setResult(value)
+    }).finally(() => setPending(false)))
+  }
+  return h(Card, { title: t('Roles') },
+    [...roles.values()].map(role => {
+      const record = Object.hasOwn(records, role.id) ? records[role.id] : undefined
+      const inUse = record && attached.has(role.id)
+      const hints = [
+        record?.status === 'broken' && t('Broken'),
+        record?.status === 'damaged' && t('Damaged'),
+        inUse && t('Detach this role from every Bot before uninstalling it.'),
+        !record && role.reason === 'community' && t('Community: not installable yet'),
+      ].filter(Boolean)
+      const version = record ? record.version : role.version
+      const button = record
+        ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: pending || readOnly || inUse,
+          onClick: () => change(actions.uninstallRole, role.id) }, t('Uninstall'))
+        : role.installable && h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: pending || readOnly,
+          onClick: () => change(actions.installRole, role.id) }, t('Install'))
+      return h(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(' · '), hint: hints.join(' · ') }, button || null)
+    }),
+    result ? h('div', { className: 'bt-bs-shell-note', role: 'status' },
+      result.warnings?.map(field => h('div', { key: field }, t('Ignored role manifest field: {field}', { field }))),
+      result.leftover ? h('div', null, t('Role package folder left at {folder}.', { folder: result.leftover })) : null) : null)
+}
+
 // A Bot's settings as grouped cards: who it is (avatar, name, description, role), what it runs on
 // (model), what it does (instructions), its memory and tasks, its Main Bot role, its
 // sidebar place, and copies.
@@ -139,6 +181,12 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
   const privacyHint = bot.private === true ? privateHint : isMainBot ? t('A Main Bot cannot be private.') : inGroup ? t('Leave its group chats before making it private.') : !bot.workDir ? t('Choose a working folder of its own first.') : privateHint
   const save = patch => run(actions.updateBot(bot.id, patch))
   const teamBot = roster.bots?.some(item => item.id === bot.id) ?? (roster.byId?.[bot.id]?.id === bot.id)
+  const requestedRoleCatalog = useRef()
+  useEffect(() => {
+    if (!teamBot || !actions.roleCatalog || requestedRoleCatalog.current === bot.id) return
+    requestedRoleCatalog.current = bot.id
+    void run(actions.roleCatalog())
+  }, [teamBot, bot.id])
   const roleTag = teamBot ? roleTagOf(bot, roster.prefs) : undefined
   const canAttachGenie = bot.kind === BUILTIN_ROLES.genie.kind
   // A model whose agent is signed out: the refusal shows as usual, and Sign in opens the sign-in
@@ -188,6 +236,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
           h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': roleTag === 'Genie', disabled: !canAttachGenie,
             title: canAttachGenie ? undefined : t(GENIE_ATTACH_REFUSAL),
             onClick: () => { if (!roleTag && canAttachGenie) void run(actions.attachRole(bot.id, 'genie')) } }, t('Genie')))) : null),
+    teamBot && rolesOn(roster.prefs) ? h(RolePackagesCard, { key: bot.id, roster, actions, run }) : null,
     h(Card, { title: t('Model') },
       h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Model')), h('span', { className: 'bt-set-hint', role: modelState?.lastFailure?.kept ? 'status' : undefined }, modelHint(bot, roster, modelState))),
