@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
@@ -13,10 +13,13 @@ import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import * as plugin from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { foldAttach, readAttach } from '../src/shared/attach-record.js'
+import { HOME_PATH, REPO_PATH } from '../src/shared/registry.js'
 import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
 import { buildCodeTree, readCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
 import { connectCore } from '../src/host/code-core.js'
-import { install, openPaneStream, streamAdmission, streamTarget } from '../src/host/code-side.js'
+import { CODE_STREAM_ROUTE, CODE_TREE_ENDPOINT, install, openPaneStream, streamAdmission, streamTarget } from '../src/host/code-side.js'
+import { CODE_INPUT_ROUTE, CODE_RELEASE_ROUTE, CODE_TAKE_ROUTE } from '../src/host/code-typing.js'
+import { install as installHooks } from '../src/host/extend.js'
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-hc-core.mjs', import.meta.url))
 const LEAD = 'b-aaaaaaaaaa'
@@ -147,6 +150,24 @@ test('the tree: projects, the main Bot first, workers under their Bot, this comp
   const other = buildCodeTree({ ...registry, attach: { rows: [], fold: foreign }, workers: new Map(), terminals, core: { id: CORE, name: 'test-machine' } })
   assert.equal(other.projects[0].bots.find(bot => bot.id === DEV).terminal, null)
   assert.equal(other.projects[0].bots.find(bot => bot.id === DEV).status, 'not-running')
+})
+
+test('a project on a linked machine never reads the repo registry at its local path', (t) => {
+  const f = fixture(t)
+  const homePath = join(f.automagikHome, HOME_PATH)
+  const remoteFolder = join(f.root, 'remote-project')
+  const remoteRegistry = join(remoteFolder, REPO_PATH)
+  const home = JSON.parse(readFileSync(homePath, 'utf8'))
+  home.projects.push({ folder: remoteFolder, machine: 'lab' })
+  writeFileSync(homePath, JSON.stringify(home))
+  mkdirSync(dirname(remoteRegistry), { recursive: true })
+  writeFileSync(remoteRegistry, JSON.stringify({ version: 2, bots: [{ id: ELSEWHERE, name: 'Remote project Bot' }] }))
+
+  const readFile = t.mock.fn(readFileSync)
+  const { projects, bots } = readRegistryTree({ env: f.env, readFile })
+  assert.deepEqual(projects, [{ folder: f.project }])
+  assert.equal(bots.some(bot => bot.id === ELSEWHERE), false)
+  assert.equal(readFile.mock.calls.some(({ arguments: [path] }) => path === remoteRegistry), false)
 })
 
 test('a global Bot with no folder is a seat: the tree lists it and its pane resolves', async (t) => {
@@ -290,7 +311,7 @@ test('owner only: the exact stream route refuses a share viewer, and an unauthen
     connection: { fetch: { register: options => { route = options; return () => { route = null } } } },
   }
   const rt = { ctx, hooks: { endpoint: (name, fn, options) => { endpoints.set(name, { fn, options }); return () => {} } }, warn: () => {} }
-  install(rt, { env: f.env })
+  install(rt, { env: f.env, desktop: true })
   t.after(() => { route = null })
   assert.ok(endpoints.has('code-tree'), 'the tree is a read-only team endpoint')
   assert.equal(endpoints.get('code-tree').options.read, true)
@@ -340,7 +361,7 @@ function startHost(t, env = process.env) {
     get: name => (name === 'connection' ? (connectionLive ? connection : undefined) : undefined),
   }
   const rt = { ctx, hooks: { endpoint: () => () => {} }, warn: () => {}, home: process.cwd() }
-  const off = install(rt, { env })
+  const off = install(rt, { env, desktop: true })
   t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
   const request = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
   return { request, get route() { return route }, off, stopConnection: () => { connectionLive = false } }
@@ -416,13 +437,98 @@ test('installing the Code side reads no tree: the read starts with the first Ter
     connection: { fetch: { register: () => () => {} } },
   }
   const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = fn; return () => {} } }, warn: () => {}, home: f.root }
-  const off = install(rt, { env: f.env, connect: (...args) => { connects += 1; return connectCore(...args) } })
+  const off = install(rt, { env: f.env, desktop: true, connect: (...args) => { connects += 1; return connectCore(...args) } })
   t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
   assert.equal(typeof endpoint, 'function', 'the tree endpoint is served')
   assert.equal(connects, 0, 'install must not read the tree at install time')
   const tree = await endpoint()
   assert.equal(tree.machine.core, CORE)
   assert.ok(connects > 0, 'the first endpoint call is what reads the tree')
+})
+
+const DESKTOP_ONLY = { v: 1, machine: null, projects: [], reason: 'desktop-only' }
+const DESKTOP_ROUTES = [CODE_TAKE_ROUTE, CODE_INPUT_ROUTE, CODE_RELEASE_ROUTE, CODE_STREAM_ROUTE]
+
+function codeRuntime(t) {
+  const routes = new Map()
+  const register = t.mock.fn((route) => {
+    assert.equal(routes.has(route.path), false, `duplicate route ${route.path}`)
+    routes.set(route.path, route)
+    return () => routes.delete(route.path)
+  })
+  const ctx = { effect: setup => setup(), connection: { fetch: { register } } }
+  const rt = { ctx }
+  installHooks(rt)
+  return { rt, routes, register, endpoint: () => rt.extended.endpointOf(CODE_TREE_ENDPOINT) }
+}
+
+test('a standalone host only serves a read-only desktop denial, without reading files or connecting', async (t) => {
+  const f = fixture(t)
+  const { rt, register, endpoint } = codeRuntime(t)
+  const readFile = t.mock.fn(readFileSync)
+  const connect = t.mock.fn(connectCore)
+  t.after(install(rt, { env: f.env, desktop: false, connect, readFile }))
+  assert.equal(endpoint().read, true)
+  assert.deepEqual(await endpoint().fn(), DESKTOP_ONLY)
+  assert.equal(readFile.mock.callCount(), 0)
+  assert.equal(connect.mock.callCount(), 0)
+  assert.equal(register.mock.callCount(), 0)
+})
+
+test('the default requires both the desktop flag and the process IPC channel', async (t) => {
+  const { rt, routes, endpoint } = codeRuntime(t)
+  const flag = process.env.AUTOMAGIK_APP_BROWSER
+  const send = process.send
+  t.after(() => {
+    if (flag === undefined) delete process.env.AUTOMAGIK_APP_BROWSER
+    else process.env.AUTOMAGIK_APP_BROWSER = flag
+    if (send === undefined) delete process.send
+    else process.send = send
+  })
+
+  delete process.env.AUTOMAGIK_APP_BROWSER
+  process.send = () => true
+  const offWithoutFlag = install(rt)
+  assert.deepEqual(await endpoint().fn(), DESKTOP_ONLY)
+  assert.equal(routes.size, 0)
+  offWithoutFlag()
+
+  process.env.AUTOMAGIK_APP_BROWSER = '1'
+  delete process.send
+  const offWithoutIpc = install(rt)
+  assert.deepEqual(await endpoint().fn(), DESKTOP_ONLY)
+  assert.equal(routes.size, 0)
+  offWithoutIpc()
+
+  process.send = () => true
+  t.after(install(rt))
+  assert.deepEqual([...routes.keys()], DESKTOP_ROUTES)
+})
+
+test('the same runtime can dispose and reinstall the Code side with or without desktop routes', async (t) => {
+  const { rt, routes, endpoint } = codeRuntime(t)
+  const offDesktop = install(rt, { desktop: true })
+  t.after(offDesktop)
+  assert.deepEqual([...routes.keys()], DESKTOP_ROUTES)
+  offDesktop()
+  assert.equal(endpoint(), undefined)
+  assert.equal(routes.size, 0)
+
+  const offStandalone = install(rt, { desktop: false })
+  assert.deepEqual(await endpoint().fn(), DESKTOP_ONLY)
+  offStandalone()
+  assert.equal(endpoint(), undefined)
+
+  const offReinstalled = install(rt, { desktop: true })
+  t.after(offReinstalled)
+  assert.deepEqual([...routes.keys()], DESKTOP_ROUTES)
+  offReinstalled()
+
+  delete rt.ctx.connection
+  const offNoCarrier = install(rt, { desktop: true })
+  assert.equal(endpoint().read, true)
+  offNoCarrier()
+  assert.equal(endpoint(), undefined)
 })
 
 test('a real Cordis plugin stop closes an open stream and its core attach', async (t) => {
@@ -434,6 +540,7 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
     HOME: f.root,
     AUTOMAGIK_HOME: f.automagikHome,
     AUTOMAGIK_BOTS_HOME: team,
+    AUTOMAGIK_APP_BROWSER: '1',
     HERDR_APP_HOME: f.appHome,
     HERDR_HC: FAKE,
     FAKE_CORE_TERMINALS: f.terminalsFile,
@@ -441,7 +548,11 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
     FAKE_CORE_KEEP_OPEN: '1',
   }
   for (const [key, value] of Object.entries(env)) { saved[key] = process.env[key]; process.env[key] = value }
+  const send = process.send
+  process.send = () => true
   t.after(() => {
+    if (send === undefined) delete process.send
+    else process.send = send
     for (const key of Object.keys(saved)) {
       if (saved[key] === undefined) delete process.env[key]
       else process.env[key] = saved[key]

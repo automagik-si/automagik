@@ -38,7 +38,7 @@ import { parseBots } from "./model.js";
 import { AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
 import { commandArgv, sessionId } from "./restart.js";
 import { approvedDataRootProblem, executionPathProblem, shimPathOf } from "./dshTui.mjs";
-import { sharedSendAllowed, teamOf } from "./hcGuard.mjs";
+import { OWNER_QUESTION_LABEL, sharedSendAllowed, teamOf } from "./hcGuard.mjs";
 import { ENV, guardPathWith, stableGuardDir, stableHelper, stableKillDir, stableRootOf, stableRunner, templateAgent, workerArgs, workerPlan, WORKER_OF_LABEL } from "./workers.js";
 
 /** The one core version this proxy speaks (the box's herdr-core, hc 0.1.14). */
@@ -500,6 +500,15 @@ function isOwnWorkerTarget(record, policy) {
   if (policy.caller.worker) return false;
   if (record?.parent === policy.terminal) return true;
   return isOwnWorker(record, policy.caller);
+}
+
+/** A pane may set or clear only its owner question on itself. Labels come from parsed JSON. */
+function ownPaneLabelProblem(labels) {
+  if (isObject(labels) && Object.keys(labels).length === 1 && Object.hasOwn(labels, OWNER_QUESTION_LABEL)) {
+    const value = labels[OWNER_QUESTION_LABEL];
+    if (typeof value === "string" || value === null) return null;
+  }
+  return `the caller's own pane takes only the ${OWNER_QUESTION_LABEL} label`;
 }
 
 /** The team check for get/read/wait: the caller itself, its team graph, or its own workers. */
@@ -1202,7 +1211,9 @@ class Session {
     }
     let why = null;
     if (OWN_WORKER_METHODS.has(method)) {
-      if (!isOwnWorkerTarget(record, this.policy)) why = "the target is not the caller's own worker";
+      if (method === "terminal.label" && record.address === this.policy.terminal) {
+        why = ownPaneLabelProblem(params.labels);
+      } else if (!isOwnWorkerTarget(record, this.policy)) why = "the target is not the caller's own worker";
     } else if (method === "terminal.send") {
       if (!sendAllowed(record, this.policy)) why = "the target is not in the caller's team";
     } else if (TEAM_METHODS.has(method)) {

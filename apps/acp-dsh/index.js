@@ -28,6 +28,7 @@ import { CliHomes, HOME_ENV, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, ensureChatProfiles } from './src/host/codex-chat-profiles.js'
 import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
 import { adaptersHome, AdapterStore, CHECK_TICK_MS, homeRelativeText, redactInstallerOutput } from './src/host/install.js'
+import { installationCliHome } from './src/host/installation.js'
 import { handshake } from './src/host/handshake.js'
 import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNAVAILABLE, unsupported } from './src/host/image.js'
 import { CliLogins } from './src/host/login.js'
@@ -130,11 +131,20 @@ export function nodeCommand() {
   return { command: process.execPath, env: process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {} }
 }
 
+function defaultCliHome(ctx, storeHome, installation) {
+  const { root, owner } = installationCliHome(dirname(storeHome), installation, {
+    warn: message => warn(ctx, message),
+  })
+  info(ctx, owner ? 'Bot sign-ins: this installation keeps the existing Bot sign-in home'
+    : 'Bot sign-ins: this installation has its own Bot sign-in home')
+  return root
+}
+
 /**
  * @param {any} ctx
  * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any, nativeTools?: any }}
  *   [config]
- * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any> }} [deps]
+ * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string }} [deps]
  *   catalogHome: where each agent's models and efforts are kept (beside the adapters by default).
  *   loginSpawn, loginTimers: tests only, a fake CLI process and clock for sign-in attempts.
  *   loginRecord: tests only, ownership records with a fake sign-in process.
@@ -142,7 +152,8 @@ export function nodeCommand() {
  *   imageSetup: tests only, the image run's lockdown check (image.js imageSetup).
  *   account: reads which account a signed-in CLI is on (account.js); consentFile: where the
  *   person's word for each account is kept (consent.js), in the isolated CLI root by default.
- *   cliHome/logoutRun: private home root and fake logout runner for tests. A synthetic store
+ *   installation: the DSH home used for the default private CLI root. cliHome overrides that root.
+ *   logoutRun: fake logout runner for tests. A synthetic store
  *   without a home keeps the legacy in-memory test behavior; real stores always have a home.
  */
 export function apply(ctx, config = {}, {
@@ -151,7 +162,8 @@ export function apply(ctx, config = {}, {
   find = name => findCommand(name), signedIn = signedInOf,
   catalogHome = store.home ? join(dirname(store.home), 'catalog') : undefined,
   loginSpawn, loginTimers, loginRecord, imageSetup, account = accountOf,
-  cliHome = store.home ? join(dirname(store.home), 'cli-homes') : undefined,
+  installation = process.env.DSH_HOME,
+  cliHome = store.home ? defaultCliHome(ctx, store.home, installation) : undefined,
   consentFile = cliHome ? join(cliHome, CONSENT_FILE)
     : typeof store.home === 'string' && store.home === adaptersHome()
       ? join(dirname(store.home), CONSENT_FILE) : undefined,
@@ -1393,6 +1405,23 @@ export function apply(ctx, config = {}, {
      * Refusals carry an `acp/image-*` code and a message to show as it is.
      */
     editImage,
+    /**
+     * Claude Code's native subagents in each running agent's current prompt, as workers
+     * (acp.js workersOf), by DSH Session id: { [sessionId]: [{ id, title, state: 'running' |
+     * 'done' | 'failed', result?, stopped?, at?, steps: [{ id, title, tool?, state }], more? }] }.
+     * `stopped`: DSH closed it when its turn ended (Stop, or the agent went away), so it is
+     * `failed` with the result `Stopped`. Only Sessions with a worker are listed. Read-only: it
+     * starts, stops and answers nothing.
+     */
+    nativeWorkers: () => {
+      const out = {}
+      for (const [sessionId, state] of adapter.live) {
+        let workers
+        try { workers = state?.run?.workers?.() } catch { workers = undefined }
+        if (Array.isArray(workers) && workers.length > 0) out[sessionId] = workers
+      }
+      return out
+    },
     /** Read only the Bot that owns this Session. Returns this registration's disposer. */
     botIdentity(reader) {
       if (typeof reader !== 'function') return () => {}

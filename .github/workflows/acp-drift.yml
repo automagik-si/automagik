@@ -12,9 +12,9 @@ name: ACP drift
 #    than the pin, fails the job and opens an issue (or comments on the open one).
 # 2. adapters: installs the newest adapters through the plugin's own AdapterStore and the two
 #    CLIs from npm into a throwaway home, with no account, and runs the plugin suite, the
-#    sequence fuzz on a wider search and the real-adapter tests against them, on Linux and
-#    macOS. An adapter release that breaks the client is seen the same day: a red run opens an
-#    issue with the end of the failing output.
+#    sequence fuzz on a wider search, the real-adapter tests and the sign-in link-start check,
+#    on Linux and macOS. An adapter release that breaks the client is seen the same day: a red run
+#    opens an issue with the end of the failing output.
 # 3. bump: when npm's latest SDK is not the pin, bumps the pin and bun.lock on dev, runs the
 #    same lint, suite, fuzz and real-adapter tests on it and moves the record (bump-check). That
 #    job runs npm's newest code, so it holds a read-only token and no credentials on disk. A
@@ -246,18 +246,63 @@ jobs:
             fi
           done
 
+      - name: The sign-in link-start check
+        id: link-start
+        timeout-minutes: 6
+        env:
+          AUTOMAGIK_TEST_LIVE_LOGIN: '1'
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/acp-link-start.log"
+          code=0
+          node --import ./test/harness-resolve.mjs --test --test-reporter=spec test/real-login.test.js > "${log}" 2>&1 || code=$?
+          tail -n 60 "${log}"
+          {
+            echo '### ACP sign-in link-start check'
+            for agent in 'Claude Code' 'Codex'; do
+              case "${agent}" in
+                'Claude Code') package='@anthropic-ai/claude-code' ;;
+                Codex) package='@openai/codex' ;;
+              esac
+              version=$(node -p 'require(process.argv[1]).version' "${RUNNER_TEMP}/acp-clis/node_modules/${package}/package.json" 2>/dev/null) || version=unknown
+              if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.+-]*$ ]]; then version=unknown; fi
+              if grep -q "^✔ real ${agent}: sign-in reaches its link" "${log}"; then
+                result='passed'
+              elif grep -q "^✖ real ${agent}: sign-in reaches its link" "${log}"; then
+                result='ran and failed'
+                if [ "${code}" -eq 0 ]; then code=1; fi
+              else
+                result='missing or skipped'
+                code=3
+              fi
+              detail=$(sed -n "s/^ℹ real ${agent} link-start: //p" "${log}")
+              echo "- ${agent} (CLI ${version}): ${result}. ${detail:-status=unavailable, cause=no result reported}"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "${code}"
+
       - name: Open or update the issue
         if: failure() || steps.run.outputs.code != '0'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           OS: ${{ matrix.os }}
+          SUITE_CODE: ${{ steps.run.outputs.code }}
+          LINK_START: ${{ steps.link-start.outcome }}
         run: |
           set -euo pipefail
           title='acp-dsh: the suite fails against the newest ACP adapters'
+          if [ "${SUITE_CODE}" = 0 ] && [ "${LINK_START}" = failure ]; then
+            title='acp-dsh: the daily sign-in link-start check failed'
+          fi
           body="${RUNNER_TEMP}/acp-daily-issue.md"
           {
-            echo "The daily run against the newest adapters failed on ${OS}."
+            if [ "${SUITE_CODE}" != 0 ]; then
+              echo "The adapter suite failed or could not start on ${OS}."
+            fi
+            if [ "${LINK_START}" = failure ]; then
+              echo "The sign-in link-start check failed on ${OS}. See the run summary for each CLI's version, status and cause."
+            fi
             echo
             echo "- claude-agent-acp ${ACP_CLAUDE_VERSION:-unknown}"
             echo "- codex-acp ${ACP_CODEX_VERSION:-unknown}"
@@ -265,10 +310,15 @@ jobs:
             echo 'The end of the output (failing tests are marked `✖`):'
             echo
             echo '```'
-            if [ -f "${RUNNER_TEMP}/acp-daily.log" ]; then
-              grep -n '^✖' "${RUNNER_TEMP}/acp-daily.log" | head -n 40 || true
+            if [ "${SUITE_CODE}" = 0 ] && [ "${LINK_START}" = failure ]; then
+              log="${RUNNER_TEMP}/acp-link-start.log"
+            else
+              log="${RUNNER_TEMP}/acp-daily.log"
+            fi
+            if [ -f "${log}" ]; then
+              grep -n '^✖' "${log}" | head -n 40 || true
               echo '...'
-              tail -n 40 "${RUNNER_TEMP}/acp-daily.log" | cut -c1-400
+              tail -n 40 "${log}" | cut -c1-400
             else
               echo 'no output: the step failed before the suite ran'
             fi

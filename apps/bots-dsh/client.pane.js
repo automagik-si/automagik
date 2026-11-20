@@ -11923,6 +11923,7 @@ var HOST_ZH = {
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
   "The Code side could not load here.": "代码端无法在此加载。",
+  "Terminals show in the Automagik desktop app.": "终端会显示在 Automagik 桌面应用中。",
   "View only · click to type": "只读 · 点击输入",
   "Typing · Esc to stop": "输入中 · 按 Esc 停止",
   "Taking the pane…": "正在接管终端…",
@@ -12034,7 +12035,17 @@ Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
-  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
+  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。",
+  // Claude Code's native subagents as workers under a Bot's row (native-workers.js, issue 1564).
+  "Subagents {name} started": "{name} 启动的子代理",
+  "{step}…": "{step}…",
+  "Starting…": "正在启动…",
+  "Worker details": "工作详情",
+  "Result: {line}": "结果：{line}",
+  "still running": "仍在运行",
+  "Steps": "步骤",
+  "Steps (latest {n})": "步骤（最近 {n} 个）",
+  "No steps yet.": "还没有步骤。"
 });
 Object.assign(ZH, {
   "Automagik official": "Automagik 官方",
@@ -15110,8 +15121,8 @@ function CodeBody({ code }) {
   const current = (0, import_react2.useSyncExternalStore)(code.subscribe, code.snapshot, code.snapshot);
   const tree = current.tree;
   (0, import_react2.useEffect)(() => {
-    if (!current.tree && !current.loading) void code.loadTree();
-  }, [code, current.tree, current.loading]);
+    if (!tree && !current.loading && !current.error) void code.loadTree();
+  }, [code, tree, current.loading, current.error]);
   const chosen = selecting(tree, current.selected);
   const title = chosen ? chosen.worker ? `${chosen.bot.name} · ${chosen.worker.role ?? chosen.worker.agent ?? chosen.worker.terminal}` : chosen.bot.name : t("No terminal chosen");
   const choose = (botId, worker = null) => {

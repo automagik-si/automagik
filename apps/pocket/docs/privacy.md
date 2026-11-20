@@ -2,7 +2,7 @@
 title: "Privacy policy"
 type: policy
 created: 2026-11-01
-updated: 2026-11-11
+updated: 2026-11-19
 tags: [privacy, policy, play]
 ---
 # Automagik Pocket privacy policy
@@ -64,7 +64,14 @@ Nothing else is collected. We, the developers, receive none of this data.
 ## What is stored on the phone
 
 - Your saved machines and settings.
-- The phone's Pocket Link (iroh) key, in app storage that Android never backs up.
+- The phone's Pocket Link (iroh) key stays in app storage that Android never backs up.
+  The app encrypts it with an AES key held in Android Keystore that cannot be exported.
+  The app decrypts the Pocket Link key into memory to connect. On the first start after
+  updating, the app wraps an older plain key and deletes the plain copy once the encrypted
+  copy is safely written and verified. If the encrypted copy can't be written or read, the
+  existing plain key stays in that storage and the app retries wrapping it on each start.
+  The app keeps a new key plain in the same storage if Keystore is unavailable or sealing
+  fails before the encrypted file is put in place. It retries wrapping that key on each start.
 - Only if you used SSH in an older version: that version's SSH key, in the same storage. The app
   deletes it once no machine saved over SSH is left.
 - Cached program icons, and a downloaded update until it installs.

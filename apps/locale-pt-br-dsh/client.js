@@ -2837,6 +2837,7 @@ const pack = createPack({
     "Reading…": "Lendo…",
     "Reconnect": "Reconectar",
     "The Code side could not load here.": "O lado de código não pôde carregar aqui.",
+    "Terminals show in the Automagik desktop app.": "Os terminais aparecem no app Automagik para desktop.",
     "The Code side could not read this computer’s team.": "O lado de código não pôde ler a equipe deste computador.",
     "The terminal could not be reached": "Não foi possível alcançar o terminal",
     "This terminal ended": "Este terminal terminou",
@@ -2976,7 +2977,15 @@ const pack = createPack({
     "Proposed change": "Alteração proposta",
     "Changes": "Alterações",
     "Applying…": "Aplicando…",
-    "Apply": "Aplicar"
+    "Apply": "Aplicar",
+    "Subagents {name} started": "Subagentes que {name} iniciou",
+    "{step}…": "{step}…",
+    "Worker details": "Detalhes do worker",
+    "Result: {line}": "Resultado: {line}",
+    "still running": "ainda em andamento",
+    "Steps": "Etapas",
+    "Steps (latest {n})": "Etapas (últimas {n})",
+    "No steps yet.": "Nenhuma etapa ainda."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

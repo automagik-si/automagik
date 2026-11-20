@@ -330,3 +330,17 @@ test('a group with approvals is marked as needing the person; the narrow rail sa
   const node = find(draw(false), named('RoomRow'))[0]
   assert.match(node.type(node.props).props['aria-label'], /2 approvals waiting/)
 })
+
+test('the native Claude Code subagents of a Bot hang under its row next to its tasks (issue 1564)', () => {
+  const { tree, threadsOf } = sidebar({ tasks: {} })
+  // The wide sidebar is the left bar: what hangs under a row comes from its renderAfter.
+  assert.equal(tree?.type?.name, 'LeftBar')
+  const under = tree.props.renderAfter({ kind: 'bot', id: 'pip', bot: {} })
+  const workers = find(under, named('BotWorkers'))
+  assert.equal(workers.length, 1, 'one workers list under the row')
+  assert.equal(workers[0].props.bot.id, 'pip')
+  assert.equal(typeof workers[0].props.useWork, 'function', 'it reads the live answer the threads read')
+  // It sits after the tasks the Bot started, before what other plugins hang there.
+  assert.deepEqual(under.props.children.map(node => node?.type?.name), ['BotThreads', 'BotWorkers', 'BotChildren'])
+  assert.ok(threadsOf('pip'))
+})

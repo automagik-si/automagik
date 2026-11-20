@@ -30,7 +30,7 @@ export async function signIn(token, { api = 'https://api.github.com', fetch: req
   let response
   try {
     response = await request(`${api.replace(/\/$/, '')}/user`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'ds-bot', 'X-GitHub-Api-Version': '2022-11-28' },
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'automagik-bots', 'X-GitHub-Api-Version': '2022-11-28' },
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     })
   } catch {

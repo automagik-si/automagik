@@ -4,8 +4,10 @@
 // key reaches the input route. Every name and terminal here is made up.
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 import { browserGuard } from './browser-guard.js'
@@ -106,4 +108,98 @@ test('a waking key or paste only retakes; nothing typed before confirmation is s
   assert.match(await note(page), /Typing is back: type again/)
 
   assert.deepEqual(errors, [], 'the pane throws nothing')
+})
+
+function codeDocument(t) {
+  const { JSDOM } = createRequire(join(process.env.DSH_HARNESS, 'package.json'))('jsdom')
+  const { window } = new JSDOM('<!doctype html><div id="root"></div>', {
+    url: 'https://automagik.test/', runScripts: 'outside-only', pretendToBeVisual: true,
+  })
+  t.after(() => window.close())
+  window.Response = Response
+  // xterm can mount for the stream lifecycle test without measuring a real display.
+  window.ResizeObserver = class { observe() {} disconnect() {} }
+  window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  window.HTMLCanvasElement.prototype.getContext = () => ({ measureText: () => ({ width: 8 }) })
+  window.eval(seeds.outputFiles[0].text)
+  window.require = name => window.nativeSeeds[name]
+  window.eval(app.outputFiles[0].text)
+  return window
+}
+
+async function waitFor(check, message) {
+  const until = Date.now() + 2000
+  while (!check() && Date.now() < until) await delay(10)
+  assert.ok(check(), message)
+}
+
+const DESKTOP_ONLY = { v: 1, machine: null, projects: [], reason: 'desktop-only' }
+const LIVE_TREE = {
+  v: 1,
+  machine: { name: 'This computer', core: 'fake-core' },
+  projects: [{ folder: '/atlas', name: 'Atlas', bots: [
+    { id: 'b-aaaaaaaaaa', name: 'Atlas', status: 'idle', terminal: { id: 't1', cols: 80, rows: 24 }, workers: [] },
+  ] }],
+}
+const portuguese = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+
+for (const [language, message] of [
+  ['en', 'Terminals show in the Automagik desktop app.'],
+  ['zh', '终端会显示在 Automagik 桌面应用中。'],
+  ['pt', 'Os terminais aparecem no app Automagik para desktop.'],
+]) {
+  test(`a denial arriving after mount shows one desktop message in ${language} without loading the pane`, async (t) => {
+    const window = codeDocument(t)
+    const { promise, resolve } = Promise.withResolvers()
+    window.__readCodeTree = () => promise
+    const pressed = window.pressTerminal()
+    window.mountCodeBody(language, portuguese)
+    await waitFor(() => window.document.querySelector('#code-fixture'), 'the body mounted before the tree answered')
+    resolve(Response.json({ ok: true, value: DESKTOP_ONLY }))
+    await pressed
+
+    const body = () => window.document.querySelector('.cs-host')
+    await waitFor(body, 'the mounted body reacted to the denial')
+    assert.deepEqual(Array.from(body().children, child => [child.tagName, child.className, child.textContent]), [['P', 'cs-empty', message]])
+    assert.equal(window.__chunkRequests.length, 0)
+    assert.equal(window.__streams.length, 0)
+    assert.equal(window.__calls.some(call => call.url.includes('/code/')), false)
+  })
+}
+
+test('a denied refresh unmounts the live pane, closes its stream and releases typing', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  window.__readCodeTree = () => Response.json({ ok: true, value: LIVE_TREE })
+  await window.pressTerminal()
+  window.mountCodeBody('en')
+  await waitFor(() => window.__streams.length === 1, 'the pane opened a stream')
+  document.querySelector('.cs-screen').click()
+  await waitFor(() => document.querySelector('.cs-screen')?.dataset.codeMode === 'typing', 'typing started')
+
+  window.__calls.length = 0
+  window.__readCodeTree = () => Response.json({ ok: true, value: DESKTOP_ONLY })
+  await window.refreshCodeTree()
+  await waitFor(() => window.__closed && window.__calls.some(call => call.url.endsWith('/release')), 'the stream closed and typing was released')
+  assert.equal(document.querySelector('.cs-host').textContent, 'Terminals show in the Automagik desktop app.')
+  assert.equal(document.querySelector('.cs-pane'), null)
+  assert.equal(window.__streams.length, 1)
+  assert.deepEqual(Array.from(window.__calls, call => call.url).filter(url => url.includes('/code/')), ['api/omni-ui/code/release'])
+})
+
+test('a tree read error stays visible and only the next Terminal press retries the read', async (t) => {
+  const window = codeDocument(t)
+  window.__readCodeTree = () => new Response(null, { status: 503 })
+  await window.pressTerminal()
+  window.mountCodeBody('en')
+  const message = () => window.document.querySelector('.cs-empty')?.textContent
+  await waitFor(() => message() === 'The Code side could not read this computer’s team.', 'the read error stayed visible')
+  const reads = () => window.__calls.filter(call => call.body?.endpoint === 'code-tree').length
+  assert.equal(reads(), 1)
+
+  window.__readCodeTree = () => Response.json({ ok: true, value: DESKTOP_ONLY })
+  await window.pressTerminal()
+  await waitFor(() => message() === 'Terminals show in the Automagik desktop app.', 'the next Terminal press showed the new response')
+  assert.equal(reads(), 2)
+  assert.equal(window.__streams.length, 0)
 })

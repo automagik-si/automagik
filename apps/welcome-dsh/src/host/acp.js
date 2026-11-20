@@ -22,6 +22,7 @@ const AgentId = z.enum(ACP_IDS)
 const RefreshPayload = z.object({ refresh: z.boolean().optional() })
 const SwitchPayload = z.object({ id: AgentId, on: z.boolean() })
 const RetryPayload = z.object({ id: AgentId })
+const SIGN_IN_CHECKS = new Set(['timeout', 'unreadable'])
 
 const failure = (code, message) => Object.assign(new Error(message), { code })
 const invalid = message => failure('omni-ai/invalid', message)
@@ -48,11 +49,13 @@ const shownPath = (path) => {
 }
 
 export function agentView(agent) {
+  const check = agent.signInCheck
   return {
     id: agent.id,
     key: agent.key,
     name: agent.name,
     on: agent.on === true,
+    ...(agent.authScope === 'isolated' ? { authScope: 'isolated' } : {}),
     // The CLI as acp-dsh's own store has it (#749): installing, failed or ready, its version and
     // an update under way, redacted like the connector's.
     cli: {
@@ -82,6 +85,8 @@ export function agentView(agent) {
       ...(typeof agent.connector?.logPath === 'string' ? { logPath: shownPath(agent.connector.logPath) } : {}),
     },
     ...(typeof agent.signedIn === 'boolean' ? { signedIn: agent.signedIn } : {}),
+    // Why the last check could not tell: only these two words reach the page.
+    ...(agent.signedIn === undefined && SIGN_IN_CHECKS.has(check) ? { signInCheck: check } : {}),
     // Signed in on this computer, to an account the person has not confirmed for the app
     // (#869, acp-dsh's consent): only that it waits, never who it is.
     ...(agent.signedIn === true && agent.consent === 'needed' ? { consent: 'needed' } : {}),

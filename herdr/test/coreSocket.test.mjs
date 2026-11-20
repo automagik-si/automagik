@@ -59,7 +59,9 @@ async function serving(t, answer) {
   const dir = shortSocketDir(t, "hc-rpc-");
   const path = join(dir, "core.sock");
   const clients = new Set();
+  let connections = 0;
   const server = createServer((client) => {
+    connections += 1;
     clients.add(client);
     client.on("error", () => {});
     client.on("close", () => clients.delete(client));
@@ -71,7 +73,7 @@ async function serving(t, answer) {
   });
   t.after(() => { for (const client of clients) client.destroy(); return new Promise((resolve) => server.close(resolve)); });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
-  return { path, env: { AUTOMAGIK_HERDR_CORE_SOCKET: path, AUTOMAGIK_HERDR_TEST_ROOTS: dir } };
+  return { path, env: { AUTOMAGIK_HERDR_CORE_SOCKET: path, AUTOMAGIK_HERDR_TEST_ROOTS: dir }, connections: () => connections };
 }
 
 test("coreStatus sends exactly one status request and reads one reply line", async (t) => {
@@ -128,8 +130,13 @@ test("coreStatus preserves RPC error message", async (t) => {
 });
 test("coreStatus has one deadline and does not retry an answering but silent socket", async (t) => {
   const s = await serving(t, () => {});
-  const start = Date.now();
+  // A deadline already past: the socket is never opened, so the deadline is the one given.
+  const past = await coreStatus(s.env, { sockets: [s.path], timeoutMs: 0 });
+  assert.match(past.error, /timed out/);
+  assert.equal(s.connections(), 0, "no deadline left: no connection");
+  // A silent socket is tried exactly once (the missing first path never connects) and then the
+  // deadline ends it. Nothing waits for a second round or a default timeout.
   const result = await coreStatus(s.env, { sockets: [`${s.path}.missing`, s.path], timeoutMs: 80 });
   assert.match(result.error, /timed out/);
-  assert.ok(Date.now() - start < 1500);
+  assert.equal(s.connections(), 1, "one connection, no retry");
 });

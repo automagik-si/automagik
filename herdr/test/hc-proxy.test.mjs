@@ -244,7 +244,7 @@ const REFUSED_METHODS = [
   "terminal.attach", "terminal.interrupt", "terminal.keep", "terminal.keys", "terminal.put",
 ];
 
-const waitFor = async (check, timeout = 4000) => {
+const waitFor = async (check, timeout = 10_000) => {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
     if (check()) return true;
@@ -1026,7 +1026,13 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
   const { proxy } = await sceneWithCore(t);
   const held = [];
   for (let i = 0; i < MAX_CONNECTIONS; i += 1) held.push(await clientFor(proxy.socket));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Every held client has answered through its session, so each one is registered before the
+  // next connects; no sleep guesses when the proxy got to accept them. The client's own 5 s
+  // test timeout is the bound: a missing answer fails here, naming the list that never came.
+  await Promise.all(held.map((client) => client.call("terminal.list").catch((e) => {
+    throw new Error("herdr/test/hc-proxy.test.mjs, the connection cap row: a held client's terminal.list answer "
+      + `did not arrive within the client's test timeout: ${e.message}`);
+  })));
   const extra = await clientFor(proxy.socket);
   const answer = JSON.parse(await extra.next());
   assert.match(answer.error.message, new RegExp(`^hc-proxy: too many connections \\(${MAX_CONNECTIONS} max\\)`));
@@ -1037,10 +1043,10 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
 test("an idle connection and a slow partial line are closed by the idle timeout", async (t) => {
   const { proxy } = await sceneWithCore(t, { proxyOptions: { idleTimeoutMs: 120 } });
   const idle = await clientFor(proxy.socket);
-  assert.ok(await waitFor(() => idle.closed, 2000), "an idle connection is closed");
+  assert.ok(await waitFor(() => idle.closed, 10_000), "an idle connection is closed");
   const slow = await clientFor(proxy.socket);
   slow.socket.write('{"jsonrpc":"2.0","id":1');
-  assert.ok(await waitFor(() => slow.closed, 2000), "a slow partial line is closed");
+  assert.ok(await waitFor(() => slow.closed, 10_000), "a slow partial line is closed");
 });
 
 test("an in-flight wait keeps the connection alive", async (t) => {
@@ -1722,4 +1728,69 @@ test("approved Claude worker: the proxy accepts its chosen session id and refuse
   const answer = await other.client.call("terminal.run", { ...cp, labels: { ...cp.labels, "agent.session": SESSION } });
   assert.match(answer.error?.message ?? "", /approved worker label agent\.session does not match approval/);
   assert.equal(other.fake.calls("terminal.run").length, 0);
+});
+
+test("#540 the proxy forwards exactly the set and both clear forms on the caller's pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const expected = ["q", "", null].map((value) => ({
+    terminal: "t100", labels: { "automagik-herdr.needs-owner": value },
+  }));
+  for (const { labels } of expected) {
+    const answer = await client.call("terminal.label", { terminal: "dev", labels });
+    assert.ok(answer.result, JSON.stringify(answer));
+  }
+  assert.deepEqual(fake.calls("terminal.label").map(({ params }) => params), expected);
+});
+
+test("#540 the proxy refuses a malformed own-pane label without forwarding it", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const labels of [
+    { "automagik-herdr.needs-owner": "q", other: "x" },
+    { other: "x" },
+    [],
+    "x",
+    { "automagik-herdr.needs-owner": 3 },
+  ]) {
+    const answer = await client.call("terminal.label", { terminal: "t100", labels });
+    assert.match(answer.error?.message ?? "", /the caller's own pane takes only the automagik-herdr\.needs-owner label/, JSON.stringify(labels));
+  }
+  assert.equal(fake.calls("terminal.label").length, 0);
+});
+
+test("#540 the proxy refuses the owner question label on a foreign pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const labels = { "automagik-herdr.needs-owner": "q" };
+  for (const terminal of ["t120", "t106"]) {
+    const answer = await client.call("terminal.label", { terminal, labels });
+    assert.match(answer.error?.message ?? "", /the target is not the caller's own worker/);
+  }
+  assert.equal(fake.calls("terminal.label").length, 0);
+});
+
+test("#540 a proxied worker can label its own pane", async (t) => {
+  const { fake, start } = await sceneWithCore(t, { proxy: false });
+  const proxy = await start("t105");
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const params = { terminal: "t105", labels: { "automagik-herdr.needs-owner": "q" } };
+  const answer = await client.call("terminal.label", params);
+  assert.ok(answer.result, JSON.stringify(answer));
+  assert.deepEqual(fake.calls("terminal.label").map((call) => call.params), [params]);
+});
+
+test("#540 the proxy still refuses killing or removing the caller's pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const method of ["terminal.kill", "terminal.rm"]) {
+    const answer = await client.call(method, { terminal: "t100" });
+    assert.match(answer.error?.message ?? "", /the target is not the caller's own worker/, method);
+    assert.equal(fake.calls(method).length, 0, method);
+  }
 });

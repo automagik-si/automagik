@@ -33,6 +33,16 @@ function start(state, { config = {}, services } = {}) {
 // Listeners run in registration order; the team tools are not in this list
 // because they are registered per Bot session scope, not globally.
 test('apply registers listeners and effects in a fixed order', (t) => {
+  const { AUTOMAGIK_APP_BROWSER: flag } = process.env
+  const send = process.send
+  process.env.AUTOMAGIK_APP_BROWSER = '1'
+  process.send = () => true
+  t.after(() => {
+    if (flag === undefined) delete process.env.AUTOMAGIK_APP_BROWSER
+    else process.env.AUTOMAGIK_APP_BROWSER = flag
+    if (send === undefined) delete process.send
+    else process.send = send
+  })
   const { ctx, stop } = start()
   t.after(stop)
   assert.deepEqual(ctx.calls, [
@@ -111,7 +121,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/created',
     'on session/event',
     'effect ds-bot: subagent asks context',
-    'prompt context ds-bot:subagent-asks 121',
+    'prompt context automagik-bots:subagent-asks 121',
     'on agent/inbox/discarded',
     'on session/event',
     'effect omni-ui: resume interrupted turns',

@@ -38,6 +38,9 @@ export function callArguments(tool) {
     ...(diffs.length ? { diffs } : {}),
     // An image being made: the chat draws its image card from the first sight of the call.
     ...(isImageCall(tool) ? { image: true } : {}),
+    // A native subagent's call: the agent's id of the Agent/Task call it ran inside, so the
+    // card's own row says which worker it belongs to.
+    ...(typeof tool.parent === 'string' ? { parent: tool.parent } : {}),
   }
 }
 
@@ -183,6 +186,7 @@ export function mirrorTool(host) {
       locations: { type: 'json' },
       diffs: { type: 'json' },
       image: { type: 'boolean' },
+      parent: { type: 'string', description: "The agent's id of the subagent call this call ran inside." },
     },
     output: {
       schema: {
@@ -373,15 +377,23 @@ function reviewedArguments(session, callId) {
 }
 
 function reviewHolds(host, live, tool, exec, permission, record) {
-  if (record === undefined) return false
+  if (record === undefined || tool.parentConflict === true) return false
   if (!permission.options.some(option => option.kind === 'allow_once')) return false
   if (live?.calls?.has(exec.callId) !== true || live.toolIds?.get(exec.callId) !== tool.id) return false
   const level = levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.())
   if (level.auto !== true || level.policy !== record.policy || level.sandbox !== record.sandbox) return false
   const args = reviewedArguments(exec.agent.session, exec.callId)
-  if (args === undefined || permission.call === undefined) return false
-  if (!isDeepStrictEqual(JSON.parse(JSON.stringify(callArguments(permission.call))), args)) return false
-  return isDeepStrictEqual(JSON.parse(JSON.stringify(callArguments(tool))), args)
+  if (args === null || typeof args !== 'object' || Object.getPrototypeOf(args) !== Object.prototype || permission.call === undefined) return false
+  const { parent: rowParent, ...reviewedCall } = args
+  if (Object.hasOwn(args, 'parent') && typeof rowParent !== 'string') return false
+  const { parent: questionParent, ...questionCall } = callArguments(permission.call)
+  const { parent: liveParent, ...liveCall } = callArguments(tool)
+  // Claude ACP can send the stamp later. It says which worker the call belongs to.
+  // Any conflicting stamp invalidates the review.
+  const parents = new Set([rowParent, questionParent, liveParent].filter(parent => typeof parent === 'string'))
+  if (parents.size > 1) return false
+  if (!isDeepStrictEqual(JSON.parse(JSON.stringify(questionCall)), reviewedCall)) return false
+  return isDeepStrictEqual(JSON.parse(JSON.stringify(liveCall)), reviewedCall)
 }
 
 // `review: false` (a nested call's question, asked from another call's card): the Auto review
