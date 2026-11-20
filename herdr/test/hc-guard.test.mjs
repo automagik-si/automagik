@@ -2218,7 +2218,8 @@ test("#540 guard labelling refuses a machine-qualified canonical address", (t) =
   editPane(s, "t105", { address: "m/t105" });
   const result = guardRun(s, ["label", "worker", "automagik-herdr.needs-owner=Ship?"]);
   assertRefused(result);
-  assert.match(result.stderr, /a machine target is not allowed/);
+  // #628's checked resolution refuses the ls/get disagreement first; either way it never reaches hc.
+  assert.match(result.stderr, /a machine target is not allowed|hc resolved the target to two different panes/);
   assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
 });
 
@@ -2237,7 +2238,7 @@ test("#540 a non-self label still needs a verified caller, an address and target
   editPane(s, "t105", { labels: { "worker.of": ID.dev }, address: undefined });
   const noAddress = guardRun(s, args);
   assertRefused(noAddress);
-  assert.match(noAddress.stderr, /the target is not resolvable with hc/);
+  assert.match(noAddress.stderr, /the target's address from hc is not a terminal id/);
   assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
 });
 
