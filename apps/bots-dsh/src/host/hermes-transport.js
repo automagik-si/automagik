@@ -363,8 +363,10 @@ export class HermesTransport {
    * with their turn id but stamps `message.complete` with none, so a completion ends the turn
    * this connection opened. A start always opens one, even without a wire id (a legacy start
    * has an empty payload): a locally numbered turn is still a turn the wire actually began,
-   * unlike a provisional submit turn. A completion with no open turn belongs to an earlier
-   * turn and is never attributed to a submit that has not streamed anything yet.
+   * unlike a provisional submit turn. A stamped delta opens one only while none is open, so a
+   * late frame of an earlier turn cannot take over the turn a start opened. A completion with
+   * no open turn belongs to an earlier turn and is never attributed to a submit that has not
+   * streamed anything yet.
    */
   turnOf(type, payload) {
     const named = typeof payload?.turn_id === 'string' && payload.turn_id ? payload.turn_id : undefined
@@ -373,8 +375,8 @@ export class HermesTransport {
       return this.turnId
     }
     if (type === 'message.delta' || type === 'message.interim') {
-      if (named !== undefined) this.turnId = named
-      return this.turnId ?? null
+      if (named !== undefined && this.turnId === undefined) this.turnId = named
+      return named ?? this.turnId ?? null
     }
     if (type === 'message.complete') {
       const turn = this.turnId ?? null
