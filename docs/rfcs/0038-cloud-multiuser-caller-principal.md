@@ -30,9 +30,9 @@ Today one workspace is one hosted DSH with one owner identity. The gate signs pe
 their roles; DSH does not. `server/gate-cloud.mjs:173-178` admits only `owner` and `admin`
 (`:42-45`), so the missing principal is hidden behind owner-only admission. The gate forwards
 `x-automagik-principal` on the browser and WebSocket hops (`server/gate-upstream.mjs:48-55`). The
-header has one consumer in this repository, the vault-unlock refusal
-(`apps/bots-dsh/src/host/channel.js:1423`): it checks only that the header is present, refuses the
-unlock when it is, and neither authenticates the principal nor covers `/api`. The DSH floor this
+header has one consumer in this repository, the vault-unlock refusal in
+`apps/bots-dsh/src/host/channel.js` (the `/api/omni-ui` route): it only checks the header's
+presence, to refuse a remote vault unlock, and never resolves a principal. The DSH floor this
 repository pins (`0.2.2-rc.2`) consumes it nowhere. The gate mints DSH's owner cookie from DSH's
 launch token (`server/gate-upstream.mjs:31-41`), so every person arrives at DSH as its owner.
 
@@ -58,26 +58,27 @@ in DSH.
 | Hop | Authentication today | What the next hop knows |
 |---|---|---|
 | browser → gate | Cloud workspace token (or the local claim and a passkey) | the gate knows `{issuer, subject, roles, workspace}` |
-| gate → DSH | DSH's launch token exchanged for DSH's owner cookie | DSH knows only "the owner"; the unsigned `x-automagik-principal` is never authority (one refusal checks its presence) |
+| gate → DSH | DSH's launch token exchanged for DSH's owner cookie | DSH knows only "the owner"; the unsigned `x-automagik-principal` is never authority (one refusal checks its presence, only to refuse a remote vault unlock) |
 | DSH core / plugins | one shared browser Peer with owner principal | every call is the owner's |
-| Bot session, in process | a session-id record; a Bot session is written `owner` | the wall's owner branch lets it read anywhere (`paths.js:153-156`) |
-| Bot command | DSH's OS user (`server/Dockerfile:165`) | the file and the wall are outside its view |
+| Bot session, in process | a session-id record; a Bot session is written `owner` | the wall's owner branch lets it read anywhere (`paths.js`'s `mayUse`) |
+| Bot command | DSH's OS user (the `USER 1000:1000` directive in `server/Dockerfile`) | the file and the wall are outside its view |
 
 Three facts complete the picture:
 
 - **The gate's principal is real but stops at the gate.** `server/gate-cloud.mjs:208-227` verifies
   issuer, audience, subject, roles, workspace and expiry; `gate-store.mjs` keeps it per session;
   `server/gate.mjs:288,312` proxies with it and sets the header. One downstream reader exists,
-  the vault-unlock refusal named above; it checks only the header's presence, never its value,
-  and covers no `/api` route, so the principal still stops at the gate.
+  the vault-unlock refusal named above; it checks only the header's presence, to refuse a remote
+  vault unlock, never its value, and never resolves a principal, so the principal still stops at
+  the gate.
 - **DSH's native identity is owner-only for browsers.** DSH 0.2.2-rc.2, the floor this repository
   pins, has a merge-extensible `PrincipalMap`, in-process Peers with a fixed principal,
   remote-access policies, and a caller `principal` on `session/prompt` for non-owner callers
   ([RFC 0015](0015-live-chat-projection.md):742-745). But the browser Web carrier admits one
   shared owner Peer; no browser request reaches DSH with a non-owner principal today.
 - **The wall's record has no writer.** #1389 reads `{version, sessions}` from a `0600` file
-  owned by DSH's user (`principals.js:17-49`); the only writer named is "the owner's side", and
-  no production code writes it. Unknown, malformed, open or missing records already fail closed
+  owned by DSH's user (`principals.js`'s `readRecord`); the only writer named is "the owner's
+  side", and no production code writes it. Unknown, malformed, open or missing records already fail closed
   to a member with no area. A Bot is the exception only because its session is recorded `owner`.
 
 So the answer to "where does the principal come from today" is: it is made in the gate (the Cloud
@@ -100,10 +101,10 @@ gate also sends a **caller assertion**: a compact signed statement
 signed with Ed25519 by the gate's assertion key, with `aud` the instance id, a lifetime of at most
 60 seconds, and a binding to one request's method and path plus a single-use nonce the adapter
 remembers for that lifetime. The private key lives in the gate's own store, on the gate's own
-volume; DSH never mounts that volume
-(`server/compose.gate.yml:33-35,8-9`). The public key is public: the adapter fetches it at DSH start
-and refetches it when the assertion names a key id it does not have, and a Bot reading it gains
-nothing.
+volume; DSH never mounts that volume (the `gate` service's own `gate-data` volume in
+`server/compose.gate.yml`; the `dsh` service mounts only its `dsh-data` volume). The public key is
+public: the adapter fetches it at DSH start and refetches it when the assertion names a key id it
+does not have, and a Bot reading it gains nothing.
 
 Inside DSH, an Automagik host adapter (`@automagik/multiuser-dsh`; § "Deliveries") does four
 things:
@@ -128,8 +129,8 @@ things:
    before.
 3. **Scopes the work.** It puts the caller into the member wall's per-turn scope (the same
    `AsyncLocalStorage` pattern as `apps/bots-dsh/src/host/member-wall/fs.js:62-63,105-111` and
-   `principals.js:16`), so every file read, search, skill load, ACP call and terminal in that turn
-   is checked against the caller and the Bot, not against a file record alone.
+   `principals.js`'s `sessionScope`), so every file read, search, skill load, ACP call and
+   terminal in that turn is checked against the caller and the Bot, not against a file record alone.
 4. **Records.** It writes the principal record the wall reads (v2 below) from what it verified;
    the record is a cache for restarts and for work with no request, never the authority for a
    person's turn.
@@ -181,7 +182,7 @@ This is the replacement for the inherited owner. In the code this RFC builds on:
 - `principals.js` gains the `bot` kind and its record entry; `readRecord` keeps its `0600`/uid and
   fail-closed checks; `principalOf` never returns `owner` for a Bot or for a record it cannot
   trust.
-- `paths.js`'s `mayUse` keeps its rule "every principal in scope must allow" (`:153-156`) and adds
+- `paths.js`'s `mayUse` keeps its rule "every principal in scope must allow" and adds
   the Bot branch: an owner-equivalent role (owner or admin) always; member by #1389's `memberMay`;
   Bot by its own directory and granted shared roots, with denied roots winning. Several
   principals means every one of them.
@@ -292,8 +293,8 @@ a caller identity, and it does not need a second id. It must key on the instance
 
 `account` is the opaque identifier the vendor's own CLI reports; an email may be a display label,
 never the key or a credential. `organisation` is present only where the vendor reports it;
-`generation` is the ACP generation id
-(`cli-generations.js:136-159`); `instance` is the id above. Claude may omit an organisation and
+`generation` is the ACP generation id that `recordVendor` returns in `cli-generations.js`;
+`instance` is the id above. Claude may omit an organisation and
 Codex does not distinguish a personal from a team workspace (the #1426 comment records both);
 that is evidence quality, not a new identity. The reservation record, its shared location and its
 sign-in refusal belong to #1426's own RFC. This RFC fixes only the id and the evidence shape that
