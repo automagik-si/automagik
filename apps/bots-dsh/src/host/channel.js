@@ -251,6 +251,7 @@ export function install(rt) {
     learning: rt.learningView(),
     learningSettled: rt.learningSettledView(),
     connectors: rt.connectorsView(),
+    secretSources: rt.secretSourcesView(),
     capabilityStatuses: rt.capabilityStatusesView(),
     ...rt.extended.live(),
     // Per Bot whose model menu a plugin owns, that menu (host-models.js); absent otherwise.
@@ -823,6 +824,8 @@ export function install(rt) {
         case 'secret-cancel':
         case 'secret-update':
         case 'secret-delete':
+        case 'secret-source-set':
+        case 'secret-source-clear':
           await rt.load()
           return ok(await rt.secretEndpoint(endpoint, body))
         case 'connector-connect':

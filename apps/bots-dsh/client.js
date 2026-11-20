@@ -1970,6 +1970,15 @@ var ZH = {
   "not used yet": "还没用过",
   "Held: the saved value is shorter than {count} characters": "已暂停使用：保存的值不足 {count} 个字符",
   "Held: nothing uses this key until you save a value of at least {count} characters.": "已暂停使用：在你保存至少 {count} 个字符的值之前，没有任何地方使用这个密钥。",
+  "The vault mapping file could not be read; no secret can be used until it is fixed.": "无法读取保管库映射文件。修复之前，所有密钥均不可用。",
+  "Defined twice": "重复定义",
+  "Defined twice: this name is also mapped to a vault item, so no Bot can use it. Delete one of them.": "重复定义：此名称也映射到了保管库中的一项，因此所有 Bot 均无法使用它。请删除其中一项。",
+  "From a vault": "来自保管库",
+  "Unavailable: the vault plugin cannot serve it yet": "不可用：保管库插件暂无法提供此密钥",
+  "Remove the vault mapping": "移除保管库映射",
+  "Remove the mapping": "移除映射",
+  "Remove the mapping for {name}?": "要移除 {name} 的映射吗？",
+  "Delete the typed key": "删除手动输入的密钥",
   "Delete {name}? Bots lose it at once.": "删除 {name}？Bot 会立刻失去它。",
   Keep: "保留",
   "Key name": "密钥名",
@@ -5779,6 +5788,72 @@ function SecretRow({ secret, roster, actions, run: run3, open, onToggle }) {
     ) : null
   );
 }
+function VaultSourceRow({ source, actions, run: run3, open, onToggle }) {
+  const [confirm, setConfirm] = (0, import_react10.useState)(null);
+  const { name, purpose, definedTwice } = source;
+  (0, import_react10.useEffect)(() => {
+    setConfirm(null);
+  }, [open, definedTwice]);
+  const remove = () => run3(confirm === "clear" ? actions.secretSourceClear(name) : actions.secretDelete(name)).then((ok) => {
+    if (ok) setConfirm(null);
+  });
+  return (0, import_react10.createElement)(
+    "div",
+    { className: "bt-secret-item", "data-open": open ? "" : void 0 },
+    (0, import_react10.createElement)(
+      "button",
+      { type: "button", className: "bt-set-row bt-secret-summary", "aria-expanded": open, onClick: onToggle },
+      (0, import_react10.createElement)(
+        "span",
+        { className: "bt-set-copy" },
+        (0, import_react10.createElement)(
+          "span",
+          { className: "bt-secret-title" },
+          (0, import_react10.createElement)(KeyIcon),
+          (0, import_react10.createElement)("code", { className: "bt-secret-name" }, name),
+          purpose ? (0, import_react10.createElement)("span", { className: "bt-secret-purpose" }, purpose) : null
+        ),
+        (0, import_react10.createElement)("span", { className: "bt-set-hint" }, definedTwice ? t("Defined twice") : t("Unavailable: the vault plugin cannot serve it yet"))
+      ),
+      (0, import_react10.createElement)("span", { className: "bt-set-control" }, (0, import_react10.createElement)("span", { className: "bt-tag" }, t("From a vault")))
+    ),
+    open ? (0, import_react10.createElement)(
+      "div",
+      { className: "bt-secret-edit" },
+      definedTwice ? (0, import_react10.createElement)(
+        "div",
+        { className: "bt-secret-warn", role: "note" },
+        (0, import_react10.createElement)(WarnIcon),
+        t("Defined twice: this name is also mapped to a vault item, so no Bot can use it. Delete one of them.")
+      ) : null,
+      (0, import_react10.createElement)(
+        "div",
+        { className: "bt-secret-row-actions" },
+        confirm === null ? [
+          (0, import_react10.createElement)(
+            "button",
+            { key: "clear", type: "button", className: "bt-soft bt-soft-sm", onClick: () => setConfirm("clear") },
+            definedTwice ? t("Remove the vault mapping") : t("Remove the mapping")
+          ),
+          definedTwice ? (0, import_react10.createElement)(
+            "button",
+            { key: "delete", type: "button", className: "bt-soft bt-soft-sm bt-secret-danger", onClick: () => setConfirm("delete") },
+            (0, import_react10.createElement)(TrashIcon),
+            t("Delete the typed key")
+          ) : null
+        ] : [
+          (0, import_react10.createElement)("span", { key: "q", className: "bt-set-hint" }, confirm === "clear" ? t("Remove the mapping for {name}?", { name }) : t("Delete {name}? Bots lose it at once.", { name })),
+          (0, import_react10.createElement)("button", { key: "no", type: "button", className: "bt-soft bt-soft-sm", onClick: () => setConfirm(null) }, t("Keep")),
+          (0, import_react10.createElement)(
+            "button",
+            { key: "yes", type: "button", className: "bt-soft bt-soft-sm bt-secret-danger", onClick: remove },
+            confirm === "clear" ? t("Remove the mapping") : t("Delete")
+          )
+        ]
+      )
+    ) : null
+  );
+}
 function AddSecret({ actions, run: run3, onDone }) {
   const [name, setName] = (0, import_react10.useState)("");
   const [purpose, setPurpose] = (0, import_react10.useState)("");
@@ -5811,7 +5886,11 @@ function AddSecret({ actions, run: run3, onDone }) {
 function SecretsPage({ roster, actions, run: run3, Section: Section3 }) {
   const [open, setOpen] = (0, import_react10.useState)(null);
   const [adding, setAdding] = (0, import_react10.useState)(false);
-  const secrets = roster.secrets ?? [];
+  const sources = roster.secretSources?.rows ?? [];
+  const mapped = new Set(sources.map((source) => source.name));
+  const secrets = (roster.secrets ?? []).filter((secret) => !mapped.has(secret.name));
+  const count = secrets.length + sources.length;
+  const toggle = (name) => () => setOpen(open === name ? null : name);
   return [
     (0, import_react10.createElement)(
       "p",
@@ -5824,9 +5903,16 @@ function SecretsPage({ roster, actions, run: run3, Section: Section3 }) {
     ),
     (0, import_react10.createElement)(
       Section3,
-      { key: "list", title: t("Secrets · {count}", { count: secrets.length }) },
-      secrets.length === 0 && !adding ? (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t("No keys yet. When a Bot needs one, it shows a card in its chat."))) : null,
-      secrets.map((secret) => (0, import_react10.createElement)(SecretRow, { key: secret.name, secret, roster, actions, run: run3, open: open === secret.name, onToggle: () => setOpen(open === secret.name ? null : secret.name) })),
+      { key: "list", title: t("Secrets · {count}", { count }) },
+      roster.secretSources?.broken ? (0, import_react10.createElement)(
+        "div",
+        { className: "bt-secret-warn", role: "note" },
+        (0, import_react10.createElement)(WarnIcon),
+        t("The vault mapping file could not be read; no secret can be used until it is fixed.")
+      ) : null,
+      count === 0 && !adding ? (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t("No keys yet. When a Bot needs one, it shows a card in its chat."))) : null,
+      secrets.map((secret) => (0, import_react10.createElement)(SecretRow, { key: secret.name, secret, roster, actions, run: run3, open: open === secret.name, onToggle: toggle(secret.name) })),
+      sources.map((source) => (0, import_react10.createElement)(VaultSourceRow, { key: source.name, source, actions, run: run3, open: open === source.name, onToggle: toggle(source.name) })),
       adding ? (0, import_react10.createElement)(AddSecret, { actions, run: run3, onDone: () => setAdding(false) }) : null
     ),
     adding ? null : (0, import_react10.createElement)("div", { key: "add", className: "bt-actions" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setAdding(true) }, t("Add a key")))
@@ -20023,6 +20109,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     secretCancel: (requestId) => after(call2("secret-cancel", { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call2("secret-update", { name, scope, purpose })),
     secretDelete: (name) => after(call2("secret-delete", { name })),
+    secretSourceClear: (name) => after(call2("secret-source-clear", { name })),
     connectorConnect: (id, payload = {}) => after(call2("connector-connect", { id, ...payload })),
     connectorDisconnect: (id) => after(call2("connector-disconnect", { id })),
     connectorRetry: (id) => after(call2("connector-retry", { id })),
@@ -40323,6 +40410,7 @@ function apply(ctx) {
     const current = roster.getSnapshot();
     const live2 = {};
     if (value.connectors !== void 0 && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live2.connectors = value.connectors;
+    if (value.secretSources !== void 0 && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live2.secretSources = value.secretSources;
     if (value.capabilityStatuses !== void 0 && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live2.capabilityStatuses = value.capabilityStatuses;
     if (value.learning !== void 0 && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live2.learning = value.learning;
     if (value.learningSettled !== void 0 && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live2.learningSettled = value.learningSettled;

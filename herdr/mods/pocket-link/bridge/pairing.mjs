@@ -21,6 +21,11 @@ export const sameCode = (a, b) => {
 /** The first 12 hex characters of a key in groups of four, as the dialog and the log show it. */
 export const fingerprint = id => (String(id).slice(0, 12).match(/.{1,4}/g) ?? []).join(' ')
 
+/** This computer's key, as Pocket shows it, only while it serves that key. */
+export const desktopFingerprint = (status, running) =>
+  running && status && !status.rotating && status.id && status.ticket
+    ? fingerprint(status.id) : null
+
 /**
  * One try at the pending code (pairing.json) from `phone` (its full key). Returns `verdict`
  * ('gone' | 'locked' | 'wrong' | 'ok') and `next`: the pairing.json to write, null to delete it,
