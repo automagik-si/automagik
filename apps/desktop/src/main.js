@@ -603,7 +603,7 @@ function restartForLane({ away = false, why } = {}) {
 }
 
 // What a plugin is called in the app's own words (the update log, the frame's status).
-const PLUGIN_NAMES = { '@automagik/bots-dsh': 'Bot team', '@automagik/welcome-dsh': 'Welcome', '@automagik/acp-dsh': 'ACP agents', '@automagik/genie-dsh': 'Genie', '@automagik/locale-pt-br-dsh': 'Português (Brasil)' }
+const PLUGIN_NAMES = { '@automagik/bots-dsh': 'Bot team', '@automagik/welcome-dsh': 'Welcome', '@automagik/acp-dsh': 'ACP agents', '@automagik/genie-dsh': 'Genie', '@automagik/locale-pt-br-dsh': 'Português (Brasil)', '@automagik/vault-dsh': 'Vault (Bitwarden)' }
 const changeText = changes => changes.map(({ name, from, to }) => `${PLUGIN_NAMES[name] ?? name.replace(/^@[^/]+\//, '')} ${from ? `${from} → ` : ''}${to}`).join(', ')
 
 // Put the staged plugins in now, with DSH restarted alone (auto-apply.js): the window stays, the

@@ -135,7 +135,7 @@ test('all runtime patch version guards track the desktop DSH pin', () => {
 })
 
 test('all shipped plugin harnesses track the exact desktop DSH pin', () => {
-  assert.deepEqual([...PLUGINS].sort(), ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'welcome-dsh'])
+  assert.deepEqual([...PLUGINS].sort(), ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'])
   const pinned = JSON.parse(readFileSync(new URL('../runtime/package.json', import.meta.url), 'utf8')).dependencies['@deepseek-ai/dsh']
   for (const name of PLUGINS) {
     const tested = JSON.parse(readFileSync(new URL(`../../${name}/dev/harness/package.json`, import.meta.url), 'utf8')).dependencies['@deepseek-ai/dsh']

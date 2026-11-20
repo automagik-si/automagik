@@ -34,6 +34,7 @@ export const MAX_VALUE = 16384
 const MAX_REQUESTS = 20
 const USED_SAVE_MS = 5000
 const VAULT_STATUS_MS = 5000
+const VAULT_ITEM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const GRANT_MS = 10 * 60_000
 const AUDIT_LIMIT = 1024 * 1024
 
@@ -77,7 +78,7 @@ const fingerprintOf = ({ provider, connection, item, field, scope }) => hash({ p
 const shellTool = name => name === 'bash' || name === 'pwsh'
 const grantKey = (botId, sessionId) => JSON.stringify([botId, sessionId])
 
-async function vaultStatus(service) {
+async function probeVault(service) {
   let timer
   try {
     const answer = await Promise.race([
@@ -87,10 +88,25 @@ async function vaultStatus(service) {
     if (!plainObject(answer) || Object.keys(answer).some(key => key !== 'state' && key !== 'lastSync')) return undefined
     const { state, lastSync } = answer
     if (lastSync !== undefined && !Number.isFinite(lastSync)) return undefined
-    if (state === 'unlocked' || state === 'locked' || state === 'unauthenticated') return state
+    if (state === 'unlocked' || state === 'locked' || state === 'unauthenticated') {
+      return { state, ...(lastSync !== undefined ? { lastSync } : {}) }
+    }
   } catch {
     // The adapter's error may name its account or a vault reference.
   } finally { clearTimeout(timer) }
+}
+const vaultStatus = async service => (await probeVault(service))?.state
+
+function pickerField(selector) {
+  switch (selector) {
+    case 'login.username': return { selector, label: 'Username' }
+    case 'login.password': return { selector, label: 'Password' }
+    case 'notes': return { selector, label: 'Notes' }
+    default:
+      if (validReference(selector) && selector.startsWith('field:') && selector.length > 6) {
+        return { selector, label: selector.slice(6) }
+      }
+  }
 }
 
 export function normalizeName(raw) {
@@ -1416,6 +1432,54 @@ export function install(rt) {
     return endpoints[endpoint](body ?? {})
   })
 
+  // Only the person-facing channel calls these operations. The password goes
+  // directly to the service and adapter errors are reduced to fixed messages.
+  async function vaultEndpoint(endpoint, body) {
+    await loadSecrets()
+    const readOnly = rt.readOnly()
+    if (readOnly !== undefined) throw refusal(readOnly)
+    const service = secretSources
+    if (service === undefined) throw refusal('The vault plugin is not on.')
+    const connection = sources.values().next().value?.connection ?? 'bitwarden'
+    const stillPresent = () => {
+      if (secretSources !== service) throw refusal('The vault plugin is not on.')
+    }
+    if (endpoint === 'vault-status') {
+      const answer = await probeVault(service)
+      stillPresent()
+      return { present: true, ...(answer ?? { state: 'unavailable' }), connection }
+    }
+    if (endpoint === 'vault-unlock') {
+      if (sourcesBroken) throw refusal(brokenSources)
+      if (typeof body.password !== 'string' || body.password.length === 0 || body.password.includes('\0')) {
+        throw refusal('Enter your Bitwarden master password.')
+      }
+      let answer
+      try { answer = await service.unlock({ password: body.password, connection }) } catch {}
+      stillPresent()
+      if (answer?.ok !== true) throw refusal('The vault could not be unlocked.')
+      return true
+    }
+    if (endpoint === 'vault-lock') {
+      try { await service.lock() } catch { throw refusal('The vault could not be locked.') }
+      return true
+    }
+    if (sourcesBroken) throw refusal(brokenSources)
+    const search = typeof body.search === 'string' ? body.search.trim().slice(0, 512) : ''
+    let result
+    try { result = await service.listItems({ connection, search }) } catch {}
+    stillPresent()
+    if (result?.ok !== true || !Array.isArray(result.items)) throw refusal('The vault items could not be listed.')
+    const items = []
+    for (const item of result.items.slice(0, 50)) {
+      if (typeof item?.id !== 'string' || !VAULT_ITEM_ID.test(item.id) || typeof item.name !== 'string'
+        || !Array.isArray(item.fields)) continue
+      const fields = [...new Set(item.fields)].map(pickerField).filter(Boolean)
+      if (fields.length > 0) items.push({ id: item.id, name: item.name, fields })
+    }
+    return { items }
+  }
+
   // Internal cleanup only: the comparison and existing endpoint's map.delete run
   // in one synchronous segment after loading, so a newer value cannot be deleted
   // across secretEndpoint's load await. The existing commit owns durable writes.
@@ -1845,6 +1909,7 @@ export function install(rt) {
     secretHeldReason,
     secretSourceReason: sourceReason,
     secretEndpoint,
+    vaultEndpoint,
     deleteSecretIfUnchanged,
     forgetBotSecrets,
     loadSecrets,

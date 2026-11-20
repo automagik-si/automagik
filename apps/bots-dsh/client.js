@@ -2001,6 +2001,32 @@ var ZH = {
   "Held: the saved value is shorter than {count} characters": "已暂停使用：保存的值不足 {count} 个字符",
   "Held: nothing uses this key until you save a value of at least {count} characters.": "已暂停使用：在你保存至少 {count} 个字符的值之前，没有任何地方使用这个密钥。",
   "The vault mapping file could not be read; no secret can be used until it is fixed.": "无法读取保管库映射文件。修复之前，所有密钥均不可用。",
+  "Vault": "保管库",
+  "Checking vault status…": "正在检查保管库状态…",
+  "Unlocked": "已解锁",
+  "Locked": "已锁定",
+  "Not signed in to Bitwarden CLI": "尚未登录 Bitwarden CLI",
+  "The vault did not answer.": "保管库没有响应。",
+  "The vault locks after the idle time set in the plugin’s settings.": "达到插件设置的空闲时间后，保管库会自动锁定。",
+  "Lock": "锁定",
+  "Unlock": "解锁",
+  "Bitwarden master password": "Bitwarden 主密码",
+  "Unlock the vault in Settings on this computer.": "请在这台电脑的设置中解锁保管库。",
+  "Add a vault key": "添加保管库密钥",
+  "Search the vault": "搜索保管库",
+  "No matching vault items.": "未找到匹配的保管库条目。",
+  "Vault item": "保管库条目",
+  "Choose an item": "选择条目",
+  "Vault field": "保管库字段",
+  "Choose a field": "选择字段",
+  "Username": "用户名",
+  "Notes": "备注",
+  "Who may ask": "谁可以请求",
+  "The vault plugin is not on.": "保管库插件未启用。",
+  "Enter your Bitwarden master password.": "请输入 Bitwarden 主密码。",
+  "The vault could not be unlocked.": "无法解锁保管库。",
+  "The vault could not be locked.": "无法锁定保管库。",
+  "The vault items could not be listed.": "无法列出保管库条目。",
   "Defined twice": "重复定义",
   "Defined twice: this name is also mapped to a vault item, so no Bot can use it. Delete one of them.": "重复定义：此名称也映射到了保管库中的一项，因此所有 Bot 均无法使用它。请删除其中一项。",
   "From a vault": "来自保管库",
@@ -3438,6 +3464,7 @@ var ROUTE = "api/omni-ui";
 var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
 var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-");
 var call = async (endpoint, payload, signal) => {
+  const vault = endpoint.startsWith("vault-");
   let response;
   try {
     response = await fetch(ROUTE, {
@@ -3449,12 +3476,15 @@ var call = async (endpoint, payload, signal) => {
     });
   } catch (error) {
     if (error?.name === "AbortError") throw error;
-    noteClientError(endpoint, Object.assign(new Error(`network error: ${error?.message ?? error}`), { code: "NETWORK" }));
-    throw markNoted(Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), { code: "NETWORK", cause: error }));
+    if (!vault) noteClientError(endpoint, Object.assign(new Error(`network error: ${error?.message ?? error}`), { code: "NETWORK" }));
+    throw markNoted(Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), {
+      code: "NETWORK",
+      ...!vault ? { cause: error } : {}
+    }));
   }
   if (!response.ok) {
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` });
-    noteClientError(endpoint, error);
+    if (!vault) noteClientError(endpoint, error);
     throw error;
   }
   const result = await response.json();
@@ -3462,7 +3492,7 @@ var call = async (endpoint, payload, signal) => {
     const code = result.error?.code ?? "bot/error";
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
-    if (!isRefusal(code)) {
+    if (!vault && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? "Request failed"), { code }));
       markNoted(error);
     }
@@ -5520,6 +5550,7 @@ var isGitHubTokenName = (name) => GITHUB_TOKEN_NAME.test(String(name ?? ""));
 var import_react10 = require("react");
 var MIN_VALUE = 4;
 var NONE = {};
+var typedKeyName = /^[A-Za-z][\w-]{0,63}$/;
 var KeyIcon = () => (0, import_react10.createElement)(
   "svg",
   { width: 15, height: 15, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true },
@@ -5539,20 +5570,21 @@ var WarnIcon = () => (0, import_react10.createElement)(
   (0, import_react10.createElement)("path", { d: "M10 8.5v3.5M10 14.2h.01" })
 );
 var MASK_BY_CSS = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("-webkit-text-security", "disc");
-var insecure = () => typeof location !== "undefined" && location.protocol === "http:" && !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(location.hostname);
+var insecure = () => typeof location !== "undefined" && !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(location.hostname);
 var scopeLabel = (scope, roster) => {
   if (scope === "all") return t("All Bots");
   const names = (scope ?? []).map((id) => roster.byId[id]?.name).filter(Boolean);
   return names.length === 0 ? t("No Bot") : names.join(t(" and "));
 };
 var when = (time) => Number.isFinite(time) ? new Date(time).toLocaleString(dateLocale(), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
-function MaskedInput({ value, onChange, onEnter, label, autoFocus = false, disabled = false }) {
+function MaskedInput({ value, onChange, onEnter, label, inputRef, autoFocus = false, disabled = false }) {
   return (0, import_react10.createElement)("input", {
     className: "bt-secret-input",
     type: MASK_BY_CSS ? "text" : "password",
     disabled,
     "data-masked": MASK_BY_CSS ? "" : void 0,
     value,
+    ref: inputRef,
     autoFocus,
     autoComplete: MASK_BY_CSS ? "off" : "new-password",
     autoCorrect: "off",
@@ -5564,7 +5596,7 @@ function MaskedInput({ value, onChange, onEnter, label, autoFocus = false, disab
     "data-form-type": "other",
     "aria-label": label,
     placeholder: label ?? t("Paste or type the key"),
-    onChange: (event) => onChange(event.target.value),
+    onChange: onChange === void 0 ? void 0 : (event) => onChange(event.target.value),
     onKeyDown: (event) => {
       if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
       event.preventDefault();
@@ -5822,22 +5854,32 @@ function SecretDock({ sessionId, useRoster, useCards, useHeldCards, actions }) {
   if (waiting.length === 0) return null;
   return (0, import_react10.createElement)("div", { className: "bt-q-dock bt-secret-dock" }, waiting.map((request) => (0, import_react10.createElement)(SecretCard, { key: JSON.stringify([sessionId, request.id, request.kind]), sessionId, bot, request, roster, actions })));
 }
-function ScopeEditor({ secret, roster, onSave }) {
+function ScopeEditor({ secret, roster, onSave, onChange }) {
   const [mode, setMode] = (0, import_react10.useState)(secret.scope === "all" ? "all" : "some");
   const [picked, setPicked] = (0, import_react10.useState)(secret.scope === "all" ? [] : secret.scope);
-  const toggle = (id) => setPicked((list) => list.includes(id) ? list.filter((item) => item !== id) : [...list, id]);
+  const id = (0, import_react10.useId)();
+  const toggle = (botId) => {
+    const next = picked.includes(botId) ? picked.filter((item) => item !== botId) : [...picked, botId];
+    setPicked(next);
+    onChange?.(next);
+  };
+  const choose = (next) => {
+    setMode(next);
+    onChange?.(next === "all" ? "all" : picked);
+  };
   const same = mode === "all" ? secret.scope === "all" : secret.scope !== "all" && [...picked].sort().join() === [...secret.scope].sort().join();
+  const label = onChange ? t("Who may ask") : t("Who may use it");
   return (0, import_react10.createElement)(
     "div",
     { className: "bt-secret-edit-block" },
-    (0, import_react10.createElement)("div", { className: "bt-secret-edit-label" }, t("Who may use it")),
+    (0, import_react10.createElement)("div", { className: "bt-secret-edit-label" }, label),
     (0, import_react10.createElement)(
       "div",
-      { className: "bt-secret-radios", role: "radiogroup", "aria-label": t("Who may use {name}", { name: secret.name }) },
-      [["all", t("All Bots")], ["some", t("Chosen Bots")]].map(([id, text2]) => (0, import_react10.createElement)(
+      { className: "bt-secret-radios", role: "radiogroup", "aria-label": onChange ? label : t("Who may use {name}", { name: secret.name }) },
+      [["all", t("All Bots")], ["some", t("Chosen Bots")]].map(([choice, text2]) => (0, import_react10.createElement)(
         "label",
-        { key: id, className: "bt-secret-radio" },
-        (0, import_react10.createElement)("input", { type: "radio", name: `scope-${secret.name}`, checked: mode === id, onChange: () => setMode(id) }),
+        { key: choice, className: "bt-secret-radio" },
+        (0, import_react10.createElement)("input", { type: "radio", name: `scope-${id}`, checked: mode === choice, onChange: () => choose(choice) }),
         text2
       ))
     ),
@@ -5848,11 +5890,11 @@ function ScopeEditor({ secret, roster, onSave }) {
       "aria-pressed": picked.includes(bot.id),
       onClick: () => toggle(bot.id)
     }, (0, import_react10.createElement)(BotAvatar, { bot, size: 20, badge: false, live: false }), bot.name, picked.includes(bot.id) ? (0, import_react10.createElement)(CheckIcon) : null))) : null,
-    (0, import_react10.createElement)(
+    onSave ? (0, import_react10.createElement)(
       "div",
       { className: "bt-secret-row-actions" },
       (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: same, onClick: () => onSave(mode === "all" ? "all" : picked) }, t("Save access"))
-    )
+    ) : null
   );
 }
 function PurposeEditor({ secret, onSave }) {
@@ -6033,7 +6075,7 @@ function AddSecret({ actions, run: run3, onDone }) {
   const [name, setName] = (0, import_react10.useState)("");
   const [purpose, setPurpose] = (0, import_react10.useState)("");
   const [value, setValue] = (0, import_react10.useState)("");
-  const ready = /^[A-Za-z][\w-]{0,63}$/.test(name.trim()) && value.trim().length >= MIN_VALUE;
+  const ready = typedKeyName.test(name.trim()) && value.trim().length >= MIN_VALUE;
   const save = () => {
     if (!ready) return;
     void run3(actions.secretSet({ name, purpose, value, scope: "all" })).then((ok) => {
@@ -6056,6 +6098,178 @@ function AddSecret({ actions, run: run3, onDone }) {
       (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onDone }, t("Cancel")),
       (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: !ready, onClick: save }, t("Save key"))
     )
+  );
+}
+function AddVaultKey({ actions, connection, roster, run: run3, onDone }) {
+  const [name, setName] = (0, import_react10.useState)("");
+  const [purpose, setPurpose] = (0, import_react10.useState)("");
+  const [search, setSearch] = (0, import_react10.useState)("");
+  const [items, setItems] = (0, import_react10.useState)(null);
+  const [itemId, setItemId] = (0, import_react10.useState)("");
+  const [field, setField] = (0, import_react10.useState)("");
+  const [scope, setScope] = (0, import_react10.useState)("all");
+  const [busy, setBusy] = (0, import_react10.useState)(false);
+  const item = items?.find((row) => row.id === itemId);
+  const ready = !busy && typedKeyName.test(name.trim()) && item?.fields.some((row) => row.selector === field);
+  const find = async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setItems(null);
+    setItemId("");
+    setField("");
+    try {
+      await run3(actions.vaultItems(search).then((answer) => setItems(answer.items)));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = async () => {
+    if (!ready) return;
+    setBusy(true);
+    try {
+      const mapping = { name: name.trim().replace(/-/g, "_"), purpose, connection, item: itemId, field, scope };
+      if (await run3(actions.secretSourceSet(mapping))) onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (0, import_react10.createElement)(
+    "div",
+    { className: "bt-set-row bt-set-paste bt-secret-add" },
+    (0, import_react10.createElement)("input", { className: "bt-input", "aria-label": t("Key name"), placeholder: t("NAME, e.g. GITHUB_TOKEN"), value: name, spellCheck: false, autoComplete: "off", autoFocus: true, onChange: (event) => setName(event.target.value.toUpperCase()) }),
+    (0, import_react10.createElement)("input", { className: "bt-input", "aria-label": t("What it is for"), placeholder: t("What it is for"), value: purpose, autoComplete: "off", onChange: (event) => setPurpose(event.target.value) }),
+    (0, import_react10.createElement)(
+      "form",
+      { className: "bt-secret-inline", onSubmit: find },
+      (0, import_react10.createElement)("input", { className: "bt-input", type: "search", "aria-label": t("Search the vault"), placeholder: t("Search the vault"), value: search, autoComplete: "off", onChange: (event) => setSearch(event.target.value) }),
+      (0, import_react10.createElement)("button", { type: "submit", className: "bt-soft bt-soft-sm", disabled: busy }, t("Search"))
+    ),
+    items?.length === 0 ? (0, import_react10.createElement)("span", { className: "bt-set-hint", role: "status" }, t("No matching vault items.")) : null,
+    items?.length > 0 ? (0, import_react10.createElement)(
+      "select",
+      {
+        className: "bt-input",
+        "aria-label": t("Vault item"),
+        value: itemId,
+        onChange: (event) => {
+          setItemId(event.target.value);
+          setField("");
+        }
+      },
+      (0, import_react10.createElement)("option", { value: "" }, t("Choose an item")),
+      items.map((row) => (0, import_react10.createElement)("option", { key: row.id, value: row.id }, row.name))
+    ) : null,
+    item ? (0, import_react10.createElement)(
+      "select",
+      {
+        className: "bt-input",
+        "aria-label": t("Vault field"),
+        value: field,
+        onChange: (event) => setField(event.target.value)
+      },
+      (0, import_react10.createElement)("option", { value: "" }, t("Choose a field")),
+      item.fields.map((row) => (0, import_react10.createElement)(
+        "option",
+        { key: row.selector, value: row.selector },
+        row.selector.startsWith("field:") ? row.label : t(row.label)
+      ))
+    ) : null,
+    (0, import_react10.createElement)(ScopeEditor, { secret: { scope: "all" }, roster, onChange: setScope }),
+    (0, import_react10.createElement)(
+      "div",
+      { className: "bt-secret-row-actions" },
+      (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onDone }, t("Cancel")),
+      (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: !ready, onClick: save }, t("Save key"))
+    )
+  );
+}
+var vaultStates = {
+  unlocked: "Unlocked",
+  locked: "Locked",
+  unauthenticated: "Not signed in to Bitwarden CLI",
+  unavailable: "The vault did not answer."
+};
+function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
+  const [status, setStatus] = (0, import_react10.useState)(null);
+  const [busy, setBusy] = (0, import_react10.useState)(false);
+  const [adding, setAdding] = (0, import_react10.useState)(false);
+  const [refreshKey, setRefreshKey] = (0, import_react10.useState)(0);
+  const password = (0, import_react10.useRef)(null);
+  const readOnly = roster.readOnly != null;
+  const state2 = readOnly ? "unavailable" : status?.state;
+  const connection = status?.connection;
+  (0, import_react10.useEffect)(() => {
+    if (readOnly || busy || typeof actions.vaultStatus !== "function") return;
+    const control2 = new AbortController();
+    let timer;
+    const refresh = async () => {
+      try {
+        const answer = await actions.vaultStatus(control2.signal);
+        if (!control2.signal.aborted) setStatus(answer);
+      } catch {
+        if (!control2.signal.aborted) setStatus({ state: "unavailable" });
+      }
+      if (!control2.signal.aborted) timer = setTimeout(refresh, 5e3);
+    };
+    void refresh();
+    return () => {
+      control2.abort();
+      clearTimeout(timer);
+    };
+  }, [actions, busy, readOnly, refreshKey]);
+  (0, import_react10.useEffect)(() => {
+    if (state2 !== "unlocked") setAdding(false);
+  }, [state2]);
+  const changed = () => {
+    setStatus(null);
+    setBusy(false);
+    setRefreshKey((key) => key + 1);
+  };
+  const unlock = async () => {
+    const input = password.current;
+    if (busy || !input?.value) return;
+    setBusy(true);
+    try {
+      await run3(actions.vaultUnlock(input.value));
+    } finally {
+      input.value = "";
+      changed();
+    }
+  };
+  const lock = async () => {
+    if (busy) return;
+    setBusy(true);
+    setAdding(false);
+    try {
+      await run3(actions.vaultLock());
+    } finally {
+      changed();
+    }
+  };
+  return (0, import_react10.createElement)(
+    Section3,
+    { title: t("Vault") },
+    (0, import_react10.createElement)(
+      "div",
+      { className: "bt-set-row", role: "status" },
+      (0, import_react10.createElement)("span", { className: "bt-tag" }, t(vaultStates[state2] ?? "Checking vault status…")),
+      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t("The vault locks after the idle time set in the plugin’s settings.")),
+      state2 === "unlocked" ? (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: lock }, t("Lock")) : null
+    ),
+    state2 === "locked" && insecure() ? (0, import_react10.createElement)(
+      "div",
+      { className: "bt-secret-warn", role: "note" },
+      (0, import_react10.createElement)(WarnIcon),
+      t("Unlock the vault in Settings on this computer.")
+    ) : null,
+    state2 === "locked" && !insecure() && !roster.secretSources?.broken ? (0, import_react10.createElement)(
+      "div",
+      { className: "bt-set-row bt-set-paste" },
+      (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, { inputRef: password, disabled: busy, onEnter: unlock, label: t("Bitwarden master password") })),
+      (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: unlock }, t("Unlock"))
+    ) : null,
+    state2 === "unlocked" && !roster.secretSources?.broken ? adding ? (0, import_react10.createElement)(AddVaultKey, { key: connection, actions, connection, roster, run: run3, onDone: () => setAdding(false) }) : (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => setAdding(true) }, t("Add a vault key"))) : null
   );
 }
 function SecretsPage({ roster, actions, run: run3, Section: Section3 }) {
@@ -6090,7 +6304,8 @@ function SecretsPage({ roster, actions, run: run3, Section: Section3 }) {
       sources.map((source) => (0, import_react10.createElement)(VaultSourceRow, { key: source.name, source, present: roster.secretSourcesPresent, actions, run: run3, open: open === source.name, onToggle: toggle(source.name) })),
       adding ? (0, import_react10.createElement)(AddSecret, { actions, run: run3, onDone: () => setAdding(false) }) : null
     ),
-    adding ? null : (0, import_react10.createElement)("div", { key: "add", className: "bt-actions" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setAdding(true) }, t("Add a key")))
+    adding ? null : (0, import_react10.createElement)("div", { key: "add", className: "bt-actions" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setAdding(true) }, t("Add a key"))),
+    roster.secretSourcesPresent ? (0, import_react10.createElement)(VaultSection, { key: "vault", roster, actions, run: run3, Section: Section3 }) : null
   ];
 }
 var SECRET_CSS = `
@@ -20425,6 +20640,11 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     secretSet: (payload) => after(call2("secret-set", payload)),
     secretAllow: (requestId, approval) => after(call2("secret-allow", { ...approval, requestId })),
     secretSourceDetail: (requestId) => call2("secret-source-detail", { requestId }),
+    vaultStatus: (signal) => call2("vault-status", void 0, signal),
+    vaultUnlock: (password) => call2("vault-unlock", { password }),
+    vaultLock: () => call2("vault-lock"),
+    vaultItems: (search) => call2("vault-items", { search }),
+    secretSourceSet: (mapping) => after(call2("secret-source-set", mapping)),
     secretCancel: (requestId) => after(call2("secret-cancel", { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call2("secret-update", { name, scope, purpose })),
     secretDelete: (name) => after(call2("secret-delete", { name })),

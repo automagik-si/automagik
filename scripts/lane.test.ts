@@ -34,7 +34,7 @@ describe('the plugin lane', () => {
     try {
       for (const path of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'package.json', 'am/part.json', 'meter/usagemeter/part.json',
         'meter/usagemeter/Cargo.toml', 'meter/usagemeter/Cargo.lock', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
-        'apps/locale-pt-br-dsh/package.json', 'apps/welcome-dsh/package.json']) {
+        'apps/locale-pt-br-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) {
         mkdir(dirname(join(repo, path)), { recursive: true });
         cpSync(join(root, path), join(repo, path));
       }
@@ -249,7 +249,7 @@ describe('the plugin lane', () => {
     try {
       for (const path of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'am/part.json', 'meter/usagemeter/part.json',
         'meter/usagemeter/Cargo.toml', 'meter/usagemeter/Cargo.lock', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
-        'apps/locale-pt-br-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(path);
+        'apps/locale-pt-br-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(path);
       put('meter/usagemeter/src/main.rs', 'fn main() {}\n');
       put(METER_KEYS, NO_KEY);
       put(METER_CONTRACT, DEV);

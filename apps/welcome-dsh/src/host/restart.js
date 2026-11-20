@@ -8,24 +8,37 @@ export function watchRestart(ctx, { proc = process, timers = globalThis, timeout
   const prepare = async () => {
     let agents = 0
     let timer
+    let vault = 'timeout'
+    // The key is added only when a vault plugin is mounted, so replies without one keep their shape.
+    const withVault = result => vault === 'absent' ? result : { ...result, vault }
+    const drain = async (name, method) => {
+      try {
+        const service = ctx.get?.(name)
+        if (typeof service?.[method] !== 'function') return 'absent'
+        return (await service[method]())?.ok === true ? 'done' : 'partial'
+      } catch { return 'partial' }
+    }
+    const cancelAgents = async () => {
+      try {
+        await Promise.all((ctx.get?.('agents')?.list?.() ?? [])
+          .filter(agent => agent?.status === 'running').map(async agent => {
+            try { await agent.cancel({ kind: 'hook', reason: 'ds-bot/stopped' }); agents += 1 } catch {}
+          }))
+      } catch {}
+    }
     const work = async () => {
-      const cancellations = (ctx.get?.('agents')?.list?.() ?? [])
-        .filter(agent => agent?.status === 'running').map(async agent => {
-          try { await agent.cancel({ kind: 'hook', reason: 'ds-bot/stopped' }); agents += 1 } catch {}
-        })
-      const acp = ctx.get?.('acpAgents')
-      const drain = async () => {
-        if (typeof acp?.prepareRestart !== 'function') return 'absent'
-        try { return (await acp.prepareRestart())?.ok === true ? 'done' : 'partial' } catch { return 'partial' }
-      }
-      const [result] = await Promise.all([drain(), ...cancellations])
-      return { agents, acp: result }
+      const [acp] = await Promise.all([
+        drain('acpAgents', 'prepareRestart'),
+        drain('secretSources', 'prepareQuit').then(result => { vault = result }),
+        cancelAgents(),
+      ])
+      return withVault({ agents, acp })
     }
     try {
       return await Promise.race([
-        work(), new Promise(resolve => { timer = timers.setTimeout(() => resolve({ agents, acp: 'timeout' }), timeoutMs) }),
+        work(), new Promise(resolve => { timer = timers.setTimeout(() => resolve(withVault({ agents, acp: 'timeout' })), timeoutMs) }),
       ])
-    } catch { return { agents, acp: 'partial' } } finally { timers.clearTimeout(timer) }
+    } catch { return withVault({ agents, acp: 'partial' }) } finally { timers.clearTimeout(timer) }
   }
   const message = async (request) => {
     if (request?.type !== 'automagik:prepare-restart' || request.protocol !== 1

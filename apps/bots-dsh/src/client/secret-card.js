@@ -15,6 +15,7 @@ import { GITHUB_FIELDS, githubPermissions, githubTokenUrl } from '../shared/gith
 
 const MIN_VALUE = 4
 const NONE = {}
+const typedKeyName = /^[A-Za-z][\w-]{0,63}$/
 
 export const KeyIcon = () => h('svg', { width: 15, height: 15, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
   h('path', { d: 'M7 9.5a3.5 3.5 0 1 1 0 .01z' }), h('path', { d: 'M10.4 10.6L17 10.6M14.5 10.6v2.4M16.6 10.6v1.8' }))
@@ -27,7 +28,8 @@ const WarnIcon = () => h('svg', { width: 14, height: 14, viewBox: '0 0 20 20', f
 // key; browsers without that CSS fall back to a new-password field.
 const MASK_BY_CSS = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('-webkit-text-security', 'disc')
 
-const insecure = () => typeof location !== 'undefined' && location.protocol === 'http:'
+// RFC 0034 Q10: only a page on this computer unlocks; Pocket and remote pages may approve only.
+const insecure = () => typeof location !== 'undefined'
   && !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(location.hostname)
 
 const scopeLabel = (scope, roster) => {
@@ -37,13 +39,14 @@ const scopeLabel = (scope, roster) => {
 }
 const when = time => (Number.isFinite(time) ? new Date(time).toLocaleString(dateLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '')
 
-export function MaskedInput({ value, onChange, onEnter, label, autoFocus = false, disabled = false }) {
+export function MaskedInput({ value, onChange, onEnter, label, inputRef, autoFocus = false, disabled = false }) {
   return h('input', {
     className: 'bt-secret-input',
     type: MASK_BY_CSS ? 'text' : 'password',
     disabled,
     'data-masked': MASK_BY_CSS ? '' : undefined,
     value,
+    ref: inputRef,
     autoFocus,
     autoComplete: MASK_BY_CSS ? 'off' : 'new-password',
     autoCorrect: 'off',
@@ -55,7 +58,7 @@ export function MaskedInput({ value, onChange, onEnter, label, autoFocus = false
     'data-form-type': 'other',
     'aria-label': label,
     placeholder: label ?? t('Paste or type the key'),
-    onChange: event => onChange(event.target.value),
+    onChange: onChange === undefined ? undefined : event => onChange(event.target.value),
     onKeyDown: (event) => {
       if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
       event.preventDefault()
@@ -263,21 +266,31 @@ export function SecretDock({ sessionId, useRoster, useCards, useHeldCards, actio
 // -------------------------------------------------------------------------
 // Settings page
 
-function ScopeEditor({ secret, roster, onSave }) {
+function ScopeEditor({ secret, roster, onSave, onChange }) {
   const [mode, setMode] = useState(secret.scope === 'all' ? 'all' : 'some')
   const [picked, setPicked] = useState(secret.scope === 'all' ? [] : secret.scope)
-  const toggle = id => setPicked(list => (list.includes(id) ? list.filter(item => item !== id) : [...list, id]))
+  const id = useId()
+  const toggle = botId => {
+    const next = picked.includes(botId) ? picked.filter(item => item !== botId) : [...picked, botId]
+    setPicked(next)
+    onChange?.(next)
+  }
+  const choose = next => {
+    setMode(next)
+    onChange?.(next === 'all' ? 'all' : picked)
+  }
   const same = mode === 'all' ? secret.scope === 'all' : secret.scope !== 'all' && [...picked].sort().join() === [...secret.scope].sort().join()
+  const label = onChange ? t('Who may ask') : t('Who may use it')
   return h('div', { className: 'bt-secret-edit-block' },
-    h('div', { className: 'bt-secret-edit-label' }, t('Who may use it')),
-    h('div', { className: 'bt-secret-radios', role: 'radiogroup', 'aria-label': t('Who may use {name}', { name: secret.name }) },
-      [['all', t('All Bots')], ['some', t('Chosen Bots')]].map(([id, text]) => h('label', { key: id, className: 'bt-secret-radio' },
-        h('input', { type: 'radio', name: `scope-${secret.name}`, checked: mode === id, onChange: () => setMode(id) }), text))),
+    h('div', { className: 'bt-secret-edit-label' }, label),
+    h('div', { className: 'bt-secret-radios', role: 'radiogroup', 'aria-label': onChange ? label : t('Who may use {name}', { name: secret.name }) },
+      [['all', t('All Bots')], ['some', t('Chosen Bots')]].map(([choice, text]) => h('label', { key: choice, className: 'bt-secret-radio' },
+        h('input', { type: 'radio', name: `scope-${id}`, checked: mode === choice, onChange: () => choose(choice) }), text))),
     mode === 'some' ? h('div', { className: 'bt-secret-bots' }, roster.bots.map(bot => h('button', {
       key: bot.id, type: 'button', className: 'bt-secret-bot', 'aria-pressed': picked.includes(bot.id), onClick: () => toggle(bot.id),
     }, h(BotAvatar, { bot, size: 20, badge: false, live: false }), bot.name, picked.includes(bot.id) ? h(CheckIcon) : null))) : null,
-    h('div', { className: 'bt-secret-row-actions' },
-      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: same, onClick: () => onSave(mode === 'all' ? 'all' : picked) }, t('Save access'))))
+    onSave ? h('div', { className: 'bt-secret-row-actions' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: same, onClick: () => onSave(mode === 'all' ? 'all' : picked) }, t('Save access'))) : null)
 }
 
 function PurposeEditor({ secret, onSave }) {
@@ -385,7 +398,7 @@ function AddSecret({ actions, run, onDone }) {
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState('')
   const [value, setValue] = useState('')
-  const ready = /^[A-Za-z][\w-]{0,63}$/.test(name.trim()) && value.trim().length >= MIN_VALUE
+  const ready = typedKeyName.test(name.trim()) && value.trim().length >= MIN_VALUE
   const save = () => {
     if (!ready) return
     void run(actions.secretSet({ name, purpose, value, scope: 'all' })).then(ok => { if (ok) { setValue(''); onDone() } })
@@ -398,6 +411,123 @@ function AddSecret({ actions, run, onDone }) {
       h('span', { className: 'bt-set-hint' }, t('New keys are for all Bots; narrow it down afterwards.')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onDone }, t('Cancel')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: !ready, onClick: save }, t('Save key'))))
+}
+
+function AddVaultKey({ actions, connection, roster, run, onDone }) {
+  const [name, setName] = useState('')
+  const [purpose, setPurpose] = useState('')
+  const [search, setSearch] = useState('')
+  const [items, setItems] = useState(null)
+  const [itemId, setItemId] = useState('')
+  const [field, setField] = useState('')
+  const [scope, setScope] = useState('all')
+  const [busy, setBusy] = useState(false)
+  const item = items?.find(row => row.id === itemId)
+  const ready = !busy && typedKeyName.test(name.trim()) && item?.fields.some(row => row.selector === field)
+  const find = async (event) => {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setItems(null)
+    setItemId('')
+    setField('')
+    try {
+      await run(actions.vaultItems(search).then(answer => setItems(answer.items)))
+    } finally { setBusy(false) }
+  }
+  const save = async () => {
+    if (!ready) return
+    setBusy(true)
+    try {
+      const mapping = { name: name.trim().replace(/-/g, '_'), purpose, connection, item: itemId, field, scope }
+      if (await run(actions.secretSourceSet(mapping))) onDone()
+    } finally { setBusy(false) }
+  }
+  return h('div', { className: 'bt-set-row bt-set-paste bt-secret-add' },
+    h('input', { className: 'bt-input', 'aria-label': t('Key name'), placeholder: t('NAME, e.g. GITHUB_TOKEN'), value: name, spellCheck: false, autoComplete: 'off', autoFocus: true, onChange: event => setName(event.target.value.toUpperCase()) }),
+    h('input', { className: 'bt-input', 'aria-label': t('What it is for'), placeholder: t('What it is for'), value: purpose, autoComplete: 'off', onChange: event => setPurpose(event.target.value) }),
+    h('form', { className: 'bt-secret-inline', onSubmit: find },
+      h('input', { className: 'bt-input', type: 'search', 'aria-label': t('Search the vault'), placeholder: t('Search the vault'), value: search, autoComplete: 'off', onChange: event => setSearch(event.target.value) }),
+      h('button', { type: 'submit', className: 'bt-soft bt-soft-sm', disabled: busy }, t('Search'))),
+    items?.length === 0 ? h('span', { className: 'bt-set-hint', role: 'status' }, t('No matching vault items.')) : null,
+    items?.length > 0 ? h('select', {
+      className: 'bt-input', 'aria-label': t('Vault item'), value: itemId,
+      onChange: event => { setItemId(event.target.value); setField('') },
+    }, h('option', { value: '' }, t('Choose an item')),
+    items.map(row => h('option', { key: row.id, value: row.id }, row.name))) : null,
+    item ? h('select', {
+      className: 'bt-input', 'aria-label': t('Vault field'), value: field, onChange: event => setField(event.target.value),
+    }, h('option', { value: '' }, t('Choose a field')),
+    item.fields.map(row => h('option', { key: row.selector, value: row.selector },
+      row.selector.startsWith('field:') ? row.label : t(row.label)))) : null,
+    h(ScopeEditor, { secret: { scope: 'all' }, roster, onChange: setScope }),
+    h('div', { className: 'bt-secret-row-actions' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onDone }, t('Cancel')),
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: !ready, onClick: save }, t('Save key'))))
+}
+
+const vaultStates = {
+  unlocked: 'Unlocked',
+  locked: 'Locked',
+  unauthenticated: 'Not signed in to Bitwarden CLI',
+  unavailable: 'The vault did not answer.',
+}
+
+function VaultSection({ roster, actions, run, Section }) {
+  const [status, setStatus] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
+  const password = useRef(null)
+  const readOnly = roster.readOnly != null
+  const state = readOnly ? 'unavailable' : status?.state
+  const connection = status?.connection
+  useEffect(() => {
+    if (readOnly || busy || typeof actions.vaultStatus !== 'function') return
+    const control = new AbortController()
+    let timer
+    const refresh = async () => {
+      try {
+        const answer = await actions.vaultStatus(control.signal)
+        if (!control.signal.aborted) setStatus(answer)
+      } catch {
+        if (!control.signal.aborted) setStatus({ state: 'unavailable' })
+      }
+      if (!control.signal.aborted) timer = setTimeout(refresh, 5000)
+    }
+    void refresh()
+    return () => { control.abort(); clearTimeout(timer) }
+  }, [actions, busy, readOnly, refreshKey])
+  useEffect(() => { if (state !== 'unlocked') setAdding(false) }, [state])
+  const changed = () => { setStatus(null); setBusy(false); setRefreshKey(key => key + 1) }
+  const unlock = async () => {
+    const input = password.current
+    if (busy || !input?.value) return
+    setBusy(true)
+    try { await run(actions.vaultUnlock(input.value)) }
+    finally { input.value = ''; changed() }
+  }
+  const lock = async () => {
+    if (busy) return
+    setBusy(true)
+    setAdding(false)
+    try { await run(actions.vaultLock()) }
+    finally { changed() }
+  }
+  return h(Section, { title: t('Vault') },
+    h('div', { className: 'bt-set-row', role: 'status' },
+      h('span', { className: 'bt-tag' }, t(vaultStates[state] ?? 'Checking vault status…')),
+      h('span', { className: 'bt-set-hint' }, t('The vault locks after the idle time set in the plugin’s settings.')),
+      state === 'unlocked' ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: lock }, t('Lock')) : null),
+    state === 'locked' && insecure() ? h('div', { className: 'bt-secret-warn', role: 'note' },
+      h(WarnIcon), t('Unlock the vault in Settings on this computer.')) : null,
+    state === 'locked' && !insecure() && !roster.secretSources?.broken ? h('div', { className: 'bt-set-row bt-set-paste' },
+      h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, { inputRef: password, disabled: busy, onEnter: unlock, label: t('Bitwarden master password') })),
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: unlock }, t('Unlock'))) : null,
+    state === 'unlocked' && !roster.secretSources?.broken
+      ? adding ? h(AddVaultKey, { key: connection, actions, connection, roster, run, onDone: () => setAdding(false) })
+        : h('div', { className: 'bt-set-row' }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => setAdding(true) }, t('Add a vault key')))
+      : null)
 }
 
 export function SecretsPage({ roster, actions, run, Section }) {
@@ -420,6 +550,7 @@ export function SecretsPage({ roster, actions, run, Section }) {
       sources.map(source => h(VaultSourceRow, { key: source.name, source, present: roster.secretSourcesPresent, actions, run, open: open === source.name, onToggle: toggle(source.name) })),
       adding ? h(AddSecret, { actions, run, onDone: () => setAdding(false) }) : null),
     adding ? null : h('div', { key: 'add', className: 'bt-actions' }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setAdding(true) }, t('Add a key'))),
+    roster.secretSourcesPresent ? h(VaultSection, { key: 'vault', roster, actions, run, Section }) : null,
   ]
 }
 
