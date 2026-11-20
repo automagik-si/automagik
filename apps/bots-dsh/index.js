@@ -39,6 +39,7 @@ import * as folders from './src/host/folders.js'
 import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
 import * as toolDeny from './src/host/tool-deny.js'
+import * as botRunner from './src/host/bot-runner.js'
 import * as botSessions from './src/host/bot-sessions.js'
 import * as readScope from './src/host/read-scope.js'
 import * as prompt from './src/host/prompt.js'
@@ -123,7 +124,7 @@ const instanceId = () => process.env.AUTOMAGIK_INSTANCE_ID
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, botSessions, readScope, privateBots, prompt, timeContext,
+  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
   parts, fallback, modelState,
   { install: rt => modelAccessHooks.install(rt, { machine: machineOf(rt), instanceId }) },
@@ -198,6 +199,8 @@ export function createRuntime(ctx, config = {}) {
   autoJudge.installAhead(rt)
   const disposeHold = botSessions.installAhead(rt)
   if (disposeHold !== undefined) disposers.push(disposeHold)
+  const disposeRunner = botRunner.installAhead(rt)
+  if (disposeRunner !== undefined) disposers.push(disposeRunner)
   // A live Agent can be scoped before the final module adds its tools; complete that scope now.
   rt.syncScopedTools?.()
   // Reloading the plugin while DSH is live must retain turns and child agents already running.

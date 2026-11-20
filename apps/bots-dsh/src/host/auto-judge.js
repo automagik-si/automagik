@@ -1,3 +1,4 @@
+import { NO_BOT_RUNNER } from './bot-runner.js'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
@@ -371,9 +372,10 @@ export function install(rt) {
       if (hardToUndo(step, hardContext(rt, sessionId, step, session))) return { ...failed, code: 'hard' }
       if (JSON.stringify(cleanArgs(step.args)).length > 4000) return { ...failed, code: 'long' }
       if (refusals.tripped(sessionId)) return { ...failed, code: 'refusals' }
-      const route = splitRef(judge === 'own' ? mark.slice(4) : await rt.backgroundModel())
+      const route = splitRef(judge === 'own' ? mark.slice(4) : await rt.backgroundModel(sessionId))
       if (controller.signal.aborted) return failed
       if (!route?.model) return { ...failed, code: 'no-model' }
+      rt.assertBotRunnerProvider?.(route.provider, sessionId)
       model = `${route.provider}/${route.model}`
       const info = await ctx.llm.resolveModelInfo(route.provider, route.model).catch(() => undefined)
       if (controller.signal.aborted) return failed
@@ -387,7 +389,7 @@ export function install(rt) {
       return verdict ? { ...verdict, code: 'verdict' } : failed
     }
     let out
-    try { out = await Promise.race([deadline, review().catch(() => failed)]) }
+    try { out = await Promise.race([deadline, review().catch(error => error?.code === NO_BOT_RUNNER ? { ...failed, code: error.code, reason: error.message } : failed)]) }
     finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel) }
     if (out.decision === 'deny') refusals.refused(sessionId)
     if (out.decision === 'allow') refusals.allowed(sessionId)

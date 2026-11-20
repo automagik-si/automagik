@@ -135,9 +135,14 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
         return sessions.map(() => NOBODY)
       }
       const botOf = this.service()?.botOf
-      return sessions.map(id => botPrincipalOf(record.file, id, {
-        botOf, instance, folderIdentity: record.folder, warn: this.warnPrincipal,
-      }))
+      const bots = sessionScope.getStore()?.bots
+      return sessions.map(id => {
+        const principal = botPrincipalOf(record.file, id, {
+          botOf, instance, folderIdentity: record.folder, warn: this.warnPrincipal,
+        })
+        const expected = bots?.get(id)
+        return expected !== undefined && (principal.kind !== 'bot' || principal.id !== expected) ? NOBODY : principal
+      })
     }
     return sessions.map(sessionId => principalOf(this.wall.principalsFile, sessionId))
   }

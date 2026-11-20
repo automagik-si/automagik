@@ -59,6 +59,25 @@ export function install(rt) {
       return {}
     }
   }))
+  const readSessionOwners = sessionId => {
+    const revision = sessionOwnersRevision
+    const owners = []
+    for (const fn of sessionOwners.slice()) {
+      try {
+        const owner = fn(sessionId)
+        if (owner === undefined) continue
+        if (isPromise(owner)) {
+          void owner.catch(() => {})
+          return undefined
+        }
+        if (owner === null || typeof owner !== 'object' || Array.isArray(owner)) return undefined
+        const { botId, label } = owner
+        if (typeof botId !== 'string' || (label !== undefined && typeof label !== 'string')) return undefined
+        owners.push({ botId, label })
+      } catch { return undefined }
+    }
+    return sessionOwnersRevision === revision ? owners : undefined
+  }
 
   // Frozen, so the entry another plugin gets from `endpointOf` cannot be given a new function.
   const register = (name, fn, read, window) => {
@@ -117,23 +136,22 @@ export function install(rt) {
     },
     // A drop can certify exclusivity only when the registered hooks read cleanly.
     sessionOwnerRead(sessionId) {
-      const revision = sessionOwnersRevision
-      const snapshot = sessionOwners.slice()
-      let read = 'free'
-      for (const fn of snapshot) {
-        try {
-          const owner = fn(sessionId)
-          if (owner === undefined) continue
-          if (isPromise(owner)) {
-            void owner.catch(() => {})
-            return 'unreadable'
-          }
-          if (owner === null || typeof owner !== 'object' || Array.isArray(owner)
-            || typeof owner.botId !== 'string' || (owner.label !== undefined && typeof owner.label !== 'string')) return 'unreadable'
-          read = 'owned'
-        } catch { return 'unreadable' }
-      }
-      return sessionOwnersRevision === revision ? read : 'unreadable'
+      const owners = readSessionOwners(sessionId)
+      return owners === undefined ? 'unreadable' : owners.length === 0 ? 'free' : 'owned'
+    },
+    // The execution boundary needs a stable identity or a verified absence.
+    sessionBotOwner(sessionId) {
+      if (sessionOwners.length === 0) return null
+      const owners = readSessionOwners(sessionId)
+      if (owners === undefined) return undefined
+      const again = readSessionOwners(sessionId)
+      if (again?.length !== owners.length
+        || owners.some(({ botId, label }, i) => again[i].botId !== botId || again[i].label !== label)
+        || rt.teamCurrent?.() !== true) return undefined
+      if (owners.length === 0) return null
+      const { botId } = owners[0]
+      if (owners.some(owner => owner.botId !== botId)) return undefined
+      return rt.botOf?.(botId) === undefined ? undefined : botId
     },
     view: () => merged(views),
     live: () => merged(lives),

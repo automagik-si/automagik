@@ -162,7 +162,13 @@ export function scopeSessions() {
 // The scope for the current work plus one more session. A scope only ever gains sessions, so
 // work that runs for one session and is handed another's never stops acting for the first:
 // it is held to every rule at once, and no event can widen what it may do.
-export function scopeWith(sessionId) {
+// File admission can also bind the Bot identity the wall must still see at each operation.
+export function scopeWith(sessionId, botId) {
   const sessions = scopeSessions()
-  return { sessionId, sessions: sessions.includes(sessionId) ? sessions : [...sessions, sessionId] }
+  const bots = sessionScope.getStore()?.bots
+  return {
+    sessionId,
+    sessions: sessions.includes(sessionId) ? sessions : [...sessions, sessionId],
+    bots: botId === undefined || bots?.has(sessionId) ? bots : new Map(bots).set(sessionId, botId),
+  }
 }
