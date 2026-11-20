@@ -615,7 +615,7 @@ test('a refused send from another watch preserves the owner’s cancel', async (
   assert.deepEqual(w.socket.calls('upload-cancel').map((m) => m.params), [{ channel: 1, phone: 'paired-key', upload: 'u1' }])
 })
 
-test('a written send removes every named admission before its reply', async (t) => {
+test('a pending send leaves every named admission owned until its reply', async (t) => {
   const w = await world(t, { host: { answer: (m) => m.method === 'send' ? null : undefined } })
   const p = await rich(w)
   const sub = w.dsh.subs.get(1)
@@ -625,11 +625,11 @@ test('a written send removes every named admission before its reply', async (t) 
   const [send] = w.socket.calls('send')
   assert.ok(send)
   assert.equal(p.answers(id).length, 0)
-  assert.deepEqual([...w.dsh.admitted.get(sub).keys()], ['kept'])
+  assert.deepEqual([...w.dsh.admitted.get(sub).keys()], ['first', 'second', 'kept'])
   for (const upload of ['first', 'second']) {
     assert.deepEqual(await p.call('chat.attachCancel', { terminal, upload }), { ok: true })
   }
-  assert.equal(w.socket.calls('upload-cancel').length, 0)
+  assert.equal(w.socket.calls('upload-cancel').length, 2)
   w.socket.answer(send)
   await tick()
   assert.deepEqual(p.answer(id).result, { ok: true, state: 'sent', id: 'message' })
@@ -778,7 +778,7 @@ test('admitted entries expire at 15 minutes on lookup and insertion', async (t) 
   assert.deepEqual([...w.dsh.admitted.get(sub).keys()], ['fresh'])
 })
 
-test('the 129th admission evicts only the oldest id on that watch', async (t) => {
+test('admissions evict the oldest id across watches of the same paired phone', async (t) => {
   const w = await world(t)
   const a = await rich(w)
   const b = await rich(w)
@@ -786,13 +786,13 @@ test('the 129th admission evicts only the oldest id on that watch', async (t) =>
   await admitUpload(b, 'kept')
   for (let i = 0; i < 129; i++) await admitUpload(a, `u${i}`)
   assert.deepEqual([...w.dsh.admitted.get(aSub).keys()], Array.from({ length: 128 }, (_, i) => `u${i + 1}`))
-  assert.deepEqual([...w.dsh.admitted.get(bSub).keys()], ['kept'])
+  assert.deepEqual([...w.dsh.admitted.get(bSub).keys()], [])
   assert.deepEqual(await a.call('chat.attachCancel', { terminal, upload: 'u0' }), { ok: true })
   assert.equal(w.socket.calls('upload-cancel').length, 0)
 })
 
-test('an unanswered admitted cancel settles at its deadline and leaves the socket open', async (t) => {
-  const w = await world(t, { host: { answer: (m) => m.method === 'upload-cancel' ? null : undefined } })
+test('an unanswered admitted cancel remains owned and can be retried on the same watch', async (t) => {
+  const w = await world(t, { host: { answer: (m, socket) => m.method === 'upload-cancel' && socket.calls('upload-cancel').length === 1 ? null : undefined } })
   const p = await rich(w)
   await admitUpload(p, 'u1')
   const params = { terminal, upload: 'u1' }
@@ -802,10 +802,12 @@ test('an unanswered admitted cancel settles at its deadline and leaves the socke
   await w.clock.advance(w.dsh.attachmentMs.cancel - 1)
   assert.equal(p.answers(cancel).length, 0)
   await w.clock.advance(1)
-  assert.deepEqual(p.answer(cancel).result, { ok: true })
+  assert.deepEqual(p.answer(cancel).result, { ok: false, state: 'unknown', reason: 'offline' })
   assert.equal(w.socket.destroyed, false)
   assert.deepEqual(await p.call('chat.attachCancel', params), { ok: true })
-  assert.equal(w.socket.calls('upload-cancel').length, 1)
+  assert.equal(w.socket.calls('upload-cancel').length, 2)
+  assert.deepEqual(await p.call('chat.attachCancel', params), { ok: true })
+  assert.equal(w.socket.calls('upload-cancel').length, 2)
 })
 
 test('endRemoved waits for rich unsubscribe; an ack preserves the other phone and a missing ack drops the socket', async (t) => {
