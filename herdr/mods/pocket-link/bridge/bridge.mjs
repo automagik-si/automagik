@@ -131,7 +131,7 @@ const engines = new ChatEngines({
 })
 // The Automagik Bots' chats, from bots-dsh's owner-only socket in the team home (#517); absent, it
 // lists nothing. Writes on them go to it only when it answered `write: 1` (dsh-source.mjs).
-const dsh = new DshSource({ log })
+const dsh = new DshSource({ log, attachments: true })
 
 // Admitted (a paired key) and its header read, by guard.mjs, on the chat route.
 async function chatRoute({ conn, bi, value, rest, peer: phone }) {

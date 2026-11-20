@@ -22,6 +22,14 @@
 // opts in at chat hello and gets one grant, tied to its connection and team home. Closing
 // the grant needs an ack in 500 ms; otherwise the socket is dropped.
 //
+// RFC 0033 adds an opt-in on both socket hellos, at phone hello, and on each DSH watch.
+// An upload belongs to that phone, connection and watch until it settles. The socket grants
+// chunk credit as it takes the bytes. The bridge bounds pending writes, rebuilds replies from
+// the attachment protocol's fields, and requires an unsubscribe ack when a rich watch closes.
+// A lost finish ack leaves admission unknown. Begin ids are remembered in memory: after a
+// bridge restart, a compensating cancel for a reused id can only reach that phone's own upload.
+// The 65 s finish deadline covers the socket's authority check and its 60 s admission.
+//
 // Absent is empty: no socket, a socket another account could reach, or one that answers neither
 // `readOnly: true` nor `readOnly: false, write: 1`, and the source lists nothing and opens nothing.
 //
@@ -38,7 +46,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { cutRow, MANAGE_METHODS, memoryRefused, page } from './chat.mjs'
+import { ATTACH_METHODS, cutRow, MANAGE_METHODS, MAX_REQUEST, memoryRefused, page, phoneId } from './chat.mjs'
 
 export const PREFIX = 'dsh:'
 export const ANSWER_ON_COMPUTER = 'Answer on the computer'
@@ -64,6 +72,76 @@ const writableHello = (hello) => hello?.readOnly === false && hello?.write === 1
 const validHello = (hello) => hello?.protocol === 1 && (hello.readOnly === true || writableHello(hello))
 const socketError = (kind, written = false) => Object.assign(new Error(kind), { kind, written })
 const manageOffline = (reading, written) => (!reading && written ? { ok: false, state: 'unknown', reason: 'offline' } : memoryRefused('offline'))
+const emptyAck = (result) => result && typeof result === 'object' && !Array.isArray(result) && Object.keys(result).length === 0
+const ATTACH_SOCKET_METHODS = ['upload-begin', 'upload-chunk', 'upload-finish', 'upload-cancel', 'attachment-read']
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp']
+const PHONE_KEY = /^[A-Za-z0-9+/=._:-]{1,256}$/
+const ATTACH_LINE = 64 * 1024 - 1
+const ATTACH_UNFLUSHED = 1024 * 1024
+const ATTACH_MS = { begin: 5000, chunk: 25_000, finish: 65_000, read: 20_000, cancel: 5000, unsubscribe: 1000, idle: 35_000, total: 185_000 }
+const realTimers = { setTimeout: (run, ms) => setTimeout(run, ms), clearTimeout: (timer) => clearTimeout(timer) }
+const ATTACH_REASONS = new Set([
+  'read-only', 'not-watching', 'not-shown', 'invalid', 'unsupported', 'too-large', 'busy', 'quota', 'rate',
+  'rejected', 'changed', 'expired', 'session-changed', 'revoked', 'unavailable', 'not-found', 'offline', 'failed',
+])
+const IMAGE_CODES = new Set(['IMAGE_TOO_LARGE', 'IMAGE_TOO_MANY_PIXELS', 'IMAGE_DIMENSION_TOO_LARGE', 'UNSUPPORTED_IMAGE_TYPE', 'INVALID_IMAGE', 'timeout'])
+const positiveInt = (n) => Number.isSafeInteger(n) && n > 0
+const base64Length = (n) => 4 * Math.ceil(n / 3)
+const lineOf = (id, method, params) => `${JSON.stringify({ id, method, params })}\n`
+const canonicalBytes = (data, max) => {
+  if (typeof data !== 'string' || data.length > base64Length(max) || data.length % 4 !== 0) return 0
+  const decoded = Buffer.from(data, 'base64')
+  return decoded.length <= max && decoded.toString('base64') === data ? decoded.length : 0
+}
+
+function attachmentOffer(hello) {
+  const a = hello.attachments
+  if (!writableHello(hello) || a?.version !== 1 || !Array.isArray(a.methods) || !Array.isArray(hello.methods)
+    || !ATTACH_SOCKET_METHODS.every((m) => a.methods.includes(m) && hello.methods.includes(m))
+    || !Array.isArray(a.mediaTypes)) return null
+  const mediaTypes = IMAGE_TYPES.filter((m) => a.mediaTypes.includes(m))
+  const { fileBytes, files, messageBytes, deviceOutstanding, deviceDailyBytes, deviceDailyCount,
+    chunkBytes, maxPixels, maxDimension, thumbnail } = a.limits ?? {}
+  if (!mediaTypes.length || ![fileBytes, files, messageBytes, deviceOutstanding, deviceDailyBytes, deviceDailyCount,
+    chunkBytes, maxPixels, maxDimension, thumbnail?.edge, thumbnail?.bytes].every(positiveInt)) return null
+  const limits = {
+    fileBytes: Math.min(fileBytes, 8 * 1024 * 1024), files: Math.min(files, 4), messageBytes: Math.min(messageBytes, 16 * 1024 * 1024),
+    deviceOutstanding, deviceDailyBytes, deviceDailyCount, chunkBytes, maxPixels, maxDimension,
+    thumbnail: { edge: Math.min(thumbnail.edge, 512), bytes: Math.min(thumbnail.bytes, 131072) },
+  }
+  const id = Number.MAX_SAFE_INTEGER
+  const fields = { upload: 'u'.repeat(128), offset: id, data: '' }
+  // Control characters are the longest JSON escapes a phone can use for a terminal or RPC id.
+  const rpcId = '\0'.repeat(64)
+  const chunkLine = lineOf(id, 'upload-chunk', { channel: id, phone: 'p'.repeat(256), ...fields })
+  const chunkFrame = { jsonrpc: '2.0', id: rpcId, method: 'chat.attachChunk', params: { terminal: '\0'.repeat(128), ...fields } }
+  const thumbnailFrame = { jsonrpc: '2.0', id: rpcId, result: { ok: true, mediaType: 'image/webp', width: 512, height: 512, data: '' } }
+  if (Buffer.byteLength(chunkLine) + base64Length(chunkBytes) > ATTACH_LINE
+    || Buffer.byteLength(JSON.stringify(chunkFrame)) + base64Length(chunkBytes) > MAX_REQUEST
+    || Buffer.byteLength(JSON.stringify(thumbnailFrame)) + base64Length(limits.thumbnail.bytes) > MAX_REQUEST) return null
+  return { mediaTypes, limits }
+}
+
+function attachmentRefusal(result, { upload, id } = {}) {
+  const sending = id !== undefined
+  let reason = result?.reason
+  if (!ATTACH_REASONS.has(reason) && !(sending && ['empty', 'too-long'].includes(reason))) reason = 'failed'
+  const code = result?.code
+  const allowedCode = (reason === 'rejected' && (IMAGE_CODES.has(code) || (sending && code === 'MODEL_DOES_NOT_SUPPORT_IMAGES')))
+    || (sending && reason === 'expired' && code === 'FILE_NOT_STAGED')
+  if (code !== undefined && !allowedCode) reason = 'failed'
+  return {
+    ...memoryRefused(reason),
+    ...(upload !== undefined && result?.upload === upload ? { upload } : {}),
+    ...(sending ? { id } : {}),
+    ...(allowedCode ? { code } : {}),
+  }
+}
+
+function attachmentFailure(error, ids) {
+  const reason = error.local || (error.kind === 'not-watching' && !error.written) ? error.kind : 'offline'
+  return attachmentRefusal(error.detail ?? { reason }, ids)
+}
 
 export const isDsh = (terminal) => typeof terminal === 'string' && terminal.startsWith(PREFIX)
 const manageTerminal = (terminal) => isDsh(terminal) && terminal.length > PREFIX.length && terminal.length <= 128
@@ -121,15 +199,30 @@ const refused = (reason, id, extra = {}) => ({ ...extra, state: 'refused', ok: f
 /** What the phone gets for a write on a DSH chat whose socket accepts none. */
 export const refusedDsh = (id) => refused('read-only', id, { message: ANSWER_ON_COMPUTER })
 
-const rowsCut = (e) => (Array.isArray(e?.rows) ? { ...e, rows: e.rows.map(cutRow) } : e)
+function watchRow(row, attachments) {
+  if (attachments || !row || !Object.hasOwn(row, 'blocks')) return row
+  const { blocks, ...legacy } = row
+  return legacy
+}
+
+function rowsCut(event, attachments) {
+  let out = event
+  // Older watches never see blocks, even if the socket erroneously sends them.
+  if (Array.isArray(event.rows)) out = { ...out, rows: event.rows.map((row) => cutRow(watchRow(row, attachments))) }
+  if (!attachments && Array.isArray(event.screen)) out = { ...out, screen: event.screen.map((row) => watchRow(row, false)) }
+  if (!attachments && event.row && Object.hasOwn(event.row, 'blocks')) out = { ...out, row: watchRow(event.row, false) }
+  return out
+}
 
 export class DshSource {
   /**
    * `paths` are tried in order (socketPaths); `path` is one place only.
-   * @param {{ path?: string, paths?: string[], connect?: typeof createConnection, check?: (path: string) => boolean, realpath?: typeof realpathSync, log?: (...a: any[]) => void, requestMs?: number, now?: () => number }} [options]
+   * The clock and attachment deadlines can be replaced by the wire tests.
    */
-  constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, realpath = realpathSync, log = () => {}, requestMs = REQUEST_MS, now = Date.now } = {}) {
-    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now })
+  constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, realpath = realpathSync, log = () => {}, requestMs = REQUEST_MS, now = Date.now,
+    attachments = false, timers = realTimers, attachmentMs = {} } = {}) {
+    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now, attachments, timers })
+    this.attachmentMs = { ...ATTACH_MS, ...attachmentMs }
     /** The socket in use: the first of `paths` that passed the check. */
     this.path = null
     this.absent = false
@@ -144,6 +237,11 @@ export class DshSource {
     // Keep the team across reconnects. Switching homes invalidates the old phone hellos.
     this.team = null
     this.negotiated = new WeakMap()
+    this.attachOffer = null
+    this.attachmentsAgreed = new WeakMap()
+    this.uploads = new Map()
+    this.uploadIds = new Map()
+    this.attachmentWrites = new Map()
     this.grants = new Map()
     this.nextGrant = 1
     /** channel -> { socket, listener, status, approval, client, terminal } */
@@ -191,9 +289,10 @@ export class DshSource {
       socket.on('close', () => { this.onClose(socket); done(null) })
       socket.once('connect', async () => {
         try {
-          let hello = await this.ask(socket, 'hello', { write: 1 })
+          const greeting = { write: 1, ...(this.attachments ? { attachments: 1 } : {}) }
+          let hello = await this.ask(socket, 'hello', greeting)
           if (validHello(hello) && writableHello(hello) && !this.stopped && !socket.destroyed) {
-            hello = await this.ask(socket, 'hello', { write: 1, manage: 1 })
+            hello = await this.ask(socket, 'hello', { ...greeting, manage: 1 })
           }
           if (!validHello(hello)) {
             this.log('chat: the DSH socket answers neither read-only nor write: 1; not used')
@@ -206,6 +305,7 @@ export class DshSource {
           const manageMethods = Array.isArray(hello.manageMethods) ? hello.manageMethods : []
           this.writes = new Set(writableHello(hello) ? Object.values(WRITE_METHODS).filter((m) => methods.includes(m)) : [])
           this.manages = new Set(writableHello(hello) && hello.manage === 1 ? MANAGE_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : [])
+          this.attachOffer = this.attachments ? attachmentOffer(hello) : null
           this.path = path
           if (this.team?.path !== path || this.team.real !== real) this.team = { path, real }
           this.socket = socket
@@ -218,25 +318,61 @@ export class DshSource {
     return this.opening
   }
 
-  ask(socket, method, params, { timeout = this.requestMs, accept } = {}) {
+  timer(run, ms) {
+    const timer = this.timers.setTimeout(run, ms)
+    timer?.unref?.()
+    return timer
+  }
+
+  ask(socket, method, params, { timeout = this.requestMs, accept, attachment = false, signal, onWrite } = {}) {
     if (!socket || socket.destroyed) return Promise.reject(socketError('unavailable'))
+    if (signal?.aborted) return Promise.reject(socketError(signal.reason))
     const id = this.nextId++
+    const line = lineOf(id, method, params)
+    let queued
+    let bytes
+    if (attachment) {
+      bytes = Buffer.byteLength(line)
+      const local = (kind) => Promise.reject(Object.assign(socketError(kind), { local: true }))
+      if (bytes > ATTACH_LINE) return local(method === 'send' ? 'too-long' : 'invalid')
+      if (method !== 'upload-cancel') {
+        queued = this.attachmentWrites.get(socket) ?? { bytes: 0 }
+        if (queued.bytes + bytes > ATTACH_UNFLUSHED) return local('busy')
+        queued.bytes += bytes
+        this.attachmentWrites.set(socket, queued)
+      }
+    }
     return new Promise((resolve, reject) => {
-      const p = { socket, resolve, reject, accept, written: false }
+      const p = { socket, resolve, reject, accept, attachment, written: false }
+      const flushed = () => {
+        if (!queued) return
+        queued.bytes -= bytes
+        if (!queued.bytes && this.attachmentWrites.get(socket) === queued) this.attachmentWrites.delete(socket)
+        queued = null
+      }
+      const abort = () => p.fail(signal.reason)
+      p.done = () => {
+        if (!this.pending.delete(id)) return false
+        this.timers.clearTimeout(p.timer)
+        signal?.removeEventListener('abort', abort)
+        return true
+      }
       p.fail = (kind) => {
-        if (!this.pending.delete(id)) return
-        clearTimeout(p.timer)
-        reject(socketError(kind, p.written))
+        if (p.done()) reject(socketError(kind, p.written))
       }
-      p.timer = setTimeout(() => p.fail('timeout'), timeout)
-      p.timer.unref?.()
+      p.timer = this.timer(() => p.fail('timeout'), timeout)
       this.pending.set(id, p)
+      signal?.addEventListener('abort', abort, { once: true })
       try {
-        socket.write(`${JSON.stringify({ id, method, params })}\n`, (error) => { if (error) p.fail('unavailable') })
         p.written = true
+        socket.write(line, (error) => { flushed(); if (error) p.fail('unavailable') })
       } catch {
+        p.written = false
+        flushed()
         p.fail('unavailable')
+        return
       }
+      onWrite?.()
     })
   }
 
@@ -249,23 +385,28 @@ export class DshSource {
     const p = this.pending.get(m?.id)
     if (p?.socket === socket) {
       if (p.accept && (m.error || !p.accept(m.result))) return
-      this.pending.delete(m.id)
-      clearTimeout(p.timer)
-      if (m.error) p.reject(Object.assign(new Error(String(m.error.message ?? m.error.kind)), { kind: m.error.kind, detail: m.error }))
+      p.done()
+      if (m.error && p.attachment) {
+        const { kind, code, upload } = m.error
+        p.reject(Object.assign(socketError('failed', p.written), { detail: { reason: kind, code, upload } }))
+      } else if (m.error) p.reject(Object.assign(new Error(String(m.error.message ?? m.error.kind)), { kind: m.error.kind, detail: m.error }))
       else p.resolve(m.result)
       return
     }
     const sub = Number.isSafeInteger(m?.channel) ? this.subs.get(m.channel) : null
     if (sub?.socket !== socket || !m.event || typeof m.event.type !== 'string') return
-    const e = rowsCut(m.event)
+    const e = rowsCut(m.event, sub.attachments)
     if (e.type === 'snapshot' || e.type === 'status') sub.status = e.status ?? sub.status
     if (e.type === 'snapshot' || e.type === 'approval') sub.approval = e.type === 'snapshot' ? e.approval : (e.row?.open === false ? null : e.row)
+    if (e.type === 'gone' && sub.attachments) this.#unwatch(sub)
     try { sub.listener(e) } catch {}
   }
 
   onClose(socket) {
-    if (this.socket === socket) { this.socket = null; this.writes.clear(); this.manages.clear() }
+    if (this.socket === socket) { this.socket = null; this.writes.clear(); this.manages.clear(); this.attachOffer = null }
+    this.attachmentWrites.delete(socket)
     for (const p of this.pending.values()) if (p.socket === socket) p.fail('unavailable')
+    for (const rec of this.uploads.values()) if (rec.socket === socket) this.#dropUpload(rec, 'unavailable')
     for (const [client, grant] of this.grants) {
       if (grant.socket !== socket) continue
       grant.state = 'closed'
@@ -274,6 +415,7 @@ export class DshSource {
     for (const [channel, sub] of this.subs) {
       if (sub.socket !== socket) continue
       this.subs.delete(channel)
+      sub.work.abort('unavailable')
       try { sub.listener({ type: 'gone', reason: 'unavailable' }) } catch {}
     }
   }
@@ -325,13 +467,14 @@ export class DshSource {
     const { id, socket, client } = grant
     if (this.grants.get(client) === grant) this.grants.delete(client)
     if (!socket.destroyed) {
-      const accept = (result) => result && typeof result === 'object' && !Array.isArray(result) && Object.keys(result).length === 0
-      this.ask(socket, 'manage-close', { grant: id }, { timeout: CLOSE_MS, accept }).catch(() => socket.destroy())
+      this.ask(socket, 'manage-close', { grant: id }, { timeout: CLOSE_MS, accept: emptyAck }).catch(() => socket.destroy())
     }
   }
 
   closeClient(client) {
     this.negotiated.delete(client)
+    this.attachmentsAgreed.delete(client)
+    for (const sub of this.subs.values()) if (sub.client === client && sub.attachments) this.#unwatch(sub)
     const grant = this.grants.get(client)
     if (grant) this.releaseGrant(grant)
   }
@@ -405,7 +548,7 @@ export class DshSource {
     phone.times = phone.times.filter((t) => now - t < 60_000)
     phone.reads = phone.reads.filter((t) => now - t < 60_000)
     for (const [terminal, at] of phone.interrupts) if (now - at >= INTERRUPT_MS) phone.interrupts.delete(terminal)
-    if (!phone.times.length && !phone.reads.length && !phone.interrupts.size && !phone.busy.size && !phone.manageBusy.size) this.phones.delete(key)
+    if (!phone.times.length && !phone.reads.length && !phone.interrupts.size && !phone.busy.size && !phone.manageBusy.size && !phone.reading) this.phones.delete(key)
   }
 
   phoneState(key, now) {
@@ -425,26 +568,306 @@ export class DshSource {
     }
   }
 
+  /** A phone grant is made only when its hello is answered and lives on this socket. */
+  attachHello(client) {
+    const { socket, team, attachOffer: offer } = this
+    const live = this.liveClient(client, socket)
+    if (!live || !offer || typeof client.device !== 'string' || !PHONE_KEY.test(client.device)) {
+      this.attachmentsAgreed.delete(client)
+      return { version: 1, unavailable: live ? 'app' : 'none' }
+    }
+    this.attachmentsAgreed.set(client, { team, socket, offer })
+    return { version: 1, methods: ATTACH_METHODS, ...offer }
+  }
+
+  offerFor(client) {
+    const grant = this.attachmentsAgreed.get(client)
+    return grant && grant.team === this.team && grant.offer === this.attachOffer && this.liveClient(client, grant.socket) ? grant.offer : null
+  }
+
+  #attachmentSub(client, terminal) {
+    if (!this.offerFor(client)) return
+    return [...this.subs.values()].find((sub) => sub.attachments && sub.client === client && sub.terminal === terminal && sub.socket === this.socket)
+  }
+
+  #activeSub(sub) {
+    return this.subs.get(sub.channel) === sub && this.liveClient(sub.client, sub.socket) && Boolean(this.offerFor(sub.client))
+  }
+
+  async #attachmentAsk(sub, method, fields, timeout, { signal = sub.work.signal, onWrite } = {}) {
+    const deadline = this.now() + timeout
+    const notWatching = () => Object.assign(socketError('not-watching'), { local: true })
+    if (!this.#activeSub(sub)) throw notWatching()
+    if (!sub.subscribed) {
+      const ready = await new Promise((resolve, reject) => {
+        const aborted = () => signal.reason === 'cancelled' ? socketError('cancelled') : notWatching()
+        if (signal.aborted) return reject(aborted())
+        const abort = () => finish(reject, aborted())
+        const finish = (done, value) => {
+          this.timers.clearTimeout(timer)
+          signal.removeEventListener('abort', abort)
+          done(value)
+        }
+        const timer = this.timer(() => finish(reject, socketError('timeout')), timeout)
+        signal.addEventListener('abort', abort, { once: true })
+        sub.ready.then((value) => finish(resolve, value))
+      })
+      if (!ready || !this.#activeSub(sub)) throw notWatching()
+    }
+    const remaining = deadline - this.now()
+    if (remaining <= 0) throw socketError('timeout')
+    return this.ask(sub.socket, method, { channel: sub.channel, phone: sub.client.device, ...fields },
+      { attachment: true, timeout: remaining, signal, onWrite })
+  }
+
+  #uploadFor(sub, upload) {
+    if (!sub) return
+    const key = sub.client.device
+    const rec = this.uploads.get(key)
+    if (rec?.sub === sub && rec.client === sub.client && rec.terminal === sub.terminal && rec.upload === upload
+      && rec.key === key && rec.socket === sub.socket && rec.team === this.team) return rec
+  }
+
+  #currentUpload(rec) { return this.uploads.get(rec.key) === rec }
+
+  #dropUpload(rec, reason) {
+    if (!this.#currentUpload(rec)) return
+    this.uploads.delete(rec.key)
+    this.timers.clearTimeout(rec.idle)
+    this.timers.clearTimeout(rec.total)
+    rec.state = 'settled'
+    rec.work.abort(reason)
+  }
+
+  #startCancelling(rec, reason = 'cancelled') {
+    if (rec.state === 'cancelling') return
+    rec.state = 'cancelling'
+    this.timers.clearTimeout(rec.idle)
+    this.timers.clearTimeout(rec.total)
+    rec.work.abort(reason)
+  }
+
+  #cancelUpload(rec) {
+    if (!this.#currentUpload(rec)) return
+    if (rec.state === 'cancelling') return rec.cleanup
+    this.#startCancelling(rec)
+    if (!rec.written) { this.#dropUpload(rec, 'cancelled'); return }
+    rec.cleanup = this.ask(rec.socket, 'upload-cancel', { channel: rec.channel, phone: rec.key, upload: rec.upload },
+      { attachment: true, timeout: this.attachmentMs.cancel, accept: (result) => result?.ok === true })
+      .catch(() => {}).then(() => this.#dropUpload(rec, 'cancelled'))
+    return rec.cleanup
+  }
+
+  #idleUpload(rec) {
+    this.timers.clearTimeout(rec.idle)
+    rec.idle = this.timer(() => this.#cancelUpload(rec), Math.max(0, rec.idleAt - this.now()))
+  }
+
+  #totalUpload(rec) {
+    rec.total = this.timer(() => this.#cancelUpload(rec), Math.max(0, rec.totalAt - this.now()))
+  }
+
+  #rememberUpload(key, upload) {
+    const ids = this.uploadIds.get(key) ?? new Set()
+    ids.add(upload)
+    if (ids.size > 256) ids.delete(ids.values().next().value)
+    this.uploadIds.set(key, ids)
+  }
+
+  async uploadBegin(client, terminal, { upload, mediaType, bytes }) {
+    const offer = this.offerFor(client)
+    if (!offer) return memoryRefused('read-only')
+    const sub = this.#attachmentSub(client, terminal)
+    if (!sub) return memoryRefused('not-watching')
+    const key = client.device
+    if (!phoneId(upload) || this.uploadIds.get(key)?.has(upload)) return memoryRefused('invalid')
+    if (this.uploads.has(key)) return memoryRefused('busy')
+    if (!offer.mediaTypes.includes(mediaType)) return memoryRefused('unsupported')
+    if (!positiveInt(bytes) || bytes > offer.limits.fileBytes) return memoryRefused('too-large')
+    const rec = {
+      client, socket: sub.socket, team: this.team, sub, channel: sub.channel, terminal, key, upload, mediaType, bytes,
+      acked: 0, state: 'opening', op: null, work: new AbortController(), totalAt: this.now() + this.attachmentMs.total,
+    }
+    this.uploads.set(key, rec)
+    this.#totalUpload(rec)
+    let result
+    try {
+      result = await this.#attachmentAsk(sub, 'upload-begin', { upload, mediaType, bytes }, this.attachmentMs.begin,
+        { signal: rec.work.signal, onWrite: () => {
+          rec.written = true
+          this.#rememberUpload(key, upload)
+        } })
+    } catch (error) {
+      if (this.#currentUpload(rec) && rec.state === 'opening') {
+        if (error.written && !error.detail) this.#cancelUpload(rec)
+        else this.#dropUpload(rec)
+      }
+      return error.kind === 'cancelled' ? memoryRefused('invalid') : attachmentFailure(error, { upload })
+    }
+    if (!this.#currentUpload(rec) || rec.state !== 'opening' || !this.#activeSub(sub)) return memoryRefused('invalid')
+    if (result?.ok === false && result.state === 'refused') {
+      this.#dropUpload(rec)
+      return attachmentRefusal(result, { upload })
+    }
+    const { chunkBytes } = offer.limits
+    if (result?.ok !== true || result.state !== 'open' || result.upload !== upload || result.chunkBytes !== chunkBytes) {
+      this.#cancelUpload(rec)
+      return memoryRefused('failed')
+    }
+    rec.state = 'open'
+    rec.idleAt = this.now() + this.attachmentMs.idle
+    this.#idleUpload(rec)
+    return { ok: true, state: 'open', upload, chunkBytes }
+  }
+
+  async uploadChunk(client, terminal, { upload, offset, data }) {
+    const offer = this.offerFor(client)
+    if (!offer) return memoryRefused('read-only')
+    const sub = this.#attachmentSub(client, terminal)
+    const rec = this.#uploadFor(sub, upload)
+    if (!rec) return memoryRefused('invalid')
+    const { chunkBytes } = offer.limits
+    const n = canonicalBytes(data, chunkBytes)
+    const received = rec.acked + n
+    if (rec.state !== 'open' || rec.op || offset !== rec.acked || !n || received > rec.bytes || (n !== chunkBytes && received !== rec.bytes)) {
+      this.#cancelUpload(rec)
+      return memoryRefused('invalid')
+    }
+    this.timers.clearTimeout(rec.idle)
+    rec.op = 'chunk'
+    let result
+    try {
+      result = await this.#attachmentAsk(sub, 'upload-chunk', { upload, offset, data }, this.attachmentMs.chunk, { signal: rec.work.signal })
+    } catch (error) {
+      if (!this.#currentUpload(rec) || rec.state !== 'open') return memoryRefused('invalid')
+      if (error.local && error.kind === 'busy') {
+        rec.op = null
+        this.#idleUpload(rec)
+      } else this.#cancelUpload(rec)
+      return attachmentFailure(error, { upload })
+    }
+    if (!this.#currentUpload(rec) || rec.state !== 'open' || !this.#activeSub(sub)) return memoryRefused('invalid')
+    if (result?.ok !== true || result.received !== received) {
+      this.#cancelUpload(rec)
+      return attachmentRefusal(result?.ok === false ? result : null, { upload })
+    }
+    rec.acked = received
+    rec.op = null
+    rec.idleAt = this.now() + this.attachmentMs.idle
+    this.#idleUpload(rec)
+    return { ok: true, received }
+  }
+
+  async uploadFinish(client, terminal, { upload }) {
+    const offer = this.offerFor(client)
+    if (!offer) return memoryRefused('read-only')
+    const sub = this.#attachmentSub(client, terminal)
+    const rec = this.#uploadFor(sub, upload)
+    if (!rec || rec.state !== 'open' || rec.op || rec.acked !== rec.bytes) return memoryRefused('invalid')
+    rec.state = 'finishing'
+    rec.op = 'finish'
+    this.timers.clearTimeout(rec.idle)
+    this.timers.clearTimeout(rec.total)
+    let result
+    try {
+      result = await this.#attachmentAsk(sub, 'upload-finish', { upload }, this.attachmentMs.finish, { signal: rec.work.signal })
+    } catch (error) {
+      if (error.kind === 'cancelled' || rec.work.signal.reason === 'cancelled') return memoryRefused('invalid')
+      if (this.#currentUpload(rec)) {
+        if (error.local && error.kind === 'busy') {
+          rec.state = 'open'
+          rec.op = null
+          this.#idleUpload(rec)
+          this.#totalUpload(rec)
+        } else this.#cancelUpload(rec)
+      }
+      if (error.written && (error.kind === 'timeout' || error.kind === 'unavailable')) {
+        return { ok: false, state: 'unknown', reason: 'offline', upload }
+      }
+      return attachmentFailure(error, { upload })
+    }
+    if (!this.#currentUpload(rec) || rec.state !== 'finishing' || !this.#activeSub(sub)) return memoryRefused('invalid')
+    const { mediaType, width, height, bytes, stored } = result?.image ?? {}
+    if (result?.ok !== true || result.state !== 'admitted' || result.upload !== upload
+      || !offer.mediaTypes.includes(mediaType) || ![width, height, bytes, stored].every(positiveInt)) {
+      this.#cancelUpload(rec)
+      return attachmentRefusal(result?.ok === false ? result : null, { upload })
+    }
+    this.#dropUpload(rec)
+    return { ok: true, state: 'admitted', upload, image: { mediaType, width, height, bytes, stored } }
+  }
+
+  async uploadCancel(client, terminal, { upload }) {
+    if (!this.offerFor(client)) return memoryRefused('read-only')
+    const rec = this.#uploadFor(this.#attachmentSub(client, terminal), upload)
+    if (rec) await this.#cancelUpload(rec)
+    return { ok: true }
+  }
+
+  async attachmentRead(client, terminal, { row, block }) {
+    const offer = this.offerFor(client)
+    if (!offer) return memoryRefused('read-only')
+    const sub = this.#attachmentSub(client, terminal)
+    if (!sub) return memoryRefused('not-watching')
+    const key = client.device
+    const now = this.now()
+    const phone = this.phoneState(key, now)
+    if (phone.reading) return memoryRefused('busy')
+    if (phone.reads.length >= READS_PER_MINUTE) return memoryRefused('rate')
+    phone.reads.push(now)
+    if (typeof row !== 'string' || row.length > 256 || !Number.isSafeInteger(block) || block < 0) return memoryRefused('invalid')
+    phone.reading = true
+    try {
+      const result = await this.#attachmentAsk(sub, 'attachment-read', { row, block }, this.attachmentMs.read)
+      if (!this.#activeSub(sub)) return memoryRefused('not-watching')
+      if (result?.ok === false) return attachmentRefusal(result)
+      const { mediaType, width, height, data } = result ?? {}
+      const { edge, bytes } = offer.limits.thumbnail
+      if (result?.ok !== true || !IMAGE_TYPES.includes(mediaType) || !positiveInt(width) || !positiveInt(height)
+        || width > edge || height > edge || !canonicalBytes(data, bytes)) return memoryRefused('failed')
+      return { ok: true, mediaType, width, height, data }
+    } catch (error) {
+      return this.#activeSub(sub) ? attachmentFailure(error) : memoryRefused('not-watching')
+    } finally {
+      phone.reading = false
+      this.trimPhone(key, phone, this.now())
+    }
+  }
+
+  #unwatch(sub, reason) {
+    const { channel, socket } = sub
+    if (this.subs.get(channel) !== sub) return false
+    this.subs.delete(channel)
+    sub.work.abort('not-watching')
+    if (!sub.attachments) {
+      if (socket) this.ask(socket, 'unsubscribe', { channel }).catch(() => {})
+      return true
+    }
+    const rec = this.uploads.get(sub.client.device)
+    if (rec?.sub === sub) this.#startCancelling(rec, reason)
+    const closed = sub.subscribing
+      ? this.ask(socket, 'unsubscribe', { channel }, { timeout: this.attachmentMs.unsubscribe, accept: emptyAck }).catch(() => socket.destroy())
+      : Promise.resolve()
+    if (rec?.sub === sub) closed.then(() => this.#dropUpload(rec, 'cancelled'))
+    return true
+  }
+
   /**
    * A subscription handle in the engine's shape. The snapshot comes from the socket, so the route
    * calls start(after) instead of building one (`streamsSnapshot`).
    */
   watch(terminal, client, listener) {
     const channel = this.nextChannel++
-    const sub = { socket: null, listener, status: null, approval: null, client, terminal }
+    const attachments = Boolean(this.offerFor(client))
+    const sub = { channel, socket: attachments ? this.socket : null, listener, status: null, approval: null, client, terminal, attachments, work: new AbortController() }
     return {
       streamsSnapshot: true,
-      start: async (after) => {
+      attachments,
+      attachmentLive: () => this.#activeSub(sub),
+      start: (after) => {
         this.subs.set(channel, sub)
-        try {
-          const socket = await this.open()
-          if (this.subs.get(channel) !== sub) return
-          sub.socket = socket
-          await this.ask(socket, 'subscribe', { terminal, channel, ...(typeof after === 'string' ? { after } : {}) })
-        } catch (error) {
-          if (!this.subs.delete(channel)) return
-          try { listener({ type: 'gone', reason: error.kind ?? 'unavailable' }) } catch {}
-        }
+        sub.ready = this.#startWatch(sub, after)
+        return sub.ready
       },
       rows: () => null,
       screen: () => [],
@@ -453,11 +876,32 @@ export class DshSource {
       held: () => [],
       backfill: async (before, limit) => {
         const result = await this.ask(sub.socket, 'backfill', { channel, before, limit })
-        return page(Array.isArray(result?.rows) ? result.rows : [])
+        return page(Array.isArray(result?.rows) ? result.rows.map((row) => watchRow(row, attachments)) : [])
       },
-      close: () => {
-        if (this.subs.delete(channel) && sub.socket) this.ask(sub.socket, 'unsubscribe', { channel }).catch(() => {})
-      },
+      close: () => this.#unwatch(sub),
+    }
+  }
+
+  async #startWatch(sub, after) {
+    const { channel, terminal, attachments } = sub
+    try {
+      const socket = attachments ? sub.socket : await this.open()
+      if (this.subs.get(channel) !== sub) return false
+      if (attachments && !this.#activeSub(sub)) throw socketError('unavailable')
+      sub.socket = socket
+      sub.subscribing = true
+      const result = await this.ask(socket, 'subscribe', {
+        terminal, channel, ...(typeof after === 'string' ? { after } : {}), ...(attachments ? { attachments: 1 } : {}),
+      })
+      if (attachments && result?.channel !== channel) throw socketError('unavailable')
+      sub.subscribed = this.subs.get(channel) === sub
+      return sub.subscribed
+    } catch (error) {
+      const removed = attachments ? this.#unwatch(sub, 'not-watching') : this.subs.delete(channel)
+      if (removed) {
+        try { sub.listener({ type: 'gone', reason: attachments ? 'unavailable' : (error.kind ?? 'unavailable') }) } catch {}
+      }
+      return false
     }
   }
 
@@ -474,12 +918,17 @@ export class DshSource {
    */
   async write(client, terminal, method, params = {}, { by = 'Phone' } = {}) {
     const id = method === 'send' ? params.id : undefined
+    const withUploads = method === 'send' && Object.hasOwn(params, 'uploads')
     const socket = this.socket
-    if (!socket || socket.destroyed || !this.writes.has(method)) return refusedDsh(id)
+    const attachmentRefused = (reason) => attachmentRefusal({ reason }, { id })
+    const readOnly = () => withUploads ? attachmentRefused('read-only') : refusedDsh(id)
+    if (!socket || socket.destroyed || !this.writes.has(method)) return readOnly()
     const key = client?.device
-    if (typeof key !== 'string' || !key) return refusedDsh(id)
-    const channel = [...this.subs.entries()].find(([, s]) => s.socket === socket && s.client === client && s.terminal === terminal)?.[0]
-    if (channel === undefined) return refused('not-watching', id)
+    if (typeof key !== 'string' || !key) return readOnly()
+    if (withUploads && !this.offerFor(client)) return readOnly()
+    const sub = withUploads ? this.#attachmentSub(client, terminal)
+      : [...this.subs.values()].find((s) => s.socket === socket && s.client === client && s.terminal === terminal)
+    if (!sub) return refused('not-watching', id)
     const now = this.now()
     const phone = this.phoneState(key, now)
     if (phone.busy.has(terminal)) return refused('busy', id)
@@ -489,10 +938,20 @@ export class DshSource {
     if (method === 'interrupt') phone.interrupts.set(terminal, now)
     phone.busy.add(terminal)
     try {
-      const result = await this.ask(socket, method, { channel, ...params, by, phone: key })
+      if (withUploads) {
+        const { text, uploads } = params
+        const result = await this.#attachmentAsk(sub, method, { text, id, uploads, by }, this.requestMs)
+        if (!this.#activeSub(sub)) return attachmentRefused('offline')
+        if (result?.ok === false) return attachmentRefusal(result, { id })
+        if (result?.ok !== true || result.id !== id || !['sent', 'queued'].includes(result.state)
+          || (Object.hasOwn(result, 'repeat') && result.repeat !== true)) return attachmentRefused('failed')
+        return { ok: true, state: result.state, id, ...(result.repeat ? { repeat: true } : {}) }
+      }
+      const result = await this.ask(socket, method, { channel: sub.channel, ...params, by, phone: key })
       if (!result || typeof result !== 'object' || Array.isArray(result)) return refused('failed', id)
       return id === undefined || Object.hasOwn(result, 'id') ? result : { ...result, id }
     } catch (error) {
+      if (withUploads) return attachmentFailure(error, { id })
       if (error.kind === 'timeout' || error.kind === 'unavailable') return refused('offline', id)
       const { kind, message, ...rest } = error.detail && typeof error.detail === 'object' ? error.detail : {}
       if (kind === 'read-only') return refusedDsh(id)
@@ -505,6 +964,7 @@ export class DshSource {
 
   close() {
     this.stopped = true
+    for (const rec of this.uploads.values()) this.#dropUpload(rec, 'unavailable')
     this.openingSocket?.destroy()
     this.socket?.destroy()
   }
@@ -519,6 +979,13 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
   if (!dsh) return engine
   return {
     dshWrite: () => dsh.writable(),
+    attachHello: (client) => dsh.attachHello(client),
+    attachOffer: (client) => dsh.offerFor(client),
+    uploadBegin: (client, terminal, params) => dsh.uploadBegin(client, terminal, params),
+    uploadChunk: (client, terminal, params) => dsh.uploadChunk(client, terminal, params),
+    uploadFinish: (client, terminal, params) => dsh.uploadFinish(client, terminal, params),
+    uploadCancel: (client, terminal, params) => dsh.uploadCancel(client, terminal, params),
+    attachmentRead: (client, terminal, params) => dsh.attachmentRead(client, terminal, params),
     openManage: (client, methods) => dsh.openManage(client, methods),
     memory: (client, method, params) => dsh.memory(client, method, params),
     schedule: (client, method, params) => dsh.schedule(client, method, params),
@@ -531,7 +998,9 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
       return [...terminals, ...bots]
     },
     watch: (terminal, client, listener) => (isDsh(terminal) ? dsh.watch(terminal, client, listener) : engine.watch(terminal, client, listener)),
-    send: (client, terminal, m) => (isDsh(terminal) ? dsh.write(client, terminal, 'send', { text: m?.text, id: m?.id }, { by }) : engine.send(client, terminal, m)),
+    send: (client, terminal, m) => (isDsh(terminal)
+      ? dsh.write(client, terminal, 'send', { text: m?.text, id: m?.id, ...(m && Object.hasOwn(m, 'uploads') ? { uploads: m.uploads } : {}) }, { by })
+      : engine.send(client, terminal, m)),
     sendHeld: (client, terminal, m) => (isDsh(terminal) ? refusedDsh(m?.id) : engine.sendHeld(client, terminal, m)),
     cancelHeld: (client, terminal, m) => (isDsh(terminal) ? refusedDsh(m?.id) : engine.cancelHeld(client, terminal, m)),
     answer: (client, terminal, a) => (isDsh(terminal)
