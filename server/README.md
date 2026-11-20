@@ -274,8 +274,8 @@ docker exec automagik /nodejs/bin/node \
   --project /data/workspace --home /data
 ```
 
-`/opt/automagik` is read-only code. The image ships empty directories in `/data`, including
-`gate-view/`. DSH seeds the profile at first start. An image-managed seed follows newer image
+`/opt/automagik` is read-only code. The image ships empty directories in `/data`. DSH creates
+`gate-view/` at each start, before its first healthy check, and seeds the profile at first start. An image-managed seed follows newer image
 releases on subsequent starts. A profile whose `package.json` the owner changed stays owner-managed.
 
 ## Measurement access (read-only)
