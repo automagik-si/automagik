@@ -907,6 +907,7 @@ export function install(rt) {
           queueRoomMessage(rt.roomOf(id).id, {
             text: textOf(event.data.content).replace(/^\[Group post from (?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, ''),
             ...(files.length > 0 ? { files } : {}),
+            ...(typeof source.excerpt === 'string' ? { excerpt: source.excerpt } : {}),
             botId: source.senderSessionId,
             name: source.senderName,
             reportBack: source.reportBack === true,
@@ -1006,6 +1007,7 @@ export function install(rt) {
               ...(images.length > 0 ? { images } : {}),
               ...(files.length > 0 ? { files } : {}),
               ...(uploads.length > 0 ? { uploads } : {}),
+              ...(typeof source.rpcId === 'string' && source.rpcId.startsWith('pocket-') ? { requestId: source.rpcId } : {}),
               ...(viaOf(source) ? { via: viaOf(source) } : {}),
             })
           }
