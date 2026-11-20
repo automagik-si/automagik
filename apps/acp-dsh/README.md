@@ -82,9 +82,11 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   and does not start with `acp_` (the mirror's ids); otherwise the plugin mints `bridge_<16 hex>`
   and logs the replacement. **Codex's MCP approvals.** With `dshTools` on, `acp-codex`'s MCP calls
   get no mirror card (it gives them no structured name), so a `session/request_permission` Codex
-  sends for one (codex-acp's MCP tool approval) is answered at once: allow once for the `dsh`
-  server (the bridge's own approval is the one dialog), the agent's reject option for any other
-  or unnamed server, which is logged (#969). **A call that
+  sends for one (codex-acp's MCP tool approval) is answered at once: for the `dsh` server, allow
+  once when the question offers it (the bridge's own approval is the one dialog), else cancelled,
+  never `allow_always` (RFC 0039; an agent may then end its turn); for any other or unnamed server,
+  the agent's reject option, which is logged, or cancelled when it offers none (#969). A question
+  that can no longer be answered is cancelled first. **A call that
   outlives its step (#957).** The agent runs its calls in parallel, and the bridge puts no
   deadline on one (a long wait, a slow command and an open approval dialog are legitimate).
   Before its step ends, an own-tool card waits for bridge calls of that step asking for approval
@@ -1062,7 +1064,7 @@ tool name `acp_tool` are public: Sessions keep them.
 
 `acpAgents.ownMode` can request Codex's `agent` mode, including bridged sessions, after two exact `true` answers before the prompt. Claude Code's own `auto` mode is withheld until it is captured from a signed-in CLI (RFC 0031, question 5).
 
-A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits a one-shot allow in the mirror body. Questions with no allow option keep their flow. The bridge's own answers and DSH's Auto review before the mirror body keep their existing behavior.
+A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits a one-shot allow in the mirror body. Questions with no allow option keep their flow. For a bridged call the bridge answers the agent's own question with `allow_once`, or cancels it when none is offered, never `allow_always` (RFC 0039); DSH's Auto review before the mirror body keeps its existing behavior.
 
 Codex review events are counted per prompt. When an own-mode prompt ends after three consecutive or ten total refusals, or immediately after a refusal without subsequent activity, an `acp-session` notice with `stop: 'refusals'` explains that replying can continue; refused steps stay refused. The turn finishes as `stop`. Strict prompts keep their existing ending.
 

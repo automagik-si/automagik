@@ -1155,6 +1155,17 @@ test('an allow-once rule answers the agent\'s own permission request and still c
   }
 })
 
+test('a bridged question offering only allow_always is cancelled and the turn stops before DSH is asked', async () => {
+  const h = dshHost({ env: { FAKE_ACP_ALWAYS_ONLY: '1' } })
+  try {
+    const chunks = await step(h.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'bridge-permit bash' }] }])
+    assert.equal(chunks.at(-1).reason.kind, 'aborted', JSON.stringify(chunks.at(-1).reason))
+    assert.doesNotMatch(textIn(chunks), /permit yes/)
+    assert.equal(h.asked.length, 0)
+    assert.equal(h.executed.length, 0)
+  } finally { h.close() }
+})
+
 test('a bridge the adapter never starts fails the turn with acp_bridge_missing', async () => {
   const h = dshHost({ env: { FAKE_ACP_SKIP_MCP: '1' }, spec: { bridgeReadyMs: 250 } })
   try {
