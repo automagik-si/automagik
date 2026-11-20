@@ -16,9 +16,11 @@ object ChatMemory {
 
     data class State(val hostId: String, val terminal: String, val token: Long, val snapshot: Snapshot? = null,
                      val confirmed: Entry? = null, val phase: Phase = Phase.CONNECTING, val op: Op = Op.NONE,
-                     val outcome: String? = null, val status: String? = null, val grants: Set<String> = emptySet()) {
+                     val outcome: String? = null, val status: String? = null, val grants: Set<String> = emptySet(),
+                     val notice: String? = null) {
         fun canWrite(method: String) = phase == Phase.READY && op == Op.NONE && method in grants
         val canRefresh get() = op == Op.NONE && (phase == Phase.READY || phase == Phase.READ_FAILED)
+        val mayHaveSaved get() = op == Op.ADD || op == Op.EDIT || phase == Phase.RECONCILING || outcome == UNCONFIRMED
 
         /** Authority ended. Drop memory content and keep the write outcome. */
         fun closed(line: String?) = copy(snapshot = null, confirmed = null, phase = Phase.CLOSED, op = Op.NONE,
@@ -28,6 +30,7 @@ object ChatMemory {
     const val SAVED = "Saved."
     const val UNCHANGED = "No change: that text is already there."
     const val UNCONFIRMED = "The computer didn't confirm this change."
+    const val EARLIER_CHANGE = "A change you sent earlier may have been saved: check Memory on the computer."
     const val CHECKING = "Checking…"
     private const val BUSY = "Too many requests at once. Try again."
     private const val READ_FAILED = "Couldn't read the memory."
