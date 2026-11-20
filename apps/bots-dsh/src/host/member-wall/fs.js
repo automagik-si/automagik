@@ -29,7 +29,7 @@ import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { multiuserMode } from '../multiuser.js'
 import { BOT_ID } from '../../shared/registry.js'
-import { botPrincipalOf, principalOf, scopeSessions, scopeWith, sessionScope } from './principals.js'
+import { botPrincipalOf, NOBODY, principalOf, scopeSessions, scopeWith, sessionScope } from './principals.js'
 import { checkBotConfig, mayUse, rootsOverlap } from './paths.js'
 
 export const SEARCH_TOOLS = Object.freeze(['grep', 'glob'])
@@ -126,9 +126,18 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
   // The principal of each session in a scope.
   principals(sessions) {
     if (this.wall.bots) {
+      const instance = process.env.AUTOMAGIK_INSTANCE_ID
+      const configuredInstance = this.wall.instanceId
+      const record = this.ctx.get('automagikPrincipalRecord')
+      if (!instance?.trim() || (configuredInstance?.trim() && configuredInstance !== instance)
+          || record?.version !== 1 || record.file !== this.wall.principalsFile
+          || record.instance !== instance || typeof record.folder !== 'string') {
+        return sessions.map(() => NOBODY)
+      }
       const botOf = this.service()?.botOf
-      const instance = this.wall.instanceId || process.env.AUTOMAGIK_INSTANCE_ID
-      return sessions.map(id => botPrincipalOf(this.wall.principalsFile, id, { botOf, instance, warn: this.warnPrincipal }))
+      return sessions.map(id => botPrincipalOf(record.file, id, {
+        botOf, instance, folderIdentity: record.folder, warn: this.warnPrincipal,
+      }))
     }
     return sessions.map(sessionId => principalOf(this.wall.principalsFile, sessionId))
   }

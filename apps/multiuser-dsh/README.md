@@ -39,6 +39,52 @@ canonical path rewrite. Direct DSH requests using path aliases fall outside that
 
 Caller assertions allow targets up to 4,096 bytes and assertion headers up to 8,192 bytes because DSH partitions startup combos at 3,072 bytes.
 
+## Bot principal record
+
+With multiuser on and a nonblank `AUTOMAGIK_INSTANCE_ID`, the adapter records confirmed
+Bot sessions in `$DSH_HOME/multiuser-dsh/principals.json`. DSH's uid owns the `0700`
+directory and the `0600` file. In Bot mode, point the member wall's `principalsFile` at
+that absolute path and leave `instanceId` blank to use the environment value or set it
+to the same id, including any surrounding whitespace. The wall checks the live
+`automagikPrincipalRecord` service for the writer's path, instance and verified directory
+identity. A missing writer, a mismatch,
+or a record file rejected for unsafe metadata or invalid UTF-8 denies all scoped file
+access in Bot mode.
+Multiuser off leaves the record untouched. A missing instance id disables recording and logs
+a warning. If the record directory cannot be initialized, the adapter keeps the private
+route reserved and refuses confirmed Bot work.
+
+Each recording point (agent creation, before a step, and before a tool executes) checks
+the live `automagikBotSessions` service. The adapter adds or confirms only
+`bot:<registry-id>` entries. It can correct a stale entry for a confirmed Bot. Other
+rows are preserved. New `owner` and `member:*` entries are deferred until there is a
+trusted source for owner sessions and a mapping from verified `(issuer, subject)` to a
+member area. Unclassified sessions, including fresh scheduled sessions and evicted
+sessions the resolver cannot identify, receive no entry. An unrecorded, confirmed
+Bot has no area. When the wall mounts after the adapter, it can refuse a Bot's first
+out-of-step search before the recording hook runs. The Bot's first step records its
+session for subsequent searches. In normal turns a step precedes its tools.
+
+The first Bot entry creates a version 2 record when the file is absent. An existing
+file must be a private, DSH-owned regular file with one link and a valid version 2
+record for this instance. The adapter refuses other files and preserves their
+contents. Version 1 member entries remain readable by the wall. Enabling Bot areas
+on a version 1 installation requires the owner's one-time migration under RFC 0038
+Q6. A single writer per record is a security requirement. Run one DSH process per
+`DSH_HOME`, and stop it before migration or repair writes. A second writer's stale
+snapshot can restore an `owner` row that the adapter replaced or drop a Bot entry.
+
+During an adapter overlap, if the current writer leaves while the incoming carrier
+is still activating, the incoming adapter can miss the removal and leave scoped file
+access denied. If one adapter's writer setup fails, its refusing hooks can block confirmed
+Bot work even when a healthy writer records the binding, for as long as both are mounted.
+
+The writer keeps the verified directory descriptor open for its lifetime to prevent inode
+reuse. The reader in Bot mode and the writer check that the pathname still refers to that
+directory. Node lacks directory-relative `openat`, `renameat`, and `unlinkat`.
+A directory swap and restore between pathname
+operations can evade these checks.
+
 ## Remote stream WebSocket upstream dependency
 
 DSH 0.2.2-rc.2's `dsh-api-gateway` provides the stream protocol and
