@@ -90,6 +90,36 @@ test('an explicit entry offers; Sign in starts; ready shows Done and leaves afte
   assert.ok(names().includes('refresh'), 'the model list is read again once signed in')
 })
 
+test('sign-in identity is stripped from the shared attempt view and copied onto finished rows', async () => {
+  const clock = manualTimers()
+  const { host, actions } = fakeHost()
+  const login = createCliLogin({ actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+  const provider = 'acp-codex'
+  const signedInAs = { ref: 'ref-work', kind: 'account', email: 'dev@example.test' }
+  await login.open({ botId: 'a', provider })
+  await login.start('a')
+  await login.open({ botId: 'b', provider })
+  host.attempt.signedInAs = signedInAs
+  await clock.advance(100)
+  const waiting = login.getSnapshot().rows
+  assert.equal(waiting.a.attempt, waiting.b.attempt)
+  assert.equal(Object.hasOwn(waiting.a.attempt, 'signedInAs'), false)
+
+  host.attempt.status = 'ready'
+  await clock.advance(100)
+  const done = login.getSnapshot().rows
+  for (const row of [done.a, done.b]) {
+    assert.equal(row.stage, 'done')
+    assert.equal(row.attempt, null)
+    assert.equal(row.account, undefined)
+    assert.deepEqual(row.signedInAs, signedInAs)
+    assert.notEqual(row.signedInAs, signedInAs)
+    assert.equal(Object.isFrozen(row.signedInAs), true)
+  }
+  await clock.advance(DONE_MS)
+  assert.deepEqual(login.getSnapshot().rows, {})
+})
+
 test('a model that could not be applied shows its reason and leaves after APPLY_FAILED_MS', async () => {
   const clock = manualTimers()
   const { host, actions } = fakeHost()
