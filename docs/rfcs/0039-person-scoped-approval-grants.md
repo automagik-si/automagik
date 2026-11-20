@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (waits for the owner's approval; no delivery scheduled) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-20, #1718; questions 1-5 answered with this RFC's own recommendations, see Answers; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-19 |
@@ -181,6 +181,26 @@ button (a change to DSH; until then the button is on the Bot team's cards and th
    with `reject_once`*: the bridge's own dialog has already asked, so a refusal here would contradict
    the person's allow. Recommended: (a); it is D7's "nothing becomes more permissive by itself"
    and the same rule #1740 applied to the mirror.
+
+## Answers (2026-11-20)
+
+The owner's delegate approved this RFC on 2026-11-20 (issue #1718) and answered every open
+question with this RFC's own recommendation. Each answer restates that recommendation; the
+questions above stay as they were asked.
+
+1. **#136 Q1:** (a). A person's grant lasts only for its task or chat part and is held in memory;
+   only the person makes one, never a Main Bot or any other Bot. "Always for this Bot" (b) is
+   not scheduled; tool-wide and pattern grants (c) are rejected. Never grantable: the whole
+   never-auto list (RFC 0031 D6 and its amendment), any ask whose target the card cannot show in
+   full, and anything that changes a level, the Auto mark or a deny list.
+2. **#136 Q2:** (a). "Approve all" never crosses Bots: a shared card groups only asks with the
+   same `capabilityKey`, each ask is still answered once, and a grant made from it covers that
+   Bot only.
+3. **#136 Q3:** (a). No timer: a grant ends with its owner and never survives a host restart.
+4. **#136 Q5:** (a). A pending approval whose session ends is answered `cancelled` by `system`,
+   for every owner kind, and the person is told; a grant whose owner ended is dropped with it.
+5. **The bridge's `allow_always` fallback:** (a). The bridge answers the agent's question with
+   `allow_once`, else `cancelled`, never `allow_always` (delivery 2).
 
 ## Links
 
