@@ -3,6 +3,7 @@ import { verifyAssertion } from './assertion.js'
 import { frontendPath } from './frontend.js'
 
 export const DEFAULT_MAX_REQUEST_BODY_BYTES = 314572800
+const DRAIN_TIMEOUT_MS = 30_000
 const PREFIX = '/_automagik/caller'
 const REQUEST_HEADERS = ['accept', 'accept-encoding', 'accept-language', 'content-type', 'content-length',
   'if-none-match', 'if-modified-since', 'range', 'if-range']
@@ -76,10 +77,12 @@ async function writeResponse(response, req, res, signal, unread) {
 }
 
 export function createCarrier({ connection, staticResource, clientModules, appResource, keys, nonces, scope, multiuser, keysConfigured,
-  expectedAuthority, maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES, now = () => Date.now(),
+  expectedAuthority, maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES, now = () => Date.now(), active = () => true,
 }) {
   const api = connection.createSharedFetchHandler('/api')
-  return async (req, res) => {
+  const inFlight = new Set()
+  let onIdle
+  const handler = async (req, res) => {
     const refuse = status => res.writeHead(status).end()
     if (!multiuser) return refuse(401)
     if (!keysConfigured) {
@@ -97,10 +100,12 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
         rawHeader(req, 'sec-fetch-site').includes('cross-site')) return refuse(403)
     const assertions = rawHeader(req, 'x-automagik-caller')
     if (assertions.length !== 1) return refuse(401)
+    let nowSec
+    try { nowSec = nonces.verificationSecond(Math.floor(now() / 1000)) }
+    catch { return refuse(503) }
     let url, verified
     try {
       url = restore(req)
-      const nowSec = nonces.verificationSecond(Math.floor(now() / 1000))
       verified = verifyAssertion(assertions[0], {
         keys, method: req.method, path: url.pathname + url.search, nowSec, startedAtSec: nonces.startupSecond,
       })
@@ -112,47 +117,61 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
     const abort = new AbortController()
     const onClose = () => { if (!res.writableEnded) abort.abort() }
     res.once('close', onClose)
+    const cancel = () => {
+      abort.abort()
+      res.destroy()
+    }
     let peer
     try {
-      peer = connection.createPeer({ principal, interactions: 'none' })
       const { method } = req
       const headers = new Headers({ host: authority })
       for (const name of REQUEST_HEADERS) {
         if (typeof req.headers[name] === 'string') headers.set(name, req.headers[name])
       }
+      const apiRequest = within(url.pathname, '/api')
+      const streaming = apiRequest && api.requestBodyMode({ method, url }) === 'streaming'
+      const body = apiRequest && !streaming ? await bufferedBody(req, maxRequestBodyBytes) : undefined
+      if (!active()) return req.readableEnded ? refuse(503) : closeRequest(req, res, 503)
+      if (body === null) return closeRequest(req, res, 413)
+      const kind = apiRequest ? undefined : frontendPath(url)
+      if (!apiRequest && !kind) return refuse(404)
+      const init = { method, headers, signal: abort.signal }
+      if (streaming && !readMethod(method)) {
+        init.body = Readable.toWeb(req)
+        init.duplex = 'half'
+      } else if (body !== undefined) init.body = body
+      const request = new Request(url, init)
+      peer = connection.createPeer({ principal, interactions: 'none' })
+      inFlight.add(cancel)
       await scope.run(principal, async () => {
-        const init = { method, headers, signal: abort.signal }
-        let response, streaming = false
-        if (within(url.pathname, '/api')) {
-          streaming = api.requestBodyMode({ method, url }) === 'streaming'
-          if (streaming) {
-            if (!readMethod(method)) {
-              init.body = Readable.toWeb(req)
-              init.duplex = 'half'
-            }
-          } else {
-            const body = await bufferedBody(req, maxRequestBodyBytes)
-            if (body === null) return closeRequest(req, res, 413)
-            if (body !== undefined) init.body = body
-          }
-          response = await api.fetch(new Request(url, init), peer)
-        } else {
-          const kind = frontendPath(url)
-          if (!kind) return refuse(404)
-          const request = new Request(url, init)
-          if (kind === 'bundle') response = await clientModules?.()?.fetchBundle(request)
-          else if (kind === 'app') response = await appResource?.(request)
-          else response = await staticResource?.(request, peer)
-          if (!response) return refuse(404)
-        }
+        let response
+        if (apiRequest) response = await api.fetch(request, peer)
+        else if (kind === 'bundle') response = await clientModules?.()?.fetchBundle(request)
+        else if (kind === 'app') response = await appResource?.(request)
+        else response = await staticResource?.(request, peer)
+        if (!response) return refuse(404)
         await writeResponse(response, req, res, abort.signal, streaming && !req.readableEnded)
       })
     } catch {
       if (res.headersSent || res.destroyed) res.destroy()
       else refuse(500)
     } finally {
+      if (inFlight.delete(cancel) && !inFlight.size) onIdle?.()
       res.off('close', onClose)
       await peer?.dispose()
     }
   }
+  handler.drain = () => {
+    if (!inFlight.size) return
+    const { promise, resolve } = Promise.withResolvers()
+    onIdle = resolve
+    const timer = setTimeout(resolve, DRAIN_TIMEOUT_MS)
+    return promise.then(() => {
+      clearTimeout(timer)
+      onIdle = undefined
+      for (const cancel of inFlight) cancel()
+      inFlight.clear()
+    })
+  }
+  return handler
 }

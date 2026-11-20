@@ -40,7 +40,10 @@ export function createStaticFrontend(webServer) {
         const html = await fs.readFile(index, 'utf8')
         const body = credentialedManifest(webServer.renderIndex(html, peer))
           .replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`)
-        return new Response(method === 'HEAD' ? null : body, { headers: { 'content-type': HTML } })
+        const etag = `W/"${createHash('sha1').update(body).digest('base64url')}"`
+        const cache = { 'cache-control': 'no-cache', etag }
+        if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers: cache })
+        return new Response(method === 'HEAD' ? null : body, { headers: { 'content-type': HTML, ...cache } })
       }
       const bytes = await fs.readFile(path)
       const etag = `W/"${createHash('sha1').update(bytes).digest('base64url')}"`

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { createNonces } from '../src/nonces.js'
 import { carrier, rpc, seconds, target } from './runtime.mjs'
@@ -51,4 +54,33 @@ test('clock rollback and handler replacement cannot reopen a consumed assertion 
   assert.equal((await send(early)).status, 401)
   assert.equal((await send(late)).status, 401)
   assert.equal(calls, 4)
+})
+
+test('sub-second observations keep verification, pruning and the watermark aligned on whole seconds', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'caller-clock-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const file = join(dir, 'watermark')
+  let mono = 0
+  const store = createNonces({ capacity: 1, startedAtSec: seconds, file, monotonicNow: () => mono })
+  const persisted = () => Number(readFileSync(file, 'utf8'))
+  assert.equal(store.verificationSecond(seconds), seconds)
+  assert.equal(store.consume('first', seconds + 1), 'ok')
+  for (mono of [200.25, 750.5]) {
+    assert.equal(store.verificationSecond(seconds), seconds)
+    assert.equal(persisted(), seconds)
+    assert.equal(store.consume('second', seconds + 2), 'full')
+  }
+  mono = 1000.75
+  assert.equal(store.verificationSecond(seconds + 1), seconds + 1)
+  assert.equal(persisted(), seconds + 1)
+  assert.equal(store.consume('second', seconds + 2), 'ok')
+  mono = 1250.5
+  assert.equal(store.verificationSecond(seconds), seconds + 1)
+  assert.equal(store.startupSecond, seconds)
+  assert.equal(persisted(), seconds + 1)
+  mono = 7525.75
+  assert.equal(store.verificationSecond(seconds - 10), seconds + 1)
+  assert.equal(store.startupSecond, seconds + 7)
+  assert.equal(persisted(), seconds + 7)
+  assert.equal(store.consume('second', seconds + 2), 'replay')
 })
