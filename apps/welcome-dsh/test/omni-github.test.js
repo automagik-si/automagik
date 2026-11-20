@@ -8,8 +8,10 @@ import { delimiter, dirname, join, relative } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
+import workerThreads from 'node:worker_threads'
+import { deflateSync, gzipSync } from 'node:zlib'
 import { install } from '../src/host/endpoint.js'
-import { atLoginUsable, bunPathOf, createOmniInstaller, routeOf } from '../src/host/omni-github.js'
+import { atLoginUsable, bunPathOf, createOmniInstaller, routeOf, verifyOmniArchive } from '../src/host/omni-github.js'
 import { fakeContext } from './fake-ctx.js'
 
 const pin = { version: '2.261112.6', commit: 'e'.repeat(40), tree: 'b'.repeat(40) }
@@ -551,6 +553,21 @@ test('bounds and redacts logs and errors including credentials split across chun
   assert.deepEqual(readdirSync(f.build), ['cache'])
 })
 
+test('trims an overfull job log at a newline boundary', async t => {
+  const lines = Array.from({ length: 70 }, (_, i) => `log ${i} `.padEnd(1024, 'y') + '\n')
+  const f = fixture(t, { onSpawn(call) {
+    if (call.args[0] === 'install') {
+      for (const line of lines) call.child.stdout.write(line)
+      call.finish(1)
+      return false
+    }
+  } })
+  await f.installer.start(defaultPayload)
+  const done = await f.done()
+  const retained = Math.floor(48 * 1024 / Buffer.byteLength(lines[0]))
+  assert.equal(done.log, lines.slice(-retained).join(''))
+})
+
 test('rejects a mismatched CLI report and never marks the image ready', async (t) => {
   for (const report of [
     { version: older, apiUrl: 'http://127.0.0.1:81' },
@@ -661,4 +678,562 @@ test('the endpoint and plugin view share the job, reject extra fields and honor 
   assert.equal((await handle('omni-github-ack', { id })).value.claimed, true)
   assert.equal((await handle('omni-github-ack', { id })).value.claimed, false)
   assert.equal((await handle('omni-plugins')).value.server.acknowledged, true)
+})
+
+const gitApi = 'https://api.github.com/repos/automagik-si/omni/git/'
+const gitUrl = 'https://github.com/automagik-si/omni.git/git-upload-pack'
+const gitType = 'application/x-git-upload-pack-result'
+const tagRef = 'refs/tags/' + tag
+const refPath = 'ref/tags/' + tag
+const annotation = 'a'.repeat(40)
+const clock = 1_800_000_000_000
+const limited = (headers = {}) => new Response(null, {
+  status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(clock / 1000 + 600), ...headers },
+})
+const gitSha = bytes => createHash('sha1').update(bytes).digest()
+const gitObject = (type, body) => gitSha(Buffer.concat([Buffer.from(type + ' ' + body.length + '\0'), body]))
+const treeEntry = (entry, digest) => gitObject('tree', Buffer.concat([Buffer.from(entry + '\0'), digest]))
+const source = Buffer.from('fake Omni')
+const sourceTree = ['100755 omni', '40000 bin', '40000 cli', '40000 packages']
+  .reduce((digest, entry) => treeEntry(entry, digest), gitObject('blob', source)).toString('hex')
+const commitBody = Buffer.from([
+  'tree ' + sourceTree, 'parent ' + annotation,
+  'author Omni Fixture <fixture@example.test> 1700000000 +0000',
+  'committer Omni Fixture <fixture@example.test> 1700000000 +0000',
+  '', 'Pinned source', '',
+].join('\n'))
+const gitPin = { ...pin, commit: gitObject('commit', commitBody).toString('hex'), tree: sourceTree }
+const commitPath = 'commits/' + gitPin.commit
+const codeloadFor = commit => 'https://codeload.github.com/automagik-si/omni/tar.gz/' + commit
+const codeload = codeloadFor(gitPin.commit)
+const bunUrl = 'https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip'
+const pkt = value => Buffer.concat([
+  Buffer.from((Buffer.byteLength(value) + 4).toString(16).padStart(4, '0')), Buffer.from(value),
+])
+const refs = (...lines) => Buffer.concat([...lines.map(line => pkt(line + '\n')), Buffer.from('0000')])
+const refLine = gitPin.commit + ' ' + tagRef
+const gitResponse = (bytes, contentType = gitType) => new Response(bytes, { headers: { 'content-type': contentType } })
+
+function gitPackFixture({ body = commitBody, count = 1, type = 1, size = body.length, extra = '', badTrailer = false } = {}) {
+  const header = Buffer.from('5041434b0000000200000000', 'hex')
+  header.writeUInt32BE(count, 8)
+  const object = [(type << 4) | (size & 15)]
+  for (let rest = size >> 4; rest; rest >>= 7) {
+    object[object.length - 1] |= 128
+    object.push(rest & 127)
+  }
+  const contents = Buffer.concat([header, Buffer.from(object), deflateSync(body), Buffer.from(extra)])
+  return Buffer.concat([contents, badTrailer ? Buffer.alloc(20) : gitSha(contents)])
+}
+
+function packReply(pack = gitPackFixture(), { lf = '\n', end = '0000', shallow = gitPin.commit, action = 'shallow' } = {}) {
+  return Buffer.concat([
+    pkt('shallow-info' + lf), pkt(action + ' ' + shallow + lf), Buffer.from('0001'), pkt('packfile' + lf),
+    pkt(Buffer.concat([Buffer.from([1]), pack.subarray(0, 13)])), pkt('\x02progress\n'),
+    pkt(Buffer.concat([Buffer.from([1]), pack.subarray(13)])), Buffer.from(end),
+  ])
+}
+
+function tarEntry(name, type, bytes, mode = '0000644') {
+  const header = Buffer.alloc(512)
+  header.write(name)
+  header.write(mode, 100)
+  header.write(bytes.length.toString(8).padStart(11, '0'), 124)
+  header.fill(32, 148, 156)
+  header.write(type, 156)
+  header.write('ustar', 257)
+  header.write(header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0') + '\0 ', 148)
+  return Buffer.concat([header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512)])
+}
+
+function gitArchive(body = source, commit = gitPin.commit) {
+  return gzipSync(Buffer.concat([
+    tarEntry('pax_global_header', 'g', Buffer.from('52 comment=' + commit + '\n')),
+    tarEntry('omni-fixture/packages/cli/bin/omni', '0', body, '0000755'), Buffer.alloc(1024),
+  ]))
+}
+
+function gitFixture(t, {
+  api = path => path === refPath ? limited() : undefined,
+  lsRefs = () => gitResponse(refs(refLine)), pack = () => gitResponse(packReply()),
+  archive, env, options,
+} = {}) {
+  const sent = [], waits = []
+  const archiveUrl = codeloadFor(options?.pin?.commit ?? gitPin.commit)
+  const f = fixture(t, {
+    env, options: {
+      pin: gitPin, now: () => clock, wait: async ms => { waits.push(ms) },
+      ...(archive ? { verifyArchive: verifyOmniArchive } : {}), ...options,
+    },
+    fetch(url, request) {
+      sent.push([url, request])
+      if (url.startsWith(gitApi)) {
+        const path = url.slice(gitApi.length)
+        const answer = api(path)
+        if (answer !== undefined) return answer
+        if (path === refPath) return json({ object: { type: 'commit', sha: gitPin.commit } })
+        if (path === commitPath) return json({ tree: { sha: gitPin.tree } })
+        assert.fail('Unexpected REST read: ' + path)
+      }
+      if (url === gitUrl) {
+        if (request.body.includes('command=ls-refs\n')) return lsRefs()
+        if (request.body.includes('command=fetch\n')) return pack()
+        assert.fail('Unexpected Git request: ' + request.body)
+      }
+      if (url === archiveUrl && archive) return new Response(archive)
+    },
+  })
+  return {
+    ...f, sent, waits,
+    github: () => f.requests.filter(url => url.startsWith(gitApi) || url === gitUrl || url === archiveUrl || url === bunUrl),
+    async install() {
+      await f.installer.start(defaultPayload)
+      return f.done()
+    },
+  }
+}
+
+test('a primary REST limit verifies the tag, packed commit and real archive before building', async t => {
+  const f = gitFixture(t, { archive: gitArchive() })
+  const job = await f.install()
+  assert.equal(job.phase, 'done', job.error)
+  assert.match(job.log, /GitHub's API rate limit was reached; checked Omni's v2\.261112\.6 tag and commit over Git instead\./)
+  assert.deepEqual(f.waits, [])
+  assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl, codeload, bunUrl])
+  const requests = f.sent.filter(([url]) => url === gitUrl).map(([, request]) => request)
+  for (const request of requests) {
+    assert.equal(request.method, 'POST')
+    assert.equal(request.redirect, 'error')
+    assert.deepEqual(request.headers, {
+      'git-protocol': 'version=2', 'content-type': 'application/x-git-upload-pack-request', accept: gitType,
+    })
+  }
+  assert.equal(requests[0].body, '0014command=ls-refs\n00010009peel\n0025ref-prefix ' + tagRef + '\n0000')
+  assert.equal(requests[1].body, '0012command=fetch\n00010032want ' + gitPin.commit +
+    '\n000ddeepen 1\n0012filter tree:0\n0010no-progress\n0009done\n0000')
+})
+
+test('a REST limit at the annotated-tag peel or commit read restarts the whole check over Git', async t => {
+  const tagPath = 'tags/' + annotation
+  for (const last of [tagPath, commitPath]) {
+    const f = gitFixture(t, { api(path) {
+      if (path === last) return limited()
+      if (path === refPath) return json({ object: { type: 'tag', sha: annotation } })
+      if (path === tagPath) return json({ object: { type: 'commit', sha: gitPin.commit } })
+    } })
+    const job = await f.install()
+    assert.equal(job.phase, 'done', job.error)
+    const reads = last === commitPath ? [refPath, tagPath, commitPath] : [refPath, tagPath]
+    assert.deepEqual(f.github(), [...reads.map(path => gitApi + path), gitUrl, gitUrl, codeload, bunUrl])
+  }
+})
+
+test('Git peels annotated tags and selects only the exact tag name', async t => {
+  const longer = annotation + ' ' + tagRef + '0'
+  for (const [lines, error] of [
+    [[annotation + ' ' + tagRef + ' peeled:' + gitPin.commit], null],
+    [[longer, refLine], null],
+    [[gitPin.commit + ' ' + tagRef + ' peeled:' + annotation], /is not the commit/],
+    [[longer], /GitHub has no v2\.261112\.6 tag for Omni/],
+  ]) {
+    const f = gitFixture(t, { lsRefs: () => gitResponse(refs(...lines)) })
+    const job = await f.install()
+    assert.equal(job.phase, error ? 'failed' : 'done', job.error)
+    if (error) {
+      assert.equal(job.next, 'update')
+      assert.match(job.error, error)
+      assert.deepEqual(f.github(), [gitApi + refPath, gitUrl])
+      assert.deepEqual(f.calls, [])
+    }
+  }
+})
+
+test('Git accepts terminal response-end markers, LF-less text, uppercase IDs and media type parameters', async t => {
+  for (const [lf, end, advertised] of [
+    ['\n', '00000002', gitPin.commit.toUpperCase() + ' ' + tagRef],
+    ['', '0000', annotation.toUpperCase() + ' ' + tagRef + ' peeled:' + gitPin.commit.toUpperCase()],
+  ]) {
+    const f = gitFixture(t, {
+      lsRefs: () => gitResponse(Buffer.concat([pkt(advertised + lf), Buffer.from(end)]), gitType.toUpperCase() + ' ; charset=utf-8'),
+      pack: () => gitResponse(packReply(undefined, { lf, end, shallow: gitPin.commit.toUpperCase() })),
+    })
+    const job = await f.install()
+    assert.equal(job.phase, 'done', job.error)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl, codeload, bunUrl])
+  }
+})
+
+test('malformed Git ref replies preserve the rate-limit refusal and stop before fetching the commit', async t => {
+  for (const answer of [
+    () => gitResponse(refs(refLine, refLine)),
+    () => gitResponse(refs(gitPin.commit + ' bogus')),
+    () => gitResponse('<html>proxy</html>'),
+    () => gitResponse(refs(refLine), 'text/html'),
+    () => gitResponse(refs(refLine), gitType + '-invalid'),
+    () => gitResponse(refs(refLine).subarray(0, -5)),
+    () => gitResponse(Buffer.concat([refs(refLine), Buffer.from('0000')])),
+    () => gitResponse(Buffer.concat([refs(refLine), Buffer.from('0002extra')])),
+    () => gitResponse('00020000'),
+    () => gitResponse('00010000'),
+    () => gitResponse(Buffer.concat([pkt(refLine + '\n\n'), Buffer.from('0000')])),
+  ]) {
+    const f = gitFixture(t, { lsRefs: answer })
+    const job = await f.install()
+    assert.equal(job.phase, 'failed')
+    assert.equal(job.next, 'retry')
+    assert.match(job.error, /rate limit.*about 10 minutes/)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitUrl])
+    assert.deepEqual(f.calls, [])
+  }
+})
+
+test('invalid advertised ref names yield a retry even with a valid pin or with no matching tag', async t => {
+  const invalid = ['..', '\x00', '\x1f', '\x7f', ' ', '~', '^', ':', '?', '*', '[', '\\', '@{', '/', '.', '.lock', '/.hidden']
+  for (const [index, suffix] of invalid.entries()) {
+    const lines = [...(index % 2 === 0 ? [] : [refLine]), refLine + suffix]
+    const f = gitFixture(t, { lsRefs: () => gitResponse(refs(...lines)) })
+    const job = await f.install()
+    assert.equal(job.phase, 'failed', JSON.stringify(suffix))
+    assert.equal(job.next, 'retry', JSON.stringify(suffix))
+    assert.match(job.error, /rate limit/)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitUrl])
+  }
+})
+
+test('Git rejects an otherwise valid ref response larger than 64 KiB', async t => {
+  const extraRefs = Array.from({ length: 85 }, (_, i) => refLine + '-' + i + '/' + ('x'.repeat(174) + '/').repeat(4) + 'x')
+  assert.ok(refs(...extraRefs.slice(0, -1), refLine).length <= 64 * 1024)
+  const oversized = refs(...extraRefs, refLine)
+  assert.ok(oversized.length > 64 * 1024)
+  const f = gitFixture(t, { lsRefs: () => gitResponse(oversized) })
+  const job = await f.install()
+  assert.equal(job.phase, 'failed')
+  assert.equal(job.next, 'retry')
+  assert.match(job.error, /rate limit/)
+  assert.deepEqual(f.github(), [gitApi + refPath, gitUrl])
+})
+
+test('Git rejects an oversized packet in a ref response under 64 KiB', async t => {
+  const name = refLine + '/'
+  const oversized = refs(name + 'x'.repeat(0xfff1 - 5 - name.length))
+  assert.equal(oversized.toString('ascii', 0, 4), 'fff1')
+  assert.ok(oversized.length < 64 * 1024)
+  const f = gitFixture(t, { lsRefs: () => gitResponse(oversized) })
+  const job = await f.install()
+  assert.equal(job.phase, 'failed')
+  assert.equal(job.next, 'retry')
+  assert.match(job.error, /rate limit/)
+  assert.deepEqual(f.github(), [gitApi + refPath, gitUrl])
+})
+
+test('Git requires an authentic single-commit pack and refuses an authentic commit with the wrong tree', async t => {
+  const changedBody = Buffer.from(commitBody.toString().replace('Pinned source', 'Other source'))
+  for (const reply of [
+    packReply(gitPackFixture({ body: changedBody })),
+    packReply(gitPackFixture({ count: 2 })),
+    packReply(gitPackFixture({ badTrailer: true })),
+    packReply(gitPackFixture({ type: 2 })),
+    packReply(gitPackFixture({ size: commitBody.length + 1 })),
+    packReply(gitPackFixture({ extra: 'junk after deflate' })),
+    packReply(undefined, { shallow: 'invalid' }),
+    packReply(undefined, { action: 'unshallow' }),
+    packReply(undefined, { lf: '\n\n' }),
+    packReply(undefined, { end: '00000001' }),
+    packReply(undefined, { end: '00020000' }),
+    packReply().subarray(0, -4),
+  ]) {
+    const f = gitFixture(t, { pack: () => gitResponse(reply) })
+    const job = await f.install()
+    assert.equal(job.phase, 'failed')
+    assert.equal(job.next, 'retry')
+    assert.match(job.error, /rate limit/)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl])
+    assert.deepEqual(f.calls, [])
+  }
+  const f = gitFixture(t, { options: { pin: { ...gitPin, tree: annotation } } })
+  const job = await f.install()
+  assert.equal(job.phase, 'failed')
+  assert.equal(job.next, 'update')
+  assert.match(job.error, /commit does not have the Git tree/)
+  assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl])
+  assert.deepEqual(f.calls, [])
+})
+
+test('Git accepts a 64 KiB commit body and rejects an authentic body one byte larger', async t => {
+  for (const size of [65_536, 65_537]) {
+    const body = Buffer.alloc(size, 'x')
+    commitBody.copy(body)
+    body[size - 1] = 10
+    const commit = gitObject('commit', body).toString('hex')
+    const reply = packReply(gitPackFixture({ body }), { shallow: commit })
+    assert.ok(reply.length < 64 * 1024)
+    const f = gitFixture(t, {
+      options: { pin: { ...gitPin, commit } },
+      lsRefs: () => gitResponse(refs(commit + ' ' + tagRef)),
+      pack: () => gitResponse(reply),
+      archive: gitArchive(source, commit),
+    })
+    const job = await f.install()
+    const pinChecks = [gitApi + refPath, gitUrl, gitUrl]
+    if (size === 65_536) {
+      assert.equal(job.phase, 'done', job.error)
+      assert.deepEqual(f.github(), [...pinChecks, codeloadFor(commit), bunUrl])
+    } else {
+      assert.equal(job.phase, 'failed')
+      assert.equal(job.next, 'retry')
+      assert.match(job.error, /rate limit/)
+      assert.deepEqual(f.github(), pinChecks)
+      assert.deepEqual(f.calls, [])
+    }
+  }
+})
+
+test('Git rejects a band-3 error in an otherwise valid commit pack', async t => {
+  const reply = packReply()
+  const withError = Buffer.concat([reply.subarray(0, -4), pkt('\x03Git error\n'), reply.subarray(-4)])
+  const f = gitFixture(t, { pack: () => gitResponse(withError) })
+  const job = await f.install()
+  assert.equal(job.phase, 'failed')
+  assert.equal(job.next, 'retry')
+  assert.match(job.error, /rate limit/)
+  assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl])
+})
+
+test('the Git fallback still requires the archive commit and tree before Bun or build', async t => {
+  for (const [archive, error] of [
+    [gitArchive(Buffer.from('changed')), /does not match the pinned Git tree/],
+    [gitArchive(source, annotation), /does not name the pinned commit/],
+  ]) {
+    const f = gitFixture(t, { archive })
+    const job = await f.install()
+    assert.equal(job.phase, 'failed')
+    assert.equal(job.next, 'update')
+    assert.match(job.error, error)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl, codeload])
+    assert.deepEqual(f.calls, [])
+  }
+})
+
+test('the real archive verifier starts its worker with an empty environment', async () => {
+  const previous = process.env.GITHUB_TOKEN
+  const { Worker } = workerThreads
+  process.env.GITHUB_TOKEN = 'ghp_SENTINEL_ambient_archive_test'
+  try {
+    workerThreads.Worker = class extends Worker {
+      constructor(url, options) {
+        assert.deepEqual(options.env, {})
+        super(url, options)
+      }
+    }
+    syncBuiltinESMExports()
+    const entries = await verifyOmniArchive(new Response(gitArchive()).body, gitPin, AbortSignal.timeout(2500))
+    assert.deepEqual(entries.map(entry => [entry.path, Buffer.from(entry.body)]), [['packages/cli/bin/omni', source]])
+  } finally {
+    workerThreads.Worker = Worker
+    syncBuiltinESMExports()
+    if (previous === undefined) delete process.env.GITHUB_TOKEN
+    else process.env.GITHUB_TOKEN = previous
+  }
+})
+
+test('rate-limit refusal gives validated timing and advice for the kind of token used', async t => {
+  for (const [headers, token, when] of [
+    [{ 'retry-after': '61' }, undefined, 'in about 2 minutes'],
+    [{ 'x-ratelimit-reset': String(clock / 1000 - 1) }, undefined, 'later'],
+    [{ 'x-ratelimit-reset': String(clock / 1000 + 3601) }, undefined, 'in about an hour'],
+    [{ 'x-ratelimit-reset': 'invalid' }, 'ghp_SENTINEL', 'later'],
+    [{ 'retry-after': '86401' }, 'invalid token', 'in about 10 minutes'],
+  ]) {
+    const f = gitFixture(t, {
+      env: { GITHUB_TOKEN: token }, api: () => limited(headers),
+      lsRefs: () => new Response(null, { status: 404 }),
+    })
+    const job = await f.install()
+    assert.equal(job.phase, 'failed')
+    assert.equal(job.next, 'retry')
+    assert.ok(job.error.startsWith("GitHub's API rate limit was reached, so Omni's " + tag + ' pin could not be checked.'))
+    assert.ok(job.error.includes('Try again ' + when + '.'))
+    assert.match(job.error, token === 'ghp_SENTINEL' ? /GITHUB_TOKEN's own limit/ : /same network shares this limit.*set GITHUB_TOKEN/i)
+    assert.ok(job.error.length <= 600)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitUrl])
+  }
+})
+
+test('rate-limit refusal uses the remaining Retry-After time or the reset when it expires', async t => {
+  for (const [elapsed, reset, when] of [
+    [30, 600, 'in about 1 minute'],
+    [90, 600, 'in about 9 minutes'],
+    [90, 60, 'later'],
+  ]) {
+    let at = clock
+    const f = gitFixture(t, {
+      api: () => limited({ 'retry-after': '61', 'x-ratelimit-reset': String(clock / 1000 + reset) }),
+      options: { now: () => at },
+      lsRefs() {
+        at += elapsed * 1000
+        return new Response(null, { status: 404 })
+      },
+    })
+    const job = await f.install()
+    assert.equal(job.phase, 'failed')
+    assert.equal(job.next, 'retry')
+    assert.match(job.error, /rate limit/)
+    assert.ok(job.error.includes('Try again ' + when + '.'), job.error)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitUrl])
+  }
+})
+
+test('REST and Git retry transient failures twice, and ordinary REST exhaustion does not fall back', async t => {
+  for (const network of [false, true]) {
+    for (const failures of [2, 3]) {
+      let reads = 0
+      const f = gitFixture(t, { api(path) {
+        if (path !== refPath || ++reads > failures) return
+        if (network) return Promise.reject(new TypeError('Network unavailable'))
+        return new Response(null, { status: 502 })
+      } })
+      const job = await f.install()
+      assert.deepEqual(f.waits, [1000, 2000])
+      const retries = Array(3).fill(gitApi + refPath)
+      assert.deepEqual(f.github(), failures === 2 ? [...retries, gitApi + commitPath, codeload, bunUrl] : retries)
+      assert.equal(job.phase, failures === 2 ? 'done' : 'failed', job.error)
+      if (failures === 3) assert.equal(job.error, "Could not check Omni's " + tag + ' pin on GitHub.')
+    }
+  }
+  let gitReads = 0
+  const f = gitFixture(t, { lsRefs() {
+    if (++gitReads === 1) return Promise.reject(new TypeError('Network unavailable'))
+    return new Response(null, { status: 500 })
+  } })
+  const job = await f.install()
+  assert.equal(job.phase, 'failed')
+  assert.equal(job.next, 'retry')
+  assert.match(job.error, /rate limit.*about 10 minutes/)
+  assert.deepEqual(f.waits, [1000, 2000])
+  assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl, gitUrl])
+  assert.deepEqual(f.calls, [])
+})
+
+test('short secondary limits retry while long, exhausted or body-confirmed limits use Git', async t => {
+  const secondary = seconds => new Response(null, { status: 429, headers: { 'retry-after': seconds } })
+  const cases = [
+    [() => secondary('3'), 1, [3000], false],
+    [() => secondary('3'), 3, [3000, 3000], true],
+    [() => secondary('60'), 1, [], true],
+    [() => new Response('{"message":"API rate limit exceeded"}', { status: 403 }), 1, [], true],
+    [() => new Response('Rate limit exceeded', { status: 429 }), 1, [], true],
+  ]
+  for (const [response, attempts, waits, fallbackUsed] of cases) {
+    let reads = 0
+    const f = gitFixture(t, { api(path) {
+      if (path === refPath && ++reads <= attempts) return response()
+    } })
+    const job = await f.install()
+    assert.equal(job.phase, 'done', job.error)
+    assert.deepEqual(f.waits, waits)
+    const rest = Array(attempts + Number(!fallbackUsed)).fill(gitApi + refPath)
+    assert.deepEqual(f.github(), [...rest, ...(fallbackUsed ? [gitUrl, gitUrl] : [gitApi + commitPath]), codeload, bunUrl])
+  }
+})
+
+test('a headerless REST rate limit uses the first 4 KiB and cancels the rest of its body', async t => {
+  let cancelled = false
+  const f = gitFixture(t, { api: () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('API rate limit exceeded'))
+      controller.enqueue(Buffer.alloc(5 * 1024, 'x'))
+    },
+    cancel() { cancelled = true },
+  }), { status: 403 }) })
+  const job = await f.install()
+  assert.equal(job.phase, 'done', job.error)
+  assert.equal(cancelled, true)
+  assert.deepEqual(f.github(), [gitApi + refPath, gitUrl, gitUrl, codeload, bunUrl])
+})
+
+test('bare REST failures and REST pin mismatches never send a Git request', async t => {
+  for (const [path, response, error, next] of [
+    [refPath, () => new Response(null, { status: 403 }), /Could not check/, 'retry'],
+    [refPath, () => new Response(null, { status: 404 }), /Could not check/, 'retry'],
+    [refPath, () => new Response('not JSON'), /Could not check/, 'retry'],
+    [refPath, () => new Response('{"error":"forbidden","help":"see rate limit documentation"}', { status: 403 }), /Could not check/, 'retry'],
+    [refPath, () => new Response('[{"error":"forbidden","help":"see rate limit documentation"}]', {
+      status: 403, headers: { 'content-type': 'application/json' },
+    }), /Could not check/, 'retry'],
+    [refPath, () => new Response('[{"message":"API rate limit exceeded"}]', { status: 403 }), /Could not check/, 'retry'],
+    [refPath, () => new Response('"API rate limit exceeded"', {
+      status: 403, headers: { 'content-type': 'application/vnd.github+json; charset=utf-8' },
+    }), /Could not check/, 'retry'],
+    [refPath, () => new Response(JSON.stringify({
+      error: 'forbidden', help: 'see rate limit documentation', pad: 'x'.repeat(5 * 1024),
+    }), { status: 403 }), /Could not check/, 'retry'],
+    [refPath, () => new Response('x'.repeat(4096) + 'rate limit', { status: 403 }), /Could not check/, 'retry'],
+    [refPath, () => json({ object: { type: 'commit', sha: annotation } }), /is not the commit/, 'update'],
+    [commitPath, () => json({ tree: { sha: annotation } }), /commit does not have the Git tree/, 'update'],
+  ]) {
+    const f = gitFixture(t, { api: read => read === path ? response() : undefined })
+    const job = await f.install()
+    assert.equal(job.phase, 'failed')
+    assert.equal(job.next, next)
+    assert.match(job.error, error)
+    assert.deepEqual(f.waits, [])
+    assert.deepEqual(f.github(), path === refPath ? [gitApi + refPath] : [gitApi + refPath, gitApi + commitPath])
+    assert.deepEqual(f.calls, [])
+  }
+})
+
+test('cancellation and download timeout interrupt backoff and release the lock before any retry', async t => {
+  for (const timeout of [false, true]) {
+    const waiting = Promise.withResolvers()
+    const f = gitFixture(t, {
+      api: () => new Response(null, { status: 502 }),
+      options: {
+        downloadMs: timeout ? 50 : 5000,
+        wait(ms, value, { signal }) {
+          waiting.resolve(signal)
+          return delay(ms, value, { signal })
+        },
+      },
+    })
+    const { job: { id } } = await f.installer.start(defaultPayload)
+    const signal = await waiting.promise
+    if (!timeout) f.installer.cancel({ id })
+    const job = await f.done()
+    assert.equal(job.phase, timeout ? 'failed' : 'cancelled')
+    assert.equal(signal.aborted, true)
+    if (timeout) assert.equal(job.error, 'The Omni download step took too long.')
+    assert.equal(existsSync(join(f.build, 'install.lock')), false)
+    assert.deepEqual(f.github(), [gitApi + refPath])
+    assert.deepEqual(f.calls, [])
+  }
+})
+
+test('the GitHub token stays on fixed REST requests and out of both job outcomes and child environments', async t => {
+  const token = 'ghp_SENTINEL_for_omni_test'
+  for (const succeeds of [true, false]) {
+    const f = gitFixture(t, {
+      env: { GITHUB_TOKEN: token },
+      api(path) {
+        if (path === commitPath) return new Response(JSON.stringify({ message: 'rate limit ' + token }), { status: 403 })
+      },
+      pack: () => succeeds ? gitResponse(packReply()) : new Response(token, { status: 403 }),
+    })
+    const job = await f.install()
+    assert.equal(job.phase, succeeds ? 'done' : 'failed', job.error)
+    assert.equal(JSON.stringify(job).includes(token), false)
+    assert.deepEqual(f.github(), [gitApi + refPath, gitApi + commitPath, gitUrl, gitUrl, ...(succeeds ? [codeload, bunUrl] : [])])
+    for (const [url, request] of f.sent) {
+      if (url.startsWith(gitApi)) {
+        assert.equal(request.redirect, 'error')
+        assert.deepEqual(request.headers, { accept: 'application/vnd.github+json', authorization: 'Bearer ' + token })
+      } else {
+        assert.equal(new Headers(request.headers).has('authorization'), false, url)
+      }
+    }
+    assert.equal(f.calls.length, succeeds ? 5 : 0)
+    for (const { options } of f.calls) {
+      assert.equal(Object.hasOwn(options.env, 'GITHUB_TOKEN'), false)
+      assert.equal(JSON.stringify(options.env).includes(token), false)
+    }
+  }
 })

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // Exercise a fresh image's authenticated Welcome install and the persistent Omni runtime.
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { setTimeout as pause } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { safeDshLine } from './lib.mjs'
+import { omniJobFailure, omniSmokeErrorLines, untrustedOutput } from './omni-smoke-report.mjs'
 
 const run = promisify(execFile)
 const image = process.argv[2] || 'automagik-server:local'
@@ -25,11 +27,11 @@ async function docker(args, { timeout = 30_000, deadline = workDeadline } = {}) 
   }
 }
 
-async function inContainer(fn, args, options) {
+async function inContainer(fn, args, { formatFailure, ...options } = {}) {
   const source = `
     const args = JSON.parse(process.argv[1]);
     try {
-      console.log(JSON.stringify({ value: await (${fn})(...args) }));
+      console.log(JSON.stringify({ value: await (${fn})(...args${formatFailure ? ', ' + formatFailure : ''}) }));
     } catch (error) {
       console.log(JSON.stringify({ error: error.message }));
     }
@@ -59,7 +61,7 @@ async function waitForDsh() {
   throw new Error('DSH did not become healthy')
 }
 
-async function installOmni(path, deadline) {
+async function installOmni(path, deadline, formatFailure) {
   const { readFileSync } = await import('node:fs')
   const { setTimeout: sleep } = await import('node:timers/promises')
   const { isDeepStrictEqual } = await import('node:util')
@@ -128,9 +130,18 @@ async function installOmni(path, deadline) {
     job = (await call('omni-github-status', { id })).job
     if (job?.id !== id) throw new Error('Welcome lost the Omni job')
   }
-  if (job.phase !== 'done' || job.source !== 'github' || job.npm?.version !== version ||
-      job.release?.version !== pin.version || job.report?.version !== pin.version) {
-    throw new Error('Omni job did not finish installing the pinned GitHub release')
+  const mismatch = Object.entries({
+    phase: job.phase === 'done',
+    source: job.source === 'github',
+    'npm.version': job.npm?.version === version,
+    'release.version': job.release?.version === pin.version,
+    'report.version': job.report?.version === pin.version,
+  }).filter(([, matches]) => !matches).map(([name]) => name)
+  if (mismatch.length) {
+    return { failed: formatFailure({
+      phase: job.phase, step: job.steps?.find(row => row.state === 'failed')?.id ?? null,
+      error: job.error, next: job.next, mismatch, log: job.log,
+    }) }
   }
   const status = await call('omni-github-status', { id })
   const plugins = await call('omni-plugins', null)
@@ -180,8 +191,11 @@ async function smoke() {
   await waitForDsh()
   const installDeadline = Math.min(workDeadline, Date.now() + 26 * 60_000)
   const installed = await inContainer(installOmni, [welcome, installDeadline], {
-    deadline: installDeadline + 1000, timeout: 26 * 60_000 + 1000,
+    deadline: installDeadline + 1000, timeout: 26 * 60_000 + 1000, formatFailure: omniJobFailure,
   })
+  if (installed.failed) {
+    throw Object.assign(new Error('Omni install job failed'), { jobFailure: installed.failed })
+  }
   const checkHealth = async (deadline) => {
     await inContainer(waitForOmni, [installed.version, Math.min(deadline, workDeadline) - 1000], {
       deadline: Math.min(deadline, workDeadline), timeout: 5 * 60_000,
@@ -198,14 +212,15 @@ try {
   await smoke()
 } catch (error) {
   process.exitCode = 1
-  console.error(`OMNI SMOKE FAILED: ${safeDshLine(error.message)}`)
+  const lines = omniSmokeErrorLines(error.jobFailure ?? error.message)
   const logs = await docker(['logs', '--tail', '150', container], { timeout: 15_000, deadline: Date.now() + 15_000 })
     .catch(() => null)
   if (logs) {
     for (const output of [logs.stdout, logs.stderr]) {
-      for (const line of output.trimEnd().split('\n')) if (line) console.error(safeDshLine(line))
+      for (const line of output.trimEnd().split('\n')) if (line) lines.push(safeDshLine(line))
     }
   }
+  for (const line of untrustedOutput(lines, randomUUID().replaceAll('-', ''))) console.error(line)
 } finally {
   const deadline = Date.now() + 90_000
   await docker(['rm', '--force', container], { deadline, timeout: 45_000 }).catch(() => {})
