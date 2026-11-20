@@ -86,6 +86,20 @@ export function callerHeaders(req, credentials, principal, assertion) {
   return headers
 }
 
+// A member's carried upgrade: the WebSocket handshake fields and the caller assertion, from an
+// explicit list. No DSH credential, principal header or other browser header crosses here.
+const CALLER_UPGRADE_HEADERS = ['sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions']
+export function callerUpgradeHeaders(req, credentials, principal, assertion) {
+  const headers = { host: credentials.authority, origin: `http://${credentials.authority}` }
+  for (const name of CALLER_UPGRADE_HEADERS) {
+    if (typeof req.headers[name] === 'string') headers[name] = req.headers[name]
+  }
+  headers.connection = 'Upgrade'
+  headers.upgrade = 'websocket'
+  headers['x-automagik-caller'] = assertion
+  return headers
+}
+
 export function responseHeaders(headers) {
   const excluded = new Set(['set-cookie', 'connection', 'transfer-encoding', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade', ...(headers.connection ?? '').toLowerCase().split(',').map(v => v.trim())])
   return Object.fromEntries(Object.entries(headers).filter(([name]) => !excluded.has(name)))

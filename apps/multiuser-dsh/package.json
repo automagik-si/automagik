@@ -30,11 +30,20 @@
     "dsh": ">=0.2.2-rc.2 <0.3.0-0",
     "node": ">=24.9"
   },
+  "dependencies": {
+    "ws": "8.18.3"
+  },
   "peerDependencies": {
+    "@deepseek-ai/dsh-api-gateway": "*",
+    "@deepseek-ai/dsh-api-remote-access": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*",
     "@deepseek-ai/dsh-web-app": "*",
     "@deepseek-ai/schemastery": "*"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-api-gateway": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-web-app": {
       "optional": true
     }
