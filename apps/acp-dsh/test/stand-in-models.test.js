@@ -216,3 +216,83 @@ test('an errored prompt or a host interruption does not claim the agent answered
   assert.equal(linesIn(interrupted).includes(LINE), false)
   assert.deepEqual(stopping.logs, [])
 })
+
+test('a missing stand-in accepts an effort offered by another model and runs on the start model', async t => {
+  const h = await host(t, { env: { FAKE_ACP_EXTRA_EFFORT: 'max' } })
+  const { reasoning } = await h.adapter.resolveModel(PROVIDER, ALIAS)
+  assert.deepEqual(reasoning.efforts.map(effort => effort.id), ['low', 'medium', 'high', 'max'])
+  assert.equal(reasoning.defaultEffort, undefined)
+  const selection = { provider: PROVIDER, model: ALIAS, reasoningEffort: 'max' }
+  assert.deepEqual(await h.ctx.llm.resolveCallConfig(selection), selection)
+
+  const chunks = await step(h, [said('plain')], { effort: 'max' })
+  assert.equal(finishOf(chunks), 'stop')
+  assert.match(chunks.filter(chunk => chunk.type === 'reasoning-delta').map(chunk => chunk.text).join(''), /On fake-large at medium effort/)
+  assert.equal(linesIn(chunks).filter(text => text === LINE).length, 1)
+})
+
+test('a missing stand-in still refuses an effort absent from the known catalog and stand-in', async t => {
+  const h = await host(t)
+  await assert.rejects(h.ctx.llm.resolveCallConfig({ provider: PROVIDER, model: ALIAS, reasoningEffort: 'max' }), { code: 'UNSUPPORTED_REASONING_EFFORT' })
+})
+
+test('a listed model still refuses an effort offered only by another model', async t => {
+  const h = await host(t)
+  await assert.rejects(h.ctx.llm.resolveCallConfig({ provider: PROVIDER, model: 'fake-small', reasoningEffort: 'medium' }), { code: 'UNSUPPORTED_REASONING_EFFORT' })
+})
+
+test('the efforts of a missing stand-in follow the ladder, with minimal before low', async t => {
+  const h = await host(t, { env: { FAKE_ACP_EXTRA_EFFORT: 'minimal' } })
+  const { reasoning } = await h.adapter.resolveModel(PROVIDER, ALIAS)
+  assert.deepEqual(reasoning.efforts.map(effort => effort.id), ['minimal', 'low', 'medium', 'high'])
+})
+
+test('a default missing from the kept catalog keeps the fallback default efforts', async t => {
+  const { writeFileSync } = await import('node:fs')
+  const home = mkdtempSync(join(tmpdir(), 'acp-stand-in-kept-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const models = [{ id: 'opus', name: 'Opus', reasoning: { efforts: [{ id: 'max', name: 'Max' }], defaultEffort: 'max' } }]
+  writeFileSync(join(home, `${PROVIDER}.json`), JSON.stringify({ key: 'v1', models }))
+  const catalog = new Catalog({ id: PROVIDER, name: AGENT.name, fallback: AGENT.fallback, home, key: () => undefined })
+  const ctx = new Context()
+  const adapter = new AcpAdapter(ctx, new Map([[PROVIDER, { name: AGENT.name, catalog }]]))
+  t.after(async () => {
+    adapter.dispose()
+    catalog.dispose()
+    await ctx.root.fiber.dispose()
+  })
+  assert.deepEqual(await catalog.models(), models)
+  const entry = AGENT.fallback.find(item => item.id === 'default')
+  assert.deepEqual(await adapter.resolveModel(PROVIDER, 'default'), { provider: PROVIDER, ...entry })
+})
+
+test('a missing stand-in merges one catalog snapshot, keeps first effort metadata and stable unknown effort order', async t => {
+  const ctx = new Context()
+  const fallback = { id: ALIAS, name: 'Sonnet', description: 'Stand-in', reasoning: {
+    efforts: [{ id: 'low', name: 'Stand-in low' }, { id: 'custom-a', name: 'Stand-in custom' }],
+    defaultEffort: 'low',
+  } }
+  const models = [
+    { id: 'first', name: 'First', reasoning: { efforts: [{ id: 'max', name: 'Max' }, { id: 'low', name: 'Catalog low' }, { id: 'custom-b', name: 'Custom B' }] } },
+    { id: 'second', name: 'Second', reasoning: { efforts: [{ id: 'minimal', name: 'Minimal' }, { id: 'custom-c', name: 'Custom C' }, { id: 'custom-b', name: 'Later B' }] } },
+  ]
+  let reads = 0
+  const catalog = { spec: { fallback: [fallback] }, models: async () => { reads++; return models }, dispose() {} }
+  const adapter = new AcpAdapter(ctx, new Map([[PROVIDER, { name: AGENT.name, catalog }]]))
+  t.after(async () => { adapter.dispose(); await ctx.root.fiber.dispose() })
+  const found = await adapter.resolveModel(PROVIDER, ALIAS)
+  assert.equal(reads, 1)
+  assert.equal(found.description, 'Stand-in')
+  assert.deepEqual(found.reasoning, { efforts: [
+    { id: 'minimal', name: 'Minimal' },
+    { id: 'low', name: 'Stand-in low' },
+    { id: 'max', name: 'Max' },
+    { id: 'custom-a', name: 'Stand-in custom' },
+    { id: 'custom-b', name: 'Custom B' },
+    { id: 'custom-c', name: 'Custom C' },
+  ] })
+
+  catalog.spec.fallback = [{ id: ALIAS, name: 'Sonnet' }]
+  models.splice(0, models.length, { id: 'plain', name: 'Plain' })
+  assert.deepEqual(await adapter.resolveModel(PROVIDER, ALIAS), { provider: PROVIDER, id: ALIAS, name: 'Sonnet' })
+})

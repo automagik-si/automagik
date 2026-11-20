@@ -27,6 +27,7 @@
 // list starts with a "default" row, as Claude Code's does; FAKE_ACP_NO_DEFAULT_EFFORT=1 leaves it
 // out, as Codex's does. FAKE_ACP_AUTH=session (or prompt) refuses `session/new` (or every
 // prompt) with ACP's auth_required, as an adapter whose CLI is signed out does.
+// FAKE_ACP_EXTRA_EFFORT adds an effort only to fake-small.
 //
 // As a native agent's CLI (a command started with `acp`, #959): FAKE_ACP_SESSION_MODELS=1 offers
 // its models only as the session's own list (`models` in the `session/new` answer, switched
@@ -45,14 +46,15 @@
 // FAKE_ACP_REFUSE_MODES=a,b refuses those session/set_mode requests with invalidParams.
 // FAKE_ACP_IGNORE_CANCEL=1 makes it ignore `session/cancel`, as a stuck agent would.
 import { spawn } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
 
+const EXTRA_EFFORT = process.env.FAKE_ACP_EXTRA_EFFORT
 const MODELS = [
   { value: 'fake-large', name: 'Fake Large', efforts: ['low', 'medium', 'high'], effort: 'medium' },
-  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high'], effort: 'low' },
+  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high', ...(EXTRA_EFFORT ? [EXTRA_EFFORT] : [])], effort: 'low' },
   { value: 'fake-plain', name: 'Fake Plain', efforts: [], effort: undefined },
 ]
 const OFFERS = process.env.FAKE_ACP_NO_OPTIONS !== '1'
@@ -430,8 +432,9 @@ const implementation = {
     // Claude Code's own tools by their structured names, as in native-tools mode: `native-read`
     // is a Read that does not ask (its default mode lets reads through), `native-bash` a Bash
     // that asks first, `native-agent` an Agent call whose subagent's nested Bash asks while the
-    // Agent call is still running. A call that asks runs only when allowed; the trace says so.
-    const native = /native-(read|bash|agent)/.exec(said)
+    // Agent call is still running. `native-agent-late` stamps the child's parent after asking.
+    // A call that asks runs only when allowed; the trace says so.
+    const native = /native-(read|bash|agent-late|agent)/.exec(said)
     if (native !== null) {
       const toolCallId = `native-${session.turns}`
       const ask = async (id, title, rawInput) => {
@@ -444,8 +447,21 @@ const implementation = {
       }
       const runBash = async (id, parent) => {
         const rawInput = { command: 'echo native' }
-        await update({ sessionUpdate: 'tool_call', toolCallId: id, name: 'Bash', title: 'echo native', kind: 'execute', status: 'pending', rawInput, _meta: { claudeCode: { toolName: 'Bash', ...(parent === undefined ? {} : { parentToolUseId: parent }) } } })
-        const answer = await ask(id, 'Run command?', rawInput)
+        const late = native[1] === 'agent-late'
+        await update({ sessionUpdate: 'tool_call', toolCallId: id, name: 'Bash', title: 'echo native', kind: 'execute', status: 'pending', rawInput, _meta: { claudeCode: { toolName: 'Bash', ...(parent === undefined || late ? {} : { parentToolUseId: parent }) } } })
+        const asking = ask(id, 'Run command?', rawInput)
+        if (late) {
+          if (/native-agent-late hold\b/.test(said)) {
+            // The test signals from the reviewer once the unstamped row has been logged.
+            const deadline = Date.now() + 5_000
+            while (!existsSync('.native-agent-late-ready') && !session.cancelled) {
+              if (Date.now() >= deadline) throw new Error('Timed out waiting for the late parent test signal')
+              await new Promise(resolve => setTimeout(resolve, 10))
+            }
+          }
+          if (!session.cancelled) await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'in_progress', _meta: { claudeCode: { parentToolUseId: parent } } })
+        }
+        const answer = await asking
         if (answer === 'yes') {
           trace({ event: 'native-tool-ran', sessionId, toolCallId: id, name: 'Bash' })
           await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'native' } }] })

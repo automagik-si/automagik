@@ -461,11 +461,15 @@ nothing.
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
-A bot started by the pack as Claude Code, Codex, omp, pi or grok is told to set and clear it in its launch briefing.
+A bot started by the pack as Claude Code, Codex, omp, pi, grok or guarded dsh-tui is told to
+set and clear it in its launch briefing. Attached Claude Code seats get the guidance when the
+briefing hook prints. `am brief` and Hermes omit it. The dsh-tui guard and per-pane proxy
+allow exactly this key on the caller's own pane.
 The sidebar draws a **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
-the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when
+the one terminal snapshot it already takes. The label is the signal for the question, without a
+screen scan or a herdr-core status word for it. The chip also clears when
 the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
 the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
@@ -1108,7 +1112,8 @@ A pack-started dsh-tui bot pane, and every worker it starts, gets
 `dsh-tui` agent only). Its `hc` is a deny-by-default wrapper around the real `hc` (#624; the
 full send/keys/attach scope is #628): it scans PATH past every guard folder and forwards
 allowed calls with the same stdio and exit code. It allows
-`send`, `read`, `ls`, `get`, `wait`, `label` (the caller's own workers only), `kill`,
+`send`, `read`, `ls`, `get`, `wait`, `label` (the caller's own workers and
+`automagik-herdr.needs-owner` on the caller's own pane), `kill`,
 `rm` (the caller's own workers only), `events`, `schema`, `templates`, the doc-only
 `--help`/`-h`/`--version`/`--skill` forms,
 and one `run` shape: the dsh-tui worker start that `am worker` emits (`--bg`, the
@@ -1168,7 +1173,10 @@ hold belongs.
 **This is a guardrail, not a boundary.** A bot can bypass it with an absolute path to the real
 `hc`, a raw socket client, or `hc connect`. The team data is still writable: a bot that edits
 its project's `.herdr/bots.json` can widen its own `send` scope (for example by giving itself
-the pm, integrator or fixer rank), and a bot can label its own workers. `ls` and `events` stay
+the pm, integrator or fixer rank), and a bot can label its own workers. For the own-pane label
+exception, the guard trusts `HC_TERMINAL_ID`. Forging it can use that exception to set or clear
+only `automagik-herdr.needs-owner` on another local pane. With the proxy on, the per-pane socket
+fixes the caller's identity independently of that environment variable. `ls` and `events` stay
 cross-pane (a wrapper cannot filter a table's text or a stream without changing what the real
 `hc` printed), and `kill` is the project's main bot's; the per-pane proxy is where a sandboxed
 pane's list is filtered and its events are refused. The real
@@ -1315,20 +1323,27 @@ Herdr starts `am machines update`: on each connected machine it runs that machin
 own `am update` (am, then the pack where one is installed), so every check is made there, by the
 copy installed there, against the keys it pins: the signed pointer, the tarball's sha256, never a
 release older than one it took, and the replaced copy kept (`am rollback automagik.am`,
-`am update --rollback`). Then usagemeter, as `meter install` does (the signed
-meter-lane pointer checked here, the build's sha256 on the machine, never a downgrade, the old
-binary kept as `usagemeter.prev`): on a machine that has one, or on all of them once you agreed to
-that, and never after `install.sh --no-usagemeter`. This computer's am and usagemeter follow in the
-same run; its pack is the sidebar's own update above.
+`am update --rollback`). The pack there takes the machine's **automatic** path (#1505): its own
+setting (`am update --auto off` on that machine) and a release it rolled back hold the pack,
+exactly as they hold the machine's own auto-update; a person's explicit `am update` there
+(`--retry-skipped` also clears the record) is still the only way to install a skipped release.
+Then usagemeter, as `meter
+install` does (the signed meter-lane pointer checked here, the build's sha256 on the machine, never
+a downgrade, the old binary kept as `usagemeter.prev`): on a machine that has one, or on all of
+them once you agreed to that, and never after `install.sh --no-usagemeter`. This computer's am and
+usagemeter follow in the same run; its pack is the sidebar's own update above.
 
 `am machines` shows the last answer of each machine: its am, pack and usagemeter
-versions, and what the last run did or why it did not (a pointer it could not verify, a download
-that failed, a machine that was not connected). A machine that was not updated is also said once in
-a notice. The record is `<app home>/automagik-herdr/linked-updates.json`.
+versions, both switches (its own pack auto setting and the linked updater's) and what the last run
+did or why it did not (a pointer it could not verify, a download that failed, a machine that was
+not connected). A machine that was not updated is also said once in a notice. The record is
+`<app home>/automagik-herdr/linked-updates.json`.
 
-It is on by default. A machine opts out with its own switch, the file `~/.automagik/linked-update`
-holding `off` (`am machines --auto off` there, or `--machine M` from here): the run
-reads it first and starts nothing on that machine. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
+The linked updater is on by default. A machine opts out with its own switch, the file
+`~/.automagik/linked-update` holding `off` (`am machines --auto off` there, or `--machine M` from
+here): the run reads it first and starts nothing on that machine. This is not the machine's pack
+setting (`am update --auto off`, shown as `pack auto`): that one holds the pack alone, while this
+one stops the whole linked run. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
 that runs Herdr turns the whole run off.
 
 Updates come from the Automagik monorepo's GitHub releases, through one signed pointer: the

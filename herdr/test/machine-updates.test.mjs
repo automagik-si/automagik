@@ -13,8 +13,11 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, wr
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MACHINES_EVERY_MS, MACHINES_KEY, START, entryLine, failureNotice, meterFollows, parseProbe, parseState, readUpdate, startCycle,
+import { MACHINES_EVERY_MS, MACHINES_KEY, START, UPDATE, entryLine, failureNotice, meterFollows, parseProbe, parseState, readUpdate, startCycle,
   stateAfter, stateLines } from "../mods/am-sidebar/machineUpdates.js";
+import { PACK_MODS } from "../mods/am-sidebar/release.js";
+import { POINTER_SIG_URL, POINTER_URL } from "../mods/am-sidebar/update.mjs";
+import { keys as packKeys, pointerBytes, signatureOf } from "./pointer.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { meterKey, publishMeter, writePointer } from "./meter-lane-fake.mjs";
 import { scratchRoot } from "./scratch-project.mjs";
@@ -93,7 +96,7 @@ function herd(t, { here = null, machines, lane }) {
     envs[name] = { ...base, ...env };
     if (m.am) installAm(name, m.am);
     if (m.meter) plant(name, m.meter);
-    return { name, state: m.state ?? "connected", uname: "Linux x86_64", home: homes[name], path: NODE_DIR, env };
+    return { name, state: m.state ?? "connected", uname: "Linux x86_64", home: homes[name], path: m.path ?? NODE_DIR, env: { ...env, ...(m.env ?? {}) } };
   });
   if (here) installAm("", here);
   const statePath = join(root, "hc.json"), logPath = join(root, "hc.log");
@@ -110,7 +113,7 @@ function herd(t, { here = null, machines, lane }) {
   const meterOf = (name) => spawnSync(join(homes[name], ".local", "bin", "usagemeter"), ["--version"], { encoding: "utf8" }).stdout.trim();
   const record = () => JSON.parse(readFileSync(join(app, "automagik-herdr", "linked-updates.json"), "utf8"));
   const execsOn = (name) => readJsonLines(logPath).filter((a) => a[0] === "exec" && a[a.indexOf("--on") + 1] === name);
-  return { root, release, app, homes, cli, store, amOf, recordOf, meterOf, record, execsOn, postAm, key, mKey, meterPointer, plant };
+  return { root, release, app, homes, envOf: (name) => envs[name], cli, store, amOf, recordOf, meterOf, record, execsOn, postAm, key, mKey, meterPointer, plant };
 }
 
 const entryOf = (out, machine) => out.entries.find((e) => e.machine === machine);
@@ -170,11 +173,11 @@ test("two linked machines on different versions both end on the pointers' versio
   const shown = s.cli("machines");
   assert.equal(shown.code, 0, shown.err);
   const lines = shown.out.trim().split("\n");
-  assert.match(lines[0], /^this computer: am 3\.3\.0, pack none, usagemeter none\. .*: am 3\.2\.0 → 3\.3\.0\.$/);
-  assert.match(lines.find((l) => l.startsWith("old: ")), /^old: am 3\.3\.0, pack none, usagemeter 3\.3\.0\. .*: am 3\.1\.0 → 3\.3\.0; usagemeter 3\.3\.0\.$/);
+  assert.match(lines[0], /^this computer: am 3\.3\.0, pack none, usagemeter none\. pack auto: no pack; linked auto: on\. .*: am 3\.2\.0 → 3\.3\.0\.$/);
+  assert.match(lines.find((l) => l.startsWith("old: ")), /^old: am 3\.3\.0, pack none, usagemeter 3\.3\.0\. pack auto: no pack; linked auto: on\. .*: am 3\.1\.0 → 3\.3\.0; usagemeter 3\.3\.0\.$/);
   assert.match(lines.find((l) => l.startsWith("mid: ")), /am 3\.2\.0 → 3\.3\.0/);
-  assert.match(lines.find((l) => l.startsWith("wary: ")), /^wary: am 3\.1\.0, pack none, usagemeter none\. .*: am not updated \(am lane: the pointer is signed by am-test, a key this am does not trust\)\.$/);
-  assert.match(lines.find((l) => l.startsWith("gone: ")), /^gone: versions not known\. .*not connected: nothing was checked\.$/);
+  assert.match(lines.find((l) => l.startsWith("wary: ")), /^wary: am 3\.1\.0, pack none, usagemeter none\. pack auto: no pack; linked auto: on\. .*: am not updated \(am lane: the pointer is signed by am-test, a key this am does not trust\)\.$/);
+  assert.match(lines.find((l) => l.startsWith("gone: ")), /^gone: versions not known\. pack auto: unknown; linked auto: unknown\. .*not connected: nothing was checked\.$/);
   assert.deepEqual(s.cli("machines", "--machine", "old", "--json").json().linked, ["old"]);
 
   // The next cycle has nothing to do on the two, and still reports the third.
@@ -268,14 +271,148 @@ test("update checks switched off on this computer: a cycle runs nothing anywhere
   assert.equal(s.amOf("old"), "3.1.0");
 });
 
+// ---- the pack part takes the machine's automatic path (#1505) ----
+// A linked machine with a pack install.sh installed: this checkout's am, its own app home, a real
+// install record and a release served through the same fake-fetch preload update.test.mjs uses.
+// The cycle runs the real am and the real update.mjs over hc's fake exec; only the network is faked,
+// so the machine's auto-update.json and its skip are read by the product's own code.
+
+const PACK_RELEASE = (version) => `https://dl.test/v${version}/automagik-herdr-pack-${version}.tgz`;
+const SIDEBAR_PACK = join(ROOT, "mods", "am-sidebar");
+
+/** The repo's pack at `version` as release.yml tars it: its PACK_MODS folders. */
+function packRelease(root, version) {
+  const tree = join(root, `pack-${version}`);
+  mkdirSync(tree, { recursive: true });
+  for (const mod of PACK_MODS) cpSync(join(ROOT, "mods", mod), join(tree, mod), { recursive: true });
+  writeFileSync(join(tree, "am-sidebar", "VERSION"), `${version}\n`);
+  const tgz = join(root, `automagik-herdr-pack-${version}.tgz`);
+  execFileSync("tar", ["czf", tgz, "-C", tree, ...PACK_MODS], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+  return readFileSync(tgz);
+}
+
+/** An app home with the pack installed at `version` by install.sh, and its own switch(es). */
+function installPack(appHome, { version = "0.1.0", auto = true, skip = null } = {}) {
+  const mods = join(appHome, "mods");
+  cpSync(SIDEBAR_PACK, join(mods, "am-sidebar"), { recursive: true });
+  writeFileSync(join(mods, "am-sidebar", "VERSION"), `${version}\n`);
+  const state = join(appHome, "automagik-herdr");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "installed-by-install.sh"), `version=${version}\nmods=am-sidebar\nbefore=none\nsequence=10000\n`);
+  writeFileSync(join(state, "auto-update.json"), `${JSON.stringify({ auto, ...(skip ? { skip } : {}) }, null, 2)}\n`);
+}
+
+/** The fake fetch update.test.mjs uses: a URL to bytes table, never the network. */
+function fakeFetchAt(root, table) {
+  const data = join(root, "fetch.json");
+  writeFileSync(data, JSON.stringify(Object.fromEntries(Object.entries(table).map(([url, body]) => [url, Buffer.from(body).toString("base64")]))));
+  const preload = join(root, "fake-fetch.mjs");
+  writeFileSync(preload, `import { readFileSync } from "node:fs";
+const table = JSON.parse(readFileSync(process.env.AUTOMAGIK_TEST_FETCH, "utf8"));
+globalThis.fetch = async (url) => {
+  const body = table[String(url)];
+  return body === undefined ? new Response("not found", { status: 404 }) : new Response(Buffer.from(body, "base64"));
+};
+`);
+  return { data, preload };
+}
+
+/** The fake fleet: the pack installed on each machine, and the 0.2.0 release served by a fake fetch. */
+function packFleet(t, { machines = ["off", "skipped", "diverge"], settings = {} } = {}) {
+  const root = scratchRoot(t, "am-pack-machine-");
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  exe(join(bin, "herdr-app"), "#!/bin/sh\nexit 0\n");
+  const body = packRelease(root, "0.2.0");
+  const url = PACK_RELEASE("0.2.0");
+  const pointer = pointerBytes("0.2.0", { url, body });
+  const fetch = fakeFetchAt(root, { [POINTER_URL]: pointer, [POINTER_SIG_URL]: signatureOf(pointer), [url]: body });
+  const target = { path: bin, env: { PATH: `${bin}:${NODE_DIR}:/usr/bin:/bin:/usr/sbin:/sbin`, NODE_OPTIONS: `--import ${fetch.preload}`,
+    AUTOMAGIK_TEST_FETCH: fetch.data, AUTOMAGIK_HERDR_NO_UPDATE: "", AUTOMAGIK_HERDR_LINKED_UPDATE: "" } };
+  const s = herd(t, { lane: "3.3.0", machines: Object.fromEntries(machines.map((name) => [name, { am: "3.3.0", ...target }])) });
+  for (const name of machines) {
+    // A test install trusts this run's key, as update.test.mjs's temp pack does.
+    writeFileSync(join(s.store(name), "current", "pack-keys.json"), JSON.stringify({ keys: packKeys }));
+    installPack(join(s.homes[name], ".config", "herdr-app"), settings[name] ?? {});
+  }
+  return {
+    s, target, fetch,
+    packVersion: (name) => readFileSync(join(s.homes[name], ".config", "herdr-app", "mods", "am-sidebar", "VERSION"), "utf8").trim(),
+    settingsOf: (name) => JSON.parse(readFileSync(join(s.homes[name], ".config", "herdr-app", "automagik-herdr", "auto-update.json"), "utf8")),
+    /** A person at that machine, with no cycle variable: the explicit retry the skip always yields to. */
+    retry: (name) => {
+      const env = { ...s.envOf(name), HOME: s.homes[name], PATH: target.env.PATH, NODE_OPTIONS: target.env.NODE_OPTIONS, AUTOMAGIK_TEST_FETCH: fetch.data };
+      delete env.AUTOMAGIK_HERDR_LINKED_UPDATE;
+      return spawnSync("sh", [join(s.homes[name], ".local", "bin", "am"), "update", "herdr.pack", "--retry-skipped", "--json"],
+        { encoding: "utf8", env, cwd: s.root });
+    },
+  };
+}
+
+test("#1505 (a): the target's own am update --auto off holds the linked pack: the cycle installs nothing", (t) => {
+  const f = packFleet(t, { machines: ["off"], settings: { off: { auto: false } } });
+  const run = f.s.cli("machines", "update", "--linked", "--json");
+  assert.equal(run.code, 0, run.err);
+  const entry = entryOf(run.json(), "off");
+  assert.equal(entry.result, "current");
+  assert.equal(entry.auto, true, "the linked updater's switch is on");
+  assert.equal(entry.packAuto, false, "the machine's own pack switch is off");
+  assert.deepEqual(entry.steps.find((p) => p.part === "pack"), { part: "pack", state: "off", to: "0.1.0", why: "Install updates automatically is off" });
+  assert.equal(f.packVersion("off"), "0.1.0", "the pack stays where the machine put it");
+});
+
+test("#1505 (b): a release rolled back on the target is not pushed again by the cycle", (t) => {
+  const f = packFleet(t, { machines: ["skipped"], settings: { skipped: { skip: "0.2.0" } } });
+  const run = f.s.cli("machines", "update", "--linked", "--json");
+  assert.equal(run.code, 0, run.err);
+  const entry = entryOf(run.json(), "skipped");
+  assert.equal(entry.result, "current");
+  assert.equal(entry.packAuto, true);
+  assert.equal(entry.steps.find((p) => p.part === "pack").state, "off");
+  assert.match(entry.steps.find((p) => p.part === "pack").why, /^0\.2\.0 was rolled back here: waiting for a newer release$/);
+  assert.equal(f.packVersion("skipped"), "0.1.0", "the skipped release is not installed");
+});
+
+test("#1505 (c): a person's explicit retry still installs the skipped release, and clears the skip", (t) => {
+  const f = packFleet(t, { machines: ["skipped"], settings: { skipped: { skip: "0.2.0" } } });
+  // The cycle first leaves it alone (b), then the person asks for it.
+  const cycle = f.s.cli("machines", "update", "--linked", "--json");
+  assert.equal(cycle.code, 0, cycle.err);
+  assert.equal(f.packVersion("skipped"), "0.1.0");
+  const retry = f.retry("skipped");
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(f.packVersion("skipped"), "0.2.0", "the person's explicit retry installs it");
+  assert.equal(f.settingsOf("skipped").skip, undefined, "and clears the record");
+});
+
+test("#1505 (d): am machines shows both switches per machine, including when they diverge", (t) => {
+  const f = packFleet(t, { machines: ["off", "skipped", "diverge"], settings: { off: { auto: false }, skipped: { skip: "0.2.0" } } });
+  assert.equal(f.s.cli("machines", "--auto", "off", "--machine", "diverge").code, 0);
+  const run = f.s.cli("machines", "update", "--linked", "--json");
+  assert.equal(run.code, 0, run.err);
+  const shown = f.s.cli("machines");
+  assert.equal(shown.code, 0, shown.err);
+  const line = (name) => shown.out.trim().split("\n").find((l) => l.startsWith(`${name}: `));
+  assert.match(line("off"), /^off: am 3\.3\.0, pack 0\.1\.0, usagemeter none\. pack auto: off; linked auto: on\. .*: the pack: Install updates automatically is off\.$/);
+  assert.match(line("skipped"), /^skipped: am 3\.3\.0, pack 0\.1\.0, usagemeter none\. pack auto: on; linked auto: on\. .*: the pack: 0\.2\.0 was rolled back here/);
+  assert.match(line("diverge"), /^diverge: am 3\.3\.0, pack 0\.1\.0, usagemeter none\. pack auto: on; linked auto: off\. .*: updates are off there/);
+  const json = f.s.cli("machines", "--json").json();
+  assert.deepEqual([json.machines.off.packAuto, json.machines.off.auto], [false, true]);
+  assert.deepEqual([json.machines.skipped.packAuto, json.machines.skipped.auto], [true, true]);
+  assert.deepEqual([json.machines.diverge.packAuto, json.machines.diverge.auto], [true, false]);
+});
+
 // ---- the pure parts ----
 
-test("parseProbe: four lines, or nothing", () => {
-  assert.deepEqual(parseProbe("am 3.1.0\npack -\nmeter ?\nauto off\n"), { am: "3.1.0", pack: null, meter: "?", auto: false });
-  assert.deepEqual(parseProbe("am -\npack 3.117.4\nmeter 3.116.0-dev\nauto on\n"), { am: null, pack: "3.117.4", meter: "3.116.0-dev", auto: true });
+test("parseProbe: five lines, or nothing; both switches", () => {
+  assert.deepEqual(parseProbe("am 3.1.0\npack -\nmeter ?\nauto off\npackauto -\n"), { am: "3.1.0", pack: null, meter: "?", auto: false, packAuto: null });
+  assert.deepEqual(parseProbe("am -\npack 3.117.4\nmeter 3.116.0-dev\nauto on\npackauto off\n"), { am: null, pack: "3.117.4", meter: "3.116.0-dev", auto: true, packAuto: false });
+  assert.deepEqual(parseProbe("am 3.1.0\npack 3.2.0\nmeter -\nauto on\npackauto on\n"), { am: "3.1.0", pack: "3.2.0", meter: null, auto: true, packAuto: true });
+  assert.equal(parseProbe("am 3.1.0\npack -\nmeter -\nauto on\n"), null, "a probe that does not say both switches is not one");
   assert.equal(parseProbe("am 3.1.0\npack -\nmeter -\n"), null);
   assert.equal(parseProbe("am $(reboot)\npack -\nmeter -\nauto on\n"), null);
   assert.equal(parseProbe("am ?\npack -\nmeter -\nauto on\n"), null);
+  assert.equal(parseProbe("am 3.1.0\npack -\nmeter -\nauto on\npackauto maybe\n"), null);
   assert.equal(parseProbe(""), null);
 });
 
@@ -292,6 +429,9 @@ test("readUpdate: the machine's own answer, am then the pack; a refusal is that 
     { part: "pack", state: "failed", why: "am: Not updated: the signature does not match" });
   // A release that did not load there: its previous pack is back, and it is said.
   assert.match(am({ am: { state: "current", to: "3.3.0" }, pack: { current: "3.2.0", installed: { version: "3.3.0", restored: { version: "3.2.0", failedVersion: "3.3.0" } } } })[1].why, /^3\.3\.0 did not load there; 3\.2\.0 is back$/);
+  // The automatic path held it (#1505): the machine's own setting or its skip, not a failure.
+  assert.deepEqual(am({ am: { state: "current", to: "3.3.0" }, pack: { current: "3.2.0", latest: "3.3.0", update: { version: "3.3.0" }, installed: null, held: "Install updates automatically is off" } })[1],
+    { part: "pack", state: "off", to: "3.2.0", why: "Install updates automatically is off" });
   assert.equal(am({ am: { state: "current", to: "3.3.0" }, pack: { current: "3.2.0", disabled: true } })[1].state, "off");
   assert.deepEqual(readUpdate({ code: 0, stdout: "via none\n", stderr: "" }), [{ part: "am", state: "absent" }, { part: "pack", state: "absent" }]);
   assert.deepEqual(readUpdate({ code: 0, stdout: `via pack\n${JSON.stringify({ current: "3.3.0", update: null, installed: null })}\n`, stderr: "" }),
@@ -317,7 +457,7 @@ test("the record: a machine not connected keeps its last versions, one no longer
   assert.equal(state.machines.a.result, "disconnected");
   assert.equal(state.machines.a.versions.am, "3.3.0");
   assert.equal(state.here.versions.am, "3.3.0");
-  assert.match(entryLine(state.machines.a), /^a: am 3\.3\.0, pack none, usagemeter none\. t2: not connected: nothing was checked\.$/);
+  assert.match(entryLine(state.machines.a), /^a: am 3\.3\.0, pack none, usagemeter none\. pack auto: unknown; linked auto: on\. t2: not connected: nothing was checked\.$/);
   assert.deepEqual(stateLines(parseState(""), ["new"]), ["new: not checked yet (am machines update)."]);
   assert.deepEqual(parseState("not json"), { at: null, here: null, machines: {} });
   // Nothing failed: nothing to say, and the signature is empty so a later failure is said.

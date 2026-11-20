@@ -9,7 +9,7 @@
 // agent on real stdio and DSH's real tool pipeline (its ToolsService, native executor and, for
 // Auto, the real Auto review plugin), as own-tools-level-gate.test.js does.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -437,4 +437,39 @@ test("Auto: a nested call the reviewer denies asks the person, and their no mean
   assert.equal(w.events('native-tool-refused')[0].answer, 'no')
   assert.deepEqual(mirrors.map(m => JSON.parse(m.call.arguments).title), ['Look around'])
   assert.match(textIn(chunks), /The subagent reported \(no\)\./)
+})
+
+test('Auto: a parent stamped during review lets the nested call run once without a dialog', async (t) => {
+  const review = async options => {
+    if (!JSON.stringify(options.messages).includes('echo native')) return ALLOW
+
+    const { run } = w.adapter.live.get(c.id)
+    const child = [...run.tools.values()].find(tool => tool.title === 'echo native')
+    const rows = c.session.snapshotEvents().filter(event => event.type === 'tool/call')
+    const args = rows.map(row => JSON.parse(row.data.arguments)).find(args => args.id === child.id)
+    assert.equal(Object.hasOwn(args, 'parent'), false, 'the reviewed row was written before the stamp')
+    assert.equal(child.permission.call.parent, undefined, 'the pending question has no stamp either')
+    assert.equal(child.parent, undefined, 'the stamp has not arrived yet')
+
+    const stamped = Promise.withResolvers()
+    const onUpdate = () => { if (child.parent !== undefined) stamped.resolve() }
+    child.listeners.add(onUpdate)
+    try {
+      writeFileSync(join(run.spec.cwd, '.native-agent-late-ready'), '')
+      await within(stamped.promise, 'the late parent stamp', 5_000)
+      assert.equal(child.parent, child.id.replace(/-child$/, ''))
+      assert.equal(child.status, 'in_progress')
+      assert.ok(child.permission, 'the agent is still waiting for permission')
+    } finally {
+      child.listeners.delete(onUpdate)
+    }
+    return ALLOW
+  }
+  const w = await world(t, { nativeTools: true, level: AUTO, decision: review, answer: 'rejected' })
+  const c = w.chat('s1')
+  const { chunks } = await c.turn('native-agent-late hold')
+  assert.equal(w.reviews.length, 2, JSON.stringify(chunks.at(-1)?.reason))
+  assert.equal(w.asked.length, 0)
+  assert.equal(w.events('native-tool-ran').length, 1)
+  assert.match(textIn(chunks), /The subagent reported \(yes\)\./)
 })

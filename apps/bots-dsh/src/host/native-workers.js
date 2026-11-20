@@ -36,8 +36,8 @@ function cleanWorker(worker) {
 }
 
 /**
- * Per Bot, its native workers: from its own chat and from any group Session it works in, in
- * the order acp-dsh lists them. A Session no Bot owns is left out.
+ * Per Bot, its newest native workers across chat and group Sessions, oldest first.
+ * An undated worker sorts with the preceding worker in its Session.
  * @param {{ chatOwners: Map<string, string>, groupOwners: Map<string, { botId?: string }> }} rt
  * @param {{ nativeWorkers?: () => Record<string, unknown[]> } | undefined} acp
  * @returns {Record<string, ReturnType<typeof cleanWorker>[]>}
@@ -51,14 +51,17 @@ export function nativeWorkersView(rt, acp) {
     const botId = rt.chatOwners?.get(sessionId) ?? rt.groupOwners?.get(sessionId)?.botId
     if (typeof botId !== 'string' || !Array.isArray(workers)) continue
     const list = out[botId] ??= []
+    let at = -Infinity
     for (const worker of workers) {
       const clean = cleanWorker(worker)
-      if (clean !== undefined) list.push(clean)
+      if (clean === undefined) continue
+      at = clean.at ?? at
+      list.push({ worker: clean, at })
     }
   }
   for (const [botId, list] of Object.entries(out)) {
     if (list.length === 0) delete out[botId]
-    else if (list.length > MAX_PER_BOT) out[botId] = list.slice(-MAX_PER_BOT)
+    else out[botId] = list.sort((a, b) => a.at - b.at).slice(-MAX_PER_BOT).map(entry => entry.worker)
   }
   return out
 }

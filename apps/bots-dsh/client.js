@@ -23412,22 +23412,38 @@ function workerLine(worker) {
   return endedLine(worker);
 }
 var ordered = (workers) => workers.map((worker, index) => ({ worker, index })).sort((a, b) => Number(b.worker.state === "running") - Number(a.worker.state === "running") || b.index - a.index).map((entry) => entry.worker);
-function WorkerPopover({ worker, anchor, age, onClose }) {
+function WorkerPopover({ worker, anchor, age, onClose, focusedOnUnmount }) {
   const pop = (0, import_react59.useRef)(null);
   const [place, setPlace] = (0, import_react59.useState)(() => ({ left: 340, top: 96 }));
+  const closeAndFocus = (0, import_react59.useCallback)(() => {
+    onClose();
+    if (anchor?.isConnected) anchor.focus();
+  }, [anchor, onClose]);
   (0, import_react59.useLayoutEffect)(() => {
     const rect = anchor?.getBoundingClientRect?.();
     const height = pop.current?.getBoundingClientRect?.().height ?? 0;
     const viewport = globalThis.innerHeight ?? 800;
     if (rect && rect.width > 0) setPlace({ left: Math.round(rect.right + 12), top: Math.max(16, Math.min(Math.round(rect.top), viewport - Math.max(height, 120) - 16)) });
   }, [anchor, worker.steps?.length]);
+  (0, import_react59.useLayoutEffect)(() => {
+    const dialog = pop.current;
+    dialog.focus();
+    return () => {
+      focusedOnUnmount.current = dialog.contains(document.activeElement);
+    };
+  }, [focusedOnUnmount]);
   (0, import_react59.useEffect)(() => {
     const onKey = (event) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      if (pop.current?.contains(event.target) || pop.current?.contains(document.activeElement)) closeAndFocus();
+      else onClose();
     };
     const onDown = (event) => {
       if (pop.current?.contains(event.target) || anchor?.contains?.(event.target)) return;
       onClose();
+      setTimeout(() => {
+        if (anchor?.isConnected && (document.activeElement === document.body || document.activeElement === null)) anchor.focus();
+      }, 0);
     };
     document.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onDown, true);
@@ -23435,11 +23451,11 @@ function WorkerPopover({ worker, anchor, age, onClose }) {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("pointerdown", onDown, true);
     };
-  }, [anchor, onClose]);
+  }, [anchor, onClose, closeAndFocus]);
   const steps = worker.steps ?? [];
   return (0, import_react_dom10.createPortal)((0, import_react59.createElement)(
     "div",
-    { ref: pop, className: "bt-menu bt-worker-pop", role: "dialog", "aria-label": t("Worker details"), style: { left: place.left, top: place.top } },
+    { ref: pop, className: "bt-menu bt-worker-pop", role: "dialog", tabIndex: -1, "aria-label": t("Worker details"), style: { left: place.left, top: place.top } },
     (0, import_react59.createElement)(
       "div",
       { className: "bt-worker-head" },
@@ -23463,7 +23479,7 @@ function WorkerPopover({ worker, anchor, age, onClose }) {
       ))
     ),
     (0, import_react59.createElement)("div", { className: "bt-menu-sep" }),
-    (0, import_react59.createElement)("button", { type: "button", onClick: onClose }, t("Close"))
+    (0, import_react59.createElement)("button", { type: "button", onClick: closeAndFocus }, t("Close"))
   ), document.body);
 }
 function NativeWorkers({ bot, useWork, wide, age }) {
@@ -23471,19 +23487,25 @@ function NativeWorkers({ bot, useWork, wide, age }) {
   const [openId, setOpenId] = (0, import_react59.useState)(null);
   const [all, setAll] = (0, import_react59.useState)(false);
   const anchors = (0, import_react59.useRef)(/* @__PURE__ */ new Map());
+  const group = (0, import_react59.useRef)(null);
+  const focusedOnUnmount = (0, import_react59.useRef)(false);
   const workers = JSON.parse(key);
   const open = openId === null ? void 0 : workers.find((worker) => worker.id === openId);
-  (0, import_react59.useEffect)(() => {
-    if (openId !== null && open === void 0) setOpenId(null);
-  }, [openId, open]);
+  (0, import_react59.useLayoutEffect)(() => {
+    if (openId !== null && open === void 0) {
+      if (focusedOnUnmount.current) group.current?.querySelector("button[data-worker]")?.focus();
+      setOpenId(null);
+    }
+    focusedOnUnmount.current = false;
+  });
+  const close = (0, import_react59.useCallback)(() => setOpenId(null), []);
   if (!wide || workers.length === 0) return null;
   const sorted = ordered(workers);
   const shown = all || sorted.length <= WORKERS_SHOWN + 1 ? sorted : sorted.slice(0, WORKERS_SHOWN);
   const more = sorted.length - shown.length;
-  const close = () => setOpenId(null);
   return (0, import_react59.createElement)(
     "div",
-    { className: "bt-threads bt-workers", role: "group", "aria-label": t("Subagents {name} started", { name: bot.name }) },
+    { ref: group, className: "bt-threads bt-workers", role: "group", "aria-label": t("Subagents {name} started", { name: bot.name }) },
     shown.map((worker) => {
       const line = workerLine(worker);
       const when3 = worker.at === void 0 ? "" : age(worker.at);
@@ -23515,7 +23537,7 @@ function NativeWorkers({ bot, useWork, wide, age }) {
       );
     }),
     more > 0 ? (0, import_react59.createElement)("button", { type: "button", className: "bt-thread bt-thread-more", onClick: () => setAll(true) }, t("+{n} more", { n: more })) : null,
-    open ? (0, import_react59.createElement)(WorkerPopover, { worker: open, anchor: anchors.current.get(open.id), age: open.at === void 0 ? "" : age(open.at), onClose: close }) : null
+    open ? (0, import_react59.createElement)(WorkerPopover, { key: openId, worker: open, anchor: anchors.current.get(open.id), age: open.at === void 0 ? "" : age(open.at), onClose: close, focusedOnUnmount }) : null
   );
 }
 

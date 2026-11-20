@@ -569,6 +569,20 @@ export async function choose(run, model, effort, ownEffort, { signal, standIns =
   if (substituted) return { model }
 }
 
+const EFFORT_LADDER = new Map(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((id, rank) => [id, rank]))
+const effortRank = id => EFFORT_LADDER.get(id) ?? EFFORT_LADDER.size
+
+function withOfferedEfforts(entry, models) {
+  const efforts = new Map()
+  for (const model of [entry, ...models]) {
+    for (const effort of model.reasoning?.efforts ?? []) {
+      if (!efforts.has(effort.id)) efforts.set(effort.id, effort)
+    }
+  }
+  if (efforts.size === 0 && !entry.reasoning) return entry
+  return { ...entry, reasoning: { efforts: [...efforts.values()].sort((a, b) => effortRank(a.id) - effortRank(b.id)) } }
+}
+
 export class AcpAdapter extends LlmAdapter {
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx
@@ -1205,10 +1219,16 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the
-  // agent sees it. A missing stand-in keeps its efforts so the prompt can reach this adapter.
+  // agent sees it. A missing stand-in other than default takes its own efforts and every one the
+  // known catalog offers, so the prompt reaches this adapter, which runs it on the agent's own model.
   async resolveModel(provider, model) {
     const agent = this.agents.get(provider)
-    const found = await agent?.catalog?.model(model) ?? agent?.catalog?.spec?.fallback?.find(entry => entry.id === model)
+    const models = agent?.catalog ? await agent.catalog.models() : []
+    let found = models.find(entry => entry.id === model)
+    if (found === undefined) {
+      found = agent?.catalog?.spec?.fallback?.find(entry => entry.id === model)
+      if (found && model !== DEFAULT_MODEL) found = withOfferedEfforts(found, models)
+    }
     const imageInput = agent?.imageInput === true ? { inputModalities: ['text', 'image'] } : {}
     if (found === undefined) return { provider, id: model, name: model, ...imageInput }
     return {

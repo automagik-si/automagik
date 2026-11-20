@@ -66,6 +66,7 @@ import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFO
 export const ALLOWED_VERBS = new Set([
   "send", "read", "ls", "get", "wait", "label", "kill", "rm", "events", "schema", "templates",
 ]);
+export const OWNER_QUESTION_LABEL = "automagik-herdr.needs-owner";
 /**
  * Commands the guard refuses by name, with their own line (#628). `put` writes a file beside a
  * terminal on its machine, and the proxy refuses `terminal.put`, so a guarded pane refuses it
@@ -944,15 +945,22 @@ function sendProblem(real, send, env, terminal) {
   return "the target is not in the caller's team";
 }
 
-/** label is own-workers only: the target's parent must be the caller's own pane. */
+/** Label an own worker, or set or clear the owner question on the caller's own pane. */
 function labelProblem(real, args, env, terminal, on) {
   const at = firstPositionalAt(args, TARGET_VALUE_OPTIONS.label);
   if (!at) return "no target";
+  // One resolution, the checked canonical address hc get answered (#628).
+  const hit = checkedTargetOf(real, at.word, on.value, env);
+  if (hit.address === terminal) {
+    if (args.length === 3 && at.index === 1 && args[2].startsWith(`${OWNER_QUESTION_LABEL}=`)) {
+      return { index: 1, address: hit.address };
+    }
+    return `the caller's own pane takes only the ${OWNER_QUESTION_LABEL} label`;
+  }
   const caller = callerOf(real, env, terminal);
   if (typeof caller === "string") return caller;
-  const hit = targetOf(real, at.word, on.value, env);
-  if (!hit) return "the target is not resolvable with hc";
   if (hit.why) return hit.why;
+  if (!hit.get?.labels || typeof hit.get.labels !== "object") return "the target is not resolvable with hc";
   // The own-worker check alone lets a machine row through when its parent is this pane
   // (`hc label worker-m` above `machine/t105`); the address hc resolved decides, as for a read,
   // and the checked address is the one forwarded.
