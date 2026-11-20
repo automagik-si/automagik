@@ -378,6 +378,7 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         env:
           TAG: ${{ steps.gate.outputs.tag }}
+          SMOKE_INPUT_KIND: ${{ steps.gate.outputs.source }}
         run: node server/smoke.mjs "automagik-server:${TAG}"
 
       - name: Plugins follow a newer image on an older release volume (offline)

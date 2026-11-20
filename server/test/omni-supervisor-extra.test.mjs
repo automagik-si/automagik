@@ -9,7 +9,9 @@ test('the image grants the Omni capability to DSH and starts its supervisor afte
   const launch = source.slice(source.indexOf('const launchDsh = () => {'), source.indexOf('await runStartup('))
   assert.match(launch, /child = spawn\(process\.execPath, dshArgs\(publicArgs\), \{\s*env: \{ \.\.\.env, AUTOMAGIK_OMNI_SUPERVISOR: '1' \}/)
   assert.match(launch, /child\.once\('spawn', \(\) => \{\s*if \(!stopping\) supervisor\.start\(\)/)
-  assert.match(source, /prepareGateView\(gateView, dirname\(gateView\), \{[\s\S]*?secrets, omni: omniHome/)
+  // The view's private directories (delivery 8 names them once, for the view and the volume leases).
+  assert.match(source, /const gatePrivateDirs = \{[\s\S]*?secrets, omni: omniHome/)
+  assert.match(source, /prepareGateView\(gateView, dirname\(gateView\), gatePrivateDirs/)
 })
 
 test('entrypoint shutdown waits for Omni and DSH before stopping core', async () => {
@@ -29,6 +31,7 @@ test('entrypoint shutdown waits for Omni and DSH before stopping core', async ()
       return target === child ? dsh : Promise.resolve()
     },
     child, core, stopping: false, warn: message => { throw new Error(message) },
+    supervision: { abort() {} }, supervised: undefined,
     isRunning: () => false,
     setTimeout: () => ({ unref() {} }),
     process: { exit: code => events.push(`exit ${code}`) },
@@ -40,6 +43,32 @@ test('entrypoint shutdown waits for Omni and DSH before stopping core', async ()
   finishOmni()
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(events, ['omni', 'dsh', 'core', 'exit 7'])
+})
+
+test('with the update supervisor hosted, shutdown aborts it and stops core only after it returns', async () => {
+  const source = readFileSync(new URL('../entrypoint.mjs', import.meta.url), 'utf8')
+  const shutdown = source.slice(source.indexOf('const shutdown = (code,'), source.indexOf('for (const signal of'))
+  const events = []
+  let finishSupervised
+  const supervised = new Promise(resolve => { finishSupervised = resolve })
+  const core = { kind: 'core' }
+  runInNewContext(`${shutdown}\nshutdown(0, 'SIGTERM')`, {
+    supervisor: { stop: () => { events.push('omni'); return Promise.resolve() } },
+    stopChild: target => {
+      events.push(target?.kind ?? 'no dsh child')
+      return Promise.resolve()
+    },
+    child: undefined, core, stopping: false, warn: message => { throw new Error(message) },
+    supervision: { abort: () => events.push('abort') }, supervised,
+    isRunning: () => false,
+    setTimeout: () => ({ unref() {} }),
+    process: { exit: code => events.push(`exit ${code}`) },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(events, ['abort', 'omni', 'no dsh child'])
+  finishSupervised(1)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(events, ['abort', 'omni', 'no dsh child', 'core', 'exit 0'])
 })
 
 test('the image carries the supervisor and schedules the Omni restart smoke after the scan', () => {

@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { test } from 'node:test'
 import { SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
+import { IMAGE_HOST, runSupervisor } from '../src/host/supervisor/main.js'
 import { HOST, MAIN } from './fixtures/supervisor.mjs'
 
 test('the supervisor copy contains exactly the main import closure and its keys', () => {
@@ -32,4 +33,10 @@ test('the supervisor copy contains exactly the main import closure and its keys'
   assert.deepEqual([...seen].sort(), [...SUPERVISOR_FILES].sort())
   assert.deepEqual(SUPERVISOR_FILES.filter(file => file.startsWith('supervisor/') && file.endsWith('.js')).sort(),
     fs.readdirSync(join(HOST, 'supervisor')).filter(file => file.endsWith('.js')).map(file => `supervisor/${file}`).sort())
+})
+
+test('the supervisor entrypoint in the inventory exposes the image host capability', () => {
+  assert.ok(SUPERVISOR_FILES.includes('supervisor/main.js'))
+  assert.equal(IMAGE_HOST, 1)
+  assert.equal(typeof runSupervisor, 'function')
 })

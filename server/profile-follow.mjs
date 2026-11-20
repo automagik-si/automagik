@@ -6,7 +6,8 @@ import { basename, dirname, join } from 'node:path'
 import * as yaml from 'yaml'
 import { hasReadScopeAdapters, mergePatch, replaceProfilePatch } from '../apps/desktop/src/profile-patch.mjs'
 import { pinStore, profileDirOf, PROFILE, seedProfile, workspaceFileStat } from './lib.mjs'
-import { ADAPTER, basePlugins, FOLLOW_STATUS, installedPlugins, LEGACY_PLUGINS, markSeed, ownership, packageHash, profileState, compareRelease, validBuild, vendorRelease, writeJson, readJson } from './profile-state.mjs'
+import { ADAPTER, basePlugins, FOLLOW_STATUS, installedPlugins, LEGACY_PLUGINS, markSeed, ownership, packageHash, profileState, compareRelease, signedProfileReason, validBuild, vendorRelease, writeJson, readJson } from './profile-state.mjs'
+import { updateRecovery, updateStoreOf } from './profile-update.mjs'
 import { materializePlugins, PLUGINS, pruneImageArchives } from './plugin-payload.mjs'
 import { mergeImageProfile, readLock } from './profile-lock.mjs'
 import { withVolumeLock } from './volume-lock.mjs'
@@ -126,7 +127,7 @@ function record(dshHome, target, build, result) {
 function recoverSwap(target, source) {
   const previous = `${target}.image-previous`
   if (!existsSync(previous)) return false
-  if (!ownership(previous, source).managed) throw new Error('Unsupported previous image profile')
+  if (!ownership(previous, source, { updateStore: updateStoreOf(target) }).managed) throw new Error('Unsupported previous image profile')
   if (!existsSync(target)) { renameSync(previous, target); return true }
   // A completed swap already has the new marker and coherent installed versions. An owner
   // edit afterwards wins: never replace it with the previous image's directory.
@@ -148,6 +149,12 @@ export function followImage(options) {
 
 async function followImageUnlocked({ dshHome, source, store, build, dshBin, install = installOffline, now = () => new Date() }) {
   const target = profileDirOf(dshHome)
+  const done = result => {
+    record(dshHome, target, build, result)
+    return { target, seeded: false, result, ...profileState({ profile: target, source, build, dshHome,
+      rolledBack: result === 'update-rolled-back' }) }
+  }
+  if (updateRecovery(target) === 'recover') return done('self-update-unfinished')
   const recovered = recoverSwap(target, source)
   if (!existsSync(target)) {
     if (!validBuild(build)) throw new Error('Invalid image metadata for first seed')
@@ -162,11 +169,6 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     // this process must not stamp an existing profile as its own fresh seed.
   }
   let own = ownership(target, source)
-  const done = result => {
-    record(dshHome, target, build, result)
-    return { target, seeded: false, result, ...profileState({ profile: target, source, build, dshHome,
-      rolledBack: result === 'update-rolled-back' }) }
-  }
   if (own.reason === 'legacy-image-seed') {
     try { markSeed(target, own.release, own.packageSha256); own = ownership(target, source) }
     catch { return done('update-rolled-back') }
@@ -176,12 +178,14 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
   if (!validBuild(build)) return done('invalid-image-metadata')
   const plugins = installedPlugins(target)
   const base = basePlugins(own)
+  const signedReason = signedProfileReason(own, build.automagik, plugins)
+  if (signedReason) return done(signedReason)
   if (base.some(name => plugins[name] === null)) return done('missing-plugins')
   if (Object.values(plugins).some(version => version !== null && compareRelease(version, build.automagik) > 0) ||
       compareRelease(own.release, build.automagik) > 0) return done('newer-than-image')
   const oldSpecs = own.imagePackage.dependencies ?? {}
   const previousFiles = base.filter(name => vendorRelease(name, oldSpecs[name])).map(name => basename(oldSpecs[name]))
-  if (base.length === PLUGINS.length && PLUGINS.every(name => plugins[name] === build.plugins[name])) {
+  if (!own.signed && base.length === PLUGINS.length && PLUGINS.every(name => plugins[name] === build.plugins[name])) {
     // Repair seeds made by older images too. These inputs must survive every later
     // `dsh plugin install`, which resolves all direct dependencies again.
     // Rebuild the lock too: a stopped seed may have written the archives but not
@@ -203,7 +207,7 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
   }
   const releaseOrder = compareRelease(build.automagik, own.release)
   const addsAdapter = !base.includes(ADAPTER) && base.every(name => plugins[name] === own.release)
-  if (releaseOrder < 0 || (releaseOrder === 0 && !addsAdapter)) return done('update-required')
+  if (releaseOrder < 0 || (releaseOrder === 0 && !own.signed && !addsAdapter)) return done('update-required')
 
   let staging
   const previous = `${target}.image-previous`
@@ -219,7 +223,7 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     mkdirSync(backup, { mode: 0o700 })
     requireProfileDirectory(target)
     await cp(target, join(backup, PROFILE), { recursive: true, verbatimSymlinks: true })
-    writeJson(join(backup, 'update.json'), { version: 1, from: own.release, to: build.automagik })
+    writeJson(join(backup, 'update.json'), { version: 1, from: own.signed ?? own.release, to: build.automagik })
     staging = mkdtempSync(join(dshHome, '.image-update-'))
     const profile = profileDirOf(staging)
     mkdirSync(dirname(profile), { recursive: true })
@@ -231,7 +235,7 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
       if (stat && !stat.isDirectory()) throw new Error('Unsupported image profile plugin manager directory')
     }
     rmSync(join(profile, 'node_modules'), { recursive: true, force: true })
-    const lock = mergeImageProfile({ source, target: profile, base })
+    const lock = mergeImageProfile({ source, target: profile, base, signedEntries: own.signedEntries })
     const readScope = hasReadScopeAdapters(source)
     mergeReadScopePatch(source, profile, readScope)
     mergeImageRows(source, profile)

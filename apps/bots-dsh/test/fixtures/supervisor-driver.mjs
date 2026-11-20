@@ -18,6 +18,7 @@ const { SUPERVISOR_VERDICT_FAILURE: failVerdict, SUPERVISOR_FAKE_TRANSPORT: fake
   SUPERVISOR_FAKE_AGE_MS: age, SUPERVISOR_CUT_AFTER: cut, SUPERVISOR_MODE: mode, SUPERVISOR_UNDO_FSYNC_FAILURE: undoFsync,
   SUPERVISOR_FROZEN_MAIN: frozen, SUPERVISOR_ROLLBACK_VERDICT_PAUSE: pause, SUPERVISOR_PAUSE_TRIAL_HEALTH: pauseTrial } = process.env
 const read = path => JSON.parse(fs.readFileSync(path))
+const image = options.imageHost
 let healthProbe
 if (failVerdict || fakeTransport) {
   healthProbe = async (url, { cookie, payload, signal } = {}) => {
@@ -31,7 +32,7 @@ if (failVerdict || fakeTransport) {
     const version = plugins.find(plugin => plugin.name === '@automagik/bots-dsh').version
     const candidate = version === '3.160.3'
     if (candidate && pauseTrial) await wait(10_000, undefined, { signal })
-    const fault = candidate && mode.startsWith('trial-') ? mode.slice('trial-'.length) : null
+    const fault = candidate && mode?.startsWith('trial-') ? mode.slice('trial-'.length) : null
     if (fault === 'port' || (mode === 'rollback-unhealthy' && state.phase === 'rollingBack')) {
       throw new Error('Fixture listener unavailable')
     }
@@ -118,4 +119,33 @@ if (frozen) {
   }
 }
 const runSupervisor = frozen ? (await import(pathToFileURL(frozen))).runSupervisor : currentSupervisor
-process.exitCode = await runSupervisor({ ...options, fetch, healthProbe, healthTimeout: fakeTransport && !pauseTrial ? 500 : 3500 })
+let imageOptions
+if (image) {
+  const abort = new AbortController()
+  if (image === 'already-aborted') abort.abort()
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => abort.abort())
+  const root = process.env.SUPERVISOR_FIXTURE
+  const record = value => fs.appendFileSync(join(root, 'events.jsonl'), JSON.stringify(value) + '\n')
+  imageOptions = {
+    signal: abort.signal,
+    refreshCopy: false,
+    onChildStart() {
+      record({ event: 'image-start' })
+      if (image === 'throw-on-start') throw new Error('private hook details: https://example.invalid/secret')
+    },
+    onLaunchUrl(url) {
+      record({ event: 'image-launch', url })
+      // The retired child's late output is released only once its replacement published.
+      if (url.endsWith('token=image-child-2')) fs.writeFileSync(join(root, 'release-retired-output'), '')
+      throw new Error('launch hook failed after recording')
+    },
+    onLine: line => record({ event: 'image-line', line }),
+    onSave(run) {
+      const saved = JSON.parse(fs.readFileSync(join(options.home, 'update', options.profile, 'state.json'), 'utf8'))
+      record({ event: 'image-save', phase: run.phase, matchesDisk: JSON.stringify(run) === JSON.stringify(saved) })
+      if (run.phase === 'checking') throw new Error('checking hook failed after recording')
+    },
+  }
+}
+
+process.exitCode = await runSupervisor({ ...options, fetch, healthProbe, healthTimeout: fakeTransport && !pauseTrial ? 500 : 3500, ...imageOptions })

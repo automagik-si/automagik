@@ -33,7 +33,9 @@ export function healthReply({ url, headers = {}, payload, plugins, run, present 
   const reply = (status, headers, body = '') => ({ status, headers, body, size: Buffer.byteLength(body) })
   const ok = value => reply(200, { 'content-type': 'application/json' }, JSON.stringify({ ok: true, value }))
   if (url.pathname === '/' && url.searchParams.has('token')) {
-    if (fault !== 'sign-in' && ['stdout-secret', 'fixture-token'].includes(url.searchParams.get('token'))) {
+    const token = url.searchParams.get('token')
+    // The image-host fixture announces one token per child (delivery 8).
+    if (fault !== 'sign-in' && (['stdout-secret', 'fixture-token'].includes(token) || /^image-child-\d+$/.test(token))) {
       return reply(303, { 'set-cookie': [cookie + '; Path=/; HttpOnly'], location: './' })
     }
   }

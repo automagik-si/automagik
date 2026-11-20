@@ -55,11 +55,13 @@ function redactCredentials(line) {
   }).replace(/token=(?!<redacted>)(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s&"'<>]*)/gi, 'token=<redacted>')
 }
 
-export async function forwardChildOutput(input, output, onLaunchUrl) {
+export async function forwardChildOutput(input, output, onLaunchUrl, onLine) {
   const forward = async line => {
     const match = LAUNCH_URL.exec(line)
     if (match) await onLaunchUrl(match[1])
-    return output.write(redactCredentials(line) + '\n')
+    const redacted = redactCredentials(line)
+    try { onLine?.(redacted) } catch {}
+    return output.write(redacted + '\n')
   }
   input.setEncoding('utf8')
   let line = ''
@@ -84,17 +86,19 @@ export async function forwardChildOutput(input, output, onLaunchUrl) {
   if (line && !await forward(line)) await once(output, 'drain')
 }
 
-export function startChild([node, ...args], env, onExit) {
+export function startChild([node, ...args], env, onExit, hooks = {}) {
   const processChild = spawn(node, args, { env, stdio: ['inherit', 'pipe', 'pipe'] })
   const child = { launchUrl: null, listener: localListener(args.slice(1)), result: null, expectedExit: false }
   let stopping
+  const capture = url => {
+    if (child.launchUrl !== null) return
+    child.launchUrl = url
+    try { hooks.onLaunchUrl?.(url) } catch {}
+    return child.onLaunchUrl?.()
+  }
   for (const [stream, output] of [[processChild.stdout, process.stdout], [processChild.stderr, process.stderr]]) {
     // A closed log sink must not leave an unhandled rejection or stall DSH.
-    void forwardChildOutput(stream, output, url => {
-      if (child.launchUrl !== null) return
-      child.launchUrl = url
-      return child.onLaunchUrl?.()
-    }).catch(() => stream.resume())
+    void forwardChildOutput(stream, output, capture, hooks.onLine).catch(() => stream.resume())
   }
   child.exited = new Promise(resolve => {
     const finish = (code, signal) => {

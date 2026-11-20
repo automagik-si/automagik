@@ -461,7 +461,12 @@ test('status explains availability and returns only the public state fields', re
     available: false, reason: 'no-store', supervisor: { version: 'v1.2.3' }, ...empty,
   })
 
-  writeJsonAtomic(currentPath, { ...current, live: { ...current.live, path: profileDir }, storeDir }, { profileDir })
+  const privateUrl = 'https://owner:fixture-credential@packages.example.invalid/bots.tgz'
+  const privateArchive = '/mnt/private/welcome.tgz'
+  const privatePin = `file:vendor/automagik-update/${'a'.repeat(64)}.tgz`
+  const entries = { '@automagik/bots-dsh': privatePin, '@automagik/welcome-dsh': privatePin }
+  const base = { '@automagik/bots-dsh': privateUrl, '@automagik/welcome-dsh': privateArchive }
+  writeJsonAtomic(currentPath, { ...current, live: { ...current.live, path: profileDir }, storeDir, entries, base }, { profileDir })
   writeJsonAtomic(supervisorPath, supervisor, { profileDir })
   writeJsonAtomic(statePath, { ...run, path: profileDir }, { profileDir })
   const privateBoot = 'private_boot_id'
@@ -472,7 +477,7 @@ test('status explains availability and returns only the public state fields', re
   const value = read()
   const { bootId: _bootId, ...visibleRun } = run
   assert.deepEqual(value, { ...available, current, run: visibleRun })
-  for (const hidden of [profileDir, storeDir, bootId, 'bootId', privateBoot, privateToken]) {
+  for (const hidden of [profileDir, storeDir, bootId, 'bootId', privateBoot, privateToken, privateUrl, privateArchive, privatePin]) {
     assert.equal(JSON.stringify(value).includes(hidden), false)
   }
 

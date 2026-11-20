@@ -451,6 +451,12 @@ startup. The private `.automagik-image-follow.lock` file stays in place; the ope
 releases its lease when the holder exits, including after a crash. Do not delete the lock file
 while containers are using the volume.
 
+Each start also holds `.automagik-image-supervisor.lock` in the volume root and in the DSH home
+for its whole life: a second container on the same volume waits up to 180 seconds and then
+stops without changing anything. A DSH home that is the volume root, under any path, is refused.
+`.automagik-profile-state.lock` in the DSH home orders the writers of the gate's profile state.
+Keep both files in place.
+
 Before installing, the image saves the complete old profile, including its package manifest,
 lock and installed dependencies, under `/data/dsh/backups/<UTC>/automagik-web`. Installation runs
 in a separate staging profile through `dsh plugin install --offline --frozen-lockfile --prod
@@ -502,6 +508,9 @@ so a proxy-only network can fail at that step. The GitHub image smoke covers Lin
 
 Equal or older releases never downgrade installed plugins. Expanding a coherent three-plugin
 base to four at the same release uses the same staged update and backup as a version change.
+If the profile took an in-app update, an image older than the profile's recorded base release
+reports `newer-than-image` and is unhealthy. An image at or above the base can keep serving the
+signed update until an image reaches that version.
 
 A failed migration keeps the old profile and reports `update-rolled-back`. Start it with
 `AUTOMAGIK_MULTIUSER=0` while resolving the failure. Mode on requires the enabled adapter and
@@ -518,6 +527,49 @@ redacted in the log:
 ```sh
 docker exec automagik cat /data/dsh/launch-url
 ```
+
+## Update inside the app (RFC 0041)
+
+In-app updates require an image with the update supervisor, multiuser mode off
+(`AUTOMAGIK_MULTIUSER=0`), the in-app update setting on, and access to the profile's registry for
+the staged install. Keep the same writable `/data` volume. With multiuser mode on, update
+through the image.
+
+When the owner confirms an update, the supervisor holds work, verifies the signed release and
+installs it beside the profile. It restarts DSH inside the same container and publishes the new
+launch URL for the gate. Work resumes after the version passes health. A version that fails
+health is rolled back the same way: the previous version is renamed back, restarted in the same
+container and checked again, and its launch URL is published for the gate.
+The container and gate stay up during this restart. If the container crashes, the next start
+uses the journal in `/data/dsh/update/automagik-web` to finish the interrupted work. The image does
+not offer Force update's reinstall of the same version yet: it needs the entrypoint to recover a
+pending reinstall before the image follow and to recognize a signed reinstall at the image's own
+version, so the supervisor never announces it in the image.
+
+The health report says `self-update-unfinished` while the supervisor owes a verdict.
+It says `signed-update-ahead` when the installed release is ahead of the image and the pins and
+base specs in `current.json` still match the profile and image seed. When an image at or above
+the installed release is pinned and the container is recreated, the image backs up the profile
+and replaces its base pins with the image's pins. The update store retains the last lane sequence.
+If that start has to finish recovery first, the image follows on the next start.
+Finish recovery with a capable image and multiuser mode off before enabling multiuser mode.
+
+With a `manualRecovery` verdict the container exits with code 1 on each start. Stop the restart
+loop and take exclusive access to the volume with a one-off container. Preserve
+`/data/dsh/update/automagik-web/state.json` and inspect its journal. The live profile is
+`/data/dsh/profiles/automagik-web`.
+
+- If there is no journal, or the undo completed (`undo: true`, empty `done`, and `pending: null`),
+  follow [Recover an unchanged or restored profile after manualRecovery](../docs/upgrade.md#recover-an-unchanged-or-restored-profile-after-manualrecovery).
+- If the candidate is installed or the switch or undo is incomplete, follow
+  [Rename back after manualRecovery](../docs/upgrade.md#rename-back-after-manualrecovery).
+  Use the journal's direction, completed steps and pending step. The kept version is under
+  `/data/dsh/update/automagik-web` at the journal's `keep` path.
+
+Verify the recovered files and retain `lastSequence` before setting `state.json` aside.
+
+For acceptance on a real Arca instance, the owner starts an update in the app and verifies
+that the app reconnects through the gate after DSH restarts and the version passes health.
 
 ## Configuration
 
@@ -646,8 +698,8 @@ docker logs automagik | grep 'startup:'
 ```
 
 **Only `401` can be healthy**: a `200` or no answer fails. The compact form prints the status
-(`000` for no answer), and exits nonzero if the profile does not match the image and is not
-explicitly owner-managed. In gate mode, both DSH and the main gate must answer `401`; a gate
+(`000` for no answer). A matching image, an explicitly owner-managed profile or a completed
+signed update ahead of the image can pass. In gate mode, both DSH and the main gate must answer `401`; a gate
 that is up cannot conceal a stopped DSH. The check uses Node's `http`, not curl.
 
 `healthcheck.mjs --json` gives keepers a versioned report:
@@ -657,9 +709,9 @@ that is up cannot conceal a stopped DSH. The check uses Node's `http`, not curl.
 | `schemaVersion` | Report format, currently `1` |
 | `image.version`, `image.revision` | The image's plugin release and build commit |
 | `plugins` | Actual installed version of each of the four plugins; `null` when unavailable |
-| `followsImage`, `ownerManaged`, `reason` | Whether the seed matches the image, whether the owner opted out, and a fixed reason such as `matching-image`, `owner-managed`, `update-rolled-back`, `newer-than-image` or `missing-plugins` |
+| `followsImage`, `ownerManaged`, `reason` | Whether the seed matches the image, whether the owner opted out, and a fixed reason such as `matching-image`, `owner-managed`, `update-rolled-back`, `newer-than-image` or `missing-plugins`. `signed-update-ahead` means the signed release is serving ahead of the image. `self-update-unfinished` means the supervisor still owes a verdict and health fails. |
 | `dsh`, `gate` | Listener availability and HTTP status; `gate.enabled` says whether it is required |
-| `fence`, `healthy` | Fence status and overall result. Exit `0` requires healthy fences and matching or owner-managed plugins |
+| `fence`, `healthy` | Fence status and overall result. Exit `0` requires healthy fences and a matching, owner-managed or signed-ahead profile |
 | `multiuser` | Present in mode on. Both the unauthorized caller endpoint and the reserved missing route must give the expected responses for health |
 
 No launch URL, token, model key, raw installer diagnostics or home path is included. The startup

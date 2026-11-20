@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { readStoreJson, signedUpdate, updateRecovery, updateStoreOf } from './profile-update.mjs'
 
 export const ADAPTER = '@automagik/multiuser-dsh'
 export const ADAPTER_SINCE = '3.160.6'
@@ -105,7 +106,7 @@ function manifestAt(manifest, names, release) {
 const ownerManaged = () => ({ managed: false, ownerManaged: true, reason: 'owner-managed' })
 
 /** Legacy adoption is deliberately stricter than a subset or dependency-name check. */
-export function ownership(profile, source) {
+export function ownership(profile, source, { updateStore = updateStoreOf(profile) } = {}) {
   const path = join(profile, 'package.json')
   if (!lstatSync(profile, { throwIfNoEntry: false })?.isDirectory() ||
       !lstatSync(path, { throwIfNoEntry: false })?.isFile()) return { managed: false, ownerManaged: false, reason: 'invalid-profile' }
@@ -120,16 +121,25 @@ export function ownership(profile, source) {
       return { managed: false, ownerManaged: false, reason: 'unsupported-seed-marker' }
     }
     const observedHash = packageHash(profile)
-    const baseline = marker.imagePackage ?? [
+    const candidates = marker.imagePackage == null ? [
       manifestAt(expected, PLUGINS, marker.release),
       manifestAt(legacyManifest(expected), LEGACY_PLUGINS, marker.release),
-    ].find(candidate => extendsImage(pkg, candidate) &&
-      (Object.hasOwn(candidate.dependencies, ADAPTER) || !Object.hasOwn(pkg.dependencies, ADAPTER)))
-    if (!baseline || (!basePlugins({ imagePackage: baseline }).includes(ADAPTER) &&
-        Object.hasOwn(pkg.dependencies ?? {}, ADAPTER)) ||
-        (observedHash !== marker.packageSha256 && !extendsImage(pkg, baseline))) return ownerManaged()
-    return { managed: true, ownerManaged: false, reason: 'image-seed', release: marker.release,
-      packageSha256: observedHash, imagePackage: baseline }
+    ] : [marker.imagePackage]
+    const compatible = candidate => candidate && (basePlugins({ imagePackage: candidate }).includes(ADAPTER) ||
+      !Object.hasOwn(pkg.dependencies ?? {}, ADAPTER))
+    const markerOwnership = imagePackage => ({ managed: true, ownerManaged: false, reason: 'image-seed',
+      release: marker.release, packageSha256: observedHash, imagePackage })
+    const baseline = candidates.find(candidate => compatible(candidate) &&
+      ((marker.imagePackage != null && observedHash === marker.packageSha256) || extendsImage(pkg, candidate)))
+    if (baseline) return markerOwnership(baseline)
+
+    const current = readStoreJson(updateStore, 'current.json')
+    for (const candidate of candidates.filter(compatible)) {
+      const signed = signedUpdate(profile, candidate, updateStore, current)
+      if (signed) return { ...markerOwnership(candidate), signed, signedNames: Object.keys(current.value.entries),
+        signedEntries: current.value.entries }
+    }
+    return ownerManaged()
   }
   for (const [manifest, names] of [[expected, PLUGINS], [legacyManifest(expected), LEGACY_PLUGINS]]) {
     const versions = names.map(name => vendorRelease(name, pkg.dependencies?.[name]))
@@ -143,22 +153,38 @@ export function ownership(profile, source) {
   return ownerManaged()
 }
 
-export function profileState({ profile, source, build, dshHome, rolledBack = false }) {
-  const own = ownership(profile, source), plugins = installedPlugins(profile)
+export function signedProfileReason(own, image, plugins) {
+  if (!own.signed) return null
+  if (compareRelease(image, own.release) < 0 ||
+      (plugins[ADAPTER] !== null && compareRelease(plugins[ADAPTER], image) > 0)) return 'newer-than-image'
+  if (compareRelease(image, own.signed) >= 0) return null
+  const untouched = basePlugins(own).filter(name => !own.signedNames.includes(name))
+  if (untouched.some(name => plugins[name] === null)) return 'missing-plugins'
+  return untouched.every(name => plugins[name] === own.release) ? 'signed-update-ahead' : 'update-required'
+}
+
+export function profileState({ profile, source, build, dshHome, rolledBack = false, updateStore }) {
+  const plugins = installedPlugins(profile)
+  if (!validBuild(build)) return { plugins, followsImage: false, ownerManaged: false, matchesImage: false,
+    reason: 'invalid-image-metadata' }
+  if (updateRecovery(profile, updateStore) === 'recover') {
+    return { plugins, followsImage: false, ownerManaged: false, matchesImage: false, reason: 'self-update-unfinished' }
+  }
+  const own = ownership(profile, source, { updateStore })
   const base = basePlugins(own)
-  const validImage = validBuild(build)
-  const newerMarker = validImage && own.managed && compareRelease(own.release, build.automagik) > 0
-  const matchesImage = validImage && !newerMarker && base.length === PLUGINS.length &&
+  const newerMarker = own.managed && compareRelease(own.release, build.automagik) > 0
+  const matchesImage = !own.signed && !newerMarker && base.length === PLUGINS.length &&
     PLUGINS.every(name => plugins[name] === build.plugins[name])
   let reason = own.reason
-  if (!validImage) reason = 'invalid-image-metadata'
-  else if (own.managed && rolledBack) reason = 'update-rolled-back'
+  if (own.managed && rolledBack) reason = 'update-rolled-back'
   else if (own.managed) {
+    const signedReason = signedProfileReason(own, build.automagik, plugins)
     const path = join(dshHome, FOLLOW_STATUS)
     const stat = lstatSync(path, { throwIfNoEntry: false })
     const status = stat?.isFile() ? readJson(path) : undefined
     if (status?.version === 1 && status.imageVersion === build.automagik &&
         status.packageSha256 === packageHash(profile) && status.result === 'update-rolled-back') reason = 'update-rolled-back'
+    else if (signedReason) reason = signedReason
     else if (base.some(name => plugins[name] === null)) reason = 'missing-plugins'
     else if (newerMarker || Object.values(plugins).some(v => v !== null && compareRelease(v, build.automagik) > 0)) reason = 'newer-than-image'
     else if (matchesImage) reason = stat && status === undefined ? 'update-rolled-back' : 'matching-image'

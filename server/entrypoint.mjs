@@ -7,7 +7,7 @@
 // --network host or a proxy in the same network namespace, not -p.
 import { spawn } from 'node:child_process'
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -24,13 +24,18 @@ import {
   prepareWorkspace,
   privateMode,
   PROFILE,
+  profileDirOf,
   publicUrlArgs,
   RUN_SECRETS_MODEL_KEY_FILE,
+  safeDshLine,
   writeMeasurementMarker,
 } from './lib.mjs'
-import { LAUNCH_FILE, prepareGateView, writePrivateFile, writeProfileState } from './gate-view.mjs'
+import { LAUNCH_FILE, prepareGateView, realLocation, writePrivateFile, writeProfileState } from './gate-view.mjs'
 import { multiuserConfigChecks, multiuserMode, multiuserReadiness, startupDecision } from './profile-multiuser.mjs'
 import { followImage } from './profile-follow.mjs'
+import { profileState } from './profile-state.mjs'
+import { updateRecovery, updateStoreOf } from './profile-update.mjs'
+import { holdVolumeLease, withProfileStateLock } from './volume-lock.mjs'
 import { nativeWorkerEnv, panelCliHomes } from './native-worker-login.mjs'
 import { installVendorClis, runFirstBoot } from './first-boot.mjs'
 import { createOmniSupervisor } from './omni-supervisor.mjs'
@@ -71,14 +76,14 @@ function modelKey(env) {
 }
 
 /** Save the owner-only launch URL for operators and the gate. */
-export function recordLaunch(dshHome, gateView, url) {
+export function recordLaunch(dshHome, gateView, url, warning = warn) {
   const target = join(dshHome, LAUNCH_FILE)
   const published = join(gateView, LAUNCH_FILE)
   const bytes = `${url}\n`
   try {
     writePrivateFile(published, bytes)
   } catch (error) {
-    warn(`startup: could not publish the gate launch URL: ${error.message}`)
+    warning(`startup: could not publish the gate launch URL: ${error.message}`)
     rmSync(published, { force: true })
   }
   writePrivateFile(target, bytes)
@@ -129,6 +134,195 @@ export function dshArgs(publicArgs = []) {
   return [DSH_BIN, '--profile', PROFILE, '--no-open', '--host', '127.0.0.1', '--port', String(PORT), ...publicArgs]
 }
 
+export async function loadImageSupervisor(seedDir, warning = warn) {
+  try {
+    const bot = join(seedDir, 'node_modules', '@automagik', 'bots-dsh')
+    const supervisor = join(bot, 'src/host/supervisor')
+    const { IMAGE_HOST, runSupervisor } = await import(pathToFileURL(join(supervisor, 'main.js')))
+    if (IMAGE_HOST === 1 && typeof runSupervisor === 'function') {
+      const { usableStore } = await import(pathToFileURL(join(supervisor, 'store.js')))
+      const { version } = JSON.parse(readFileSync(join(bot, 'package.json'), 'utf8'))
+      if (typeof version === 'string' && version && typeof usableStore === 'function') {
+        return { runSupervisor, usableStore, version }
+      }
+    }
+  } catch {}
+  warning("in-app update unavailable: this image's Bot team has no supervisor")
+  return null
+}
+
+export function imageSupervisorHost(env, loaded) {
+  return multiuserMode(env.AUTOMAGIK_MULTIUSER) !== 'on' && loaded
+}
+
+function clearStaleUpdateLocks(dshHome, profile) {
+  const dir = join(dshHome, 'profiles', profile)
+  const store = updateStoreOf(dir)
+  for (const [path, name] of [[store, 'update.lock'], [dir, 'package.json.lock']]) {
+    if ([dirname(path), path].every(parent => lstatSync(parent, { throwIfNoEntry: false })?.isDirectory())) {
+      try { unlinkSync(join(path, name)) } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+      }
+    }
+  }
+}
+
+/** Two paths name one directory: a bind mount of the same folder at both is not collapsed by realpath. */
+export function sameDirectory(left, right) {
+  // bigint: two distinct 64-bit inode numbers can round to one JavaScript number.
+  const a = statSync(left, { bigint: true, throwIfNoEntry: false })
+  const b = statSync(right, { bigint: true, throwIfNoEntry: false })
+  return Boolean(a?.isDirectory() && b?.isDirectory() && a.dev === b.dev && a.ino === b.ino)
+}
+
+export async function prepareImageVolume({
+  dshHome, gateView, privateDirs, hold = holdVolumeLease, same = sameDirectory,
+}) {
+  const volumeRoot = dirname(gateView)
+  prepareGateView(gateView, volumeRoot, privateDirs, { checkOnly: true })
+  const volume = realLocation(volumeRoot), home = realLocation(dshHome)
+  // The same directory under another path (a second bind mount) is the volume itself, which holds the
+  // view: refuse it as the view's own checks refuse that path, before any lease is taken.
+  if (home !== volume && same(volume, home)) throw new Error('gate-view overlaps DSH_HOME')
+  const releases = []
+  const release = () => { while (releases.length) releases.pop()() }
+  try {
+    const name = '.automagik-image-supervisor.lock'
+    // A contender for the shared view waits before creating a lock in its own home.
+    releases.push(await hold(volume, name))
+    if (home !== volume) releases.push(await hold(home, name))
+  } catch (error) {
+    release()
+    throw new Error(`another server holds this volume or its lease could not be acquired: ${error.message}`)
+  }
+  try {
+    prepareGateView(gateView, volumeRoot, privateDirs)
+    // Clear the previous launch before starting a new one.
+    rmSync(join(gateView, LAUNCH_FILE), { force: true })
+  } catch (error) {
+    release()
+    throw error
+  }
+  return release
+}
+
+export function refuseUnfinishedUpdate(host, seeded, warning = warn) {
+  if (host || seeded.result !== 'self-update-unfinished') return false
+  warning('an in-app update is unfinished and this start cannot finish it: multiuser on or no supervisor; see server/README.md')
+  return true
+}
+
+export function prepareImageLaunch(host, seeded, dshHome, warning = warn) {
+  if (!host) return { host: null, code: refuseUnfinishedUpdate(host, seeded, warning) ? 1 : 0 }
+  if (host.usableStore(seeded.target)) {
+    clearStaleUpdateLocks(dshHome, PROFILE)
+    return { host, code: 0 }
+  }
+  const unavailable = "the update store must be on the profile's filesystem and writable"
+  if (updateRecovery(seeded.target) !== 'recover') {
+    warning(`in-app update unavailable: ${unavailable}`)
+    return { host: null, code: 0 }
+  }
+  warning(`cannot start with existing in-app update state: ${unavailable}; see server/README.md`)
+  return { host: null, code: 1 }
+}
+
+/** A DSH started without the image's supervisor must not inherit a supervisor's capability variables. */
+export function scrubSupervisorEnv(env) {
+  for (const name of Object.keys(env)) if (name.startsWith('AUTOMAGIK_SUPERVISOR_')) delete env[name]
+  return env
+}
+
+export const bareDshEnv = env => scrubSupervisorEnv({ ...env })
+
+function publishLaunch(dshHome, gateView, url, log, warn) {
+  try {
+    const file = recordLaunch(dshHome, gateView, url, warn)
+    log(`startup: http://127.0.0.1:${PORT}/ (token in ${file})`)
+  } catch (error) {
+    warn(`startup: dsh is up, but the launch URL could not be written: ${error.message}`)
+  }
+}
+
+export async function superviseDsh({
+  host, dshHome, gateView, publicArgs, env, signal, observeVendors, noteDsh, refreshView, log, warn,
+  onChildStart: hostChildStart = () => {}, refreshRetryMs = 1000, refreshDrainMs = 5000,
+}) {
+  // One worker publishes the gate view's profile state. Each publication computes the state under the
+  // lock, so pending requests coalesce into the next one. While the supervisor runs, a lock timeout is
+  // retried until the newest state is published: a healthcheck that held the lock past the wait cannot
+  // leave an older verdict as the last one. Shutdown gives the worker its own drain deadline.
+  const sleep = ms => new Promise(done => setTimeout(done, ms))
+  let dirty = false, closing = false, worker = null
+  const drain = async () => {
+    try {
+      while (dirty) {
+        dirty = false
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await refreshView()
+            break
+          } catch {
+            if (dirty) break
+            if (closing) {
+              warn('startup: could not refresh the gate profile state')
+              return
+            }
+            if (attempt === 10) warn('startup: the gate profile state is waiting for its lock')
+            await sleep(refreshRetryMs)
+            // A newer request publishes the newest state; a shutdown starts no new lock acquisition.
+            if (dirty) break
+            if (closing) {
+              warn('startup: could not refresh the gate profile state')
+              return
+            }
+          }
+        }
+      }
+    } finally {
+      worker = null
+    }
+  }
+  const queueRefresh = () => {
+    dirty = true
+    worker ??= drain()
+  }
+  let code
+  try {
+    observeVendors()
+    code = await host.runSupervisor({
+      home: dshHome, profile: PROFILE, command: [process.execPath, ...dshArgs(publicArgs)],
+      version: host.version, env, signal, refreshCopy: false,
+      onChildStart() {
+        for (const dir of [dshHome, gateView]) {
+          try { rmSync(join(dir, LAUNCH_FILE), { force: true }) } catch {
+            warn('startup: could not clear the previous launch URL')
+          }
+        }
+        queueRefresh()
+        try { hostChildStart() } catch { warn('startup: could not start a service beside DSH') }
+      },
+      onSave: queueRefresh,
+      onLaunchUrl: url => publishLaunch(dshHome, gateView, url, log, warn),
+      onLine: line => noteDsh(safeDshLine(line)),
+    })
+  } catch (error) {
+    warn(`dsh supervisor: ${error.message}`)
+    code = 1
+  }
+  closing = true
+  const pending = worker
+  if (pending) await Promise.race([pending, new Promise(done => setTimeout(done, refreshDrainMs).unref?.())])
+  return code
+}
+
+export function imageProfilePublisher({ dshHome, gateView, source, build }) {
+  const profile = profileDirOf(dshHome)
+  return ({ rolledBack = false } = {}) => withProfileStateLock(dshHome, () => {
+    writeProfileState(gateView, profileState({ profile, source, build, dshHome, rolledBack }))
+  })
+}
+
 async function main() {
   const env = process.env
   let publicArgs
@@ -155,18 +349,23 @@ async function main() {
   }
   const secrets = join(home, 'secrets')
   const dirs = [botsHome, workspace, secrets, appHome]
+  let supervisorWarning
+  const availableHost = imageSupervisorHost(env, await loadImageSupervisor(SEED, message => { supervisorWarning = message }))
+  const gatePrivateDirs = {
+    AUTOMAGIK_HOME: home, DSH_HOME: dshHome, AUTOMAGIK_BOTS_HOME: botsHome,
+    AUTOMAGIK_WORKSPACE: workspace, HERDR_APP_HOME: appHome, secrets, omni: omniHome,
+    // ACP's store and the agents' sign-in homes (acp-dsh: <AUTOMAGIK_HOME>/acp, cli-homes).
+    acp: join(home, 'acp'), 'acp cli-homes': panelCliHomes(join(home, 'acp'), dshHome),
+  }
   try {
-    prepareGateView(gateView, dirname(gateView), {
-      AUTOMAGIK_HOME: home, DSH_HOME: dshHome, AUTOMAGIK_BOTS_HOME: botsHome,
-      AUTOMAGIK_WORKSPACE: workspace, HERDR_APP_HOME: appHome, secrets, omni: omniHome,
-      // ACP's store and the agents' sign-in homes (acp-dsh: <AUTOMAGIK_HOME>/acp, cli-homes).
-      acp: join(home, 'acp'), 'acp cli-homes': panelCliHomes(join(home, 'acp'), dshHome),
-    })
+    // The view's overlap checks first, then the DSH home (0700, no symbolic links) before its lease
+    // file is opened.
+    prepareGateView(gateView, dirname(gateView), gatePrivateDirs, { checkOnly: true })
     prepareDshHome(dshHome, { prepareStore: true })
+    // This process owns the leases until it exits. The view is created and the launch cleared under them.
+    await prepareImageVolume({ dshHome, gateView, privateDirs: gatePrivateDirs })
     prepareWorkspace(workspace, { uid: 1000 })
     ensureDataDirs(dirs, { uid: 1000 })
-    // Clear the previous launch before starting a new one.
-    rmSync(join(gateView, LAUNCH_FILE), { force: true })
     for (const dir of [runtimeDir, coreRuntime]) {
       mkdirSync(dir, { recursive: true, mode: 0o700 })
       // The physical path, after it exists: a symlink into /data is refused before any chmod.
@@ -196,14 +395,24 @@ async function main() {
   nativeWorkerEnv(env)
 
   const build = versions()
+  if (supervisorWarning) warn(supervisorWarning)
   log(`profile ${PROFILE}: automagik ${build.automagik ?? 'unknown'}, dsh ${build.dsh ?? 'unknown'}`)
 
+  // An image upgrade copies the existing profile to staging. Keep a stale DSH lock out
+  // of that copy when the volume supports supervision. Check store eligibility again
+  // after following, when a first seed or restored profile is available.
+  if (availableHost && availableHost.usableStore(profileDirOf(dshHome))) {
+    clearStaleUpdateLocks(dshHome, PROFILE)
+  }
   const seeded = await followImage({ dshHome, source: SEED, store: join(ROOT, 'offline-store'), build, dshBin: DSH_BIN })
-  writeProfileState(gateView, seeded)
+  const refreshView = imageProfilePublisher({ dshHome, gateView, source: SEED, build })
+  await refreshView({ rolledBack: seeded.result === 'update-rolled-back' })
   try { writeMeasurementMarker(dirname(gateView), seeded.target) }
   catch (error) { warn(`could not publish the measurement marker: ${error.message}`) }
   log(seeded.seeded ? `seeded ${seeded.target}` : `profile present at ${seeded.target}`)
   log(`image follow: ${seeded.result}; ${seeded.reason}`)
+  const { host, code } = prepareImageLaunch(availableHost, seeded, dshHome)
+  if (code) process.exit(code)
 
   const readiness = async () => {
     const checks = multiuserConfigChecks(env, { cwd: workspace, dshHome })
@@ -214,7 +423,9 @@ async function main() {
   }
 
   const supervisor = createOmniSupervisor({ env, log, warn })
-  let core, child, stopping = false
+  // With the update supervisor hosted, it owns the DSH child: aborting it stops DSH and it returns.
+  const supervision = new AbortController()
+  let core, child, supervised, stopping = false
   const shutdown = (code, signal = 'SIGTERM') => {
     if (stopping) return
     stopping = true
@@ -224,7 +435,10 @@ async function main() {
       process.exit(code)
     }, 70_000).unref()
     void (async () => {
+      // A hosted update supervisor stops its own DSH child once aborted, beside Omni's drain.
+      supervision.abort()
       const drained = await Promise.allSettled([supervisor.stop(), stopChild(child, signal)])
+      if (supervised) await supervised
       if (drained.some(result => result.status === 'rejected')) {
         warn('Could not finish shutting down Omni or dsh.')
       }
@@ -316,27 +530,15 @@ async function main() {
     }
   }
 
-  const launchDsh = () => {
-    if (stopping) return
-    const dshVendorFailures = new Map()
-    const noteDsh = (line) => {
-      if (!/(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) return
-      const vendor = /claude/i.test(line) ? 'claude' : /codex/i.test(line) ? 'codex' : null
-      if (!vendor || dshVendorFailures.has(vendor)) return
-      dshVendorFailures.set(vendor, line)
-      warn(`vendor CLIs: DSH reported (${vendor}): ${line}`)
-    }
-    child = spawn(process.execPath, dshArgs(publicArgs), {
-      env: { ...env, AUTOMAGIK_OMNI_SUPERVISOR: '1' },
-      stdio: ['inherit', 'pipe', 'pipe'],
-    })
-    child.on('error', (error) => {
-      warn(`dsh did not start: ${error.message}`)
-      shutdown(1)
-    })
-    child.once('spawn', () => {
-      if (!stopping) supervisor.start()
-    })
+  const dshVendorFailures = new Map()
+  const noteDsh = (line) => {
+    if (!/(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) return
+    const vendor = /claude/i.test(line) ? 'claude' : /codex/i.test(line) ? 'codex' : null
+    if (!vendor || dshVendorFailures.has(vendor)) return
+    dshVendorFailures.set(vendor, line)
+    warn(`vendor CLIs: DSH reported (${vendor}): ${line}`)
+  }
+  const observeVendors = () => {
     if (installClis) {
       log('vendor CLIs: observing the ACP store and refreshing the launch bridge in the background')
       void installVendorClis({
@@ -348,18 +550,41 @@ async function main() {
         })
         .catch((error) => warn(`vendor CLIs: ${error?.message ?? error}`))
     }
+  }
+  const launchDsh = () => {
+    if (stopping) return
+    if (host) {
+      supervised = superviseDsh({
+        // Read now: launchCore and runStartup have set the model key and the multiuser mode.
+        host, dshHome, gateView, publicArgs, env: { ...env, AUTOMAGIK_OMNI_SUPERVISOR: '1' },
+        signal: supervision.signal, observeVendors,
+        noteDsh: installClis ? noteDsh : () => {}, refreshView, log, warn,
+        // Omni starts with the first DSH child and keeps running across the supervisor's restarts.
+        onChildStart: () => { if (!stopping) supervisor.start() },
+      })
+      void supervised.then(code => shutdown(code))
+      return
+    }
+    scrubSupervisorEnv(env)
+    child = spawn(process.execPath, dshArgs(publicArgs), {
+      env: { ...env, AUTOMAGIK_OMNI_SUPERVISOR: '1' },
+      stdio: ['inherit', 'pipe', 'pipe'],
+    })
+    child.on('error', (error) => {
+      warn(`dsh did not start: ${error.message}`)
+      shutdown(1)
+    })
+    child.once('spawn', () => {
+      if (!stopping) supervisor.start()
+    })
+    observeVendors()
 
     let announced = false
     const onLaunchLine = (line) => {
       const url = launchUrlOf(line)
       if (!url || announced) return
       announced = true
-      try {
-        const file = recordLaunch(dshHome, gateView, url)
-        log(`startup: http://127.0.0.1:${PORT}/ (token in ${file})`)
-      } catch (error) {
-        warn(`startup: dsh is up, but the launch URL could not be written: ${error.message}`)
-      }
+      publishLaunch(dshHome, gateView, url, log, warn)
     }
     const onSafeLine = installClis ? noteDsh : undefined
     pipeRedacted(child.stdout, process.stdout, onSafeLine, onLaunchLine)
