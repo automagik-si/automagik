@@ -186,9 +186,9 @@ async function main() {
     && runtime.gid === 1000, `${runtimeDir} must be a 0700 directory owned by 1000:1000`)
   check(lstatSync(coreSocket).isSocket(), `${coreSocket} is not a Unix socket`)
   check(!realpathSync(coreSocket).startsWith('/data/'), `core socket is on /data: ${coreSocket}`)
-  // No socket of this image's toolchain may sit on /data (the gate mounts it read-only, which
-  // still allows connect()). The one socket dev already keeps there is bots-dsh's Pocket chat
-  // socket (`<team home>/pocket/chat.sock`, owner-only, RFC 0015); any other fails, by path.
+  // No socket of this image's toolchain may sit on /data, defence in depth beside the gate's
+  // DSH_HOME-only mount. The one socket there is bots-dsh's Pocket chat socket
+  // (`<team home>/pocket/chat.sock`, owner-only, RFC 0015); any other fails, by path.
   const pocketSocket = join(process.env.AUTOMAGIK_BOTS_HOME || join(HOME, 'bots'), 'pocket', 'chat.sock')
   const dataSockets = command('find', ['/data', '-type', 's', '-print']).split('\n').filter(Boolean)
   say(`sockets on /data: ${dataSockets.length ? dataSockets.join(', ') : 'none'}`)

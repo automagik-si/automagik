@@ -186,7 +186,8 @@ Each instance keeps its persistent homes on its own `/data` volume, including
 `XDG_RUNTIME_DIR=/run/automagik` with owner `1000:1000` and mode `0700`. The entrypoint uses
 `HC_RUNTIME=/run/automagik/herdr-core` and `HC_SESSION=automagik-server` by default. It sets
 `HC_SOCKET` and `HC_TERMINAL_SOCKET` to `$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock`.
-The gate mounts the DSH volume read-only and the core socket stays outside that mount.
+The gate mounts only the volume's `dsh/` folder, read-only, and the core socket is never on the
+volume.
 
 The entrypoint starts `herdr-core serve` before DSH. It prints `herdr-core: serving on <path>`
 once the expected endpoint is a Unix socket. On failure it prints the directory listing, the
@@ -215,7 +216,8 @@ The builder fetches am from that release's pinned tarball and verifies it before
 runs `hc --version` there. The in-image smoke checks the bundled versions of am, hc,
 herdr-core, pnpm and Node, and runs the shipped CLI store with a recording runner. It checks
 the briefing link and runs a scratch Bot with a fake agent. It also checks that the private
-socket answers `hc server status` and `hc ls`, and that `/data` holds no sockets. The main smoke
+socket answers `hc server status` and `hc ls`, and that the only socket on `/data` is
+bots-dsh's owner-only Pocket chat socket, which the gate cannot reach. The main smoke
 starts the container with networking and automatic CLI installation disabled.
 
 The context is the repository root because the builder reuses

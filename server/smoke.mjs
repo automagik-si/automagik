@@ -204,10 +204,10 @@ async function main() {
   // The rest of the DSH volume stays out of the gate's reach: Pocket's chat socket exists in
   // DSH, and the gate (the same uid 1000) can neither see nor connect to it, nor read the key.
   await docker(['exec', name, '/bin/bash', '-c', 'test -S /data/bots/pocket/chat.sock'])
-  await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs"),net=require("net");for(const p of ["/dsh/bots","/dsh/secrets","/dsh/acp","/dsh/workspace"])if(fs.existsSync(p))process.exit(2);const c=net.connect("/dsh/bots/pocket/chat.sock");c.on("connect",()=>process.exit(3));c.on("error",e=>process.exit(e.code==="ENOENT"?0:4))'])
+  await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs"),net=require("net");for(const root of ["/dsh","/dsh/dsh"])for(const p of ["bots","secrets","acp","workspace"])if(fs.existsSync(root+"/"+p))process.exit(2);let left=2;for(const p of ["/dsh/bots/pocket/chat.sock","/dsh/dsh/bots/pocket/chat.sock"]){const c=net.connect(p);c.on("connect",()=>process.exit(3));c.on("error",e=>{if(e.code!=="ENOENT")process.exit(4);if(--left===0)process.exit(0)})}'])
   check(gateConfig.Mounts.some(m => m.Name === gateVolume && m.Destination === '/data' && m.RW), 'gate has no separate writable store')
   check(!dshConfig.Mounts.some(m => m.Name === gateVolume), 'DSH mounts the gate store')
-  await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs");fs.accessSync("/dsh/dsh/launch-url");fs.writeFileSync("/data/gate-only", "private");try{fs.writeFileSync("/dsh/gate-write-probe", "bad");process.exit(1)}catch(e){if(e.code!=="EROFS")throw e}'])
+  await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs");fs.accessSync("/dsh/dsh/launch-url");fs.writeFileSync("/data/gate-only", "private");try{fs.writeFileSync("/dsh/dsh/gate-write-probe", "bad");process.exit(1)}catch(e){if(e.code!=="EROFS")throw e}'])
   await docker(['exec', name, '/nodejs/bin/node', '-e', 'const fs=require("fs");try{fs.readFileSync("/data/gate-only");process.exit(1)}catch(e){if(e.code!=="ENOENT")throw e}'])
   await docker(['exec', gateName, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs'])
   const gateReport = JSON.parse((await docker(['exec', gateName, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs', '--json'])).stdout)
