@@ -149,6 +149,8 @@ const OPEN_ENDED = [
 ]
 // The events whose text is one stream: it reaches a chat only through text().
 const STREAM_TEXT = new Set(['message.delta', 'message.interim', 'message.complete'])
+// The reply frames a turn owns: each carries the submit generation that opened it.
+const REPLY_FRAMES = new Set(['message.start', 'message.delta', 'message.interim', 'message.complete'])
 
 // The requests that are about the connection, not a profile: Hermes refuses a field its
 // contract does not name, so these never carry one.
@@ -531,6 +533,15 @@ export class RemoteChat {
     // The wire turn this run saw begin after its submit. A completion only ends the run's own
     // turn; one for an earlier turn is recovered or ignored, never terminal.
     this.turn = undefined
+    this.turnGeneration = undefined
+    // Every submit begins a new generation of turns. The turn this run had open at the submit
+    // is the previous generation's: a prompt queued or steered behind a still-streaming turn
+    // must not let that turn's frames open or end the new reply. `awaitingStart` is that
+    // window, from the submit until the wire starts the new turn.
+    this.submitGeneration = 0
+    this.retiredTurn = undefined
+    this.retiredGeneration = undefined
+    this.awaitingStart = false
     this.off = event => this.receive(event)
     transport.listeners.add(this.off)
   }
@@ -565,6 +576,10 @@ export class RemoteChat {
     if (event.kind === 'lost') {
       this.identity.uncertain = true
       this.turn = undefined
+      this.turnGeneration = undefined
+      this.retiredTurn = undefined
+      this.retiredGeneration = undefined
+      this.awaitingStart = false
       for (const tool of this.tools.values()) { tool.status = 'unknown'; tool.done?.() }
       for (const asking of this.questions.values()) asking.abort?.()
       void this.save().catch(() => {})
@@ -586,12 +601,33 @@ export class RemoteChat {
       this.identity.lastSeq = event.seq
     }
     const payload = event.payload ?? {}
+    // A reply frame of the generation an earlier submit opened. The submit retires the turn
+    // this run had open, and until this send's own start every stamped reply frame is that
+    // turn still streaming: neither its text nor its completion may reach the new reply. A
+    // frame with no turn at all is a caller handing an event straight in, not this wire.
+    if (REPLY_FRAMES.has(event.type) && event.turn !== undefined) {
+      let generation
+      if (this.awaitingStart) {
+        if (event.type === 'message.start' && event.turn !== this.retiredTurn) {
+          this.awaitingStart = false
+          generation = this.submitGeneration
+        } else generation = Math.max(0, this.submitGeneration - 1)
+      } else if (typeof event.turn === 'string' && event.turn === this.retiredTurn) generation = this.retiredGeneration
+      else generation = this.submitGeneration
+      if (generation < this.submitGeneration) {
+        if (event.type === 'message.complete') { this.dropHeld(); this.streamed = '' }
+        return
+      }
+    }
     // A turn the wire names is the one this run streams. The transport derives the id for a
     // frame that carries none (a completion) from the turn it opened, so a completion of an
     // earlier turn is recognisable and never ends this one. A start opens the turn even when
     // the transport had to number it locally; a stamped delta opens one only when none is open.
     if (typeof event.turn === 'string' && !this.joining
-      && (event.type === 'message.start' || (this.turn === undefined && (event.type === 'message.delta' || event.type === 'message.interim')))) this.turn = event.turn
+      && (event.type === 'message.start' || (this.turn === undefined && (event.type === 'message.delta' || event.type === 'message.interim')))) {
+      this.turn = event.turn
+      this.turnGeneration = this.submitGeneration
+    }
     if (event.type === 'request.cancel') {
       this.cancelledQuestions.add(payload.id)
       this.questions.get(payload.id)?.abort?.()
@@ -804,6 +840,10 @@ export class RemoteChat {
     this.cancelledQuestions.clear()
     this.streamed = ''
     this.turn = undefined
+    this.turnGeneration = undefined
+    this.retiredTurn = undefined
+    this.retiredGeneration = undefined
+    this.awaitingStart = false
     this.dropHeld()
   }
 
@@ -874,8 +914,15 @@ export class RemoteChat {
     for (const { epoch, ...request } of this.openAtJoin) void this.control({ ...request, kind: 'question', epoch })
     this.openAtJoin = []
     // This run owns one turn at a time, and only after the wire starts it: its own completion
-    // ends it, never an earlier turn's completion that arrives after this send.
+    // ends it, never an earlier turn's completion that arrives after this send. The submit
+    // begins a new generation and retires the turn this run had open, so a prompt queued or
+    // steered behind a still-streaming turn cannot let that turn reopen or end this reply.
+    this.retiredTurn = this.turn
+    this.retiredGeneration = this.turnGeneration
     this.turn = undefined
+    this.turnGeneration = undefined
+    this.submitGeneration += 1
+    this.awaitingStart = true
     this.identity.pendingSubmit = true
     await this.save() // Durable before any submit bytes leave.
     try {
@@ -884,7 +931,15 @@ export class RemoteChat {
       await this.save()
     } catch (error) {
       this.turn = undefined
+      this.turnGeneration = undefined
       if (refusedSubmit(error)) {
+        // Nothing was sent: the turn that was open stays this run's turn.
+        this.submitGeneration = Math.max(0, this.submitGeneration - 1)
+        this.awaitingStart = false
+        this.turn = this.retiredTurn
+        this.turnGeneration = this.retiredGeneration
+        this.retiredTurn = undefined
+        this.retiredGeneration = undefined
         this.identity.pendingSubmit = false
         await this.save()
         const message = error.remote.message

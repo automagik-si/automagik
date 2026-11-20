@@ -1435,6 +1435,98 @@ test('#1401 a queued or steered send keeps its reply open past the earlier turn�
   assert.equal(f.identity.pendingSubmit, false)
 })
 
+// #1774: a turn that is open when the prompt is sent keeps streaming after the send, which a
+// queued or steered prompt makes the normal case. The submit begins a new generation and
+// retires that turn: its start, deltas and completion cannot open or end the new reply.
+test('#1774 a queued send does not re-adopt the turn that was open at submit', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11 }, result: { status: 'queued', admission_id: 'queued-1' } })
+  await f.wire.connect()
+  f.socket().event('message.start', { turn_id: 'turn-old' }, 11)
+  await f.run.submit('Queued prompt')
+  // The earlier turn is still streaming when the prompt is queued behind it.
+  f.socket().event('message.delta', { text: 'Earlier reply', turn_id: 'turn-old' }, 12)
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 13)
+  assert.deepEqual(f.run.queue, [], `the earlier turn’s frames must not reach the queued reply: ${JSON.stringify(f.run.queue)}`)
+  assert.equal(f.run.turn, undefined, 'the earlier turn did not reopen')
+  assert.equal(f.identity.pendingSubmit, true, 'the queued reply is still waiting for its own turn')
+})
+
+test('#1774 a queued send does not adopt stamped deltas of a turn it never saw start', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11 }, result: { status: 'steered', admission_id: 'steered-1' } })
+  await f.wire.connect()
+  // A reconnect that joins a turn already streaming sees no start: its stamped deltas are the
+  // only trace of the earlier turn, and they must not open the new reply either.
+  await f.run.submit('Queued prompt')
+  f.socket().event('message.delta', { text: 'Earlier reply', turn_id: 'turn-old' }, 12)
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 13)
+  assert.deepEqual(f.run.queue, [], `the earlier turn’s frames must not reach the queued reply: ${JSON.stringify(f.run.queue)}`)
+  assert.equal(f.run.turn, undefined, 'the earlier turn did not reopen')
+  assert.equal(f.identity.pendingSubmit, true, 'the queued reply is still waiting for its own turn')
+})
+
+test('#1774 the new turn after a queued send opens and closes on its own completion', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11 }, result: { status: 'queued', admission_id: 'queued-1' } })
+  await f.wire.connect()
+  f.socket().event('message.start', { turn_id: 'turn-old' }, 11)
+  await f.run.submit('Queued prompt')
+  f.socket().event('message.delta', { text: 'Earlier reply', turn_id: 'turn-old' }, 12)
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 13)
+  assert.deepEqual(f.run.queue, [], `the earlier turn’s frames must not reach the queued reply: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 14)
+  f.socket().event('message.delta', { text: 'New ', turn_id: 'turn-new' }, 15)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 16)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the queued reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text).join(''), 'New reply')
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1774 a normal send closes on its own start and completion', async t => {
+  const f = attachedReconnect(t)
+  await f.wire.connect()
+  await f.run.submit('New prompt')
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 11)
+  f.socket().event('message.delta', { text: 'New reply', turn_id: 'turn-new' }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text).join(''), 'New reply')
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1774 a later reconnect still recovers an earlier completion as text', async t => {
+  let activates = 0
+  const f = attachedReconnect(t, {
+    handle: (frame, socket) => {
+      if (frame.method !== 'session.activate') return false
+      // The second submit's join sees a completion of the turn before it.
+      if (++activates === 2) socket.event('message.complete', { text: 'Earlier reply', status: 'complete' })
+      return false
+    },
+  })
+  await f.wire.connect()
+  await f.run.submit('First prompt')
+  f.socket().event('message.start', { turn_id: 'turn-first' })
+  f.socket().event('message.complete', { text: 'First reply', status: 'complete' })
+  const first = []
+  for (;;) { const row = await boundedNext(f.run, 'the first reply'); first.push(row); if (terminalRows([row]).length) break }
+  assert.equal(first.at(-1).kind, 'done')
+  // The generation a submit retires must not swallow the join's recovery: this completion is
+  // still shown as the earlier turn's text, never as the end of the new reply.
+  await f.run.submit('Second prompt')
+  assert.deepEqual(f.run.takeRecovered(), ['Earlier reply'], 'the earlier turn’s reply is recovered, not taken as the new turn’s')
+  assert.deepEqual(f.run.queue, [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.start', { turn_id: 'turn-second' })
+  f.socket().event('message.complete', { text: 'Second reply', status: 'complete' })
+  const second = []
+  for (;;) { const row = await boundedNext(f.run, 'the second reply'); second.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(second.filter(row => row.kind === 'text').map(row => row.text), ['Second reply'])
+  assert.equal(second.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
 test('a Hermes that approves on its own (yolo) connects, and its tool runs with no question from us', async t => {
   for (const metadata of [{ approval_mode: 'off', yolo: true }, { approval_mode: 'smart', yolo: false }, { approval_mode: 'manual', yolo: false }]) {
     let asked = 0
