@@ -316,6 +316,7 @@ export function install(rt) {
     'cli-login-start', 'cli-login-current', 'cli-login-status', 'cli-login-answer',
     'cli-login-cancel', 'cli-login-connections', 'cli-login-confirm', 'cli-login-accounts',
     'cli-login-noticed', 'cli-login-switch', 'cli-login-signout', 'cli-login-reset',
+    'cli-login-reserve', 'cli-login-release',
   ])
   // The endpoints whose text reaches a Bot or a model: one that carries a Claude sign-in state
   // acp-dsh showed is refused before anything is queued (cli-login.js, loginTextMatches).
@@ -1370,7 +1371,7 @@ export function install(rt) {
       const desktopWindow = appBrowserBridge() && verifiedWindow(request)
       const dispatch = () => handle(endpoint, body?.payload, request.signal, desktopWindow)
       const result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
-      const noStore = CLI_LOGIN.has(body?.endpoint)
+      const noStore = CLI_LOGIN.has(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)
       return new Response(JSON.stringify(result), { status: 200, headers: {
         'content-type': 'application/json', ...(noStore ? { 'cache-control': 'no-store' } : {}),

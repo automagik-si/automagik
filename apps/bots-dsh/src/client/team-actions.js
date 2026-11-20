@@ -167,7 +167,11 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     cliLoginCancel: (botId, provider, attemptId) => call('cli-login-cancel', loginPayload(botId, provider, { attemptId })),
     cliLoginConnections: () => call('cli-login-connections', {}),
     cliLoginConfirm: (botId, provider, ref, model) => call('cli-login-confirm', loginPayload(botId, provider, { ...(ref === undefined ? {} : { ref }), ...(model === undefined ? {} : { model }) })),
-    cliLoginAccounts: () => call('cli-login-accounts', {}),
+    cliLoginAccounts: options => call('cli-login-accounts', options?.reservations === true ? { reservations: true } : {}),
+    cliLoginReserve: (offerId, label, claim) => call('cli-login-reserve', {
+      offerId, label, ...(claim === undefined ? {} : { claimId: claim.claimId, rev: claim.rev }),
+    }),
+    cliLoginRelease: (claimId, rev) => call('cli-login-release', { claimId, rev }),
     cliLoginSwitch: (botId, provider) => call('cli-login-switch', loginPayload(botId, provider)),
     cliLoginReset: (botId, provider) => call('cli-login-reset', loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call('cli-login-signout',

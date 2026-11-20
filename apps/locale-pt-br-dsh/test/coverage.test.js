@@ -25,3 +25,30 @@ test('the pack keeps almost every Bot string translated, not only listed', async
   const ratio = translated / keys.size
   assert.ok(ratio >= MIN_TRANSLATED, `only ${(ratio * 100).toFixed(1)}% of ${keys.size} keys are translated (floor ${MIN_TRANSLATED * 100}%)`)
 })
+
+test('the reservation card has pt-BR text and keeps its project and vendor placeholders', async () => {
+  const keys = await omniKeys()
+  const pack = loadDictionaries()['omni-ui']
+  for (const key of [
+    'Personal plan',
+    'Workspace plan: covers every ChatGPT workspace of this email',
+    'Shared with other instances (default).',
+    'Reserve for a project',
+    'Reserved for {label}. This holds in this installation only for now; other installations are not checked yet.',
+    'Also reserved here: {label} (another {vendor} account).',
+    'Reserved here: {label}.',
+    'Reserved by another installation: {label}.',
+    'Rename',
+    'Make shared',
+    'Project name',
+    'Continue',
+    'Cancel',
+    "The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.",
+  ]) {
+    assert.ok(keys.has(key), key)
+    assert.ok(pack[key]?.trim(), key)
+    assert.notEqual(pack[key], key)
+    const placeholders = text => (text.match(/\{\w+\}/g) ?? []).sort()
+    assert.deepEqual(placeholders(pack[key]), placeholders(key), key)
+  }
+})

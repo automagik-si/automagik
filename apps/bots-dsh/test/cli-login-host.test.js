@@ -1,9 +1,14 @@
 // The Bot team's side of a CLI sign-in (cli-login.js, plan v3 2.3): the route to acp-dsh's
 // attempt, the model chosen with the entry (rule 5) and the code guard. acp-dsh is a fake here.
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { RESERVATION_FILE } from '../src/host/account-reservations.js'
 import { CODE_HINT, cliLoginUrl, cliLoginView, install } from '../src/host/cli-login.js'
+import { CLAUDE, CODEX, reservationAcp } from './fixtures/account-reservations.js'
 
 const ATTEMPT = randomUUID()
 const CODEX_URL = 'https://auth.openai.com/codex/device'
@@ -11,7 +16,7 @@ const CLAUDE_URL = 'https://claude.com/cai/oauth/authorize?code=true&state=expec
 const settle = () => new Promise(resolve => setImmediate(resolve))
 const nativeError = code => Object.assign(new Error('private-cli-output code#state and token-secret'), { code })
 
-function fixture() {
+function fixture(reservationDeps) {
   const listeners = new Map()
   const warnings = []
   const updates = []
@@ -63,7 +68,7 @@ function fixture() {
       return bots[id]
     },
   }
-  install(rt)
+  install(rt, reservationDeps)
   const emit = (name, ...args) => (listeners.get(name) ?? []).map(({ listener }) => listener(...args))
   const actions = rt.cliLoginActions
   return { rt, acp, bots, calls, updates, warnings, listeners, emit, actions, matches, ready: async (id) => { emit('acp-dsh/login-ready', { id }); await settle() } }
@@ -455,4 +460,160 @@ test('a delivery that carries a shown code is refused before it is noted or sent
   assert.equal(await h.rt.deliver({ toId: 'b', role: 'room', text: 'hello' }), 'exchange')
   assert.equal(h.rt.delivered.length, 1)
   assert.doesNotMatch(JSON.stringify(h.warnings), /expected_state|code-abc/)
+})
+
+function reservationHost(t, { authScope = 'isolated' } = {}) {
+  const home = fs.mkdtempSync(join(tmpdir(), 'automagik-reservation-host-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const path = join(home, RESERVATION_FILE)
+  let instance = 'test-instance'
+  const h = fixture({
+    path, fs, pid: process.pid,
+    random: (size, encoding) => randomBytes(size).toString(encoding),
+    decodeKey: key => Buffer.from(key, 'base64url'),
+    instanceId: () => instance,
+  })
+  h.rt.holdsLock = () => true
+  h.rt.readOnly = () => undefined
+  const fake = reservationAcp({ authScope })
+  Object.assign(h.acp, fake.service)
+  return { ...h, ...fake, path,
+    setInstance: value => { instance = value },
+    list: () => h.actions['cli-login-accounts']({ reservations: true }),
+    reserve: (offer, label) => h.actions['cli-login-reserve']({ ...offer, label }),
+  }
+}
+
+test('the start-up notice list asks for no reservation evidence; only the card does', async t => {
+  for (const authScope of ['isolated', 'consent']) {
+    const h = reservationHost(t, { authScope })
+    const plain = await h.actions['cli-login-accounts']({})
+    assert.equal(h.calls.filter(([kind]) => kind === 'evidence').length, 0, authScope)
+    for (const entry of Object.values(plain.accounts)) assert.equal(entry.reservation, undefined, authScope)
+    await assert.rejects(h.actions['cli-login-accounts']({ reservations: false }), { code: 'bot/invalid' })
+    await assert.rejects(h.actions['cli-login-accounts']({ reservations: true, other: 1 }), { code: 'bot/invalid' })
+  }
+})
+
+test('only complete, coherent vendor observations produce opaque offers', async t => {
+  const h = reservationHost(t)
+  const read = h.acp.accountEvidence
+  const keyAndDigests = []
+  h.acp.accountEvidence = async (id, options) => {
+    const seen = await read(id, options)
+    keyAndDigests.push(options.key.toString('base64url'), seen.exact, seen.loose)
+    return seen
+  }
+  const complete = await h.list()
+  assert.deepEqual(h.calls, [
+    ['account', CODEX, { fresh: true }], ['evidence', CODEX],
+    ['account', CLAUDE, { fresh: true }], ['evidence', CLAUDE],
+  ])
+  const codex = complete.accounts[CODEX]
+  assert.equal(codex.account.email, 'private-codex@example.test')
+  assert.deepEqual(codex.reservation, { state: 'complete', claims: [], scope: 'personal',
+    offer: { offerId: codex.reservation.offer.offerId } })
+  assert.match(codex.reservation.offer.offerId, /^[\w-]{22}$/)
+  assert.doesNotMatch(JSON.stringify(codex.reservation), /email|org|plan|digest|key|private|ref/)
+  for (const value of keyAndDigests) assert.equal(JSON.stringify(complete).includes(value), false)
+
+  for (const override of [
+    { id: CLAUDE }, { vendor: 'claude' }, { ref: 'other-ref' }, { ref: 'unknown' },
+    { exact: 'short' }, { loose: '*'.repeat(43) }, { reservable: false }, { class: 'workspace' },
+  ]) {
+    h.acp.accountEvidence = async (id, options) => ({
+      ...await read(id, options), ...(id === CODEX ? override : {}),
+    })
+    const { accounts } = await h.list()
+    assert.deepEqual(accounts[CODEX].reservation, { state: 'changed', claims: [] })
+    assert.ok(accounts[CLAUDE].reservation.offer, 'a failed Codex read leaves Claude available')
+  }
+  assert.equal(fs.existsSync(h.path), false)
+})
+
+test('reservation card states bound R2 outcomes and show consent-mode sign-ins', async t => {
+  const h = reservationHost(t, { authScope: 'consent' })
+  h.accounts[CLAUDE].consent = 'carried'
+  h.accounts[CLAUDE].notice = true
+  const read = h.acp.accountEvidence
+  const first = (await h.list()).accounts
+  assert.equal(first[CLAUDE].notice, true)
+  assert.equal(first[CLAUDE].consent, 'carried')
+  assert.equal(first[CODEX].consent, 'given')
+  assert.ok(first[CLAUDE].reservation.offer)
+  assert.ok(first[CODEX].reservation.offer)
+  await h.reserve(first[CLAUDE].reservation.offer, 'Account project')
+
+  for (const [answer, state, why] of [
+    [{ supported: false }, 'unsupported'],
+    [{ signedIn: false }, 'signed-out'],
+    [{}, 'unknown'],
+    [{ recoveryRequired: true }, 'recovery'],
+    [{ signedIn: true, outcome: 'changed' }, 'changed'],
+    [{ signedIn: true, outcome: 'unread' }, 'unread'],
+    [{ signedIn: true, outcome: 'ambiguous', why: 'no-organisation' }, 'not-reservable', 'no-organisation'],
+    [{ signedIn: true, outcome: 'ambiguous', why: 'unknown-plan' }, 'not-reservable', 'unknown-plan'],
+    [{ signedIn: true, outcome: 'none', why: 'not-a-subscription' }, 'not-reservable', 'not-a-subscription'],
+    [{ signedIn: true, outcome: 'none', why: 'no-email' }, 'not-reservable', 'no-email'],
+    [{ signedIn: true, outcome: 'none', why: 'private-token' }, 'not-reservable'],
+    [new Error('private CLI output'), 'unread'],
+  ]) {
+    h.acp.accountEvidence = async (id, options) => {
+      if (id !== CLAUDE) return read(id, options)
+      if (answer instanceof Error) throw answer
+      return { id, ...answer }
+    }
+    const { accounts } = await h.list()
+    const { reservation } = accounts[CLAUDE]
+    assert.deepEqual(reservation, { state,
+      claims: [{ ...firstClaim(reservation), label: 'Account project', current: false, mine: true }],
+      ...(why ? { why } : {}),
+    })
+    assert.doesNotMatch(JSON.stringify(reservation), /private-token|private CLI output/)
+    assert.equal(accounts[CLAUDE].notice, true)
+    assert.ok(accounts[CODEX].reservation.offer)
+  }
+  delete h.acp.accountEvidence
+  assert.equal((await h.list()).accounts[CLAUDE].reservation.state, 'unsupported')
+})
+
+const firstClaim = ({ claims: [{ claimId, rev }] }) => ({ claimId, rev })
+
+test('fresh refusals leave the record untouched and Plus to Pro still reserves the same account', async t => {
+  const h = reservationHost(t)
+  const read = h.acp.accountEvidence
+  const initial = (await h.list()).accounts
+  await h.reserve(initial[CLAUDE].reservation.offer, 'Claude project')
+  const original = fs.readFileSync(h.path, 'utf8')
+  const { offer } = (await h.list()).accounts[CODEX].reservation
+
+  for (const instance of [undefined, '', 'x'.repeat(4097), '\u0000', '\ud800']) {
+    h.setInstance(instance)
+    assert.equal((await h.list()).accounts[CODEX].reservation.state, 'no-instance')
+    await assert.rejects(h.reserve(offer, 'Codex project'), { code: 'bot/reservation-no-instance' })
+    assert.equal(fs.readFileSync(h.path, 'utf8'), original)
+  }
+  h.setInstance('test-instance')
+  for (const [answer, state] of [
+    [{ signedIn: false }, 'signed-out'],
+    [{ signedIn: true, outcome: 'ambiguous', why: 'unknown-plan' }, 'not-reservable'],
+    [{ signedIn: true, outcome: 'unread' }, 'unread'],
+    [{ signedIn: true, outcome: 'changed' }, 'changed'],
+  ]) {
+    h.acp.accountEvidence = async id => ({ id, ...answer })
+    await assert.rejects(h.reserve(offer, 'Codex project'), { code: `bot/reservation-${state}` })
+    assert.equal(fs.readFileSync(h.path, 'utf8'), original)
+  }
+  h.acp.accountEvidence = read
+  h.accounts[CODEX].plan = 'team'
+  h.accounts[CODEX].class = 'workspace'
+  await assert.rejects(h.reserve(offer, 'Codex project'), { code: 'bot/reservation-changed' })
+  assert.equal(fs.readFileSync(h.path, 'utf8'), original)
+
+  h.accounts[CODEX].plan = 'pro'
+  h.accounts[CODEX].class = 'personal'
+  const result = await h.reserve(offer, 'Codex project')
+  assert.equal(result.claims[0].label, 'Codex project')
+  assert.equal(result.scope, 'personal')
+  assert.deepEqual(h.calls.filter(([method]) => ['switch', 'signout', 'reset'].includes(method)), [])
 })

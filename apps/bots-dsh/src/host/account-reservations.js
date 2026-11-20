@@ -1,0 +1,310 @@
+// R3's private record in the team home. In R4 a local claim can be promoted only from one
+// observation that supplies both the matching local-key exact and the machine-key digests.
+// That requires an additive two-key read in ACP. Two independent reads never promote a claim;
+// a failed read or a conflict leaves the local claim intact.
+import { codexPlanClass } from '../shared/codex-plan-classes.js'
+import { RESERVATION_REASONS, reservationMessage } from '../shared/account-reservations.js'
+
+export const RESERVATION_FILE = 'bot-account-reservations.json'
+const VENDORS = { 'acp-claude': 'claude', 'acp-codex': 'codex' }
+const DIGEST = /^[A-Za-z0-9_-]{43}$/
+const TOKEN = /^[A-Za-z0-9_-]{21}[AQgw]$/
+const REF = /^[A-Za-z0-9_-]{1,64}$/
+const UTC_DATE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/
+const OFFER_MS = 10 * 60_000
+const MAX_OFFERS = 20
+const LABEL_HINT = 'Give the project a name, up to 60 characters.'
+const BAD_REQUEST = 'This reservation request is no longer valid. Look again.'
+const SAVE_FAILED = 'The reservation could not be saved. Try again.'
+const READ_ONLY = 'This window cannot change the Bot team.'
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const fields = (value, keys) => object(value) && Object.keys(value).length === keys.length
+  && keys.every(key => Object.hasOwn(value, key))
+const matches = (pattern, value) => typeof value === 'string' && pattern.test(value)
+const validInstance = value => typeof value === 'string' && value.length > 0 && value.length <= 4096
+  && !value.includes('\0') && value.isWellFormed()
+const cleanLabel = value => value.replace(/\p{Cc}/gu, '').replace(/\s+/gu, ' ').trim()
+const validLabel = value => typeof value === 'string' && value.length > 0 && value.length <= 120
+  && value.isWellFormed() && [...value].length <= 60 && value === cleanLabel(value)
+const validDate = value => matches(UTC_DATE, value) && Number.isFinite(Date.parse(value))
+  && new Date(value).toISOString() === (value.length === 20 ? value.replace('Z', '.000Z') : value)
+const validClass = value => value === 'personal' || value === 'workspace'
+const goodRecord = record => record.state === 'absent' || record.state === 'ok'
+const unavailable = state => ({ state })
+const refusal = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
+const refuse = view => { throw refusal(reservationMessage(view), `bot/reservation-${view.state}`) }
+const changed = () => refuse(unavailable('changed'))
+
+function validClaim(id, claim) {
+  const keys = ['vendor', 'exact', 'loose', 'instance', 'label', 'at', 'rev']
+  if (claim?.vendor === 'codex') keys.push('class')
+  return fields(claim, keys) && (claim.vendor === 'claude' || (claim.vendor === 'codex' && validClass(claim.class)))
+    && matches(DIGEST, claim.exact) && matches(DIGEST, claim.loose) && id === `${claim.vendor}:${claim.exact}`
+    && validInstance(claim.instance) && validLabel(claim.label) && validDate(claim.at) && matches(TOKEN, claim.rev)
+}
+
+async function observe(service, provider, key) {
+  if (typeof service?.accountEvidence !== 'function') return unavailable('unsupported')
+  let seen
+  try { seen = await service.accountEvidence(provider, { key }) } catch (error) {
+    return unavailable(error?.code === 'acp-account/unverified-login' ? 'recovery' : 'unread')
+  }
+  if (seen?.id !== provider) return unavailable('changed')
+  if (seen.supported === false) return unavailable('unsupported')
+  if (seen.recoveryRequired === true) return unavailable('recovery')
+  if (seen.signedIn === false) return unavailable('signed-out')
+  if (seen.signedIn !== true) return unavailable('unknown')
+  if (seen.outcome === 'none' || seen.outcome === 'ambiguous') {
+    const why = typeof seen.why === 'string' && Object.hasOwn(RESERVATION_REASONS, seen.why) ? seen.why : undefined
+    return { state: 'not-reservable', ...(why === undefined ? {} : { why }) }
+  }
+  if (seen.outcome === 'changed') return unavailable('changed')
+  if (seen.outcome !== 'complete') return unavailable('unread')
+  const vendor = VENDORS[provider]
+  if (seen.reservable !== true || seen.vendor !== vendor || !matches(REF, seen.ref) || seen.ref === 'unknown'
+    || !matches(DIGEST, seen.exact) || !matches(DIGEST, seen.loose)
+    || (vendor === 'codex' && !validClass(seen.class))) return unavailable('changed')
+  return {
+    state: 'complete', vendor, ref: seen.ref, exact: seen.exact, loose: seen.loose,
+    ...(vendor === 'codex' ? { class: seen.class } : {}),
+  }
+}
+
+function coherent(account, provider, evidence) {
+  return account?.id === provider && account.signedIn === true && account.ref === evidence.ref
+    && (provider !== 'acp-codex' || codexPlanClass(account.account?.plan) === evidence.class)
+}
+
+export function createAccountReservations(rt, { path, fs, random, decodeKey, instanceId, now = Date.now, pid }) {
+  const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants
+  const offers = new Map()
+  const handles = new Map()
+  const claimIds = new Map()
+  let tail = Promise.resolve()
+  let offerKey, activeKey, lastState
+  let keyEpoch = 0
+
+  const currentInstance = () => {
+    const id = instanceId()
+    return validInstance(id) ? id : undefined
+  }
+  const requireWriter = () => {
+    if (rt.holdsLock() !== true || rt.readOnly() !== undefined) throw refusal(READ_ONLY, 'bot/read-only')
+  }
+  const unsafeStat = info => !info.isFile() || (info.mode & 0o077) !== 0
+  function read() {
+    let info
+    try { info = fs.lstatSync(path) } catch (error) {
+      return unavailable(error?.code === 'ENOENT' ? 'absent' : 'unreadable')
+    }
+    if (unsafeStat(info)) return unavailable('unsafe')
+
+    let bytes
+    try {
+      const fd = fs.openSync(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+      try {
+        const opened = fs.fstatSync(fd)
+        if (unsafeStat(opened)) return unavailable('unsafe')
+        if (opened.dev !== info.dev || opened.ino !== info.ino) return unavailable('unreadable')
+        bytes = fs.readFileSync(fd)
+      } finally { fs.closeSync(fd) }
+    } catch (error) {
+      return unavailable(error?.code === 'ELOOP' ? 'unsafe' : 'unreadable')
+    }
+
+    try {
+      const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+      const record = JSON.parse(source)
+      if (fields(record, ['version', 'key', 'claims']) && record.version === 1 && object(record.claims)
+        && matches(DIGEST, record.key) && decodeKey(record.key).length === 32
+        && Object.entries(record.claims).every(([id, claim]) => validClaim(id, claim))) {
+        return { state: 'ok', key: record.key, claims: record.claims, source }
+      }
+    } catch {}
+    return unavailable('damaged')
+  }
+
+  function keyOf(record, forOffer = false) {
+    if (record.state === 'absent' && forOffer) offerKey ??= random(32, 'base64url')
+    const key = record.state === 'ok' ? record.key : record.state === 'absent' ? offerKey : undefined
+    // Promotion of the same key leaves other offers from the empty record valid. Losing a
+    // persisted key invalidates them even if it was originally this process's offer key.
+    if (activeKey !== key || (lastState === 'ok' && record.state === 'absent')) {
+      offers.clear()
+      keyEpoch++
+    }
+    activeKey = key
+    lastState = record.state
+    return key
+  }
+
+  function write(before, key, claims, instance) {
+    let temp
+    try {
+      const pending = `${path}.${pid}.${random(8, 'hex')}.tmp`
+      const fd = fs.openSync(pending, 'wx', 0o600)
+      temp = pending
+      try {
+        fs.fchmodSync(fd, 0o600)
+        fs.writeFileSync(fd, `${JSON.stringify({ version: 1, key, claims }, null, 2)}\n`)
+        fs.fsyncSync(fd)
+      } finally { fs.closeSync(fd) }
+      const latest = read()
+      if (!goodRecord(latest)) refuse(latest)
+      if (latest.state !== before.state || latest.source !== before.source || currentInstance() !== instance) changed()
+      requireWriter()
+      fs.renameSync(temp, path)
+      temp = undefined
+    } catch (error) {
+      if (error?.code === 'bot/read-only' || (typeof error?.code === 'string' && error.code.startsWith('bot/reservation-'))) throw error
+      throw refusal(SAVE_FAILED)
+    } finally {
+      if (temp !== undefined) {
+        try { fs.unlinkSync(temp) } catch {}
+      }
+    }
+  }
+
+  function claimIdOf(id) {
+    if (!claimIds.has(id)) {
+      const handle = random(16, 'base64url')
+      claimIds.set(id, handle)
+      handles.set(handle, id)
+    }
+    return claimIds.get(id)
+  }
+
+  function pruneOffers(time) {
+    for (const [offerId, offer] of offers) if (offer.expires <= time) offers.delete(offerId)
+  }
+
+  function makeOffer(provider, evidence, record, instance, key) {
+    const time = now()
+    pruneOffers(time)
+    while (offers.size >= MAX_OFFERS) offers.delete(offers.keys().next().value)
+    const offerId = random(16, 'base64url')
+    offers.set(offerId, {
+      ...evidence, provider, instance, key, keyEpoch, expires: time + OFFER_MS,
+      absent: record.state === 'absent', seen: record.claims?.[`${evidence.vendor}:${evidence.exact}`]?.rev ?? 'absent',
+    })
+    return { offerId }
+  }
+
+  function view(provider, record, evidence, instance, key) {
+    if (!goodRecord(record)) return { state: record.state, claims: [] }
+    const vendor = VENDORS[provider]
+    const { state, why } = evidence
+    const current = state === 'complete' && instance !== undefined ? evidence.exact : undefined
+    const claims = []
+    for (const [id, claim] of Object.entries(record.claims ?? {})) {
+      if (claim.vendor !== vendor) continue
+      claims.push({
+        claimId: claimIdOf(id), label: claim.label, current: claim.exact === current,
+        mine: claim.instance === instance, rev: claim.rev,
+      })
+    }
+    return {
+      state: state === 'complete' && instance === undefined ? 'no-instance' : state, claims,
+      ...(why === undefined ? {} : { why }),
+      ...(state === 'complete' && evidence.class !== undefined ? { scope: evidence.class } : {}),
+      ...(current === undefined ? {} : { offer: makeOffer(provider, evidence, record, instance, key) }),
+    }
+  }
+
+  async function list(service, provider, account, { recoveryRequired = false, unread = false } = {}) {
+    const before = read()
+    const probe = goodRecord(before) && !recoveryRequired && !unread && typeof service?.accountEvidence === 'function'
+    const key = keyOf(before, probe)
+    if (!probe) {
+      const state = recoveryRequired ? 'recovery' : unread ? 'unread' : 'unsupported'
+      return view(provider, before, unavailable(state), currentInstance(), key)
+    }
+    const epoch = keyEpoch
+    let seen = await observe(service, provider, decodeKey(key))
+    const latest = read()
+    if (keyOf(latest) !== key || epoch !== keyEpoch
+      || (seen.state === 'complete' && !coherent(account, provider, seen))) seen = unavailable('changed')
+    return view(provider, latest, seen, currentInstance(), key)
+  }
+
+  function enqueue(fn) {
+    const result = tail.then(fn)
+    tail = result.catch(() => {})
+    return result
+  }
+
+  const reserve = (service, payload) => enqueue(async () => {
+    requireWriter()
+    const rename = fields(payload, ['offerId', 'label', 'claimId', 'rev'])
+    if ((!rename && !fields(payload, ['offerId', 'label'])) || !matches(TOKEN, payload.offerId)
+      || (rename && (!matches(TOKEN, payload.claimId) || !matches(TOKEN, payload.rev)))) {
+      throw refusal(BAD_REQUEST, 'bot/invalid')
+    }
+    const label = typeof payload.label === 'string' && payload.label.length <= 4096 ? cleanLabel(payload.label) : ''
+    if (!validLabel(label)) throw refusal(LABEL_HINT, 'bot/invalid')
+    const instance = currentInstance()
+    if (instance === undefined) refuse(unavailable('no-instance'))
+    const before = read()
+    const key = keyOf(before)
+    if (!goodRecord(before)) refuse(before)
+    pruneOffers(now())
+    const offer = offers.get(payload.offerId)
+    const sameKey = record => record.state === 'absent' ? offer.absent : record.key === offer.key
+    if (offer === undefined || offer.key !== key || offer.keyEpoch !== keyEpoch
+      || offer.instance !== instance || !sameKey(before)) changed()
+
+    const seen = await observe(service, offer.provider, decodeKey(offer.key))
+    requireWriter()
+    const record = read()
+    keyOf(record)
+    if (!goodRecord(record)) refuse(record)
+    if (offer.keyEpoch !== keyEpoch || !sameKey(record) || offer.expires <= now()
+      || currentInstance() !== instance) changed()
+    if (seen.state !== 'complete') refuse(seen)
+    if (seen.ref !== offer.ref || seen.exact !== offer.exact || seen.class !== offer.class) changed()
+
+    const id = `${offer.vendor}:${offer.exact}`
+    const claim = record.claims?.[id]
+    if ((claim?.rev ?? 'absent') !== offer.seen) changed()
+    if (claim !== undefined && claim.instance !== instance) {
+      throw refusal(`This account is reserved for ${claim.label} by another installation that shares this team.`)
+    }
+    if (claim === undefined ? rename : !rename || handles.get(payload.claimId) !== id || payload.rev !== claim.rev) changed()
+    const claims = {
+      ...record.claims,
+      [id]: {
+        vendor: seen.vendor, exact: seen.exact, loose: seen.loose,
+        ...(seen.class === undefined ? {} : { class: seen.class }),
+        instance, label, at: new Date(now()).toISOString(), rev: random(16, 'base64url'),
+      },
+    }
+    write(record, offer.key, claims, instance)
+    offers.delete(payload.offerId)
+    const persisted = { state: 'ok', key: offer.key, claims }
+    keyOf(persisted)
+    return view(offer.provider, persisted, seen, instance, offer.key)
+  })
+
+  const release = payload => enqueue(() => {
+    requireWriter()
+    if (!fields(payload, ['claimId', 'rev']) || !matches(TOKEN, payload.claimId) || !matches(TOKEN, payload.rev)) {
+      throw refusal(BAD_REQUEST, 'bot/invalid')
+    }
+    const instance = currentInstance()
+    if (instance === undefined) refuse(unavailable('no-instance'))
+    const record = read()
+    keyOf(record)
+    if (!goodRecord(record)) refuse(record)
+    const id = handles.get(payload.claimId)
+    const claim = record.claims?.[id]
+    if (claim === undefined || claim.rev !== payload.rev || claim.instance !== instance) changed()
+    const claims = { ...record.claims }
+    delete claims[id]
+    write(record, record.key, claims, instance)
+    handles.delete(payload.claimId)
+    claimIds.delete(id)
+    return view(`acp-${claim.vendor}`, { ...record, claims }, unavailable('unknown'), instance, record.key)
+  })
+
+  return { list, reserve, release }
+}

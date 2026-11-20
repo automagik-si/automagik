@@ -558,6 +558,36 @@ var ZH = {
   "Account not shown by the CLI": "CLI 未显示账号",
   "Account change failed. Close other app windows and try again.": "无法更改账号。请关闭其他应用窗口后重试。",
   "Bot accounts": "Bot 账号",
+  "The reservation record cannot be read here; nothing was changed.": "无法在此读取预留记录，未进行任何更改。",
+  "The reservation record has unsafe permissions.": "预留记录的文件权限不安全。",
+  "This installation has no instance id; reservations are off.": "此安装没有实例 ID，账号预留已关闭。",
+  "This version cannot read the account evidence needed for reservations.": "此版本无法读取预留所需的账号信息。",
+  "Sign in to reserve this account.": "登录后即可预留此账号。",
+  "The sign-in could not be read; reservations wait.": "无法读取登录状态，暂时不能预留账号。",
+  "Recover the Bot sign-in before reserving this account.": "请先恢复 Bot 登录，再预留此账号。",
+  "This reservation changed. Look again.": "此预留已更改，请重新查看。",
+  "The account could not be read for reservations. Try again.": "无法读取账号的预留信息。请重试。",
+  "This account cannot be reserved.": "无法预留此账号。",
+  "Update Claude Code: this version does not name the organisation.": "请更新 Claude Code：此版本不提供组织信息。",
+  "This Codex plan is not known to this version.": "此版本无法识别该 Codex 套餐。",
+  "Only a subscription sign-in can be reserved.": "只能预留通过订阅登录的账号。",
+  "The CLI did not show an email for this account.": "CLI 未显示此账号的邮箱。",
+  "Give the project a name, up to 60 characters.": "请为项目命名，最多 60 个字符。",
+  "This reservation request is no longer valid. Look again.": "此预留请求已失效，请重新查看。",
+  "The reservation could not be saved. Try again.": "无法保存预留。请重试。",
+  "This window cannot change the Bot team.": "此窗口无法更改 Bot 团队。",
+  "This account is reserved for {label} by another installation that shares this team.": "共享此团队的另一套安装已将此账号预留给 {label}。",
+  "Shared with other instances (default).": "与其他实例共享（默认）。",
+  "Reserve for a project": "为项目预留",
+  "Reserved for {label}. This holds in this installation only for now; other installations are not checked yet.": "已预留给 {label}。目前仅对此安装有效，暂不检查其他安装。",
+  "Also reserved here: {label} (another {vendor} account).": "此处也为 {label} 保留了一个账号（另一个 {vendor} 账号）。",
+  "Reserved here: {label}.": "已在此处预留给 {label}。",
+  "Reserved by another installation: {label}.": "另一套安装已预留给 {label}。",
+  "Make shared": "设为共享",
+  "Project name": "项目名称",
+  "Personal plan": "个人套餐",
+  "Workspace plan: covers every ChatGPT workspace of this email": "工作区套餐：涵盖此邮箱的所有 ChatGPT 工作区",
+  "The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.": "记录只保存带密钥的摘要，不保存邮箱。能读取此团队的文件和密钥的人可以验证猜测的邮箱。",
   "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
   "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.": "这台电脑上的其他 Automagik 安装可能使用同一个 Bot 登录。在此更改会同时更改它们的登录。",
@@ -3298,6 +3328,7 @@ var HOST_TEMPLATES = [
   // A host sign-in refusal with no sentence of its own carries its ACP class.
   "Could not continue this sign-in ({kind}). Try again.",
   "The account could not be confirmed ({kind}). Try again.",
+  "This account is reserved for {label} by another installation that shares this team.",
   "{name} could not switch to {model}. It stays on {kept}.",
   { template: "{name} cannot use the {route} route.", host: ["route"] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
@@ -3438,7 +3469,7 @@ ${REST_NOTE}`);
 // src/client/api.js
 var ROUTE = "api/omni-ui";
 var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
-var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-");
+var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-") || code.startsWith("bot/reservation-");
 var call = async (endpoint, payload, signal) => {
   let response;
   try {
@@ -6203,7 +6234,7 @@ function hostGroups(entries2) {
   return [...groups];
 }
 function HostModelMenu({ bot, roster, actions, run: run3, wide = false, link = false, bar = false }) {
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu();
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu();
   const [confirming, setConfirming] = (0, import_react11.useState)(null);
   const host = roster.hostModels?.[bot.id] ?? { entries: [] };
   const entries2 = host.entries ?? [];
@@ -6242,7 +6273,7 @@ function HostModelMenu({ bot, roster, actions, run: run3, wide = false, link = f
     import_react11.Fragment,
     null,
     link ? (0, import_react11.createElement)("button", {
-      ref: button,
+      ref: button2,
       type: "button",
       className: "bt-model-change",
       "aria-haspopup": "menu",
@@ -6252,7 +6283,7 @@ function HostModelMenu({ bot, roster, actions, run: run3, wide = false, link = f
     }, t("change")) : (0, import_react11.createElement)(
       "button",
       {
-        ref: button,
+        ref: button2,
         type: "button",
         className: `bt-model-trigger${bar ? " bt-model-bar-trigger" : ""}`,
         "data-wide": wide || void 0,
@@ -7796,7 +7827,7 @@ function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
   const [anchor, setAnchor] = (0, import_react16.useState)(null);
   const [place, setPlace] = (0, import_react16.useState)(null);
   const [shownPlace, leaving] = useLinger(place, MENU_EXIT_MS);
-  const button = (0, import_react16.useRef)(null);
+  const button2 = (0, import_react16.useRef)(null);
   const menu = (0, import_react16.useRef)(null);
   const tick = useViewport();
   const escape = (0, import_react16.useRef)(onEscape);
@@ -7808,16 +7839,16 @@ function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
   (0, import_react16.useEffect)(() => {
     if (place === null) return void 0;
     const onDown = (event) => {
-      if (menu.current?.contains(event.target) || button.current?.contains(event.target)) return;
+      if (menu.current?.contains(event.target) || button2.current?.contains(event.target)) return;
       close();
     };
     const onKey = (event) => {
-      if (stepMenuFocus(menu.current, event, button.current)) return;
+      if (stepMenuFocus(menu.current, event, button2.current)) return;
       if (event.key !== "Escape") return;
       event.stopPropagation();
       if (escape.current?.() === true) return;
       close();
-      button.current?.focus();
+      button2.current?.focus();
     };
     const onScroll = (event) => {
       if (!menu.current?.contains(event.target)) close();
@@ -7833,14 +7864,14 @@ function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
   }, [place]);
   const open = () => setAnchor({});
   (0, import_react16.useLayoutEffect)(() => {
-    if (anchor === null || !button.current) return;
-    const rect = button.current.getBoundingClientRect();
+    if (anchor === null || !button2.current) return;
+    const rect = button2.current.getBoundingClientRect();
     const width = Math.max(minWidth, rect.width);
     const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
     const below = viewBottom() - rect.bottom;
     setPlace(below >= 260 || below >= rect.top ? { left, width, top: rect.bottom + 4, maxHeight: below - 16, "--bt-origin": "top right" } : { left, width, bottom: viewBottom() - rect.top + 4, maxHeight: rect.top - 16, "--bt-origin": "bottom right" });
   }, [anchor, tick]);
-  return { isOpen: place !== null, shownPlace, leaving, button, menu, open, close };
+  return { isOpen: place !== null, shownPlace, leaving, button: button2, menu, open, close };
 }
 function ModelMenu(props) {
   return (0, import_react16.createElement)(props.roster?.hostModels?.[props.bot?.id] === void 0 ? DshModelMenu : HostModelMenu, props);
@@ -7902,7 +7933,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     else setView(MENU_ROOT);
     return true;
   };
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300 });
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300 });
   const live = (0, import_react16.useRef)(false);
   live.current = isOpen;
   const shown2 = modelOf(bot, roster);
@@ -7965,7 +7996,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
   const finish = () => {
     const focused = Boolean(menu.current?.contains(document.activeElement));
     close();
-    if (focused) button.current?.focus();
+    if (focused) button2.current?.focus();
   };
   const same = (ref) => !onPick && ref === current && Boolean(bot.model);
   const crossing = (ref) => Boolean(current) && saved && ref !== current && crossesHarness(current, ref);
@@ -8108,7 +8139,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     remote.current.active = false;
     remote.current.generation++;
     setHermes(false);
-    button.current?.focus();
+    button2.current?.focus();
   };
   const remoteConnected = async (next, generation) => {
     const current2 = () => remote.current.mounted && remote.current.active && remote.current.generation === generation && owner.current === bot.id;
@@ -8141,7 +8172,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     null,
     hermes ? (0, import_react16.createElement)(HermesRemoteConnect, { key: hermes, edit: remote.current.edit === true, more: remote.current.edit === true, onClose: () => closeRemote(hermes), onConnected: (next) => remoteConnected(next, hermes) }) : null,
     link ? (0, import_react16.createElement)("button", {
-      ref: button,
+      ref: button2,
       type: "button",
       className: "bt-model-change",
       "aria-haspopup": "menu",
@@ -8151,7 +8182,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     }, t("change")) : (0, import_react16.createElement)(
       "button",
       {
-        ref: button,
+        ref: button2,
         type: "button",
         className: `bt-model-trigger${bar ? " bt-model-bar-trigger" : ""}`,
         "data-wide": wide || void 0,
@@ -13695,7 +13726,7 @@ var import_react_dom6 = require("react-dom");
 var folderName = (path2) => String(path2).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || String(path2);
 var Tick2 = ({ on }) => (0, import_react33.createElement)("span", { className: "bt-model-tick", "aria-hidden": true }, on ? (0, import_react33.createElement)(CheckIcon) : null);
 function FolderMenu({ value, group = false, team = false, actions, run: run3, onPick, wide = false, disabled = false }) {
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu();
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu();
   const [warning, setWarning] = (0, import_react33.useState)(null);
   (0, import_react33.useEffect)(() => {
     let active = true;
@@ -13818,7 +13849,7 @@ function FolderMenu({ value, group = false, team = false, actions, run: run3, on
     (0, import_react33.createElement)(
       "button",
       {
-        ref: button,
+        ref: button2,
         type: "button",
         className: "bt-model-trigger",
         "data-wide": wide || void 0,
@@ -14990,13 +15021,13 @@ function MemoryDialog({ owner, actions, leaving = false }) {
     window.addEventListener("scroll", onScroll, true);
     return () => window.removeEventListener("scroll", onScroll, true);
   }, [moveOpen]);
-  const openMove = (entry, button) => {
-    if (moveOpen && moveAnchor.current === button) {
+  const openMove = (entry, button2) => {
+    if (moveOpen && moveAnchor.current === button2) {
       setMoveOpen(false);
       return;
     }
-    moveAnchor.current = button;
-    const rect = button.getBoundingClientRect();
+    moveAnchor.current = button2;
+    const rect = button2.getBoundingClientRect();
     const below = window.innerHeight - rect.bottom - MOVE_MENU_GAP;
     const above = rect.top - MOVE_MENU_GAP;
     const right = Math.max(MOVE_MENU_GAP, window.innerWidth - rect.right);
@@ -15204,28 +15235,156 @@ var installationNameOf = (value) => {
   return text2 === "" ? void 0 : [...text2].slice(0, 60).join("");
 };
 
+// src/shared/account-reservations.js
+var RECORD_UNREAD = "The reservation record cannot be read here; nothing was changed.";
+var RESERVATION_MESSAGES = {
+  damaged: RECORD_UNREAD,
+  unreadable: RECORD_UNREAD,
+  unsafe: "The reservation record has unsafe permissions.",
+  "no-instance": "This installation has no instance id; reservations are off.",
+  unsupported: "This version cannot read the account evidence needed for reservations.",
+  "signed-out": "Sign in to reserve this account.",
+  unknown: "The sign-in could not be read; reservations wait.",
+  recovery: "Recover the Bot sign-in before reserving this account.",
+  changed: "This reservation changed. Look again.",
+  unread: "The account could not be read for reservations. Try again.",
+  "not-reservable": "This account cannot be reserved."
+};
+var RESERVATION_REASONS = {
+  "no-organisation": "Update Claude Code: this version does not name the organisation.",
+  "unknown-plan": "This Codex plan is not known to this version.",
+  "not-a-subscription": "Only a subscription sign-in can be reserved.",
+  "no-email": "The CLI did not show an email for this account."
+};
+function reservationMessage({ state: state2, why }) {
+  return state2 === "not-reservable" && Object.hasOwn(RESERVATION_REASONS, why) ? RESERVATION_REASONS[why] : RESERVATION_MESSAGES[state2];
+}
+
 // src/client/cli-accounts.js
 var import_react38 = require("react");
 var botAccountName = (account) => account?.email ?? account?.org ?? t("Account not shown by the CLI");
+var consented = (entry) => entry.consent === "given" || entry.consent === "carried";
+var button = (label, onClick, disabled) => (0, import_react38.createElement)("button", {
+  type: "button",
+  className: "bt-soft bt-soft-sm",
+  onClick,
+  disabled
+}, t(label));
+function Reservation({ provider, reservation, actions, refresh, updated }) {
+  const [form, setForm] = (0, import_react38.useState)(null);
+  const [busy, setBusy] = (0, import_react38.useState)(false);
+  const [problem, setProblem] = (0, import_react38.useState)(null);
+  const offerId = reservation.offer?.offerId;
+  (0, import_react38.useEffect)(() => {
+    setForm((current) => current?.offerId === offerId ? current : null);
+  }, [offerId]);
+  const active = offerId !== void 0 && form?.offerId === offerId ? form : null;
+  const edit = (claim) => {
+    setProblem(null);
+    setForm({
+      offerId,
+      label: claim?.label ?? "",
+      ...claim ? { claimId: claim.claimId, rev: claim.rev } : {}
+    });
+  };
+  const change = async (action) => {
+    setBusy(true);
+    setProblem(null);
+    try {
+      updated(await action());
+      setForm(null);
+      await refresh().catch(() => {
+      });
+    } catch (error) {
+      setProblem(error?.message || t("The reservation could not be saved. Try again."));
+      if (error?.code !== "bot/invalid") await refresh().catch(() => {
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  function submit() {
+    if (!active || busy) return;
+    const { offerId: offerId2, label, claimId, rev } = active;
+    void change(() => claimId === void 0 ? actions.cliLoginReserve(offerId2, label) : actions.cliLoginReserve(offerId2, label, { claimId, rev }));
+  }
+  const { state: state2, claims } = reservation;
+  const line = reservationMessage(reservation);
+  const hasCurrent = claims.some((claim) => claim.current);
+  return (0, import_react38.createElement)(
+    "div",
+    null,
+    ...claims.map((claim) => (0, import_react38.createElement)(
+      "div",
+      { key: claim.claimId },
+      (0, import_react38.createElement)("span", null, t(!claim.mine ? "Reserved by another installation: {label}." : claim.current ? "Reserved for {label}. This holds in this installation only for now; other installations are not checked yet." : state2 === "complete" ? "Also reserved here: {label} (another {vendor} account)." : "Reserved here: {label}.", { label: claim.label, vendor: CLI_NAMES[provider] })),
+      claim.mine && claim.current && offerId ? button("Rename", () => edit(claim), busy || active !== null) : null,
+      claim.mine ? button(
+        "Make shared",
+        () => void change(() => actions.cliLoginRelease(claim.claimId, claim.rev)),
+        busy || active !== null
+      ) : null
+    )),
+    line ? (0, import_react38.createElement)("span", { className: "bt-set-hint" }, t(line)) : null,
+    !hasCurrent && offerId ? (0, import_react38.createElement)("span", null, t("Shared with other instances (default).")) : null,
+    !hasCurrent && !active ? (0, import_react38.createElement)("div", null, button("Reserve for a project", () => edit(), busy || !offerId)) : null,
+    active ? (0, import_react38.createElement)(
+      "div",
+      null,
+      (0, import_react38.createElement)(
+        "label",
+        { className: "bt-field" },
+        (0, import_react38.createElement)("span", { className: "bt-field-label" }, t("Project name")),
+        (0, import_react38.createElement)("input", {
+          className: "bt-input",
+          autoFocus: true,
+          value: active.label,
+          maxLength: 120,
+          disabled: busy,
+          onChange: (event) => setForm({ ...active, label: event.target.value }),
+          onKeyDown: (event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              submit();
+            }
+          }
+        })
+      ),
+      (0, import_react38.createElement)(
+        "p",
+        { className: "bt-set-hint" },
+        t("The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.")
+      ),
+      button("Continue", submit, busy),
+      button("Cancel", () => {
+        setForm(null);
+        setProblem(null);
+      }, busy)
+    ) : null,
+    problem ? (0, import_react38.createElement)("p", { role: "alert" }, problem) : null
+  );
+}
 function CliAccounts({ bot, actions }) {
   const [accounts, setAccounts] = (0, import_react38.useState)({});
   const [installation, setInstallation] = (0, import_react38.useState)(void 0);
   const [pending, setPending] = (0, import_react38.useState)(null);
   const [busy, setBusy] = (0, import_react38.useState)(false);
   const [error, setError] = (0, import_react38.useState)(null);
-  const shown2 = (value) => {
+  const latest = (0, import_react38.useRef)(0);
+  const refresh = async (alive = () => true) => {
+    const request = ++latest.current;
+    const value = await actions.cliLoginAccounts?.({ reservations: true });
+    if (latest.current !== request || !alive()) return;
     setAccounts(value?.accounts ?? {});
     setInstallation(value?.installation);
   };
-  const refresh = async () => {
-    const value = await actions.cliLoginAccounts?.();
-    shown2(value);
+  const updated = (provider, reservation) => {
+    latest.current++;
+    setAccounts((current) => current[provider] === void 0 ? current : { ...current, [provider]: { ...current[provider], reservation } });
   };
   (0, import_react38.useEffect)(() => {
     let alive = true;
-    Promise.resolve(actions.cliLoginAccounts?.()).then((value) => {
-      if (alive) shown2(value);
-    }).catch(() => {
+    void refresh(() => alive).catch(() => {
     });
     return () => {
       alive = false;
@@ -15236,9 +15395,7 @@ function CliAccounts({ bot, actions }) {
     const off = actions.cliLogin?.subscribe(() => {
       const rows2 = Object.values(actions.cliLogin.getSnapshot().rows);
       if (!rows2.some((row) => row.stage === "done")) return;
-      Promise.resolve(actions.cliLoginAccounts?.()).then((value) => {
-        if (alive) shown2(value);
-      }).catch(() => {
+      void refresh(() => alive).catch(() => {
       });
     });
     return () => {
@@ -15265,7 +15422,11 @@ function CliAccounts({ bot, actions }) {
         setAccounts((current) => ({ ...current, [provider]: {
           ...current[provider],
           signedIn: false,
-          recoveryRequired: true
+          recoveryRequired: true,
+          ...current[provider]?.reservation ? { reservation: {
+            state: "recovery",
+            claims: current[provider].reservation.claims.map((claim) => ({ ...claim, current: false }))
+          } } : {}
         } }));
         setPending(null);
       } else setError(accountChangeFailure(error2) ?? t("Account change failed. Close other app windows and try again."));
@@ -15273,8 +15434,9 @@ function CliAccounts({ bot, actions }) {
       setBusy(false);
     }
   };
-  const entries2 = Object.entries(accounts).filter(([id, entry]) => Object.hasOwn(CLI_NAMES, id) && entry.authScope === "isolated");
+  const entries2 = Object.entries(accounts).filter(([id, entry]) => Object.hasOwn(CLI_NAMES, id) && (entry.authScope === "isolated" || consented(entry)));
   if (!entries2.length) return null;
+  const isolated = entries2.some(([, entry]) => entry.authScope === "isolated");
   return (0, import_react38.createElement)(
     "section",
     { className: "bt-set-section" },
@@ -15285,12 +15447,12 @@ function CliAccounts({ bot, actions }) {
       t("This installation: {installation}", { installation })
     ) : null,
     (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t("Bots in this installation share these accounts.")),
-    (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t(ACCOUNT_SHARING_HINT)),
-    (0, import_react38.createElement)(
+    isolated ? (0, import_react38.createElement)("p", { className: "bt-set-hint" }, t(ACCOUNT_SHARING_HINT)) : null,
+    isolated ? (0, import_react38.createElement)(
       "p",
       { className: "bt-set-hint" },
       t("Your terminal login is separate and stays unchanged.")
-    ),
+    ) : null,
     (0, import_react38.createElement)("div", { className: "bt-set-card" }, ...entries2.map(([provider, entry]) => (0, import_react38.createElement)(
       "div",
       {
@@ -15299,13 +15461,25 @@ function CliAccounts({ bot, actions }) {
       },
       (0, import_react38.createElement)("strong", null, CLI_NAMES[provider]),
       (0, import_react38.createElement)("span", null, t("Bots: {account}", {
-        account: entry.signedIn ? botAccountName(entry.account) : t("Sign in again in the app to resume Bots")
+        account: entry.signedIn || consented(entry) ? botAccountName(entry.account) : t("Sign in again in the app to resume Bots")
       })),
-      (0, import_react38.createElement)("span", { className: "bt-set-hint" }, t("Terminal: {account}", {
+      entry.reservation?.scope === "personal" ? (0, import_react38.createElement)("span", { className: "bt-set-hint" }, t("Personal plan")) : entry.reservation?.scope === "workspace" ? (0, import_react38.createElement)(
+        "span",
+        { className: "bt-set-hint" },
+        t("Workspace plan: covers every ChatGPT workspace of this email")
+      ) : null,
+      entry.reservation || consented(entry) ? (0, import_react38.createElement)(Reservation, {
+        provider,
+        reservation: entry.reservation ?? { state: "unsupported", claims: [] },
+        actions,
+        refresh,
+        updated: (reservation) => updated(provider, reservation)
+      }) : null,
+      entry.authScope === "isolated" ? (0, import_react38.createElement)("span", { className: "bt-set-hint" }, t("Terminal: {account}", {
         account: entry.terminal ? botAccountName(entry.terminal) : t("Account not shown by the CLI")
-      })),
+      })) : null,
       entry.recoveryRequired ? (0, import_react38.createElement)("p", { role: "alert" }, t(ACCOUNT_RECOVERY_HINT)) : null,
-      pending?.provider === provider ? (0, import_react38.createElement)(
+      entry.authScope !== "isolated" ? null : pending?.provider === provider ? (0, import_react38.createElement)(
         "div",
         null,
         (0, import_react38.createElement)("p", null, t("This stops running Bot work for this account. Continue?")),
@@ -15772,7 +15946,7 @@ function RolePackagesCard({ roster, actions, run: run3 }) {
         !record && role.reason === "community" && t("Community: not installable yet")
       ].filter(Boolean);
       const version = record ? record.version : role.version;
-      const button = record ? (0, import_react40.createElement)("button", {
+      const button2 = record ? (0, import_react40.createElement)("button", {
         type: "button",
         className: "bt-soft bt-soft-sm",
         disabled: pending || readOnly || inUse,
@@ -15783,7 +15957,7 @@ function RolePackagesCard({ roster, actions, run: run3 }) {
         disabled: pending || readOnly,
         onClick: () => change(actions.installRole, role.id)
       }, t("Install"));
-      return (0, import_react40.createElement)(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(" · "), hint: hints.join(" · ") }, button || null);
+      return (0, import_react40.createElement)(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(" · "), hint: hints.join(" · ") }, button2 || null);
     }),
     result ? (0, import_react40.createElement)(
       "div",
@@ -16447,12 +16621,12 @@ function ConnectorRow({ connector, actions }) {
     if (connector.auth?.kind === "oauth") return connector.auth.client?.id || !connector.auth.token ? signIn() : setForm("token");
     return void 0;
   };
-  const button = (label, onClick) => (0, import_react42.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick }, label);
+  const button2 = (label, onClick) => (0, import_react42.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick }, label);
   let actionsNode = null;
   if (pending || form) actionsNode = null;
-  else if (connector.state === "needs-sign-in") actionsNode = [button(t("Sign in again"), signIn), button(t("Disconnect"), () => void run3(actions.connectorDisconnect(connector.id)))];
-  else if (connector.state === "error") actionsNode = [button(t("Try again"), () => void run3(actions.connectorRetry(connector.id))), button(connector.custom ? t("Remove") : t("Disconnect"), () => void run3(actions.connectorDisconnect(connector.id)))];
-  else if (on) actionsNode = button(connector.custom ? t("Remove") : t("Disconnect"), () => void run3(actions.connectorDisconnect(connector.id)));
+  else if (connector.state === "needs-sign-in") actionsNode = [button2(t("Sign in again"), signIn), button2(t("Disconnect"), () => void run3(actions.connectorDisconnect(connector.id)))];
+  else if (connector.state === "error") actionsNode = [button2(t("Try again"), () => void run3(actions.connectorRetry(connector.id))), button2(connector.custom ? t("Remove") : t("Disconnect"), () => void run3(actions.connectorDisconnect(connector.id)))];
+  else if (on) actionsNode = button2(connector.custom ? t("Remove") : t("Disconnect"), () => void run3(actions.connectorDisconnect(connector.id)));
   else {
     actionsNode = [
       connector.auth?.kind === "oauth" && connector.auth.token === true && connector.auth.client?.id ? (0, import_react42.createElement)("button", { key: "token", type: "button", className: "bt-connector-link", disabled: busy, onClick: () => setForm("token") }, t("Use a token instead")) : null,
@@ -20351,7 +20525,13 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     cliLoginCancel: (botId, provider, attemptId) => call2("cli-login-cancel", loginPayload(botId, provider, { attemptId })),
     cliLoginConnections: () => call2("cli-login-connections", {}),
     cliLoginConfirm: (botId, provider, ref, model) => call2("cli-login-confirm", loginPayload(botId, provider, { ...ref === void 0 ? {} : { ref }, ...model === void 0 ? {} : { model } })),
-    cliLoginAccounts: () => call2("cli-login-accounts", {}),
+    cliLoginAccounts: (options) => call2("cli-login-accounts", options?.reservations === true ? { reservations: true } : {}),
+    cliLoginReserve: (offerId, label, claim) => call2("cli-login-reserve", {
+      offerId,
+      label,
+      ...claim === void 0 ? {} : { claimId: claim.claimId, rev: claim.rev }
+    }),
+    cliLoginRelease: (claimId, rev) => call2("cli-login-release", { claimId, rev }),
     cliLoginSwitch: (botId, provider) => call2("cli-login-switch", loginPayload(botId, provider)),
     cliLoginReset: (botId, provider) => call2("cli-login-reset", loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call2(
@@ -23250,7 +23430,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
   const edges = useScrollEdges(ref, rows2.length);
   const press = (row) => onOpen ? () => onOpen(row) : void 0;
   const status = (row) => (0, import_react57.createElement)(Status, { status: row.status, worded, quiet: quiet2 });
-  const button = (row, className, extra, ...children) => (0, import_react57.createElement)("button", {
+  const button2 = (row, className, extra, ...children) => (0, import_react57.createElement)("button", {
     key: row.key,
     type: "button",
     className: classes("lb-row", className),
@@ -23269,7 +23449,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
     if (row.kind === "section") return (0, import_react57.createElement)("div", { key: row.key, className: classes("lb-sec", row.first && "lb-sec-first") }, row.label);
     if (row.kind === "bot") {
       const state2 = row.bot.state ?? stateOfStatus(statusOr(row.bot.status));
-      return button(
+      return button2(
         row,
         classes(row.unread && "lb-row-unread", row.status === "off" && "lb-row-off"),
         null,
@@ -23282,7 +23462,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
       );
     }
     if (row.kind === "channel") {
-      return button(
+      return button2(
         row,
         classes("lb-row-channel", row.unread && "lb-row-unread"),
         { "aria-expanded": !row.folded },
@@ -23294,7 +23474,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
       );
     }
     if (row.kind === "chat") {
-      return button(
+      return button2(
         row,
         classes("lb-row-chat", row.status !== "idle" && "lb-row-hot", row.unread && "lb-row-unread"),
         null,
@@ -23306,7 +23486,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
       );
     }
     const [first, second] = row.members;
-    return button(
+    return button2(
       row,
       classes(row.lead && "lb-row-lead", row.unread && "lb-row-unread"),
       null,
@@ -24930,18 +25110,18 @@ function UpdateButton({ useUpdate, actions }) {
   const [box, setBox] = (0, import_react61.useState)(null);
   const [error, setError] = (0, import_react61.useState)("");
   const [dshError, setDshError] = (0, import_react61.useState)("");
-  const button = (0, import_react61.useRef)(null);
+  const button2 = (0, import_react61.useRef)(null);
   (0, import_react61.useEffect)(() => {
     if (!open) return void 0;
     const onDown = (event) => {
-      if (event.target instanceof Element && (event.target.closest(".bt-update-pop") || button.current?.contains(event.target))) return;
+      if (event.target instanceof Element && (event.target.closest(".bt-update-pop") || button2.current?.contains(event.target))) return;
       setOpen(false);
     };
     const onKey = (event) => {
       if (event.key === "Escape") {
         event.stopPropagation();
         setOpen(false);
-        button.current?.focus();
+        button2.current?.focus();
       }
     };
     window.addEventListener("mousedown", onDown);
@@ -24958,7 +25138,7 @@ function UpdateButton({ useUpdate, actions }) {
   const tick = useViewport();
   (0, import_react61.useLayoutEffect)(() => {
     if (!open) return;
-    const rect = button.current?.getBoundingClientRect();
+    const rect = button2.current?.getBoundingClientRect();
     if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 });
   }, [open, tick]);
   if (!update?.available && !dshRow && phase === "idle" && dshPhase === "idle") return null;
@@ -24980,7 +25160,7 @@ function UpdateButton({ useUpdate, actions }) {
     import_react61.Fragment,
     null,
     (0, import_react61.createElement)("button", {
-      ref: button,
+      ref: button2,
       type: "button",
       className: "bt-round bt-update",
       "data-phase": cloudPhase,
@@ -25123,7 +25303,7 @@ function AccountLauncher({ seat = true, settingsOpen, openSettings, openOnboardi
     return () => actions.seatAccount(false);
   }, [seat]);
   const [box, setBox] = (0, import_react61.useState)(null);
-  const button = (0, import_react61.useRef)(null);
+  const button2 = (0, import_react61.useRef)(null);
   (0, import_react61.useEffect)(() => {
     if (settingsOpen) setOpen(false);
   }, [settingsOpen]);
@@ -25144,14 +25324,14 @@ function AccountLauncher({ seat = true, settingsOpen, openSettings, openOnboardi
   (0, import_react61.useEffect)(() => {
     if (!open) return void 0;
     const onDown = (event) => {
-      if (event.target instanceof Element && (event.target.closest(".bt-account-menu") || button.current?.contains(event.target))) return;
+      if (event.target instanceof Element && (event.target.closest(".bt-account-menu") || button2.current?.contains(event.target))) return;
       setOpen(false);
     };
     const onKey = (event) => {
       if (event.key === "Escape") {
         event.stopPropagation();
         setOpen(false);
-        button.current?.focus();
+        button2.current?.focus();
       }
     };
     window.addEventListener("mousedown", onDown);
@@ -25199,7 +25379,7 @@ function AccountLauncher({ seat = true, settingsOpen, openSettings, openOnboardi
   };
   const tick = useViewport();
   const anchor = () => {
-    const rect = button.current?.getBoundingClientRect();
+    const rect = button2.current?.getBoundingClientRect();
     if (rect) setBox({ left: rect.left, bottom: viewBottom() - rect.top + 5 });
   };
   (0, import_react61.useLayoutEffect)(() => {
@@ -25234,7 +25414,7 @@ function AccountLauncher({ seat = true, settingsOpen, openSettings, openOnboardi
     null,
     (0, import_react61.createElement)(
       "button",
-      { ref: button, type: "button", className: "bt-account", "aria-label": t("Account"), "aria-haspopup": "menu", "aria-expanded": open, onClick: toggle },
+      { ref: button2, type: "button", className: "bt-account", "aria-label": t("Account"), "aria-haspopup": "menu", "aria-expanded": open, onClick: toggle },
       (0, import_react61.createElement)("span", { className: "bt-you", "aria-hidden": true }, (0, import_react61.createElement)(PersonFace)),
       // The new left bar shows the word beside the face (left-bar-css.js); the rail does not.
       (0, import_react61.createElement)("span", { className: "bt-account-name", "aria-hidden": true }, t("Account"))
@@ -25314,20 +25494,20 @@ function FooterAccount(props) {
   return (0, import_react61.createElement)("span", { className: "bt-foot-account" }, (0, import_react61.createElement)(AccountLauncher, { ...props, seat: false }));
 }
 function RailToggle({ wide, actions }) {
-  const button = (0, import_react61.useRef)(null);
+  const button2 = (0, import_react61.useRef)(null);
   const hadFocus = (0, import_react61.useRef)(false);
   (0, import_react61.useLayoutEffect)(() => {
     const native = document.querySelector("[data-sidebar-toggle]");
     if (!wide && hadFocus.current) {
       hadFocus.current = false;
       native?.focus({ preventScroll: true });
-    } else if (wide && native === document.activeElement && !document.documentElement.matches("[data-windows-titlebar],[data-platform=darwin]") && !button.current?.closest("[data-sidebar-drawer]")) {
-      button.current?.focus({ preventScroll: true });
+    } else if (wide && native === document.activeElement && !document.documentElement.matches("[data-windows-titlebar],[data-platform=darwin]") && !button2.current?.closest("[data-sidebar-drawer]")) {
+      button2.current?.focus({ preventScroll: true });
     }
   }, [wide]);
   if (!wide) return null;
   return (0, import_react61.createElement)("button", {
-    ref: button,
+    ref: button2,
     type: "button",
     className: "bt-round bt-side-collapse bt-foot-toggle",
     "aria-label": t("Collapse sidebar"),
@@ -26220,9 +26400,9 @@ function PermissionList({ catalog, saved, onPick, repick = false, disabled = fal
 }
 function PermissionSelect({ catalog, saved, onPick, repick = false, disabled = false, name, cli, remote = false, askedOf, replaced, judge }) {
   const { current, pick: pick2, confirming, asks, cancel } = usePermissionPick({ saved, onPick, askedOf, repick, confirmFull: true });
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ minWidth: Math.min(380, window.innerWidth - 24) });
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ minWidth: Math.min(380, window.innerWidth - 24) });
   (0, import_react64.useEffect)(() => {
-    if (!isOpen && menu.current?.contains(document.activeElement)) button.current?.focus({ preventScroll: true });
+    if (!isOpen && menu.current?.contains(document.activeElement)) button2.current?.focus({ preventScroll: true });
     if (confirming && (!isOpen || disabled)) cancel();
   }, [isOpen, disabled, confirming]);
   (0, import_react64.useEffect)(() => {
@@ -26242,7 +26422,7 @@ function PermissionSelect({ catalog, saved, onPick, repick = false, disabled = f
   }, [isOpen, confirming]);
   const finish = () => {
     close();
-    button.current?.focus({ preventScroll: true });
+    button2.current?.focus({ preventScroll: true });
   };
   const choose = (value) => {
     if (disabled) return;
@@ -26281,7 +26461,7 @@ function PermissionSelect({ catalog, saved, onPick, repick = false, disabled = f
     import_react64.Fragment,
     null,
     (0, import_react64.createElement)("button", {
-      ref: button,
+      ref: button2,
       className: "bt-model-trigger",
       "data-wide": true,
       type: "button",
@@ -26519,7 +26699,7 @@ function ComposerPermission({ sessionId, useRoster, actions }) {
   const roster = useRoster((value) => value);
   const bot = roster.byId[sessionId];
   const catalog = levelsOf(roster.permissions, bot);
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ minWidth: 320 });
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ minWidth: 320 });
   if (!bot || !catalog?.options?.length || roster.readOnly || currentPart(bot) !== sessionId) return null;
   const saved = savedLevelOf(bot, catalog);
   const cli = cliOfBot(bot);
@@ -26545,7 +26725,7 @@ function ComposerPermission({ sessionId, useRoster, actions }) {
     (0, import_react65.createElement)(
       "button",
       {
-        ref: button,
+        ref: button2,
         type: "button",
         className: "bt-perm-chip",
         "aria-haspopup": "menu",
@@ -26572,7 +26752,7 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
   const roster = useRoster((value) => value);
   const [open, setOpen] = (0, import_react65.useState)(null);
   const [shown2, leaving] = useLinger(open, 120);
-  const button = (0, import_react65.useRef)(null);
+  const button2 = (0, import_react65.useRef)(null);
   const menu = (0, import_react65.useRef)(null);
   const tick = useViewport();
   const inputNow = (0, import_react65.useRef)(void 0);
@@ -26583,10 +26763,10 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
   (0, import_react65.useEffect)(() => {
     if (!open) return void 0;
     const onDown = (event) => {
-      if (![button.current, menu.current].some((node) => node?.contains(event.target))) setOpen(null);
+      if (![button2.current, menu.current].some((node) => node?.contains(event.target))) setOpen(null);
     };
     const onKey = (event) => {
-      if (stepMenuFocus(menu.current, event, button.current)) return;
+      if (stepMenuFocus(menu.current, event, button2.current)) return;
       if (event.key === "Escape") {
         event.stopPropagation();
         setOpen(null);
@@ -26600,7 +26780,7 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
     };
   }, [open]);
   (0, import_react65.useEffect)(() => {
-    const card = button.current?.closest("[data-composer-card]");
+    const card = button2.current?.closest("[data-composer-card]");
     if (!ready || card === null || card === void 0) return void 0;
     card.style.setProperty("--bt-placeholder", JSON.stringify(t("Press Enter to steer queued messages")));
     return () => card.style.removeProperty("--bt-placeholder");
@@ -26611,7 +26791,7 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
       if (steering || event.defaultPrevented || open) return;
       const target2 = event.target;
       if (typeof target2?.closest !== "function") return;
-      const card = button.current?.closest("[data-composer-card]");
+      const card = button2.current?.closest("[data-composer-card]");
       if (card === null || card === void 0 || target2.closest("[data-composer-card]") !== card) return;
       if (target2.closest("[contenteditable=true]") === null) return;
       if (target2.closest("[data-composer-composing]")) return;
@@ -26628,13 +26808,13 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
     return () => window.removeEventListener("keydown", onKey, true);
   }, [open, sessionId]);
   const place = (0, import_react65.useMemo)(() => {
-    if (!shown2 || !button.current) return null;
-    const rect = button.current.getBoundingClientRect();
+    if (!shown2 || !button2.current) return null;
+    const rect = button2.current.getBoundingClientRect();
     return { left: rect.left, bottom: viewBottom() - rect.top + 8 };
   }, [shown2, open, tick]);
   const target = roster.byId?.[sessionId]?.id ?? roster.roomsById?.[sessionId]?.id;
   if (sessionId === void 0 || target === void 0) return null;
-  const fileInput = () => button.current?.closest("[data-composer-card]")?.querySelector("input[type=file]");
+  const fileInput = () => button2.current?.closest("[data-composer-card]")?.querySelector("input[type=file]");
   const toggle = () => {
     if (open) {
       setOpen(null);
@@ -26664,7 +26844,7 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
     import_react65.Fragment,
     null,
     (0, import_react65.createElement)("button", {
-      ref: button,
+      ref: button2,
       type: "button",
       className: "bt-plus",
       "aria-label": t("Add"),
@@ -28783,7 +28963,7 @@ function FailureCell({ node, sessionId, useRoster, useTurnClock, actions }) {
       setError(hostText(failure?.message ?? String(failure)));
     });
   };
-  const button = (fix, primary) => {
+  const button2 = (fix, primary) => {
     const className = primary ? "bt-send bt-fail-go" : "bt-soft bt-soft-sm";
     if (fix === "top-up") {
       return (0, import_react72.createElement)("a", { key: fix, className: `${className} bt-fail-link`, href: data.code === "ACCOUNT_QUOTA" ? topUp : TOP_UP_URL, target: "_blank", rel: "noopener noreferrer" }, FIX_LABELS[fix]());
@@ -28792,7 +28972,7 @@ function FailureCell({ node, sessionId, useRoster, useTurnClock, actions }) {
     return (0, import_react72.createElement)("button", { key: fix, type: "button", className, "aria-expanded": toggles ? keying : void 0, onClick: () => runs[fix]() }, FIX_LABELS[fix](signedIn));
   };
   const retryButton = (primary) => (0, import_react72.createElement)("button", { key: "retry", type: "button", className: primary ? "bt-send bt-fail-go" : "bt-soft bt-soft-sm", disabled: retry !== "idle", onClick: resume }, retry === "idle" ? t("Retry") : t("Retrying…"));
-  const row = retryFirst ? [retryButton(true), ...fixes.map((fix) => button(fix, false))] : [...fixes.map((fix, index) => button(fix, current && index === 0)), retrying ? retryButton(false) : null];
+  const row = retryFirst ? [retryButton(true), ...fixes.map((fix) => button2(fix, false))] : [...fixes.map((fix, index) => button2(fix, current && index === 0)), retrying ? retryButton(false) : null];
   const hasActions = row.some(Boolean);
   const confirmSwitch = switching !== "idle" && fixes.includes("switch-account");
   return (0, import_react72.createElement)(
@@ -29377,7 +29557,7 @@ function NewGenie({ roster, actions, onBack, onCreated }) {
 var import_react76 = require("react");
 var import_react_dom15 = require("react-dom");
 function PresetMenu({ value, options, onPick }) {
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu();
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu();
   const current = options.find((entry) => entry.id === value);
   const item = (id, label, note) => (0, import_react76.createElement)(
     "button",
@@ -29394,7 +29574,7 @@ function PresetMenu({ value, options, onPick }) {
     (0, import_react76.createElement)(
       "button",
       {
-        ref: button,
+        ref: button2,
         type: "button",
         className: "bt-model-trigger",
         "data-wide": true,
@@ -35610,14 +35790,14 @@ function PanelMenu({ items, className, "aria-label": label }) {
   const [open, setOpen] = (0, import_react95.useState)(false);
   const [shown2, leaving] = useLinger(open, 120);
   const wrap = (0, import_react95.useRef)(null);
-  const button = (0, import_react95.useRef)(null);
+  const button2 = (0, import_react95.useRef)(null);
   (0, import_react95.useEffect)(() => {
     if (!open) return void 0;
     const onDown = (event) => {
       if (wrap.current && !wrap.current.contains(event.target)) setOpen(false);
     };
     const onKey = (event) => {
-      if (stepMenuFocus(wrap.current, event, button.current)) return;
+      if (stepMenuFocus(wrap.current, event, button2.current)) return;
       if (event.key !== "Escape") return;
       event.stopPropagation();
       setOpen(false);
@@ -35634,7 +35814,7 @@ function PanelMenu({ items, className, "aria-label": label }) {
     "span",
     { className: "bt-pmenu", ref: wrap },
     (0, import_react95.createElement)("button", {
-      ref: button,
+      ref: button2,
       type: "button",
       className,
       "aria-label": label,
@@ -38211,8 +38391,8 @@ function installKnownStateGuard({ target = window, onRefused = () => {
     },
     // The send button is the composer card's busy-aware primary button.
     click: (event) => {
-      const button = event.target instanceof Element ? event.target.closest("[data-composer-card] button[aria-busy]") : null;
-      if (button) check(event, composerOf(button)?.querySelector("[data-composer-input]")?.innerText);
+      const button2 = event.target instanceof Element ? event.target.closest("[data-composer-card] button[aria-busy]") : null;
+      if (button2) check(event, composerOf(button2)?.querySelector("[data-composer-input]")?.innerText);
     }
   };
   for (const [type, handler] of Object.entries(handlers)) target.addEventListener(type, handler, true);
@@ -40745,7 +40925,7 @@ function ReadScopeControl({ sessionId }) {
   return typeof sessionId === "string" ? (0, import_react104.createElement)(SessionReadScope, { key: sessionId, sessionId }) : null;
 }
 function SessionReadScope({ sessionId }) {
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu();
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu();
   const [scope, setScope] = (0, import_react104.useState)(null);
   const [draft, setDraft] = (0, import_react104.useState)("");
   const [error, setError] = (0, import_react104.useState)("");
@@ -40784,7 +40964,7 @@ function SessionReadScope({ sessionId }) {
     import_react104.Fragment,
     null,
     (0, import_react104.createElement)("button", {
-      ref: button,
+      ref: button2,
       type: "button",
       className: "bt-plus",
       "aria-expanded": isOpen,

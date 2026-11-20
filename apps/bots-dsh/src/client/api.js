@@ -6,7 +6,7 @@ const ROUTE = 'api/omni-ui'
 // flow's refusals are a family (`bot/adopt-*`): each names its reason and the Bot and
 // Session involved, so the toast shows it and reportError records it once.
 const REFUSALS = new Set(['bot/refused', 'bot/sign-in-required', 'bot/account-confirm-required', 'bot/account-changed', 'bot/account-signed-out', 'bot/invalid', 'bot/read-only', 'bot/not-found', 'bot/browser-off', 'bot/login-ended', 'bot/login-restarted'])
-const isRefusal = code => REFUSALS.has(code) || code.startsWith('bot/adopt-')
+const isRefusal = code => REFUSALS.has(code) || code.startsWith('bot/adopt-') || code.startsWith('bot/reservation-')
 
 export const call = async (endpoint, payload, signal) => {
   let response

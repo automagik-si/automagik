@@ -103,3 +103,45 @@ test('a sentence from this list that the packs do not know would fall back to En
   // added to the host without its two entries fails the first test, not the interface.
   for (const sentence of SENTENCES) assert.notEqual(DICTIONARY.zh[sentence], undefined, sentence)
 })
+
+const RESERVATION_SENTENCES = [
+  'The reservation record cannot be read here; nothing was changed.',
+  'The reservation record has unsafe permissions.',
+  'This installation has no instance id; reservations are off.',
+  'This version cannot read the account evidence needed for reservations.',
+  'Sign in to reserve this account.',
+  'The sign-in could not be read; reservations wait.',
+  'Recover the Bot sign-in before reserving this account.',
+  'This reservation changed. Look again.',
+  'The account could not be read for reservations. Try again.',
+  'This account cannot be reserved.',
+  'Update Claude Code: this version does not name the organisation.',
+  'This Codex plan is not known to this version.',
+  'Only a subscription sign-in can be reserved.',
+  'The CLI did not show an email for this account.',
+  'Give the project a name, up to 60 characters.',
+  'This reservation request is no longer valid. Look again.',
+  'The reservation could not be saved. Try again.',
+  'This window cannot change the Bot team.',
+]
+const FOREIGN_RESERVATION = 'This account is reserved for {label} by another installation that shares this team.'
+
+test('reservation refusals and states have zh and pt-BR host copy', () => {
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    for (const sentence of RESERVATION_SENTENCES) {
+      for (const dictionary of [DICTIONARY.zh, ptBR]) {
+        assert.ok(dictionary[sentence]?.trim(), sentence)
+        assert.notEqual(dictionary[sentence], sentence, sentence)
+      }
+      assert.equal(hostText(sentence), DICTIONARY.zh[sentence])
+    }
+    const label = 'Example {project}'
+    const message = FOREIGN_RESERVATION.replace('{label}', label)
+    assert.equal(hostTemplateOf(message), FOREIGN_RESERVATION)
+    assert.equal(hostText(message), DICTIONARY.zh[FOREIGN_RESERVATION].replace('{label}', label))
+    assert.match(ptBR[FOREIGN_RESERVATION], /\{label\}/)
+  } finally {
+    off()
+  }
+})

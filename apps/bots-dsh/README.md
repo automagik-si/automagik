@@ -538,6 +538,13 @@ enter team state, messages, tools, model calls or logs. The earlier confirm step
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
+**Account reservations (RFC 0024 R3)**: Bot settings let the owner reserve a signed-in Claude
+Code or Codex account for a named project, rename the reservation, or make the account shared
+again. Accounts are shared by default. A reservation holds in this installation only for now.
+A Codex workspace reservation covers every ChatGPT workspace of that email. The private record in
+the team home keeps the project label and keyed digests of the account. Anyone with access to
+the record and its key could test a guessed email.
+
 **Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table). With it absent, both get the chat's history as a redacted replay. Claude Code gets the team's tools over the bridge. A team Bot on Codex gets DSH's extras in its current own chat and in group Sessions, including `message_bot` and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions on Codex keep only its own tools by default. An explicit `dshTools: true` gives Codex the whole DSH preset, including on a Genie.
 
 - Give every model a `contextWindow`. DS Bot takes its lines from it: the usable window is the window minus the reply reserve (`maxTokens`), the hard line is 95% of that, and the check line is `checkRatio` of it. A model without `contextWindow` gets the adapter's default (262,144 tokens for `llm-pi-ai`), which may be wrong for that model; a model that reports no window at all counts as 500,000.
