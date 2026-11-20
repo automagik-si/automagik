@@ -59,6 +59,7 @@ import { MODEL_SWITCH_CSS, ModelSwitchNotice } from './model-switch.js'
 import { announceCarried, CLI_LOGIN_CSS, CliLoginConversation, installCliLoginBridge, installKnownStateGuard } from './cli-login.js'
 import { createCliLogin } from './cli-login-state.js'
 import { cliLoginBotOf } from './cli-login-model.js'
+import { installLoginCommand } from './login-command.js'
 import { ConnectorDock, MailDock, CONNECTOR_CSS } from './connectors.js'
 import { CONNECTORS_PAGE_CSS } from './connectors-page.js'
 import { LearningDock, LearningTurnTail, LEARNING_CSS } from './learning-card.js'
@@ -1331,6 +1332,7 @@ export function apply(ctx) {
     () => installCompiledStyles(QUEUE_CSS, 'queue'),
     () => installMentions(),
     () => installAtMenu(),
+    () => installLoginCommand(ctx, { roster, actions, t }),
     () => installAdvancedStyle(),
     installHeader,
     installNativeBotHeader,

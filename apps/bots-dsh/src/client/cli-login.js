@@ -272,7 +272,14 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
           h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: () => void manager.confirm(bot.id) }, t('Use this account')),
           h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t('Not now'))))
       case 'attempt': return h(Attempt, { bot, row, roster, manager, secretPending, fieldRef })
-      case 'done': return h('p', null, row.taken ? t('Done: Bots will use this {name} account.', { name }) : t('Done: signed in to {name}.', { name }))
+      case 'done': {
+        if (row.taken) return h('p', null, t('Done: Bots will use this {name} account.', { name }))
+        if (row.signedInAs?.kind === 'key') return h('p', null, t('Done: {name} uses an API key.', { name }))
+        const account = accountLabel(row.signedInAs)
+        return h('p', null, account
+          ? t('Done: signed in to {name} as {account}.', { name, account })
+          : t('Done: signed in to {name}.', { name }))
+      }
       case 'applyFailed': return h('p', null, t('Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.', {
         model: modelName(roster, row.outcome?.ref) || name, reason: hostText(row.outcome?.message ?? ''), kept: modelName(roster, row.outcome?.kept) || t('its model'),
       }))
