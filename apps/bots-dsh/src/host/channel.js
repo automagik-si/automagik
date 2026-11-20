@@ -511,6 +511,12 @@ export function install(rt) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
       await rt.refresh()
+      if (endpoint === 'self-update-status') {
+        if (rt.holdsLock() !== true) {
+          return fail('This window does not hold the team, so it cannot report updates.', 'bot/read-only')
+        }
+        return ok(rt.selfUpdateStatus())
+      }
       const readOnly = rt.readOnly()
       // An endpoint another Omni plugin serves (extend.js) says itself whether it only reads.
       const added = rt.extended.endpointOf(endpoint)
