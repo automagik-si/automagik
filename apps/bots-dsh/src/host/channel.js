@@ -320,7 +320,7 @@ export function install(rt) {
     'cli-login-reserve', 'cli-login-release',
   ])
   const VAULT_LOCAL = new Set(['vault-unlock', 'vault-token-set', 'vault-token-clear'])
-  const VAULT = new Set(['vault-status', 'vault-lock', 'vault-items', ...VAULT_LOCAL])
+  const VAULT = new Set(['vault-status', 'vault-lock', 'vault-items', 'vault-fields', ...VAULT_LOCAL])
   // The endpoints whose text reaches a Bot or a model: one that carries a Claude sign-in state
   // acp-dsh showed is refused before anything is queued (cli-login.js, loginTextMatches).
   const CODE_GUARDED = new Set(['send', 'side-ask', 'answer-question', 'view-reply', 'memory-ask'])

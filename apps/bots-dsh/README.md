@@ -706,6 +706,8 @@ When a Bot needs an API key, token or password, it calls `request_secret`, and a
 - **Manage**: Settings → Secrets lists every secret by name, purpose, the Bot that asked and the last use. You can change who may use it, replace the value, delete it or add one. Deleting a Bot removes it from every secret.
 - **Storage**: `<DSH_HOME>/bot/secrets.json`, file mode 600, written atomically. Values are never in `state.json` or logs.
 
+HashiCorp Vault uses a supported Vault CLI to browse KV v1 and v2 mounts. In local Settings › Secrets › Vault, connect with the server address, token and optional namespace. Enter them again after restarting. The mapping binds to the address and namespace through a hash, and replacement cancels pending approvals and grants. Reads assume a direct Vault server or a non-caching Vault Proxy that forwards the supplied token. Caching cannot be detected. The CLI uses OS TLS trust with no forward proxy, custom CA or redirect support. Before rolling back to a Bot team version that predates this provider, remove the HashiCorp Vault mappings.
+
 Vault mappings live in a separate `vault-sources.json` in the team home, written atomically with file mode 600. Mapped names stay reserved even when the vault plugin is off. When the vault is unlocked, a Bot in scope can ask for approval in its own chat. Each approval covers one attempt at the exact command, in the shell and folder shown on the card. Vault values cannot reach a shell in this version. If a name appears in both files, remove one definition in Settings → Secrets to resolve the conflict. You can remove a mapping there with the vault plugin off. If the mapping file cannot be read, secret use stops until the file is fixed.
 
 Limits:

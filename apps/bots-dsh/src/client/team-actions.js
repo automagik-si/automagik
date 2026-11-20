@@ -247,9 +247,12 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     secretSourceDetail: requestId => call('secret-source-detail', { requestId }),
     vaultStatus: (signal, provider) => call('vault-status', provider === undefined ? undefined : { provider }, signal),
     vaultUnlock: (password, connection) => call('vault-unlock', { provider: 'bitwarden', password, connection }),
-    vaultLock: () => call('vault-lock'),
-    vaultItems: (search, provider) => call('vault-items', { search, ...(provider === undefined ? {} : { provider }) }),
-    vaultTokenSet: (provider, token, connection) => call('vault-token-set', { provider, token, connection }),
+    vaultLock: provider => provider === undefined ? call('vault-lock') : call('vault-lock', { provider }),
+    vaultItems: (search, provider) => call('vault-items', provider === 'hashicorp-vault'
+      ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }) }),
+    vaultFields: (provider, mount, path) => call('vault-fields', { provider, mount, path }),
+    vaultTokenSet: (provider, token, connection) => call('vault-token-set', provider === 'hashicorp-vault'
+      ? { provider, token, ...connection } : { provider, token, connection }),
     vaultTokenClear: provider => call('vault-token-clear', { provider }),
     secretSourceSet: mapping => after(call('secret-source-set', mapping)),
     secretCancel: requestId => after(call('secret-cancel', { requestId })),
