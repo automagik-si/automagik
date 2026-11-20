@@ -15,8 +15,8 @@ import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { helperPlan } from "../mods/am-sidebar/restart.js";
 import { AGENTS } from "../mods/am-sidebar/models.js";
 import { FIRST_SESSION_MS, KEEP_DOWN, PLIST_DECL, PLIST_LABEL, PLIST_MARK, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, launchEnvOf, launchHomeEnv, launchdNotLoaded, ledgerRivals,
-  pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
-import { firstLine as firstLineTrusted } from "../mods/am-sidebar/sessionFiles.mjs";
+  latestResumeIn, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
+import { firstLine as firstLineTrusted, firstLineWithIdentity, passReads } from "../mods/am-sidebar/sessionFiles.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { servicePath, unitKeepsPath } from "../mods/am-sidebar/revive.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -318,8 +318,8 @@ exit 0
   mkdirSync(join(project, ".herdr"), { recursive: true });
   writeFileSync(join(project, ".herdr/bots.json"), `${JSON.stringify(file, null, 2)}\n`);
   const statePath = join(root, "hc.json"), logPath = join(root, "hc.log");
-  // #1490: a discovered agent's pane records its launch home, as the pack's own launch does. A
-  // row can opt out (`noHome`: an unknown home) or name another (`launchEnv`: { HOME, DSH_HOME… }).
+  // #1490: model a hand launch's env HOME= words. A pack Start records its home in the seat
+  // row (the Start test below). A pane can opt out with noHome or name another with launchEnv.
   const terms = terminals(project, { root, home }).map(({ noHome = false, launchEnv = null, ...x }) => {
     if (noHome || !["dsh-tui", "agy", "codex", "kimi"].includes(programOf(x.argv))) return x;
     if (launchEnvOf(x.argv).HOME) return x;
@@ -364,6 +364,11 @@ const changes = (s) => s.calls().filter((c) => ["run", "kill", "label", "send"].
 const hasSeq = (words, seq) => words.some((_, i) => seq.every((w, j) => words[i + j] === w));
 /** The run that started bot `botId` (its hc labels name it). */
 const runFor = (s, botId) => runsOf(s).find((run) => run.includes(`bot=${botId}`));
+/** The value of a label passed to hc run, before its command. */
+const labelOf = (run, key) => run?.slice(0, run.indexOf("--"))
+  .find((arg, i) => run[i - 1] === "--label" && arg.startsWith(`${key}=`))?.slice(key.length + 1);
+/** Session ids written with hc label on this terminal. */
+const sessionOn = (s, terminal) => sessionLabels(s).filter(([t]) => t === terminal).map(([, id]) => id);
 /** The run `name` was given (a helper keeps its old pane's name when hc still has it free). */
 const runNamed = (s, name) => runsOf(s).find((run) => run[run.indexOf("--name") + 1] === name);
 
@@ -1252,19 +1257,35 @@ test("#1490 launchEnvOf, seatHomeOf, launchHomeEnv, seatHomesRecorded: the searc
   assert.deepEqual(launchHomeEnv("dsh-tui", { HOME: "/h", DSH_HOME: "/d/" }), { HOME: "/h", DSH_HOME: "/d" });
   assert.equal(seatHomesRecorded([{ event: "start", env: { HOME: "/h" } }]), true);
   assert.equal(seatHomesRecorded([{ event: "start", env: { HOME: "relative" } }, { event: "session", session: SID }]), false);
+  assert.deepEqual(launchEnvOf(["codex", "exec", "env", "HOME=/x"]), {});
+  assert.deepEqual(launchEnvOf(["sh", "-c", '"$@"; exec "${SHELL:-sh}" -i', "sh", "/usr/bin/env", "HOME=/a", "codex"]), { HOME: "/a" });
+  assert.deepEqual(launchEnvOf(["env", "-u", "CODEX_HOME", "HOME=/a", "codex"]), { CODEX_HOME: null, HOME: "/a" });
+  assert.deepEqual(launchEnvOf(["env", "--unset=CODEX_HOME", "codex"]), { CODEX_HOME: null });
+  assert.deepEqual(launchEnvOf(["env", "-uCODEX_HOME", "codex"]), { CODEX_HOME: null });
+  assert.deepEqual(launchEnvOf(["env", "-i", "HOME=/a", "codex"]), { HOME: "/a", DSH_HOME: null, CODEX_HOME: null, KIMI_CODE_HOME: null });
+  assert.equal(launchEnvOf(["env", "-S", "HOME=/a codex"]), null);
+  assert.deepEqual(seatHomeOf("codex", { argv: ["env", "-u", "CODEX_HOME", "HOME=/a", "codex"], record: { env: { CODEX_HOME: "/k" } } }),
+    { home: "/a", env: { HOME: "/a" } });
+  assert.equal(seatHomeOf("codex", { argv: ["env", "-i", "codex"], record: { env: { HOME: "/r" } } }), null);
+  assert.equal(seatHomeOf("codex", { argv: ["env", "-S", "x"], record: { env: { HOME: "/r" } } }), null);
+  assert.equal(latestResumeIn("codex", "codex resume --last"), "--last");
+  assert.equal(latestResumeIn("kimi", 'exec kimi --continue "$@"'), "--continue");
+  assert.equal(latestResumeIn("kimi", "kimi"), null);
+  assert.equal(latestResumeIn("dsh-tui", "dsh-tui -c"), null);
 });
 
-test("#1490 pickSession: a live rival makes an unclaimed session born while it runs ambiguous, whatever the launch gap", () => {
+test("#1490 pickSession: an older rival far from the launch never blocks the seat's one window session (#1499); two candidates or a claimed id give nothing; the accepted residual (#1619)", () => {
   const c = (id, born) => ({ id, born });
   const T = 10_000_000;
-  // A rival live in the folder long before may start a new conversation at any time.
-  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], rivals: [{ created_ms: T - 10 * FIRST_SESSION_MS, live: true }] }), null);
-  // Whatever the launch gap: a live rival in the folder is enough.
-  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], rivals: [{ created_ms: T + 60_000, live: true }] }), null);
-  // A launch record (not a live pane) that started after the birth can't own it.
-  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], rivals: [{ created_ms: T + 60_000 }] }), SID);
-  // A claimed id is never taken, even with no rival at all.
-  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], claimed: new Set([SID]) }), null);
+  const old = { created_ms: T - 10 * FIRST_SESSION_MS };
+  const own = c(SID, T + 800), other = c(SID2, T + 20_000);
+  assert.equal(pickSession({ createdMs: T, candidates: [own], rivals: [old] }), SID);
+  assert.equal(pickSession({ createdMs: T, candidates: [own], rivals: [{ ...old, live: true }] }), SID);
+  assert.equal(pickSession({ createdMs: T, candidates: [own, other], rivals: [old] }), null);
+  assert.equal(pickSession({ createdMs: T, candidates: [own], claimed: new Set([SID]) }), null);
+  assert.equal(pickSession({ createdMs: T, candidates: [own, other], rivals: [old], claimed: new Set([SID2]) }), SID);
+  // owner-accepted (#1619); README What stays unknowable
+  assert.equal(pickSession({ createdMs: T, candidates: [other], rivals: [old] }), SID2);
 });
 
 test("#1490 a session file is read only when it is a regular file and didn't change under the read", (t) => {
@@ -1287,11 +1308,35 @@ test("#1490 a session file is read only when it is a regular file and didn't cha
   const rewritten = join(root, "rollout-c.jsonl");
   writeFileSync(rewritten, text);
   assert.equal(firstLineTrusted(rewritten, { afterOpen: () => writeFileSync(rewritten, "x\n") }), null);
+  assert.equal(firstLineTrusted(file, { afterOpen: () => {
+    const moved = `${file}.moved`;
+    renameSync(file, moved);
+    symlinkSync(moved, file);
+  } }), null);
 });
 
-test("#1490 revive: two Codex seats far apart in one folder; a later thread of one is never the other's", (t) => {
+test("#1490 a session file replaced inside the read is refused for the rest of the pass", (t) => {
+  const root = scratchRoot(t, "hb-revive-");
+  const file = join(root, "rollout.jsonl"), replacement = join(root, "replacement.jsonl");
+  writeFileSync(file, "old\n");
+  writeFileSync(replacement, "other\n");
+  const reads = passReads();
+  const read = (f) => {
+    const got = firstLineWithIdentity(f);
+    renameSync(replacement, f);
+    return got;
+  };
+  assert.equal(reads.once(file, read), "old");
+  assert.equal(reads.once(file, firstLineWithIdentity), null);
+  assert.equal(reads.once(file, firstLineWithIdentity), null);
+  reads.reset();
+  assert.equal(reads.once(file, firstLineWithIdentity), "other");
+});
+
+test("#1490 revive: two Codex seats far apart in one folder; the later seat's window holds its own thread and the older seat's /new: it takes neither (two candidates)", (t) => {
   const born = Date.now() - 3_600_000;
   const aId = v7(born + 1000, "8abc-0123456789ab");
+  const own = v7(born + 183_000, "7abc-0123456789ab");
   const newId = v7(born + 200_000, "9abc-0123456789ab"); // A's /new, born inside B's window
   const s = world(t, { file: team({ main: { agent: "codex", name: "A" }, cap: { agent: "codex", name: "B" } }),
     terminals: (p) => [
@@ -1299,6 +1344,7 @@ test("#1490 revive: two Codex seats far apart in one folder; a later thread of o
       pane("t6", { bot: ID.cap, cwd: p, created: born + 180_000, argv: ["codex"] }),
     ] });
   codexRollout(s, { id: aId, cwd: s.project, dayMs: born });
+  codexRollout(s, { id: own, cwd: s.project, dayMs: born + 183_000 });
   codexRollout(s, { id: newId, cwd: s.project, dayMs: born + 200_000 });
   const r = s.cli(["revive", "--json"]);
   assert.equal(r.code, 0, r.err);
@@ -1308,12 +1354,14 @@ test("#1490 revive: two Codex seats far apart in one folder; a later thread of o
   assert.deepEqual(sessionLabels(s).filter(([terminal]) => ["t6", "t101"].includes(terminal)), [], "B takes no id");
   assert.ok(!sessionLabels(s).some(([, id]) => id === newId), "the later thread is never recorded");
   const results = r.json().projects[0].results;
+  assert.equal(labelOf(runFor(s, ID.cap), "agent.session"), undefined);
+  assert.ok(!s.ledger().some((row) => [own, newId].includes(row.session) && ["t6", results[1].terminal].includes(row.terminal)));
   assert.deepEqual(results.map((x) => [x.name, x.outcome]), [["A", "resumed"], ["B", "fresh"]]);
   assert.match(results[1].why, /no Codex conversation of its own could be identified for t6/);
   for (const text of [r.out, r.err, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(newId), text);
 });
 
-test("#1490 revive: a rival's recorded id is never claimed by another seat", (t) => {
+test("#1490 revive: a rival's recorded id is never claimed by another seat (a near rival)", (t) => {
   const born = Date.now() - 3_600_000;
   const rivalId = v7(born + 1000, "8abc-0123456789ab");
   const s = world(t, { file: team({ main: { agent: "codex", name: "A" }, cap: { agent: "codex", name: "B" } }),
@@ -1327,6 +1375,129 @@ test("#1490 revive: a rival's recorded id is never claimed by another seat", (t)
   assert.ok(!sessionLabels(s).some(([terminal, id]) => ["t6", "t101"].includes(terminal) && id === rivalId));
   assert.ok(!wordsOf(runFor(s, ID.cap)).includes(rivalId));
   assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome]), [["A", "resumed"], ["B", "fresh"]]);
+});
+
+test("#1499 revive: an unlabelled Codex seat beside an older live Codex seat keeps its own launch-window thread", (t) => {
+  const born = Date.now() - 3_600_000;
+  const aId = v7(born + 1000), own = v7(born + 183_000, "7abc-0123456789ab");
+  const newId = v7(born + 400_000, "9abc-0123456789ab");
+  const s = world(t, { file: team({ main: { agent: "codex", name: "A" }, cap: { agent: "codex", name: "B" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], labels: { "agent.session": aId } }),
+      pane("t6", { bot: ID.cap, cwd: p, created: born + 180_000, argv: ["codex"] }),
+    ] });
+  codexRollout(s, { id: aId, cwd: s.project, dayMs: born + 1000 });
+  codexRollout(s, { id: own, cwd: s.project, dayMs: born + 183_000 });
+  codexRollout(s, { id: newId, cwd: s.project, dayMs: born + 400_000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionOn(s, "t6"), [own]);
+  const run = runFor(s, ID.cap);
+  assert.ok(hasSeq(wordsOf(run), ["resume", own]), run.join(" "));
+  const results = r.json().projects[0].results;
+  assert.deepEqual(results.map((x) => [x.name, x.outcome]), [["A", "resumed"], ["B", "resumed"]]);
+  assert.ok(s.ledger().some((row) => row.event === "session" && row.terminal === "t6" && row.session === own));
+  assert.ok(!sessionOn(s, results[1].terminal).includes(newId));
+  assert.notEqual(labelOf(run, "agent.session"), newId);
+  assert.ok(!run.some((word) => word.includes(newId)));
+  assert.ok(!s.ledger().some((row) => row.session === newId && ["t6", results[1].terminal].includes(row.terminal)));
+  for (const output of [r.out, r.err, JSON.stringify(s.lastReport())]) {
+    for (const id of [aId, own, newId]) assert.ok(!output.includes(id), output);
+  }
+});
+
+test("#1499 revive: a Kimi seat beside an older live Kimi seat keeps its session born in its window", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "kimi", name: "A" }, cap: { agent: "kimi", name: "B" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"], labels: { "agent.session": KID2 } }),
+      pane("t6", { bot: ID.cap, cwd: p, created: born + 180_000, argv: ["kimi"] }),
+    ] });
+  kimiBin(s);
+  kimiIndex(s, [{ id: KID2, at: born + 1000 }, { id: KID, at: born + 183_000 }]);
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runFor(s, ID.cap);
+  assert.ok(wordsOf(run).includes(`--session=${KID}`), run.join(" "));
+  assert.deepEqual(sessionOn(s, "t6"), [KID]);
+  assert.equal(r.json().projects[0].results[1].outcome, "resumed");
+});
+
+test("#1490 revive: an older seat's claimed thread born in the later seat's window is never taken", (t) => {
+  const born = Date.now() - 3_600_000;
+  const newId = v7(born + 183_000);
+  const s = world(t, { file: team({ main: { agent: "codex", name: "A" }, cap: { agent: "codex", name: "B" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], labels: { "agent.session": newId } }),
+      pane("t6", { bot: ID.cap, cwd: p, created: born + 180_000, argv: ["codex"] }),
+    ] });
+  codexRollout(s, { id: newId, cwd: s.project, dayMs: born + 183_000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.ok(hasSeq(wordsOf(runFor(s, ID.main)), ["resume", newId]));
+  const results = r.json().projects[0].results;
+  assert.deepEqual(results.map((x) => [x.name, x.outcome]), [["A", "resumed"], ["B", "fresh"]]);
+  assert.match(results[1].why, /no Codex conversation of its own could be identified for t6/);
+  assert.deepEqual(sessionOn(s, "t6"), []);
+  const run = runFor(s, ID.cap);
+  assert.ok(!wordsOf(run).includes(newId), run.join(" "));
+  assert.equal(labelOf(run, "agent.session"), undefined);
+  assert.ok(!s.ledger().some((row) => row.session === newId && ["t6", results[1].terminal].includes(row.terminal)));
+});
+
+test("#1490 revive: with an older seat's claimed thread beside its own, the seat resumes its own; a pane started after that birth can't own it", (t) => {
+  const born = Date.now() - 3_600_000;
+  const newId = v7(born + 183_000), own = v7(born + 182_000, "7abc-0123456789ab");
+  const s = world(t, { file: team({ main: { agent: "codex", name: "A" }, cap: { agent: "codex", name: "B" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], labels: { "agent.session": newId } }),
+      pane("t6", { bot: ID.cap, cwd: p, created: born + 180_000, argv: ["codex"] }),
+      pane("t7", { cwd: p, created: born + 300_000, front: ["codex"], argv: ["codex"] }),
+    ] });
+  codexRollout(s, { id: newId, cwd: s.project, dayMs: born + 183_000 });
+  codexRollout(s, { id: own, cwd: s.project, dayMs: born + 182_000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const b = r.json().projects[0].results[1];
+  const run = runFor(s, ID.cap);
+  assert.ok(hasSeq(wordsOf(run), ["resume", own]), run.join(" "));
+  assert.ok(labelOf(run, "agent.session") === own || sessionOn(s, b.terminal).includes(own));
+  assert.ok(s.ledger().some((row) => row.event === "session" && row.session === own && ["t6", b.terminal].includes(row.terminal)));
+  assert.equal(b.outcome, "resumed");
+});
+
+test("#1490 revive: an id another live pane's label holds is never taken, whatever folder or agent that pane shows", (t) => {
+  const born = Date.now() - 3_600_000;
+  const own = v7(born + 2000);
+  const s = world(t, { file: team({ main: { agent: "codex", name: "B" } }),
+    terminals: (p, { root }) => [
+      pane("t6", { bot: ID.main, cwd: p, created: born, argv: ["codex"] }),
+      pane("t7", { cwd: join(root, "elsewhere"), created: born, front: ["claude"], argv: ["claude"], labels: { "agent.session": own } }),
+    ] });
+  codexRollout(s, { id: own, cwd: s.project, dayMs: born + 2000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().projects[0].results[0].outcome, "fresh");
+  assert.deepEqual(sessionOn(s, "t6"), []);
+  assert.ok(!runFor(s, ID.main).some((word) => word.includes(own)));
+});
+
+test("#1490 revive: a live pane hc can't read, or reads incompletely, leaves ownership unresolved", (t) => {
+  const born = Date.now() - 3_600_000;
+  const own = v7(born + 2000);
+  for (const hcExtra of [{ failGet: ["t7"], failGetExit: 3 }, { failGet: ["t7"] }, { getReply: { t7: { address: "t7" } } }]) {
+    const s = world(t, { file: team({ main: { agent: "codex", name: "B" } }), hcExtra,
+      terminals: (p) => [
+        pane("t6", { bot: ID.main, cwd: p, created: born, argv: ["codex"] }),
+        pane("t7", { cwd: p, created: born, front: ["zsh"], argv: ["zsh"] }),
+      ] });
+    codexRollout(s, { id: own, cwd: s.project, dayMs: born + 2000 });
+    const r = s.cli(["revive", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(sessionOn(s, "t6"), [], JSON.stringify(hcExtra));
+    assert.ok(!runFor(s, ID.main).some((word) => word.includes(own)), JSON.stringify(hcExtra));
+    assert.equal(r.json().projects[0].results[0].outcome, "fresh", JSON.stringify(hcExtra));
+  }
 });
 
 test("#1490 revive --tree: a Codex and a Kimi helper with no recorded id start fresh, never the folder's latest; a manual restart keeps its fallback", (t) => {
@@ -1362,6 +1533,115 @@ test("#1490 revive --tree: a Codex and a Kimi helper with no recorded id start f
   assert.equal(mr.code, 0, mr.err + mr.out);
   const manualRun = runNamed(m, "t8");
   assert.ok(manualRun && hasSeq(wordsOf(manualRun), ["resume", "--last"]), manualRun?.join(" "));
+});
+
+test("#1490 revive --tree: a helper's launch home comes only from its own launch's worker row, never a reused terminal's", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "claude", name: "Lead" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, labels: { "agent.session": SID } }),
+      pane("t8", { cwd: p, created: born + 1000, parent: "t5", front: ["codex"], argv: ["codex"], status: "idle", noHome: true,
+        labels: { "worker.of": ID.main, "worker.role": "dev" } }),
+    ] });
+  const decoy = join(s.root, "decoy-home"), codexHome = join(decoy, ".codex");
+  const old = born - 500_000;
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "worker", terminal: "t8", botId: ID.main,
+    project: s.project, worktree: s.project, agent: "codex", core: CORE, created_ms: old,
+    at: new Date(old).toISOString(), env: { HOME: decoy, CODEX_HOME: codexHome } })}\n`, { mode: 0o600 });
+  const id = v7(born + 2000);
+  codexRollout(s, { id, cwd: s.project, dayMs: born + 2000, codexHome });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const helper = r.json().projects[0].results[0].helpers[0];
+  assert.equal(helper.outcome, "fresh");
+  assert.match(helper.why, /no Codex conversation of its own could be identified for t8/);
+  const run = runNamed(s, "t8");
+  assert.ok(!wordsOf(run).some((word) => word === `HOME=${decoy}` || word.startsWith("CODEX_HOME=") || word.includes(id)), run.join(" "));
+  const newTerminal = s.hcState().terminals.find((pane) => pane.name === "t8" && pane.state === "live").address;
+  const start = s.ledger().find((row) => row.event === "start" && row.kind === "worker" && row.terminal === newTerminal);
+  assert.ok(start);
+  assert.equal(Object.hasOwn(start, "env"), false);
+});
+
+test("#1490 revive --tree: a helper whose own command names its latest flag isn't started; one that doesn't runs as written", (t) => {
+  const born = Date.now() - 3_600_000;
+  const fixture = { file: team({ main: { agent: "claude", name: "Lead" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, labels: { "agent.session": SID }, status: "idle" }),
+      pane("t8", { cwd: p, created: born + 1000, parent: "t5", front: ["zsh"], argv: ["sh", "-c", "kimi --continue"], status: "idle" }),
+      pane("t9", { cwd: p, created: born + 2000, parent: "t5", front: ["zsh"], argv: ["sh", "-c", "kimi"], status: "idle" }),
+      pane("t10", { cwd: p, created: born + 3000, parent: "t5", front: ["zsh"], argv: ["sh", "-c", "codex resume --last"], status: "idle",
+        labels: { "worker.of": ID.main, "worker.role": "dev", "worker.template": "tpl" } }),
+    ] };
+  const s = world(t, fixture);
+  kimiBin(s);
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 1, r.err + r.out);
+  const helpers = r.json().projects[0].results[0].helpers;
+  const [held, fresh, template] = ["t8", "t9", "t10"].map((name) => helpers.find((h) => h.name === name));
+  assert.equal(runNamed(s, "t8"), undefined);
+  assert.equal(held.outcome, "failed");
+  assert.match(held.why, /names --continue, which resumes its folder's latest Kimi conversation/);
+  const hand = s.lastReport().projects[0].results[0].helpers.find((h) => h.name === "t8").by_hand;
+  assert.match(hand, /^hc run .* -- \S*env PATH=\S+ sh -c 'kimi --continue'$/);
+  assert.ok(hasSeq(wordsOf(runNamed(s, "t9")), ["sh", "-c", "kimi"]));
+  assert.equal(fresh.outcome, "fresh");
+  assert.equal(runNamed(s, "t10"), undefined);
+  assert.equal(template.outcome, "failed");
+
+  const manual = world(t, fixture);
+  kimiBin(manual);
+  const restarted = manual.cli(["restart", "Lead", "--tree", "--json"]);
+  const run = runNamed(manual, "t8");
+  assert.ok(run && hasSeq(wordsOf(run), ["sh", "-c", "kimi --continue"]), restarted.err + restarted.out);
+});
+
+test("#1490 legacy inputs: dev's pre-#1490 inputs (the reviving process's home, no recorded home) start new once, said", (t) => {
+  const born = Date.now() - 3_600_000;
+  const dsh = world(t, { file: team({ main: { agent: "dsh-tui" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["dsh-tui"], noHome: true })] });
+  const dshHome = join(dsh.root, "dsh-home");
+  dshSessions(dsh, [[SID, born + 5000]], dshHome);
+  const dr = dsh.cli(["revive", "--json"], { env: { DSH_HOME: dshHome } });
+  assert.equal(dr.code, 0, dr.err);
+  assert.deepEqual(sessionLabels(dsh), []);
+  assert.equal(labelOf(runFor(dsh, ID.main), "agent.session"), undefined);
+  const dshResult = dr.json().projects[0].results[0];
+  assert.equal(dshResult.outcome, "fresh");
+  assert.ok(dshResult.why);
+
+  const codex = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    attach: () => [{ bot: ID.main, terminal: "t5", created_ms: born }] });
+  writeFileSync(ledgerPath(codex.app), `${JSON.stringify({ event: "start", kind: "seat", terminal: "t5", botId: ID.main,
+    project: codex.project, worktree: codex.project, agent: "codex", core: CORE, created_ms: born,
+    at: new Date(born).toISOString() })}\n`, { mode: 0o600 });
+  const codexHome = join(codex.root, "codex-home");
+  codexRollout(codex, { id: v7(born + 5000), cwd: codex.project, codexHome });
+  const cr = codex.cli(["revive", "--json"], { env: { CODEX_HOME: codexHome } });
+  assert.equal(cr.code, 0, cr.err);
+  const run = runFor(codex, ID.main);
+  assert.ok(!wordsOf(run).includes("resume"), run.join(" "));
+  const codexResult = cr.json().projects[0].results[0];
+  assert.equal(codexResult.outcome, "fresh");
+  assert.match(codexResult.why, /no conversation of its own was on record/);
+});
+
+test("#1490 revive: a Codex seat the pack started records its home in its seat row, and revive searches there", (t) => {
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }) });
+  const start = s.cli(["start", "Lead", "--json"]);
+  assert.equal(start.code, 0, start.err);
+  const seat = s.ledger().find((row) => row.event === "start" && row.kind === "seat" && row.botId === ID.main);
+  assert.deepEqual(seat.env, { HOME: s.env.HOME });
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === seat.terminal).foreground.argv = ["zsh"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const born = seat.created_ms + 2000;
+  const own = v7(born);
+  codexRollout(s, { id: own, cwd: s.project, dayMs: born });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s).filter((call) => labelOf(call, "bot") === ID.main).at(-1);
+  assert.ok(hasSeq(wordsOf(run), ["resume", own]), run.join(" "));
 });
 
 test("#1490 revive: the search root is the seat's own recorded launch, not the reviving process's; an unknown home fails closed", (t) => {

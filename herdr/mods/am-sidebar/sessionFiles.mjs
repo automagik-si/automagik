@@ -2,7 +2,7 @@
 // without following a symlink, without trusting a file that was swapped under the read, and
 // within a byte cap. A read that can't prove what it read fails closed (null). Pure Node: the
 // CLI passes the caps; the tests drive `afterOpen` to swap a file under a read.
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 
 /** A file identity that names one file: its device and inode (the path's or an open handle's). */
 export const identityOf = (st) => (st && Number.isSafeInteger(st.dev) && Number.isSafeInteger(st.ino) ? `${st.dev}:${st.ino}` : null);
@@ -21,7 +21,7 @@ export function regularIdentity(file) {
  */
 function openProven(file) {
   let before = null;
-  try { before = statSync(file); } catch { return null; }
+  try { before = lstatSync(file); } catch { return null; }
   if (!before.isFile()) return null;
   let fd = null;
   try {
@@ -40,13 +40,13 @@ function openProven(file) {
  * The handle still runs the file the path names: read the caller's bytes first, then this. A
  * file that shrank under the read (a rewrite) or whose path now names another file (a
  * rename-over) is refused; an append is fine, since the bytes already read didn't change. The
- * path is followed: a symlink was already refused at the open (O_NOFOLLOW).
+ * path is checked without following it, so a symlink put in its place is refused.
  */
 function stillTheSame(file, fd, opened) {
   try {
     const after = fstatSync(fd);
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size < opened.size) return false;
-    const now = statSync(file);
+    const now = lstatSync(file);
     return now.isFile() && now.dev === opened.dev && now.ino === opened.ino;
   } catch { return false; }
 }
@@ -55,7 +55,7 @@ const CHUNK = 64 * 1024;
 
 /**
  * Read at most `maxBytes` from a proven regular file and call `stillTheSame` on the way out.
- * Resolves { bytes, size, complete } where `complete` says the read reached the end; null when
+ * Returns { bytes, size, complete, identity } where `complete` says the read reached the end; null when
  * the read can't be trusted (or `afterOpen` threw). `afterOpen(file)` runs after the open is
  * proven and before any byte is read: the test seam for a file swapped under a read.
  */
@@ -77,7 +77,7 @@ function readProven(file, { maxBytes, afterOpen = null }) {
       if (used >= maxBytes && opened.size > maxBytes) complete = false;
     }
     if (!stillTheSame(file, fd, opened)) return null;
-    return { bytes: Buffer.concat(chunks), size: opened.size, complete };
+    return { bytes: Buffer.concat(chunks), size: opened.size, complete, identity: identityOf(opened) };
   } finally {
     try { closeSync(fd); } catch { /* already closed */ }
   }
@@ -86,23 +86,51 @@ function readProven(file, { maxBytes, afterOpen = null }) {
 /**
  * A rollout's first line, at most `maxBytes` (1 MiB by default); null when unreadable, swapped
  * under the read, a symlink, not a regular file, or a first line longer than the cap. A file
- * larger than the cap with a shorter first line is fine: only the line is read.
+ * larger than the cap with a shorter first line is fine. Returns the line and the read handle's identity.
  */
-export function firstLine(file, { maxBytes = 1024 * 1024, afterOpen = null } = {}) {
+export function firstLineWithIdentity(file, { maxBytes = 1024 * 1024, afterOpen = null } = {}) {
   const got = readProven(file, { maxBytes: maxBytes + 1, afterOpen });
   if (!got) return null;
   const end = got.bytes.indexOf(10);
-  if (end >= 0) return got.bytes.subarray(0, end).toString("utf8");
-  if (!got.complete) return null; // no newline inside the cap: the first line is oversized
-  return got.bytes.toString("utf8");
+  if (end < 0 && !got.complete) return null; // no newline inside the cap: the first line is oversized
+  const bytes = end >= 0 ? got.bytes.subarray(0, end) : got.bytes;
+  return { value: bytes.toString("utf8"), identity: got.identity };
+}
+
+export function firstLine(file, opts) {
+  return firstLineWithIdentity(file, opts)?.value ?? null;
 }
 
 /**
  * A whole text file, at most `maxBytes`; null when unreadable, swapped under the read, a
- * symlink, not a regular file, or larger than the cap.
+ * symlink, not a regular file, or larger than the cap. Returns the text and the read handle's identity.
  */
-export function wholeText(file, { maxBytes = 16 * 1024 * 1024, afterOpen = null } = {}) {
+export function wholeTextWithIdentity(file, { maxBytes = 16 * 1024 * 1024, afterOpen = null } = {}) {
   const got = readProven(file, { maxBytes, afterOpen });
   if (!got || !got.complete || got.size > maxBytes) return null;
-  return got.bytes.toString("utf8");
+  return { value: got.bytes.toString("utf8"), identity: got.identity };
+}
+
+export function wholeText(file, opts) {
+  return wholeTextWithIdentity(file, opts)?.value ?? null;
+}
+
+/** A session file read once per pass. A replaced file is refused until the next pass. */
+export function passReads() {
+  const reads = new Map();
+  return {
+    reset() { reads.clear(); },
+    once(key, read) {
+      if (!reads.has(key)) {
+        const got = read(key);
+        const hit = got?.identity ? { value: got.value, identity: got.identity } : null;
+        reads.set(key, hit);
+        return hit?.value ?? null;
+      }
+      const hit = reads.get(key);
+      if (hit && regularIdentity(key) === hit.identity) return hit.value;
+      reads.set(key, null);
+      return null;
+    },
+  };
 }

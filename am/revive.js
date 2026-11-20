@@ -151,14 +151,12 @@ export const FIRST_SESSION_MS = 120_000;
  * Desktop), so only the pane's first conversation is ever taken, and only when nothing else
  * could be it. `candidates`: that agent's sessions in the pane's folder, [{ id, born }] (ms);
  * `claimed`: the ids another terminal's label or ledger row holds; `rivals`: the other panes and
- * launches of that agent in that folder (hc's live panes, `live: true`, and the ledger's
- * launches not known to have ended before this one), [{ created_ms, live }].
+ * launches of that agent in that folder (hc's live panes, and the ledger's launches not known to
+ * have ended before this one), [{ created_ms }].
  * The pick: the one session born between the pane's start and FIRST_SESSION_MS after it. Two
  * born then, none, or a rival that started between FIRST_SESSION_MS before the pane and that
  * birth (or at a time not known): null. A session born later (a new conversation started inside
- * the pane, or anyone's) is never taken. A live rival is stronger (#1490): it may start a new
- * conversation at any time, so an unclaimed session in the folder is ambiguous whenever one is
- * live, whatever the launch gap.
+ * the pane, or anyone's) is never taken.
  */
 export function pickSession({ createdMs, candidates = [], claimed = new Set(), rivals = [] }) {
   if (!Number.isSafeInteger(createdMs)) return null;
@@ -166,86 +164,10 @@ export function pickSession({ createdMs, candidates = [], claimed = new Set(), r
     && c.born >= createdMs - BORN_SLACK_MS && c.born <= createdMs + FIRST_SESSION_MS);
   if (mine.length !== 1) return null;
   const first = mine[0];
-  const ambiguous = rivals.some((r) => {
-    // A live pane of the agent in the folder may start a new conversation at any time, whatever
-    // the launch gap: an unclaimed session born while one runs can't be proven this pane's.
-    if (r?.live === true) return true;
-    // A launch record that started after the session was born can't own it: its process wasn't there.
-    if (Number.isSafeInteger(r?.created_ms) && r.created_ms > first.born + BORN_SLACK_MS) return false;
-    return !Number.isSafeInteger(r?.created_ms)
-      || (r.created_ms >= createdMs - FIRST_SESSION_MS && r.created_ms <= first.born + BORN_SLACK_MS);
-  });
-  return ambiguous ? null : first.id;
+  const near = rivals.some((r) => !Number.isSafeInteger(r?.created_ms)
+    || (r.created_ms >= createdMs - FIRST_SESSION_MS && r.created_ms <= first.born + BORN_SLACK_MS));
+  return near ? null : first.id;
 }
-
-// ---- the home a seat's own launch names ----
-
-/** The variable each agent's disk search may take instead of the person's home (Antigravity's history lives under it). */
-export const SEAT_HOME_VARS = Object.freeze({ "dsh-tui": "DSH_HOME", antigravity: null, codex: "CODEX_HOME", kimi: "KIMI_CODE_HOME" });
-const HOME_KEYS = ["HOME", "DSH_HOME", "CODEX_HOME", "KIMI_CODE_HOME"];
-/** An absolute folder env value, its trailing slashes dropped, or null. */
-const absoluteDir = (v) => {
-  if (typeof v !== "string" || !v.startsWith("/")) return null;
-  return v.length > 1 ? v.replace(/\/+$/, "") || "/" : v;
-};
-
-/**
- * The HOME/DSH_HOME/CODEX_HOME/KIMI_CODE_HOME a launch argv's leading `env [-u NAME…] K=V…`
- * names: the seat's recorded launch environment (#1490). Only the prefix before the program is
- * read; any other env option leaves it unread. Keys absent from the launch are absent here.
- */
-export function launchEnvOf(argv) {
-  const words = Array.isArray(argv) ? argv : [];
-  const at = words.findIndex((w) => base(w) === "env");
-  if (at < 0) return {};
-  let i = at + 1;
-  for (;;) {
-    const w = words[i];
-    if (w === "-u" || w === "--unset") i += 2;
-    else if (w === "-i" || w === "-" || w === "--ignore-environment" || /^(-u.|--unset=)/.test(w ?? "")) i += 1;
-    else break;
-  }
-  const out = {};
-  for (; i < words.length; i += 1) {
-    const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(typeof words[i] === "string" ? words[i] : "");
-    if (!m) break;
-    if (HOME_KEYS.includes(m[1])) out[m[1]] = m[2];
-  }
-  return out;
-}
-
-/** The home variables a launch of `agentKey` records, from `env` (the launching environment): absolute ones only. */
-export function launchHomeEnv(agentKey, env = {}) {
-  const out = {};
-  const home = absoluteDir(env.HOME);
-  if (home) out.HOME = home;
-  const key = SEAT_HOME_VARS[agentKey];
-  const own = key ? absoluteDir(env[key]) : null;
-  if (own) out[key] = own;
-  return out;
-}
-
-/**
- * The search root a seat's own launch names, for `agentKey`, or null: { home, env } where `home`
- * is the person's home (for Antigravity and every default) and `env` the agent's recorded
- * override. `argv`: the pane's launch argv (hc get's, the `env` prefix read); `record`: its
- * workers-ledger start row (the launch record a gone pane has left). The argv's own words win
- * over the row's. A home the launch doesn't name is unknown: never the reviving process's
- * (#1490), and the search then fails closed.
- */
-export function seatHomeOf(agentKey, { argv = null, record = null } = {}) {
-  const recorded = record?.env && typeof record.env === "object" && !Array.isArray(record.env) ? record.env : {};
-  const merged = { ...recorded, ...launchEnvOf(argv) };
-  const home = absoluteDir(merged.HOME);
-  const key = SEAT_HOME_VARS[agentKey];
-  const own = key ? absoluteDir(merged[key]) : null;
-  if (!home && !own) return null;
-  return { home: home ?? own, env: { ...(home ? { HOME: home } : {}), ...(own ? { [key]: own } : {}) } };
-}
-
-/** Whether any start row records a seat's launch home (#1490): with none, there is nothing a search could trust. */
-export const seatHomesRecorded = (rows) => (rows ?? []).some((r) => r?.event === "start"
-  && r.env && typeof r.env === "object" && HOME_KEYS.some((k) => absoluteDir(r.env[k])));
 
 /**
  * pickSession's `rivals` and `claimed` from the workers ledger's rows, for the launch on
@@ -270,6 +192,97 @@ export function ledgerRivals(rows, { terminal, createdMs, agentKey, folders }) {
     rivals.push({ terminal: r.terminal, created_ms: Number.isSafeInteger(r.created_ms) ? r.created_ms : null });
   }
   return { rivals, claimed };
+}
+
+// ---- the home a seat's own launch names ----
+
+/** The variable each agent's disk search may take instead of the person's home (Antigravity's history lives under it). */
+export const SEAT_HOME_VARS = Object.freeze({ "dsh-tui": "DSH_HOME", antigravity: null, codex: "CODEX_HOME", kimi: "KIMI_CODE_HOME" });
+const HOME_KEYS = ["HOME", "DSH_HOME", "CODEX_HOME", "KIMI_CODE_HOME"];
+/** An absolute folder env value, its trailing slashes dropped, or null. */
+const absoluteDir = (v) => {
+  if (typeof v !== "string" || !v.startsWith("/")) return null;
+  return v.length > 1 ? v.replace(/\/+$/, "") || "/" : v;
+};
+
+/**
+ * The home variables named by the effective launch prefix (#1490). A null value means the
+ * launch unset that key; a null result means the prefix is unreadable.
+ */
+export function launchEnvOf(argv) {
+  const words = unwrapKeep(Array.isArray(argv) ? argv : []);
+  if (base(words[0]) !== "env") return {};
+  const out = {};
+  let i = 1;
+  for (; i < words.length; i += 1) {
+    const w = words[i];
+    if (typeof w !== "string" || !w.startsWith("-")) break;
+    if (w === "--") { i += 1; break; }
+    if (w === "-i" || w === "-" || w === "--ignore-environment") {
+      for (const key of HOME_KEYS) out[key] = null;
+      continue;
+    }
+    let key;
+    if (w === "-u" || w === "--unset") {
+      key = words[++i];
+      if (typeof key !== "string") return null;
+    } else if (w.startsWith("-u")) key = w.slice(2);
+    else if (w.startsWith("--unset=")) key = w.slice(8);
+    else return null;
+    if (HOME_KEYS.includes(key)) out[key] = null;
+  }
+  for (; i < words.length; i += 1) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(typeof words[i] === "string" ? words[i] : "");
+    if (!m) break;
+    if (HOME_KEYS.includes(m[1])) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+/** The home variables a launch of `agentKey` records, from `env` (the launching environment): absolute ones only. */
+export function launchHomeEnv(agentKey, env = {}) {
+  const out = {};
+  const home = absoluteDir(env.HOME);
+  if (home) out.HOME = home;
+  const key = SEAT_HOME_VARS[agentKey];
+  const own = key ? absoluteDir(env[key]) : null;
+  if (own) out[key] = own;
+  return out;
+}
+
+/**
+ * The search root a seat's own launch names, for `agentKey`, or null: { home, env } where `home`
+ * is the person's home (for Antigravity and every default) and `env` the agent's recorded
+ * override. `argv`: the pane's launch argv (hc get's, the `env` prefix read); `record`: its
+ * workers-ledger start row. The argv's assignments and unsets win over the row's. An unreadable
+ * prefix or a launch that names no home leaves the search with no root (#1490).
+ */
+export function seatHomeOf(agentKey, { argv = null, record = null } = {}) {
+  const recorded = record?.env && typeof record.env === "object" && !Array.isArray(record.env) ? record.env : {};
+  const launch = launchEnvOf(argv);
+  if (launch === null) return null;
+  const merged = { ...recorded, ...launch };
+  const home = absoluteDir(merged.HOME);
+  const key = SEAT_HOME_VARS[agentKey];
+  const own = key ? absoluteDir(merged[key]) : null;
+  if (!home && !own) return null;
+  return { home: home ?? own, env: { ...(home ? { HOME: home } : {}), ...(own ? { [key]: own } : {}) } };
+}
+
+/** Whether any start row records a seat's launch home (#1490): with none, there is nothing a search could trust. */
+export const seatHomesRecorded = (rows) => (rows ?? []).some((r) => r?.event === "start"
+  && r.env && typeof r.env === "object" && HOME_KEYS.some((k) => absoluteDir(r.env[k])));
+
+/**
+ * A latest-conversation flag in a helper's shell command, or null. This textual check is
+ * deliberately broad: a hit like Kimi's line containing bash -c leaves the helper unstarted
+ * with its by-hand line. Revive never resumes a guessed conversation.
+ */
+export function latestResumeIn(agentKey, shell) {
+  const tokens = String(shell).replace(/['"\\]/g, " ").split(/[\s;&|()<>`$]+/).filter(Boolean);
+  if (agentKey === "codex" && tokens.includes("--last")) return "--last";
+  if (agentKey === "kimi") return ["--continue", "-c"].find((flag) => tokens.includes(flag)) ?? null;
+  return null;
 }
 
 // ---- who comes back ----
@@ -355,7 +368,7 @@ const list = (items) => items.join("; ");
 /**
  * The one report a project's main bot gets, one line (hc send types it as one message):
  * `results`: [{ name, bot, outcome: "resumed" | "fresh" | "failed" | "skipped", why, terminal,
- * helpers: [{ name, outcome, why }] }]. Null when nothing came back and nothing failed.
+ * helpers: [{ name, outcome, why, by_hand }] }]. Null when nothing came back and nothing failed.
  */
 export function reportLine(project, results) {
   const of = (o) => results.filter((r) => r.outcome === o);
@@ -369,7 +382,8 @@ export function reportLine(project, results) {
   const helped = (o) => helpers.filter((h) => h.outcome === o);
   if (helped("resumed").length) parts.push(`Helpers resumed: ${list(helped("resumed").map((h) => `${h.name} (under ${h.of})`))}.`);
   if (helped("fresh").length) parts.push(`Helpers on a new conversation: ${list(helped("fresh").map((h) => `${h.name} (under ${h.of}), ${h.why ?? "no reason given"}`))}.`);
-  if (helped("failed").length) parts.push(`Helpers not back: ${list(helped("failed").map((h) => `${h.name} (under ${h.of}), ${h.why ?? "no reason given"}`))}.`);
+  if (helped("failed").length) parts.push(`Helpers not back: ${list(helped("failed").map((h) => `${h.name} (under ${h.of}), ${h.why ?? "no reason given"}`
+    + (h.by_hand ? `; by hand: ${h.by_hand}` : "")))}.`);
   if (failed.length) {
     parts.push(`Not back: ${list(failed.map((r) => `${r.name}, ${r.why ?? "no reason given"}; by hand: ${byHandCommand(r.bot, project)}`))}.`);
   }

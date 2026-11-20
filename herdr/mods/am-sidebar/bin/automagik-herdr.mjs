@@ -46,8 +46,8 @@ import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchEnvOf, launchHomeEnv, launchdNotLoaded, ledgerRivals,
-  lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
-import { firstLine as rolloutFirstLine, regularIdentity, wholeText } from "../sessionFiles.mjs";
+  lastText, latestResumeIn, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
+import { firstLineWithIdentity, passReads, wholeTextWithIdentity } from "../sessionFiles.mjs";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -5000,11 +5000,11 @@ const sessionsOnDisk = () => existsSync(join(dshHomeOf(home(), process.env), "se
   || existsSync(codexSessionsDir(codexHomeOf(home(), process.env))) || existsSync(kimiIndexPath(kimiHomeOf(home(), process.env)));
 
 // One read per path per pass (recordSessions, or one restart and its helpers), and only while
-// the path still names the file that was read: a file replaced mid-pass isn't trusted (#1490).
-const sessionDiscovery = new Map();
+// the path still names the file that was read: a replacement is refused for the rest of the pass (#1490).
+const sessionReads = passReads();
 const sessionListings = new Map();
 function resetSessionDiscovery() {
-  sessionDiscovery.clear();
+  sessionReads.reset();
   sessionListings.clear();
 }
 /** A folder listing once per pass; a listing that can't be read is null, and the caller fails closed. */
@@ -5012,22 +5012,6 @@ function onceListing(key, read) {
   if (!sessionListings.has(key)) sessionListings.set(key, read());
   return sessionListings.get(key);
 }
-/**
- * A file read once per pass, trusted only while the path still names the same regular file: a
- * rollout or index replaced mid-pass is read again (and refused if it can't be trusted).
- */
-function onceFile(key, read) {
-  const hit = sessionDiscovery.get(key);
-  if (hit) {
-    if (regularIdentity(key) === hit.identity) return hit.value;
-    sessionDiscovery.delete(key);
-    return null;
-  }
-  const value = read();
-  sessionDiscovery.set(key, { value, identity: regularIdentity(key) });
-  return value;
-}
-
 /** Codex's existing YYYY/MM/DD folders, or null when their listing can't be read. */
 function codexFolders(dir) {
   return onceListing(dir, () => {
@@ -5049,20 +5033,18 @@ function codexFolders(dir) {
 }
 
 /** A rollout's first line, at most 1 MiB; null when unreadable, oversized, a symlink or swapped under the read. */
-function codexFirstLine(file) {
-  return onceFile(file, () => rolloutFirstLine(file));
-}
+const codexFirstLine = (file) => sessionReads.once(file, (f) => firstLineWithIdentity(f));
 
 /** Kimi's whole index, at most 16 MiB; null when unreadable, larger, a symlink or swapped under the read. */
-function kimiIndexText(file) {
-  return onceFile(file, () => wholeText(file));
-}
+const kimiIndexText = (file) => sessionReads.once(file, (f) => wholeTextWithIdentity(f));
 
-/** hc's live panes on this computer, as hc get answers them ([] when hc can't say): discoveredSession's rivals come from them. */
+/** hc's live panes on this computer, or null when hc can't list them or can't read one of them. */
 async function livePanes() {
   try {
     const rows = rowsOf(await hcJson(["ls"])).filter((r) => local(r?.address) && r.state === "live");
-    return (await Promise.all(rows.map((r) => hcGet(r.address).catch(() => null)))).filter(Boolean);
+    const panes = await Promise.all(rows.map((r) => hcLookup(r.address, { strictNotFound: true })));
+    if (panes.some((p) => p !== null && (typeof p.address !== "string" || !p.address || typeof p.state !== "string"))) return null;
+    return panes.filter((p) => p?.state === "live");
   } catch { return null; }
 }
 
@@ -5072,12 +5054,13 @@ async function livePanes() {
  * folders, Antigravity's prompt history, Codex's session_meta first line, or Kimi's index.
  * Only ids, folders and times are read. revive.js pickSession decides, right or nothing;
  * `ledger`: the workers ledger's rows (the other launches there, and the ids already tied to one);
+ * `panes`: claims come from every other live pane, and rivals are that agent in that folder;
  * `seat`: the search root the pane's own launch names (revive.js seatHomeOf: { home, env }), and
  * with none nothing is searched at all: never the reviving process's home (#1490). Null when
  * there is none, or it can't be told from another pane's. The id is held: never printed.
  */
 function discoveredSession(agentKey, get, ledger, panes, seat) {
-  // `panes` (livePanes): null when hc couldn't list them, and then nothing is picked.
+  // `panes` (livePanes): null when hc couldn't list or read them, and then nothing is picked.
   if (!discoversSession(agentKey) || !seat || !Number.isSafeInteger(get?.created_ms) || !Array.isArray(panes)) return null;
   const cwd = get.cwd ?? get.foreground?.cwd ?? null;
   if (typeof cwd !== "string" || !cwd.startsWith("/")) return null;
@@ -5146,16 +5129,16 @@ function discoveredSession(agentKey, get, ledger, panes, seat) {
     }
   } catch { return null; }
   const { rivals, claimed } = ledgerRivals(ledger, { terminal: get.address, createdMs: get.created_ms, agentKey, folders });
-  // Every other live pane on that agent in the folder is a rival too, whoever started it (as
-  // sharersOf counts them): by the program in front, or its launch command (a bare shell hc kept).
-  // A live rival makes an unclaimed session born while it runs ambiguous (#1490).
+  // Every other live pane can claim an id. Only panes of this agent in the folder are rivals,
+  // by the program in front or the launch command of a bare shell hc kept.
   const agents = agentTable();
   const inFolder = (d) => typeof d === "string" && d !== "" && (folders.includes(d) || folders.includes(realDir(d) ?? d));
   for (const p of panes) {
-    if (p.address === get.address || !(inFolder(p.cwd) || inFolder(p.foreground?.cwd))) continue;
-    if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey && agentKeyOfArgv(paneCommand(p)?.argv, agents) !== agentKey) continue;
-    rivals.push({ terminal: p.address, created_ms: Number.isSafeInteger(p.created_ms) ? p.created_ms : null, live: true });
+    if (p.address === get.address) continue;
     for (const k of [SESSION_LABEL, "revive.session"]) if (typeof p.labels?.[k] === "string" && p.labels[k]) claimed.add(p.labels[k]);
+    if (!(inFolder(p.cwd) || inFolder(p.foreground?.cwd))) continue;
+    if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey && agentKeyOfArgv(paneCommand(p)?.argv, agents) !== agentKey) continue;
+    rivals.push({ terminal: p.address, created_ms: Number.isSafeInteger(p.created_ms) ? p.created_ms : null });
   }
   const id = sessionFor(agentKey, pickSession({ createdMs: get.created_ms, candidates, claimed, rivals }));
   return id ? holdId(id) : null;
@@ -5428,8 +5411,9 @@ function helperCommand(p, warn = () => {}) {
  * a child of `parent` (the bot's new pane), in its folder, with its name and labels, its command
  * resumed and a seat's PATH, and waited on as the bot's was. A worker's ledger row is copied to
  * its new terminal. A helper that is itself a bot (`binding`) has its binding moved to it
- * (attachMoved) and a seat row. One that fails is reported with the hc run line that resumes it
- * by hand (`by_hand`), and the rest go on. `say` takes the warnings. Resolves [{ name,
+ * (attachMoved) and a seat row. A revive hold leaves the helper down after its old pane ended.
+ * A held helper or one that fails is reported with its hc run line (`by_hand`), and the rest
+ * go on. `say` takes the warnings. Resolves [{ name,
  * replaced, terminal, bot, agent, mode, session, up, note, error, by_hand, still_running }].
  */
 async function rerunHelpers(plans, parent, say) {
@@ -5461,6 +5445,7 @@ async function rerunHelpers(plans, parent, say) {
         : `${who} wasn't run again: ${end.why}; with it possibly running, a second copy would share its session. Check it with hc get ${p.replaced}.`);
       continue;
     }
+    if (p.hold) { failed(p.hold); continue; }
     const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
     const name = p.name && !taken.has(p.name) ? p.name : null;
     const loginWarnings = [];
@@ -5581,8 +5566,10 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
   const planOf = (h, fresh = null) => {
     const worker = workerRowOf(ledger, h.address);
     // #939, revive only: a helper hc kept as a bare shell names its agent by its launch command.
+    const launch = revive && isBareShell(h) ? paneCommand(h) : null;
+    const shellAgent = launch?.shell ? templateAgent(launch.shell, agents) : null;
     const agentKey = agentKeyOfArgv(h.foreground?.argv, agents) ?? worker?.agent
-      ?? (revive && isBareShell(h) ? agentKeyOfArgv(paneCommand(h)?.argv, agents) : null) ?? null;
+      ?? agentKeyOfArgv(launch?.argv, agents) ?? (shellAgent === "codex" || shellAgent === "kimi" ? shellAgent : null);
     // A helper that is itself a bot (attached by hand): its binding moves with it.
     const binding = view.byTerminal.get(h.address)?.binding ?? null;
     const proxyIdentity = agentKey === "dsh-tui" && process.platform === "linux" ? {
@@ -5598,7 +5585,8 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     holdId(known);
     // #1490: the helper's own launch names its home; its replacement keeps it. A helper whose
     // launch names none records none: the search for it fails closed, never to this process's.
-    const seat = agentKey ? seatHomeOf(agentKey, { argv: h.argv, record: worker }) : null;
+    const record = worker && worker.created_ms === h.created_ms ? worker : null;
+    const seat = agentKey ? seatHomeOf(agentKey, { argv: h.argv, record }) : null;
     const homeEnv = agentKey && discoversSession(agentKey) ? seat?.env ?? null : null;
     // #1490: a revive helper follows the bot's never-guess rule. Codex and Kimi must have a
     // conversation of their own recorded; with none it starts fresh, never the folder's latest.
@@ -5608,6 +5596,11 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const planned = helperPlan({ get: h, worker, session: known,
       agents, fresh: neverGuess, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
       launchAgent: revive && isBareShell(h), grants: grantPlan?.dirs ?? [], where: localWhere() });
+    if (revive && !known && (agentKey === "codex" || agentKey === "kimi") && !planned.error
+      && ["sh", "bash", "dash", "zsh"].includes(basename(planned.argv?.[0] ?? "")) && planned.argv[1] === "-c") {
+      const flag = latestResumeIn(agentKey, planned.argv[2]);
+      if (flag !== null) planned.hold = `${h.name ?? h.address} runs its own command as written, and it names ${flag}, which resumes its folder's latest ${agents[agentKey]?.name ?? agentKey} conversation; no conversation of its own could be identified, so revive doesn't start it`;
+    }
     // #1418: an attached helper's native template becomes a label when the seat is rebuilt.
     if (binding && planned.template && !Object.hasOwn(planned.labels, WORKER_TEMPLATE_LABEL)) {
       planned.labels[WORKER_TEMPLATE_LABEL] = planned.template;
@@ -9679,10 +9672,14 @@ async function reviveOne(target, bot) {
   const args = ["restart", bot.id, "--project", target.project, "--tree", "--revive", "--json"];
   const read = (r) => { let out = null; try { out = JSON.parse(r.stdout); } catch { out = null; } return { code: r.code, out, err: r.stderr, killed: r.killed === true }; };
   const helpersOfAnswer = (out) => (Array.isArray(out?.helpers) ? out.helpers : []).map((h) => ({ name: h.name ?? h.replaced, bot: h.bot ?? null,
-    outcome: !h.up ? "failed" : h.mode === "resume" ? "resumed" : "fresh", why: !h.up ? firstSentence(h.error) : h.note ?? null }));
-  const done = (out, why = null) => ({ outcome: out.mode === "resume" ? "resumed" : "fresh", terminal: out.terminal,
-    why: out.mode === "resume" ? null : why ?? out.note ?? (target.pane === "gone" ? "its pane was gone and no conversation of its own was on record" : "no reason given"),
-    helpers: helpersOfAnswer(out) });
+    outcome: !h.up ? "failed" : h.mode === "resume" ? "resumed" : "fresh", why: !h.up ? firstSentence(h.error) : h.note ?? null,
+    ...(h.by_hand ? { by_hand: h.by_hand } : {}) }));
+  const done = (out, why = null) => {
+    const noSession = !out.note || /^no (Codex|Kimi) conversation of its own could be identified for /.test(out.note);
+    const note = target.pane === "gone" && noSession ? "its pane was gone and no conversation of its own was on record" : out.note;
+    return { outcome: out.mode === "resume" ? "resumed" : "fresh", terminal: out.terminal,
+      why: out.mode === "resume" ? null : why ?? note ?? "no reason given", helpers: helpersOfAnswer(out) };
+  };
   // A refusal's --json carries `error` (and may name the pane that failed): never read as an answer.
   const back = (r) => Boolean(r.out && !r.out.error && r.out.terminal);
   const first = read(await runSelf(args));
