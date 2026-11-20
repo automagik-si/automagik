@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; no delivery merged; delivery 1 waits for delivery 0, the grant, upstream) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; no delivery merged; delivery 1 waits for delivery 0, the grant, upstream, and delivery 0b) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr-core (the scoped grant), plugin (3.N.P) for each Automagik delivery |
 | Created | 2026-11-10 |
@@ -10,6 +10,8 @@
 | Amends | RFC 0022 (a second, host-side path beside delivery H; its rejection stands) |
 
 > Approved by the owner's delegate on 2026-11-19, while the owner is away; the owner may amend on return.
+> The durable wake log (Design, and delivery 0b) is an amendment approved by the owner's delegate on
+> 2026-11-19.
 
 ## Summary
 
@@ -104,24 +106,181 @@ Only the host process holds the grant's credential. Bots' shells keep delivery H
 seat and every terminal a person started stay outside every Bot's grant, so RFC 0022's rejected
 design (a Bot between the owner and Chat) stays impossible, not only discouraged.
 
-Until the grant exists upstream, nothing in this RFC ships (delivery 1 waits for delivery 0).
+Until the grant exists upstream, nothing in this RFC that reaches core ships (delivery 1 waits
+for delivery 0). The durable wake log (delivery 0b) does not reach core and may ship first.
 
 ### Waking the Bot
 
 The host follows `hc events --label automagik.bot=<botId>` for each Bot with workers. When a
 worker's turn ends, it blocks, it errors or it exits:
 
-1. The host notes a wake intent in the Bot team's durable wake log (`<home>/wake.jsonl`, which
-   notes task and group reports before they are delivered) before anything else. That log is
-   on its own branch, not yet on dev; delivery 1 waits for it.
+1. The host notes a wake intent in the Bot team's durable wake log (`wake.jsonl`, below) before
+   anything else, naming the worker, its event and the event's transcript position; the reply
+   read in step 2 is added to it before step 3. Delivery 1 waits for that log (delivery 0b).
 2. It reads the worker's last reply: the transcript when the terminal has one, else `hc read`.
 3. It queues one message into the Bot's Session: the worker's name, status, elapsed time and
    reply, marked as a worker report.
 4. It clears the intent once the Session accepted the message.
 
-A crash between 1 and 4 resends on restart, once, by the intent's id. Reports from several
-workers that end close together arrive as one message. A Bot that is busy reads it at its next
-step, like a message from another Bot.
+A crash between 1 and 4 resends on restart by the intent's id, and the Bot takes the report up
+once. Reports from several workers that end close together arrive together and one turn reads
+them, each closing its own intent (reports for different work are not batched). A Bot that is
+busy reads them at its next step, like a message from another Bot.
+
+### The durable wake log
+
+Amendment approved by the owner's delegate on 2026-11-19. The earlier text put this log on a
+branch of its own; this amendment defines it, and it ships as delivery 0b, on the plugin lane.
+
+**What it is for.** Between the moment the host decides that a report goes to a Bot and the
+moment a turn of the Bot's Session takes it up, a crash must not lose the report, and a restart
+must not make the Bot take it up twice. Today `inflight.json` (resume.js) notes a delivery once
+`rt.deliver` is called, but that file is written in place, coalesced and never fsynced, and the
+producers save the source as finished before the report is on its way: a task's turn end sets
+`task.status` and starts `rt.save()` before it builds the report (agents.js), and a group round
+saves before `reportRound`, which can close the delegated work before it delivers (groups.js).
+A kill in between leaves a finished task or round whose report never arrives.
+
+**Where.** `wake.jsonl` in the Bot team's home (`join(rt.home, 'wake.jsonl')`, the home the
+plugin already uses, beside `inflight.json` and `state.json`), created owner-only (0600), with
+the folder fsynced after the file is first made. One file per team, appended to, one JSON record
+per line, like `ledger/<book>.jsonl` and `memory/journal.jsonl`. No existing plugin id, route,
+storage prefix or file in the team's home is renamed or moved.
+
+**What is recorded.** Every line has `v: 1`, `id` (the report's id), `at` (ms) and one `event`:
+
+| `event` | Written | Other fields |
+|---|---|---|
+| `intent` | by the producer, when it decides a report goes to a Bot, before it saves anything that marks the source finished (task status, the round, the closed work) | `kind` (`task-report` and `group-report` first; `worker-report` with delivery 1; RFC 0030's mailbox rows with its delivery 3), `botId`, `key` (the source's completion key: the task's Session, the group post's id and round, the worker and its event), `roomId` (the room the report is about, for its header), `returnRoomId` (the group whose Session it goes back to; none for the Bot's own chat), and, when known at that moment, the report (header role and note, text, `taskSessionId`, `work`, `replyTo`) and the Session it is first sent to |
+| `prepared` | when the report was not known at `intent` (a worker's reply is read after the intent) | the report and the Session it is first sent to; or `unread: true` when the reply cannot be read any more |
+| `attempt` | before each resend | `sessionId`: the Session it is sent to |
+| `sent` | once DSH made the message | `messageId`: DSH's id of that message |
+| `moved` | before a part switch hands the waiting message to the part that replaced the Session (parts.js) | `sessionId`: the new Session |
+| `done` | when the report is finished with | `how`: `taken` (a turn took it up), `discarded` (the person stopped the Bot or withdrew the message), `gone` (the Bot was deleted) |
+| `dropped` | when an open report is given up | `reason`: `stale` or `attempts` |
+
+The report's `id` is the delivery's `exchangeId`, so the Session's log, `inflight.json` and the
+wake log name one report the same way. A producer that reaches the same completion again (a
+restart's own pass over a cut task, a round finished twice) finds the open or closed report by
+its `key` and makes no second one. The text is the report as delivered, with today's caps (a
+task's `TASK_REPORT_MAX`); images and files go by reference, never as bytes. A worker report's
+`intent` names the event's transcript position, so the reply of that event, not a later one, is
+what `prepared` reads.
+
+Every record but `done` (`taken`) and `done` (`gone`) is written and fsynced before the host goes
+on; the `intent` synchronously, in the same step that decides the report. Those two may be written
+without waiting, because the next start can tell both again from the Session's log and the
+roster; `done` (`taken`) is written only after DSH flushed the Session that holds the
+`user/message` (`ctx.sessions.flush`), and only after the producer's own change is saved (below).
+Records are appended one at a time, behind the same queue that rewrites the file; after a write
+cut short, the next record starts on a new line. While the host is stopping it writes
+nothing, as `inflight.json` does today, so a clean shutdown's cancelling of an inbox never closes
+a report.
+
+**One owner for a report's resend.** A report sent through the wake log is still noted in
+`inflight.json` (so `rt.unreadOf` keeps counting it), but marked as the wake log's, and the
+resume pass never resends a marked note, at this start or a later one. The wake log alone decides
+whether that report goes out again. A note that is not marked belongs to the resume pass, and
+while one exists the wake log never resends its id: that is how a report whose `intent` could not
+be written stays with today's path and has one owner.
+
+**At start, and when this host takes the lock over.** Only a loaded host that holds the team's
+lock (`rt.holdsLock()`) reads, writes, rewrites or replays the log, and it checks the lock again
+after each await before it writes or sends. A host that only reads the team does none of this. A
+resume pass that failed or was stopped does not hold the replay back, since the two no longer
+share a report. The pass covers only the reports the log held when this ownership began; a report
+made since is this run's own. A report whose records include one of a later `v` is left alone:
+this host cannot tell its state. Each check waits until that Session's agent is idle, so a
+message DSH already claimed for a step (after a plugin reload, DSH went on) has reached its
+`user/message` first. A worker report with no `prepared` gets one first: the reply at the
+`intent`'s transcript position, else `unread`. For each other open report (an `intent` with no
+`done` or `dropped`), in this order:
+
+1. Its Bot is gone: `done` (`gone`).
+2. A Session it was sent or moved to holds its `user/message` (read from the end of that
+   Session's log back to the report's `at`, so the search is whole, not a fixed window): `done`
+   (`taken`).
+3. That Session's inbox still holds it (DSH keeps an inbox in the Session's log across a hard
+   stop): nothing is sent again, and the host wakes that agent the way parts.js wakes a part with
+   kept input, so the turn that takes it up runs and closes it.
+4. A Session it went to exists but its log cannot be read: it stays open for the next start,
+   with no record. A Session that no longer exists counts as not holding it.
+5. Its `at` is more than 7 days old: `dropped` (`stale`). Expiry decides only a resend; a report
+   found by steps 2 and 3 is closed or woken first.
+6. It has two `attempt` records already: `dropped` (`attempts`), so a report that crashes the host
+   cannot loop.
+7. Otherwise it is sent again, `attempt` first, with the restart header: "DeepSeek Harness
+   restarted before this report could reach you" (`task-done` has it today; delivery 0b adds the
+   same for `report`, and delivery 1 for a worker report). It goes to the current Session of
+   `returnRoomId` for that Bot, or to the Bot's own chat when that group or Session is gone,
+   never to `roomId`'s Session unless the two are the same room. A worker report with `unread`
+   says that the worker's reply could not be read.
+
+What a turn took up is in the Session's log, and what still waits is in its inbox, so a report
+that steps 2 and 3 do not find never reached the Bot, and sending it again cannot make the Bot
+read it twice. The guarantee is bounded, and the RFC says so: a report is delivered late but
+delivered, unless it is older than 7 days, or its first send and both resends are each cut by a
+crash before the message was in the Session's inbox. Each drop writes one diagnostics line, and
+removes the report's `inflight.json` note and settles its `work` so nothing waits for it (the
+delivery plan picks the handoffs.js path, since `closeWork` may already have removed the child).
+The same clean-up follows `done` (`discarded`) and `done` (`gone`). It is idempotent and runs again
+at every start for each closed report that still has a note or a wait, so a crash between the
+record and the clean-up only delays it.
+
+A report's `intent` with no `sent` and no note at all, marked or not (its first send may not have
+happened, or its note was lost in a coalesced `inflight.json` write), is treated as not sent. The replay runs
+after the resume pass, so anything that pass sent is already in a Session's inbox or log, and
+steps 2 and 3 find it.
+
+When the `intent` is on disk but the producer's own save is not (a kill between the two), the
+replay finishes the producer's change from the `intent` (the task gets the outcome its report
+states, the delegated work is closed as the report closes it) and saves it before it writes the
+report's `done`. A closed report keeps its `key` in a record with no text for 7 days, so a
+producer that reaches the same completion again still finds it.
+
+**Moves and withdrawals while the host runs.** parts.js writes `moved`, fsynced, before it
+forwards a wake log message to the part that replaces its Session, and the new copy keeps the
+`exchangeId`. A message the person stopped or withdrew gets `done` (`discarded`), fsynced. DSH
+records a withdrawal and a shutdown's cancelling of an inbox the same way, so a kill between
+DSH's record and that line cannot be told from a shutdown: such a report comes back once, marked
+as resent. That is a residual this amendment accepts over losing a report.
+
+**Several reports at once.** Reports for one Session and one `work` (or none) that end close
+together go in together and one turn reads them, each as its own message with its own
+`exchangeId`, the way replies are batched today (delivery.js `queueReply`); each closes on its
+own. Reports for different work are not batched.
+
+**Retention.** A report is eligible for sending for 7 days after its `at`; expiry is checked
+before any send, at start, and once an hour while the host holds the lock. The host rewrites the
+file with only open reports, each with all of its records, plus a text-free record (`id`, `key`,
+how it closed) for each report closed in the last 7 days, after the start pass, once a day while
+it holds the lock, and whenever the file passes 1 MiB: the new file is written and fsynced, renamed
+over the old one, and the folder fsynced where the system allows it; when the rename fails, it
+goes on appending to the old file. A line that does not parse was never a record and is left out
+of the rewrite; the records of a report that has one of a later `v` are copied as they are, and
+that report is left to a host that reads that `v`. A report's text therefore stays on disk for
+at most about 8 days while the host runs; time it is off, or a rewrite that fails, can delay
+that. Deleting a Bot writes `done` (`gone`) for its open reports.
+
+**Who reads it.** The team's host is the only supported reader. No route serves it, and the
+client, Pocket and other plugins never read it. The file and the rewrite's new file are refused to
+every Bot's file and search tools whatever the roster, not only through private-bots.js
+`sharedFiles` (which applies only while a private Bot exists). Diagnostics lines name the Bot,
+the kind and the id, never the text. A Bot's shell running as the same account can still read the
+file, as it can `state.json` and `inflight.json` (private-bots.js says its shell checks are not
+isolation). No delivery closes that today; it is a residual risk this amendment keeps, recorded
+in the threat model.
+
+**When it fails.**
+
+- An `intent` that cannot be written or fsynced (a full disk, a read-only home): a host that
+  holds the lock still delivers the report as today, through an unmarked `inflight.json` note
+  that the resume pass owns, with one diagnostics warning. Only that report loses this log's
+  guarantee; the log never holds a first send back.
+- An `attempt` that cannot be written: that resend is not sent, and the report stays open.
+- A line cut by a kill, or any line that does not parse, is not a record and is skipped, as in a
+  ledger book. A file that cannot be read at all is left as it is, nothing in it is replayed, and
+  a diagnostics line says so.
 
 ### A report is data
 
@@ -182,6 +341,10 @@ step, like a message from another Bot.
 - Terminal label `automagik.worker=<workerId>`, beside RFC 0006's `automagik.bot`.
 - Space prefix `automagik:` (RFC 0006's contract, kept).
 - A worker report message kind in the Bot's Session.
+- The durable wake log `wake.jsonl` in the team's home, records `v: 1` (`intent`, `prepared`,
+  `attempt`, `sent`, `moved`, `done`, `dropped`), and the wake log's mark on its notes in
+  `inflight.json`.
+  Compatibility: new; an older host skips a record of a later `v` and never rewrites that file.
 - The herdr-core grant scope (label-scoped run and terminal calls), filed upstream.
 
 ## Threat model
@@ -193,30 +356,42 @@ step, like a message from another Bot.
 | A Bot raises its own reach through a worker | No `send --force` in the grant; worker level never above the Bot's; the owner answers approvals |
 | Runaway starts | Per-Bot and per-team caps; starts metered; the setting is off by default and owner-only |
 | Work leaks to another machine | No `--on` until delivery 5 |
-| Lost wake-ups across restarts | The durable wake log notes the intent before the report, and resends it once |
+| Lost wake-ups across restarts | The durable wake log notes the intent, fsynced, before the producer marks its source finished, and resends it by its id |
+| A report read twice | One owner per report (the resume pass skips the wake log's notes); a resend only when no Session it went to took it up or still holds it in its inbox |
+| The log leaks a private Bot's report | Host-only reader, 0600, refused to every Bot's file tools; text out of diagnostics; closed reports leave at the next rewrite. Residual: a Bot's shell under the same account can read it, as it can `state.json` |
 | A worktree with work in it is deleted | Removed only with no uncommitted changes and no unpushed commits |
 
 ## Deliveries
 
-Each is one PR on one lane. The order is 0, 1, 2, 3, 4, 5.
+Each is one PR on one lane. The order is 0, 0b, 1, 2, 3, 4, 5. Deliveries 0 and 0b may ship in
+either order; delivery 1 needs both.
 
-0. **The grant** (herdr-core, filed upstream from #628 and #631). *Check:* with the grant, `run`
-   without the label, `exec`, and a send to an unlabelled terminal are refused, and a labelled
-   run, read, send and kill work.
-1. **The tools and the wake loop** (plugin, behind the setting). `code_start`, `code_send`,
-   `code_read`, `code_list` and `code_stop`, and the report through the durable wake log.
-   Needs delivery 0 and the durable wake log on dev.
-   *Check:* a Bot starts a worker in a temporary core session, ends its turn, and is woken with
-   its reply; a crash between intent and acceptance resends once; every refusal in the tools
-   table is tested.
-2. **The worker card and the sidebar pill** (plugin). *Check:* the card updates in place
-   through working, blocked and done; Open in Code and Stop act on the right worker.
-3. **Caps, cleanup and worktrees** (plugin). *Check:* the fourth start for one Bot is refused;
-   cleanup keeps a worktree with uncommitted changes.
-4. **Approvals from the chat** (plugin, after herdr-core#122). *Check:* answering in the chat
-   and in Code at once leaves one answer and one receipt.
-5. **Workers on linked machines** (plugin and herdr-core, after #206 and delivery H's link
-   scoping). *Check:* `--on` works only for machines the owner allowed for that Bot.
+- **0. The grant** (herdr-core, filed upstream from #628 and #631). *Check:* with the grant, `run`
+  without the label, `exec`, and a send to an unlabelled terminal are refused, and a labelled
+  run, read, send and kill work.
+- **0b. The durable wake log** (plugin; amendment of 2026-11-19). `wake.jsonl` as defined
+  above, with today's task and group reports as its first users (agents.js and both
+  `reportRound` calls in groups.js). *Check:* a kill after the intent and before a turn takes the
+  report up delivers it at the next start, and the Bot reads it once; a report still in the
+  Session's inbox after a hard stop is not sent again, and the idle Bot is woken to read it; two reports for one Session
+  and a second restart before either is taken still give one of each; a report a turn took up is
+  never resent, and the resume pass never resends a wake note; a group report posted to one group
+  from another goes back to the group it came from; a failed intent write still delivers; the
+  file is refused to a Bot's file tools with no private Bot on the team.
+- **1. The tools and the wake loop** (plugin, behind the setting). `code_start`, `code_send`,
+  `code_read`, `code_list` and `code_stop`, and the report through the durable wake log.
+  Needs deliveries 0 and 0b on dev.
+  *Check:* a Bot starts a worker in a temporary core session, ends its turn, and is woken with
+  its reply; a crash between intent and acceptance delivers the report once; every refusal in the tools
+  table is tested.
+- **2. The worker card and the sidebar pill** (plugin). *Check:* the card updates in place
+  through working, blocked and done; Open in Code and Stop act on the right worker.
+- **3. Caps, cleanup and worktrees** (plugin). *Check:* the fourth start for one Bot is refused;
+  cleanup keeps a worktree with uncommitted changes.
+- **4. Approvals from the chat** (plugin, after herdr-core#122). *Check:* answering in the chat
+  and in Code at once leaves one answer and one receipt.
+- **5. Workers on linked machines** (plugin and herdr-core, after #206 and delivery H's link
+  scoping). *Check:* `--on` works only for machines the owner allowed for that Bot.
 
 ## Answers (2026-11-19)
 
