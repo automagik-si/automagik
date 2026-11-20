@@ -22,6 +22,7 @@ import { FLEET_FILE } from "../mods/am-sidebar/accountsRows.js";
 import { auth, fpr } from "./accounts-fixture.mjs";
 import { startFakeCore } from "./fake-core.mjs";
 import { readJsonLines } from "./log-lines.mjs";
+import { loginFixture } from "./login-fixture.mjs";
 import { scratchProject, scratchRoot, shortSocketDir } from "./scratch-project.mjs";
 
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
@@ -42,6 +43,7 @@ const privateDir = (root, name, mode = 0o700) => { const d = join(root, name); m
 const chosenArgv = (agent, home, launch = LAUNCH, path = "/usr/bin:/bin") => workerArgs({ botId: BOT, branch: "b", name: "w", cwd: "/w", parent: "t1",
   agent, argv: [agent], task: "t", path, login: chosenHomeWords(agent, home, launch), outliveParent: true, killGuard: null });
 const afterDashes = (args) => args.slice(args.indexOf("--") + 1);
+const branchesOf = (s) => s.branches();
 
 // The post-run patch the scene's hc applies to the terminal a run just made (an hc whose core is
 // inconsistent, or that reports another launch): { key: value } set, null deletes, `launch` swaps the id.
@@ -392,6 +394,42 @@ export function agentHomeTests(cli) {
     assert.doesNotMatch(r.err, /claude-logins\.json/);
   });
 
+  // #1509 over #1208: under the Bot login policy (the pointer present) a chosen home may only be the
+  // folder the panel's login record names; any other refuses before anything is made. With the
+  // policy off every row above holds unchanged.
+  test("#1509 under the login policy a chosen agent home must be the reader's own folder", (t) => {
+    const s = homeScene(t, cli);
+    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const policy = { env: { ...login.env } };
+    const same = s.run(["worker", "same home", "--branch", "e2e/same", "--agent-home", realpathSync(login.dir), "--json"], policy);
+    assert.equal(same.code, 0, same.err);
+    assert.equal(chosenHomeOfArgv(afterDashes(s.runs().at(-1))).home, realpathSync(login.dir), "the chosen launch, on the reader's folder");
+    const before = s.runs().length;
+    const other = privateDir(s.root, "homes/claude-other");
+    const differs = s.run(["worker", "other home", "--branch", "e2e/other", "--agent-home", other, "--json"], policy);
+    assert.equal(differs.code, 2, differs.err);
+    assert.match(differs.err, /\(agent-home-differs\)/);
+    assert.equal(s.runs().length, before, "nothing launched");
+    assert.equal(branchesOf(s).includes("e2e/other"), false, "no worktree made");
+  });
+
+  test("#1509 under the login policy the roster's worker.agentHome refuses when it is not the reader's folder", (t) => {
+    const s = homeScene(t, cli);
+    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const other = privateDir(s.root, "homes/claude-roster");
+    const edit = s.run(["edit", "Genie", "--worker-agent-home", other], { from: null });
+    assert.equal(edit.code, 0, edit.err);
+    const before = s.runs().length;
+    const r = s.run(["worker", "roster home", "--branch", "e2e/roster", "--json"], { env: { ...login.env } });
+    assert.equal(r.code, 2, r.err);
+    assert.match(r.err, /\(agent-home-differs\)/);
+    assert.equal(s.runs().length, before);
+    // Policy off: the roster's home is the launch's, exactly as #1208 ships it.
+    const off = s.run(["worker", "roster home", "--branch", "e2e/roster-off", "--json"]);
+    assert.equal(off.code, 0, off.err);
+    assert.equal(chosenHomeOfArgv(afterDashes(s.runs().at(-1))).home, other);
+  });
+
   test("#1208 worker --agent-home (Codex): CODEX_HOME, its keys unset, its model list and trust config read from that folder", (t) => {
     const s = homeScene(t, cli);
     const dir = privateDir(s.root, "homes/codex-b");
@@ -493,11 +531,10 @@ export function agentHomeTests(cli) {
     const current = privateDir(s.root, "cli-homes/current");
     const codex = privateDir(s.root, "core-codex");
     writeFileSync(join(codex, "config.toml"), `[projects.${JSON.stringify(s.project)}]\ntrust_level = "untrusted"\n`);
-    writeFileSync(join(current, "claude"), "x");
-    writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 9,
-      claude: { generation: GEN.claude }, codex: { generation: GEN.codex } }));
-    const env = { PATH: [s.bin, dirname(process.execPath), "/usr/bin", "/bin"].join(":"),
-      CODEX_HOME: codex, AUTOMAGIK_BOT_CLI_POINTER: join(current, "claude") };
+    // No Bot login pointer: since #1509 a present pointer is the login policy, which changes the
+    // launch on purpose; without it every launch is dev's, and its rows name no generation.
+    void current;
+    const env = { PATH: [s.bin, dirname(process.execPath), "/usr/bin", "/bin"].join(":"), CODEX_HOME: codex };
     const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: s.project, encoding: "utf8" }).trim();
     for (const [branch, agent] of [["e2e/a", "claude"], ["e2e/b", "codex"]]) {
       const r = s.run(["worker", "x", "--branch", branch, "--agent", agent], { env });
@@ -530,7 +567,7 @@ export function agentHomeTests(cli) {
       event: "start", kind: "worker", terminal: pane.address, pid, botId: BOT, task: null, worktree: worktree(name),
       agent, model: null, effort: null, template: null, role: "dev", branch, project: s.project, lead: BOT, base,
       created: true, swap: false, override: true, override_requested: null, core: "fakecore0000", created_ms: pane.created_ms,
-      squad: null, session: agent === "claude" ? session : null, generation: GEN[agent], sequence: 9,
+      squad: null, session: agent === "claude" ? session : null, generation: null, sequence: null,
     });
     const expected = [
       start(claude, "e2e-a", "e2e/a", "claude", 5100),
@@ -584,7 +621,7 @@ export function agentHomeTests(cli) {
     // Another install's guard: its own copy of the guard's modules beside an entry this copy ships.
     const other = join(s.app, "mods/am-sidebar");
     mkdirSync(join(other, "guard"), { recursive: true });
-    for (const f of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+    for (const f of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "loginWords.js", "retired.js", "hermesPair.js"]) {
       cpSync(join(GUARD_DIR, "..", f), join(other, f));
     }
     writeFileSync(join(other, "hcGuard.mjs"), `${readFileSync(join(other, "hcGuard.mjs"), "utf8")}\n// another version\n`);
@@ -832,23 +869,22 @@ export function agentHomeTests(cli) {
     assert.deepEqual(s.runs(), []);
   });
 
-  test("#1208 the login generation: kept only when the record's own vendor folder is the chosen one, both vendors", (t) => {
+  test("#1208 under #1509: with the pointer, only the record's own vendor folder may be chosen, and its generation is kept", (t) => {
     for (const agent of ["claude", "codex"]) {
       const s = homeScene(t, cli);
-      const match = privateDir(s.root, "homes/match"), other = privateDir(s.root, "homes/other");
-      const current = join(s.root, "cli-homes/current");
-      mkdirSync(current, { recursive: true });
-      writeFileSync(join(current, "claude"), "x");
-      writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 9,
-        claude: { generation: GEN.claude, configDir: match }, codex: { generation: GEN.codex, home: match } }));
-      const env = { AUTOMAGIK_BOT_CLI_POINTER: join(current, "claude") };
+      const login = loginFixture(join(s.root, "cli-homes"), agent, GEN[agent]);
+      const match = realpathSync(login.dir), other = privateDir(s.root, "homes/other");
+      const env = { ...login.env };
       assert.equal(s.run(["worker", "x", "--branch", "e2e/a", "--agent", agent, "--agent-home", match], { env }).code, 0);
-      assert.equal(s.run(["worker", "y", "--branch", "e2e/b", "--agent", agent, "--agent-home", other], { env }).code, 0);
+      const refused = s.run(["worker", "y", "--branch", "e2e/b", "--agent", agent, "--agent-home", other], { env });
+      assert.equal(refused.code, 2, `${agent}: ${refused.err}`);
+      assert.match(refused.err, /\(agent-home-differs\)/);
       const starts = s.ledger().filter((x) => x.event === "start");
-      assert.deepEqual([starts[0].generation, starts[0].sequence], [GEN[agent], 9], `${agent}: the record names this folder`);
-      assert.deepEqual([starts[1].generation, starts[1].sequence], [null, null], `${agent}: another folder, never a guess`);
+      assert.equal(starts.length, 1, `${agent}: the other folder never started`);
+      assert.deepEqual([starts[0].generation, starts[0].sequence], [GEN[agent], 1], `${agent}: the record names this folder`);
     }
   });
+
 
   test("#1208 Codex on the folder the Accounts panel manages: a switch replaces its auth.json, the worker keeps naming that folder", (t) => {
     const s = homeScene(t, cli);

@@ -77,7 +77,7 @@ import { claudeMember, confirmedClaude, idDigest, isClaudeKey, isCodexKey, isFin
 import { loginEdit, setLoginOp, writerCapability, writerQualified, WRITER_MAX_BYTES } from "../accountsWrite.js";
 import { exceptionWarning, routeManaged } from "../accountsLaunch.js";
 import { paneLogin } from "../loginProbe.js";
-import { POINTER_VAR, REQUIRED_VAR, loginVar, loginWords, resolveLogin } from "../loginRecord.js";
+import { DIRECT_LOGIN_PROBLEM, VENDORS, botLoginWords, directLoginVendor, loginLaunchHome, loginLaunchProblem, loginPolicyActive, loginPolicyEnv, loginPolicyForward, loginReadIo, resolveLogin } from "../loginRecord.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
@@ -304,35 +304,65 @@ function claudeLogin(argv, warnings = []) {
 }
 /**
  * The Bot login record (#1509): the reader's injected filesystem and this installation's
- * one-number sequence memory. Reads only the record, the pointer, the folder's stat, the marker
- * and this file; never a credential file.
+ * one-number sequence memory. Reads only the record, pointer, folder and marker stats,
+ * login-tree names and the sequence memory.
  */
 const loginMemoryPath = () => join(appHome(), "automagik-herdr", "login-sequence");
 const loginReaderIo = () => ({
-  read: (path) => readFileSync(path, "utf8"),
-  lstat: (path) => lstatSync(path),
+  ...loginReadIo,
   writeAtomic: (path, text) => {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const fresh = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(fresh, text, { mode: 0o600 });
-    chmodSync(fresh, 0o600);
-    renameSync(fresh, path);
+    try {
+      writeFileSync(fresh, text, { mode: 0o600 });
+      chmodSync(fresh, 0o600);
+      renameSync(fresh, path);
+    } catch (error) {
+      try { unlinkSync(fresh); } catch { /* preserve the write error */ }
+      throw error;
+    }
   },
 });
 
 /** The refusal a launch shows: one effect-only sentence and the stable code, never a path. */
-const loginRefusal = (record) => new CliError(`${record.reason} (${record.code})`, 2);
+const loginRefusal = (record) => Object.assign(new CliError(`${record.reason} (${record.code})`, 2), { loginCode: record.code });
 
 /**
- * The login a launch of `vendor` must use, from the pointer record, or null when the pointer is
- * absent and the pilot marker is not set (today's behaviour).
+ * The pointer record's login for the executable in `argv`, or null when neither the pointer
+ * nor the pilot marker is set (today's behaviour).
  */
-function botLogin(vendor, { log = () => {}, readOnly = false } = {}) {
-  if (loginVar(vendor) === null) return null;
+function botLogin(argv, { agent, log = () => {}, readOnly = false } = {}) {
+  if (!loginPolicyActive(process.env)) return null;
+  const problem = loginLaunchProblem(argv, agent, Object.hasOwn(AGENTS, agent) ? AGENTS[agent].run : null);
+  if (problem) throw loginRefusal(problem);
+  const vendor = directLoginVendor(argv);
+  if (!vendor) return null;
   const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), log, readOnly });
-  if (resolved.state === "absent") return null;
   if (resolved.code) throw loginRefusal(resolved);
-  return { ...resolved, words: loginWords(vendor, resolved.dir) };
+  return { ...resolved, vendor, words: botLoginWords(vendor, resolved.dir) };
+}
+
+function checkHelperLogins(plans) {
+  for (const helper of plans) botLogin(helper.argv, { agent: helper.agent, readOnly: true });
+}
+
+/**
+ * #1208 under #1509: with the Bot login policy on, a worker's chosen agent home must be the
+ * folder the reader resolved for the same vendor; a different one, or none resolved, refuses.
+ * With the policy off this is a no-op and the chosen home behaves as it always has.
+ */
+function refuseOtherHome(chosen, login) {
+  if (!chosen || !loginPolicyActive(process.env)) return;
+  const same = login && login.vendor === chosen.agent
+    && (realDir(chosen.home) ?? chosen.home) === (realDir(login.dir) ?? login.dir);
+  if (!same) throw loginRefusal({ code: "agent-home-differs", reason: "Use the Bot login selected by the panel." });
+}
+
+function refuseLinkedLogin(argv, agent, tree = false) {
+  if (!loginPolicyActive(process.env)) return;
+  if (!tree && !directLoginVendor(argv) && !loginLaunchProblem(argv, agent, AGENTS[agent]?.run)) return;
+  throw loginRefusal({ code: "linked-machine",
+    reason: "A linked machine can't carry this computer's Bot login; start the bot on that machine." });
 }
 
 const modelIo = () => ({ home: home(), appHome: appHome(), read: (p) => { try { return readText(p); } catch { return null; } } });
@@ -1949,8 +1979,7 @@ Usage: am <command> [options]                   (every command takes --json and 
   brief <bot>                   print the bot's briefing with its team's live state, as it is now
   login --check <claude|codex>  the Bot login generation this computer resolves, and a folder
                                 name; read-only, never a path or an account
-  login-env <claude|codex>      the one vendor config assignment a raw launch wrapper needs,
-                                or nothing; stdout only
+  login-env <claude|codex>      the Bot login's env words, one per line, or nothing if absent
   tidy                          what drifted in the window, labels and project list, as a plan;
                                 changes nothing (--json: the plan's actions)
   forget <project>              take a project's folder off this CLI's project list; its folder,
@@ -3581,7 +3610,13 @@ async function relabelPane(terminal, words, prefix, warnedRelabels) {
  * version-1 record naming that vendor, both are null, never a guess. Reads one small file and
  * never resolves, copies or exports a login.
  */
-function launchLogin(vendor) {
+function launchLogin(vendor, resolved = null) {
+  // Under the reader (#1509) the row records the login the launch itself resolved: its generation
+  // and the record's sequence, or both null for a login from before any generation (#1532's policy).
+  if (resolved) {
+    return resolved.generation && resolved.generation !== "legacy" && Number.isSafeInteger(resolved.sequence)
+      ? { generation: resolved.generation, sequence: resolved.sequence } : { generation: null, sequence: null };
+  }
   const pointer = process.env.AUTOMAGIK_BOT_CLI_POINTER;
   if (typeof pointer !== "string" || !pointer.startsWith("/")) return { generation: null, sequence: null };
   try {
@@ -4404,6 +4439,7 @@ async function cmdStart(opts, [ref], warnedRelabels) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  if (project.machine && loginPolicyActive(process.env)) refuseLinkedLogin(agentTable()[bot.agent]?.run, bot.agent);
   warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
@@ -4906,9 +4942,13 @@ async function seatOnMachine(project, bot, over = {}) {
     ...seatSettingsArgs(agentKey, bot)];
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const command = agyGuarded(agentKey, withAgySettings(agentKey, chosen ? [...source, ...sessionIdArgs(agentKey, chosen)] : source, agySettings?.path));
+  refuseLinkedLogin(command, agentKey);
   // #612: a local absolute override that isn't there falls back to the shipped run when that is.
   const there = await agentThere(machine, command, agent.name ?? agentKey, paneEnv.prepend,
     shippedRunFor(agentKey, agent.run, command));
+  // #1509 over #1914: under the Bot login policy a Claude or Codex launch on a linked machine is
+  // refused here, before any remote call; with the policy off the managed login runs as before.
+  refuseLinkedLogin(there.argv, agentKey);
   const managed = launchAgent(there.argv, table) === "claude"
     ? await managedLoginOn(machine, m.id, paneEnv, bot, managedLaunchIo, claudeLauncher(accountsTable(), command[0])) : null;
   if (agySettings) {
@@ -5509,6 +5549,10 @@ const chainOf = (p) => {
 function startableAgent(bot, agentKey = bot.agent) {
   const agent = agentTable()[agentKey];
   if (!agent?.run?.length) throw new CliError(`${bot.name}'s coding agent "${agentKey}" isn't one Herdr can start.`);
+  if (loginPolicyActive(process.env)) {
+    const problem = loginLaunchProblem(agent.run, agentKey, AGENTS[agentKey]?.run);
+    if (problem) throw loginRefusal(problem);
+  }
   if (!onPath(agent.run[0])) throw new CliError(`${agent.name} (${agent.run[0]}) isn't installed on this computer.`);
   return agent;
 }
@@ -5594,6 +5638,7 @@ async function launchSeat(project, bot, over = {}) {
   // here. Always passed (#213): without it the pane has herdr-core's PATH, which may lack node.
   const runPath = launchPath(argv[0], cwd);
   const path = runPath.path;
+  const readerLogin = botLogin(argv, { agent: agentKey, readOnly: true });
   // A restart's own place (the old pane's space and tab) stands; a start asks the window too:
   // one herdr-app ls, shared by placementOf (a label whose space doesn't show the project is
   // dropped) and windowPlace (an open space on the project, else a new one). The space only:
@@ -5603,10 +5648,9 @@ async function launchSeat(project, bot, over = {}) {
     const seen = await windowSpaces();
     place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
   }
-  // The pointer record (#1509) wins when the entrypoint exported it; otherwise the Claude
-  // login record (#453) chooses, exactly as before.
-  const readerLogin = botLogin(agentKey, { log: (line) => briefed.warnings.push(line) });
-  const login = readerLogin ? readerLogin.words : over.login?.words ?? claudeLogin(argv, briefed.warnings);
+  // The pointer record wins when the entrypoint exported it. Otherwise the Claude login
+  // record (#453) chooses at the same point as a start without the Bot login policy.
+  const login = readerLogin?.words ?? over.login?.words ?? claudeLogin(argv, briefed.warnings);
   if (!readerLogin && over.login) briefed.warnings.push(...over.login.warnings);
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
@@ -5617,20 +5661,23 @@ async function launchSeat(project, bot, over = {}) {
   // Start adds no env word (herdr-core's own environment is the launch's, as before).
   const homeEnv = discoversSession(agentKey) ? (over.sessionEnv ?? launchHomeEnv(agentKey, process.env)) : null;
   const env = { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}),
-    ...briefed.env, ...hermesPairEnv(bot), ...(discoversSession(agentKey) && over.sessionEnv ? over.sessionEnv : {}) };
+    ...briefed.env, ...hermesPairEnv(bot), ...(discoversSession(agentKey) && over.sessionEnv ? over.sessionEnv : {}),
+    ...(agentKey === "dsh-tui" ? loginPolicyForward(process.env) : {}) };
   const name = hcName(bot.name, bot.id, taken);
-  const args = startArgs({ botId: bot.id, name, cwd, space: place?.space, tab: place?.tab, parent, argv, labels, path,
-    env, login, agent: agentKey, project: key, sandbox: proxyOn });
   // The hook goes in before the session starts, so Claude Code reads it at startup.
   const hook = agentKey === "claude" ? await writeBriefingHook(bot, cwd) : { written: false, warnings: [] };
   hook.warnings.unshift(...briefed.warnings);
   if (runPath.note) hook.warnings.unshift(runPath.note);
-  report(hook.warnings);
+  if (!readerLogin) report(hook.warnings);
   const run = async (ledger) => {
+    const freshLogin = botLogin(argv, { agent: agentKey, log: (line) => hook.warnings.push(line) });
+    if (readerLogin) report(hook.warnings);
+    const args = startArgs({ botId: bot.id, name, cwd, space: place?.space, tab: place?.tab, parent, argv, labels, path,
+      env, login: freshLogin?.words ?? login, agent: agentKey, project: key, sandbox: proxyOn });
     // #1262: hc waits 60 s for the new terminal's first status, so the run gets its own timeout
     // above that wait; a timeout after hc made the terminal is a start looked up by its name
     // (the attach row is still written), never a failed start.
-    ledgerLogin = launchLogin(agentKey);
+    ledgerLogin = launchLogin(agentKey, freshLogin);
     const { address, late, get: recovered } = await hcStartRun(hc, args, name);
     if (late) {
       const proof = await paneProof({ get: recovered, project });
@@ -5653,7 +5700,7 @@ async function launchSeat(project, bot, over = {}) {
         throw new CliError(`${address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with am attach ${bot.id} ${address}`);
       }
     }
-    return { terminal: address, created_ms: get?.created_ms ?? null, pid: get?.foreground?.pid ?? get?.pid ?? null };
+    return { terminal: address, created_ms: get?.created_ms ?? null, pid: get?.foreground?.pid ?? get?.pid ?? null, homeEnv: loginLaunchHome(homeEnv, freshLogin) };
   };
   // Start: under the ledger's lock, still unattached, then hc run and the attach row (by
   // "start"). Restart: hc run alone (the old pane still holds the bot).
@@ -5670,7 +5717,7 @@ async function launchSeat(project, bot, over = {}) {
   const logSeat = async (createdMs = started.created_ms) => {
     const unlogged = appendLedger(startRow({ kind: "seat", terminal, pid: started.pid ?? await pidOf(terminal), botId: bot.id, worktree: cwd,
       project: key, agent: agentKey, model, template: carry[WORKER_TEMPLATE_LABEL] ?? null,
-      ...tags, core: await rowCore(), createdMs, env: homeEnv, session: agentKey === "claude" ? session : null, ...ledgerLogin }));
+      ...tags, core: await rowCore(), createdMs, env: started.homeEnv, session: agentKey === "claude" ? session : null, ...ledgerLogin }));
     if (unlogged) { hook.warnings.push(unlogged); report([unlogged]); }
   };
   if (!over.replacing) await logSeat();
@@ -6124,13 +6171,14 @@ async function sharersOf({ view, cwd, botId, file, agentKey, ledger = [], old, a
  * meanwhile) nothing is written: { lost: the terminal it names, or null }. With the old pane
  * already ended (its end row written), the new one is attached alone.
  */
-async function attachMoved(bot, oldBinding, terminal, created_ms, key) {
+async function attachMoved(bot, oldBinding, terminal, created_ms, key, beforeWrite) {
   return underLedger(async ({ core, byBot, holds, write }) => {
     const now = byBot.get(bot.id);
     const rows = [];
     if (now && attachKey(now) === attachKey(oldBinding)) rows.push(closingRow(oldBinding, "detach", "start", "moved"));
     else if (now && (await holds(now))) return { lost: now.terminal };
     rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal, core, created_ms, by: "start" }));
+    beforeWrite?.();
     write(rows);
     return { lost: undefined };
   });
@@ -6278,6 +6326,9 @@ const shellWord = (w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${String(w)
  * when the line is on the default login because the record can't be followed. { line, notes }.
  */
 function byHand(p, parent) {
+  if (loginPolicyActive(process.env)) {
+    return { line: "Start the helper through am so it uses the current Bot login.", notes: [] };
+  }
   const loginWarnings = [];
   const args = helperArgs({ name: p.name, cwd: p.cwd, labels: p.labels, parent, ...helperCommand(p),
     login: claudeLogin(p.argv, loginWarnings), env: p.env });
@@ -6322,7 +6373,14 @@ async function rerunHelpers(plans, parent, say) {
     mode: p.mode ?? null, session: p.session ?? null, up: false, note: p.note ?? null, error: null, cause: null, by_hand: null, still_running: false }));
   for (const [i, p] of plans.entries()) {
     const who = `${p.replaced}${p.name && p.name !== p.replaced ? ` (${p.name})` : ""}`;
-    const failed = (why) => {
+    const failed = (failure) => {
+      if (failure instanceof CliError && failure.loginCode) {
+        out[i].error = failure.message;
+        out[i].login = failure.loginCode;
+        say(`${who}: ${failure.message}`);
+        return;
+      }
+      const why = String(failure);
       let hand;
       try { hand = byHand(p, parent); }
       catch { hand = { line: "# repair approval before restarting this helper", notes: [] }; }
@@ -6351,7 +6409,11 @@ async function rerunHelpers(plans, parent, say) {
     const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
     const name = p.name && !taken.has(p.name) ? p.name : null;
     const loginWarnings = [];
-    const login = claudeLogin(p.argv, loginWarnings);
+    let freshLogin;
+    try { freshLogin = botLogin(p.argv, { agent: p.agent, log: (line) => loginWarnings.push(line) }); }
+    catch (e) { failed(e); continue; }
+    const login = freshLogin?.words ?? claudeLogin(p.argv, loginWarnings);
+    const homeEnv = loginLaunchHome(p.env, freshLogin);
     for (const w of loginWarnings) say(`${who}: ${w}`);
     let command;
     try { command = helperCommand(p, say); }
@@ -6361,7 +6423,8 @@ async function rerunHelpers(plans, parent, say) {
       try { writeAgySettingsFile(p.agySettings, { name: p.name ?? p.replaced }); }
       catch (e) { failed(e.message); continue; }
     }
-    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login, env: p.env });
+    const env = p.agent === "dsh-tui" && loginPolicyActive(process.env) ? { ...p.env, ...loginPolicyForward(process.env) } : p.env;
+    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login, env });
     const guardWhy = launchGuardProblem(helperRun, name ?? p.name);
     if (guardWhy) { failed(guardWhy); continue; }
     const r = await hc(helperRun);
@@ -6395,7 +6458,7 @@ async function rerunHelpers(plans, parent, say) {
       const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
         project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
         template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
-        core, createdMs, squad, env: p.env, session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent ?? w.agent) }));
+        core, createdMs, squad, env: homeEnv, session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent ?? w.agent, freshLogin) }));
       if (unlogged) say(unlogged);
     }
     if (p.binding) {
@@ -6418,8 +6481,7 @@ async function rerunHelpers(plans, parent, say) {
       let tags = seatTags(null, b.bot);
       try { tags = seatTags(loadProject(b.project).file, b.bot); } catch { /* its file can't be read now: no tags */ }
       const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: await pidOf(address), botId: b.bot, worktree: p.cwd, project: b.project,
-        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, env: p.env,
-        session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent) }));
+        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, env: homeEnv, session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent, freshLogin) }));
       if (unlogged) say(unlogged);
     }
     // A session id carried onto the new terminal, any harness (RFC 0021 (f) 5): a session row.
@@ -6498,9 +6560,10 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const neverGuess = revive && !known && (agentKey === "codex" || agentKey === "kimi")
       ? `no ${agents[agentKey]?.name ?? agentKey} conversation of its own could be identified for ${h.address}, so its folder's latest one was not guessed` : fresh;
     const grantPlan = grantsAt.get(helperCwd({ get: h, worker, realpath: realDir })) ?? null;
-    const planned = helperPlan({ get: h, worker, session: known,
+    const planned = helperPlan({ get: h, worker, session: known, directLogin: loginPolicyActive(process.env),
       agents, fresh: neverGuess, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
       launchAgent: revive && isBareShell(h), grants: grantPlan?.dirs ?? [], where: localWhere() });
+    if (planned.loginProblem) throw loginRefusal(planned.loginProblem);
     if (revive && !known && (agentKey === "codex" || agentKey === "kimi") && !planned.error
       && ["sh", "bash", "dash", "zsh"].includes(basename(planned.argv?.[0] ?? "")) && planned.argv[1] === "-c") {
       const flag = latestResumeIn(agentKey, planned.argv[2]);
@@ -7018,6 +7081,7 @@ async function runQueuedRestart(opts) {
           force: false, tree: entry.options?.tree })
         : null;
       if (idle && !helperRefusal && handoff && askedAt === null) {
+        await checkDueLogins(entry.project, entry.botId, entry.terminal, entry.created_ms);
         if (screenLines(screen).some(line => line.trim())) {
           const attention = readAttention().find(row => row.open && isEpisode(row, entry.project, entry.botId)
             && row.terminal === entry.terminal && row.created_ms === entry.created_ms);
@@ -7154,12 +7218,15 @@ async function runQueuedRestart(opts) {
   }
 }
 
-async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered, dir = appHome() }) {
+async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered, dir = appHome(), helpers = [] }) {
   const rateLimited = opts.rateLimit === true;
   const dialog = rateLimited ? null
     : pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
   const queueId = randomUUID();
   const entry = await editRestartQueue(async (rows) => {
+    const loginPolicy = loginPolicyActive(process.env);
+    botLogin(plan.argv, { agent: plan.agent, readOnly: true });
+    checkHelperLogins(helpers);
     const i = rows.findIndex((row) => row.project === key && row.botId === bot.id);
     const previous = rows[i];
     if (previous && rateLimited) {
@@ -7196,6 +7263,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
     // HC_SOCKET, HC_TERMINAL_ID and HC_TERMINAL_SOCKET are never copied from here: the
     // caller pane's would make the watcher that bot's own pane (#805). The sh in front of
     // env -i adds the two hc gave the watcher's own run instead.
+    const policyEnv = loginPolicy ? loginPolicyEnv(process.env) : {};
     const watcherEnv = [
       `HOME=${home()}`,
       `HERDR_APP_HOME=${dir}`,
@@ -7203,7 +7271,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
       ...Object.entries(process.env)
         .filter(([k, v]) => v !== undefined && (
           k.startsWith("AUTOMAGIK_HERDR_") ||
-          k === POINTER_VAR || k === REQUIRED_VAR ||
+          Object.hasOwn(policyEnv, k) ||
           ["USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "HERMES_HOME", "VIRTUAL_ENV"].includes(k)
         ))
         .map(([k, v]) => `${k}=${v}`),
@@ -7604,6 +7672,13 @@ async function cmdRestartDue(opts) {
   try { return await restartDuePass(opts, keys, false); } finally { stop(); dropLock(lock, token); }
 }
 
+/** Check the same seat and helper commands the handoff restart will launch. */
+async function checkDueLogins(project, botId, terminal, created_ms) {
+  if (!loginPolicyActive(process.env)) return;
+  await cmdRestart({ fresh: true, tree: true, project, _checkDueLogin: true,
+    _targetPin: { terminal, created_ms } }, [botId]);
+}
+
 /** The measured, acted-on pass behind `cmdRestartDue` (#1556); `dry` only reports it. */
 async function restartDuePass(opts, keys, dry) {
   // #1557 first: a seat parked on the rate-limit dialog must not be woken early by this pass,
@@ -7669,6 +7744,17 @@ async function restartDuePass(opts, keys, dry) {
       ...rate.notes,
       ...(rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
   }
+  const loginPolicy = loginPolicyActive(process.env);
+  // A managed handoff must plan and check the same replacement tree it will run when it fires.
+  const queueDue = async (r, pane) => {
+    const options = { fresh: true, tree: true, handoff: true, json: true, contextTokens: r.tokens, restartAt: r.threshold };
+    if (loginPolicy) {
+      return cmdRestart({ ...options, project: r.key, _queueDue: true,
+        _targetPin: { terminal: r.terminal, created_ms: r.created_ms } }, [r.bot.id]);
+    }
+    return queueRestart({ bot: r.bot, key: r.key, old: pane.get, screen: pane.screen, opts: { ...opts, ...options },
+      wanted: null, plan: { mode: "fresh", agent: r.bot.agent, model: r.bot.model ?? null }, recovered: false });
+  };
   const restarted = [], queued = [], failed = [];
   const say = [];
   for (const r of due) {
@@ -7706,15 +7792,14 @@ async function restartDuePass(opts, keys, dry) {
         continue;
       }
       if (!now.idle) {
-        const entry = await queueRestart({ bot: r.bot, key: r.key, old: now.get, screen: now.screen,
-          opts: { ...opts, fresh: true, tree: true, handoff: true, json: true, contextTokens: r.tokens, restartAt: r.threshold },
-          wanted: null, plan: { mode: "fresh", agent: r.bot.agent, model: r.bot.model ?? null }, recovered: false });
+        const entry = await queueDue(r, now);
         queued.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, reason: entry.reason, watcher: entry.watcher,
           context_tokens: r.tokens, restart_at: r.threshold, handoff: path });
         say.push(`${line(r)}; queued until its next idle, then asked for its handoff and restarted from it `
           + `(am restart --queued lists it; the handoff is ${path}).`);
         continue;
       }
+      await checkDueLogins(r.key, r.bot.id, r.terminal, r.created_ms);
       // Empty before asking: only what the seat writes for THIS request can be sent (#1556).
       const cleared = clearHandoff(path);
       if (cleared) {
@@ -7749,7 +7834,7 @@ async function restartDuePass(opts, keys, dry) {
       if (result && result.queued) {
         // The seat took a turn between the check and the restart: take the plain queue entry
         // back and queue the handoff-aware one instead, so the file is not lost.
-        await cmdRestart({ cancel: true, json: true, project: r.key }, [r.bot.id]);
+        if (!loginPolicy) await cmdRestart({ cancel: true, json: true, project: r.key }, [r.bot.id]);
         const again = await paneNow(r.terminal);
         if (again.state !== "live") {
           // The seat ended between the handoff and the queued restart: the written handoff was
@@ -7760,9 +7845,7 @@ async function restartDuePass(opts, keys, dry) {
           await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, "dropped", why, path, { notify: false });
           continue;
         }
-        const entry = await queueRestart({ bot: r.bot, key: r.key, old: again.get, screen: again.screen,
-          opts: { ...opts, fresh: true, tree: true, handoff: true, json: true, contextTokens: r.tokens, restartAt: r.threshold },
-          wanted: null, plan: { mode: "fresh", agent: r.bot.agent, model: r.bot.model ?? null }, recovered: false });
+        const entry = await queueDue(r, again);
         queued.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, reason: entry.reason, watcher: entry.watcher,
           context_tokens: r.tokens, restart_at: r.threshold, handoff: path });
         say.push(`${line(r)}; it took a turn, so it is queued until its next idle and restarted from ${path}.`);
@@ -8262,7 +8345,7 @@ async function adoptedTarget(project, bot, pane, core, home) {
  * binding another CLI wrote meanwhile is refused (lost), never overwritten, and the terminating
  * pane keeps the bot as it was.
  */
-async function commitAdoption(bot, adoption, terminal, created_ms, key) {
+async function commitAdoption(bot, adoption, terminal, created_ms, key, beforeWrite) {
   const path = attachPath(adoption.home);
   try {
     return await withLockAsync(ledgerLock(path), async () => {
@@ -8285,6 +8368,7 @@ async function commitAdoption(bot, adoption, terminal, created_ms, key) {
       if (adoption.stale && nowKey === staleKey) {
         rows.push(closingRow(adoption.stale, "detach", "start", "moved"));
       }
+      beforeWrite?.();
       appendAttach(path, rows);
       return { lost: undefined };
     });
@@ -8421,6 +8505,11 @@ async function cmdRestart(opts, [ref]) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  if (project.machine && loginPolicyActive(process.env)) {
+    const agents = agentTable();
+    const agent = opts.agent === undefined ? bot.agent : resolveAgent(opts.agent, agents);
+    refuseLinkedLogin(agents[agent]?.run, agent, opts.tree);
+  }
   warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
@@ -8447,7 +8536,7 @@ async function cmdRestart(opts, [ref]) {
   const queued = opts._queuedTarget;
   const legacyPark = queued?.options?.rateLimit === true && !queued.ownerHome;
   if (queued) opts._queueHome = requested;
-  const target = await restartTarget(project, bot, requested, Boolean(explicit) && !legacyPark, !queued);
+  const target = await restartTarget(project, bot, requested, Boolean(explicit) && !legacyPark, !queued && !opts._checkDueLogin);
   const recovered = opts._queuedTarget?.options?.recoveredHome === true || !sameHome(requested, target.dir);
   if (recovered) {
     process.env.HERDR_APP_HOME = target.dir;
@@ -8503,12 +8592,16 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     throw new CliError(`${bot.name}: the pane this pass measured (${pin.terminal}) is no longer its live seat, so it was not restarted.`,
       1, { refused: "handoff", terminal: pin.terminal });
   }
-  const recheck = async (argv) => {
+  const recheck = async ({ argv, agent }) => {
     const current = await restartTarget(project, bot, appHome(), true);
     if ((current.held ? attachKey(current.held.binding) : null) !== (held ? attachKey(held.binding) : null)) {
       throw new CliError(`${bot.name}'s attachment changed while planning the restart; nothing was started.`);
     }
     if (!current.held) return undefined;
+    // The pointer record (#1509) decides this launch's login (launchSeat), so the app home's
+    // Claude login record is not what the new pane runs on, and its check against the old pane
+    // does not apply. A refusal of the record stops here, before anything is stopped or queued.
+    if (botLogin(argv, { agent, readOnly: true })) return undefined;
     if (target.adopted) return adoptedLogin(current.held.get, argv, recovered);
     return recovered ? recoveredLogin(current.held.get, argv) : undefined;
   };
@@ -8606,9 +8699,10 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     newSession: newSessionId(),
   };
   let plan = restartPlan(planned);
-  if (old && !opts.force && !isPaneIdle(old, screen)
-    && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen))) {
-    await recheck(plan.argv);
+  const shouldQueue = old && (opts._queueDue || (!opts.force && !isPaneIdle(old, screen)
+    && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen))));
+  if (shouldQueue && !(opts.tree && loginPolicyActive(process.env))) {
+    await recheck(plan);
     return queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered });
   }
   // --cwd: Claude resumes only within one folder slug (~/.claude/projects/<slug>), by id or --continue.
@@ -8656,7 +8750,16 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     : { tree: [], treeWarnings: [] };
   // --tree: the old pane and its helpers idle first (no turn ends once two panes could hold the bot's session).
   let plans = tree;
+  checkHelperLogins(plans);
+  if (opts._checkDueLogin) {
+    botLogin(plan.argv, { agent: plan.agent, readOnly: true });
+    return;
+  }
   const early = [];
+  if (shouldQueue) {
+    await recheck(plan);
+    return queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered, helpers: plans });
+  }
   if (tree.length) plans = await treeIdle(old, tree, (w) => early.push(w), { force: opts.force, revive: Boolean(opts.revive) });
   // A resumed session keeps its label on the new pane, so the next restart resumes it too; a
   // template keeps its name in the worker.template label, so the next restart finds it again.
@@ -8664,7 +8767,8 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}) };
   // The session the new pane runs, for its label and seat row: the id chosen for a new one, or the resumed one.
   const sessionOfPlan = (p, resumed) => p.sessionId ?? (p.mode === "resume" ? resumed : null);
-  const login = await recheck(plan.argv);
+  const login = await recheck(plan);
+  checkHelperLogins(plans);
   // A queued restart claims its entry only once every check passed and the seat is about to
   // start: a cancel between the watcher's read and here wins, and nothing is launched.
   if (opts._queuedTarget) {
@@ -8680,9 +8784,12 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   // A direct restart supersedes a queued one only once it really started: its watcher must not
   // start a second replacement while this one hands the bot over.
-  if (!opts._queuedTarget) {
+  const managedTree = plans.length > 0 && loginPolicyActive(process.env);
+  const supersedeQueue = async () => {
+    if (opts._queuedTarget) return;
     let queued = false;
-    try { queued = readRestartQueue().some((e) => e.project === key && e.botId === bot.id); } catch {}
+    try { queued = readRestartQueue().some((e) => e.project === key && e.botId === bot.id); }
+    catch (e) { if (managedTree) throw e; }
     if (queued) {
       await editRestartQueue(async (rows) => {
         const i = rows.findIndex((e) => e.project === key && e.botId === bot.id);
@@ -8692,7 +8799,8 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
         return e;
       });
     }
-  }
+  };
+  if (!managedTree) await supersedeQueue();
   const warnings = seat.hook.warnings;
   const say = (w) => { warnings.push(w); report([w]); };
   // #597: the replacement is built from the bot's source (a live template's current command, or
@@ -8735,7 +8843,8 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     if (providerGone(plan, gone)) {
       const note = providerGoneNote(resumeId, seat.terminal, gone);
       plan = { ...restartPlan({ ...planned, fresh: true }), note };
-      await recheck(plan.argv);
+      await recheck(plan);
+      checkHelperLogins(plans);
       resumeId = null;
       say(`${bot.name} starts on a new conversation: ${note}.`);
       const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
@@ -8760,18 +8869,30 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     // Up: the ledger moves the bot to the new terminal, under its lock.
     const created = Number.isSafeInteger(up.get?.created_ms) ? up.get.created_ms : seat.created_ms;
     let moved;
+    // Check after taking the attachment lock, before the old binding can move. A refusal
+    // ends the replacement alone, just as when its agent failed to come up.
+    const beforeMove = managedTree ? () => checkHelperLogins(plans) : undefined;
     try {
       if (!Number.isSafeInteger(created)) throw new CliError(`hc get gave no created_ms for ${seat.terminal}`);
       moved = target.adopted
-        ? await commitAdoption(bot, target.adoption, seat.terminal, created, key)
-        : await attachMoved(bot, held.binding, seat.terminal, created, key);
+        ? await commitAdoption(bot, target.adoption, seat.terminal, created, key, beforeMove)
+        : await attachMoved(bot, held.binding, seat.terminal, created, key, beforeMove);
     } catch (e) {
       await hcKill(seat.terminal);
+      if (e instanceof CliError && e.loginCode) throw e;
       throw new CliError(`${seat.terminal} was ended and ${old.address} still runs ${bot.name}: the attach ledger wasn't written (${e?.message ?? e}).`);
     }
     if (moved.lost !== undefined) {
       await hcKill(seat.terminal);
       throw new CliError(`${bot.name} was attached to ${moved.lost} while it restarted, so ${seat.terminal} was ended and nothing changed.`);
+    }
+    const treeKill = managedTree ? await hcKill(old.address) : null;
+    if (managedTree) {
+      try { await supersedeQueue(); }
+      catch (e) {
+        exitAfter.code = 1;
+        say(`Could not clear ${bot.name}'s queued restart: ${e?.message ?? e}`);
+      }
     }
     await seat.logSeat(created);
     // A session id carried onto the new pane, any harness (RFC 0021 (f) 5): a session row too.
@@ -8783,7 +8904,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     // --tree: the old pane ends now, its helpers with it, so nothing types into a pane on the
     // bot's session while the new one runs it; then each helper runs again under the new pane.
     if (plans.length) {
-      const k = await hcKill(old.address);
+      const k = treeKill ?? await hcKill(old.address);
       if (k.code === 0) {
         oldEnded = true;
         await endOld();
@@ -11003,6 +11124,8 @@ async function cmdWorker(opts, rest) {
   const plan = workerPlan(bot, pick, agents, localWhere());
   if (plan.error) throw new CliError(plan.error, 2);
   warnings.push(...plan.warnings);
+  const loginPolicy = loginPolicyActive(process.env);
+  if (loginPolicy && plan.template) throw loginRefusal(DIRECT_LOGIN_PROBLEM);
   // #1208: the login folder this worker runs on when --agent-home or the bot's worker.agentHome
   // applies, checked before anything is made; null (the usual launch, unchanged) otherwise.
   const chosen = await chosenWorkerHome({ opts, bot, project, plan, pick, agents, me });
@@ -11014,15 +11137,8 @@ async function cmdWorker(opts, rest) {
   let templateCommand = null;
   if (plan.template) {
     const t = await templateRuns(plan.template, agents);
-    runs = t.runs;
     templateCommand = t.command?.trim() ? t.command : null;
-    // #1125: a worker template owns its command (the owner's exception, bypass included): never
-    // rewritten or refused here; one that runs Codex without --no-daemon is named, with the fix.
-    // #1142: one whose Codex run puts an option after its -- would run without it: refused first.
-    const lost = templateCommand ? codexTemplateRefusal(plan.template, templateCommand, agents) : null;
-    if (lost) throw new CliError(lost);
-    const noDaemon = templateCommand ? codexTemplateWarning(plan.template, templateCommand, agents) : null;
-    if (noDaemon) warnings.push(noDaemon);
+    runs = t.runs;
     if (runs === "claude") {
       templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [task]) : null;
       if (!templateArgv) {
@@ -11030,25 +11146,25 @@ async function cmdWorker(opts, rest) {
           : "hc gave no command for it"}; it can't be started on the chosen Claude login. Not started.`);
       }
     }
-  } else {
+  }
+  // The pointer record (#1509) rules when the entrypoint set it; otherwise the launch is exactly
+  // as it was. Under it, #1208's chosen home (--agent-home or worker.agentHome) may only be the
+  // reader's own folder: any other is refused, never a second login.
+  refuseOtherHome(chosen, botLogin(templateArgv ?? plan.argv, { agent: runs, readOnly: true }));
+  if (!plan.template) {
     if (!onPath(plan.argv[0])) throw new CliError(`${agents[plan.agent].name} (${plan.argv[0]}) isn't installed on this computer.`);
     const list = plan.model ? modelList(plan.agent, plan.model, chosen?.agent === "codex" ? chosen.home : undefined) : [];
     if (list.length && !list.includes(plan.model)) warnings.push(`${plan.model} isn't on ${plan.agent}'s model list; started with it anyway.`);
   }
   // The Bot login generation this launch starts on (#1532), read at the spawn and frozen in its row.
   let ledgerLogin = { generation: null, sequence: null };
-  // The pointer record (#1509) rules when the entrypoint set it; otherwise the launch is exactly
-  // as it was.
-  const readerLogin = botLogin(runs, { log: (line) => warnings.push(line) });
-  const readerWords = readerLogin ? readerLogin.words : null;
-  // A Codex template needs commandArgv when the record's home must ride the launch: hc's
-  // template form carries no environment. The Claude path above already built its argv.
-  if (plan.template && runs === "codex" && readerWords && !templateArgv) {
-    templateArgv = templateCommand ? commandArgv({ shell: templateCommand }, [task]) : null;
-    if (!templateArgv) {
-      const why = templateCommand ? "its command ends in a separator or a comment, so it can't take the task" : "hc gave no command for it";
-      throw new CliError(`Template ${plan.template} runs Codex, but ${why}; it can't be started on the Bot login. Not started.`);
-    }
+  if (templateCommand) {
+    // A worker template owns its Codex command (#1125). Warn about --no-daemon and refuse
+    // options that would land in the prompt (#1142).
+    const lost = codexTemplateRefusal(plan.template, templateCommand, agents);
+    if (lost) throw new CliError(lost);
+    const noDaemon = codexTemplateWarning(plan.template, templateCommand, agents);
+    if (noDaemon) warnings.push(noDaemon);
   }
   // Where it works: --worktree's, the branch's worktree, or the folder a new one gets (made
   // below, once the check passes). Nothing is made yet.
@@ -11194,6 +11310,8 @@ async function cmdWorker(opts, rest) {
     const codexWithheld = codexPlan && !plan.template ? localCodexWarning(agents.codex?.run, codexPlan) : null;
     if (codexWithheld) warnings.push(codexWithheld);
     workerArgv = codexPlan ? withCodexGrants(launchArgv, codexPlan.dirs) : launchArgv;
+    const freshLogin = botLogin(templateArgv ?? workerArgv, { agent: runs, log: (line) => warnings.push(line) });
+    refuseOtherHome(chosen, freshLogin);
     // #1420: worker starts alone get a per-launch trust word, after checking the person's settings.
     // The proxy and templates keep their commands; no config is written and no prompt is answered.
     if (plan.template && runs === "codex") {
@@ -11201,8 +11319,9 @@ async function cmdWorker(opts, rest) {
     } else if (plan.agent === "codex" && proxied && !plan.template) {
       warnings.push(codexTrustKeptWarning(`${bot.name}'s Codex worker`, "proxy"));
     } else if (plan.agent === "codex" && !proxied && !plan.template && codexPlan) {
-      // #1208: a worker on a chosen agent home reads that folder's config, as its Codex will.
-      const codexHome = chosen ? chosen.home : process.env.CODEX_HOME || join(home(), ".codex");
+      // #1509: the reader's folder when the policy chose it; #1208: a worker on a chosen agent home
+      // reads that folder's config, as its Codex will.
+      const codexHome = freshLogin?.dir ?? (chosen ? chosen.home : process.env.CODEX_HOME || join(home(), ".codex"));
       const configs = isAbsolute(codexHome)
         ? ["/etc/codex/config.toml", "/etc/codex/managed_config.toml", join(codexHome, "config.toml")].map((path) => {
           try { return { text: readFileSync(path, "utf8") }; } catch (error) { return { error }; }
@@ -11218,9 +11337,10 @@ async function cmdWorker(opts, rest) {
       agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task: prompt, template: plan.template,
       templateArgv,
       // #1208: a chosen home's words replace the Claude Accounts login (and unset the keys that would outrank it);
-      // the pointer record (#1509) rules over both when the entrypoint exported it.
-      login: readerWords ?? (chosen ? chosenHomeWords(chosen.agent, chosen.home, chosen.launch) : claudeLogin(templateArgv ?? plan.argv ?? [], warnings)),
+      // under the Bot login policy (#1509) a chosen home is the reader's own folder (checked above).
+      login: chosen ? chosenHomeWords(chosen.agent, chosen.home, chosen.launch) : freshLogin?.words ?? claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
       outliveParent: Boolean(chosen),
+      loginEnv: process.env,
       path: runPath?.path ?? process.env.PATH, taskId, project: project.key, lead,
       agySettingsPath: agySettings && !templateArgv ? agySettings.path : null,
       // #955: the proxy matches a worker's `hc kill` shim as the stable folder's copy.
@@ -11232,7 +11352,7 @@ async function cmdWorker(opts, rest) {
     // waiting 60 s for a program that never does; the run gets its own timeout above that wait.
     // One the timeout still ends after hc made the terminal is a start whose task didn't go in,
     // never a failed start: the row below is written from the terminal looked up by its name.
-    ledgerLogin = chosen ? chosenLaunchLogin(chosen.agent, chosen.home) : launchLogin(runs ?? plan.agent);
+    ledgerLogin = chosen && !freshLogin ? chosenLaunchLogin(chosen.agent, chosen.home) : launchLogin(runs ?? plan.agent, freshLogin);
     let core = null;
     if (chosen) {
       core = await coreId();
@@ -11263,7 +11383,7 @@ async function cmdWorker(opts, rest) {
       warnings.push(`${name} started, but its task wasn't delivered: hc never saw its terminal report a status${why ? ` (${why})` : ""}. `
         + `Send it: hc send ${address} "<task>".`);
     }
-    return { address, name, proxied, pane };
+    return { address, name, proxied, pane, homeEnv: loginLaunchHome(homeEnv, freshLogin) };
   }, { wait: Math.max(0, deadline - Date.now()), what: `the worker lock on ${place.worktree}` });
   const started = await (taskName ? withLockAsync(taskLock(lockDir, taskName), inWorktree,
     { wait: WORKER_LOCK_WAIT, what: `the task name ${taskName}` }) : inWorktree())
@@ -11276,7 +11396,7 @@ async function cmdWorker(opts, rest) {
     : await launchOf(terminal);
   const unlogged = appendLedger(startRow({ kind: "worker", terminal, pid, botId: bot.id, task: taskId, branch: place.branch,
     project: project.key, lead, worktree, base, created: place.created, agent: plan.agent, model: plan.model, effort: plan.effort,
-    template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, env: homeEnv, squad: squadOf(project.file, bot.id),
+    template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, env: started.homeEnv, squad: squadOf(project.file, bot.id),
     session, ...ledgerLogin, ...(chosen ? { agentHome: chosen.home, launch: chosen.launch } : {}) }));
   if (unlogged) warnings.push(unlogged);
   // An agent that takes no first prompt on its command line (kimi, #1032) started bare: its task
@@ -11513,7 +11633,8 @@ async function reviveOne(target, bot) {
   const args = ["restart", bot.id, "--project", target.project, "--tree", "--revive", "--json"];
   const read = (r) => { let out = null; try { out = JSON.parse(r.stdout); } catch { out = null; } return { code: r.code, out, err: r.stderr, killed: r.killed === true }; };
   const helpersOfAnswer = (out) => (Array.isArray(out?.helpers) ? out.helpers : []).map((h) => ({ name: h.name ?? h.replaced, bot: h.bot ?? null,
-    outcome: !h.up ? "failed" : h.mode === "resume" ? "resumed" : "fresh", why: !h.up ? firstSentence(h.error) : h.note ?? null,
+    outcome: !h.up ? "failed" : h.mode === "resume" ? "resumed" : "fresh", why: !h.up ? (h.login ? h.error : firstSentence(h.error)) : h.note ?? null,
+    ...(h.login ? { login: h.login } : {}),
     ...(h.by_hand ? { by_hand: h.by_hand } : {}) }));
   const done = (out, why = null) => {
     const noSession = !out.note || /^no (Codex|Kimi) conversation of its own could be identified for /.test(out.note);
@@ -11526,6 +11647,7 @@ async function reviveOne(target, bot) {
   const first = read(await runSelf(args));
   if (back(first)) return done(first.out);
   if (first.out?.running) return { outcome: "running", terminal: first.out.running, why: null, helpers: [] };
+  if (first.out?.login) return { outcome: "failed", terminal: null, why: first.out.error, helpers: [] };
   if (first.killed) return { outcome: "failed", terminal: null, why: `its restart gave no answer in ${REVIVE_RESTART_MS / 1000}s`, helpers: [] };
   const refusal = restartAnswer({ code: first.code || 1, out: first.out, err: first.err });
   if (!refusal.freshable) return { outcome: "failed", terminal: null, why: firstSentence(refusal.refused), helpers: [] };
@@ -11533,7 +11655,7 @@ async function reviveOne(target, bot) {
   if (back(again)) return done(again.out, `its conversation couldn't be resumed (${firstSentence(refusal.refused)})`);
   if (again.out?.running) return { outcome: "running", terminal: again.out.running, why: null, helpers: [] };
   return { outcome: "failed", terminal: null, helpers: [],
-    why: firstSentence(restartAnswer({ code: again.code || 1, out: again.out, err: again.err }).refused) };
+    why: again.out?.login ? again.out.error : firstSentence(restartAnswer({ code: again.code || 1, out: again.out, err: again.err }).refused) };
 }
 
 /**
@@ -11766,8 +11888,9 @@ function reviveKeptPath() {
   return servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
 }
 
-/** The service's environment: the kept PATH, and the app home when it isn't the default. */
-const reviveServiceEnv = (keptPath) => ({ ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath });
+/** The kept PATH, a custom app home, and the active Bot login policy for the boot pass. */
+const reviveServiceEnv = (keptPath) => ({ ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath,
+  ...(loginPolicyActive(process.env) ? loginPolicyEnv(process.env) : {}) });
 
 /** `revive service ...` on Linux: the systemd user unit in ~/.config/systemd/user. */
 async function reviveSystemd(opts, verb) {
@@ -13433,11 +13556,9 @@ export async function accountsMain(argv) {
   }
 }
 
-/** The two vendor logins the reader serves. */
-const LOGIN_VENDORS = new Set(["claude", "codex"]);
 function loginVendor(rest, what) {
   const [vendor, extra] = rest;
-  if (extra || !LOGIN_VENDORS.has(vendor)) throw new CliError(`${what} takes one vendor: claude or codex.`, 2);
+  if (extra || !VENDORS.includes(vendor)) throw new CliError(`${what} takes one vendor: claude or codex.`, 2);
   return vendor;
 }
 
@@ -13459,14 +13580,13 @@ function cmdLogin(opts, rest) {
     : `generation ${report.generation}, folder ${report.folder}, sequence ${report.sequence}`;
 }
 
-/** `am login-env <vendor>`: the one assignment a raw launch wrapper needs, stdout only. */
+/** `am login-env <vendor>`: the launch's env words, one per line. */
 function cmdLoginEnv(opts, rest) {
   const vendor = loginVendor(rest, "login-env");
-  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), readOnly: false,
-    log: (line) => process.stderr.write(`${line}\n`) });
+  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo() });
   if (resolved.state === "absent") return PRINTED;
   if (resolved.code) throw loginRefusal(resolved);
-  process.stdout.write(`${loginVar(vendor)}=${resolved.dir}\n`);
+  process.stdout.write(`${botLoginWords(vendor, resolved.dir).join("\n")}\n`);
   return PRINTED;
 }
 
@@ -13505,8 +13625,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   }
   if (command !== "main") {
     if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
-    // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either.
-    if (command !== "accounts") io.repairCliLinks?.();
+    // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either;
+    // nor does the reader's read-only login --check (#1509).
+    if (command !== "accounts" && (command !== "login" || !opts.check)) io.repairCliLinks?.();
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
   if (opts.version && !command) {
@@ -13557,8 +13678,8 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     const message = e instanceof CliError ? e.message : botAction
       ? actionError(e, command === "start" ? "Start" : "Restart") : `${e?.stack ?? e}`;
     process.stderr.write(unprinted(`am: ${message}\n`));
-    if (opts.json && e instanceof CliError && (e.detail || command === "main")) {
-      process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail }, null, 2)}\n`));
+    if (opts.json && e instanceof CliError && (e.detail || command === "main" || (opts.revive && e.loginCode))) {
+      process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail, ...(opts.revive && e.loginCode ? { login: e.loginCode } : {}) }, null, 2)}\n`));
     }
     return e instanceof CliError ? e.code : 1;
   }

@@ -17,6 +17,7 @@ import { GUARD_DIR, KILL_GUARD_DIR, ledgerPath, readLedger } from "../mods/am-si
 import { AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
 import { claudeSlug, restartAnswer } from "../mods/am-sidebar/restart.js";
+import { loginFixture } from "./login-fixture.mjs";
 import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 // Start and Restart put each bot's briefing in its agent's command (models.js withBriefing);
 // the tests on the rest of the command compare it with those words out.
@@ -2577,17 +2578,40 @@ test("#805 restart queues working panes, lists, replaces and cancels watchers", 
   assert.equal(forced.code, 0, forced.err);
 });
 
-test("#1509 a queued restart keeps the pointer export and lands on the recorded home", async (t) => {
+test("#1509 policy-off watcher argv is byte-identical to 4beec409f with DSH_HOME set", (t) => {
+  const s = restartScene(t, { status: "working" });
+  const path = `${s.root}/bin:${dirname(process.execPath)}:/usr/bin:/bin`;
+  const env = { ...s.env, PATH: path, DSH_HOME: join(s.root, "dsh"), AUTOMAGIK_HOME: s.root, [REQUIRED_VAR]: "off" };
+  const queued = s.cli(["restart", "Genie", "--json"], { env });
+  assert.equal(queued.code, 0, queued.err);
+  const [{ id }] = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"));
+  const inherited = Object.entries(env).filter(([key, value]) => value !== undefined &&
+    (key.startsWith("AUTOMAGIK_HERDR_") || ["USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "HERMES_HOME", "VIRTUAL_ENV"].includes(key)));
+  const shell = [
+    'if [ -n "${HC_SOCKET-}" ]; then set -- "HC_SOCKET=$HC_SOCKET" "$@"; fi',
+    'if [ -n "${HC_TERMINAL_ID-}" ]; then set -- "HC_TERMINAL_ID=$HC_TERMINAL_ID" "$@"; fi',
+    'exec /usr/bin/env -i "$@"',
+  ].join("\n");
+  assert.deepEqual(runCall(s.calls()), ["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", s.project,
+    "--label", `herdr.queued-restart=${ID.main}`, "--", "/bin/sh", "-c", shell, "sh",
+    `HOME=${s.home}`, `HERDR_APP_HOME=${s.app}`, `PATH=${path}`, ...inherited.map(([key, value]) => `${key}=${value}`),
+    process.execPath, CLI, "restart", ID.main, "--project", s.project, "--run-queued", id]);
+});
+
+test("#1509 the captured watcher resolves the new generation at fire time", async (t) => {
   const setup = (s) => {
-    const current = join(s.root, "cli-homes", "current");
-    const login = join(s.root, "generation-login");
-    mkdirSync(current, { recursive: true }); mkdirSync(login);
-    chmodSync(login, 0o700);
+    const current = join(s.root, "acp", "cli-homes", "current");
     const generation = "11111111-1111-4111-8111-111111111111";
+    const login = join(dirname(current), "homes", "claude", generation, ".claude");
+    const dsh = join(s.root, "dsh");
+    mkdirSync(current, { recursive: true }); mkdirSync(login, { recursive: true }); mkdirSync(dsh, { recursive: true });
+    // The panel's claim on the shared root names this DSH home (acp-dsh installationCliHome).
+    writeFileSync(join(s.root, "acp", "cli-homes", "installation.json"), JSON.stringify({ version: 1, identity: realpathSync(dsh) }));
+    chmodSync(login, 0o700);
     writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 6,
       claude: { generation, configDir: login }, codex: null, updatedAt: "2026-11-16T20:00:00.000Z" }));
     writeFileSync(join(current, "claude"), generation);
-    return { pointer: join(current, "claude"), login };
+    return { current, pointer: join(current, "claude"), login, dsh };
   };
   const queue = (s, env) => {
     const q = s.cli(["restart", "Genie", "--json"], { env });
@@ -2604,19 +2628,38 @@ test("#1509 a queued restart keeps the pointer export and lands on the recorded 
   };
 
   const s = restartScene(t, { status: "working" });
-  const { pointer, login } = setup(s);
-  const first = queue(s, { [POINTER_VAR]: pointer, [REQUIRED_VAR]: "required" });
+  const { current, pointer, login, dsh } = setup(s);
+  const first = queue(s, { [POINTER_VAR]: pointer, [REQUIRED_VAR]: "required", DSH_HOME: dsh, AUTOMAGIK_HOME: s.root });
   assert.ok(first.watcher.includes(`${POINTER_VAR}=${pointer}`), JSON.stringify(first.watcher));
   assert.ok(first.watcher.includes(`${REQUIRED_VAR}=required`), JSON.stringify(first.watcher));
-  const fired = await fire(s, first.entry, { [POINTER_VAR]: pointer });
-  assert.equal(fired.code, 0, fired.err);
+  assert.ok(first.watcher.includes(`DSH_HOME=${dsh}`), JSON.stringify(first.watcher));
+  assert.ok(first.watcher.includes(`AUTOMAGIK_HOME=${s.root}`), JSON.stringify(first.watcher));
+  const next = loginFixture(dirname(current), "claude", "22222222-2222-4222-8222-222222222222");
+  const state = s.hcState();
+  state.idleOnWait = "t5";
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  // The watcher's env -i deliberately removes fixture variables. Bake those into its fake hc.
+  exe(join(s.root, "bin", "hc"), `#!/bin/sh
+HC_FAKE_STATE="${s.env.HC_FAKE_STATE}" HC_FAKE_LOG="${s.env.HC_FAKE_LOG}" exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const [command, ...args] = first.watcher.slice(first.watcher.indexOf("--") + 1);
+  const fired = spawnSync(command, args, { cwd: s.project, env: s.env, encoding: "utf8" });
+  assert.equal(fired.status, 0, fired.error?.message ?? fired.stderr);
   const launch = runs(s).at(-1);
-  assert.ok(launch.includes(`CLAUDE_CONFIG_DIR=${login}`), JSON.stringify(launch));
+  assert.ok(launch.includes(`CLAUDE_CONFIG_DIR=${next.dir}`), JSON.stringify(launch));
+  assert.equal(launch.includes(`CLAUDE_CONFIG_DIR=${login}`), false);
 
-  // The marker without the pointer refuses at the queued fire; no launch happens.
+  // The marker without the pointer refuses before anything is queued: no watcher, no launch.
+  const early = restartScene(t, { status: "working" });
+  setup(early);
+  const refused = early.cli(["restart", "Genie", "--json"], { env: { [REQUIRED_VAR]: "required" } });
+  assert.equal(refused.code, 2, refused.out);
+  assert.match(refused.err, /login-required/);
+  assert.equal(runs(early).length, 0, "no watcher and no launch");
+
+  // A fire whose env lost the pointer refuses at the queued fire; no launch happens.
   const required = restartScene(t, { status: "working" });
-  setup(required);
-  const second = queue(required, { [REQUIRED_VAR]: "required" });
+  const second = queue(required, (({ pointer: p, dsh: d }) => ({ [POINTER_VAR]: p, [REQUIRED_VAR]: "required", DSH_HOME: d }))(setup(required)));
   assert.ok(second.watcher.includes(`${REQUIRED_VAR}=required`), JSON.stringify(second.watcher));
   const before = runs(required).length;
   const noPointer = await fire(required, second.entry, { [REQUIRED_VAR]: "required" });
@@ -3995,6 +4038,144 @@ test("restart --tree #453: the bot's own -u launch is rebuilt on login 2; a Clau
   assert.equal(claude.words[0], "claude");
   assert.equal(codex.words[0], "codex");
   assert.equal(codex.env.length, 1, `codex helper: PATH only: ${codex.env.join(" ")}`);
+});
+
+for (const mode of ["ready", "paused", "recovery", "late refusal"]) {
+  test(`#1509 restart --tree checks the helper's own Bot login (${mode})`, (t) => {
+    const s = restartScene(t);
+    const root = join(s.root, "cli-homes");
+    const claude = loginFixture(root, "claude");
+    const codex = loginFixture(root, "codex");
+    const work = join(s.root, "helper-work");
+    mkdirSync(work);
+    const state = s.hcState();
+    state.terminals.push({ ...term("t8", { parent: "t5", cwd: work, argv: ["codex"], app: "codex" }),
+      name: "reader-helper", die_with_parent: true, argv: ["codex"] });
+    if (mode === "paused") writeFileSync(join(dirname(codex.dir), "paused"), "");
+    if (mode === "recovery") state.failRun = ["reader-helper"];
+    if (mode === "late refusal") state.onKillWrite = { terminal: "t5", path: join(dirname(codex.dir), "paused"), text: "" };
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    const r = s.cli(["restart", "Genie", "--tree", "--json"], { env: claude.env });
+    if (mode === "paused") {
+      assert.equal(r.code, 2, r.err);
+      assert.match(r.err, /login-paused/);
+      assert.deepEqual(s.calls().filter((call) => ["run", "kill"].includes(call[0])), []);
+      return;
+    }
+    if (mode === "late refusal") {
+      assert.equal(r.code, 1, r.err);
+      assert.match(r.err, /t8 \(reader-helper\): The Bot login record is missing or out of date; sign in again\. \(login-paused\)/);
+      assert.equal(r.json().helpers[0].login, "login-paused");
+      assert.equal(runs(s).length, 1, "only the parent restarted");
+      return;
+    }
+    assert.equal(r.code, mode === "recovery" ? 1 : 0, r.err);
+    assert.ok(runs(s)[0].includes(`CLAUDE_CONFIG_DIR=${claude.dir}`));
+    assert.ok(runs(s)[1].includes(`CODEX_HOME=${codex.dir}`));
+    if (mode === "recovery") {
+      const line = r.json().helpers[0].by_hand;
+      assert.equal(line, "Start the helper through am so it uses the current Bot login.");
+      assert.doesNotMatch(r.err, /CODEX_HOME=|hc run --bg/);
+    }
+  });
+}
+
+test("#1509 an early start refusal opens neither a space nor a pane", (t) => {
+  const s = scene(t, { window: { spaces: [], place: true } });
+  s.seed(team());
+  const r = s.cli(["start", "Genie"], { env: { [POINTER_VAR]: "" } });
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /\(pointer-invalid\)/);
+  assert.deepEqual(s.appCalls().filter((c) => c[0] === "do"), []);
+  assert.deepEqual(runs(s), []);
+});
+
+function managedTree(t, launch = ["codex"], status = "idle") {
+  const s = restartScene(t, { status });
+  const root = join(s.root, "cli-homes");
+  const claude = loginFixture(root, "claude");
+  const codex = loginFixture(root, "codex");
+  const work = join(s.root, "reader-helper");
+  mkdirSync(work);
+  const state = s.hcState();
+  state.terminals.push({ ...term("t8", { parent: "t5", cwd: work, argv: ["codex"], app: "codex" }),
+    name: "reader-helper", die_with_parent: true, argv: launch });
+  const save = () => writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  save();
+  return { s, env: claude.env, claude, codex, state, save };
+}
+
+for (const launch of [["sh", "-c", "exec codex"], ["opaque-helper"]]) {
+  test(`#1509 restart --tree refuses the helper's ${launch[0]} command`, (t) => {
+    const { s, env } = managedTree(t, launch);
+    const r = s.cli(["restart", "Genie", "--tree"], { env });
+    assert.equal(r.code, 2, r.err);
+    assert.match(r.err, /\(launch-not-direct\)/);
+    assert.deepEqual(s.calls().filter((c) => ["run", "kill"].includes(c[0])), []);
+  });
+}
+
+test("#1509 the final helper check ends only the new parent and leaves the old tree attached", (t) => {
+  const { s, env, codex, state, save } = managedTree(t);
+  attachSeat(s, "Genie", "t5");
+  state.onRunWrite = { path: join(dirname(codex.dir), "paused"), text: "" };
+  save();
+  const before = attachOf(s);
+  const r = s.cli(["restart", "Genie", "--tree", "--json"], { env });
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /\(login-paused\)/);
+  assert.equal(runs(s).length, 1);
+  assert.deepEqual(s.calls().filter((c) => c[0] === "kill").map((c) => c[1]), ["t100"]);
+  assert.deepEqual(s.hcState().terminals.map(({ address, state }) => [address, state]),
+    [["t5", "live"], ["t8", "live"], ["t100", "finished"]]);
+  assert.deepEqual(attachOf(s), before);
+});
+
+test("#1509 a restarted Codex helper records the home passed to its launch", (t) => {
+  const { s, env, codex, state, save } = managedTree(t);
+  const file = s.bots();
+  file.bots.find((b) => b.id === ID.dev).agent = "codex";
+  s.seed(file);
+  const previous = join(s.root, "previous-codex");
+  state.terminals[1].argv = ["/usr/bin/env", "PATH=/bin", `HOME=${s.home}`, `CODEX_HOME=${previous}`, "codex"];
+  save();
+  attachSeat(s, "Dev", "t8");
+  const r = s.cli(["restart", "Genie", "--tree", "--json"], { env });
+  assert.equal(r.code, 0, r.err);
+  const terminal = r.json().helpers[0].terminal;
+  assert.equal(terminal, "t101");
+  const overrides = runs(s)[1].filter((word) => word.startsWith("CODEX_HOME="));
+  assert.equal(overrides.at(-1), `CODEX_HOME=${codex.dir}`);
+  assert.equal(seatRows(s).find((row) => row.terminal === terminal).env.CODEX_HOME, codex.dir);
+});
+
+test("#1509 guarded tree recovery runs after a successful kill even when queue cleanup fails", (t) => {
+  const { s, env, state, save } = managedTree(t);
+  const queue = join(s.app, "automagik-herdr/queued-restarts.json");
+  mkdirSync(dirname(queue), { recursive: true });
+  // Since #1880 a queue row is the project's and the bot's together.
+  writeFileSync(queue, JSON.stringify([{ project: realpathSync(s.project), botId: ID.main }]));
+  // Make the queue unreadable only after cleanup has found the row and entered its write path.
+  const hook = join(s.root, "queue-error.cjs");
+  writeFileSync(hook, `
+    const fs = require("node:fs");
+    const rename = fs.renameSync;
+    fs.renameSync = (src, dest) => {
+      if (dest === ${JSON.stringify(queue)}) throw new Error("fixture queue rename failed");
+      return rename(src, dest);
+    };
+    require("node:module").syncBuiltinESMExports();
+  `);
+  save();
+  const r = s.cli(["restart", "Genie", "--tree", "--json"], { env: { ...env, NODE_OPTIONS: `--require=${hook}` } });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /Could not clear Genie's queued restart: fixture queue rename failed/);
+  const result = r.json();
+  assert.ok(result.warnings.some((line) => line.includes("fixture queue rename failed")));
+  assert.equal(result.helpers[0].up, true);
+  assert.equal(result.helpers[0].error, null);
+  assert.deepEqual(s.hcState().terminals.map(({ address, state: life }) => [address, life]),
+    [["t5", "finished"], ["t8", "finished"], ["t100", "live"], ["t101", "live"]]);
 });
 
 test("restart --tree #453: a Claude helper's by-hand line under a bad record carries login A's words and says why (review Low 2)", (t) => {
@@ -6221,6 +6402,68 @@ test("#1556 a due seat with a helper restarts with its helper under the new pane
   assert.ok(calls.some((c) => c[0] === "send" && c[1] === replacement.address && /Helper handoff/.test(c[2])),
     "the handoff is the new conversation's first message");
   assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
+});
+
+test("#1509 restart --due checks every helper before replacing a queued watcher", (t) => {
+  const { s, env, codex } = managedTree(t, ["codex"], "working");
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const previous = s.cli(["restart", "Genie", "--tree", "--json"], { env });
+  assert.equal(previous.code, 0, previous.err);
+  assert.equal(previous.json().queued, true);
+  const file = join(s.app, "automagik-herdr/queued-restarts.json");
+  const before = readFileSync(file, "utf8");
+  writeFileSync(join(dirname(codex.dir), "paused"), "");
+  const at = s.calls().length;
+  const due = s.cli(["restart", "--due", "--json"], { env });
+  assert.match(due.json().failed[0].error, /\(login-paused\)/);
+  assert.deepEqual(due.json().queued, []);
+  assert.equal(readFileSync(file, "utf8"), before);
+  assert.deepEqual(s.calls().slice(at).filter((c) => ["run", "kill", "send"].includes(c[0])), []);
+});
+
+for (const paused of ["seat", "helper"]) {
+  test(`#1509 restart --due refuses a paused ${paused} before asking for a handoff`, (t) => {
+    const { s, env, claude, codex } = managedTree(t);
+    attachSeat(s, "Genie", "t5");
+    assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+    seatTranscript(s, SID, [assistantUsage(5000)]);
+    const dir = paused === "seat" ? claude.dir : codex.dir;
+    writeFileSync(join(dirname(dir), "paused"), "");
+
+    const due = s.cli(["restart", "--due", "--json"], { env: {
+      ...env, AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "120", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10",
+    } });
+    assert.equal(due.code, 1, due.err);
+    assert.match(due.json().failed[0].error, /\(login-paused\)/);
+    assert.deepEqual(due.json().queued, []);
+    assert.deepEqual(s.calls().filter((c) => ["send", "run", "kill"].includes(c[0])), []);
+    assert.equal(existsSync(join(s.app, "automagik-herdr/login-sequence")), false);
+  });
+}
+
+test("#1509 a due watcher rechecks logins before asking for a handoff", (t) => {
+  const { s, env, codex } = managedTree(t, ["codex"], "working");
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const due = s.cli(["restart", "--due", "--json"], { env });
+  assert.equal(due.code, 0, due.err);
+  assert.equal(due.json().queued.length, 1);
+  const [entry] = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"));
+  writeFileSync(join(dirname(codex.dir), "paused"), "");
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === "t5").status.state = "idle";
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const before = s.calls().length;
+  const watcher = s.cli(["restart", ID.main, "--run-queued", entry.id], { env: {
+    ...env, AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "120", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10",
+  } });
+  assert.equal(watcher.code, 2, watcher.err);
+  assert.match(watcher.err, /\(login-paused\)/);
+  assert.equal(s.calls().slice(before).some((c) => c[0] === "send" && c[2]?.includes("Write your handoff to")), false);
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === "t5").state, "live");
 });
 
 test("#1556 a working seat is queued with a handoff and restarts from it at its next idle", async (t) => {

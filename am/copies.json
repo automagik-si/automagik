@@ -170,6 +170,10 @@
       "to": "am/logins.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/loginWords.js",
+      "to": "am/loginWords.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/machineUpdates.js",
       "to": "am/machineUpdates.js"
     },

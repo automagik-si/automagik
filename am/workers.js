@@ -9,6 +9,7 @@ import { AGENTS, AGY_MODE_DEFAULT, CODEX_LOGIN_SHELL, CODEX_NETWORK, agyModeArgs
   hasEffortFlag, launchRun, modelArgs, modelRefusal, promptArgs, resolveAgent } from "./models.js";
 import { TEMPLATE_SHAPE, agentHomeAgent, agentHomePathProblem } from "./model.js";
 import { envWords } from "./logins.js";
+import { loginPolicyWords } from "./loginWords.js";
 
 export { TEMPLATE_SHAPE };
 
@@ -382,8 +383,8 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
  * not herdr-core's (a bun script like omp needs ~/.bun/bin). A
  * `template` runs in hc's documented template form, `<template> <task>` after the options,
  * with no `--` (neither starts with a dash: both are refused before): it sets its own command.
- * `login`: a Claude worker's login words (logins.js chooseLogin), after PATH. A Claude template
- * can't take them through hc's template form, so it runs its own command instead
+ * `login`: a worker's login options and assignments (logins.js). A template that needs
+ * login words runs its own command instead
  * (`templateArgv`, `sh -c '<command> "$@"' sh <task>`, as Restart re-runs a template) under
  * `/usr/bin/env <login words>`, its template label kept. `agyMode`: an Antigravity worker's
  * execution mode (auto by default), written in the `worker.agyMode` label only when it isn't
@@ -402,7 +403,7 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
  */
 export function workerArgs({ botId, branch, role, name, cwd, parent, agent, model, effort, agyMode, argv, task, template, path,
   taskId, project, lead, space, login = [], templateArgv = null, sandbox = false, stableRoot = null, session = null,
-  agySettingsPath = null, killGuard = undefined, outliveParent = false }) {
+  agySettingsPath = null, killGuard = undefined, outliveParent = false, loginEnv = {} }) {
   const args = ["run", "--bg", "--json"];
   if (name) args.push("--name", name);
   args.push("--cwd", cwd, "--label", `${WORKER_OF_LABEL}=${botId}`);
@@ -426,7 +427,10 @@ export function workerArgs({ botId, branch, role, name, cwd, parent, agent, mode
   const sandboxRoot = sandbox === true && agent === "dsh-tui" ? (stableRoot ?? stableRootOf()) : null;
   const guard = sandboxRoot ? stableGuardDir(sandboxRoot)
     : agent === "dsh-tui" ? GUARD_DIR : agent ? (killGuard === undefined ? KILL_GUARD_DIR : killGuard) : null;
-  const vars = envWords(path ? [`PATH=${guardPathWith(path, guard)}`] : [], login);
+  const vars = envWords([
+    ...(path ? [`PATH=${guardPathWith(path, guard)}`] : []),
+    ...(agent === "dsh-tui" ? loginPolicyWords(loginEnv) : []),
+  ], login);
   const env = vars.length ? [ENV, ...vars] : [];
   // #955: an Antigravity worker with no permission file never runs on skip-permissions.
   const taskArgv = [...agyGuarded(agent, [...argv, ...agySettingsArgs(agent, agySettingsPath)]), ...promptArgs(agent, task)];

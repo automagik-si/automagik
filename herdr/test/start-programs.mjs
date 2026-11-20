@@ -7,8 +7,10 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { readJsonLines } from "./log-lines.mjs";
+import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { attachPath } from "../mods/am-sidebar/attach.js";
-import { POINTER_VAR } from "../mods/am-sidebar/loginRecord.js";
+import { loginFixture } from "./login-fixture.mjs";
+import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/start-programs.json", import.meta.url), "utf8"));
 const fake = new URL("./fake-hc.mjs", import.meta.url).pathname;
@@ -23,6 +25,7 @@ function scene(t, cli, agent, paired, remote) {
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${fake}" "$@"\n`);
   exe(join(bin, "herdr-app"), "#!/bin/sh\nexit 1\n");
   exe(join(bin, "pgrep"), "#!/bin/sh\nexit 1\n");
+  exe(join(bin, "claude"));
   for (const { run } of Object.values(fixture.programs)) exe(join(bin, run[0]));
   const binding = { home: join(root, "hermes-data"), profile: "research" };
   const bot = { id, name: "Research", kind: "main", look: { character: "star", colour: "blue" },
@@ -119,11 +122,12 @@ export function startProgramsTests(cli) {
     const s = scene(t, cli, "codex", false, false);
     s.live();
     const current = join(s.root, "cli-homes", "current");
-    const claudeDir = join(s.root, "generation-claude"), codexDir = join(s.root, "generation-codex");
-    for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
-    chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
     const claudeGen = "11111111-1111-4111-8111-111111111111";
     const codexGen = "22222222-2222-4222-8222-222222222222";
+    const claudeDir = join(dirname(current), "homes", "claude", claudeGen, ".claude");
+    const codexDir = join(dirname(current), "homes", "codex", codexGen, ".codex");
+    for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+    chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
     writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 5,
       claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
       updatedAt: "2026-11-16T20:00:00.000Z" }));
@@ -133,6 +137,164 @@ export function startProgramsTests(cli) {
     assert.equal(r.status, 0, r.stderr);
     const launch = s.calls().filter((call) => call[0] === "run").at(-1);
     assert.ok(launch.includes(`CODEX_HOME=${codexDir}`), JSON.stringify(launch));
+  });
+
+  for (const action of ["start", "restart", "tree"]) {
+    test(`#1509 linked ${action} refuses this computer's Bot login before launch`, (t) => {
+      const s = scene(t, cli, "codex", false, true);
+      if (action !== "start") s.live();
+      const env = action === "restart" ? { [REQUIRED_VAR]: "required" } : loginFixture(join(s.root, "cli-homes"), "codex").env;
+      const r = s.run([action === "start" ? "start" : "restart", id, ...(action === "tree" ? ["--tree", "--force"] : [])], env);
+      assert.equal(r.status, 2, r.stderr);
+      assert.equal(r.stderr.trim(), "am: A linked machine can't carry this computer's Bot login; start the bot on that machine. (linked-machine)");
+      assert.deepEqual(s.calls().filter((c) => ["run", "kill"].includes(c[0])), []);
+      // Identifying the launch agent requires reading the project on the linked machine.
+      const probes = s.calls().filter((c) => c[0] === "exec").map((c) => c.slice(c.indexOf("--") + 1, c.indexOf("--") + 3).join(" "));
+      assert.ok(probes.every((p) => p === `test -d` || p === "git rev-parse"), JSON.stringify(probes));
+    });
+  }
+
+  for (const action of ["start", "restart", "swap"]) {
+    test(`#1509 linked ${action} allows a non-vendor agent under the Bot login policy`, (t) => {
+      const s = scene(t, cli, action === "swap" ? "codex" : "omp", false, true);
+      if (action !== "start") s.live();
+      const args = [action === "start" ? "start" : "restart", id];
+      if (action === "swap") args.push("--agent", "omp");
+      const r = s.run(args, { [REQUIRED_VAR]: "required" });
+      assert.equal(r.status, 0, r.stderr);
+      const launch = s.calls().find((c) => c[0] === "run");
+      assert.ok(launch?.some((word) => word === "omp" || word.endsWith("/omp")), JSON.stringify(s.calls()));
+    });
+  }
+
+  test("#1509 a linked restart refuses a swap to a vendor under the Bot login policy", (t) => {
+    const s = scene(t, cli, "omp", false, true);
+    s.live();
+    const r = s.run(["restart", id, "--agent", "codex"], { [REQUIRED_VAR]: "required" });
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /\(linked-machine\)/);
+    assert.deepEqual(s.calls().filter((c) => ["run", "kill"].includes(c[0])), []);
+  });
+
+  test("#1509 start resolves a custom program's executable instead of its key", (t) => {
+    const s = scene(t, cli, "omp", false, false);
+    const programs = structuredClone(fixture);
+    programs.programs.omp.run = ["codex"];
+    writeFileSync(join(s.app, "programs.json"), JSON.stringify(programs));
+    const login = loginFixture(join(s.root, "cli-homes"), "codex");
+    const r = s.run(["start", id], login.env);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(s.calls().find((c) => c[0] === "run").includes(`CODEX_HOME=${login.dir}`));
+  });
+
+  for (const [action, vendor] of [["start", "codex"], ["restart", "claude"]]) {
+    test(`#1509 linked ${action} refuses a ${vendor} executable under a non-vendor key`, (t) => {
+      const s = scene(t, cli, "omp", false, true);
+      if (action === "restart") s.live();
+      const programs = structuredClone(fixture);
+      programs.programs.omp.run = [vendor];
+      writeFileSync(join(s.app, "programs.json"), JSON.stringify(programs));
+      const args = [action, id, ...(action === "restart" ? ["--fresh"] : [])];
+      const refused = s.run(args, { [POINTER_VAR]: "" });
+      assert.equal(refused.status, 2, refused.stderr);
+      assert.match(refused.stderr, /\(linked-machine\)/);
+      assert.deepEqual(s.calls().filter((c) => ["run", "kill"].includes(c[0])), []);
+      const baseline = s.run(args);
+      assert.equal(baseline.status, 0, baseline.stderr);
+      assert.ok(s.calls().find((c) => c[0] === "run")?.includes(vendor));
+    });
+  }
+
+  test("#1509 a linked tree with a non-vendor parent and a vendor helper is refused", (t) => {
+    const s = scene(t, cli, "omp", false, true);
+    s.live();
+    const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+    state.terminals.push({ address: "vm/t2", name: "helper", parent: "vm/t1", die_with_parent: true,
+      state: "live", cwd: s.project, argv: ["codex"], foreground: { argv: ["codex"], cwd: s.project } });
+    writeFileSync(s.statePath, JSON.stringify(state));
+    const before = s.calls().length;
+    const refused = s.run(["restart", id, "--tree", "--force"], { [REQUIRED_VAR]: "required" });
+    assert.equal(refused.status, 2, refused.stderr);
+    assert.match(refused.stderr, /\(linked-machine\)/);
+    const calls = s.calls().slice(before);
+    assert.deepEqual(calls.filter((c) => ["run", "kill"].includes(c[0])), []);
+    assert.ok(!calls.some((c) => c[0] === "exec" && c.includes("--tree")), JSON.stringify(calls));
+  });
+
+  test("#1509 Claude launch settings are guarded only while the Bot login policy is active", (t) => {
+    const s = scene(t, cli, "claude", false, false);
+    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const programs = structuredClone(fixture);
+    const settings = join(s.root, "settings.json");
+    writeFileSync(settings, "{}");
+    const override = (words) => {
+      programs.programs.claude = { run: ["claude", ...words] };
+      writeFileSync(join(s.app, "programs.json"), JSON.stringify(programs));
+    };
+    for (const words of [
+      ["--settings", '{"env":{}}'],
+      ["--settings", '{"env":{"CLAUDE_CONFIG_DIR":"/other"}}'],
+      ['--settings={"forceLoginOrgUUID":"other"}'],
+      ["--settings", settings],
+    ]) {
+      override(words);
+      const refused = s.run(["start", id], login.env);
+      assert.equal(refused.status, 2, refused.stderr);
+      assert.match(refused.stderr, /\(settings-overrides-login\)/);
+      assert.deepEqual(s.calls().filter((c) => c[0] === "run"), []);
+    }
+    const baseline = s.run(["start", id]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.ok(s.calls().find((c) => c[0] === "run")?.includes(settings));
+    const generated = scene(t, cli, "claude", false, false);
+    const native = loginFixture(join(generated.root, "cli-homes"), "claude");
+    const started = generated.run(["start", id], native.env);
+    assert.equal(started.status, 0, started.stderr);
+    assert.ok(generated.calls().find((c) => c[0] === "run")?.includes(`CLAUDE_CONFIG_DIR=${native.dir}`));
+  });
+
+  for (const [agent, argv] of [
+    ["claude", ["/bin/sh", "-lc", "exec claude"]],
+    ["codex", ["/usr/bin/env", "-S", "codex"]],
+    ["omp", ["opaque-wrapper"]],
+  ]) test(`#1509 start refuses programs.json ${agent} command ${argv[0]} under the policy`, (t) => {
+    const s = scene(t, cli, agent, false, false);
+    const programs = structuredClone(fixture);
+    programs.programs[agent] = { ...(programs.programs[agent] ?? {}), run: argv };
+    writeFileSync(join(s.app, "programs.json"), JSON.stringify(programs));
+    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const r = s.run(["start", id], login.env);
+    assert.equal(r.status, 2, r.stderr);
+    assert.equal(r.stderr.trim(), "am: Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)");
+    assert.deepEqual(s.calls().filter((c) => ["run", "kill"].includes(c[0])), []);
+  });
+
+  test("#1509 start rereads the Bot login after the early check", (t) => {
+    const s = scene(t, cli, "codex", false, false);
+    const root = join(s.root, "cli-homes");
+    const generation = "22222222-2222-4222-8222-222222222222";
+    const next = loginFixture(root, "codex", generation);
+    const first = loginFixture(root, "codex");
+    const hook = join(s.root, "switch.cjs");
+    writeFileSync(hook, `
+      const fs = require("node:fs");
+      const lstat = fs.lstatSync;
+      fs.lstatSync = (path, ...args) => {
+        if (path === ${JSON.stringify(join(dirname(first.dir), "changing"))}) {
+          fs.writeFileSync(${JSON.stringify(next.pointer)}, ${JSON.stringify(generation)});
+          fs.writeFileSync(${JSON.stringify(next.recordPath)}, ${JSON.stringify(next.text)});
+        }
+        return lstat(path, ...args);
+      };
+      require("node:module").syncBuiltinESMExports();
+    `);
+    const r = s.run(["start", id], { ...first.env, CODEX_HOME: join(s.root, "caller-codex"), NODE_OPTIONS: `--require=${hook}` });
+    assert.equal(r.status, 0, r.stderr);
+    const launch = s.calls().find((c) => c[0] === "run");
+    assert.ok(launch.includes(`CODEX_HOME=${next.dir}`), JSON.stringify(launch));
+    assert.equal(launch.includes(`CODEX_HOME=${first.dir}`), false);
+    const row = readLedger(readFileSync(ledgerPath(s.app), "utf8")).find((row) => row.kind === "seat");
+    assert.equal(row.env.CODEX_HOME, next.dir);
   });
 
   for (const mode of ["tree", "end", "partial"]) test(`programs fixture: linked paired helper restart ${mode}`, (t) => {
