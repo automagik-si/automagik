@@ -231,4 +231,50 @@ class HomeChatsTest {
         val other = ChatWatch.read(w, "h2", listOf(row("s9", "blocked")), 9)
         assertEquals(setOf(k, ChatWatch.key("h2", "dsh:s9")), other.keys)
     }
+
+    @Test fun aGroupIsNoHomeAgentAndNeverCountsAsNeedsYou() {
+        val c = chats(listOf(row("bot", "blocked"), row("room:r1", "blocked")))
+        assertEquals(listOf("dsh:bot"), c.agents.map { it.first.address })
+        assertEquals(1, pulse(c).needsYou)
+        assertEquals(listOf("dsh:bot"), refs(pulse(c), Cockpit.BLOCKED))
+    }
+
+    @Test fun groupsListUnderTheirOwnHeadingMostUrgentFirst() {
+        val blocked = row("room:r1", "blocked", kind = "permission", title = "Launch")
+        val working = row("room:r2", "working", kind = "permission", title = "Work")
+        val idleA = row("room:r3", "idle", title = "Alpha")
+        val idleZ = row("room:r4", "idle", title = "Zulu")
+        val hidden = row("room:hidden", "blocked", shown = false)
+        val groups = ChatGroups.rows(mapOf(host to listOf(idleZ, idleA, blocked, working, hidden, row("bot", "blocked"))))
+        assertEquals("Groups", ChatGroups.HEADING)
+        assertEquals(listOf(blocked, working, idleA, idleZ), groups.map { it.second })
+        assertTrue(groups.all { it.first.hostId == host })
+        assertEquals(Chat.WAITING_ON_COMPUTER, ChatGroups.waiting(blocked))
+        assertEquals("1 approval", ChatGroups.waiting(blocked.copy(approvals = 1)))
+        assertEquals("2 approvals", ChatGroups.waiting(blocked.copy(approvals = 2)))
+        assertNull(ChatGroups.waiting(working))
+        assertEquals("Group", ChatGroups.card(blocked).agent)
+        assertEquals("permission", ChatGroups.card(blocked).kind)
+        assertEquals("", ChatGroups.card(working).kind)
+    }
+
+    @Test fun everyMemberNameIsOnTheCard() {
+        val r = row("room:r1", "blocked").copy(members = listOf("Ana", "Ben", "Cid", "Dee", "Eve"))
+        assertEquals("Ana, Ben, Cid, Dee, Eve", ChatGroups.card(r).message)
+    }
+
+    @Test fun withStateUpdatesOnlyTheOpenGroup() {
+        val group = row("room:r1", "working")
+        val bot = row("b1", "idle")
+        val list = listOf(group, bot)
+        val status = Chat.Status("blocked", "permission")
+        val changed = ChatGroups.withState(list, group.terminal, "Renamed", status, 2)
+        assertEquals(group.copy(title = "Renamed", status = "blocked", kind = "permission", approvals = 2), changed.first())
+        assertSame(bot, changed.last())
+        assertSame(changed, ChatGroups.withState(changed, group.terminal, "Renamed", status, 2))
+        assertSame(changed, ChatGroups.withState(changed, "dsh:room:missing", "Renamed", status, 2))
+        assertSame(changed, ChatGroups.withState(changed, group.terminal, "Other", Chat.Status(""), 0))
+        assertEquals(listOf(bot), ChatGroups.without(changed, group.terminal))
+        assertSame(changed, ChatGroups.without(changed, "dsh:room:missing"))
+    }
 }

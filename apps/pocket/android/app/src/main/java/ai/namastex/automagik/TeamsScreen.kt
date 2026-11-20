@@ -96,7 +96,8 @@ object SpaceIcons {
  * else the projected chat of a Herdr-only main bot's terminal ([Teams.bubbles]).
  */
 @Composable fun TeamsScreen(state: PocketState, vm: PocketViewModel, teams: List<Teams.Team>, dsh: Map<String, List<Chat.Terminal>>,
-                            onOpen: (Teams.Opens) -> Unit) {
+                            groupChats: List<Pair<TerminalRef, Chat.Terminal>> = emptyList(),
+                            onOpenGroup: (TerminalRef) -> Unit = {}, onOpen: (Teams.Opens) -> Unit) {
     val celebrations by vm.celebrations.collectAsState()
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     val ordered = remember(teams) { Teams.order(teams) }
@@ -134,6 +135,16 @@ object SpaceIcons {
             // A merge celebrates for two minutes after it is seen: a row scrolled back later doesn't jump again.
             val celebrate = b.main?.let { celebrations["${b.team.id}|${it.id}"] }?.takeIf { System.currentTimeMillis() - it < 120_000 }
             BubbleRow(state, vm, b, celebrate = celebrate, modifier = Modifier.animateItem(), onOpen = onOpen)
+        }
+        if (selected == null && groupChats.isNotEmpty()) {
+            item(key = "groups") {
+                Box(Modifier.padding(horizontal = 14.dp)) { SectionHeader(ChatGroups.HEADING, groupChats.size) }
+            }
+            items(groupChats, key = { "g:${it.first.hostId}:${it.first.address}" }) { (ref, g) ->
+                Box(Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
+                    GroupCard(g, vm.hostName(ref.hostId)) { onOpenGroup(ref) }
+                }
+            }
         }
     }
 }
