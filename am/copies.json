@@ -42,6 +42,10 @@
       "to": "am/actionError.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/agentHome.js",
+      "to": "am/agentHome.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/agentPath.mjs",
       "to": "am/agentPath.mjs"
     },

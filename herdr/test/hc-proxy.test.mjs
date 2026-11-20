@@ -1794,3 +1794,23 @@ test("#540 the proxy still refuses killing or removing the caller's pane", async
     assert.equal(fake.calls(method).length, 0, method);
   }
 });
+
+test("#1208 an approved bot that names worker.agentHome starts no worker through the proxy, in either worker shape", async (t) => {
+  for (const [worker, params] of [
+    [{ agent: "codex", agentHome: "/homes/codex-b" }, (s) => approvedParams(s, { agent: "codex" })],
+    [{ template: "dev-sol", agentHome: "/homes/b" }, (s) => approvedParams(s, { template: "dev-sol" })],
+    // Worker defaults the snapshot had to drop still name the home: refused, never run without them.
+    [{ agent: "codex", model: 7, agentHome: "/homes/codex-b" }, (s) => approvedParams(s, { agent: "codex" })],
+    // The helper shape (a dsh-tui worker, no named template or agent).
+    [{ agent: "dsh-tui", agentHome: "/homes/b" }, (s) => runParams(s)],
+  ]) {
+    const { s, client, fake } = await approvedWorkerScene(t, worker);
+    const answer = await client.call("terminal.run", params(s));
+    assert.equal(answer.result, undefined, JSON.stringify(worker));
+    assert.match(answer.error.message, /^hc-proxy: terminal\.run: approved worker refused: worker\.agentHome needs a local, unproxied worker launch$/);
+    assert.equal(fake.calls("terminal.run").length, 0, "the core never received the start");
+  }
+  // The same approved bot without the field: started as before.
+  const { s, client } = await approvedWorkerScene(t, { agent: "codex" });
+  assert.ok((await client.call("terminal.run", approvedParams(s, { agent: "codex" }))).result);
+});

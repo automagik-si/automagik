@@ -1814,3 +1814,18 @@ test("#1172 a paired bot's menu from a stale linked roster snapshot still names 
   assert.match(textOf(nodes.get("menu-remote-note")), /vm isn't answering/);
   assert.match(textOf(nodes.get("menu-remote-note")), /paired to its Hermes Bot Chat \(profile default\): Configure… unpairs it once vm is back/);
 });
+
+test("#1208 menu Prompt: the form's save keeps a stored worker.agentHome as it is (the form has no field for it)", async () => {
+  const before = { ...OMP, instructions: "old words", worker: { agent: "codex", agentHome: "/homes/codex-b" } };
+  seed([MAIN, before]);
+  const { form, cx, draw, click } = await menu();
+  draw();
+  await click("menu-prompt");
+  draw();
+  form.prompt.type("new words", cx);
+  draw();
+  await click("menu-prompt-save");
+  const saved = stored().bots.find((b) => b.id === OMP.id);
+  assert.equal(saved.instructions, "new words");
+  assert.deepEqual(saved.worker, { agent: "codex", agentHome: "/homes/codex-b" }, "kept, never dropped by a form that doesn't edit it");
+});

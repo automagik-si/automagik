@@ -200,6 +200,10 @@ async function main(args) {
     if (verb === "rollback") return rollback(rest);
     if (verb === "self") return self(rest);
     if (verb === undefined || verb === "help" || verb === "--help" || verb === "-h") {
+      // #1208: --agent-home starts one worker (am worker "<task>"); help with it is refused, never ignored.
+      if (rest.some((w) => w === "--agent-home" || w.startsWith("--agent-home="))) {
+        throw new Usage("--agent-home goes with am worker \"<task>\" only: it starts one new worker on a chosen login folder");
+      }
       process.stdout.write(HELP);
       await forward(["--help"]);
       return null;

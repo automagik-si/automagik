@@ -65,6 +65,9 @@ const freshClaude = (words) => {
 import { attachPath as attachFile, foldAttach as foldRows, readAttach as readRows } from "../mods/am-sidebar/attach.js";
 import { readJsonLines } from "./log-lines.mjs";
 import { assertScratchProject, scratchProject, scratchRoot, warnTmpdir } from "./scratch-project.mjs";
+import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
+import { envWords } from "../mods/am-sidebar/logins.js";
+import { workerIntent } from "../mods/am-sidebar/workers.js";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 // AUTOMAGIK_HERDR_TEST_RUNTIME=<bun or node path> runs the CLI with that runtime instead.
@@ -7208,4 +7211,456 @@ test("#1557 delivery checks a parked seat in its project home from a nested cwd"
   put({ ...item, created_ms: pane.created_ms - 1 });
   assert.deepEqual(status().json(), { terminal: "t5", held: false });
   assert.equal(s.calls().some(words => words[0] === "send"), false);
+});
+
+// ---- #1208: a worker on a chosen agent home is never a seat, never ended with its lead ----
+
+const CHOSEN_LAUNCH = "0f0e0d0c-0b0a-4908-8706-050403020100";
+/** A chosen-home worker's launch argv, as hc get reports it (agentHome.js chosenHomeOfArgv reads it). */
+const chosenPaneArgv = (agent, home = "/homes/b") => ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords(agent, home, CHOSEN_LAUNCH)), agent];
+/** A chosen-home worker under `parent`, as hc get answers for it. */
+const chosenWorker = (address, { agent = "codex", parent = "t5", die = false, created = 2 } = {}) => ({
+  ...term(address, { argv: chosenPaneArgv(agent), app: agent === "claude" ? "claude-code" : agent, parent, created }),
+  name: `${address}-w`, argv: chosenPaneArgv(agent), labels: { "worker.of": ID.main, branch: "e2e/x", "worker.role": "dev" },
+  ...(die === "missing" ? {} : { die_with_parent: die }) });
+
+test("#1208 restart --tree: a chosen-home worker that outlives the bot is not planned, not ended, and still runs (both agents)", (t) => {
+  for (const agent of ["claude", "codex"]) {
+    const s = restartScene(t, { extra: [chosenWorker("t7", { agent })] });
+    const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+    assert.equal(r.code, 0, `${agent}: ${r.err}`);
+    assert.deepEqual(r.json().helpers, [], `${agent}: nothing planned`);
+    assert.equal(at(s.calls(), "kill", "t7"), -1, `${agent}: never ended`);
+    assert.equal(runs(s).length, 1, `${agent}: only the bot's own replacement`);
+    assert.deepEqual(["t5", "t7"].map((x) => s.hcState().terminals.find((y) => y.address === x).state), ["finished", "live"]);
+  }
+});
+
+test("#1208 a chosen-home worker hc says would end with the bot refuses every restart before anything, --force and --tree included", (t) => {
+  for (const die of [true, "missing"]) {
+    for (const flags of [[], ["--force"], ["--tree"], ["--tree", "--force"]]) {
+      const s = restartScene(t, { extra: [chosenWorker("t7", { die })] });
+      const r = s.cli(["restart", "Genie", ...flags]);
+      assert.equal(r.code, 1, `${die} ${flags}: ${r.err}`);
+      assert.match(r.err, die === true ? /t7 is a worker on a chosen agent home that would end with its parent \(under t5\)\. Nothing was started or ended, --force included: end it with am worker kill t7 first/
+        : /hc doesn't say whether t7, a worker on a chosen agent home, ends with its parent/);
+      assert.deepEqual(runs(s), [], "nothing started");
+      assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing ended");
+    }
+  }
+});
+
+test("#1208 the walk goes to every depth: a chosen-home worker under a helper that ends with the bot refuses a plain --force", (t) => {
+  const helper = { ...term("t7", { argv: ["codex"], app: "codex", parent: "t5", created: 2 }), die_with_parent: true };
+  const s = restartScene(t, { extra: [helper, chosenWorker("t8", { parent: "t7", die: true, created: 3 })] });
+  const r = s.cli(["restart", "Genie", "--force"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /t8 is a worker on a chosen agent home that would end with its parent \(under t5\)/);
+  assert.deepEqual(runs(s), []);
+  // One that outlives its own parent is no reason: the helper ends with the bot, the worker stays.
+  const ok = restartScene(t, { extra: [helper, chosenWorker("t8", { parent: "t7", die: false, created: 3 })] });
+  const done = ok.cli(["restart", "Genie", "--force"]);
+  assert.equal(done.code, 0, done.err);
+  assert.equal(ok.hcState().terminals.find((x) => x.address === "t8").state, "live");
+});
+
+test("#1208 a failed get of an intermediate helper still exposes its chosen descendants", (t) => {
+  const helper = (address, parent) => ({ ...term(address, { argv: ["codex"], app: "codex", parent, created: 2 }), die_with_parent: true });
+  for (const unreadable of ["t7", "t8"]) {
+    for (const failure of [
+      { failGet: [unreadable] },
+      { failGet: [unreadable], failGetExit: 3 },
+      { getReply: { [unreadable]: null } },
+      { getReply: { [unreadable]: {} } },
+    ]) {
+      const s = restartScene(t, { extra: [helper("t7", "t5"), helper("t8", "t7"), chosenWorker("t9", { parent: "t8", die: true })] });
+      writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), ...failure }));
+      const r = s.cli(["restart", "Genie", "--force"]);
+      assert.equal(r.code, 1, r.err);
+      assert.match(r.err, /t9 is a worker on a chosen agent home that would end with its parent \(under t5\)/);
+      assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
+    }
+  }
+});
+
+test("#1208 an address-only helper reply still exposes its chosen descendants", (t) => {
+  const helper = (address, parent) => ({ ...term(address, { parent }), die_with_parent: true });
+  for (const address of ["t7", "t8"]) {
+    const s = restartScene(t, { extra: [helper("t7", "t5"), helper("t8", "t7"), chosenWorker("t9", { parent: "t8", die: true })] });
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), getReply: { [address]: { address } } }));
+    const r = s.cli(["restart", "Genie", "--force"]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /t9 is a worker on a chosen agent home that would end with its parent \(under t5\)/);
+    assert.equal(s.calls().some(([verb]) => verb === "run" || verb === "kill"), false);
+  }
+});
+
+test("#1208 an incomplete descendant reply still protects the worker named by its argv", (t) => {
+  for (const missingAddress of [false, true]) {
+    const helper = { ...term("t7", { parent: "t5" }), die_with_parent: true };
+    const worker = chosenWorker("t8", { parent: "t7", die: true });
+    const s = restartScene(t, { extra: [helper, worker] });
+    const get = { ...(missingAddress ? {} : { address: "t8" }), argv: worker.argv, die_with_parent: true };
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), getReply: { t8: get } }));
+    const r = s.cli(["restart", "Genie", "--force"]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /t8 is a worker on a chosen agent home that would end with its parent \(under t5\)/);
+    assert.equal(s.calls().some(([verb]) => verb === "run" || verb === "kill"), false);
+  }
+});
+
+test("#1208 an ordinary forced restart makes one helper list call even when a direct helper is unreadable", (t) => {
+  const s = restartScene(t, { extra: [{ ...term("t7", { parent: "t5" }), die_with_parent: true }] });
+  const marker = join(s.root, "helper-looked-up");
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), failGet: ["t7"] }));
+  // Fail an extra list between the helper get and the normal target recheck.
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get t7" ]; then : > "${marker}"; fi
+if [ "$1 $2" = "ls --label" ]; then rm -f "${marker}"; fi
+if [ "$1 $2" = "ls --json" ] && [ -f "${marker}" ]; then echo "extra list" >&2; exit 1; fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["restart", "Genie", "--force", "--fresh", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  const calls = s.calls();
+  const read = at(calls, "read", "t5");
+  const recheck = calls.findIndex(([verb, opt], i) => i > read && verb === "ls" && opt === "--label");
+  assert.ok(read >= 0 && recheck > read, JSON.stringify(calls));
+  assert.equal(calls.slice(read, recheck).filter(([verb, opt]) => verb === "ls" && opt === "--json").length, 1);
+  assert.equal(calls.slice(read, recheck).filter(([verb, address]) => verb === "get" && address === "t7").length, 1);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
+});
+
+test("#1208 ordinary restart --tree omits a listed helper whose get returns JSON null", (t) => {
+  const s = restartScene(t, { extra: [{ ...term("t7", { parent: "t5" }), die_with_parent: true }] });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), getReply: { t7: null } }));
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  assert.deepEqual(r.json().helpers, []);
+  assert.equal(runs(s).length, 1);
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", "t5"]]);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "finished");
+});
+
+test("#1208 ordinary restart --tree omits a listed helper whose get exits 3 with internal", (t) => {
+  const s = restartScene(t, { extra: [{ ...term("t7", { parent: "t5" }), die_with_parent: true }] });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), failGet: ["t7"], failGetExit: 3 }));
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  assert.deepEqual(r.json().helpers, []);
+  assert.equal(runs(s).length, 1);
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", "t5"]]);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "finished");
+});
+
+test("#1208 forced restart promotes an unresolved descendant and keeps refusing after its name changes", (t) => {
+  const helper = { ...term("t7", { parent: "t5", created: 2 }), die_with_parent: true };
+  const child = { ...term("t8", { parent: "t7", created: 3 }), name: "pending-worker", die_with_parent: true };
+  const s = restartScene(t, { extra: [helper, child] });
+  const intent = workerIntent({ launch: CHOSEN_LAUNCH, name: child.name, project: s.project, worktree: s.project,
+    agent: "claude", agentHome: "/homes/b", at: Date.now() - 11 * 60_000 });
+  const unresolved = { event: "unresolved", terminal: child.address, core: "fakecore0000", created_ms: null, launch: intent.launch };
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(ledgerPath(s.app), [intent, unresolved].map((row) => JSON.stringify(row) + "\n").join(""));
+  const promoted = { ...unresolved, created_ms: child.created_ms };
+  for (const name of [child.name, "renamed-worker"]) {
+    const state = s.hcState();
+    state.terminals.find((x) => x.address === child.address).name = name;
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    const r = s.cli(["restart", "Genie", "--force"]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /t8 may be a worker still starting on a chosen agent home \(under t5\)/);
+    assert.deepEqual(ledgerOf(s), [intent, unresolved, promoted]);
+  }
+  assert.equal(s.calls().some(([verb]) => verb === "run" || verb === "kill"), false);
+});
+
+test("#1208 a child hc can't read that this computer's ledger records as a chosen-home worker refuses the restart", (t) => {
+  const s = restartScene(t, { extra: [{ ...term("t7", { argv: ["codex"], app: "codex", parent: "t5", created: 2 }), die_with_parent: true }] });
+  const st = s.hcState();
+  st.getReply = { t7: { address: "t7", created_ms: 2 } };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "worker", terminal: "t7", botId: ID.main, agent: "codex",
+    created_ms: 2, core: "fakecore0000", agentHome: "/homes/b", launch: CHOSEN_LAUNCH })}\n`);
+  const r = s.cli(["restart", "Genie", "--force"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /hc can't read t7, which this computer's ledger records as a worker on a chosen agent home/);
+  assert.deepEqual(runs(s), []);
+});
+
+test("#1208 restart never replaces a pane that is a chosen-home worker, however it came to hold the bot", (t) => {
+  for (const agent of ["claude", "codex"]) {
+    const s = restartScene(t, { paneArgv: chosenPaneArgv(agent) });
+    const r = s.cli(["restart", "Genie", "--fresh"]);
+    assert.equal(r.code, 1, `${agent}: ${r.err}`);
+    assert.match(r.err, /t5 is a worker on a chosen agent home; it can't be a Bot's seat\. Nothing was attached or started\./);
+    assert.deepEqual(runs(s), []);
+    assert.equal(s.calls().some((c) => c[0] === "kill"), false);
+  }
+});
+
+test("#1208 local restart leaves a chosen worker found during readiness alone", (t) => {
+  const s = restartScene(t);
+  assert.equal(s.cli(["whois", "--bot", ID.main, "--json"]).code, 0);
+  const before = readFileSync(attachFile(s.app), "utf8");
+  const first = join(s.root, "initial-get");
+  const chosen = join(s.root, "chosen-get.json");
+  writeFileSync(first, "");
+  writeFileSync(chosen, JSON.stringify({ ...term("t100", { cwd: s.project, created: 100 }), argv: chosenPaneArgv("claude") }));
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get t100" ]; then
+  if [ -f "${first}" ]; then rm -f "${first}"
+  else
+    "${process.execPath}" "${FAKE_HC}" "$@" >/dev/null || exit $?
+    exec cat "${chosen}"
+  fi
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["restart", "Genie", "--fresh"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /t100 is a worker on a chosen agent home; it can't be a Bot's seat/);
+  assert.equal(readFileSync(attachFile(s.app), "utf8"), before);
+  assert.deepEqual(ledgerOf(s), []);
+  assert.equal(at(s.calls(), "kill"), -1);
+  assert.deepEqual(s.hcState().terminals.map((x) => [x.address, x.state]), [["t5", "live"], ["t100", "live"]]);
+});
+
+test("#1208 restart --tree reports an ordinary live helper without created_ms as up", (t) => {
+  const s = restartScene(t);
+  const wt = join(s.root, "proj.worktrees", "dev");
+  mkdirSync(wt, { recursive: true });
+  const st = s.hcState();
+  st.terminals.push({ ...term("t8", { bot: ID.dev, parent: "t5", cwd: wt }), die_with_parent: true, argv: ["claude"] });
+  st.noCreated = ["t8"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  assert.equal(s.cli(["whois", "--bot", ID.dev, "--json"]).json().terminal, "t8");
+
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  const [helper] = r.json().helpers;
+  assert.deepEqual([helper.bot, helper.terminal, helper.up, helper.error], [ID.dev, "t101", true,
+    "its attach row wasn't written (hc get gave no created_ms for t101)"]);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t101").state, "live");
+  assert.equal(attachOf(s).some((row) => row.terminal === "t101"), false);
+});
+
+test("#1208 helper reruns read a replacement's project-home ledger at launch and during readiness", (t) => {
+  for (const phase of ["launch", "poll"]) {
+    const s = restartScene(t);
+    const state = s.hcState();
+    state.terminals.push({ ...term("t7", { cwd: s.project, parent: "t5", created: 2 }),
+      labels: { bot: ID.cap, "agent.session": SID2 }, argv: ["claude"], die_with_parent: true });
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    const latest = join(s.root, "helper-first-get");
+    if (phase === "poll") writeFileSync(latest, "");
+    const ledger = ledgerPath(join(s.project, ".herdr/app-home"));
+    mkdirSync(dirname(ledger), { recursive: true });
+    const reply = term("t101", { cwd: s.project, created: 3 });
+    const ordinary = join(s.root, "helper-ordinary.json"), replacement = join(s.root, "helper-replacement.json");
+    writeFileSync(ordinary, JSON.stringify({ ...reply, argv: ["claude"] }));
+    writeFileSync(replacement, JSON.stringify(reply));
+    const chosen = join(s.root, "helper-chosen.jsonl");
+    writeFileSync(chosen, `${JSON.stringify({ event: "start", kind: "worker", terminal: "t101", core: "fakecore0000",
+      created_ms: 3, agentHome: "/homes/b" })}\n`);
+    exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get t101" ]; then
+  "${process.execPath}" "${FAKE_HC}" "$@" >/dev/null || exit $?
+  if [ -f "${latest}" ]; then rm -f "${latest}"; exec cat "${ordinary}"; fi
+  cp "${chosen}" "${ledger}"
+  exec cat "${replacement}"
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+    const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+    assert.equal(r.code, 1, r.err);
+    const [helper] = r.json().helpers;
+    assert.equal(helper.bot, ID.cap);
+    assert.equal(helper.up, false);
+    assert.match(helper.error, /t101 is a worker on a chosen agent home/);
+    assert.equal(at(s.calls(), "kill", "t101"), -1);
+    assert.equal(s.hcState().terminals.find((pane) => pane.address === "t101").state, "live");
+    assert.equal(attachOf(s).some((row) => row.terminal === "t101"), false);
+  }
+});
+
+test("#1208 the one-time label import and restart's adoption never take a chosen-home worker as a bot's seat", (t) => {
+  // The import: an ordinary labelled pane is imported, a chosen-home worker carrying a label isn't.
+  const s = scene(t, { terminals: [] });
+  s.seed(team());
+  const st = s.hcState();
+  st.terminals.push({ ...chosenWorker("t7", { parent: null }), labels: { bot: ID.main }, cwd: s.project, foreground: { argv: chosenPaneArgv("codex"), cwd: s.project } },
+    { ...term("t6", { bot: ID.cap, cwd: s.project }), foreground: { argv: ["claude"], cwd: s.project } });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  assert.equal(s.cli(["ls"]).code, 0);
+  const imported = attachOf(s);
+  assert.deepEqual(imported.map((x) => [x.bot, x.terminal]), [[ID.cap, "t6"]]);
+  // Adoption: a labelled pane no ledger proves is the bot, unless it is a chosen-home worker.
+  const r = s.cli(["restart", "Genie", "--fresh"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /t7 is a worker on a chosen agent home; it can't be a Bot's seat/);
+  assert.deepEqual(attachOf(s), imported, "no row written");
+  assert.deepEqual(runs(s), []);
+});
+
+test("#1208 label import leaves the bot unbound when its newest candidate has chosen proof", (t) => {
+  const s = scene(t);
+  s.seed(team());
+  const ordinary = term("t6", { bot: ID.main, cwd: s.project, created: 6 });
+  const chosen = term("t7", { bot: ID.main, cwd: s.project, created: 7 });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), terminals: [ordinary, chosen] }));
+  const ledger = ledgerPath(join(s.project, ".herdr/app-home"));
+  mkdirSync(dirname(ledger), { recursive: true });
+  writeFileSync(ledger, `${JSON.stringify({ event: "start", kind: "worker", terminal: "t7", core: "fakecore0000",
+    created_ms: 7, agentHome: "/homes/b" })}\n`, { mode: 0o600 });
+
+  const r = s.cli(["ls"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(attachOf(s).map((row) => [row.bot, row.terminal]), []);
+});
+
+test("#1208 label import picks the newest ordinary pane before checking for a project", (t) => {
+  const s = scene(t);
+  s.seed(team());
+  const unrelated = join(s.root, "unrelated");
+  mkdirSync(unrelated);
+  const other = scratchProject(unrelated, "other", { isGit: true, commit: true,
+    bots: { version: 1, categories: [], bots: [bot(ID.cap, "main", { name: "Other" })] } });
+  const older = term("t6", { bot: ID.main, cwd: s.project, created: 6 });
+  const newer = term("t7", { bot: ID.main, cwd: other, created: 7 });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), terminals: [older, newer] }));
+
+  const r = s.cli(["ls", "--json"], { cwd: other });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(attachOf(s), []);
+});
+
+test("#1208 squad import dry-run leaves a pending worker's ledger byte-identical", (t) => {
+  const pending = { ...term("t7", { bot: ID.main, created: 7 }), name: "pending-w", argv: chosenPaneArgv("claude") };
+  const s = importScene(t, [pending]);
+  const path = ledgerPath(s.app);
+  const intent = workerIntent({ launch: CHOSEN_LAUNCH, name: pending.name, project: s.project, worktree: s.project,
+    agent: "claude", agentHome: "/homes/b" });
+  const before = `${JSON.stringify(intent)}\n`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, before, { mode: 0o600 });
+
+  const r = s.cli(["import", "--from-hc", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().dryRun, true);
+  assert.equal(readFileSync(path, "utf8"), before);
+  assert.equal(existsSync(attachFile(s.app)), false);
+
+  const applied = s.cli(["import", "--from-hc", "--apply", "--json"]);
+  assert.equal(applied.code, 0, applied.err);
+  assert.deepEqual(attachOf(s), []);
+  assert.deepEqual(ledgerOf(s), [intent, { event: "unresolved", terminal: "t7", core: "fakecore0000",
+    created_ms: 7, launch: intent.launch }]);
+});
+
+test("#1208 squad import refuses a chosen pane before writing a new bot", (t) => {
+  const chosen = { ...seat("t7", "runtime-cap", "runtime"), argv: chosenPaneArgv("claude") };
+  const s = importScene(t, [chosen]);
+  const before = readFileSync(s.botsPath, "utf8");
+
+  const r = s.cli(["import", "--from-hc", "--apply", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.ok(r.json().conflicts.some((line) => /t7 .* is a worker on a chosen agent home/.test(line)));
+  assert.deepEqual(r.json().attached, []);
+  assert.equal(readFileSync(s.botsPath, "utf8"), before);
+  assert.deepEqual(attachOf(s), []);
+  assert.deepEqual(labelCalls(s.calls()), []);
+});
+
+test("#1208 the label import leaves out an argv-less labelled pane whose name a launch reserved minutes ago", (t) => {
+  const s = scene(t, { terminals: [] });
+  s.seed(team());
+  const st = s.hcState();
+  st.terminals.push({ ...term("t7", { bot: ID.main, cwd: s.project }), name: "pending-w" },
+    { ...term("t6", { bot: ID.cap, cwd: s.project }), name: "old-w" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  const intent = (launch, name, at) => JSON.stringify({ event: "intent", kind: "worker", launch, name, project: s.project,
+    worktree: s.project, agent: "claude", agentHome: "/homes/b", at });
+  writeFileSync(ledgerPath(s.app), `${intent(CHOSEN_LAUNCH, "pending-w", Date.now() - 60_000)}\n`
+    + `${intent("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "old-w", Date.now() - 11 * 60_000)}\n`);
+  assert.equal(s.cli(["ls"]).code, 0);
+  assert.deepEqual(attachOf(s).map((x) => [x.bot, x.terminal]), [[ID.cap, "t6"]], "the reservation older than ten minutes proves nothing");
+});
+
+test("#1208 replacing a stale park protects a watcher only with chosen-home evidence", (t) => {
+  for (const identity of ["chosen", "another queue", "original"]) {
+    const s = restartScene(t);
+    setScreen(s, "t5", rateDialog("Try again later."));
+    const first = s.cli(["rate-limit", "--json"]);
+    assert.equal(first.code, 0, first.err);
+    const file = queueFileOf(s);
+    const [saved] = JSON.parse(readFileSync(file, "utf8"));
+    writeFileSync(file, JSON.stringify([{ ...saved, created_ms: 0 }]));
+    const state = s.hcState();
+    const watcher = state.terminals.find((x) => x.address === saved.watcher);
+    if (identity === "chosen") watcher.argv = [...chosenPaneArgv("claude"), "--run-queued", saved.id];
+    if (identity === "another queue") watcher.argv[watcher.argv.length - 1] = CHOSEN_LAUNCH;
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    const r = s.cli(["rate-limit", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const [park] = JSON.parse(readFileSync(file, "utf8"));
+    assert.notEqual(park.id, saved.id);
+    assert.notEqual(park.watcher, saved.watcher);
+    assert.equal(at(s.calls(), "kill", saved.watcher) >= 0, identity !== "chosen");
+    assert.equal(s.hcState().terminals.find((x) => x.address === saved.watcher).state, identity !== "chosen" ? "finished" : "live");
+    if (identity === "chosen") assert.match(r.err, /Queued watcher .* was left as it is: it is a worker on a chosen agent home/);
+  }
+});
+
+test("#1208 cancel ends an ordinary watcher with its label when hc omits argv", (t) => {
+  const s = restartScene(t, { status: "working" });
+  const queued = s.cli(["restart", "Genie", "--json"]);
+  assert.equal(queued.code, 0, queued.err);
+  const { watcher } = queued.json();
+  const st = s.hcState();
+  const pane = st.terminals.find((x) => x.address === watcher);
+  assert.equal(pane.labels["herdr.queued-restart"], ID.main);
+  delete pane.argv;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+
+  const canceled = s.cli(["restart", "--cancel", ID.main, "--json"]);
+  assert.equal(canceled.code, 0, canceled.err);
+  assert.deepEqual(canceled.json(), { id: ID.main, canceled: true, terminal: "t5" });
+  assert.deepEqual(JSON.parse(readFileSync(queueFileOf(s), "utf8")), []);
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", watcher]]);
+  assert.equal(s.hcState().terminals.find((x) => x.address === watcher).state, "finished");
+  assert.doesNotMatch(canceled.err, /Queued watcher/);
+});
+
+test("#1208 --tree cleanup: a helper whose address now holds a chosen worker is treated as ended, never killed", (t) => {
+  const { s } = treeScene(t);
+  assert.equal(s.cli(["whois", "--bot", ID.main, "--json"]).code, 0, "the label import, done first");
+  const first = join(s.root, "read-old-helper");
+  const chosen = join(s.root, "chosen-helper.json");
+  writeFileSync(first, "");
+  writeFileSync(chosen, JSON.stringify({ ...term("t7", { cwd: s.project, created: 99 }), argv: chosenPaneArgv("claude") }));
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get t7" ]; then
+  if [ -f "${first}" ]; then rm -f "${first}"
+  else
+    "${process.execPath}" "${FAKE_HC}" "$@" >/dev/null || exit $?
+    exec cat "${chosen}"
+  fi
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const st = s.hcState();
+  st.surviveParent = ["t7"];
+  // t7 is read once as the tree's helper; every later look finds another terminal at its address.
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(at(s.calls(), "kill", "t7"), -1, "the pane at t7 now is not the helper: never killed");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "live");
+  assert.deepEqual(r.json().helpers.map((h) => [h.replaced, h.up]), [["t7", true], ["t8", true]]);
 });

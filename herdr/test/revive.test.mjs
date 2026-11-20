@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { helperPlan } from "../mods/am-sidebar/restart.js";
+import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
+import { envWords } from "../mods/am-sidebar/logins.js";
 import { AGENTS } from "../mods/am-sidebar/models.js";
 import { FIRST_SESSION_MS, KEEP_DOWN, PLIST_DECL, PLIST_LABEL, PLIST_MARK, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, launchEnvOf, launchHomeEnv, launchdNotLoaded, ledgerRivals,
   latestResumeIn, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
@@ -554,6 +556,141 @@ function assertRevivedSeat(s, address, argv, template, agent = "omp") {
   const rows = s.ledger().filter((r) => r.event === "start" && r.kind === "seat" && r.terminal === address);
   assert.deepEqual(rows.map((r) => [r.botId, r.agent, r.template, r.created_ms]), [[ID.main, agent, template, get.created_ms]]);
 }
+
+const chosenReviveArgv = ["/usr/bin/env",
+  ...envWords(["PATH=/bin"], chosenHomeWords("claude", "/homes/b", SID)), "claude"];
+
+test("#1208 revive refuses an initially chosen replacement before writing the seat rows", (t) => {
+  const s = goneSeat(t, { hcExtra: { getReply: { t100: { address: "t100", state: "live", created_ms: 100, argv: chosenReviveArgv } } } });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  const [result] = r.json().projects[0].results;
+  assert.equal(result.outcome, "failed");
+  assert.match(result.why, /t100 is a worker on a chosen agent home/);
+  assert.equal(s.attachRows().some((x) => x.terminal === "t100"), false);
+  assert.equal(s.ledger().some((x) => x.terminal === "t100"), false);
+  assert.equal(s.calls().some(([verb]) => verb === "kill"), false);
+});
+
+test("#1208 an ordinary gone seat is recorded and visible during readiness before timeout cleanup", (t) => {
+  const s = goneSeat(t, { hcExtra: { runAs: "shell" } });
+  const initial = join(s.root, "initial-get");
+  const poll = join(s.root, "readiness-get");
+  const snapshot = join(s.root, "pre-kill");
+  for (const file of [initial, poll]) writeFileSync(file, "");
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get t100" ]; then
+  if [ -f "${initial}" ]; then rm -f "${initial}"
+  elif [ -f "${poll}" ]; then
+    rm -f "${poll}"
+    "${RUNTIME}" "${CLI}" ls --json >"${s.root}/ls.json" || exit $?
+    "${RUNTIME}" "${CLI}" whois --bot Genie --json >"${s.root}/whois.json" || exit $?
+    "${RUNTIME}" "${CLI}" start Genie --json >"${s.root}/start.json" || exit $?
+  fi
+fi
+if [ "$1 $2" = "kill t100" ]; then
+  mkdir "${snapshot}"
+  cp "${attachPath(s.app)}" "${snapshot}/attach.jsonl"
+  cp "${ledgerPath(s.app)}" "${snapshot}/workers.jsonl"
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["revive", "--json"], { env: { AUTOMAGIK_HERDR_RESTART_WAIT_MS: "1500" } });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.json().projects[0].results[0].why, /t100 didn't keep an agent in front .*so it was ended/);
+
+  const observed = (command) => JSON.parse(readFileSync(join(s.root, `${command}.json`), "utf8"));
+  const listed = observed("ls").projects[0].bots.find((b) => b.id === ID.main);
+  assert.deepEqual([listed.terminal, listed.status], ["t100", "no agent in front"]);
+  assert.equal(observed("whois").terminal, "t100");
+  const { id, running } = observed("start");
+  assert.deepEqual([id, running], [ID.main, "t100"]);
+
+  const attached = readAttach(readFileSync(join(snapshot, "attach.jsonl"), "utf8")).rows;
+  const starts = readLedger(readFileSync(join(snapshot, "workers.jsonl"), "utf8"));
+  const pane = s.hcState().terminals.find((x) => x.address === "t100");
+  assert.deepEqual(attached.filter((x) => x.terminal === "t100").map((x) => [x.event, x.bot, x.by, x.created_ms]),
+    [["attach", ID.main, "start", pane.created_ms]]);
+  assert.deepEqual(starts.filter((x) => x.terminal === "t100").map((x) => [x.event, x.kind, x.botId, x.created_ms]),
+    [["start", "seat", ID.main, pane.created_ms]]);
+  assert.equal(runsOf(s).length, 1);
+  assert.equal(pane.state, "finished");
+});
+
+test("#1208 revive retries an ordinary resume fresh when readiness exits 3 with internal", (t) => {
+  const s = goneSeat(t, { bot: { agent: "claude" }, seat: { session: SID },
+    hcExtra: { runQueue: [{ runAs: "exit", screen: "No conversation found with session ID\n" }] } });
+  const initial = join(s.root, "initial-get");
+  writeFileSync(initial, "");
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get t100" ]; then
+  if [ -f "${initial}" ]; then rm -f "${initial}"
+  else
+    "${process.execPath}" "${FAKE_HC}" "$@" >/dev/null || exit $?
+    echo '{"error":{"kind":"internal","message":"server error reading t100"}}' >&2
+    exit 3
+  fi
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const [result] = r.json().projects[0].results;
+  assert.deepEqual([result.outcome, result.terminal], ["fresh", "t101"]);
+  assert.match(result.why, /^its conversation couldn't be resumed/);
+  const runs = runsOf(s).map(wordsOf);
+  assert.equal(runs.length, 2);
+  assert.ok(hasSeq(runs[0], ["--resume", SID]));
+  assert.ok(!runs[1].includes("--resume"));
+  assert.deepEqual(s.ledger().filter((row) => row.event === "start" && row.terminal !== "t5").map((row) => row.terminal), ["t100", "t101"]);
+});
+
+test("#1208 a gone seat rechecks chosen evidence and the current binding under the attach lock", (t) => {
+  const s = goneSeat(t, { hcExtra: { runAs: "shell" } });
+  const initial = join(s.root, "initial-get");
+  const poll = join(s.root, "readiness-get");
+  const checked = join(s.root, "checked-under-lock");
+  const chosen = join(s.root, "chosen.mjs");
+  for (const file of [initial, poll]) writeFileSync(file, "");
+  writeFileSync(chosen, `import { readFileSync } from "node:fs";
+const get = JSON.parse(readFileSync(0, "utf8"));
+console.log(JSON.stringify({ ...get, argv: ${JSON.stringify(chosenReviveArgv)} }));
+`);
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get t100" ]; then
+  if [ -f "${initial}" ]; then rm -f "${initial}"
+  elif [ -f "${poll}" ]; then
+    rm -f "${poll}"
+    "${RUNTIME}" "${CLI}" detach Genie --json >"${s.root}/detach.json" || exit $?
+    "${RUNTIME}" "${CLI}" attach Captain t100 --json >"${s.root}/attach.json" || exit $?
+    "${process.execPath}" "${FAKE_HC}" "$@" | "${process.execPath}" "${chosen}"
+    exit $?
+  elif [ -f "${attachPath(s.app)}.lock" ] && [ -f "${s.root}/attach.json" ]; then
+    : >"${checked}"
+    "${process.execPath}" "${FAKE_HC}" "$@" | "${process.execPath}" "${chosen}"
+    exit $?
+  fi
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["revive", "--json"], { env: { AUTOMAGIK_HERDR_RESTART_WAIT_MS: "8000" } });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.json().projects[0].results[0].why, /t100 was attached to .* during readiness and was left as it is/);
+  assert.equal(existsSync(checked), true);
+  assert.ok(s.attachRows().some((row) => row.event === "attach" && row.bot === ID.cap && row.terminal === "t100"));
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), []);
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === "t100").state, "live");
+});
+
+test("#1208 revive --dry-run still targets an ordinary seat when hc exits 3 with internal", (t) => {
+  const s = goneSeat(t, { hcExtra: { failGet: ["t5"], failGetExit: 3 } });
+  const r = s.cli(["revive", "--dry-run", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const { targets, skipped } = r.json();
+  assert.deepEqual(targets.map((pane) => [pane.bot, pane.terminal, pane.pane, pane.action]), [[ID.main, "t5", "gone", "restart"]]);
+  assert.deepEqual(skipped, []);
+  assert.equal(runsOf(s).length, 0);
+});
 
 const seatTemplate = { name: "dev-kimi", command: "/opt/agents/omp --auto-approve --model kimi/k3" };
 

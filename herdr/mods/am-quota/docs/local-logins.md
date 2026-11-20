@@ -111,6 +111,7 @@ CLI never repairs or rewrites the record.
 | a worker (`am worker`) | `workerArgs` (`workers.js`) | the same words, after `PATH=` |
 | a **template** worker | `workerArgs` with `template`: today `hc run … <template> <task>`, which takes no environment | see below |
 | the Accounts panel's background Restart | `cliRun` (`am-quota/main.js`) runs `am restart` in an hc terminal | none of its own: the CLI it runs reads the record. `CLI_ENV` never carries `CLAUDE_CONFIG_DIR` |
+| a worker on a chosen login home (`am worker --agent-home DIR`, a bot's `worker.agentHome`; #1208) | `workerArgs` (`workers.js`) with that folder's words | none: it never reads the record. It keeps the folder it was started on, and a switch never moves it |
 
 **Template workers.** `hc run <template>` takes no environment, so a template's pane would get
 herdr-core's environment, whatever login that names. When `templateAgent` says a template runs
