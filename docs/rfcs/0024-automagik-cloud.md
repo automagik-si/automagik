@@ -1232,7 +1232,7 @@ the reservation wins.
 | Claude, a person's sign-in with an email and an `orgId` | `claude`, the `orgId`, the email lowercased | yes |
 | Claude, an email with no `orgId` | none | no; the card says why (an older CLI, update it) |
 | Claude, an API key, a subscription token in the environment, Bedrock or Vertex | none | no; no subscription person is named. Never refused |
-| Codex, a ChatGPT sign-in | `codex`, the email lowercased, the plan class: `personal` (free, plus, pro) or `workspace` (team, business, enterprise, edu) | yes |
+| Codex, a ChatGPT sign-in | `codex`, the email lowercased, the plan class: `personal` (free, plus, pro and the other personal plans) or `workspace` (team, business, enterprise, edu and their variants); the full lists are in [R0's record](../cloud/0024-reservations-evidence.md), section 2 | yes |
 | Codex, a ChatGPT sign-in whose `planType` is absent or unknown | none | no; at the check it matches either class |
 | Codex, an API key | none | no; never refused |
 
@@ -1352,6 +1352,11 @@ Each is one PR per lane, in this order.
   prints `orgId` for a personal (Pro, Max) and a Team or Enterprise sign-in; Codex's `account/read`
   fields and its `planType` values, and whether it names a workspace; set-group-id and sticky
   semantics for the directory on Linux and macOS. *Check:* a written record. *Rollback:* none.
+  *Record:* [the R0 evidence record](../cloud/0024-reservations-evidence.md) (2026-11-20; no real
+  sign-in and no credential store read): Claude Code prints `orgId` beside the email for every
+  `claude.ai` sign-in that has one; Codex names a workspace only by display name, so (m) stands, with
+  the full `planType` lists; `mkdir -m 3770` drops set-group-id, so R4's setup sets the mode after
+  creating the folder, and writers set each file's mode on its descriptor.
 - **R1. The desktop instance id** (desktop lane). *Acceptance:* the first run writes the owner
   record version 1 with random `local_id` and `instance_id`, `0600`, exclusively; a restart keeps
   both; two Automagik homes on one machine and one OS user get different ids; a record with a higher
