@@ -15,9 +15,12 @@
 // Every other agent's pane gets the kill shim instead (`hc-kill/hc`, runKillGuard below): that
 // shim also refuses a prefixed send to an agent or an unknown target (#1421). Both wrappers
 // refuse a send to a pane held by a dialog (#1414): they look at the target's status and, when
-// it is neither working nor blocked, its screen, and never type into or answer the dialog. A pane
-// can still start an agent between the check and delivery: a guardrail, not a guarantee. The real
-// fix for every sender is in herdr-core.
+// it is neither working nor blocked, its screen, and never type into or answer the dialog.
+// An Antigravity pane is read even while it reports working (RFC 0042): agy fires no hook while
+// it waits at its folder-trust or file-access question, so its status can say working, idle, done
+// or nothing, and a known prompt shape on its screen is refused the same way. A pane can still
+// start an agent between the check and delivery: a guardrail, not a guarantee. The real fix
+// for every sender is in herdr-core.
 //
 // The caller comes from the attach ledger (attach.js) in the app home recorded in the
 // caller pane's launch argv (#628). A worker pane has no ledger row, so its `worker.of`
@@ -59,6 +62,7 @@ import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
 import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
 import { agentKeyOfArgv, resolveAgent } from "./models.js";
 import { pendingDialog } from "./dialog.js";
+import { agyCandidate, agyPromptOf } from "./agyPrompt.js";
 import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL,
   WORKER_OF_LABEL, isKillGuardWord, stableRootOf } from "./workers.js";
 
@@ -437,22 +441,35 @@ function hcJson(real, args, env) {
 
 const rowsOf = (ls) => (Array.isArray(ls?.terminals) ? ls.terminals : Array.isArray(ls) ? ls : []);
 
+/** The statuses an Antigravity pane is read in: agyScan.js readable, the sidebar's twin. */
+const agyReadable = (state) => state == null || state === "working" || state === "idle" || state === "done";
+
 /**
  * The target a send must not be typed into (#1414), or null: a pane herdr-core reports blocked
  * is waiting for a person, and a pane whose status says idle, done or nothing at all can still
  * show a visible dialog (a linked machine, a revived pane). A working pane is mid-turn, not
  * asking, so it is left alone. The screen look is the pack's own pendingDialog; a screen that
- * cannot be read is left to hc's own send, never guessed at. Returns the resolved address.
+ * cannot be read is left to hc's own send, never guessed at. An Antigravity pane that reports
+ * working, idle, done or nothing gets one read matched against its captured prompt shapes too
+ * (RFC 0042). The screen's text never leaves the guard. Returns the resolved address.
  */
 export function heldTarget(real, hit, env) {
   if (!hit?.get) return null;
   // A finished pane has no live dialog: its last screen may still show one, and hc's own
   // `finished` refusal is the answer the sender needs (#1414).
   if (hit.get.state && hit.get.state !== "live") return null;
-  if (hit.get.status?.state === "blocked") return hit.address;
-  if (hit.get.status?.state === "working") return null;
-  const read = hcJson(real, ["read", hit.address, "--lines", "40"], env);
+  const state = hit.get.status?.state;
+  if (state === "blocked") return hit.address;
+  // RFC 0042: a pane its live hc get record calls Antigravity (agyCandidate) is read in these
+  // states too, once, at the address hc get answered, and refused under that address when one
+  // of its prompt shapes is on screen. agy fires no hook while it waits there.
+  const agy = agyReadable(state) && agyCandidate(hit.get) === true;
+  if (state === "working" && !agy) return null;
+  const at = agy ? hit.get.address : hit.address;
+  const read = hcJson(real, ["read", at, "--lines", "40"], env);
   if (typeof read?.text !== "string") return null;
+  if (agy && agyPromptOf(read.text)) return at;
+  if (state === "working") return null;
   return pendingDialog(read.text) ? hit.address : null;
 }
 
