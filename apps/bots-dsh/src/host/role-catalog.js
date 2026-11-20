@@ -2,15 +2,14 @@ import { createPublicKey, verify } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { isPackageRoleId, isRoleVersion } from '../shared/roles.js'
 import { refusal } from './refusal.js'
+import { boundedGet as get } from './bounded-get.js'
 
 // Rotate in RFC 0011 order: update plugin-lane/keys.json and this copy before switching the signer.
 export const ROLE_KEYS = Object.freeze(JSON.parse(readFileSync(new URL('./role-keys.json', import.meta.url), 'utf8')).keys.map(Object.freeze))
 export const ROLE_CAPABILITIES = Object.freeze(['audio-out', 'task-start', 'route-policy', 'history-read'])
 const REPOSITORY = 'https://github.com/automagik-si/automagik'
 const RELEASES = `${REPOSITORY}/releases/download/`
-const CDN = 'https://release-assets.githubusercontent.com'
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
-const REDIRECTS = new Set([301, 302, 303, 307, 308])
 const MAX_PACKAGE = 16 * 1024 * 1024
 export const ROLE_EVIDENCE_LIMITS = [MAX_PACKAGE, 256 * 1024, 1024]
 const UNCHECKED = Object.freeze({ available: false, roles: Object.freeze([]) })
@@ -26,66 +25,7 @@ export const roleDescription = value => typeof value === 'string' && value.lengt
 export const roleToolName = value => typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value)
 export const parseRoleJson = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
 
-function cancel(body) {
-  void body?.cancel().catch(() => {})
-}
-
-export async function boundedGet(fetch, url, { limit, signal, label, missing = false, allowEmpty = false }) {
-  for (let hops = 0; ; hops++) {
-    let response
-    try {
-      signal.throwIfAborted()
-      response = await fetch(url, { redirect: 'manual', signal })
-    } catch {
-      throw refusal(`${label} could not be downloaded.`)
-    }
-    if (REDIRECTS.has(response.status)) {
-      cancel(response.body)
-      let target
-      try { target = new URL(response.headers.get('location') ?? '') } catch {}
-      if (hops === 3 || target?.protocol !== 'https:' || target.origin !== CDN || target.username || target.password) {
-        throw refusal(`${label} returned an unsupported redirect.`)
-      }
-      url = target.href
-      continue
-    }
-    if (!response.ok) {
-      cancel(response.body)
-      if (missing && response.status === 404) return undefined
-      throw refusal(`${label} returned HTTP ${response.status}.`)
-    }
-    if ((!response.body && !allowEmpty) || Number(response.headers.get('content-length')) > limit) {
-      cancel(response.body)
-      throw refusal(`${label} is missing or exceeds its size limit.`)
-    }
-    if (!response.body) return Buffer.alloc(0)
-
-    const reader = response.body.getReader()
-    const chunks = []
-    let length = 0
-    let complete = false
-    const abort = () => cancel(reader)
-    signal.addEventListener('abort', abort, { once: true })
-    try {
-      while (true) {
-        signal.throwIfAborted()
-        let chunk
-        try { chunk = await reader.read() } catch { throw refusal(`${label} could not be downloaded.`) }
-        signal.throwIfAborted()
-        if (chunk.done) break
-        length += chunk.value.byteLength
-        if (length > limit) throw refusal(`${label} exceeds its size limit.`)
-        chunks.push(chunk.value)
-      }
-      complete = true
-      return Buffer.concat(chunks, length)
-    } finally {
-      signal.removeEventListener('abort', abort)
-      if (!complete) cancel(reader)
-      reader.releaseLock()
-    }
-  }
-}
+export const boundedGet = (fetch, url, options) => get(fetch, url, { ...options, errorOf: refusal })
 
 function verifiedIndex(bytes, signature, keys, releaseVersion) {
   let index

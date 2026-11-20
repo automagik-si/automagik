@@ -367,10 +367,13 @@ and the sections above now carry the corrected design:
 | 2 | This RFC | no |
 | 3 | Host half: the version store, `current.json`, `state.json` and its stale-run rule, the read-only `self-update-status` answer the page and the supervisor use | no (no update yet) |
 | 4 | Verified check: `plugin-lane/verify.mjs` and the plugin's checked copy; read `lane.json`, take the set the profile has, download and check every tarball, check `engines.dsh`, the sequence and the registry, and stop — a dry run that writes what it would do | a "check for updates" line in Settings, no install |
-| 5 | The supervisor and the plain-host wrapper with its self-check and fallback (documented in `docs/upgrade.md`): the click closes admission and stops work, the staged install of the set on installer-owned files, the switch with DSH stopped, the restart of the DSH child, the pre-switch failure path, the state written at every step | a real update behind a setting, off by default |
+| 5a | The supervisor and the plain-host launcher with its self-check and fallback, staged install, the journaled switch and recovery, and setup and recovery in `docs/upgrade.md` | inert without an update request |
+| 5b | The setting, `self-update-start`, the hold at the click, resume after the verdict and the "Update now" line | a real update behind a setting, off by default |
 | 6 | Health and automatic rollback by renaming the kept version back; the resume held until health | the rollback screen tells the truth |
 | 7 | The nod and the full-screen modal wired to the real state instead of the mock's timers; the mock and its flag retire | the approved flow, working |
 | 8 | Arca: the entrypoint as the supervisor (record, exit for Arca's restart, finish on the next start), and the follow and the health check keeping a profile a signed update moved ahead; a server image change, documented in `server/README.md` (closes #1540) | an instance in Arca updating itself |
+
+Delivery 5 ships as two PRs, 5a then 5b, as approved by the coordinator on 2026-11-20.
 
 Delivery 4 must not install anything; 5 and 6 are one setting apart from people; 7 is the switch that
 retires `?mock-1540`.

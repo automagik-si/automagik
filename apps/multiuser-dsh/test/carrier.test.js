@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import test from 'node:test'
 import { Peer } from '@deepseek-ai/dsh-client-connection'
@@ -186,4 +186,174 @@ test('closing the response during dispatch aborts the Request signal', async t =
   response.destroy()
   assert.equal((await aborted.promise).aborted, true)
   await inFlight
+})
+
+function watermarkFile(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'caller-watermark-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  return join(dir, 'state', 'watermark')
+}
+
+function clockCarrier(t) {
+  const file = watermarkFile(t)
+  let wall = seconds
+  let mono = 0
+  const monotonicNow = () => mono
+  const now = () => wall * 1000
+  const nonces = createNonces({ startedAtSec: seconds - 6, file, monotonicNow })
+  const f = carrier(t, { nonces, now })
+  const handler = t.mock.fn(() => ({ ok: true }))
+  f.observe(handler)
+  const assertion = (iat = wall) => f.key.assertion({ iat, exp: iat + 30 })
+  const send = value => f.call(target, { assertion: value, body: rpc() })
+  const advance = (nextWall, elapsedMs) => {
+    wall = nextWall
+    mono += elapsedMs
+  }
+  const restart = () => {
+    const restarted = createCarrier({
+      ...f, keys: f.key.keys, nonces: createNonces({ startedAtSec: wall, file, monotonicNow }),
+      multiuser: true, keysConfigured: true, expectedAuthority: () => f.authority, now,
+    })
+    return value => invoke(restarted, {
+      url: prefix + target, method: 'POST',
+      headers: { host: f.authority, 'x-automagik-caller': value, 'content-type': 'application/json' },
+      body: rpc(),
+    })
+  }
+  return { file, nonces, handler, assertion, send, advance, restart }
+}
+
+test('a rollback refuses the delayed first use of an assertion that was valid before the step', async t => {
+  const f = clockCarrier(t)
+  const unused = f.assertion()
+  f.advance(seconds + 1, 1000)
+  assert.equal((await f.send(f.assertion())).status, 200)
+  f.advance(seconds - 599, 40_000)
+  assert.equal((await f.send(unused)).status, 401)
+  assert.equal(f.handler.mock.callCount(), 1)
+  assert.equal(f.nonces.startupSecond, seconds + 41)
+  assert.equal(Number(readFileSync(f.file, 'utf8')), seconds + 41)
+})
+
+test('the rollback cutoff survives restart and allows fresh assertions as the wall recovers', async t => {
+  const f = clockCarrier(t)
+  assert.equal((await f.send(f.assertion())).status, 200)
+  f.advance(seconds - 600, 40_000)
+  assert.equal((await f.send(f.assertion())).status, 401)
+  const cutoff = seconds + 40
+  assert.equal(f.nonces.startupSecond, cutoff)
+  f.advance(seconds - 590, 10_000)
+  const restarted = f.restart()
+  f.advance(cutoff + 5, (cutoff + 5 - (seconds - 590)) * 1000)
+  const atCutoff = f.assertion()
+  assert.equal((await f.send(atCutoff)).status, 401)
+  assert.equal((await restarted(atCutoff)).status, 401)
+  assert.equal(f.handler.mock.callCount(), 1)
+  f.advance(cutoff + 6, 1000)
+  assert.equal((await f.send(f.assertion())).status, 200)
+  assert.equal((await restarted(f.assertion())).status, 200)
+  assert.equal(f.handler.mock.callCount(), 3)
+})
+
+test('corrupt and unreadable watermark files refuse before verification and a missing file starts fresh', async t => {
+  const file = watermarkFile(t)
+  const log = t.mock.method(console, 'error', () => {})
+  const start = { startedAtSec: seconds - 6, anchorSec: seconds, file }
+  mkdirSync(dirname(file))
+  for (const contents of ['broken JSON', '-1', '1.5', '"x"', '', undefined]) {
+    if (contents === undefined) mkdirSync(file)
+    else writeFileSync(file, contents)
+    const nonces = createNonces(start)
+    const consume = t.mock.method(nonces, 'consume')
+    const f = carrier(t, { nonces })
+    const lookup = t.mock.method(f.key.keys, 'get')
+    const handler = t.mock.fn(() => ({ ok: true }))
+    f.observe(handler)
+    const assertion = f.key.assertion()
+    assert.equal((await f.call(target, { assertion: 'malformed', body: rpc() })).status, 503)
+    for (let i = 0; i < 2; i++) assert.equal((await f.call(target, { assertion, body: rpc() })).status, 503)
+    assert.equal(lookup.mock.callCount(), 0)
+    assert.equal(handler.mock.callCount(), 0)
+    assert.equal(consume.mock.callCount(), 0)
+    rmSync(file, { recursive: true })
+
+    const repaired = carrier(t, { nonces: createNonces(start), keys: f.key.keys })
+    repaired.observe(handler)
+    assert.equal((await repaired.call(target, { assertion, body: rpc() })).status, 200)
+    assert.equal(handler.mock.callCount(), 1)
+    rmSync(file)
+  }
+  assert.equal(log.mock.callCount(), 6)
+  assert.ok(log.mock.calls.every(({ arguments: [message] }) => message.includes(file)))
+})
+
+test('a same-second watermark write retry keeps refusing until persistence succeeds', async t => {
+  const file = watermarkFile(t)
+  const nonces = createNonces({ startedAtSec: seconds - 6, file })
+  const f = carrier(t, { nonces })
+  const handler = t.mock.fn(() => ({ ok: true }))
+  const consume = t.mock.method(nonces, 'consume')
+  f.observe(handler)
+  writeFileSync(dirname(file), 'blocks mkdir')
+  const assertion = f.key.assertion()
+  const send = () => f.call(target, { assertion, body: rpc() })
+  assert.equal((await send()).status, 503)
+  assert.equal((await send()).status, 503)
+  assert.equal(consume.mock.callCount(), 0)
+  assert.equal(handler.mock.callCount(), 0)
+  rmSync(dirname(file))
+  assert.equal((await send()).status, 200)
+  assert.equal(handler.mock.callCount(), 1)
+  assert.equal(Number(readFileSync(file, 'utf8')), seconds)
+})
+
+test('a failed rollback write retains the pending cutoff after wall time recovers', async t => {
+  const f = clockCarrier(t)
+  const unused = f.assertion()
+  f.advance(seconds + 1, 1000)
+  assert.equal((await f.send(f.assertion())).status, 200)
+  const backup = f.file + '.backup'
+  renameSync(f.file, backup)
+  mkdirSync(f.file)
+  f.advance(seconds - 599, 40_000)
+  assert.equal((await f.send(unused)).status, 503)
+  f.advance(seconds + 2, 1000)
+  assert.equal((await f.send(unused)).status, 503)
+  assert.equal(f.handler.mock.callCount(), 1)
+  assert.equal(f.nonces.startupSecond, seconds - 6)
+  assert.equal(Number(readFileSync(backup, 'utf8')), seconds + 1)
+  rmSync(f.file, { recursive: true })
+  renameSync(backup, f.file)
+  assert.equal((await f.send(unused)).status, 401)
+  assert.equal(f.handler.mock.callCount(), 1)
+  assert.equal(f.nonces.startupSecond, seconds + 41)
+  assert.equal(Number(readFileSync(f.file, 'utf8')), seconds + 41)
+  f.advance(seconds + 47, 45_000)
+  assert.equal((await f.send(f.assertion())).status, 200)
+})
+
+test('frequent small rollbacks accumulate and refuse an unused assertion after its lifetime', async t => {
+  const f = clockCarrier(t)
+  const unused = f.assertion()
+  assert.equal((await f.send(f.assertion())).status, 200)
+  for (let elapsed = 2; elapsed < 40; elapsed += 2) {
+    f.advance(seconds, 2000)
+    await f.send(f.assertion())
+  }
+  f.advance(seconds, 2000)
+  assert.equal((await f.send(unused)).status, 401)
+  assert.equal(f.nonces.startupSecond, seconds + 6)
+})
+
+test('500 ms clock observations refuse an unused assertion after 40 seconds with the wall held', async t => {
+  const f = clockCarrier(t)
+  const unused = f.assertion()
+  assert.equal((await f.send(f.assertion())).status, 200)
+  for (let elapsed = 500; elapsed < 40_000; elapsed += 500) {
+    f.advance(seconds, 500)
+    await f.send(f.assertion())
+  }
+  f.advance(seconds, 500)
+  assert.equal((await f.send(unused)).status, 401)
 })

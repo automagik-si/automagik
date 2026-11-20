@@ -15,11 +15,22 @@ this profile row.
 
 In the standard `dsh-web-app` composition, the carrier reads the built Web frontend
 directly and renders the shell for each admitted member or guest. The stock Web app
-continues to serve the owner through its fallback.
+continues to serve the owner through its fallback. Single plugin bundle requests
+are limited to rc.2 executable web chunks, including `client.pane.js`.
 
-- `AUTOMAGIK_MULTIUSER=1` enables the carrier. Unset, empty or `0` refuses carrier requests.
-  After a restart, the carrier accepts assertions issued more than five seconds after the
-  later of startup and the recorded verification time in `$DSH_HOME/multiuser-dsh/caller-watermark`.
+Once installed, the `/_automagik` reservation lasts for the lifetime of the WebServer.
+Private HTTP paths return 503 when the adapter is absent and 404 on a startup route
+collision or an unmatched path while the adapter is active. Unmatched private upgrades
+return 503 even while the adapter is active. The reservation covers the gate's
+canonical path rewrite. Direct DSH requests using path aliases fall outside that guarantee.
+
+- `AUTOMAGIK_MULTIUSER=1` enables the carrier. Unset, empty or `0` returns 401 on
+  carrier requests and registered private upgrades. The carrier accepts assertions
+  issued more than five seconds after its issuance cutoff. Each activation starts
+  with the later of startup and the recorded second in `$DSH_HOME/multiuser-dsh/caller-watermark`.
+  A backward clock step beyond five seconds raises the cutoff to the second projected
+  by the monotonic clock. A corrupt or unreadable watermark returns 503 until it is
+  repaired and DSH is restarted.
 - `AUTOMAGIK_CALLER_KEYS` is the absolute path to the gate's public key file on a read-only mount.
 - `AUTOMAGIK_INSTANCE_ID`, if set, must equal the instance in the published key file.
 - `maxRequestBodyBytes` defaults to 314572800 and must equal

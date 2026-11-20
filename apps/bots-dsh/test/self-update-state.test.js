@@ -169,7 +169,7 @@ test('the reader refuses a FIFO without opening it for reading', requiresStore, 
   const { profileDir, storeDir, statePath } = fixture(t)
   mkdirSync(storeDir, { recursive: true })
   try {
-    execFileSync('mkfifo', [statePath])
+    execFileSync('mkfifo', [statePath], { stdio: 'ignore' })
   } catch (error) {
     if (error.code === 'ENOENT') return t.skip('mkfifo is unavailable')
     throw error

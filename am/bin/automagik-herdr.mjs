@@ -8,7 +8,7 @@
 // (that wrapper runs this file through bin/run.sh, which finds node 22.7+ or bun without node on PATH).
 // Apache-2.0.
 
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
   readSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
@@ -60,6 +60,11 @@ import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
 import { CONFIG_VAR, chooseLogin } from "../logins.js";
+import { hereAnswer, HERE_BUDGET_MS, HERE_MAX_BYTES } from "../accountsHere.js";
+import { botsOff, DISCOVER, execOutcome, fleetAfter, fleetMembers, FLEET_BUDGET_MS, HERE_BUDGET_S, HERE_MIN_S, hereArgv, hereWithin, MAX_BINDINGS,
+  MAX_EXTRA_PROJECTS, MAX_LOOKUPS, parseDiscover, pickCli, readHere, READ_SECONDS, REAL_SCRIPT, slotsWithDir } from "../accountsFleet.js";
+import { coreOkay, FLEET_FILE, FLEET_V, object, parseFleet, pathOkay, rowFor, TERMINAL } from "../accountsRows.js";
+import { paneLogin } from "../loginProbe.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
@@ -569,9 +574,9 @@ async function connectedMachine(name, what = "nothing was changed") {
 }
 
 /** loadProject for a project on a linked machine, read there through herdr-core. */
-export async function loadRemoteProject(key, machine) {
+export async function loadRemoteProject(key, machine, io = remoteIo) {
   let text;
-  try { text = await readRemoteText(remoteIo, machine, under(key, BOTS_PATH)); } catch (e) {
+  try { text = await readRemoteText(io, machine, under(key, BOTS_PATH)); } catch (e) {
     if (e instanceof RemoteFileError) throw new CliError(e.message);
     throw e;
   }
@@ -937,8 +942,8 @@ export class LedgerRefusal extends CliError {}
  * `hc get <t> --json`; null only when hc answers not_found (exit 3), any other failure throws
  * (no answer within `timeout` ms, hc's 15 s when not given, included).
  */
-async function hcLookup(terminal, { timeout, strictNotFound = false } = {}) {
-  const r = await hc(["get", terminal, "--json"], { timeout });
+async function hcLookup(terminal, { timeout, strictNotFound = false, ask = hc } = {}) {
+  const r = await ask(["get", terminal, "--json"], { timeout });
   if (r.code === 0) {
     const get = parsed(r, ["get", terminal]);
     if (strictNotFound && (!get || typeof get !== "object" || Array.isArray(get))) throw new CliError(`hc get ${terminal} gave incomplete pane identity; nothing was started.`);
@@ -1502,7 +1507,8 @@ function linkedRestartHeld(project, bot, observation) {
 }
 
 async function recheckLinkedRestart(project, bot, initial, opts, tree = false) {
-  const current = await linkedObservation(project, bot);
+  const want = opts._expectPane;
+  const current = want ? await shownLinkedObservation(project, bot, want) : await linkedObservation(project, bot);
   const held = linkedRestartHeld(project, bot, current);
   if (current.core !== initial.core || (held ? attachKey(held.binding) : null) !== (initial.candidate ? attachKey(initial.candidate.binding) : null)) {
     throw new CliError(`${bot.name}'s target identity changed before restart; nothing was started.`);
@@ -1656,7 +1662,7 @@ const OPTIONS = {
   task: { type: "string" }, bot: { type: "string" }, move: { type: "boolean" },
   queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" },
   fresh: { type: "boolean" }, force: { type: "boolean" }, save: { type: "boolean" }, tree: { type: "boolean" }, "fresh-shared": { type: "boolean" },
-  cwd: { type: "string" },
+  cwd: { type: "string" }, "expect-pane": { type: "string" },
   revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" }, last: { type: "boolean" },
   machine: { type: "string" }, linked: { type: "boolean" }, local: { type: "boolean" },
   "from-hc": { type: "boolean" }, "squad-label": { type: "string" }, apply: { type: "boolean" },
@@ -1783,6 +1789,8 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 prints the plan and touches nothing; --all covers this CLI's
                                 remembered projects. A timer or the login service runs the pass.
   restart <bot> [--fresh] [--agent A] [--model M [--save]] [--tree [--fresh-shared]] [--force] [--cwd DIR]
+    [--machine M --expect-pane CORE/TERMINAL/CREATED_MS]
+                                With --expect-pane, restart only the linked pane shown.
                                 the bot's agent again in its pane's place (same space and tab,
                                 same folder, labels kept), launched from its current source
                                 (a live hc template's current command, else the definition's
@@ -1962,6 +1970,9 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 node folder) and the PATH its pane gets, as one line of JSON:
                                 {"program": null, "path": null} when none has it. For the
                                 Accounts panel, which runs claude auth status as a launch would.
+  accounts here [PROJECT…]      what this machine's Codex and Claude logins are, read-only, as JSON
+  accounts fleet                the Accounts panel's read of every linked machine, as JSON
+                                (writes only fleet.json)
 
 Antigravity (\`agy\`, 1.5.3): --model takes the ids \`agy models\` lists (a Gemini or Claude
 id, e.g. gemini-4-argon-high), never the label its settings.json keeps. The pack caches that
@@ -4411,6 +4422,7 @@ async function restartOnMachine(opts, project, bot, entry, observed) {
     if (changed) warnings.push(changed);
   }
   report(warnings);
+  let retired = null;
   if (old) {
     let up = await agentUp(seat.address);
     // Codex can't resume the thread at all (#413): one new pane on a new thread, as cmdRestart does.
@@ -4439,35 +4451,69 @@ async function restartOnMachine(opts, project, bot, entry, observed) {
           + `${old.address} still runs ${bot.name}, untouched.`);
     }
     const created = Number.isSafeInteger(up.get?.created_ms) ? up.get.created_ms : seat.created_ms;
+    // The old pane is the one the ledger moved from, never a terminal id reused there since.
+    const LOOKUP_FAILED = Symbol("hc get failed");
+    const endOld = async () => {
+      const lookup = opts._expectPane ? checkedPane(old.address, { strictNotFound: true }) : hcGet(old.address);
+      const before = await lookup.catch(() => LOOKUP_FAILED);
+      if (before === LOOKUP_FAILED || (opts._expectPane && before && !object(before.labels))) {
+        if (opts._expectPane) {
+          const w = `${old.address} couldn't be looked at, so it wasn't ended; check in Herdr that it is still ${bot.name}'s old pane before ending it (hc kill ${old.address}).`;
+          warnings.push(w); report([w]);
+        }
+        return "unconfirmed";
+      }
+      if (before && before.created_ms !== held.binding.created_ms) {
+        const w = `${old.address} is another terminal now (its created_ms changed), so it wasn't ended; ${seat.address} plays ${bot.name}.`;
+        warnings.push(w); report([w]);
+        return "kept";
+      } else if (before && opts._expectPane && before.labels?.[BOT_LABEL] !== bot.id) {
+        const w = `${old.address} is no longer ${bot.name}'s pane, so it wasn't ended; ${seat.address} plays ${bot.name}.`;
+        warnings.push(w); report([w]);
+        return "kept";
+      } else if (before) {
+        const kill = hcKill(old.address);
+        const killed = await (opts._expectPane ? kill.catch(() => ({ code: 1, stdout: "", stderr: "" })) : kill);
+        if (killed.code !== 0) {
+          const w = `${old.address} wasn't ended (hc kill: ${hcSaid((killed.stderr || killed.stdout).trim())}); end it with hc kill ${old.address}.`;
+          warnings.push(w); report([w]);
+          return "unconfirmed";
+        }
+        return "ended";
+      }
+      return "gone";
+    };
     let lost;
     try {
       lost = await underLedger(async ({ machines, heldBy, holds, write }) => {
         const now = heldBy(bot.id, m.id);
+        // --expect-pane: the binding shown must still be this bot's in this project, field for field,
+        // when the ledger moves it (a project's clone can carry the same bot id).
+        if (opts._expectPane && !matchesPane(now, opts._expectPane, bot.id, key)) return SHOWN_GONE;
         const rows = [];
         if (now && attachKey(now) === attachKey(held.binding)) rows.push(closingRow(held.binding, "detach", "start", "moved"));
         else if (now && now.project !== key) return addressOf(now, machines);
         else if (now && (await holds(now))) return addressOf(now, machines);
         rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal: seat.terminal, core: seat.core, created_ms: created, machine, by: "start" }));
         write(rows);
+        // --expect-pane: the old pane is checked and ended before the lock is let go, so no attach
+        // can give it to another bot between the ledger's move and its end.
+        if (opts._expectPane) retired = await endOld();
         return undefined;
       });
     } catch (e) {
       await hcKill(seat.address);
       throw new CliError(`${seat.address} was ended and ${old.address} still runs ${bot.name}: the attach ledger wasn't written (${e?.message ?? e}).`);
     }
+    if (lost === SHOWN_GONE) {
+      await hcKill(seat.address);
+      throw bindingRefusal(bot.name, machine, opts._expectPane);
+    }
     if (lost !== undefined) {
       await hcKill(seat.address);
       throw new CliError(`${bot.name} was attached to ${lost} while it restarted, so ${seat.address} was ended and nothing changed.`);
     }
-    // The old pane is the one the ledger moved from, never a terminal id reused there since.
-    const before = await hcGet(old.address).catch(() => null);
-    if (before && before.created_ms !== held.binding.created_ms) {
-      const w = `${old.address} is another terminal now (its created_ms changed), so it wasn't ended; ${seat.address} plays ${bot.name}.`;
-      warnings.push(w); report([w]);
-    } else if (before) {
-    const killed = await hcKill(old.address);
-    if (killed.code !== 0) { const w = `${old.address} wasn't ended (hc kill: ${hcSaid((killed.stderr || killed.stdout).trim())}); end it with hc kill ${old.address}.`; warnings.push(w); report([w]); }
-    }
+    if (!opts._expectPane) await endOld();
   }
   let saved = false;
   if (opts.save) {
@@ -4477,7 +4523,8 @@ async function restartOnMachine(opts, project, bot, entry, observed) {
   }
   if (!opts.json) report([`${bot.name}: ${old ? `${seat.address} replaces ${old.address}, ${restartText(plan, session)}` : `${bot.name} wasn't running; started in ${seat.address}`}${saved ? `; ${BOTS_PATH} now says ${plan.agent}` : ""}.`]);
   return opts.json ? { ...seatOnJson(bot, seat), warnings, replaced: old ? held.binding.terminal : null, mode: old ? plan.mode : "start",
-    agent: plan.agent, model: plan.model, session: session ? SESSION_MASK : null, note: plan.note, saved } : seat.address;
+    agent: plan.agent, model: plan.model, session: session ? SESSION_MASK : null, note: plan.note, saved,
+    ...(opts._expectPane && old ? { retired } : {}) } : seat.address;
 }
 
 /**
@@ -7443,7 +7490,52 @@ function adoptedLogin(old, argv, keep) {
   1, { refused: "login", terminal: old.address });
 }
 
+function expectedPane(value) {
+  const words = value.split("/");
+  const time = words.pop(), terminal = words.pop(), core = words.join("/");
+  if (!coreOkay(core) || typeof terminal !== "string" || !TERMINAL.test(terminal)
+    || !/^\d{1,16}$/.test(time) || !Number.isSafeInteger(Number(time))) {
+    throw new CliError("--expect-pane takes CORE/TERMINAL/CREATED_MS.", 2);
+  }
+  return { core, terminal, created_ms: Number(time) };
+}
+
+const matchesPane = (binding, want, bot, key) => binding?.bot === bot && binding.project === key
+  && binding.core === want.core && binding.terminal === want.terminal && binding.created_ms === want.created_ms && binding.machine;
+
+const SHOWN_GONE = Symbol("the shown binding is gone");
+const bindingRefusal = (name, machine, want) =>
+  new CliError(`${name}'s pane couldn't be confirmed as the one shown (${machine}/${want.terminal}); nothing was restarted.`,
+    1, { refused: "binding" });
+
+function expectHeldPane(want, bot, project) {
+  const held = heldIn(foldAttach(readAttachFile(attachPath(appHome())) ?? []), bot, want.core);
+  return matchesPane(held, want, bot, project);
+}
+
+async function shownLinkedObservation(project, bot, want) {
+  const refuse = () => bindingRefusal(bot.name, project.machine, want);
+  if (!expectHeldPane(want, bot.id, project.key)) throw refuse();
+  let observed;
+  try {
+    observed = await linkedObservation(project, bot);
+  } catch (error) {
+    if (error instanceof LedgerRefusal) throw error;
+    throw refuse();
+  }
+  if (!matchesPane(observed.candidate?.binding, want, bot.id, project.key)
+    || observed.candidate.get.labels[BOT_LABEL] !== bot.id) throw refuse();
+  return observed;
+}
+
 async function cmdRestart(opts, [ref]) {
+  let expect = null;
+  if (opts["expect-pane"] !== undefined) {
+    if (!opts.machine || !MACHINE_NAME.test(opts.machine) || ["tree", "queued", "cancel", "due", "run-queued"].some((flag) => opts[flag] !== undefined)) {
+      throw new CliError("--expect-pane needs --machine and a plain restart.", 2);
+    }
+    expect = expectedPane(opts["expect-pane"]);
+  }
   if (opts["run-queued"]) return runQueuedRestart(opts);
   if (opts.due) {
     if (ref) throw new CliError("restart --due takes no bot: it lists every seat over its threshold, or take one with am restart <bot>.", 2);
@@ -7464,6 +7556,11 @@ async function cmdRestart(opts, [ref]) {
     if (!dir || !isDir(dir)) throw new CliError(`--cwd ${opts.cwd || '""'} isn't a folder on this computer.`, 2);
     wanted = dir;
   }
+  // The panel passes the ledger's bot id and project key. A different binding can be
+  // refused before routing any lookup by the machine name.
+  if (expect && !expectHeldPane(expect, ref, opts.project?.replace(/\/+$/, "") || "/")) {
+    throw bindingRefusal(ref, opts.machine, expect);
+  }
   const project = await projectFor(opts);
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
@@ -7476,7 +7573,8 @@ async function cmdRestart(opts, [ref]) {
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
   if (project.machine) {
     // Observe before swap/model validation can refresh a caller-side model cache.
-    const observed = await linkedObservation(project, bot);
+    const observed = expect ? await shownLinkedObservation(project, bot, expect) : await linkedObservation(project, bot);
+    if (expect) opts = { ...opts, _expectPane: expect };
     linkedRestartHeld(project, bot, observed);
     return restartResolved(opts, project, bot, wanted, swap, observed);
   }
@@ -10981,10 +11079,336 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
   return PRINTED;
 }
 
+// A deadline belongs to a child when it starts. Queued calls make no process after it,
+// and killing the process group also stops shells and their children.
+function accountsPrograms() {
+  const active = new Set();
+  const waiting = [];
+  let closed = false;
+  const kill = (child) => {
+    if (!child.pid) return;
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* The group already ended. */ }
+  };
+  const start = () => {
+    while (waiting.length && active.size < MAX_RUNNING) {
+      const { command, prepare, cwd, stderr, done } = waiting.shift();
+      const call = closed ? null : prepare(Date.now());
+      if (!call) { done({ late: true }); continue; }
+      let child;
+      try { child = spawn(command, call.args, { cwd, detached: true, stdio: ["ignore", "pipe", stderr ? "pipe" : "ignore"] }); }
+      catch { done({ code: 127, stdout: "", stderr: "" }); continue; }
+      active.add(child);
+      let late = false, missing = false, overflow = false;
+      let bytes = 0;
+      const stdout = [], errors = [];
+      const collect = (list) => (chunk) => {
+        bytes += chunk.length;
+        if (bytes <= 1024 * 1024) list.push(chunk);
+        else { overflow = true; kill(child); }
+      };
+      child.stdout.on("data", collect(stdout));
+      child.stderr?.on("data", collect(errors));
+      child.once("error", (error) => { missing = error.code === "ENOENT"; });
+      const timer = setTimeout(() => { late = true; kill(child); }, call.timeout);
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        // End anything the program left in its group.
+        kill(child);
+        active.delete(child);
+        done(late ? { late: true, killed: true } : { code: missing ? 127 : overflow ? 1 : code ?? 1,
+          stdout: overflow ? "" : Buffer.concat(stdout).toString("utf8"),
+          stderr: overflow ? "" : Buffer.concat(errors).toString("utf8") });
+        start();
+      });
+    }
+  };
+  return {
+    run: (command, prepare, { cwd, stderr = false } = {}) => new Promise((done) => {
+      waiting.push({ command, prepare, cwd, stderr, done });
+      start();
+    }),
+    stop: () => { closed = true; active.forEach(kill); start(); },
+  };
+}
+
+const FLEET_READ_MAX = 4 * 1024 * 1024;
+
+function accountsBytes(path, max) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > max) throw new Error();
+    if (max === undefined) return readFileSync(fd);
+    const bytes = Buffer.alloc(max + 1);
+    let length = 0;
+    while (length <= max) {
+      const n = readSync(fd, bytes, length, bytes.length - length, null);
+      if (!n) break;
+      length += n;
+    }
+    if (length > max) throw new Error();
+    return bytes.subarray(0, length);
+  } finally { closeSync(fd); }
+}
+
+// The programs table for the accounts read, read once: a file that can't be read as a small
+// regular file gives null, and only the Claude routes that depend on it are failed.
+const PROGRAMS_READ_MAX = 1 << 20;
+function accountsTable() {
+  try { return withOverrides(accountsBytes(join(appHome(), "programs.json"), PROGRAMS_READ_MAX).toString("utf8")); }
+  catch (e) { return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? withOverrides(null) : null; }
+}
+
+// Whether Claude's configured run is the shipped command, word for word (null table: unknown).
+const shippedClaude = (table) => {
+  const run = table?.claude?.run, shipped = AGENTS.claude.run;
+  return Array.isArray(run) && run.length === shipped.length && run.every((w, i) => w === shipped[i]);
+};
+
+async function cmdAccountsHere(projects, { print = false, limit = Infinity, table } = {}) {
+  const programs = accountsPrograms();
+  const deadline = Math.min(Date.now() + HERE_BUDGET_MS, limit);
+  const dir = home();
+  const exec = (command, args, { timeout }) => programs.run(command,
+    (now) => now < deadline ? { args, timeout: Math.min(timeout, deadline - now) } : null, { cwd: dir });
+  try {
+    if (table === undefined) table = accountsTable();
+    const recordRoute = table === null ? "unread" : shippedClaude(table) ? "shipped" : "own";
+    const program = programPath(AGENTS.claude.run[0]);
+    const bareWhere = { program, path: program ? launchPath(AGENTS.claude.run[0]).path : null };
+    const answer = await hereAnswer({ env: process.env, home: dir, appHome: appHome(), amStore: amStore(),
+      readBytes: accountsBytes, exec, sha256: (bytes) => createHash("sha256").update(bytes).digest("hex"),
+      bareWhere, recordRoute,
+      realpath: realpathSync, isDir: (path) => statSync(path).isDirectory(), paneEnvOf, now: Date.now }, projects, deadline);
+    if (!answer) throw new Error();
+    if (print) {
+      const line = `${JSON.stringify(answer)}\n`;
+      if (Buffer.byteLength(line) > HERE_MAX_BYTES) throw new Error();
+      // Finish the one stdout write before stopping any probes still in flight.
+      await new Promise((done, fail) => process.stdout.write(line, (error) => error ? fail(error) : done()));
+      programs.stop();
+      process.exit(0);
+    }
+    return answer;
+  } finally { programs.stop(); }
+}
+
+const accountsOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+
+async function accountsBots(machine, answer, bindings, checked, table, ask, remote) {
+  const { name, id } = machine;
+  const confirmed = [];
+  const confirmedAt = new Set(), skipped = new Set();
+  const rosters = new Map();
+  let looked = 0, index = 0;
+  for (; index < bindings.length && confirmed.length < MAX_BINDINGS && looked < MAX_LOOKUPS; index += 1) {
+    const { bot, project, terminal, created_ms } = bindings[index];
+    const address = `${name}/${terminal}`;
+    if (!checked.has(project)) { skipped.add(address); continue; }
+    looked += 1;
+    const get = await checkedPane(address, { strictNotFound: true, ask });
+    if (!get || get.created_ms !== created_ms || get.labels?.[BOT_LABEL] !== bot) continue;
+    const agent = launchAgent(get.argv, table);
+    if (!rosters.has(project)) rosters.set(project, loadRemoteProject(project, name, { hc: ask }).catch(() => null));
+    const roster = await rosters.get(project);
+    let real = null;
+    if (agent === "claude") {
+      const login = paneLogin(get.argv, slotsWithDir(answer.claude));
+      if (login.unknown && pathOkay(login.unknown)) {
+        const result = await remote(["sh", "-c", REAL_SCRIPT, "sh", login.unknown], 10);
+        if (result.kind !== "ok") throw new Error();
+        if (result.code === 0) real = result.stdout.trim();
+      }
+    }
+    confirmed.push({ id: bot, name: roster?.file.bots.find((b) => b.id === bot)?.name, project, agent,
+      expect: { core: id, terminal, created_ms }, argv: get.argv, real });
+    confirmedAt.add(address);
+  }
+  for (const { terminal } of bindings.slice(index)) skipped.add(name + "/" + terminal);
+  const ls = await ask(["ls", "--json"]);
+  if (ls.code !== 0) throw new Error();
+  const reply = JSON.parse(ls.stdout);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) throw new Error();
+  // Confirmed and unchecked bindings are not unbound bots; a pane that replaced a stale binding is.
+  const otherPanes = rowsOf(reply).filter((r) => typeof r?.address === "string" && r.address.startsWith(`${name}/`)
+    && TERMINAL.test(r.address.slice(name.length + 1)) && r.state === "live" && !confirmedAt.has(r.address) && !skipped.has(r.address));
+  // Older hc lists omit labels. Ask those panes before counting unbound bots.
+  const paneLabels = await Promise.all(otherPanes.map((r) => r.labels ?? checkedPane(r.address, { strictNotFound: true, ask })
+    .then((get) => get?.labels)));
+  const unbound = paneLabels.filter((labels) => labels?.[BOT_LABEL]).length;
+  return botsOff({ claude: answer.claude, exceptions: answer.exceptions, bindings: confirmed,
+    unbound, more: bindings.length - looked });
+}
+
+async function cmdAccountsFleet() {
+  const app = appHome();
+  const file = join(app, FLEET_FILE);
+  const kept = isDir(app);
+  const cycle = async () => {
+    const deadline = Date.now() + FLEET_BUDGET_MS;
+    const table = accountsTable();
+    // Leave time for the final membership read after all calls routed by name.
+    const workUntil = deadline - 2000;
+    const programs = accountsPrograms();
+    try {
+      const hcBin = hcExecutable(realHcPath());
+      const ask = (args, { timeout = 20_000, until = workUntil, stderr = false } = {}) =>
+        programs.run(hcBin, (now) => now < until ? { args, timeout: Math.min(timeout, until - now) } : null, { stderr });
+      const membership = ["machine", "ls", "--json"];
+      const listed = await ask(membership);
+      if (listed.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
+      const first = fleetMembers(listed);
+      const localAnswer = await cmdAccountsHere([], { limit: workUntil, table });
+      const when = () => new Date().toISOString();
+      const reads = new Map([["local", { answer: localAnswer, at: when() }]]);
+      const bareUnresolved = !shippedClaude(table);
+      let bindings = [];
+      let ledgerFailed = false;
+      try {
+        bindings = [...foldAttach(readAttachFile(attachPath(app)) ?? []).byKey.values()]
+          .filter((b) => b.machine).sort((a, b) => accountsOrder(a.project, b.project) || accountsOrder(a.bot, b.bot));
+      } catch { ledgerFailed = true; }
+      await Promise.all((first?.list ?? []).map(async (machine) => {
+        const { id, name, connected } = machine;
+        const status = (state, reason = null) => reads.set(id, { name, state, reason });
+        if (!connected) return status("away");
+        let machineDeadline = null;
+        const remote = async (argv, seconds = READ_SECONDS, botsUntil) => {
+          const result = await programs.run(hcBin, (now) => {
+            const until = botsUntil ?? (machineDeadline ??= Math.min(workUntil, now + READ_SECONDS * 1000));
+            const left = Math.min(seconds, Math.floor((until - now) / 1000));
+            const words = typeof argv === "function" ? argv(left) : argv;
+            return left >= 2 && words ? { args: hcExecArgs(name, words, left), timeout: left * 1000 } : null;
+          });
+          return execOutcome(result);
+        };
+        try {
+          const found = await remote(["sh", "-c", DISCOVER]);
+          if (found.kind !== "ok") return status("failed", found.kind);
+          if (found.code !== 0) return status("failed", "failed");
+          const { cli, reason } = pickCli(parseDiscover(found.stdout));
+          if (!cli) return status("unknown", reason);
+          const bound = bindings.filter((b) => b.core === id);
+          const lookable = bound.slice(0, MAX_LOOKUPS);
+          const projects = [...new Set(lookable.map((b) => b.project).filter(pathOkay))].slice(0, MAX_EXTRA_PROJECTS);
+          const result = await remote((left) => {
+            const within = hereWithin(left);
+            return within ? hereArgv(cli, projects, within) : null;
+          });
+          if (result.kind !== "ok") return status("failed", result.kind);
+          if (result.code === 90) return status("unknown", "old-cli");
+          if (result.code !== 0) return status("failed", "failed");
+          const answer = readHere(result.stdout);
+          if (answer.reason) return status("failed", answer.reason);
+          if (bareUnresolved && answer.claude) {
+            answer.claude.routes.bare = { email: null, state: "unresolved" };
+            answer.claude.routesDiffer = false;
+          }
+          const at = when();
+          const botsUntil = Math.min(workUntil, Date.now() + READ_SECONDS * 1000);
+          const bots = ledgerFailed || table === null ? { reason: "failed" } :
+            await accountsBots(machine, answer, bound, new Set(projects), table, (args, opts) => ask(args, { ...opts, until: botsUntil, stderr: true }),
+              (argv, seconds) => remote(argv, seconds, botsUntil)).catch(() => ({ reason: "failed" }));
+          reads.set(id, { name, cli: cli.kind, answer, at, bots });
+        } catch { status("failed", "failed"); }
+      }));
+      const final = fleetMembers(await ask(membership, { until: deadline }));
+      const at = when();
+      let previous;
+      try { previous = accountsBytes(file, FLEET_READ_MAX).toString("utf8"); } catch { /* No observations to keep. */ }
+      const next = fleetAfter(parseFleet(previous), reads, { first, final, at });
+      if (kept) {
+        const tmp = `${file}.${process.pid}.tmp`;
+        const fd = openSync(tmp, "wx", 0o600);
+        try {
+          try { writeFileSync(fd, `${JSON.stringify(next)}\n`); } finally { closeSync(fd); }
+          chmodSync(tmp, 0o600);
+          renameSync(tmp, file);
+        } finally {
+          try { unlinkSync(tmp); } catch { /* Renamed or already removed. */ }
+        }
+      }
+      const refs = { codex: { fingerprint: localAnswer.codex?.account ?? null }, claude: { email: localAnswer.claude?.email ?? null } };
+      const rows = (entry) => ({ codex: rowFor("codex", entry, refs.codex, Date.parse(at)),
+        claude: rowFor("claude", entry, refs.claude, Date.parse(at)) });
+      const machines = Object.keys(next.machines).filter((core) => core !== "local").sort().map((core) => {
+        const entry = next.machines[core];
+        const { name, state, reason, cli, versions } = entry;
+        const bots = state === "read" ? reads.get(core)?.bots ?? null : null;
+        return { core, name, state, reason, cli, versions, rows: rows(entry), bots };
+      });
+      return { v: FLEET_V, at, kept, linked: next.linked ? { reason: "failed" } : null,
+        local: { rows: rows(next.machines.local) }, machines };
+    } finally { programs.stop(); }
+  };
+  if (!kept) return cycle();
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  let entered = false;
+  const lock = join(dirname(file), "fleet.lock");
+  try {
+    return await withLockAsync(lock, () => { entered = true; return cycle(); },
+      { wait: 0, what: "a read of the machines' accounts" });
+  } catch (error) {
+    if (!entered && existsSync(lock)) return { error: "busy" };
+    throw error;
+  }
+}
+
+async function cmdAccounts(opts, [verb, ...rest]) {
+  if (verb !== "here" && verb !== "fleet") throw new CliError("accounts takes here or fleet.", 2);
+  if (Object.keys(opts).some((flag) => flag !== "json" && flag !== "within" && flag !== "started")) throw new CliError("accounts takes only --json.", 2);
+  const { within, started } = opts;
+  const seconds = Number(within);
+  if (started !== undefined && (verb !== "here" || within === undefined || !/^\d{1,12}$/.test(started))) {
+    throw new CliError("accounts here takes --started <seconds> with --within.", 2);
+  }
+  if (within !== undefined && (verb !== "here" || !/^\d{1,2}$/.test(within) || seconds < HERE_MIN_S || seconds > HERE_BUDGET_S)) {
+    throw new CliError("accounts here takes --within <5-15>.", 2);
+  }
+  if (verb === "fleet" && rest.length) throw new CliError("accounts fleet takes no projects.", 2);
+  if (verb === "here" && (rest.length > MAX_EXTRA_PROJECTS || !rest.every(pathOkay))) {
+    throw new CliError("accounts here takes up to 20 absolute project paths.", 2);
+  }
+  try {
+    if (verb === "here") {
+      const limit = within === undefined ? Infinity : Math.min(Date.now() + seconds * 1000,
+        started === undefined ? Infinity : Number(started) * 1000 + seconds * 1000);
+      await cmdAccountsHere(rest, { print: true, limit });
+    } else {
+      const answer = await cmdAccountsFleet();
+      exitAfter.code = answer.error === "busy" ? 1 : 0;
+      process.stdout.write(`${JSON.stringify(answer)}\n`);
+    }
+    return PRINTED;
+  } catch (e) {
+    if (e instanceof CliError && e.message === "hc (herdr-core) is not on PATH.") throw e;
+    throw new CliError(`accounts ${verb} failed.`);
+  }
+}
+
+/** The dedicated reader and the person-facing command share this command's output. */
+export async function accountsMain(argv) {
+  try {
+    const { positionals, values: { within, started } } = parseArgs({
+      args: argv, options: { json: OPTIONS.json, within: { type: "string" }, started: { type: "string" } }, allowPositionals: true,
+    });
+    exitAfter.code = 0;
+    await cmdAccounts({ ...(within === undefined ? {} : { within }), ...(started === undefined ? {} : { started }) }, positionals);
+    return exitAfter.code;
+  } catch (e) {
+    if (e instanceof CliError) {
+      process.stderr.write(`am: ${e.message}\n`);
+      return e.code;
+    }
+    process.stderr.write("am: accounts takes here or fleet.\n");
+    return 2;
+  }
+}
+
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
-  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus };
+  proxy: cmdProxy, "launch-path": cmdLaunchPath, accounts: cmdAccounts, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */
@@ -11000,7 +11424,8 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   const [command, ...rest] = positionals;
   if (command !== "main") {
     if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
-    io.repairCliLinks?.();
+    // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either.
+    if (command !== "accounts") io.repairCliLinks?.();
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
   if (opts.version && !command) {

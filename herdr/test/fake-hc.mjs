@@ -75,6 +75,13 @@ const callNo = logged.length;
 }
 // state.fail: commands that fail as a server that is down would (exit 1).
 if ((state.fail ?? []).includes(words[0])) fail(`hc: can't reach the server (${words[0]})`);
+// state.lockProbe: record whether the ledger lock is held when this pane is checked or ended.
+const lockProbe = state.lockProbe;
+if (lockProbe && words[1] === lockProbe.terminal && ["get", "kill"].includes(words[0])) {
+  (lockProbe.seen ??= []).push({ call: words[0], held: existsSync(lockProbe.path) });
+  save();
+}
+
 // A linked machine's terminal ("vm/t8") on a machine that isn't connected: unavailable, as hc says.
 if (["get", "label", "kill", "read", "send", "keys", "interrupt"].includes(words[0]) && words[1]?.includes("/")) {
   const m = (state.machines ?? []).find((x) => x.name === words[1].split("/")[0]);

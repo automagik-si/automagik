@@ -2,12 +2,20 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, fchmodSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+const pendingCutoffs = new Map()
+const observations = new Map()
+
 function readWatermark(file) {
   try {
     const value = JSON.parse(readFileSync(file, 'utf8'))
     if (Number.isSafeInteger(value) && value >= 0) return value
-  } catch {}
-  return 0
+  } catch (error) {
+    if (error.code === 'ENOENT') return 0
+  }
+}
+
+function watermarkError() {
+  return Object.assign(new Error('caller watermark unavailable'), { code: 'CALLER_WATERMARK' })
 }
 
 function writeWatermark(file, second) {
@@ -26,11 +34,38 @@ function writeWatermark(file, second) {
   }
 }
 
-export function createNonces({ capacity = 65_536, startedAtSec = 0, file } = {}) {
-  const startupSecond = Math.max(startedAtSec, file ? readWatermark(file) : 0)
-  let nowSec = startupSecond
+export function createNonces({ capacity = 65_536, startedAtSec = 0, anchorSec = startedAtSec, file, monotonicNow = () => performance.now() } = {}) {
+  const anchorMono = monotonicNow()
+  const inherited = observations.get(file)
+  const observation = inherited ?? { lastWall: anchorSec, lastMono: anchorMono }
+  const watermark = file ? readWatermark(file) : 0
+  const failed = watermark === undefined
+  if (failed) console.error(`multiuser-dsh: caller watermark unavailable: ${file}`)
+  let persisted = watermark ?? 0
+  let cutoff = Math.max(startedAtSec, persisted)
+  let pending = pendingCutoffs.get(file)
+  let verified = cutoff
   const entries = new Set()
   const expiries = []
+
+  function observe(wall, mono) {
+    const projected = observation.lastWall + (mono - observation.lastMono) / 1000
+    const sharedPending = pendingCutoffs.get(file)
+    if (sharedPending !== undefined) pending = Math.max(pending ?? 0, sharedPending)
+    const stepped = wall + 5 < projected
+    if (stepped) {
+      pending = Math.max(pending ?? 0, cutoff, Math.floor(projected))
+      if (file) pendingCutoffs.set(file, pending)
+    }
+    // Carry the projection until the floored wall catches up or a step is recorded.
+    if (stepped || wall >= projected) {
+      observation.lastWall = wall
+      observation.lastMono = mono
+    }
+  }
+
+  if (inherited) observe(anchorSec, anchorMono)
+  else if (file) observations.set(file, observation)
 
   function insert(entry) {
     let index = expiries.length
@@ -60,17 +95,26 @@ export function createNonces({ capacity = 65_536, startedAtSec = 0, file } = {})
   }
 
   return {
-    startupSecond,
-    verificationSecond(wallSecond) {
-      if (wallSecond > nowSec) {
-        // Record time before verification can admit an assertion or prune a nonce.
-        if (file) writeWatermark(file, wallSecond)
-        nowSec = wallSecond
+    get startupSecond() { return cutoff },
+    verificationSecond(wall) {
+      if (failed) throw watermarkError()
+      observe(wall, monotonicNow())
+      verified = Math.max(verified, wall)
+      const target = Math.max(verified, pending ?? 0)
+      if (file && target > persisted) {
+        try { writeWatermark(file, target) }
+        catch { throw watermarkError() }
+        persisted = target
       }
-      return nowSec
+      if (pending !== undefined && (!file || persisted >= pending)) {
+        cutoff = Math.max(cutoff, pending)
+        if (file) pendingCutoffs.delete(file)
+        pending = undefined
+      }
+      return verified
     },
     consume(nonce, exp) {
-      while (expiries[0]?.exp <= nowSec) removeEarliest()
+      while (expiries[0]?.exp <= verified) removeEarliest()
       if (entries.has(nonce)) return 'replay'
       if (entries.size >= capacity) return 'full'
       entries.add(nonce)

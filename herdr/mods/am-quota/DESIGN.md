@@ -98,3 +98,44 @@ intervals, and drops a response that a newer read has overtaken.
 Every request the proxy client makes carries a **30-second `AbortSignal.timeout`**, so a hung
 server cannot leave a switch `busy` (or the panel reading forever). A runtime without
 `AbortSignal.timeout` gets no signal rather than an exception.
+
+## Accounts on linked machines (RFC 0043, delivery 1)
+
+`am accounts here` reads one machine's Codex account-id fingerprint and Claude login
+inventory, including what a start from the controller and a tree restart on that machine
+would use. It skips CLI-link repair. `am accounts fleet` is the Accounts panel's read of
+the controller and its linked machines. It checks each target's real install folders and
+strict versions from their VERSION files, then runs the newest qualified CLI through
+`hc exec --on`. The marker is the dedicated `bin/accounts.mjs` program itself. An old
+CLI given an unknown command can repair links, so the fleet never asks it to run.
+If the folder changes after discovery, an old install either lacks the program or lacks
+its named imports. ESM links those imports before evaluating the program.
+
+The bare route looks for `claude` on the PATH the core gives the read, in `~/.local/bin`
+and in the CLI's Node folder without starting a login shell, so a `claude` only a login
+profile puts on PATH reads `failed` on that route. The read takes `programs.json` once as a
+small regular file. If the file is unreadable, the record route and effective account read
+`failed`, and the slot inventory and the bare route still read. The record route is probed
+only when Claude's configured run is the shipped `claude` command. Any other configured run,
+whatever its form, reads `unresolved`. The read never runs a configured launcher, so that
+machine's effective Claude account is unknown and its row compares nothing. The slot inventory
+is always read through the shipped `claude`.
+
+The controller gives the reader at most half the time `hc exec` still waits, with at least
+three seconds held back and a minimum of five seconds to start the read. If delivery takes
+longer than that half, hc can give up and end the reader before its own deadline. A read-only
+`claude auth status` or login-folder check may then run on alone until it exits. The reader
+enforces the seven-second probe limit, so the limit is gone once the reader exits.
+
+The controller keeps only observations in `data/am-quota/fleet.json` (0600). An away or
+failed machine keeps its last successful read alongside the latest attempt. A machine
+confirmed unlinked by both membership reads loses its entry immediately. A read and
+its bot bindings are kept only while the machine name resolves to the same core id.
+The account comparison with this Mac lives in the row's `here` field. A linked account
+is observed, and only a subsequent delivery can confirm that an approved assignment is
+on that account. A Codex observation always has unknown grant origin.
+
+Our code writes no linked files. It keeps fleet.json and its lock on this computer, and
+the panel removes its private run files after reading. Claude's vendor-supplied
+`claude auth status` runs on each machine as the RFC prescribes. Its own file behaviour
+is outside this code's control, as with the panel's local probe every five minutes.

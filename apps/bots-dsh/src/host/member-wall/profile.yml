@@ -16,3 +16,13 @@
         sharedReadRoots: []
         # DSH's own data folder belongs here: no member reads it, even inside a shared root.
         denyReadRoots: []
+        # Bots need members and AUTOMAGIK_MULTIUSER on. Bots never read DSH's home,
+        # Automagik's home, the team home, the principal record's folder, /data/gate-view
+        # or /data/secrets. botsRoot must be a real 0700-style folder outside all of them.
+        # bots: false
+        # botsRoot: ''
+        # botReadRoots: {}
+        # botDenyRoots: []
+        # instanceId: ''
+        # To release the rollback hold as owner, stop DSH and remove multiuser-mode.json
+        # from the team home. Turning multiuser mode back on also releases the hold.

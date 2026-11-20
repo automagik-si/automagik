@@ -20,18 +20,21 @@ export function frontendPath(url) {
     return 'bundle'
   }
 
-  // Static frontend decodes before resolving the file. Preserve the asset boundary
-  // and exclude maps. For bundles, DSH uses the raw package ID in its route.
-  const plugin = path.startsWith('/plugins/')
-  if (plugin) {
-    const id = /^\/plugins\/(@[^/]+\/[^/]+|[^@/][^/]*)\/.+$/.exec(path)?.[1]
+  if (path.startsWith('/plugins/')) {
+    const [, id, file] = /^\/plugins\/(@[^/]+\/[^/]+|[^@/][^/]*)\/([^/]+)$/.exec(path) ?? []
     if (!id || !validId(id)) return undefined
+    // Allow rc.2 web chunks such as the Bot team's client.pane.js. Refuse exported package assets.
+    if (file === 'client.js' || (/^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/.test(file) &&
+        !file.startsWith('client.node.'))) return 'bundle'
+    return undefined
   }
+
+  // Static frontend decodes before resolving the file.
   let target
   try { target = decodeURIComponent(path) }
   catch { return undefined }
   if (target.split(/[,/\\]/).some(part => part === '..' || part.toLowerCase().endsWith('.map'))) return undefined
-  return plugin ? 'bundle' : 'static'
+  return 'static'
 }
 
 const shellOrigin = 'https://dsh.invalid'
