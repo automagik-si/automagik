@@ -20,9 +20,10 @@
 // RFC 0036 adds memory.read, memory.edit, memory.add, schedule.list, schedule.pause,
 // schedule.resume and schedule.rename on channel 0. They need a grant opened at hello
 // for this connection's opted-in methods. Their replies are live-only.
-// RFC 0033 adds image upload, send with uploads and thumbnail reads on opted-in DSH watches.
-// The phone asks for attachments at hello and gets live-only replies. Row frames carry metadata;
-// a queued thumbnail is checked again when its write comes up. Cancel has its own request slot.
+// RFC 0033 adds image and TXT/PDF uploads and mixed sends on opted-in DSH watches. The phone
+// asks for attachments and separately opts into documents at hello. Only document begins take
+// a display name. Row frames carry metadata and reads serve image thumbnails. Attachment replies
+// are live-only and queued thumbnails are checked again when written. Cancel has its own slot.
 // The phone needs a timeout of at least 75 s for chat.attachFinish and 30 s for the other calls.
 
 /** Frame kinds, as herdr-core's. */
@@ -56,6 +57,7 @@ const ATTACH = {
   'chat.attachCancel': 'uploadCancel', 'chat.attachmentRead': 'attachmentRead',
 }
 export const ATTACH_METHODS = Object.keys(ATTACH)
+export const DOCUMENT_TYPES = ['text/plain', 'application/pdf']
 const attachmentRequest = (m) => typeof m?.method === 'string' && (Object.hasOwn(ATTACH, m.method)
   || (m.method === 'chat.send' && m.params && Object.hasOwn(m.params, 'uploads')))
 export const phoneId = (id) => typeof id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(id)
@@ -190,8 +192,8 @@ export class ChatConnection {
         this.take(9)
         this.onFrame(channel, kind, this.take(length))
       }
-    } catch (e) {
-      this.log(`chat: bad input: ${e.message}`)
+    } catch {
+      this.log('chat: bad input')
       this.close('bad request')
     }
   }
@@ -216,7 +218,9 @@ export class ChatConnection {
       if (this.closed) return
       if (manage?.length) result.manage = manage
       if (m.params.attachments === 1) {
-        result.attachments = this.engine.attachHello?.(this.client) ?? { version: 1, unavailable: 'none' }
+        result.attachments = this.engine.attachHello?.(this.client, {
+          attachments: 1, ...(m.params.documents === 1 ? { documents: 1 } : {}),
+        }) ?? { version: 1, unavailable: 'none' }
         if (!result.attachments.unavailable) result.methods = [...METHODS, ...ATTACH_METHODS]
       }
       this.write(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n'))
@@ -253,10 +257,10 @@ export class ChatConnection {
       if (this.inFlight >= MAX_IN_FLIGHT) { this.reply(errorOf(m?.id ?? null, 'busy', `at most ${MAX_IN_FLIGHT} requests at once`), opts); return }
       this.inFlight += 1
       this.request(m)
-        .then((answer) => this.reply(answer, opts), (e) => {
+        .then((answer) => this.reply(answer, opts), () => {
           if (memory) this.log('chat: memory request failed')
           else if (schedule) this.log('chat: schedule request failed')
-          else this.log(`chat: ${e.message}`)
+          else this.log('chat: request failed')
           this.reply(errorOf(m?.id ?? null, 'failed'), opts)
         })
         .finally(() => { this.inFlight -= 1 })
@@ -279,19 +283,23 @@ export class ChatConnection {
       this.reply(errorOf(null, 'invalid_params'), opts)
       return
     }
-    if (params && Object.hasOwn(params, 'name')) { this.reply(refuse('invalid'), opts); return }
+    const document = method === 'chat.attach' && DOCUMENT_TYPES.includes(params?.mediaType)
+    if (!document && params && Object.hasOwn(params, 'name')) { this.reply(refuse('invalid'), opts); return }
     const cancelling = method === 'chat.attachCancel'
-    if (cancelling ? this.cancelInFlight : this.inFlight >= MAX_IN_FLIGHT || this.attachmentInFlight >= 2) {
+    const joined = cancelling && this.cancelInFlight && this.inFlight < MAX_IN_FLIGHT + 1
+      ? this.engine.pendingAdmittedCancel?.(this.client, params?.terminal, params?.upload)
+      : undefined
+    if (cancelling ? this.cancelInFlight && !joined : this.inFlight >= MAX_IN_FLIGHT || this.attachmentInFlight >= 2) {
       this.reply(refuse('busy'), opts)
       return
     }
-    if (cancelling) this.cancelInFlight = true
-    else this.attachmentInFlight++
+    if (!cancelling) this.attachmentInFlight++
+    else if (!joined) this.cancelInFlight = true
     this.inFlight++
     const finish = () => {
       if (this.closed) return
-      if (cancelling) this.cancelInFlight = false
-      else this.attachmentInFlight--
+      if (!cancelling) this.attachmentInFlight--
+      else if (!joined) this.cancelInFlight = false
     }
     const sub = this.subs.get(this.byTerminal.get(params?.terminal))
     // The general request limit counts until a reply is queued. The attachment slots
@@ -300,7 +308,8 @@ export class ChatConnection {
       this.inFlight--
       return this.reply(answer, opts)
     }
-    this.requestAttachment(method, params ?? {}).then((result) => {
+    const request = joined ?? this.requestAttachment(method, params ?? {})
+    request.then((result) => {
       if (method === 'chat.attachmentRead' && result?.ok === true && sub) {
         opts.valid = () => this.subs.get(this.byTerminal.get(sub.terminal)) === sub && sub.handle.attachmentLive?.() === true
         opts.fallback = replyFrame(refuse('not-watching'))
@@ -313,7 +322,8 @@ export class ChatConnection {
   }
 
   async requestAttachment(method, p) {
-    if (!this.engine.attachOffer?.(this.client)) return memoryRefused('read-only')
+    const document = method === 'chat.attach' && DOCUMENT_TYPES.includes(p.mediaType)
+    if (!this.engine.attachOffer?.(this.client)) return memoryRefused(document ? 'unsupported' : 'read-only')
     const terminal = typeof p.terminal === 'string' && p.terminal.length <= 128 ? p.terminal : null
     if (!terminal) return memoryRefused('invalid')
     if (!terminal.startsWith('dsh:')) return memoryRefused('unsupported')

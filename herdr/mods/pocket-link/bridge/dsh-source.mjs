@@ -22,12 +22,14 @@
 // opts in at chat hello and gets one grant, tied to its connection and team home. Closing
 // the grant needs an ack in 500 ms; otherwise the socket is dropped.
 //
-// RFC 0033 adds an opt-in on both socket hellos, at phone hello, and on each DSH watch.
-// An upload belongs to that phone, connection and watch until it settles. The socket grants
-// chunk credit as it takes the bytes. The bridge bounds pending writes, rebuilds replies from
-// the attachment protocol's fields, and requires an unsubscribe ack when a rich watch closes.
-// A lost finish ack leaves admission unknown. Begin ids are remembered in memory: after a
-// bridge restart, a compensating cancel for a reused id can only reach that phone's own upload.
+// RFC 0033 negotiates images and a separate TXT/PDF grant on the socket, phone and DSH watch.
+// Uploads share chunk credit and one active slot per paired phone. The bridge keeps only a
+// document's canonical leaf for finish validation and rebuilds replies from the protocol fields.
+// A socket-wide file refusal withdraws documents from later phone hellos. Unsent admissions
+// have a cap per paired phone and retain watch ownership until a confirmed cancel, validated
+// send, expiry or watch loss. A lost finish ack leaves admission unknown. Begin ids are kept
+// in memory. After a bridge restart, a compensating cancel for a reused id can only reach
+// that phone's own upload.
 // The 65 s finish deadline covers the socket's authority check and its 60 s admission.
 //
 // Absent is empty: no socket, a socket another account could reach, or one that answers neither
@@ -46,7 +48,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { ATTACH_METHODS, cutRow, MANAGE_METHODS, MAX_REQUEST, memoryRefused, page, phoneId } from './chat.mjs'
+import { ATTACH_METHODS, cutRow, DOCUMENT_TYPES, MANAGE_METHODS, MAX_REQUEST, memoryRefused, page, phoneId } from './chat.mjs'
 
 export const PREFIX = 'dsh:'
 export const ANSWER_ON_COMPUTER = 'Answer on the computer'
@@ -73,9 +75,11 @@ const validHello = (hello) => hello?.protocol === 1 && (hello.readOnly === true 
 const socketError = (kind, written = false) => Object.assign(new Error(kind), { kind, written })
 const manageOffline = (reading, written) => (!reading && written ? { ok: false, state: 'unknown', reason: 'offline' } : memoryRefused('offline'))
 const emptyAck = (result) => result && typeof result === 'object' && !Array.isArray(result) && Object.keys(result).length === 0
-const ATTACH_SOCKET_METHODS = ['upload-begin', 'upload-chunk', 'upload-finish', 'upload-cancel', 'attachment-read']
+const UPLOAD_STEPS = ['upload-begin', 'upload-chunk', 'upload-finish']
+const ATTACH_SOCKET_METHODS = [...UPLOAD_STEPS, 'upload-cancel', 'attachment-read']
 const UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 const READ_TYPES = [...UPLOAD_TYPES, 'image/gif']
+const MAX_FILE_BYTES = 8 * 1024 * 1024
 const ADMITTED_MAX = 128
 const ADMITTED_MS = 15 * 60_000
 const PHONE_KEY = /^[A-Za-z0-9+/=._:-]{1,256}$/
@@ -88,6 +92,8 @@ const ATTACH_REASONS = new Set([
   'rejected', 'changed', 'expired', 'session-changed', 'revoked', 'unavailable', 'not-found', 'offline', 'failed',
 ])
 const IMAGE_CODES = new Set(['IMAGE_TOO_LARGE', 'IMAGE_TOO_MANY_PIXELS', 'IMAGE_DIMENSION_TOO_LARGE', 'UNSUPPORTED_IMAGE_TYPE', 'INVALID_IMAGE', 'timeout'])
+const FILES_UNSUPPORTED = 'ATTACHMENT_FILES_UNSUPPORTED'
+const DOCUMENT_CODES = new Set([FILES_UNSUPPORTED, 'SUBAGENT_FILE_UNSUPPORTED'])
 const positiveInt = (n) => Number.isSafeInteger(n) && n > 0
 const base64Length = (n) => 4 * Math.ceil(n / 3)
 const lineOf = (id, method, params) => `${JSON.stringify({ id, method, params })}\n`
@@ -97,7 +103,43 @@ const canonicalBytes = (data, max) => {
   return decoded.length <= max && decoded.toString('base64') === data ? decoded.length : 0
 }
 
-function attachmentOffer(hello) {
+function cutName(name, limit) {
+  let clean = ''
+  let bytes = 0
+  for (const char of name) {
+    bytes += Buffer.byteLength(char)
+    if (bytes > limit) break
+    clean += char
+  }
+  return clean
+}
+
+const trimStem = (name) => name.replace(/[. ]+$/, '')
+
+// Keep in step with RFC 0015's canonical leaf and the socket's pocket-attach.js.
+function documentLeaf(params, mediaType) {
+  const extension = mediaType === 'text/plain' ? '.txt' : '.pdf'
+  if (!Object.hasOwn(params, 'name')) return `document${extension}`
+  const { name } = params
+  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024 || !name.isWellFormed()) return
+  let stem = name.split(/[/\\]/).at(-1).replace(/[\p{Cc}\p{Cf}]/gu, '').normalize('NFC')
+  stem = trimStem(stem.replace(/[<>:"|?*]/g, '_').trim())
+  if (stem.toLowerCase().endsWith(extension)) stem = stem.slice(0, -extension.length)
+  do { stem = cutName(stem, 124).normalize('NFC') } while (Buffer.byteLength(stem) > 124)
+  stem = trimStem(stem) || 'document'
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(trimStem(stem.split('.')[0]))) {
+    stem = trimStem(cutName(`_${stem}`, 124))
+  }
+  return stem + extension
+}
+
+function documentOffer(offer) {
+  if (!Array.isArray(offer?.mediaTypes) || !positiveInt(offer.limits?.fileBytes)) return
+  const mediaTypes = DOCUMENT_TYPES.filter((type) => offer.mediaTypes.includes(type))
+  if (mediaTypes.length) return { mediaTypes, limits: { fileBytes: Math.min(offer.limits.fileBytes, MAX_FILE_BYTES) } }
+}
+
+function attachmentOffer(hello, documentsEnabled) {
   const a = hello.attachments
   if (!writableHello(hello) || a?.version !== 1 || !Array.isArray(a.methods) || !Array.isArray(hello.methods)
     || !ATTACH_SOCKET_METHODS.every((m) => a.methods.includes(m) && hello.methods.includes(m))
@@ -108,7 +150,7 @@ function attachmentOffer(hello) {
   if (!mediaTypes.length || ![fileBytes, files, messageBytes, deviceOutstanding, deviceDailyBytes, deviceDailyCount,
     chunkBytes, maxPixels, maxDimension, thumbnail?.edge, thumbnail?.bytes].every(positiveInt)) return null
   const limits = {
-    fileBytes: Math.min(fileBytes, 8 * 1024 * 1024), files: Math.min(files, 4), messageBytes: Math.min(messageBytes, 16 * 1024 * 1024),
+    fileBytes: Math.min(fileBytes, MAX_FILE_BYTES), files: Math.min(files, 4), messageBytes: Math.min(messageBytes, 16 * 1024 * 1024),
     deviceOutstanding, deviceDailyBytes, deviceDailyCount, chunkBytes, maxPixels, maxDimension,
     thumbnail: { edge: Math.min(thumbnail.edge, 512), bytes: Math.min(thumbnail.bytes, 131072) },
   }
@@ -122,15 +164,17 @@ function attachmentOffer(hello) {
   if (Buffer.byteLength(chunkLine) + base64Length(chunkBytes) > ATTACH_LINE
     || Buffer.byteLength(JSON.stringify(chunkFrame)) + base64Length(chunkBytes) > MAX_REQUEST
     || Buffer.byteLength(JSON.stringify(thumbnailFrame)) + base64Length(limits.thumbnail.bytes) > MAX_REQUEST) return null
-  return { mediaTypes, limits }
+  const documents = documentsEnabled && documentOffer(a.documents)
+  return { mediaTypes, limits, ...(documents ? { documents } : {}) }
 }
 
-function attachmentRefusal(result, { upload, id } = {}) {
+function attachmentRefusal(result, { upload, id, begin = false } = {}) {
   const sending = id !== undefined
   let reason = result?.reason
   if (!ATTACH_REASONS.has(reason) && !(sending && ['empty', 'too-long'].includes(reason))) reason = 'failed'
   const code = result?.code
   const allowedCode = (reason === 'rejected' && (IMAGE_CODES.has(code) || (sending && code === 'MODEL_DOES_NOT_SUPPORT_IMAGES')))
+    || (reason === 'unsupported' && DOCUMENT_CODES.has(code))
     || (sending && reason === 'expired' && code === 'FILE_NOT_STAGED')
   if (code !== undefined && !allowedCode) reason = 'failed'
   return {
@@ -138,12 +182,28 @@ function attachmentRefusal(result, { upload, id } = {}) {
     ...(upload !== undefined && result?.upload === upload ? { upload } : {}),
     ...(sending ? { id } : {}),
     ...(allowedCode ? { code } : {}),
+    ...((begin || sending) && reason === 'invalid' && result?.message === 'sign-in-code' ? { message: 'sign-in-code' } : {}),
   }
 }
 
 function attachmentFailure(error, ids) {
   const reason = error.local || (error.kind === 'not-watching' && !error.written) ? error.kind : 'offline'
   return attachmentRefusal(error.detail ?? { reason }, ids)
+}
+
+function admittedMetadata(result, rec, offer) {
+  if (result?.ok !== true || result.state !== 'admitted' || result.upload !== rec.upload) return
+  if (rec.leaf !== undefined) {
+    const { mediaType, bytes, name } = result.file ?? {}
+    if (result.image == null && mediaType === rec.mediaType && bytes === rec.bytes && name === rec.leaf) {
+      return { file: { mediaType, bytes, name } }
+    }
+  } else {
+    const { mediaType, width, height, bytes, stored } = result.image ?? {}
+    if (result.file == null && offer.mediaTypes.includes(mediaType) && [width, height, bytes, stored].every(positiveInt)) {
+      return { image: { mediaType, width, height, bytes, stored } }
+    }
+  }
 }
 
 export const isDsh = (terminal) => typeof terminal === 'string' && terminal.startsWith(PREFIX)
@@ -202,18 +262,22 @@ const refused = (reason, id, extra = {}) => ({ ...extra, state: 'refused', ok: f
 /** What the phone gets for a write on a DSH chat whose socket accepts none. */
 export const refusedDsh = (id) => refused('read-only', id, { message: ANSWER_ON_COMPUTER })
 
-function watchRow(row, attachments) {
-  if (attachments || !row || !Object.hasOwn(row, 'blocks')) return row
+function legacyRow(row) {
+  if (!row || !Object.hasOwn(row, 'blocks')) return row
   const { blocks, ...legacy } = row
   return legacy
 }
 
+const visibleLegacyRow = (row) => !(row?.kind === 'text' && typeof row.text === 'string' && !row.text.trim()
+  && Array.isArray(row.blocks) && row.blocks.some((block) => block?.type === 'file'))
+const watchRows = (rows, attachments) => (attachments ? rows : rows.filter(visibleLegacyRow).map(legacyRow))
+
 function rowsCut(event, attachments) {
   let out = event
   // Older watches never see blocks, even if the socket erroneously sends them.
-  if (Array.isArray(event.rows)) out = { ...out, rows: event.rows.map((row) => cutRow(watchRow(row, attachments))) }
-  if (!attachments && Array.isArray(event.screen)) out = { ...out, screen: event.screen.map((row) => watchRow(row, false)) }
-  if (!attachments && event.row && Object.hasOwn(event.row, 'blocks')) out = { ...out, row: watchRow(event.row, false) }
+  if (Array.isArray(event.rows)) out = { ...out, rows: watchRows(event.rows, attachments).map(cutRow) }
+  if (!attachments && Array.isArray(event.screen)) out = { ...out, screen: event.screen.map(legacyRow) }
+  if (!attachments && event.row && Object.hasOwn(event.row, 'blocks')) out = { ...out, row: legacyRow(event.row) }
   return out
 }
 
@@ -223,8 +287,8 @@ export class DshSource {
    * The clock and attachment deadlines can be replaced by the wire tests.
    */
   constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, realpath = realpathSync, log = () => {}, requestMs = REQUEST_MS, now = Date.now,
-    attachments = false, timers = realTimers, attachmentMs = {} } = {}) {
-    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now, attachments, timers })
+    attachments = false, documents = false, timers = realTimers, attachmentMs = {} } = {}) {
+    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now, attachments, documents, timers })
     this.attachmentMs = { ...ATTACH_MS, ...attachmentMs }
     /** The socket in use: the first of `paths` that passed the check. */
     this.path = null
@@ -242,8 +306,10 @@ export class DshSource {
     this.negotiated = new WeakMap()
     this.attachOffer = null
     this.attachmentsAgreed = new WeakMap()
+    this.documentsWithdrawn = new WeakSet()
     this.uploads = new Map()
     this.admitted = new Map()
+    this.nextAdmission = 1
     this.uploadIds = new Map()
     this.attachmentWrites = new Map()
     this.grants = new Map()
@@ -263,7 +329,7 @@ export class DshSource {
     if (this.opening) return this.opening
     const path = this.paths.find((candidate) => this.check(candidate))
     if (!path) {
-      if (!this.absent) this.log(`chat: no DSH socket only this account reaches in ${this.paths.join(', ')}; no Bot chats`)
+      if (!this.absent) this.log('chat: no DSH socket only this account reaches')
       this.absent = true
       return Promise.resolve(null)
     }
@@ -293,7 +359,9 @@ export class DshSource {
       socket.on('close', () => { this.onClose(socket); done(null) })
       socket.once('connect', async () => {
         try {
-          const greeting = { write: 1, ...(this.attachments ? { attachments: 1 } : {}) }
+          const greeting = { write: 1 }
+          if (this.attachments) greeting.attachments = 1
+          if (this.attachments && this.documents) greeting.documents = 1
           let hello = await this.ask(socket, 'hello', greeting)
           if (validHello(hello) && writableHello(hello) && !this.stopped && !socket.destroyed) {
             hello = await this.ask(socket, 'hello', { ...greeting, manage: 1 })
@@ -309,7 +377,7 @@ export class DshSource {
           const manageMethods = Array.isArray(hello.manageMethods) ? hello.manageMethods : []
           this.writes = new Set(writableHello(hello) ? Object.values(WRITE_METHODS).filter((m) => methods.includes(m)) : [])
           this.manages = new Set(writableHello(hello) && hello.manage === 1 ? MANAGE_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : [])
-          this.attachOffer = this.attachments ? attachmentOffer(hello) : null
+          this.attachOffer = this.attachments ? attachmentOffer(hello, this.documents) : null
           this.path = path
           if (this.team?.path !== path || this.team.real !== real) this.team = { path, real }
           this.socket = socket
@@ -347,7 +415,7 @@ export class DshSource {
       }
     }
     return new Promise((resolve, reject) => {
-      const p = { socket, resolve, reject, accept, attachment, written: false }
+      const p = { socket, resolve, reject, accept, attachment, method, upload: attachment ? params.upload : undefined, written: false }
       const flushed = () => {
         if (!queued) return
         queued.bytes -= bytes
@@ -390,9 +458,17 @@ export class DshSource {
     if (p?.socket === socket) {
       if (p.accept && (m.error || !p.accept(m.result))) return
       p.done()
-      if (m.error && p.attachment) {
-        const { kind, code, upload } = m.error
-        p.reject(Object.assign(socketError('failed', p.written), { detail: { reason: kind, code, upload } }))
+      const { result } = m
+      const detail = m.error && p.attachment ? {
+        reason: m.error.kind, code: m.error.code, upload: m.error.upload,
+        ...(m.error.message === 'sign-in-code' ? { message: 'sign-in-code' } : {}),
+      } : undefined
+      const refusal = detail ?? (result?.ok === false && result.state === 'refused' ? result : undefined)
+      if (p.attachment && UPLOAD_STEPS.includes(p.method) && socket === this.socket && !socket.destroyed
+        && refusal?.reason === 'unsupported' && refusal.code === FILES_UNSUPPORTED
+        && (refusal.upload === undefined || refusal.upload === p.upload)) this.documentsWithdrawn.add(socket)
+      if (detail) {
+        p.reject(Object.assign(socketError('failed', p.written), { detail }))
       } else if (m.error) p.reject(Object.assign(new Error(String(m.error.message ?? m.error.kind)), { kind: m.error.kind, detail: m.error }))
       else p.resolve(m.result)
       return
@@ -574,20 +650,26 @@ export class DshSource {
   }
 
   /** A phone grant is made only when its hello is answered and lives on this socket. */
-  attachHello(client) {
+  attachHello(client, { attachments, documents: requested } = {}) {
     const { socket, team, attachOffer: offer } = this
     const live = this.liveClient(client, socket)
-    if (!live || !offer || typeof client.device !== 'string' || !PHONE_KEY.test(client.device)) {
+    if (!live || attachments !== 1 || !offer || typeof client.device !== 'string' || !PHONE_KEY.test(client.device)) {
       this.attachmentsAgreed.delete(client)
       return { version: 1, unavailable: live ? 'app' : 'none' }
     }
-    this.attachmentsAgreed.set(client, { team, socket, offer })
-    return { version: 1, methods: ATTACH_METHODS, ...offer }
+    const { documents: documentOffer, ...imageOffer } = offer
+    const documents = requested === 1 && Boolean(documentOffer) && !this.documentsWithdrawn.has(socket)
+    this.attachmentsAgreed.set(client, { team, socket, offer, documents })
+    return { version: 1, methods: ATTACH_METHODS, ...imageOffer, ...(documents ? { documents: documentOffer } : {}) }
   }
 
   offerFor(client) {
     const grant = this.attachmentsAgreed.get(client)
     return grant && grant.team === this.team && grant.offer === this.attachOffer && this.liveClient(client, grant.socket) ? grant.offer : null
+  }
+
+  documentsFor(client) {
+    return Boolean(this.offerFor(client) && this.attachmentsAgreed.get(client).documents)
   }
 
   #attachmentSub(client, terminal) {
@@ -636,12 +718,45 @@ export class DshSource {
   #currentUpload(rec) { return this.uploads.get(rec.key) === rec }
 
   #rememberAdmitted(sub, upload) {
-    const ids = this.admitted.get(sub) ?? new Map()
     const at = this.now()
-    for (const [id, entry] of ids) if (at - entry.at >= ADMITTED_MS) ids.delete(id)
-    ids.set(upload, { at })
-    if (ids.size > ADMITTED_MAX) ids.delete(ids.keys().next().value)
+    const ids = this.admitted.get(sub) ?? new Map()
+    // Several watches can admit in the same clock tick.
+    ids.set(upload, { at, order: this.nextAdmission++ })
     this.admitted.set(sub, ids)
+    let count = 0
+    let oldest
+    for (const [owner, records] of this.admitted) {
+      if (owner.client.device !== sub.client.device) continue
+      for (const [id, entry] of records) {
+        if (at - entry.at >= ADMITTED_MS) { records.delete(id); continue }
+        count++
+        if (!oldest || entry.order < oldest.order) oldest = { records, id, order: entry.order }
+      }
+    }
+    if (count > ADMITTED_MAX) oldest.records.delete(oldest.id)
+  }
+
+  #consumeAdmitted(key, socket, team, uploads) {
+    for (const [owner, records] of this.admitted) {
+      if (owner.client.device === key && owner.socket === socket && owner.team === team) {
+        for (const upload of uploads) records.delete(upload)
+      }
+    }
+    const rec = this.uploads.get(key)
+    if (rec?.socket === socket && rec.team === team && rec.state === 'finishing' && rec.op === 'finish'
+      && uploads.includes(rec.upload)) rec.sent = true
+  }
+
+  #admittedEntry(sub, upload) {
+    const ids = this.admitted.get(sub)
+    const entry = ids?.get(upload)
+    if (!entry) return
+    if (this.now() - entry.at >= ADMITTED_MS) { ids.delete(upload); return }
+    return entry
+  }
+
+  pendingAdmittedCancel(client, terminal, upload) {
+    return this.#admittedEntry(this.#attachmentSub(client, terminal), upload)?.cancel
   }
 
   #dropUpload(rec, reason) {
@@ -665,7 +780,7 @@ export class DshSource {
     if (!this.#currentUpload(rec)) return
     if (rec.state === 'cancelling') return rec.cleanup
     this.#startCancelling(rec)
-    if (!rec.written) { this.#dropUpload(rec, 'cancelled'); return }
+    if (!rec.written || !this.liveClient(rec.client, rec.socket)) { this.#dropUpload(rec, 'cancelled'); return }
     rec.cleanup = this.ask(rec.socket, 'upload-cancel', { channel: rec.channel, phone: rec.key, upload: rec.upload },
       { attachment: true, timeout: this.attachmentMs.cancel, accept: (result) => result?.ok === true })
       .catch(() => {}).then(() => this.#dropUpload(rec, 'cancelled'))
@@ -688,25 +803,33 @@ export class DshSource {
     this.uploadIds.set(key, ids)
   }
 
-  async uploadBegin(client, terminal, { upload, mediaType, bytes }) {
+  async uploadBegin(client, terminal, params) {
+    const { upload, mediaType, bytes } = params
+    const document = DOCUMENT_TYPES.includes(mediaType)
+    if (!document && Object.hasOwn(params, 'name')) return memoryRefused('invalid')
     const offer = this.offerFor(client)
-    if (!offer) return memoryRefused('read-only')
     const sub = this.#attachmentSub(client, terminal)
+    if (document && !sub?.documents) return memoryRefused('unsupported')
+    if (!offer) return memoryRefused('read-only')
     if (!sub) return memoryRefused('not-watching')
     const key = client.device
     if (!phoneId(upload) || this.uploadIds.get(key)?.has(upload)) return memoryRefused('invalid')
     if (this.uploads.has(key)) return memoryRefused('busy')
-    if (!offer.mediaTypes.includes(mediaType)) return memoryRefused('unsupported')
-    if (!positiveInt(bytes) || bytes > offer.limits.fileBytes) return memoryRefused('too-large')
+    const kindOffer = document ? offer.documents : offer
+    if (!kindOffer.mediaTypes.includes(mediaType)) return memoryRefused('unsupported')
+    if (!positiveInt(bytes) || bytes > kindOffer.limits.fileBytes) return memoryRefused('too-large')
+    const leaf = document ? documentLeaf(params, mediaType) : undefined
+    if (document && leaf === undefined) return memoryRefused('invalid')
     const rec = {
-      client, socket: sub.socket, team: this.team, sub, channel: sub.channel, terminal, key, upload, mediaType, bytes,
+      client, socket: sub.socket, team: this.team, sub, channel: sub.channel, terminal, key, upload, mediaType, bytes, leaf,
       acked: 0, state: 'opening', op: null, work: new AbortController(), totalAt: this.now() + this.attachmentMs.total,
     }
     this.uploads.set(key, rec)
     this.#totalUpload(rec)
     let result
     try {
-      result = await this.#attachmentAsk(sub, 'upload-begin', { upload, mediaType, bytes }, this.attachmentMs.begin,
+      const fields = { upload, mediaType, bytes, ...(document && Object.hasOwn(params, 'name') ? { name: params.name } : {}) }
+      result = await this.#attachmentAsk(sub, 'upload-begin', fields, this.attachmentMs.begin,
         { signal: rec.work.signal, onWrite: () => {
           rec.written = true
           this.#rememberUpload(key, upload)
@@ -716,12 +839,12 @@ export class DshSource {
         if (error.written && !error.detail) this.#cancelUpload(rec)
         else this.#dropUpload(rec)
       }
-      return error.kind === 'cancelled' ? memoryRefused('invalid') : attachmentFailure(error, { upload })
+      return error.kind === 'cancelled' ? memoryRefused('invalid') : attachmentFailure(error, { upload, begin: true })
     }
     if (!this.#currentUpload(rec) || rec.state !== 'opening' || !this.#activeSub(sub)) return memoryRefused('invalid')
     if (result?.ok === false && result.state === 'refused') {
       this.#dropUpload(rec)
-      return attachmentRefusal(result, { upload })
+      return attachmentRefusal(result, { upload, begin: true })
     }
     const { chunkBytes } = offer.limits
     if (result?.ok !== true || result.state !== 'open' || result.upload !== upload || result.chunkBytes !== chunkBytes) {
@@ -801,15 +924,14 @@ export class DshSource {
       return attachmentFailure(error, { upload })
     }
     if (!this.#currentUpload(rec) || rec.state !== 'finishing' || !this.#activeSub(sub)) return memoryRefused('invalid')
-    const { mediaType, width, height, bytes, stored } = result?.image ?? {}
-    if (result?.ok !== true || result.state !== 'admitted' || result.upload !== upload
-      || !offer.mediaTypes.includes(mediaType) || ![width, height, bytes, stored].every(positiveInt)) {
+    const metadata = admittedMetadata(result, rec, offer)
+    if (!metadata) {
       this.#cancelUpload(rec)
       return attachmentRefusal(result?.ok === false ? result : null, { upload })
     }
     if (rec.sent !== true) this.#rememberAdmitted(sub, upload)
     this.#dropUpload(rec)
-    return { ok: true, state: 'admitted', upload, image: { mediaType, width, height, bytes, stored } }
+    return { ok: true, state: 'admitted', upload, ...metadata }
   }
 
   async uploadCancel(client, terminal, { upload }) {
@@ -820,16 +942,17 @@ export class DshSource {
       if (!rec.sent) await this.#cancelUpload(rec)
       return { ok: true }
     }
+    const entry = this.#admittedEntry(sub, upload)
+    if (!entry) return { ok: true }
     const ids = this.admitted.get(sub)
-    const entry = ids?.get(upload)
-    if (entry) {
-      ids.delete(upload)
-      if (this.now() - entry.at < ADMITTED_MS) {
-        await this.ask(sub.socket, 'upload-cancel', { channel: sub.channel, phone: client.device, upload },
-          { attachment: true, timeout: this.attachmentMs.cancel, accept: (result) => result?.ok === true }).catch(() => {})
-      }
-    }
-    return { ok: true }
+    entry.cancel ??= this.ask(sub.socket, 'upload-cancel', { channel: sub.channel, phone: client.device, upload },
+      { attachment: true, timeout: this.attachmentMs.cancel, signal: sub.work.signal, accept: (result) => result?.ok === true })
+      .then(() => {
+        if (ids.get(upload) === entry) ids.delete(upload)
+        return { ok: true }
+      }, () => ({ ok: false, state: 'unknown', reason: 'offline' }))
+      .finally(() => { entry.cancel = undefined })
+    return entry.cancel
   }
 
   async attachmentRead(client, terminal, { row, block }) {
@@ -888,7 +1011,9 @@ export class DshSource {
   watch(terminal, client, listener) {
     const channel = this.nextChannel++
     const attachments = Boolean(this.offerFor(client))
-    const sub = { channel, socket: attachments ? this.socket : null, listener, status: null, approval: null, client, terminal, attachments, work: new AbortController() }
+    const documents = this.documentsFor(client)
+    const sub = { channel, socket: attachments ? this.socket : null, team: this.team, listener, status: null, approval: null,
+      client, terminal, attachments, documents, work: new AbortController() }
     return {
       streamsSnapshot: true,
       attachments,
@@ -905,14 +1030,14 @@ export class DshSource {
       held: () => [],
       backfill: async (before, limit) => {
         const result = await this.ask(sub.socket, 'backfill', { channel, before, limit })
-        return page(Array.isArray(result?.rows) ? result.rows.map((row) => watchRow(row, attachments)) : [])
+        return page(Array.isArray(result?.rows) ? watchRows(result.rows, attachments) : [])
       },
       close: () => this.#unwatch(sub),
     }
   }
 
   async #startWatch(sub, after) {
-    const { channel, terminal, attachments } = sub
+    const { channel, terminal, attachments, documents } = sub
     try {
       const socket = attachments ? sub.socket : await this.open()
       if (this.subs.get(channel) !== sub) return false
@@ -920,7 +1045,8 @@ export class DshSource {
       sub.socket = socket
       sub.subscribing = true
       const result = await this.ask(socket, 'subscribe', {
-        terminal, channel, ...(typeof after === 'string' ? { after } : {}), ...(attachments ? { attachments: 1 } : {}),
+        terminal, channel, ...(typeof after === 'string' ? { after } : {}),
+        ...(attachments ? { attachments: 1 } : {}), ...(documents ? { documents: 1 } : {}),
       })
       if (attachments && result?.channel !== channel) throw socketError('unavailable')
       sub.subscribed = this.subs.get(channel) === sub
@@ -969,17 +1095,13 @@ export class DshSource {
     try {
       if (withUploads) {
         const { text, uploads } = params
-        const onWrite = () => {
-          const ids = this.admitted.get(sub)
-          for (const upload of uploads) ids?.delete(upload)
-          const rec = this.uploads.get(key)
-          if (rec?.sub === sub && rec.state === 'finishing' && rec.op === 'finish' && uploads.includes(rec.upload)) rec.sent = true
-        }
-        const result = await this.#attachmentAsk(sub, method, { text, id, uploads, by }, this.requestMs, { onWrite })
+        const result = await this.#attachmentAsk(sub, method, { text, id, uploads, by }, this.requestMs)
+        const accepted = result?.ok === true && result.id === id && ['sent', 'queued'].includes(result.state)
+          && (!Object.hasOwn(result, 'repeat') || result.repeat === true)
+        if (accepted) this.#consumeAdmitted(key, socket, sub.team, uploads)
         if (!this.#activeSub(sub)) return attachmentRefused('offline')
         if (result?.ok === false) return attachmentRefusal(result, { id })
-        if (result?.ok !== true || result.id !== id || !['sent', 'queued'].includes(result.state)
-          || (Object.hasOwn(result, 'repeat') && result.repeat !== true)) return attachmentRefused('failed')
+        if (!accepted) return attachmentRefused('failed')
         return { ok: true, state: result.state, id, ...(result.repeat ? { repeat: true } : {}) }
       }
       const result = await this.ask(socket, method, { channel: sub.channel, ...params, by, phone: key })
@@ -1015,12 +1137,13 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
   if (!dsh) return engine
   return {
     dshWrite: () => dsh.writable(),
-    attachHello: (client) => dsh.attachHello(client),
+    attachHello: (client, opts) => dsh.attachHello(client, opts),
     attachOffer: (client) => dsh.offerFor(client),
     uploadBegin: (client, terminal, params) => dsh.uploadBegin(client, terminal, params),
     uploadChunk: (client, terminal, params) => dsh.uploadChunk(client, terminal, params),
     uploadFinish: (client, terminal, params) => dsh.uploadFinish(client, terminal, params),
     uploadCancel: (client, terminal, params) => dsh.uploadCancel(client, terminal, params),
+    pendingAdmittedCancel: (client, terminal, upload) => dsh.pendingAdmittedCancel(client, terminal, upload),
     attachmentRead: (client, terminal, params) => dsh.attachmentRead(client, terminal, params),
     openManage: (client, methods) => dsh.openManage(client, methods),
     memory: (client, method, params) => dsh.memory(client, method, params),
