@@ -34,7 +34,7 @@ import { pathToFileURL } from "node:url";
 
 import { approvedSettingsDir, readApprovedRecord, sha256Of } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
-import { parseBots } from "./model.js";
+import { parseBots, workerHomeOf } from "./model.js";
 import { AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
 import { commandArgv, sessionId } from "./restart.js";
 import { approvedDataRootProblem, executionPathProblem, shimPathOf } from "./dshTui.mjs";
@@ -406,6 +406,10 @@ export function runProblem(params, snapshot, templates = []) {
   if (snapshot.approval) {
     try { bot = workerApproval(snapshot); }
     catch (e) { return `approved worker refused: ${oneLine(e.message)}`; }
+    // #1208: a worker on a chosen agent home is a local, unproxied launch only. The approved bot
+    // naming worker.agentHome at all (any value, even one its worker defaults were dropped with)
+    // refuses both worker shapes here, before either is checked.
+    if (workerHomeOf(bot).present) return "approved worker refused: worker.agentHome needs a local, unproxied worker launch";
   }
   const namedWorker = bot?.worker?.template || (bot?.worker?.agent && bot.worker.agent !== "dsh-tui");
   const workerLabels = namedWorker

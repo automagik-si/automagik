@@ -189,22 +189,23 @@ function tomlTopModel(text) {
 /**
  * The agents' own config files this module reads, by name, under a home folder. A caller
  * whose file reads are async (the mod's readTextFile) reads these first and passes the
- * texts to defaultModelFrom / knownModelsFrom.
+ * texts to defaultModelFrom / knownModelsFrom. `codexHome`: Codex's folder when a launch names
+ * its own (a worker on a chosen agent home, #1208); else `<home>/.codex`.
  */
-export function configPaths(home) {
+export function configPaths(home, codexHome = `${home}/.codex`) {
   return {
     claudeSettings: `${home}/.claude/settings.json`,
-    codexConfig: `${home}/.codex/config.toml`,
-    codexModels: `${home}/.codex/models_cache.json`,
+    codexConfig: `${codexHome}/config.toml`,
+    codexModels: `${codexHome}/models_cache.json`,
     hermesConfig: `${home}/.hermes/config.yaml`,
     antigravitySettings: `${home}/.gemini/antigravity-cli/settings.json`,
   };
 }
 
 // Every config text (null when missing) through a synchronous `read(path)`.
-export function configTexts(home, read) {
+export function configTexts(home, read, codexHome = undefined) {
   const out = {};
-  for (const [name, path] of Object.entries(configPaths(home))) {
+  for (const [name, path] of Object.entries(configPaths(home, codexHome))) {
     try { out[name] = read(path) ?? null; } catch { out[name] = null; }
   }
   return out;
@@ -331,9 +332,10 @@ export function offeredModelsFrom(agentKey, texts = {}) {
 /**
  * knownModelsFrom over a synchronous `read(path)` under `home`, plus the pack's Antigravity
  * model cache under `appHome`. No reader: the static list (Claude's), and no Antigravity list.
+ * `codexHome`: as configPaths.
  */
-export function knownModels(agentKey, { home, read, appHome } = {}) {
-  const texts = read && home ? configTexts(home, read) : {};
+export function knownModels(agentKey, { home, read, appHome, codexHome } = {}) {
+  const texts = read && home ? configTexts(home, read, codexHome) : {};
   if (read && appHome) {
     try { texts.antigravityModels = read(agModelsPath(appHome)) ?? null; } catch { texts.antigravityModels = null; }
   }

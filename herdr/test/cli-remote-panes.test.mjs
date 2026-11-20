@@ -25,6 +25,8 @@ import { loginsPath } from "../mods/am-sidebar/logins.js";
 import { DEADLINE_CALL_MS, DEADLINE_MARGIN_MS, DEADLINE_PLACE_MS } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
+import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
+import { envWords } from "../mods/am-sidebar/logins.js";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 const ACCOUNTS_WRITE = new URL("../mods/am-sidebar/accountsWrite.js", import.meta.url).href;
@@ -2260,5 +2262,156 @@ test("restart --machine --expect-pane: an old pane that can't be looked at or en
         assert.ok(r.json().warnings.some((w) => w.includes("check in Herdr that it is still")));
       }
     });
+  }
+});
+
+// ---- #1208: a worker on a chosen agent home on the linked machine is read by its launch argv ----
+
+const CHOSEN_LAUNCH = "0f0e0d0c-0b0a-4908-8706-050403020100";
+const chosenArgv = (agent = "claude", home = "/srv/am-scene/homes/b") => ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords(agent, home, CHOSEN_LAUNCH)), agent];
+
+test("#1208 linked attach refuses a chosen-home worker by its launch argv, before any row or label", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ address: "vm/t9", name: "w9", argv: chosenArgv(),
+    foreground: { argv: chosenArgv(), cwd: undefined }, status: { state: "idle", app: "claude-code" } })] });
+  const r = s.cli(["attach", "Hedge", "vm/t9", ...s.on]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /vm\/t9 is a worker on a chosen agent home; it can't be a Bot's seat/);
+  assert.deepEqual(s.rows(), []);
+  assert.equal(s.calls().some((c) => c[0] === "label"), false);
+});
+
+test("#1208 linked attach checks the remote project ledger against the linked core", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ address: "vm/t9", labels: {}, created_ms: 9, argv: undefined })] });
+  const dir = join(s.project, ".herdr/app-home/automagik-herdr");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "workers.jsonl"), `${JSON.stringify({ event: "start", kind: "worker", terminal: "t9", core: CORE,
+    created_ms: 9, agentHome: "/homes/b" })}\n`, { mode: 0o600 });
+  const r = s.cli(["attach", "Atlas", "vm/t9", ...s.on]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /vm\/t9 is a worker on a chosen agent home/);
+  assert.deepEqual(s.rows(), []);
+});
+
+test("#1208 linked restart never replaces a binding whose pane is a chosen-home worker", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } })] });
+  assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
+  s.setState((st) => { st.terminals.find((x) => x.address === "vm/t8").argv = chosenArgv("codex"); });
+  const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /vm\/t8 is a worker on a chosen agent home; it can't be a Bot's seat/);
+  assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
+});
+
+test("#1208 linked start recovery uses argv when ls supplies it and keeps dev's call budget", (t) => {
+  for (const [argv, chosen] of [[chosenArgv(), true], [["hermes", "--tui"], false], [undefined, false]]) {
+    const s = scene(t);
+    const reply = join(s.root, "ls-after-run.json");
+    const rows = { terminals: [{ address: "vm/t100", name: "atlas", argv }] };
+    s.setState((st) => { st.runNoAddress = true; st.onRunWrite = { path: reply, text: JSON.stringify(rows) }; });
+    exe(join(s.root, "bin/hc"), `#!/bin/sh\nif [ "$1 $2" = "ls --json" ] && [ -f "${reply}" ]; then\n`
+      + `  "${process.execPath}" "${FAKE_HC}" "$@" >/dev/null && exec cat "${reply}"\nfi\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+    const r = s.cli(["start", "Atlas", ...s.on]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, chosen ? /vm\/t100 is named atlas, but it is a worker on a chosen agent home, so it was left as it is/
+      : /hc run on vm gave no terminal address \(\{\}\); the pane it started \(vm\/t100, named atlas\) was ended\./);
+    const calls = s.calls();
+    const ledgerRead = ["file", "read", "--json", "--on", "vm", join(s.project, ".herdr/app-home/automagik-herdr/workers.jsonl")];
+    assert.deepEqual(calls.slice(calls.findIndex((c) => c[0] === "run") + 1),
+      chosen ? [["ls", "--json"]] : [["ls", "--json"], ledgerRead, ["kill", "vm/t100"]]);
+    assert.deepEqual(s.rows(), []);
+  }
+});
+
+test("#1208 an ordinary linked run timeout has enough time for dev's lookup and kill", (t) => {
+  const s = scene(t);
+  const marker = join(s.root, "run-started"), clock = join(s.root, "clock.mjs");
+  s.setState((st) => { st.runDelayMs = 10_000; st.onRunWrite = { path: marker, text: "started" }; });
+  // Once hc run has spawned the pane, the CLI consistently sees ten seconds left.
+  writeFileSync(clock, `import { existsSync } from "node:fs";
+const now = Date.now.bind(Date);
+if (process.argv[1] === ${JSON.stringify(CLI)}) {
+  Date.now = () => existsSync(${JSON.stringify(marker)}) ? Number(process.env.AUTOMAGIK_HERDR_DEADLINE) - 10_000 : now();
+}
+`);
+  const r = s.cli(["start", "Atlas", ...s.on], { AUTOMAGIK_HERDR_DEADLINE: String(Date.now() + 30_000),
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${clock}`].filter(Boolean).join(" ") });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /hc run on vm didn't answer within 5 s; the pane it started \(vm\/t100, named atlas\) was ended\./);
+  const calls = s.calls();
+  const ledgerRead = ["file", "read", "--json", "--on", "vm", join(s.project, ".herdr/app-home/automagik-herdr/workers.jsonl")];
+  assert.deepEqual(calls.slice(calls.findIndex((c) => c[0] === "run") + 1), [["ls", "--json"], ledgerRead, ["kill", "vm/t100"]]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t100").state, "finished");
+  assert.deepEqual(s.rows(), []);
+});
+
+test("#1208 a normal linked seat reply to a reused address refuses before binding or cleanup", (t) => {
+  for (const created_ms of [5, null]) {
+    const s = scene(t);
+    s.setState((st) => { st.getReply = { "vm/t100": { ...atlasPane({ address: "vm/t100", created_ms }),
+      name: "chosen-worker", argv: chosenArgv("codex") } }; });
+    const r = s.cli(["start", "Atlas", ...s.on]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /vm\/t100 is a worker on a chosen agent home; it can't be a Bot's seat/);
+    assert.deepEqual(s.rows(), []);
+    assert.equal(s.calls().some((c) => c[0] === "kill" || c[0] === "label"), false);
+  }
+});
+
+test("#1208 linked restart ends an ordinary replacement without created_ms as on dev", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } })] });
+  assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
+  const before = linkedBytes(s);
+  s.setState((st) => { st.getReply = { "vm/t100": atlasPane({ address: "vm/t100", created_ms: null, argv: KEEP }) }; });
+  const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /vm\/t100 started, but hc get gave no created_ms, so it could have no attach row; it was ended\./);
+  assert.deepEqual(linkedBytes(s), before);
+  const calls = s.calls();
+  assert.deepEqual(calls.slice(calls.findIndex(([verb]) => verb === "run") + 1), [["get", "vm/t100", "--json"],
+    ["file", "read", "--json", "--on", "vm", join(s.project, ".herdr/app-home/automagik-herdr/workers.jsonl")],
+    ["kill", "vm/t100"]]);
+  assert.deepEqual(s.hcState().terminals.map((x) => [x.address, x.state]), [["vm/t8", "live"], ["vm/t100", "finished"]]);
+});
+
+test("#1208 linked restart leaves a chosen worker found during readiness alone", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } })] });
+  assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
+  const before = linkedBytes(s);
+  const chosen = join(s.root, "chosen-get.json");
+  const first = join(s.root, "initial-get");
+  writeFileSync(first, "");
+  writeFileSync(chosen, JSON.stringify(atlasPane({ address: "vm/t100", cwd: s.project, created_ms: 100, argv: chosenArgv() })));
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "get vm/t100" ]; then
+  if [ -f "${first}" ]; then rm -f "${first}"
+  else
+    "${process.execPath}" "${FAKE_HC}" "$@" >/dev/null || exit $?
+    exec cat "${chosen}"
+  fi
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /vm\/t100 is a worker on a chosen agent home; it can't be a Bot's seat/);
+  assert.deepEqual(linkedBytes(s), before);
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), []);
+  assert.deepEqual(s.hcState().terminals.map((x) => [x.address, x.state]), [["vm/t8", "live"], ["vm/t100", "live"]]);
+});
+
+test("#1208 linked --force refuses a chosen descendant even if an intermediate get fails", (t) => {
+  for (const failure of [null, { failGet: ["vm/t7"] }, { failGet: ["vm/t7"], failGetExit: 3 },
+    { getReply: { "vm/t7": null } }, { getReply: { "vm/t7": {} } }]) {
+    const intermediate = failure !== null;
+    const child = { address: "vm/t9", name: "w9", state: "live", created_ms: 9, parent: intermediate ? "vm/t7" : "vm/t8", labels: {},
+      die_with_parent: true, argv: chosenArgv("codex"), foreground: { argv: chosenArgv("codex") }, status: { state: "idle", app: "codex" } };
+    const helper = { ...child, address: "vm/t7", name: "w7", parent: "vm/t8", argv: ["codex"] };
+    const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } }), child, ...(intermediate ? [helper] : [])] });
+    assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
+    if (failure) s.setState((st) => { Object.assign(st, failure); });
+    const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force"]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /vm\/t9 is a worker on a chosen agent home that would end with its parent \(under vm\/t8\)/);
+    assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
   }
 });

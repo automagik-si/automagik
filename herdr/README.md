@@ -623,7 +623,7 @@ am brief <bot>
 am forget <project>
 am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
-       [--task ID [--lead BOT]]
+       [--task ID [--lead BOT]] [--agent-home DIR]
 am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
 am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
@@ -1094,6 +1094,41 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
   ready (up to 30 s for one that reports no status), then `hc send <pane> "<task>"`. When hc
   refuses the send (the pane waits for a sign-in or a trust answer, or has ended), the worker
   is kept and a warning names the pane and the `hc send` to run by hand; `--json` lists it.
+- **Login home (#1208):** `--agent-home DIR` starts one Claude or Codex worker on the login
+  folder `DIR` (Claude: `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`; Codex:
+  `CODEX_HOME`). Without the flag, a worker that runs the bot's default worker agent uses the
+  bot's `worker.agentHome` when it has one; a worker on any other agent, or a bot with neither,
+  starts exactly as before (Claude on the Accounts login, `claude-logins.json`). The folder must
+  exist, belong to you and have mode exactly `0700`; it is used by its real path, and Claude's
+  default `~/.claude` is refused (omit the flag for the default login). The launch runs the
+  agent's shipped command only (a `programs.json` run for it is refused), never a template, and
+  unsets the variables that would outrank the folder's sign-in (Claude: `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL` and the Bedrock, Vertex
+  and Foundry switches; Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`). The
+  worktree's own settings may not pick another account: Claude's `.claude/settings.json` and
+  `.claude/settings.local.json` with an `apiKeyHelper` or an `env` naming one of those variables
+  (or either folder variable), and Codex's `.codex/config.toml` naming a provider, profile or
+  login method, are refused by file and key (Claude's are read again after the briefing hook is
+  written, just before the start). A call through the hc proxy or behind the full hc guard is
+  refused; the `hc kill` shim every ordinary seat runs behind is fine. An hc that doesn't
+  report a pane's launch argv is refused too: such a worker could never be told apart from a
+  seat. Every
+  refusal comes before any branch, worktree or hook is made, except the settings check, which
+  needs the worktree. Before `hc run` the launch is reserved in the workers ledger (an `intent`
+  row: its launch id, name, folder and home; no reservation, no start), and its argv carries
+  that id (`AUTOMAGIK_AGENT_HOME_LAUNCH`) after the folder words. Right after hc answers (a late
+  answer too) the pane must show that id, the folder and `die_with_parent: false`: one that is
+  this launch but not that is ended, and one hc can't show to be this launch is left alone and
+  named. The start row records `agentHome` and `launch`, and its `env` names the folder, so
+  Codex's session search reads that folder. The Bot login `generation` and `sequence` (#1532)
+  are recorded only when ACP's record names that same folder for the vendor; otherwise both are
+  null. A Codex worker reads its model list and its project trust from the chosen folder. The
+  folder decides the sign-in only: the model and effort pins, the pane's PATH (the agent's
+  program is found on it, as for every launch), Codex's granted folders, managed policy, and the
+  folder's own settings (Claude's `settings.json` there, Codex's `config.toml` there) are the
+  person's choices as for any launch. A Codex folder that is also the one the Accounts panel
+  manages is switched with it: the panel replaces that folder's `auth.json`, so a separate
+  account needs a separate folder.
 - **Templates:** `--template T` runs the hc template `T` (`hc templates` lists them)
   instead of an agent, for seats whose command sets more than a model: a custom model
   provider, keys, flags. A template owns its command, so `--template` with `--agent`,
@@ -1134,7 +1169,28 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 - **Lifecycle:** the bot checks the worker's result, and ends it with
   `am worker kill <terminal>` once the task merges (see
   [Ending a worker](#ending-a-worker)). The bot's briefing says so. As an hc child, a worker
-  also ends when its bot's program ends; its branch stays.
+  also ends when its bot's program ends; its branch stays. A worker on a chosen login home
+  (#1208) is started with `--outlive-parent` instead: it never ends with its lead, and no
+  restart, `--tree` or revive runs it again; it ends when its task ends, by `am worker kill`, the
+  worktree sweep, or by hand. It is never a Bot's seat: attach (here or on a linked machine),
+  the one-time label import, restart's adoption of a labelled pane and a restart of a binding
+  that names it refuse it, by its launch argv (and here, by its ledger rows too: a pane that
+  shows no argv while a reservation of its name less than ten minutes old has no start row yet
+  is refused as well, and a failed verification marks an observed pane unresolved for the life
+  of that instance). A restart that would end it with its parent (hc saying it doesn't outlive
+  it, at any depth under the pane) is refused before anything, `--force` included. A local start
+  that times out refuses a chosen or unresolved pane that took its name. Linked timeout recovery
+  uses the launch signature when `hc ls` supplies argv. An `am` or pack CLI older than this
+  release can attach such a worker,
+  after which a restart would run it on the seat's login, so chosen homes need both at this
+  version or newer; a worker may run for a moment before its launch is checked (on its chosen
+  folder); a linked reader sees one as ordinary when its hc reply omits launch argv, including
+  the list used for timeout recovery; a process of yours that edits the worktree's settings
+  after the last check is not seen; and hc
+  has no conditional kill, so `--tree` cleanup still reads a helper's address and ends it in two
+  calls (it skips a pane whose core, `created_ms` or launch shows another pane there now). A seat on a
+  chosen home (`am restart --agent-home`) is not done: it needs the seat's relaunch (linked
+  restart, revive, clear and switch, the restart queue) to carry the home.
 - **Cleanup (#567):** a worktree this command made (`created` in the ledger) is removed
   (`git worktree remove`, no `--force`) once every worker that ran
   in it has ended, done or killed, at least 15 minutes ago (hc's `finished_ms`: restart
@@ -1632,6 +1688,15 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   (an empty value clears one); the form keeps the field as it is. An invalid one is ignored
   with a warning. A Codex worker runs [Codex's launch mode](#codexs-launch-mode) like its bot's
   seat; a `template` owns the command and gets no flag.
+- `worker.agentHome` (#1208) is an optional absolute folder: the login home a worker on the
+  bot's default worker agent (`worker.agent`, else the bot's own agent) runs on, Claude or Codex
+  only, never beside a `worker.template` (see the worker's login home in [Workers](#workers)).
+  `am create|edit --worker-agent-home DIR` sets it and `--worker-agent-home=` clears it. The save
+  checks its shape only; each launch checks the folder on its own machine. An edit that changes
+  the default worker agent drops it unless the same edit gives it again, and a writer that has
+  no field for it (the form, `restart --save`) keeps it while that agent stays and never brings
+  back one that was dropped. A worker object the file has to drop (a field that isn't text) takes
+  no launch with a home: one that would use it is refused, never run without those defaults.
 - Ids are `b-` plus 10 lowercase base32 characters. A bot's terminal carries the hc label
   `bot=<id>`.
 

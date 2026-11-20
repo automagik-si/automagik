@@ -24,6 +24,8 @@ import { startProxy } from "../mods/am-sidebar/hcProxy.mjs";
 import { startFakeCore } from "./fake-hc-core.mjs";
 import { fixturePaneEdit } from "./fixture-pane-edit.mjs";
 import { readJsonLines } from "./log-lines.mjs";
+import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
+import { envWords } from "../mods/am-sidebar/logins.js";
 import { assertScratchProject, scratchProject, scratchRoot, shortSocketDir }
   from "./scratch-project.mjs";
 const createHashOf = (text) => createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -4143,4 +4145,48 @@ test("#1728 a main bot's worker kill still succeeds through an unvouched shim", 
   assert.equal(r.status, 0, r.error?.message ?? r.stderr);
   assert.equal(JSON.parse(r.stdout).ended, true);
   assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal]]);
+});
+
+// ---- #1208: an ordinary seat start that times out never binds a chosen-home worker that took its name ----
+
+test("#1208 a timed-out seat start whose name a chosen-home worker took (or one still starting) binds and ends nothing", (t) => {
+  const chosen = ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords("codex", "/homes/b", "0f0e0d0c-0b0a-4908-8706-050403020100")), "codex"];
+  for (const [what, reply, intent] of [["chosen", { argv: chosen }, false], ["still starting", {}, true]]) {
+    const s = scene(t);
+    hcStateExtra(s, { runDelayMs: 10_000, getReply: { genie: { address: "t55", name: "genie", state: "live", created_ms: 3, labels: {}, ...reply } } });
+    if (intent) {
+      mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+      appendFileSync(join(s.app, "automagik-herdr/workers.jsonl"), `${JSON.stringify({ event: "intent", kind: "worker",
+        launch: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", name: "genie", project: s.project, worktree: s.project, agent: "codex",
+        agentHome: "/homes/b", at: Date.now() })}\n`);
+    }
+    const r = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+    assert.equal(r.code, 1, `${what}: ${r.err}`);
+    assert.match(r.err, /genie was taken by a worker (on|that may be starting on) a chosen agent home \(t55\) before hc run answered; nothing was attached/);
+    assert.equal(s.calls().some((c) => c[0] === "kill"), false, `${what}: nothing ended`);
+    assert.equal(s.ledger().some((x) => x.kind === "seat"), false, `${what}: no seat row`);
+    const whois = s.cli(["whois", "--bot", ID.main, "--json"], { from: null });
+    assert.notEqual(whois.json().terminal, "t55", `${what}: not bound`);
+  }
+});
+
+test("#1208 a normal seat reply to a reused address binds neither a chosen nor an unresolved worker", (t) => {
+  const launch = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const argv = ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords("codex", "/homes/b", launch)), "codex"];
+  for (const unresolved of [false, true]) {
+    const s = scene(t);
+    hcStateExtra(s, { getReply: { t100: { address: "t100", name: "worker-reusing-address", state: "live", created_ms: 3,
+      labels: {}, argv: unresolved ? ["codex"] : argv } } });
+    if (unresolved) {
+      const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+      mkdirSync(dirname(ledger), { recursive: true });
+      appendFileSync(ledger, JSON.stringify({ event: "unresolved", terminal: "t100", core: "fakecore0000", created_ms: 3, launch }) + "\n");
+    }
+    const r = s.cli(["start", "Genie"], { from: null });
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /t100 (is|may be) a worker .*on a chosen agent home/);
+    assert.equal(s.calls().some((c) => c[0] === "kill" || c[0] === "label"), false);
+    assert.equal(s.ledger().some((row) => row.kind === "seat"), false);
+    assert.notEqual(s.cli(["whois", "--bot", ID.main, "--json"], { from: null }).json().terminal, "t100");
+  }
 });
