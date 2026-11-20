@@ -29,10 +29,12 @@ record is named and left to its own RFC.
 Today one workspace is one hosted DSH with one owner identity. The gate signs people in and knows
 their roles; DSH does not. `server/gate-cloud.mjs:173-178` admits only `owner` and `admin`
 (`:42-45`), so the missing principal is hidden behind owner-only admission. The gate forwards
-`x-automagik-principal` on every upstream request (`server/gate-upstream.mjs:48-55`), but no code
-in this repository or in the DSH floor this repository pins (`0.2.2-rc.2`) consumes it. The gate
-mints DSH's owner cookie from DSH's launch token (`server/gate-upstream.mjs:31-41`), so every
-person arrives at DSH as its owner.
+`x-automagik-principal` on the browser and WebSocket hops (`server/gate-upstream.mjs:48-55`). The
+header has one consumer in this repository, the vault-unlock refusal
+(`apps/bots-dsh/src/host/channel.js:1423`): it checks only that the header is present, refuses the
+unlock when it is, and neither authenticates the principal nor covers `/api`. The DSH floor this
+repository pins (`0.2.2-rc.2`) consumes it nowhere. The gate mints DSH's owner cookie from DSH's
+launch token (`server/gate-upstream.mjs:31-41`), so every person arrives at DSH as its owner.
 
 The probe on #1374's branch shows the consequence in five steps: a member is fenced by #1389's
 read rule, but a Bot session is recorded owner
@@ -56,7 +58,7 @@ in DSH.
 | Hop | Authentication today | What the next hop knows |
 |---|---|---|
 | browser → gate | Cloud workspace token (or the local claim and a passkey) | the gate knows `{issuer, subject, roles, workspace}` |
-| gate → DSH | DSH's launch token exchanged for DSH's owner cookie | DSH knows only "the owner"; the unsigned `x-automagik-principal` is ignored |
+| gate → DSH | DSH's launch token exchanged for DSH's owner cookie | DSH knows only "the owner"; the unsigned `x-automagik-principal` is never authority (one refusal checks its presence) |
 | DSH core / plugins | one shared browser Peer with owner principal | every call is the owner's |
 | Bot session, in process | a session-id record; a Bot session is written `owner` | the wall's owner branch lets it read anywhere (`paths.js:153-156`) |
 | Bot command | DSH's OS user (`server/Dockerfile:165`) | the file and the wall are outside its view |
@@ -65,11 +67,13 @@ Three facts complete the picture:
 
 - **The gate's principal is real but stops at the gate.** `server/gate-cloud.mjs:208-227` verifies
   issuer, audience, subject, roles, workspace and expiry; `gate-store.mjs` keeps it per session;
-  `server/gate.mjs:288,312` proxies with it and sets the header. Nothing downstream reads it.
+  `server/gate.mjs:288,312` proxies with it and sets the header. One downstream reader exists,
+  the vault-unlock refusal named above; it checks only the header's presence, never its value,
+  and covers no `/api` route, so the principal still stops at the gate.
 - **DSH's native identity is owner-only for browsers.** DSH 0.2.2-rc.2, the floor this repository
   pins, has a merge-extensible `PrincipalMap`, in-process Peers with a fixed principal,
   remote-access policies, and a caller `principal` on `session/prompt` for non-owner callers
-  ([RFC 0015](0015-live-chat-projection.md):739-742). But the browser Web carrier admits one
+  ([RFC 0015](0015-live-chat-projection.md):742-745). But the browser Web carrier admits one
   shared owner Peer; no browser request reaches DSH with a non-owner principal today.
 - **The wall's record has no writer.** #1389 reads `{version, sessions}` from a `0600` file
   owned by DSH's user (`principals.js:17-49`); the only writer named is "the owner's side", and
@@ -97,7 +101,7 @@ signed with Ed25519 by the gate's assertion key, with `aud` the instance id, a l
 60 seconds, and a binding to one request's method and path plus a single-use nonce the adapter
 remembers for that lifetime. The private key lives in the gate's own store, on the gate's own
 volume; DSH never mounts that volume
-(`server/compose.gate.yml:31-34`). The public key is public: the adapter fetches it at DSH start
+(`server/compose.gate.yml:33-35,8-9`). The public key is public: the adapter fetches it at DSH start
 and refetches it when the assertion names a key id it does not have, and a Bot reading it gains
 nothing.
 
@@ -360,7 +364,7 @@ exists.
    service needed. *Check:* a valid assertion admits and attributes the caller; missing, expired,
    replayed, wrong-audience and reused-nonce assertions are 401; the owner's own interface is
    unchanged; a forged bare `x-automagik-principal` is ignored. *Rollback:* remove the adapter;
-   the gate keeps only the header, which DSH ignores.
+   the gate keeps only the header, which no code treats as authority.
 2. **Bot principal and the file fence** (plugin, 3.N.P). `bot:<id>` sessions, the v2 record, the
    Bot branch in `paths.js`, and DSH's data home and the launch file denied to Bots by default.
    *Unlocked by:* delivery 1 and the Bot registry. *Check:* the #1374 probe, with its Bot session
