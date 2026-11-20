@@ -6,6 +6,7 @@ import { appendFile, mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { replaceFile } from './files.js'
 import { createAgentRedactor } from './agent-redaction.js'
+import { multiuserMode } from './multiuser.js'
 
 export const MCP_PATH = '/api/omni-mcp'
 const VERSION = '2025-11-25'
@@ -114,7 +115,7 @@ export function agentBindAddress(value = '127.0.0.1') {
   } catch { throw invalid() }
 }
 
-export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn => fn() } = {}) {
+export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn => fn(), multiuser = () => multiuserMode() } = {}) {
   const tokenPath = () => join(rt.home, 'agent-tokens.json')
   const auditPath = () => join(rt.home, 'agent-audit.jsonl')
   let records
@@ -360,6 +361,7 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
     })
   }
   const fetch = async request => {
+    if (multiuser()) return json(403, { error: 'Agent access is off in multiuser mode' })
     const context = {}
     try { return await processRequest(request, context) }
     catch {
