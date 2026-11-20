@@ -856,14 +856,18 @@ host, and a bot started there runs the pack's normal linked-machine launch.
 - A holder is **full at its limit**: `count >= limit` leaves no room, and `over limit` is
   `count > limit` (the wording only; the choice and `am holders` use the same meaning). A new
   `am start` chooses its holder and reserves that seat together under `holders.json`'s lock, so
-  two starts launched at once go to different holders instead of both picking `local`; the
-  reservation is released once the start's attach row is written, or when the start fails (a
-  reservation left by a killed CLI lapses after the holder-start timeout). `am holders` counts
-  attached agents, not in-flight reservations. A start goes to the holder with the fewest of the
-  pack's agents, and never to a holder whose core isn't answering while another is. With N agents
-  and a limit L over two or more holders, a start above the limit goes to another holder: one
-  holder's loss cannot take every seat. A start is never refused for the limit; when every holder
-  is full, the least loaded takes it and says so on stderr (and as `limitWarning` with `--json`).
+  two starts of different bots launched at once go to different holders instead of both picking
+  `local`; the reservation is released once the start's attach row is written, or when the start
+  fails (a reservation left by a killed CLI lapses after the holder-start timeout). `am holders`
+  counts attached agents, not in-flight reservations. One bot never gets two seats: a start is
+  refused when the bot already has a binding (live, or unknown on a holder whose line dropped)
+  or another start is still placing it. The refusal exits non-zero and says the bot and holder;
+  with `--json` it carries `error`, `bot` and `holder`. A start goes to the holder with the
+  fewest of the pack's agents, and never to a holder whose core isn't answering while another
+  is. With N agents and a limit L over two or more holders, a start above the limit goes to
+  another holder: one holder's loss cannot take every seat. A start is never refused for the
+  limit; when every holder is full, the least loaded takes it and says so on stderr (and as
+  `limitWarning` with `--json`).
 - `am ls`, `am show` and `am whois` name the holder; a bot whose holder's line dropped reads
   `unknown in NAME/tN`, never stopped. `am restart` finds the bot's holder and runs the restart
   there. A worker started from a holder's pane runs in that holder (its `am` talks to that

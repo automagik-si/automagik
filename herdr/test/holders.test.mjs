@@ -203,11 +203,15 @@ test("starts spread over the pool, and one holder's loss leaves the other's agen
   const held = s.rows().filter((r) => r.event === "attach");
   assert.deepEqual(held.map((r) => [r.bot, r.machine ?? null]).sort(), [[MAIN, null], [MEMBER, "h2"]]);
 
-  // `--holder` names one; the bot already on h2 is reported, not started twice.
+  // `--holder` names one; a bot that already has a seat is refused, never started twice (#1881).
   const again = s.cli(["start", "Member", "--json"]);
-  assert.equal(again.code, 0, again.err);
-  assert.equal(again.json().running, two.json().terminal);
-  assert.equal(again.json().holder, "h2");
+  assert.equal(again.code, 1, "a bot that already has a seat is refused");
+  const already = again.json();
+  assert.equal(already.bot, MEMBER);
+  assert.equal(already.holder, "h2");
+  assert.match(already.error, /already has a seat on holder "h2"/);
+  assert.match(again.err, /start refused so one bot never gets two panes/);
+  assert.equal(s.rows().filter((r) => r.event === "attach").length, 2, "no second row was written");
 
   // The team view names the holder and its terminal, so a spread seat doesn't read as stopped.
   const ls = s.cli(["ls", "--json"]).json().projects[0].bots;
@@ -303,6 +307,66 @@ for (let run = 1; run <= 3; run += 1) {
     assert.deepEqual(s.reservations(), [], "both reservations are released once the rows are written");
   });
 }
+
+// #1881: the same bot never gets two seats. Two `am start Main`s at once, two holders at
+// limit 1: the first reserves and starts, the second must refuse under the holder lock. The
+// regression checked `liveAt` before the lock and never refused a live reservation, so both
+// starts passed and wrote `local` and `h2` rows. Three fresh runs, no sleep.
+for (let run = 1; run <= 3; run += 1) {
+  test(`two starts of the same bot create one seat, the second refuses (run ${run}/3)`, async (t) => {
+    const s = scene(t);
+    assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+    assert.equal(s.cli(["holders", "limit", "1"]).code, 0);
+    const [a, b] = await Promise.all([
+      s.cliAsync(["start", "Main", "--json"]),
+      s.cliAsync(["start", "Main", "--json"]),
+    ]);
+    const won = [a, b].filter((r) => r.code === 0);
+    const refused = [a, b].filter((r) => r.code !== 0);
+    assert.equal(won.length, 1, `exactly one start won: ${a.code}/${b.code} ${a.err}${b.err}`);
+    const rows = s.rows().filter((r) => r.event === "attach");
+    assert.equal(rows.length, 1, "one seat, never two rows");
+    assert.equal(rows[0].bot, MAIN);
+    const no = refused[0];
+    const answer = no.json();
+    assert.equal(answer.bot, MAIN, "the refusal names the bot");
+    assert.equal(answer.holder, rows[0].machine ?? "local", "it names the holder that got the seat");
+    assert.match(answer.error, /already has a seat|already starting/);
+    assert.match(no.err, /start refused so one bot never gets two panes/);
+    assert.deepEqual(s.reservations(), [], "the winner released its reservation");
+  });
+}
+
+// #1881: a retry with the bot's only binding unknown on a dropped holder must refuse, not add
+// a second seat on local. Only `liveAt` was read before, so the retry missed the binding and
+// started a fresh pane here.
+test("a retry refuses while the bot's binding is unknown on a dropped holder", (t) => {
+  const s = scene(t);
+  assert.equal(s.cli(["holders", "add", "--local", "h2"]).code, 0);
+  assert.equal(s.cli(["start", "Main", "--json"]).code, 0);
+  const member = s.cli(["start", "Member", "--json"]);
+  assert.equal(member.code, 0, member.err);
+  assert.equal(member.json().holder, "h2");
+  const before = s.rows().filter((r) => r.event === "attach").length;
+  s.setState((st) => {
+    const m = st.machines.find((x) => x.name === "h2");
+    m.state = "disconnected";
+    m.since_ms = Date.parse("2026-11-16T10:00:00.000Z");
+  });
+  assert.equal(s.cli(["holders", "--json"]).json().holders.find((h) => h.name === "h2").count, 1,
+    "the unknown binding still counts as held");
+  const retry = s.cli(["start", "Member", "--json"]);
+  assert.equal(retry.code, 1, "the retry is refused, not started on local");
+  const answer = retry.json();
+  assert.equal(answer.bot, MEMBER);
+  assert.equal(answer.holder, "h2");
+  assert.match(answer.error, /already has a seat on holder "h2"/);
+  assert.match(retry.err, /start refused so one bot never gets two panes/);
+  const rows = s.rows().filter((r) => r.event === "attach");
+  assert.equal(rows.length, before, "no second row was written");
+  assert.equal(rows.some((r) => r.bot === MEMBER && (r.machine ?? null) === null), false, "no local seat");
+  assert.deepEqual(s.reservations(), [], "the refused retry reserved nothing");
+});
 
 test("a burst of ten starts spreads over two holders and stays within the limit", async (t) => {
   // #1881: a team start in parallel must not pile every seat on local. Ten concurrent starts,

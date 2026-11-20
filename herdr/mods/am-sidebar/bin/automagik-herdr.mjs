@@ -3804,20 +3804,42 @@ function writeReservations(list) {
  * view's counts are confirmed with hc before the lock; this fast local read under the lock sees
  * attach rows another start wrote meanwhile, so a decision never rests on a count taken before
  * that start finished. `attached` lets a reservation whose real row has just landed stop
- * counting even before its CLI has released it, so one seat is never counted twice.
+ * counting even before its CLI has released it, so one seat is never counted twice. `bound`
+ * maps each bot to its binding and holder for the same-bot guard: both a live binding and an
+ * unknown one (a holder whose line is down) are rows here, so neither can be missed before a
+ * second seat is reserved (#1881).
  */
 function holderCountsFromLedger(machines, config) {
   const counts = new Map(config.holders.map((h) => [h.name, 0]));
   const attached = new Set();
+  const bound = new Map();
   const rows = readAttachFile(attachPath(appHome())) ?? [];
   for (const binding of foldAttach(rows).byKey.values()) {
     attached.add(binding.bot);
     const place = placeOfRow(binding);
     const name = place === null ? LOCAL_HOLDER : (machines.get(place)?.name ?? binding.machine ?? null);
+    if (binding.bot && !bound.has(binding.bot)) bound.set(binding.bot, { binding, holder: name });
     if (!name || !counts.has(name)) continue;
     counts.set(name, counts.get(name) + 1);
   }
-  return { counts, attached };
+  return { counts, attached, bound };
+}
+
+/**
+ * The refusal of a start whose bot already has a seat (#1881): one terminal plays a bot, so an
+ * existing binding (live, or unknown on a holder whose line dropped) must refuse the new start
+ * instead of leaving two rows. `--json` carries `bot` and `holder` beside the message.
+ */
+function startSeatRefusal(bot, holder, terminal) {
+  const where = holder && holder !== LOCAL_HOLDER ? `holder "${holder}"` : "this computer";
+  return new CliError(`${bot.name} already has a seat on ${where}${terminal ? ` (${terminal})` : ""}; `
+    + "start refused so one bot never gets two panes. Stop that pane first.", 1, { bot: bot.id, holder: holder ?? null });
+}
+
+/** The refusal of a start whose bot another start is already placing (#1881). */
+function startStartingRefusal(bot, holder) {
+  return new CliError(`${bot.name} is already starting on holder "${holder}" (another start reserved its seat); `
+    + "start refused so one bot never gets two panes.", 1, { bot: bot.id, holder });
 }
 
 /** The holder machine names: only a holder's dropped line is a `holder_unreachable` record. */
@@ -3863,6 +3885,12 @@ async function holderView() {
  * CLI's lapses after HOLDER_RESERVATION_TTL_MS. A named holder that isn't
  * connected is refused before anything is reserved; with no name, an all-away pool falls back
  * to this computer, as before.
+ *
+ * The same bot is refused here, inside the critical section, never before the lock (#1881): the
+ * ledger just read names any binding, live or unknown, and the reservations name a start still
+ * in flight. Checking the view before the lock let two launches of one bot both pass and write
+ * `local` and `h2` rows, and let a retry put a second seat on `local` while the bot's only
+ * binding sat unknown on a holder whose line was down.
  */
 async function reserveHolder({ view, counts, connected, holder, bot }) {
   return withLockAsync(holdersLock(), async () => {
@@ -3871,8 +3899,12 @@ async function reserveHolder({ view, counts, connected, holder, bot }) {
     // A reservation whose attach row is already in the ledger is spent, and a stale one (a
     // killed CLI) is dropped: neither takes a seat. The spent one leaves the file here too, so
     // the release that failed has no effect.
-    const { counts: fresh, attached } = holderCountsFromLedger(view.machines, config);
+    const { counts: fresh, attached, bound } = holderCountsFromLedger(view.machines, config);
     const live = liveReservations(readReservations(), now).filter((r) => !attached.has(r.bot));
+    const seat = bound.get(bot.id);
+    if (seat) throw startSeatRefusal(bot, seat.holder, seat.binding.terminal);
+    const starting = live.find((r) => r.bot === bot.id);
+    if (starting) throw startStartingRefusal(bot, starting.holder);
     const reserved = reservedCounts(live);
     const merged = new Map(config.holders.map((h) => [h.name, Math.max(counts.get(h.name) ?? 0, fresh.get(h.name) ?? 0)]));
     let pick = chooseHolder({ config, counts: merged, connected, holder, reserved });
@@ -3884,7 +3916,7 @@ async function reserveHolder({ view, counts, connected, holder, bot }) {
       if (pick.error) throw new CliError(pick.error, 2);
     }
     const id = randomUUID();
-    live.push({ id, holder: pick.name, bot, at: new Date(now).toISOString() });
+    live.push({ id, holder: pick.name, bot: bot.id, at: new Date(now).toISOString() });
     writeReservations(live);
     return { pick, config, reservation: { id, holder: pick.name } };
   }, { wait: LOCK_STALE + 2000, what: "holders.json" });
@@ -4172,13 +4204,14 @@ function limitWarning(bot, name, count, limit) {
 }
 
 /**
- * The start path's holder decision: { holder } to start there, { local: true } for this
- * computer, or { held } when the bot already plays somewhere in the pool. Only a pool with more
- * than one holder spreads; `--holder` names one explicitly; `--space` is this computer's.
- * `limitWarning`: the line `cmdStart` says once it starts there, at or over the limit.
- * `reservation` (#1881): the seat reserved under holders.json's lock; `cmdStart` releases it
- * once the attach row is written or the start failed. The conservative one-holder default takes
- * no reservation, so a pack that never runs `am holders` writes no new file.
+ * The start path's holder decision: { holder } to start there or { local: true } for this
+ * computer. Only a pool with more than one holder spreads; `--holder` names one explicitly;
+ * `--space` is this computer's. `limitWarning`: the line `cmdStart` says once it starts there,
+ * at or over the limit. `reservation` (#1881): the seat reserved under holders.json's lock;
+ * `cmdStart` releases it once the attach row is written or the start failed. The conservative
+ * one-holder default takes no reservation, so a pack that never runs `am holders` writes no new
+ * file. An existing binding or an in-flight reservation for this same bot is refused inside
+ * `reserveHolder`'s lock (#1881), never by a view read before it.
  */
 async function holderForStart(opts, project, bot) {
   const config = readHolders();
@@ -4191,12 +4224,10 @@ async function holderForStart(opts, project, bot) {
     return { local: true, ...(warning ? { limitWarning: warning } : {}) };
   }
   const { view, counts, connected } = await holderView();
-  const held = holderHeld(view, bot.id, project.key);
-  if (held) return { held };
   // `--space` is this computer's, never a holder's; reserving it still tells a parallel
   // least-loaded start that the seat is taken.
   const named = opts.space !== undefined ? LOCAL_HOLDER : opts.holder;
-  const { pick, config: current, reservation } = await reserveHolder({ view, counts, connected, holder: named, bot: bot.id });
+  const { pick, config: current, reservation } = await reserveHolder({ view, counts, connected, holder: named, bot });
   const limit = current.limit;
   const warning = pick.atLimit ? limitWarning(bot, pick.name, pick.count, limit) : undefined;
   if (pick.local) return { local: true, reservation, ...(warning ? { limitWarning: warning } : {}) };
@@ -4230,14 +4261,9 @@ async function cmdStart(opts, [ref], warnedRelabels) {
   const decision = await holderForStart(opts, project, bot);
   // #1881: the seat chosen above is reserved; release it when the real attach row is written
   // (both start paths write it before they return) or when the start fails, so the next start
-  // sees the seat freed. A `held` decision reserved nothing.
+  // sees the seat freed. A bot that already had a binding, or another start's reservation, was
+  // refused under the lock with nothing reserved.
   try {
-    if (decision.held) {
-      const where = decision.held.holder && decision.held.holder !== LOCAL_HOLDER ? ` on holder ${decision.held.holder}` : "";
-      const elsewhere = decision.held.elsewhere ? `, for ${decision.held.elsewhere}` : "";
-      return opts.json ? { id: bot.id, running: decision.held.binding.terminal, holder: decision.held.holder }
-        : `${bot.name} is already running in ${decision.held.binding.terminal}${where}${elsewhere}.`;
-    }
     if (decision.holder) {
       if (decision.limitWarning) report([decision.limitWarning]);
       const out = startOnHolder(project, bot, decision.holder);
