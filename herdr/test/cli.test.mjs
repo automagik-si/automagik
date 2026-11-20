@@ -6938,6 +6938,24 @@ test("#1557 a parked restart is dropped when the dialog is gone; a report mentio
   assert.equal(prompt.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false);
 });
 
+test("#1557 an empty or blank terminal keeps the episode held through a sweep and watcher check", async (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog("Try again later."));
+  const issue = s.cli(["rate-limit", "--json"]).json().attention[0];
+  const [entry] = JSON.parse(readFileSync(queueFileOf(s), "utf8"));
+  for (const blank of ["", "  \n", "\u001b[32m\u001b[0m"]) {
+    setScreen(s, "t5", blank);
+    assert.equal(s.cli(["rate-limit", "--json"]).json().attention.length, 0);
+    assert.equal(openItems(s)[0]?.id, issue.id);
+    assert.deepEqual(s.cli(["delivery-status", "t5", "--json"]).json(), { terminal: "t5", held: true });
+  }
+  const watcher = await s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"],
+    { env: { AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "40", AUTOMAGIK_HERDR_QUEUE_MAX_MS: "1000" } });
+  assert.equal(watcher.code, 0, watcher.err);
+  assert.equal(openItems(s)[0]?.id, issue.id);
+  assert.equal(s.calls().some(words => ["kill", "send", "keys"].includes(words[0])), false);
+});
+
 test("#1557 an unreadable sweep keeps its episode open and never writes a second item", (t) => {
   const s = restartScene(t);
   s.seed(team());

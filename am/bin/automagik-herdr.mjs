@@ -44,6 +44,8 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
+import { screenLines } from "../dialog.js";
+import { agyCandidate, agyPromptOf } from "../agyPrompt.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchEnvOf, launchHomeEnv, launchdNotLoaded, ledgerRivals,
   lastText, latestResumeIn, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
@@ -5731,7 +5733,7 @@ async function readScreenCapture(terminal) {
     const r = await hc(["read", terminal, "--lines", "40", "--json"]);
     if (r.code !== 0) return { ok: false };
     const text = JSON.parse(r.stdout)?.text;
-    return typeof text === "string" ? { ok: true, text } : { ok: false };
+    return screenLines(text).some(line => line.trim()) ? { ok: true, text } : { ok: false };
   } catch { return { ok: false }; }
 }
 
@@ -6148,7 +6150,7 @@ async function runQueuedRestart(opts) {
           force: false, tree: entry.options?.tree })
         : null;
       if (idle && !helperRefusal && handoff && askedAt === null) {
-        if (typeof screen === "string") {
+        if (screenLines(screen).some(line => line.trim())) {
           const attention = readAttention().find(row => row.open && isEpisode(row, entry.project, entry.botId)
             && row.terminal === entry.terminal && row.created_ms === entry.created_ms);
           if (attention) await healRateLimitAttention(entry.project, entry.botId, "it recovered", appHome(), attention.id);
@@ -6658,7 +6660,9 @@ async function deliveryStatus(terminal) {
   }
   const capture = await readScreenCapture(address);
   if (!capture.ok) throw new CliError("Could not read the terminal before automatic delivery.");
-  return { terminal: address, held: Boolean(pendingDialog(capture.text) || rateLimitDialog(capture.text)) };
+  const held = pendingDialog(capture.text) || rateLimitDialog(capture.text)
+    || (agyCandidate(pane) && agyPromptOf(capture.text));
+  return { terminal: address, held: Boolean(held) };
 }
 
 async function cmdDeliveryStatus(opts, [terminal, ...other]) {

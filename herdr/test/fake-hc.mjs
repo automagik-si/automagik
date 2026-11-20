@@ -227,7 +227,9 @@ switch (words[0]) {
   case "read": {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
-    out({ text: t.screen ?? "" });
+    // An unspecified screen on an idle fixture represents its ready prompt. Tests can set
+    // an empty string explicitly when the terminal has painted nothing.
+    out({ text: t.screen ?? (["idle", "done"].includes(t.status?.state) ? "❯" : "") });
     // state.onRead: the screen (and status) changes just after this answer, between two checks.
     // The look is counted across processes: `nth` can name a read later than the first (the
     // counter is saved on every look, not only on the one that fires).
