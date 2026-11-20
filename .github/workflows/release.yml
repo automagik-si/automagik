@@ -7,6 +7,7 @@ name: Release
 #   automagik-bots-dsh-<version>.tgz      the Bot team (npm pack of apps/bots-dsh)
 #   automagik-welcome-dsh-<version>.tgz   the welcome and Connect AI (apps/welcome-dsh)
 #   automagik-locale-pt-br-dsh-<version>.tgz   Brazilian Portuguese for DSH (apps/locale-pt-br-dsh)
+#   automagik-vault-dsh-<version>.tgz     Bitwarden vault source (apps/vault-dsh)
 #   automagik-acp-dsh-<version>.tgz       agents over ACP as DSH models (apps/acp-dsh)
 #   plugins.json                          each tarball's name, version, file and integrity
 #   <add-on>-<its version>.tgz            the add-ons the lane carries, at the profile's pins
@@ -459,7 +460,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          for app in acp-dsh bots-dsh locale-pt-br-dsh welcome-dsh; do
+          for app in acp-dsh bots-dsh locale-pt-br-dsh vault-dsh welcome-dsh; do
             (cd "apps/${app}" && npm pack --silent --ignore-scripts --pack-destination ../../release >/dev/null)
           done
           bun scripts/release-plugins.ts release "${VERSION}" "${SHA}" > release/plugins.json
@@ -502,7 +503,7 @@ jobs:
           METER: ${{ steps.cut.outputs.meter }}
         run: |
           set -euo pipefail
-          notes="\`@automagik/acp-dsh\`, \`@automagik/bots-dsh\`, \`@automagik/locale-pt-br-dsh\`, \`@automagik/welcome-dsh\` for DeepSeek Harness, and the Automagik desktop app. Install the plugins from the [Automagik market](https://github.com/automagik-si/dsh-marketplace) or from an Omni's own market; \`plugins.json\` lists each tarball's integrity. The desktop builds follow when they are done."
+          notes="\`@automagik/acp-dsh\`, \`@automagik/bots-dsh\`, \`@automagik/locale-pt-br-dsh\`, \`@automagik/vault-dsh\`, \`@automagik/welcome-dsh\` for DeepSeek Harness, and the Automagik desktop app. Install the plugins from the [Automagik market](https://github.com/automagik-si/dsh-marketplace) or from an Omni's own market; \`plugins.json\` lists each tarball's integrity. The desktop builds follow when they are done."
           [[ "${KIND}" == "herdr" ]] && notes="The Automagik Herdr pack alone (no plugins, no desktop build)."
           [[ "${KIND}" == "pocket" ]] && notes="Automagik Pocket (no plugins, no desktop build)."
           [[ "${KIND}" == "am" ]] && notes="am, the Automagik command, alone (no plugins, no desktop build)."

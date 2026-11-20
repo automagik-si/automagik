@@ -81,7 +81,7 @@ const DOWNLOADS = 'https://github.com/automagik-si/automagik/releases/download/'
 // The plugins this release lane ships and updates. None of Unfold's is one: they left this
 // repository for Unfold's own, whose release ships them (RFC 0020); this repository's releases
 // attach no tarball of any and its lane names none. Whoever installed one keeps it.
-const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'welcome-dsh'];
+const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'];
 const PROFILE = 'apps/desktop/profile/package.json';
 // The add-ons the desktop profile pins that the lane carries too, so a pin move is a patch: each
 // a reviewed fork with no dependencies of its own (its folder alone is the add-on) that declares

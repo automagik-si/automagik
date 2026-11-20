@@ -318,6 +318,7 @@ export function install(rt) {
     'cli-login-noticed', 'cli-login-switch', 'cli-login-signout', 'cli-login-reset',
     'cli-login-reserve', 'cli-login-release',
   ])
+  const VAULT = new Set(['vault-status', 'vault-unlock', 'vault-lock', 'vault-items'])
   // The endpoints whose text reaches a Bot or a model: one that carries a Claude sign-in state
   // acp-dsh showed is refused before anything is queued (cli-login.js, loginTextMatches).
   const CODE_GUARDED = new Set(['send', 'side-ask', 'answer-question', 'view-reply', 'memory-ask'])
@@ -500,6 +501,7 @@ export function install(rt) {
       }
       if (CODE_GUARDED.has(endpoint) && textsOf(body).some(text => rt.loginTextMatches?.(text) === true)) return fail(CODE_REFUSED, 'bot/refused')
       if (CLI_LOGIN.has(endpoint)) return ok(await rt.cliLoginActions[endpoint](body))
+      if (VAULT.has(endpoint)) return ok(await rt.vaultEndpoint(endpoint, body))
       if (endpoint.startsWith('space-')) return ok(await spaceReads.read(endpoint, body, handle))
       switch (endpoint) {
         case 'agent-access':
@@ -1242,6 +1244,7 @@ export function install(rt) {
       // provider's, carrying its request or endpoint text, or a file system's, carrying
       // a path: neither the log nor the reply says its message, only its kind.
       if (code !== 'bot/internal' && exposition(error) !== undefined) return fail(error.message, code)
+      if (VAULT.has(endpoint)) return fail('The vault did not answer.', 'bot/internal')
       const kind = errorKind(error)
       rt.noteFailure({ source: 'api', text: `${endpoint}: ${kind}`, code: kind, stack: error?.stack })
       return fail(`Something went wrong (${kind}).`, code)
@@ -1369,9 +1372,26 @@ export function install(rt) {
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
       const desktopWindow = appBrowserBridge() && verifiedWindow(request)
-      const dispatch = () => handle(endpoint, body?.payload, request.signal, desktopWindow)
+      const dispatch = () => {
+        if (endpoint === 'vault-unlock') {
+          // DSH rebuilds the request on an internal URL (http://dsh.internal), so the page's own
+          // origin is read from what the browser sent: Origin, else Host. Neither means refuse.
+          let page
+          try {
+            const origin = request.headers.get('origin')
+            const host = request.headers.get('host')
+            page = origin && origin !== 'null' ? new URL(origin) : host ? new URL(`http://${host}`) : undefined
+          } catch { page = undefined }
+          // RFC 0034 Q10: Pocket and remote may approve but never unlock, so HTTPS from another host is
+          // refused too; only the desktop's own window or a page on this computer unlocks.
+          if (!desktopWindow && (page === undefined || !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(page.hostname))) {
+            return fail('Unlock the vault in Settings on this computer.', 'bot/refused')
+          }
+        }
+        return handle(endpoint, body?.payload, request.signal, desktopWindow)
+      }
       const result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
-      const noStore = CLI_LOGIN.has(endpoint)
+      const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)
       return new Response(JSON.stringify(result), { status: 200, headers: {
         'content-type': 'application/json', ...(noStore ? { 'cache-control': 'no-store' } : {}),

@@ -9,6 +9,7 @@ const REFUSALS = new Set(['bot/refused', 'bot/sign-in-required', 'bot/account-co
 const isRefusal = code => REFUSALS.has(code) || code.startsWith('bot/adopt-') || code.startsWith('bot/reservation-')
 
 export const call = async (endpoint, payload, signal) => {
+  const vault = endpoint.startsWith('vault-')
   let response
   try {
     // Document-relative so the Web UI keeps working under a mounted base path.
@@ -21,13 +22,15 @@ export const call = async (endpoint, payload, signal) => {
     })
   } catch (error) {
     if (error?.name === 'AbortError') throw error
-    noteClientError(endpoint, Object.assign(new Error(`network error: ${error?.message ?? error}`), { code: 'NETWORK' }))
+    if (!vault) noteClientError(endpoint, Object.assign(new Error(`network error: ${error?.message ?? error}`), { code: 'NETWORK' }))
     // The browser's own text ("Failed to fetch", "Load failed") does not say what failed.
-    throw markNoted(Object.assign(new Error(t('Could not reach DSH. Check that it is still running.')), { code: 'NETWORK', cause: error }))
+    throw markNoted(Object.assign(new Error(t('Could not reach DSH. Check that it is still running.')), {
+      code: 'NETWORK', ...(!vault ? { cause: error } : {}),
+    }))
   }
   if (!response.ok) {
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` })
-    noteClientError(endpoint, error)
+    if (!vault) noteClientError(endpoint, error)
     throw error
   }
   const result = await response.json()
@@ -35,7 +38,7 @@ export const call = async (endpoint, payload, signal) => {
     const code = result.error?.code ?? 'bot/error'
     const message = hostText(result.error?.message ?? 'Request failed')
     const error = Object.assign(new Error(code === 'bot/internal' ? `${message} ${t('Settings → Feedback has the details.')}` : message), { code })
-    if (!isRefusal(code)) {
+    if (!vault && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? 'Request failed'), { code }))
       markNoted(error)
     }
