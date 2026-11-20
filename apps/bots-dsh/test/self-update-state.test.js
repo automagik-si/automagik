@@ -597,7 +597,7 @@ test('runtime installation captures the supervisor and polls the configured prof
 
 const endpoint = 'self-update-status'
 
-function statusChannel(profileDir, teamHome) {
+function statusChannel(profileDir, teamHome, routeEndpoint = endpoint) {
   const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
   const register = ctx.connection.fetch.register
   let route
@@ -606,8 +606,8 @@ function statusChannel(profileDir, teamHome) {
     return register(options)
   }
   const rt = createRuntime(ctx, { home: teamHome, browser: false, memory: false, updateCheck: false })
-  const post = async () => (await route.fetch(new Request('http://fixture.invalid' + ROUTE, {
-    method: 'POST', body: JSON.stringify({ endpoint }),
+  const post = async payload => (await route.fetch(new Request('http://fixture.invalid' + ROUTE, {
+    method: 'POST', body: JSON.stringify({ endpoint: routeEndpoint, payload }),
   }))).json()
   const dispose = async () => {
     try { await ctx.dispose() } finally { rt.dispose() }
@@ -669,5 +669,35 @@ test('the channel refuses self-update-status after lock acquisition throws', req
   } finally {
     write.mock.restore()
     syncBuiltinESMExports()
+  }
+})
+
+test('the self-update check requires the team lock ahead of read extensions and takes no input', requiresStore, async t => {
+  const { home, profileDir } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  const checkEndpoint = 'self-update-check'
+  const teamHome = join(home, 'team')
+  const { rt, post, dispose } = statusChannel(profileDir, teamHome, checkEndpoint)
+  const extension = t.mock.fn(() => ({ extension: true }))
+  rt.hooks.endpoint(checkEndpoint, extension, { read: true })
+  const value = { state: 'current', reason: 'not-newer' }
+  assert.equal(typeof rt.selfUpdateCheck, 'function')
+  rt.selfUpdateCheck = t.mock.fn(async () => value)
+  try {
+    assert.deepEqual(await post({ url: 'https://fixture.invalid/update' }), { ok: true, value })
+    assert.equal(rt.holdsLock(), true)
+    assert.deepEqual(rt.selfUpdateCheck.mock.calls[0].arguments, [])
+
+    const lockPath = join(teamHome, 'state.lock')
+    writeFileSync(lockPath, JSON.stringify({ pid: process.ppid, host: hostname(), token: 'other' }))
+    const reply = await post()
+    assert.deepEqual(reply, refused)
+    assert.equal(reply.error.message.includes(teamHome), false)
+    assert.equal(rt.holdsLock(), false)
+    assert.equal(rt.selfUpdateCheck.mock.callCount(), 1)
+    assert.equal(extension.mock.callCount(), 0)
+    assert.equal(AGENT_TOOLS.some(tool => tool.endpoint === checkEndpoint || /^self[-_]update[-_]check$/.test(tool.name)), false)
+  } finally {
+    await dispose()
   }
 })

@@ -151,6 +151,46 @@ function pluginReason(versions) {
   }
 }
 
+function selfUpdateReason(reason) {
+  switch (reason) {
+    case 'desktop-app': return t('updates come with the desktop app.')
+    case 'no-store': return t('the update store is unavailable.')
+    case 'store-invalid': return t('the saved update state is invalid.')
+    case 'profile-invalid': return t('the installed plugin versions could not be read.')
+    case 'download-failed': return t('the update files could not be downloaded.')
+    case 'signature-invalid': return t('the signed release could not be verified.')
+    case 'lane-invalid': return t('the published release has invalid update information.')
+    case 'not-newer': return t('the published release would downgrade an installed plugin.')
+    case 'sequence-lower': return t('the published release is older than one already accepted.')
+    case 'engines-dsh': return t('the published release needs a different DeepSeek Harness version.')
+    case 'hash-mismatch': return t('a downloaded plugin package did not match the signed release.')
+    case 'registry-unreachable': return t('the package registry could not be reached.')
+    case 'bot/read-only': return t('this window does not hold the team lock.')
+    default: return t('the update check could not be completed.')
+  }
+}
+
+function SelfUpdateRow({ Row, check }) {
+  const [checking, setChecking] = useState(false)
+  const [result, setResult] = useState(null)
+  const onCheck = async () => {
+    setChecking(true)
+    setResult(null)
+    try { setResult(await check()) } catch (error) {
+      setResult({ reason: error?.code === 'bot/read-only' ? error.code : null })
+    } finally {
+      setChecking(false)
+    }
+  }
+  const message = result === null ? null
+    : result.state === 'available' ? t('Automagik {version} is available, signed and checked.', { version: result.laneVersion })
+    : result.state === 'current' ? t('Up to date.')
+    : t('Cannot update: {reason}', { reason: selfUpdateReason(result.reason) })
+  return h(Row, { label: 'Automagik', hint: h('span', { role: 'status' }, message) },
+    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: checking, onClick: onCheck },
+      checking ? t('Checking…') : t('Check for updates')))
+}
+
 const linkProps = href => ({ className: 'bt-soft bt-soft-sm bt-about-link', href, target: '_blank', rel: 'noopener noreferrer' })
 
 export function AboutPage({ useUpdate, actions, run, Section, Row }) {
@@ -251,6 +291,7 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
       stars === null ? null : h('span', { className: 'bt-star-count' }, starCount(stars))) : null),
     repo ? h('p', { key: 'ask', className: 'bt-about-ask' }, t('If Omni helps you, a star on GitHub helps more people find it.')) : null,
     h(Section, { key: 'updates', title: t('Updates') },
+      ours ? null : h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate }),
       h(Row, { label: ours ? 'Automagik' : 'Omni', hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)
         // With the plugin's own check off, the app still knows the runtime it carries.

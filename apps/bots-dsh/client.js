@@ -2497,6 +2497,23 @@ var ZH = {
   "Check for updates": "检查更新",
   "Checking…": "正在检查…",
   "Up to date": "已是最新版本",
+  "Up to date.": "已是最新版本。",
+  "Automagik {version} is available, signed and checked.": "Automagik {version} 已发布，签名和安装包均已验证。",
+  "Cannot update: {reason}": "无法更新：{reason}",
+  "updates come with the desktop app.": "更新随桌面应用提供。",
+  "the update store is unavailable.": "更新存储不可用。",
+  "the saved update state is invalid.": "保存的更新状态无效。",
+  "the installed plugin versions could not be read.": "无法读取已安装插件的版本。",
+  "the update files could not be downloaded.": "无法下载更新文件。",
+  "the signed release could not be verified.": "无法验证已签名的发行版本。",
+  "the published release has invalid update information.": "已发布版本的更新信息无效。",
+  "the published release would downgrade an installed plugin.": "已发布版本会降级某个已安装的插件。",
+  "the published release is older than one already accepted.": "已发布版本早于已接受的版本。",
+  "the published release needs a different DeepSeek Harness version.": "已发布版本需要其他版本的 DeepSeek Harness。",
+  "a downloaded plugin package did not match the signed release.": "下载的插件包与已签名的发行版本不符。",
+  "the package registry could not be reached.": "无法连接软件包仓库。",
+  "this window does not hold the team lock.": "此窗口未持有团队锁。",
+  "the update check could not be completed.": "无法完成更新检查。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
   "Update checks are off.": "已关闭更新检查。",
@@ -22188,6 +22205,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     diagnosticsClear: () => call2("diagnostics-clear"),
     diagnosticsPermissions: () => call2("diagnostics-permissions"),
     repoStars: () => call2("repo-stars"),
+    checkSelfUpdate: () => call2("self-update-check"),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = "action") => {
       noteClientError(where, error);
@@ -35053,6 +35071,63 @@ function pluginReason(versions) {
       return null;
   }
 }
+function selfUpdateReason(reason) {
+  switch (reason) {
+    case "desktop-app":
+      return t("updates come with the desktop app.");
+    case "no-store":
+      return t("the update store is unavailable.");
+    case "store-invalid":
+      return t("the saved update state is invalid.");
+    case "profile-invalid":
+      return t("the installed plugin versions could not be read.");
+    case "download-failed":
+      return t("the update files could not be downloaded.");
+    case "signature-invalid":
+      return t("the signed release could not be verified.");
+    case "lane-invalid":
+      return t("the published release has invalid update information.");
+    case "not-newer":
+      return t("the published release would downgrade an installed plugin.");
+    case "sequence-lower":
+      return t("the published release is older than one already accepted.");
+    case "engines-dsh":
+      return t("the published release needs a different DeepSeek Harness version.");
+    case "hash-mismatch":
+      return t("a downloaded plugin package did not match the signed release.");
+    case "registry-unreachable":
+      return t("the package registry could not be reached.");
+    case "bot/read-only":
+      return t("this window does not hold the team lock.");
+    default:
+      return t("the update check could not be completed.");
+  }
+}
+function SelfUpdateRow({ Row: Row3, check }) {
+  const [checking, setChecking] = (0, import_react89.useState)(false);
+  const [result, setResult] = (0, import_react89.useState)(null);
+  const onCheck = async () => {
+    setChecking(true);
+    setResult(null);
+    try {
+      setResult(await check());
+    } catch (error) {
+      setResult({ reason: error?.code === "bot/read-only" ? error.code : null });
+    } finally {
+      setChecking(false);
+    }
+  };
+  const message = result === null ? null : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
+  return (0, import_react89.createElement)(
+    Row3,
+    { label: "Automagik", hint: (0, import_react89.createElement)("span", { role: "status" }, message) },
+    (0, import_react89.createElement)(
+      "button",
+      { type: "button", className: "bt-soft bt-soft-sm", disabled: checking, onClick: onCheck },
+      checking ? t("Checking…") : t("Check for updates")
+    )
+  );
+}
 var linkProps = (href) => ({ className: "bt-soft bt-soft-sm bt-about-link", href, target: "_blank", rel: "noopener noreferrer" });
 function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3 }) {
   const update = useUpdate((value) => value) ?? {};
@@ -35167,6 +35242,7 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
     (0, import_react89.createElement)(
       Section3,
       { key: "updates", title: t("Updates") },
+      ours ? null : (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate }),
       (0, import_react89.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react89.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),

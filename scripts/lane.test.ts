@@ -362,6 +362,17 @@ describe('the plugin lane', () => {
     expect(kindOf(changed, none, none, changed)).toBe('herdr');
   });
 
+  test('the canonical lane verifier leaves a plugin-only release on the plugin lane', () => {
+    const none = () => false;
+    const verifier = 'plugin-lane/verify.mjs';
+    const copy = 'apps/bots-dsh/src/host/lane-verify.js';
+    const unpacked = unpackedIn({ 'bots-dsh': ['src/host/'] });
+    expect(ships([verifier], unpacked)).toBe(false);
+    expect(unpacked(copy)).toBe(false);
+    expect(ships([verifier, copy], unpacked)).toBe(true);
+    expect(kindOf([verifier, copy], none, unpacked, [verifier, copy])).toBe('plugins');
+  });
+
   test('the Windows helper\'s image and launcher (apps/desktop/wslc/) ship nothing until Windows reads them', () => {
     const none = () => false;
     const wslc = ['apps/desktop/wslc/Dockerfile', 'apps/desktop/wslc/bin/dsh-launch.mjs', 'apps/desktop/wslc/lib/launcher.mjs',
