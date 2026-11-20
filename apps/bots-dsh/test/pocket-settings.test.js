@@ -1165,3 +1165,21 @@ test('astra-code #10 projects the current level of the loaded own chat', async t
   assert.deepEqual((await c.read()).settings.level, { ...level, inherited: false })
   assert.deepEqual(h.calls, [])
 })
+
+test('a snapshot older than the desktop menu cache still lists models until it is dropped', async t => {
+  const h = await setup(t)
+  const c = await h.connect()
+  const listed = Date.now()
+  t.mock.method(Date, 'now', () => listed + 10 * 60_000)
+  const { settings, models } = await c.read()
+  assert.deepEqual(models.entries.map(entry => entry.id).slice(0, 2), [NATIVE, NEXT])
+  assert.equal(settings.model.label, 'V4')
+  assert.equal((await c.model(settings.rev, NEXT)).state, 'saved')
+  assert.deepEqual(h.calls, [['select', 's-0', NEXT]])
+  h.calls.length = 0
+  h.rt.dropCatalog()
+  const cold = await c.read()
+  assert.deepEqual(cold.models, { entries: [], truncated: false })
+  assert.deepEqual(await c.model(cold.settings.rev, NATIVE), REFUSED('unavailable'))
+  assert.deepEqual(h.calls, [])
+})

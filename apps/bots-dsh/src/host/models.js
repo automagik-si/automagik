@@ -187,8 +187,12 @@ export function install(rt) {
   // and nothing chooses it again until that provider serves different models.
   const refused = new Map()
   const answerable = entries => (refused.size === 0 ? entries : entries.filter(entry => !refused.has(entry.ref)))
-  const cachedCatalog = ({ current = false } = {}) => {
-    if (current && (catalogCache.at === 0 || Date.now() - catalogCache.at >= CATALOG_TTL_MS)) return undefined
+  // `held`: the snapshot as last listed, whatever its age, or undefined when none is held
+  // (never listed, or dropped by a key, sign-in or route change). Pocket reads only this:
+  // the desktop lists models when its menus need them, so a phone could wait a long time
+  // for one listed in the last few seconds (RFC 0036, Models).
+  const cachedCatalog = ({ held = false } = {}) => {
+    if (held && catalogCache.at === 0) return undefined
     return answerable(catalogCache.value)
   }
   // The models a ref's provider serves, as a string to compare; undefined when it
@@ -314,7 +318,7 @@ export function install(rt) {
   async function catalog({ fresh = false, remember = true } = {}) {
     // Pocket's work can use the existing snapshot. Even a module-local catalog call
     // must leave desktop enumeration, cache population and unblocking to the desktop.
-    if (quiet.getStore() === rt) return cachedCatalog({ current: true }) ?? []
+    if (quiet.getStore() === rt) return cachedCatalog({ held: true }) ?? []
     if (!fresh && Date.now() - catalogCache.at < CATALOG_TTL_MS && catalogCache.value.length > 0) return answerable(catalogCache.value)
     const epoch = catalogEpoch
     const listed = []

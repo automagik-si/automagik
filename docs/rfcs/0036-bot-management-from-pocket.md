@@ -524,8 +524,11 @@ only for an entry that would be listed:
   tools run commands).
 
 At most 200 entries, in catalog order. Every settings-bearing reply carries `models`; the phone
-replaces its list from each one. The list read is from the catalog as cached (at most 10 s old
-or freshly listed), without saving anything; a write checks a fresh listing.
+replaces its list from each one. The list read is from the last snapshot the host holds,
+whatever its age, without saving anything; a write checks a fresh listing. A key, sign-in or
+route change on the computer drops the snapshot, and the list stays empty until the desktop
+lists models again. (Amended 2026-11-20: a 10 s limit left the phone with no list almost
+always, because the desktop lists models only when its menus need them.)
 
 ### Replies
 
