@@ -829,7 +829,7 @@ export async function forgetDshLogins(cookies, origin) {
  */
 export const toolDirs = (userHome = homedir()) => [join(userHome, '.local', 'bin'), join(userHome, '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin']
 
-export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform, windowDigest }) {
+export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform, windowDigest, instanceId }) {
   // After the machine's own: a project's commands keep the user's node and pnpm, and then the
   // usual tool folders, then the app's own node and pnpm. dsh's plugin manager does not resolve
   // pnpm here: startDsh binds it to the bundled pnpm by absolute path (src/dsh-launch.cjs).
@@ -838,9 +838,14 @@ export function dshEnv({ base = process.env, home, electronAsNode = false, binDi
     .join(delimiter)
   const env = { ...base }
   delete env.AUTOMAGIK_WINDOW_DIGEST
+  // Only the launcher sets this id. It is non-secret and grants nothing (RFC 0024 amendment (l)).
+  for (const key of Object.keys(env)) {
+    if ((platform === 'win32' ? key.toUpperCase() : key) === 'AUTOMAGIK_INSTANCE_ID') delete env[key]
+  }
   return {
     ...env,
     ...(windowDigest ? { AUTOMAGIK_WINDOW_DIGEST: windowDigest } : {}),
+    ...(typeof instanceId === 'string' ? { AUTOMAGIK_INSTANCE_ID: instanceId } : {}),
     PATH,
     DSH_HOME: join(home, 'dsh'),
     // The app's own team, apart from one in a dsh the person runs (bots-dsh folders.js).
