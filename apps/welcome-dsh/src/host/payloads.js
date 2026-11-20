@@ -45,6 +45,7 @@ export const TeamPayload = z.object({
 })
 // A Bot type the team step describes.
 export const BotTypePayload = z.object({ type: z.enum(['omni']) })
+export const OmniServerPayload = z.strictObject({ version: z.string().regex(/^\d+\.\d{6}\.\d+(-[0-9A-Za-z.]+)?$/) })
 
 /** The parsed value, or undefined when it does not match. */
 export function parse(schema, value) {
