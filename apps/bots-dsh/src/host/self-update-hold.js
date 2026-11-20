@@ -256,9 +256,17 @@ export function install(rt) {
     }
   }
 
-  function startEligibility({ ownsTeam, status } = {}) {
+  function startEligibility({ ownsTeam, status, force } = {}) {
     if (rt.config?.selfUpdate !== true) return { reason: 'self-update-off' }
+    if (force) {
+      // A supervisor can inherit this variable from its service. Only this boot's value counts.
+      const rollback = env.AUTOMAGIK_SUPERVISOR_ROLLBACK
+      if (typeof rollback !== 'string' || rollback === '' || rollback !== env.AUTOMAGIK_SUPERVISOR_BOOT) {
+        return { reason: 'rollback-missing' }
+      }
+    }
     status ??= rt.selfUpdateStatus()
+    if (force && status.problem) return { reason: 'store-invalid' }
     if (hold.closed || (status.run && (RUNNING.has(status.run.phase) || status.run.phase === 'manualRecovery'))) {
       return { reason: 'update-running' }
     }
@@ -282,8 +290,8 @@ export function install(rt) {
   }
   rt.selfUpdateStartRefusal = status => startEligibility({ status }).reason
 
-  rt.selfUpdateStart = async (ownsTeam = () => rt.holdsLock?.() === true) => {
-    const { reason, profileDir, supervisor, path } = startEligibility({ ownsTeam })
+  rt.selfUpdateStart = async (ownsTeam = () => rt.holdsLock?.() === true, { force } = {}) => {
+    const { reason, profileDir, supervisor, path } = startEligibility({ ownsTeam, force })
     if (reason !== null) return refuse(reason)
 
     const requestId = randomUUID()
