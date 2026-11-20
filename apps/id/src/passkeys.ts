@@ -3,6 +3,7 @@ import {
 } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
 import type { Env } from './auth';
+import { whatsappEnabled } from './whatsapp';
 
 // Passkeys on an existing account. Adding or deleting a passkey needs
 // a session created by a passkey ceremony less than five minutes ago. Better Auth's own
@@ -30,9 +31,11 @@ const SIGN_IN_METHODS: Record<string, string> = {
   '/whatsapp/status': 'whatsapp',
 };
 
-// A passkey is deleted only when the account keeps another passkey or a phone number.
+// WhatsApp looks up the verified sender as "+" followed by 8 to 15 digits.
 const KEEPS_A_WAY_IN = `((SELECT count(*) FROM passkey WHERE userId = ?2) > 1
-  OR EXISTS (SELECT 1 FROM "user" WHERE id = ?2 AND phoneNumber IS NOT NULL))`;
+  OR (?3 = 1 AND EXISTS (SELECT 1 FROM "user" WHERE id = ?2 AND phoneNumberVerified = 1
+    AND length(phoneNumber) BETWEEN 9 AND 16 AND phoneNumber GLOB '+[1-9]*'
+    AND substr(phoneNumber, 2) NOT GLOB '*[^0-9]*')))`;
 
 interface StoredPasskey {
   id: string; name?: string | null; createdAt?: string | number | Date | null;
@@ -124,7 +127,7 @@ export function passkeyAccountPlugin(env: Env): BetterAuthPlugin {
         const userId = ctx.context.session.user.id;
         // One statement, so two concurrent deletes cannot both pass the last-passkey guard.
         const deleted = await env.DB.prepare(`DELETE FROM passkey WHERE id = ?1 AND userId = ?2
-          AND ${KEEPS_A_WAY_IN}`).bind(id, userId).run();
+          AND ${KEEPS_A_WAY_IN}`).bind(id, userId, Number(whatsappEnabled(env))).run();
         if (deleted.meta.changes === 1) return ctx.json({ status: true });
         // Someone else's passkey and a missing one get the same answer.
         const owned = await env.DB.prepare('SELECT 1 FROM passkey WHERE id = ? AND userId = ?')

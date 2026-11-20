@@ -19,8 +19,9 @@ ceremony less than five minutes ago. Each session records the ceremony that made
 it (`session.signInMethod`, migration `0004`) and `src/passkeys.ts` checks that and
 `session.createdAt` itself. Better Auth's `session.freshAge` is not used: it is one
 global setting, also behind `/list-sessions`, and cannot tell a passkey sign-in
-from a WhatsApp one. The last passkey of an account without a phone number cannot
-be deleted, and another person's passkey ID answers exactly like a missing one.
+from a WhatsApp one. An account can delete its last passkey only when WhatsApp
+sign-in is enabled and it has a verified phone number usable for that sign-in.
+Another person's passkey ID answers exactly like a missing one.
 No page offers these yet; the account page is later work.
 
 Better Auth's user schema requires a unique email. Accounts receive a random

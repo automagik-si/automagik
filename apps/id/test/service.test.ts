@@ -1118,13 +1118,40 @@ describe('passkeys on an existing account', () => {
     const [last] = await jsonOK(await request('/api/auth/passkey/account/list'));
     await expectError(await request('/api/auth/passkey/account/delete', { id: last.id }), 409, 'LAST_PASSKEY');
     expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', userId)).toBe(1);
-    // A verified phone number is another way in, so the last passkey may go.
+  });
+
+  test.each([
+    { scenario: 'WhatsApp disabled', enabled: false, phone: '+15555550160', verified: 1 },
+    { scenario: 'an unverified phone', enabled: true, phone: '+15555550160', verified: 0 },
+    { scenario: 'an unusable phone', enabled: true, phone: '+1555bad0160', verified: 1 },
+  ])('keeps the last passkey with $scenario', async ({ enabled, phone, verified }) => {
+    const { userId } = await signup();
+    const [last] = await jsonOK(await request('/api/auth/passkey/account/list'));
+    const mf = enabled ? await instance(true) : runtime;
+    const db = await mf.getD1Database('DB');
+    await db.prepare('UPDATE user SET phoneNumber = ?, phoneNumberVerified = ? WHERE id = ?')
+      .bind(phone, verified, userId).run();
+    await expectError(await request('/api/auth/passkey/account/delete', { id: last.id }, { mf }),
+      409, 'LAST_PASSKEY');
+    expect(await jsonOK(await request('/api/auth/passkey/account/list', undefined, { mf }))).toEqual([last]);
+  });
+
+  test('the owner can sign in with WhatsApp after deleting the last passkey', async () => {
+    const { userId } = await signup();
+    const [last] = await jsonOK(await request('/api/auth/passkey/account/list'));
+    const mf = await instance(true);
     const db = await runtime.getD1Database('DB');
     await db.prepare('UPDATE user SET phoneNumber = ?, phoneNumberVerified = 1 WHERE id = ?')
       .bind('+15555550160', userId).run();
-    expect(await jsonOK(await request('/api/auth/passkey/account/delete', { id: last.id })))
+    expect(await jsonOK(await request('/api/auth/passkey/account/delete', { id: last.id }, { mf })))
       .toEqual({ status: true });
     expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', userId)).toBe(0);
+
+    cookie = '';
+    const started = await startWhatsApp(mf);
+    expect((await deliver(mf, started.code, { from: '15555550160' })).status).toBe(200);
+    const signedIn = await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf }));
+    expect(signedIn.user.id).toBe(userId);
   });
 
   test("someone else's passkey cannot be deleted and answers like a missing one", async () => {

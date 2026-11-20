@@ -306,9 +306,9 @@ trimmed and must be 1 to 64 characters. Success is `{passkey: {...}}` as listed.
 
 Deleting: `POST /api/auth/passkey/account/delete` with `{id}`, behind a fresh
 sign-in. Success is `{status: true}`. Deleting the account's last passkey is
-refused with HTTP 409 `{code: "LAST_PASSKEY"}` unless the account also has a phone
-number: add another passkey first. There is no recovery for a person who loses
-every passkey.
+allowed only when WhatsApp sign-in is enabled and the account has a verified
+phone number usable for WhatsApp sign-in. Otherwise the service returns HTTP
+409 `{code: "LAST_PASSKEY"}`. The person must add another passkey first.
 
 A missing ID and another person's ID both answer HTTP 404
 `{code: "PASSKEY_NOT_FOUND", message: "Passkey not found"}`, byte for byte the same.
