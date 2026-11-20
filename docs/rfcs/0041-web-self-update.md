@@ -50,9 +50,10 @@ The updater reads **only** the signed lane pointer, never the releases list:
    downgrades); a `sequence` lower than the last one this instance took (recorded in `current.json`, as
    am refuses its own pointer at `am/lib/self.mjs:369`); a plugin whose `engines.dsh` the running DSH
    does not satisfy (as `scripts/upgrade.ts:543-545` and `apps/desktop/src/lane.js:132` check); an
-   instance with no supervisor or no writable home; and, where the instance cannot reach the package
-   registry the install needs, an install that would fail half-way. The nod is never offered for an
-   update that would stop work and then fail.
+   instance with no supervisor or no writable home; and an instance that cannot reach the package
+   registry the install needs at the moment of the check. These checks keep the nod from offering an
+   update that is known to fail; they cannot promise a later download or install succeeds, and a
+   failure after the click takes the path in "When the update fails before the switch".
 
 The keys are never printed, never written into a log, and never returned by a route. A missing key, an
 unknown `keyId` or a failed signature stops the update with a sentence the person can read. This is the
@@ -66,8 +67,8 @@ A host plugin cannot supervise the restart of the service it runs in: the plain 
 (`docs/upgrade.md:121`, `:203`); in a server image the entrypoint forwards termination to DSH and exits
 with it (`server/entrypoint.mjs:158-159`). So the **supervisor is the process that starts DSH**:
 
-- **Plain host:** a small wrapper the unit's `ExecStart` runs once the owner switches it on
-  (documented in `docs/upgrade.md`, a one-time host change). It starts DSH as its child and restarts
+- **Plain host:** a small wrapper the unit's `ExecStart` runs once the owner switches it on (a
+  one-time host change that delivery 5 documents in `docs/upgrade.md`). It starts DSH as its child and restarts
   that child itself, so an update never calls `systemctl` or `sudo`. It runs from its own copy under
   the version store, so an update never replaces the running supervisor. The copy is refreshed only
   after a healthy run, and only when the new code passes a self-check run (it loads every module and
@@ -93,30 +94,59 @@ The version store lives **beside** the profile, never in it: `$DSH_HOME/update/<
 profile directory (`server/profile-follow.mjs:144-174`), which would carry or drop a store inside it.
 
 - **Only installer-owned files move.** The installer owns, in the profile: `node_modules/`, the
-  `pnpm-lock.yaml`, the local archives that lockfile names (`vendor/*.tgz` on an image host), and in
+  `pnpm-lock.yaml`, the updater's own copies of the set's tarballs (below), and in
   `package.json` only the entries of the selected lane plugins (`@automagik/acp-dsh`, `bots-dsh`,
   `locale-pt-br-dsh`, `vault-dsh`, `welcome-dsh` — never every `@automagik/*` name, which other
   publishers' plugins also use). Everything else in the profile — settings, secrets, model keys, other
   plugins' entries — belongs to the person and is never copied, moved or written by an update or a
   rollback.
-- **The install is staged on those files alone.** A staging profile beside the live one gets a copy of
-  `package.json` and the lockfile (and the archives the lockfile names) — no settings, no secrets — and
-  the new set is installed into it through DSH (`dsh plugin add file:<tgz>` with the verified tarballs),
-  under a staging `DSH_HOME` on the same pnpm store, as the image's follow stages its install
-  (`server/profile-follow.mjs:144-174`). The live profile is not touched while it runs.
+- **Archives: only the updater's own copies.** A lockfile naming an archive does not make it the
+  updater's: a plain host's upgrade pins tarballs in `releases/<version>/dist/`, outside the profile
+  (`scripts/upgrade.ts:653`), and an image keeps its `vendor/` archives for later installs
+  (`server/README.md:398`). The updater never moves, renames or deletes an archive it did not put
+  there. It copies each verified candidate tarball into the profile's own `vendor/` under a
+  content-addressed name (`vendor/automagik-update/<sha256>.tgz`) and pins `file:` to that copy; only
+  those copies belong to a version. Before the switch, every candidate `file:` pin must resolve with
+  the staging profile removed.
+- **The install is staged on those files alone, with the profile's own installer settings.** A
+  staging profile beside the live one gets a copy of `package.json`, the lockfile and the profile's
+  pnpm settings (`pnpm-workspace.yaml` and its kind: the image's hoisted linker and its peer rule,
+  `server/profile/pnpm-workspace.yaml:6`) — no settings of the person's, no secrets — and the new set is
+  installed into it through DSH (`dsh plugin add file:vendor/automagik-update/<sha256>.tgz`), under a
+  staging `DSH_HOME` on the same pnpm store, as the image's follow stages its install
+  (`server/profile-follow.mjs:144-174`). The staged lock must then pass a frozen install with the live
+  profile's settings, or the update stops before the switch. The live profile is not touched while
+  it runs.
 - **The switch happens with DSH stopped, and only if nothing changed meanwhile.** The supervisor
   stops the DSH child, checks that the live `package.json` and lockfile are byte-equal to what was
-  staged from (if the person changed a plugin meanwhile, the switch is refused and the pre-switch
-  failure path below runs), then: moves the live `node_modules/` and the archives into
+  staged from (if the person changed a plugin meanwhile, the switch is refused: the supervisor starts
+  the unchanged child again and takes the pre-switch failure path below), takes the data snapshot
+  below, then: moves the live `node_modules/` and the updater's previous tarball copies into
   `versions/<previous>/` by rename, renames the staged `node_modules/` in, writes the selected lane
   plugins' entries into the live `package.json` (leaving every other key as it is) and puts the staged
   lockfile in place. It then relinks that tree in place, offline (`dsh plugin install --offline
   --frozen-lockfile` on the live profile: every package is already in the store), so no path written
   under the staging profile survives the move; a relink that fails is a failed candidate and the
   rollback below runs. Plugin installs and removals are refused while an update runs.
+- **A switch or a rollback cut half-way is finished before anything starts.** Each switch and each
+  rollback writes its intent and every completed rename to `state.json` before the next one, under
+  the store's lock. A supervisor that starts and finds an unfinished one completes it or undoes it, by
+  that record, before the image's follow or DSH starts, as the image's follow recovers its own swap
+  (`recoverSwap`, `server/profile-follow.mjs:75`).
+- **The data the new version migrates is snapshotted at the switch.** Loading the team can save a
+  forward-only migration (`apps/bots-dsh/src/host/store.js:199`, `:439`), and an older Bots refuses a
+  newer state format; a server image already says going back needs matching data
+  (`server/README.md:409`). So, with DSH stopped, the supervisor copies into `versions/<previous>/` the
+  set's versioned state files, and only those: the Bots team file `store.js` stamps with a format
+  version, and any other set plugin's state file that carries one — never sessions, secrets or
+  settings. A rollback restores them only when the trial wrote a newer format than the previous
+  version reads. Admission stays closed through the trial, so no Bot turn writes there; the one named
+  limit is a change the person makes to the team in the trial's health window (at most two minutes),
+  which a restored snapshot undoes, and the rollback screen says so when it happened.
+  `manualRecovery` names the snapshot beside the kept version.
 - **The previous version is kept whole, so a rollback installs nothing.** `versions/<previous>/` holds
-  the previous `node_modules/` (moved aside, not deleted), its lockfile, its lane plugins' entries and
-  the archives its lockfile names. A rollback renames them back the same way; it needs no network, no
+  the previous `node_modules/` (moved aside, not deleted), its lockfile, its lane plugins' entries, the
+  updater's tarball copies its lockfile names and the data snapshot. A rollback renames them back the same way; it needs no network, no
   registry and no dependency store, so it works on a fresh Arca volume as on a plain host. The store
   and the profile must be on one filesystem for those renames; where they are not, the updater
   refuses before the click. This is the host upgrade's never-half-updated rule
@@ -168,10 +198,12 @@ The restart kills the web socket under the open page, so the modal cannot be dri
 
 - Triggered by any health check failing or timing out, or by the new DSH exiting before health.
 - Steps: stop the DSH child, rename the kept version's installer-owned files back (its
-  `node_modules/`, lockfile, archives and lane plugins' entries), restart the same way, then run the
-  same health checks against the **previous** version.
+  `node_modules/`, lockfile, the updater's tarball copies and lane plugins' entries), restore the data
+  snapshot when the trial wrote a newer format, restart the same way, then run the same health checks
+  against the **previous** version.
 - If the previous version is healthy, the state records `rolledBack` with both versions, and the modal
-  says the previous version came back and nothing was lost.
+  says the previous version came back and nothing was lost (or names the team change the snapshot
+  undid, the one limit above).
 - If the previous version is also unhealthy, the state records `manualRecovery` with what was tried;
   the instance stops in a state the owner can see, and the message names the kept version and the
   command (or, in Arca, the image) that brings it back. The updater never loops.
@@ -182,7 +214,8 @@ The restart kills the web socket under the open page, so the modal cannot be dri
 Work stops at the click, before the download (Q6), so a failure before the switch must give it back:
 a refused or failed download, a failed check, a staged install that does not converge, a refused
 switch, or a supervisor restart before the switch. In each case the supervisor discards the staging
-profile, confirms the still-current instance answers the health checks above, records `notUpdated`
+profile, starts the unchanged DSH child again if it had stopped it, confirms the still-current
+instance answers the health checks above (or records `manualRecovery` if it does not), records `notUpdated`
 with the reason, reopens admission and releases the held work once, through the same resume as after a
 healthy update. The modal says the update did not happen, why, and that the work came back.
 
@@ -265,8 +298,8 @@ is interrupted at the click, and it comes back by itself once a healthy version 
    rather than a silent loss.
 
 The modal states it before the click: "Work in progress stops when you click Update now, and it comes
-back by itself once the update is done. Nothing is lost." The success and rollback screens say that the
-stopped work came back.
+back by itself once the update is done. Nothing is lost." The success, rollback and not-updated screens
+report what actually came back: the work that resumed, and by name any that could not (step 6).
 
 ## What exists already, and what we reuse ("O que já existe e o que reutilizamos")
 
@@ -294,9 +327,9 @@ and the sections above now carry the corrected design:
 2. **Q2 kept as the owner chose it:** in Arca the restart is Arca's container restart; the entrypoint
    records the pending step and finishes it on the next start. On a plain host the wrapper restarts its
    DSH child.
-3. **The version store moved beside the profile** (`$DSH_HOME/update/<profile>/`), and it keeps only
-   the Automagik pins and the lockfile: a rollback never restores a whole-profile backup, so settings,
-   secrets and model keys written after the update survive it.
+3. **The version store moved beside the profile** (`$DSH_HOME/update/<profile>/`); what a version
+   keeps is the inventory in "Where the previous version is kept". A rollback never restores a
+   whole-profile backup, so settings, secrets and model keys written after the update survive it.
 4. **The update set is every Automagik plugin the profile has, at one version**, instead of "this
    plugin" alone.
 5. **The Arca path no longer hands the payload to the image's follow**, which cannot install lane
@@ -316,7 +349,13 @@ and the sections above now carry the corrected design:
     a start it forges is bounded to the newest signed, checked version.
 11. **The plain-host wrapper is refreshed only after a self-check**, with the previous copy kept as the
     fallback the unit starts.
-12. **Corrections to "What exists already":** the Bots plugin's own updater and the desktop's lane
+12. **Final review, 2026-11-20:** archives outside the profile are never moved (the updater pins its
+    own content-addressed copies); the data the new version migrates is snapshotted at the switch and
+    restored on rollback when its format moved, with the trial-window team change as the one named
+    limit; staging reproduces the profile's pnpm settings; an interrupted switch or rollback is
+    finished from its record before anything starts; a refused switch restarts the unchanged child;
+    the preflight and the final screens say only what they checked and what came back.
+13. **Corrections to "What exists already":** the Bots plugin's own updater and the desktop's lane
    reader are listed (the desktop can take a subset; the web takes the whole set); am reads its own pointer; the plugin pointer moves only on releases that ship
    plugins; the supervisor ships under an already shipped path, so the plugin-only lane holds.
 
