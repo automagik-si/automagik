@@ -92,9 +92,10 @@ export async function runSupervisor({
   const stop = async (sig) => {
     if (child) await child.stop(sig)
   }
+  // The signal the service sent goes to DSH first; the shutdown that follows never sends a second one.
   const forward = Object.fromEntries(['SIGTERM', 'SIGINT', 'SIGHUP'].map(sig => [sig, () => {
-    shutdown(0)
     void stop(sig)
+    shutdown(0)
   }]))
 
   function discard(staging) {
@@ -103,6 +104,10 @@ export async function runSupervisor({
 
   async function giveBack(staging, reason, restart) {
     signal.throwIfAborted()
+    discard(staging)
+    if (validJournal(run) && run.journal.undo && run.journal.done.length === 0) {
+      fs.rmSync(join(store, run.journal.keep), { recursive: true, force: true })
+    }
     if (restart) {
       // A restored child exiting belongs to supervisor health until the verdict is recorded.
       trial = true
@@ -114,10 +119,6 @@ export async function runSupervisor({
       trial = false
     }
     phase('notUpdated', reason)
-    discard(staging)
-    if (validJournal(run) && run.journal.undo && run.journal.done.length === 0) {
-      fs.rmSync(join(store, run.journal.keep), { recursive: true, force: true })
-    }
   }
 
   async function manualRecovery(code = 1, reason = 'health-failed') {

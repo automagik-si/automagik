@@ -29,8 +29,8 @@ export function startChild([node, ...args], env, onExit) {
   child.stop = (signal = 'SIGTERM') => {
     if (child.result) return child.exited
     child.expectedExit = true
-    processChild.kill(signal)
     if (!stopping) {
+      processChild.kill(signal)
       const timer = setTimeout(() => processChild.kill('SIGKILL'), CHILD_STOP_MS)
       stopping = child.exited.finally(() => clearTimeout(timer))
     }

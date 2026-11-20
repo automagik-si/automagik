@@ -2,15 +2,15 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
-import { stageInstall, takeProfileLock } from '../src/host/supervisor/stage.js'
+import { stageInstall, takeProfileLock, VENDOR } from '../src/host/supervisor/stage.js'
 import { completeSwitch, planSwitch } from '../src/host/supervisor/switch.js'
 import { writeJsonAtomic } from '../src/host/supervisor/store.js'
-import { BOTS, eventsOf, fixture, FROM, MAIN, lane, putDownloads, read, RUN_ID, TO } from './fixtures/supervisor.mjs'
+import { BOTS, eventsOf, fixture, FROM, HOST, lane, putDownloads, read, RUN_ID, TO, write } from './fixtures/supervisor.mjs'
 
 const DRIVER = fileURLToPath(new URL('./fixtures/supervisor-driver.mjs', import.meta.url))
 const stateOf = f => read(join(f.store, 'state.json'))
@@ -47,11 +47,20 @@ async function until(get, message) {
 }
 
 async function setup(t, f) {
-  const cli = launch(t, process.execPath, [MAIN, 'install-copy', ...opts(f)], f.env)
+  const installed = join(f.profileDir, 'node_modules', BOTS)
+  const host = join(installed, 'src/host')
+  fs.mkdirSync(join(host, 'supervisor'), { recursive: true })
+  for (const file of [...SUPERVISOR_FILES, 'supervisor/launcher.sh']) {
+    fs.copyFileSync(join(HOST, file), join(host, file))
+  }
+  const manifest = join(installed, 'package.json')
+  write(manifest, { ...read(manifest), type: 'module' })
+  const cli = launch(t, process.execPath, [join(host, 'supervisor/main.js'), 'install-copy', ...opts(f)], f.env)
   const result = await cli.exit
   assert.equal(result.code, 0, result.stderr)
   const launcher = result.stdout.trim()
   const current = join(f.store, 'supervisor/current')
+  assert.equal(read(join(current, 'version.json')).version, FROM)
   for (const file of SUPERVISOR_FILES) assert.ok(fs.existsSync(join(current, file)), file)
   const check = launch(t, process.execPath, [join(current, 'supervisor/main.js'), '--self-check'], f.env)
   assert.equal((await check.exit).code, 0)
@@ -146,7 +155,7 @@ test('a boot-bound request updates once, keeps the old version and rotates the s
   assert.deepEqual(read(join(f.store, 'current.json')), {
     version: 1, live: { version: TO, sequence: 42 }, kept: { version: FROM }, lastSequence: 42,
   })
-  assert.ok(fs.existsSync(join(f.store, 'supervisor/kept/version.json')))
+  assert.deepEqual(read(join(f.store, 'supervisor/kept/version.json')), { version: FROM })
   assert.ok(fs.existsSync(launcher))
   assert.equal(fs.existsSync(earlier), false)
   assert.equal(fs.existsSync(join(f.store, `stage-${state.runId}`)), false)
@@ -169,6 +178,11 @@ for (const [mode, phase, reason] of [
 ]) {
   test(`records ${phase} after ${mode}`, async t => {
     const f = fixture(t, { mode })
+    const lockfile = join(f.profileDir, 'pnpm-lock.yaml')
+    const manifest = join(f.profileDir, 'package.json')
+    const originalLockfile = fs.readFileSync(lockfile)
+    const originalManifest = fs.readFileSync(manifest)
+    const originalArchive = fs.readFileSync(f.archive)
     const running = driver(t, f)
     await until(() => running.stdout().includes('token=x'), 'fake child did not start')
     request(f)
@@ -183,8 +197,17 @@ for (const [mode, phase, reason] of [
       assert.equal(boots(f).length, 2)
       assert.equal(stateOf(f).bootId, supervisorOf(f).bootId)
     } else {
-      assert.equal(fs.existsSync(join(f.store, `stage-${stateOf(f).runId}`)), false)
-      if (mode === 'lock-edit-while-staging') assert.match(fs.readFileSync(join(f.profileDir, 'pnpm-lock.yaml'), 'utf8'), /owner: edited/)
+      assert.equal(fs.existsSync(join(f.store, `stage-${stateOf(f).runId}`)), false, 'staging still exists after notUpdated')
+      if (mode === 'lock-edit-while-staging') assert.match(fs.readFileSync(lockfile, 'utf8'), /owner: edited/)
+      if (mode === 'relink-fails') {
+        assert.deepEqual(fs.readFileSync(lockfile), originalLockfile)
+        assert.deepEqual(fs.readFileSync(manifest), originalManifest)
+        assert.deepEqual(fs.readFileSync(f.archive), originalArchive)
+        assert.deepEqual(fs.readdirSync(join(f.profileDir, VENDOR)), [basename(f.archive)])
+        assert.equal(fs.readFileSync(join(f.profileDir, 'vendor/owner.tgz'), 'utf8'), 'owner archive')
+        assert.equal(eventsOf(f).filter(event => event.event === 'install' && event.live).length, 1)
+        assert.deepEqual(boots(f)[1], boots(f)[0])
+      }
       running.child.kill('SIGTERM')
       assert.equal((await running.exit).code, 0)
     }
@@ -194,6 +217,7 @@ for (const [mode, phase, reason] of [
 for (const move of ['keep-lockfile', 'install-modules']) {
   test(`a new supervisor recovers an interrupted ${move} before the first child boot`, async t => {
     const f = fixture(t)
+    const launcher = await setup(t, f)
     const release = await takeProfileLock(f.profileDir)
     try {
       await stageInstall(f.config, f.staging, putDownloads(f), f.versions)
@@ -209,7 +233,6 @@ for (const move of ['keep-lockfile', 'install-modules']) {
       }), /supervisor cut/)
     } finally { release() }
 
-    const launcher = await setup(t, f)
     const child = launch(t, 'sh', [launcher, ...opts(f), '--', ...f.command], f.env)
     const completed = move === 'install-modules'
     const phase = completed ? 'healthy' : 'notUpdated'
