@@ -23,6 +23,7 @@ import {
   redactTokens,
 } from './lib.mjs'
 import { LAUNCH_FILE, prepareGateView, writePrivateFile, writeProfileState } from './gate-view.mjs'
+import { multiuserMode, startupDecision } from './profile-multiuser.mjs'
 import { followImage } from './profile-follow.mjs'
 import { nativeWorkerEnv, panelCliHomes } from './native-worker-login.mjs'
 import { installVendorClis, runFirstBoot } from './first-boot.mjs'
@@ -112,6 +113,22 @@ export function pipeRedacted(stream, into, onLine, onRawLine, maxPending = Infin
   })
 }
 
+// RFC 0038 delivery 1: this image does not carry the multiuser adapter yet, so multiuser mode on
+// (or an invalid value) stops startup before the core or DSH is launched (fail closed).
+export function refuseStartup({ env, warn, exit }) {
+  const { ok, reason } = startupDecision(multiuserMode(env.AUTOMAGIK_MULTIUSER))
+  if (ok) return false
+  warn(reason)
+  exit(1)
+  return true
+}
+
+export async function runStartup({ env, launchCore, launchDsh, exit, warn }) {
+  if (refuseStartup({ env, warn, exit })) return
+  await launchCore()
+  await launchDsh()
+}
+
 async function main() {
   const env = process.env
   let publicArgs
@@ -182,6 +199,7 @@ async function main() {
   writeProfileState(gateView, seeded)
   log(seeded.seeded ? `seeded ${seeded.target}` : `profile present at ${seeded.target}`)
   log(`image follow: ${seeded.result}; ${seeded.reason}`)
+  if (refuseStartup({ env, warn, exit: process.exit })) return
 
   let key
   try {

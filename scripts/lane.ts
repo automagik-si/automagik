@@ -89,6 +89,8 @@ const MAX_ROLE_COUNT = 200;
 // The plugins this release lane ships and updates. None of Unfold's is one: they left this
 // repository for Unfold's own, whose release ships them (RFC 0020); this repository's releases
 // attach no tarball of any and its lane names none. Whoever installed one keeps it.
+/** Released tarballs listed in plugins.json and omitted from desktop builds, profiles and lane readers. */
+export const SERVER_PLUGINS = ['multiuser-dsh'];
 const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'];
 const PROFILE = 'apps/desktop/profile/package.json';
 // The add-ons the desktop profile pins that the lane carries too, so a pin move is a patch: each
@@ -321,18 +323,18 @@ const neverShipped = (path: string) => !HERDR_SHIPPING_SCRIPTS.test(path) && (pa
 
 /**
  * A file inside a plugin that its package does not carry (not in its package.json `files`), such
- * as its dev tools and lint script: no install sees it. A plugin's dev/harness and lockfile still
+ * as its dev tools and lint script: no install sees it. A desktop plugin's dev/harness and lockfile still
  * count (the app's build reads them), and so does any file of a plugin whose `files` has a glob.
  */
 export function unpackedIn(files: Record<string, string[]>) {
   return (path: string) => {
     // The release packs these as separate role tarballs.
     if (ROLE_SOURCE.test(path)) return false;
-    const plugin = PLUGINS.find(name => path.startsWith(`apps/${name}/`));
+    const plugin = [...PLUGINS, ...SERVER_PLUGINS].find(name => path.startsWith(`apps/${name}/`));
     const carried = plugin ? files[plugin] : undefined;
     if (!plugin || !carried || carried.some(entry => /[*?![{]/.test(entry))) return false;
     const inside = path.slice(`apps/${plugin}/`.length);
-    if (inside === 'package.json' || inside.startsWith('dev/harness/') || LOCKFILE.test(inside)) return false;
+    if (inside === 'package.json' || (PLUGINS.includes(plugin) && (inside.startsWith('dev/harness/') || LOCKFILE.test(inside)))) return false;
     return !carried.some(entry => (entry.endsWith('/') ? inside.startsWith(entry) : inside === entry || inside.startsWith(`${entry}/`)));
   };
 }
@@ -400,6 +402,7 @@ export function kindOf(changed: string[], installChanged: (plugin: string) => bo
   if (changed.length === 0) return 'full';
   for (const path of changed) {
     if (neverShipped(path) || inert(path) || HERDR.test(path) || POCKET.test(path) || METER.test(path) || AM.test(path)) continue;
+    if (SERVER_PLUGINS.some(name => path.startsWith(`apps/${name}/`))) continue;
     const plugin = PLUGINS.find(name => path.startsWith(`apps/${name}/`));
     if (!plugin) return 'full';
     const inside = path.slice(`apps/${plugin}/`.length);
@@ -528,15 +531,17 @@ export function manifest(plugins: ReleasePlugins, { base, issuedAt, dir, engines
     version: plugins.version,
     commit: plugins.commit,
     base,
-    plugins: Object.entries(plugins.packages).map(([name, entry]) => ({
-      name,
-      version: entry.version,
-      url: `${DOWNLOADS}v${plugins.version}/${entry.file}`,
-      integrity: entry.integrity,
-      sha256: sha256(entry.file),
-      size: entry.size,
-      engines: { dsh: engines(name) },
-    })),
+    plugins: Object.entries(plugins.packages)
+      .filter(([name]) => !SERVER_PLUGINS.some(plugin => name === `@automagik/${plugin}`))
+      .map(([name, entry]) => ({
+        name,
+        version: entry.version,
+        url: `${DOWNLOADS}v${plugins.version}/${entry.file}`,
+        integrity: entry.integrity,
+        sha256: sha256(entry.file),
+        size: entry.size,
+        engines: { dsh: engines(name) },
+      })),
     addons: Object.entries(addons).map(([name, entry]) => ({
       name,
       version: entry.version,
@@ -685,17 +690,18 @@ if (import.meta.main) {
     const diff = (from: string) => {
       const paths = git('diff', '--name-only', `${from}..HEAD`).split('\n').filter(Boolean);
       if (command === 'ships' || command === 'kind') {
-        // A detected rename out of roles/ would otherwise report only its destination.
-        const rolePaths = git('diff', '--name-only', '--no-renames', '-z', `${from}..HEAD`, '--', `${ROLE_ROOT}/`)
-          .split('\0').filter(path => ROLE_SOURCE.test(path));
-        return [...new Set([...paths, ...rolePaths])];
+        // A rename into an unpacked path can still remove a shipped role or server plugin file.
+        const serverRoots = SERVER_PLUGINS.map(name => `apps/${name}/`);
+        const shippingPaths = git('diff', '--name-only', '--no-renames', '-z', `${from}..HEAD`, '--', `${ROLE_ROOT}/`, ...serverRoots)
+          .split('\0').filter(path => ROLE_SOURCE.test(path) || serverRoots.some(root => path.startsWith(root)));
+        return [...new Set([...paths, ...shippingPaths])];
       }
       return paths;
     };
     const changed = diff(last);
     const before = (path: string) => git('show', `${last}:${path}`);
     const read = (get: () => string) => { try { return get(); } catch { return undefined; } };
-    const unpacked = unpackedIn(Object.fromEntries(PLUGINS.map(plugin => [plugin, JSON.parse(readFileSync(join(ROOT, 'apps', plugin, 'package.json'), 'utf8')).files ?? []])));
+    const unpacked = unpackedIn(Object.fromEntries([...PLUGINS, ...SERVER_PLUGINS].map(plugin => [plugin, JSON.parse(readFileSync(join(ROOT, 'apps', plugin, 'package.json'), 'utf8')).files ?? []])));
     // A file only the version fields of changed in (a release's own bump), or the held meter's.
     const bumped = (path: string) => versionOnly(path, read(() => before(path)), read(() => readFileSync(join(ROOT, path), 'utf8')));
     const inert = (path: string) => bumped(path) || (held && METER.test(path));

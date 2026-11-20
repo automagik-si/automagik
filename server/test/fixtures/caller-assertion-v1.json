@@ -1,0 +1,46 @@
+{
+  "protectedHeaderTemplate": "{\"alg\":\"EdDSA\",\"kid\":\"<kid>\",\"typ\":\"automagik-caller\"}",
+  "familyId": "family-fixture",
+  "limits": { "targetBytes": 4096, "headerBytes": 8192 },
+  "payload": {
+    "version": 1,
+    "aud": "workspace-1",
+    "principal": {
+      "issuer": "https://identity.invalid",
+      "subject": "member-1",
+      "roles": [
+        "member"
+      ],
+      "workspace": "workspace-1"
+    },
+    "session": "_udHdc_PO_-bD5iqTRPZrLznsgaZat3e5j9SnPlsVXw",
+    "method": "POST",
+    "path": "/api/fixture?b=2&a=%20&a=1",
+    "iat": 1700000000,
+    "exp": 1700000030,
+    "nonce": "AAECAwQFBgcICQoLDA0ODw"
+  },
+  "canonicalTargets": [
+    [
+      "/api/fixture?b=2&a=%20&a=1",
+      "/api/fixture?b=2&a=%20&a=1"
+    ],
+    [
+      "/x/../api/a?value=+&value=%20",
+      "/api/a?value=+&value=%20"
+    ],
+    [
+      "/api/%2e/a",
+      "/api/a"
+    ],
+    [
+      "/plugins/??a/client.js,b/client.js&rev=x",
+      "/plugins/??a/client.js,b/client.js&rev=x"
+    ],
+    [
+      "/api/a?",
+      "/api/a"
+    ]
+  ],
+  "payloadSegment": "eyJ2ZXJzaW9uIjoxLCJhdWQiOiJ3b3Jrc3BhY2UtMSIsInByaW5jaXBhbCI6eyJpc3N1ZXIiOiJodHRwczovL2lkZW50aXR5LmludmFsaWQiLCJzdWJqZWN0IjoibWVtYmVyLTEiLCJyb2xlcyI6WyJtZW1iZXIiXSwid29ya3NwYWNlIjoid29ya3NwYWNlLTEifSwic2Vzc2lvbiI6Il91ZEhkY19QT18tYkQ1aXFUUlBackx6bnNnYVphdDNlNWo5U25QbHNWWHciLCJtZXRob2QiOiJQT1NUIiwicGF0aCI6Ii9hcGkvZml4dHVyZT9iPTImYT0lMjAmYT0xIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDAwMzAsIm5vbmNlIjoiQUFFQ0F3UUZCZ2NJQ1FvTERBME9EdyJ9"
+}

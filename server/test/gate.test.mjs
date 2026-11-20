@@ -7,10 +7,12 @@ import net from 'node:net'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import { COOKIE, cookieSecret, createOwner, IDLE_MS, principalOf, readOwner, SessionStore, sessionCookie } from '../gate-store.mjs'
+import { createSigner } from '../gate-caller.mjs'
+import { verifyAssertion } from '../../apps/multiuser-dsh/src/assertion.js'
 import { createGate, pinOrigin } from '../gate.mjs'
 import { DSH_HOST, DshCredentials } from '../gate-upstream.mjs'
 
@@ -42,6 +44,15 @@ function request(port, path = '/', { method = 'GET', headers = {}, body, upgrade
     req.setTimeout(5000, () => req.destroy(new Error('Test request timed out')))
     req.end(body)
   })
+}
+async function rawRequest(port, line, headers, body = '') {
+  const socket = net.connect({ host: DSH_HOST, port })
+  socket.setTimeout(5000, () => socket.destroy(new Error('Raw test request timed out')))
+  const response = []
+  socket.on('data', chunk => response.push(chunk))
+  socket.write([line, ...headers, '', body].join('\r\n'))
+  await once(socket, 'close')
+  return Number(/^HTTP\/1\.1 (\d+)\b/.exec(Buffer.concat(response).toString())?.[1])
 }
 const websocketHeaders = { origin: ORIGIN, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': randomBytes(16).toString('base64'), 'sec-websocket-version': '13' }
 
@@ -392,4 +403,343 @@ test('every rotated hash uses timingSafeEqual even when the current hash matched
   assert.equal(f.sessions.authenticate(issued.secret, ORIGIN), undefined)
   assert.deepEqual(comparisons, expected, 'replay must compare every rotated hash with timingSafeEqual')
   assert.equal(f.sessions.list().length, 0)
+})
+
+async function callerFixture(t, { multiuser = true, selfHosted, carrierStatus = 200, captureWire = false } = {}) {
+  const { dir, sessions } = store(t, { memory: true, accepts: () => true })
+  const seen = [], cookieCalls = [], signs = [], wire = []
+  const workspace = 'caller-workspace'
+  const issue = role => {
+    const principal = { issuer: 'https://identity.invalid', subject: role, roles: [role], workspace }
+    const issued = sessions.issue(ORIGIN, principal)
+    return { ...issued, principal, headers: { cookie: `${COOKIE}=${issued.secret}`, origin: ORIGIN } }
+  }
+  const upstream = http.createServer((req, res) => {
+    const { method, url, rawHeaders, headers } = req
+    const hop = { method, url, rawHeaders, headers }
+    seen.push(hop)
+    const chunks = []
+    if (captureWire) req.on('data', chunk => chunks.push(chunk))
+    else req.resume()
+    req.on('end', () => {
+      if (captureWire) hop.body = Buffer.concat(chunks).toString()
+      res.writeHead(url.startsWith('/_automagik/caller') ? carrierStatus : 200).end()
+    })
+  })
+  if (captureWire) upstream.on('connection', socket => socket.on('data', chunk => wire.push(chunk)))
+  upstream.on('upgrade', (req, socket) => {
+    const { method, url, headers } = req
+    seen.push({ method, url, headers })
+    socket.on('error', () => {})
+    socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+  })
+  const port = await listen(upstream)
+  const credentials = { port, authority: `${DSH_HOST}:${port}`, async cookie(refresh) {
+    cookieCalls.push(refresh)
+    return 'dsh=cached'
+  } }
+  const signer = createSigner({ dir, publicDir: dir, instance: () => workspace })
+  const caller = { sign(value) { signs.push(value); return signer.sign(value) } }
+  const makeGate = async (enabled, hosted = selfHosted) => {
+    const gate = createGate({ origin: ORIGIN, sessions, credentials, multiuser: enabled, caller, selfHosted: hosted })
+    const gatePort = await listen(gate)
+    t.after(() => gate.closeGate())
+    return gatePort
+  }
+  const gatePort = await makeGate(multiuser)
+  const stopUpstream = () => { upstream.closeAllConnections(); return new Promise(resolve => upstream.close(resolve)) }
+  t.after(stopUpstream)
+  return { dir, sessions, issue, seen, signs, cookieCalls, gatePort, makeGate, stopUpstream, wire }
+}
+
+test('the gate sends exactly one framed DELETE or POST with the original body on every HTTP proxy path', async t => {
+  const f = await callerFixture(t, { captureWire: true })
+  const off = await f.makeGate(false)
+  const member = f.issue('member')
+  const owner = f.issue('owner')
+  const body = 'alpha\r\nbeta'
+  for (const [port, path, target, headers] of [
+    [f.gatePort, '/api/example', '/_automagik/caller/api/example', member.headers],
+    [f.gatePort, '/api/example', '/api/example', owner.headers],
+    [off, '/api/example', '/api/example', owner.headers],
+    [off, '/api/omni-mcp', '/api/omni-mcp', { origin: ORIGIN, authorization: 'Bearer fixture' }],
+  ]) {
+    const base = [`Host: ${HOST}`, 'Connection: close', ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`)]
+    for (const [method, framed, upload] of [
+      ['DELETE', 'Transfer-Encoding: chunked', '5\r\nalpha\r\n6\r\n\r\nbeta\r\n0\r\n\r\n'],
+      ['POST', 'Transfer-Encoding: Chunked', '5\r\nalpha\r\n6\r\n\r\nbeta\r\n0\r\n\r\n'],
+      ['DELETE', `Content-Length: ${Buffer.byteLength(body)}`, body],
+    ]) {
+      const count = f.seen.length
+      const offset = f.wire.length
+      assert.equal(await rawRequest(port, `${method} ${path} HTTP/1.1`, [...base, framed], upload), 200)
+      assert.equal(f.seen.length, count + 1)
+      const hop = f.seen.at(-1)
+      assert.deepEqual([hop.method, hop.url, hop.body], [method, target, body])
+      const isChunked = framed.startsWith('Transfer-Encoding')
+      assert.equal(hop.headers['transfer-encoding'], isChunked ? 'chunked' : undefined)
+      assert.equal(hop.headers['content-length'], isChunked ? undefined : String(Buffer.byteLength(body)))
+      const raw = Buffer.concat(f.wire.slice(offset)).toString()
+      assert.equal(raw.split('\r\n', 1)[0], `${method} ${target} HTTP/1.1`)
+      assert.equal(raw.match(/ HTTP\/1\.1\r\n/g)?.length, 1)
+      assert.ok(raw.endsWith(isChunked ? '\r\n0\r\n\r\n' : body))
+    }
+  }
+})
+
+test('ambiguous or unsupported upload framing is refused before signing or acquiring credentials', async t => {
+  const f = await callerFixture(t)
+  const off = await f.makeGate(false)
+  const member = f.issue('member')
+  const owner = f.issue('owner')
+  for (const [port, path, cookie] of [
+    [f.gatePort, '/api/example', member.headers.cookie],
+    [f.gatePort, '/api/example', owner.headers.cookie],
+    [off, '/api/omni-mcp', owner.headers.cookie],
+  ]) {
+    const base = [`Host: ${HOST}`, `Origin: ${ORIGIN}`, `Cookie: ${cookie}`, 'Connection: close']
+    for (const framing of [['Transfer-Encoding: chunked', 'Content-Length: 5'], ['Transfer-Encoding: gzip, chunked']]) {
+      assert.equal(await rawRequest(port, `POST ${path} HTTP/1.1`, [...base, ...framing], '0\r\n\r\n'), 400)
+    }
+  }
+  assert.deepEqual(f.seen, [])
+  assert.deepEqual(f.signs, [])
+  assert.deepEqual(f.cookieCalls, [])
+})
+
+test('public HTTP, upgrade and MCP reject duplicate Host headers with the same or different values', async t => {
+  const f = await callerFixture(t)
+  const off = await f.makeGate(false)
+  const owner = f.issue('owner')
+  const auth = t.mock.method(f.sessions, 'authenticate')
+  const base = [`Origin: ${ORIGIN}`, `Cookie: ${owner.headers.cookie}`]
+  for (const [line, headers, port] of [
+    ['GET / HTTP/1.1', ['Connection: close'], f.gatePort],
+    ['GET /api/remote.mux HTTP/1.1', ['Connection: Upgrade', 'Upgrade: websocket'], f.gatePort],
+    ['POST /api/omni-mcp HTTP/1.1', ['Connection: close', 'Content-Length: 0'], off],
+  ]) {
+    for (const hosts of [[], [`Host: ${HOST}`, `hOsT: ${HOST}`], [`Host: ${HOST}`, 'hOsT: other.invalid']]) {
+      assert.equal(await rawRequest(port, line, [...base, ...headers, ...hosts]), 400, line)
+    }
+  }
+  assert.equal(await rawRequest(f.gatePort, 'GET / HTTP/1.1',
+    [...base, 'Connection: close', `Host: ${HOST}`, ...Array(1050).fill('x: v'), 'Host: other.invalid']), 400)
+  assert.equal(auth.mock.callCount(), 0)
+  assert.deepEqual(f.seen, [])
+  assert.deepEqual(f.signs, [])
+  assert.deepEqual(f.cookieCalls, [])
+})
+
+test('the member carrier rewrite binds the exact method and query and drops browser credentials and assertions', async t => {
+  const f = await callerFixture(t)
+  const member = f.issue('member')
+  const path = '/api/x?b=2&a=%20&a=1'
+  const response = await request(f.gatePort, path, { method: 'POST', body: 'body', headers: {
+    ...member.headers, cookie: member.headers.cookie + '; dsh=spoofed', authorization: 'Bearer browser',
+    'x-automagik-caller': 'spoofed', 'x-automagik-principal': 'spoofed',
+    connection: 'keep-alive, x-automagik-caller', 'sec-websocket-key': 'spoofed',
+  } })
+  assert.equal(response.status, 200)
+  const [hop] = f.seen
+  assert.equal(hop.url, '/_automagik/caller' + path)
+  assert.equal(hop.headers.cookie, undefined)
+  assert.equal(hop.headers.authorization, undefined)
+  assert.equal(hop.headers['sec-websocket-key'], undefined)
+  assert.equal(hop.rawHeaders.filter((value, i) => i % 2 === 0 && value.toLowerCase() === 'x-automagik-caller').length, 1)
+  assert.equal(hop.headers['x-automagik-principal'], Buffer.from(JSON.stringify(member.principal)).toString('base64url'))
+  const { instance, keys: [{ kid, crv, x }] } = JSON.parse(readFileSync(join(f.dir, 'caller-keys.json')))
+  assert.deepEqual(verifyAssertion(hop.headers['x-automagik-caller'], {
+    keys: new Map([[kid, { instance, key: crypto.createPublicKey({ key: { kty: 'OKP', crv, x }, format: 'jwk' }) }]]),
+    method: 'POST', path, nowSec: Math.floor(Date.now() / 1000), startedAtSec: 0,
+  }).principal, member.principal)
+  assert.deepEqual(f.cookieCalls, [])
+})
+
+test('the gate fences all carrier namespace spellings before authentication on every transport', async t => {
+  const f = await callerFixture(t)
+  const off = await f.makeGate(false)
+  const paths = ['/_automagik', '/_automagik/caller/api/x', '//_automagik', '/x/../_automagik/caller',
+    '/api/%2e%2e/_automagik', '/%5Fautomagik', '/%5fAUTOMAGIK/caller', '/\\_automagik',
+    '/_automagik%2Fcaller', '/_AUTOMAGIK', '/%255Fautomagik', '/_automagik?x=1']
+  for (const port of [f.gatePort, off]) {
+    for (const headers of [f.issue('owner').headers, f.issue('member').headers, {}]) {
+      for (const path of paths) {
+        assert.equal((await request(port, path, { headers })).status, 400, path)
+        assert.equal((await request(port, path, { headers: { ...websocketHeaders, ...headers }, upgrade: true })).status, 400, path)
+        assert.equal((await request(port, path, { method: 'CONNECT', headers })).status, 400, path)
+      }
+    }
+  }
+  assert.equal(f.seen.length, 0)
+  assert.equal(f.cookieCalls.length, 0)
+  assert.equal(f.signs.length, 0)
+})
+
+test('owner and admin HTTP and WebSocket forwarding are identical in both modes', async t => {
+  const f = await callerFixture(t)
+  const off = await f.makeGate(false)
+  for (const role of ['owner', 'admin']) {
+    const { headers } = f.issue(role)
+    for (const port of [f.gatePort, off]) {
+      assert.equal((await request(port, '/api/x?x=1', { headers })).status, 200)
+      const ws = await request(port, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })
+      assert.equal(ws.status, 101)
+      ws.socket.destroy()
+    }
+    const [onHttp, onUpgrade, offHttp, offUpgrade] = f.seen.splice(0)
+    assert.deepEqual(onHttp.headers, offHttp.headers)
+    assert.equal(onHttp.url, offHttp.url)
+    assert.deepEqual(onUpgrade, offUpgrade)
+    assert.equal(onHttp.headers['x-automagik-caller'], undefined)
+    assert.equal(onUpgrade.headers['x-automagik-caller'], undefined)
+  }
+  assert.equal(f.cookieCalls.length, 8)
+})
+
+test('revocation between authorization and the owner credential step never mints a cookie', async t => {
+  const f = await callerFixture(t)
+  const httpGate = await f.makeGate(true, { handle(_req, _res, family) { f.sessions.revoke(family); return false } })
+  const authenticate = f.sessions.authenticate.bind(f.sessions)
+  for (const role of ['owner', 'admin']) {
+    let issued = f.issue(role)
+    assert.equal((await request(httpGate, '/api/x', { headers: issued.headers })).status, 401)
+    issued = f.issue(role)
+    f.sessions.authenticate = (...args) => {
+      const family = authenticate(...args)
+      f.sessions.revoke(family)
+      return family
+    }
+    assert.equal((await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...issued.headers }, upgrade: true })).status, 401)
+    f.sessions.authenticate = authenticate
+  }
+  assert.deepEqual(f.cookieCalls, [])
+  assert.deepEqual(f.seen, [])
+})
+
+test('member frontend allowlist, MCP refusal and rollback never use the owner credential', async t => {
+  const f = await callerFixture(t)
+  const member = f.issue('member')
+  const guest = f.issue('guest')
+  const off = await f.makeGate(false)
+  for (const { headers } of [member, guest]) {
+    assert.equal((await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })).status, 403)
+    assert.equal((await request(off, '/api/x', { headers })).status, 403)
+    assert.equal((await request(off, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })).status, 403)
+  }
+  const paths = JSON.parse(source('./fixtures/caller-frontend-paths.json'))
+  for (const path of paths.allowed) assert.equal((await request(f.gatePort, path, { headers: member.headers, method: 'HEAD' })).status, 200, path)
+  for (const path of paths.refused) assert.equal((await request(f.gatePort, path, { headers: member.headers })).status, 404, path)
+  assert.ok(f.seen.every(hop => hop.url.startsWith('/_automagik/caller/')))
+  assert.equal(f.seen.length, paths.allowed.length)
+  assert.equal((await request(f.gatePort, '/x', { method: 'PUT', headers: member.headers })).status, 405)
+  assert.equal((await request(f.gatePort, '/api/omni-mcp', { method: 'POST' })).status, 403)
+  const owner = f.issue('owner')
+  for (const alias of ['/api/omni-mcp?x=1', '/x/../api/omni-mcp']) {
+    assert.equal((await request(f.gatePort, alias, { method: 'POST', headers: owner.headers })).status, 403)
+  }
+  assert.deepEqual(f.cookieCalls, [])
+  assert.equal((await request(off, '/api/omni-mcp', { method: 'POST' })).status, 200)
+  assert.equal(f.cookieCalls.length, 1)
+  assert.equal(f.seen.at(-1).url, '/api/omni-mcp')
+})
+
+test('carrier unavailability, an upstream 401 and an inactive member never use the owner fallback', async t => {
+  const f = await callerFixture(t, { carrierStatus: 401 })
+  const { headers, family } = f.issue('member')
+  assert.equal((await request(f.gatePort, '/api/x', { headers })).status, 401)
+  assert.equal(f.seen.length, 1)
+  assert.equal(f.signs.length, 1)
+  await f.stopUpstream()
+  assert.equal((await request(f.gatePort, '/api/x', { headers })).status, 502)
+  assert.equal(f.signs.length, 2)
+  const staleGate = await f.makeGate(true, { handle() { f.sessions.revoke(family); return false } })
+  assert.equal((await request(staleGate, '/api/x', { headers })).status, 401)
+  assert.equal(f.signs.length, 2)
+  assert.deepEqual(f.cookieCalls, [])
+})
+
+test('gate handlers refuse private paths and revoked owner families before requesting credentials', async t => {
+  const { sessions } = store(t, { memory: true, accepts: () => true })
+  const events = []
+  const forbid = () => { events.push('owner credential or caller assertion requested'); throw new Error('Unexpected credential request') }
+  const credentials = { cookie: forbid }
+  const request = (path, headers = {}, method = 'GET') => {
+    const fields = { host: HOST, ...headers }
+    return { url: path, method, headers: fields, rawHeaders: Object.entries(fields).flat() }
+  }
+  async function status(gate, req, transport = 'request') {
+    const handle = gate.listeners(transport)[0]
+    if (transport === 'request') {
+      let result
+      await handle(req, {
+        writeHead(code) { result = code; return this },
+        end() {},
+      })
+      return result
+    }
+    const socket = new EventEmitter()
+    socket.destroy = () => socket.emit('close')
+    let result
+    socket.end = (line, callback) => { result = Number(line.split(' ')[1]); callback() }
+    await handle(req, socket, Buffer.alloc(0))
+    return result
+  }
+  const take = sessions.authenticate.bind(sessions)
+  const issue = role => {
+    const { secret } = sessions.issue(ORIGIN, { issuer: 'fixture', subject: role, roles: [role], workspace: 'w' })
+    return { cookie: `${COOKIE}=${secret}`, origin: ORIGIN }
+  }
+  for (const multiuser of [false, true]) {
+    const gate = createGate({ origin: ORIGIN, sessions, credentials, multiuser, caller: { sign: forbid }, selfHosted: {
+      handle(_req, _res, family) {
+        if (family?.principal.roles.some(role => role === 'owner' || role === 'admin')) sessions.revoke(family)
+        return false
+      },
+    } })
+    try {
+      for (const path of ['/api/x', '/api/omni-mcp']) {
+        for (const framing of [
+          { 'transfer-encoding': 'chunked', 'content-length': '5' },
+          { 'transfer-encoding': 'gzip, chunked' },
+        ]) {
+          assert.equal(await status(gate, request(path, { ...issue('owner'), ...framing }, 'POST')), 400)
+        }
+      }
+      for (const duplicate of [HOST, 'other.invalid']) {
+        const withDuplicate = req => ({ ...req, rawHeaders: [...req.rawHeaders, 'hOsT', duplicate] })
+        assert.equal(await status(gate, withDuplicate(request('/', issue('owner')))), 400)
+        assert.equal(await status(gate, withDuplicate(request('/api/omni-mcp', issue('owner'), 'POST'))), 400)
+        assert.equal(await status(gate, withDuplicate(request('/api/remote.mux', { ...websocketHeaders, ...issue('owner') })), 'upgrade'), 400)
+      }
+      for (const framing of [{ 'transfer-encoding': 'chunked' }, { 'content-length': '5' }]) {
+        assert.equal(await status(gate, request('/api/remote.mux', { ...websocketHeaders, ...issue('owner'), ...framing }), 'upgrade'), 400)
+      }
+      for (const path of ['/_automagik', '/%255Fautomagik/caller/api/fixture', '/x/../_AUTOMAGIK', '//_automagik', '/\\_automagik']) {
+        assert.equal(await status(gate, request(path)), 400)
+        assert.equal(await status(gate, request(path, websocketHeaders), 'upgrade'), 400)
+        assert.equal(await status(gate, request(path, {}, 'CONNECT'), 'connect'), 400)
+      }
+      for (const role of ['owner', 'admin']) {
+        assert.equal(await status(gate, request('/api/x', issue(role))), 401)
+        const headers = issue(role)
+        sessions.authenticate = (...args) => {
+          const family = take(...args)
+          sessions.revoke(family)
+          return family
+        }
+        assert.equal(await status(gate, request('/api/remote.mux', { ...websocketHeaders, ...headers }), 'upgrade'), 401)
+        sessions.authenticate = take
+        if (multiuser) {
+          for (const path of ['/api/omni-mcp', '/api/omni-mcp?x=1', '/x/../api/omni-mcp']) {
+            assert.equal(await status(gate, request(path, { ...websocketHeaders, ...issue(role) }), 'upgrade'), 403)
+          }
+        }
+      }
+      const member = issue('member')
+      assert.equal(await status(gate, request('/api/remote.mux', { ...websocketHeaders, ...member }), 'upgrade'), 403)
+      if (!multiuser) assert.equal(await status(gate, request('/api/x', member)), 403)
+      else assert.equal(await status(gate, request('/api/omni-mcp', { origin: ORIGIN }, 'POST')), 403)
+    } finally { await gate.closeGate() }
+  }
+  assert.deepEqual(events, [])
 })

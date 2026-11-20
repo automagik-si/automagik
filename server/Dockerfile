@@ -123,6 +123,7 @@ RUN set -eux; \
     rm -f /tmp/herdr-core.tar.gz /tmp/herdr-core; \
     /out/bin/hc --version | grep -qx "hc ${HERDR_CORE_VERSION}"; \
     install -d -o 1000 -g 1000 -m 0700 /out/rootfs/run/automagik; \
+    install -d -m 0755 /out/caller-keys; \
     chmod 0700 /out/data/secrets; \
     chown -R 1000:1000 /out/data
 
@@ -177,6 +178,7 @@ COPY --from=tools /out/bin/herdr-core /usr/local/bin/herdr-core
 COPY --from=tools /out/bin/hc /usr/local/bin/hc
 COPY --from=tools /out/licenses /opt/automagik/licenses
 COPY --from=tools --chown=1000:1000 /out/data /data
+COPY --from=tools --chown=1000:1000 /out/caller-keys /caller-keys
 
 COPY --from=gate-deps /gate/node_modules /opt/automagik/node_modules
 COPY --from=builder /build/out/runtime /opt/automagik/runtime

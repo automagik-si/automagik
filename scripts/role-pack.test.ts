@@ -85,7 +85,7 @@ function repo() {
   const { root, clean } = scratch();
   for (const path of [
     'scripts/lane.ts', 'scripts/role-pack.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json',
-    ...['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'].map(plugin => 'apps/' + plugin + '/package.json'),
+    ...['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'multiuser-dsh', 'vault-dsh', 'welcome-dsh'].map(plugin => 'apps/' + plugin + '/package.json'),
     ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js'].map(file => PLUGIN + '/src/host/' + file),
     PLUGIN + '/src/shared/roles.js',
   ]) copy(root, path);
