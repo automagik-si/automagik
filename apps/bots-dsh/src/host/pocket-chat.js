@@ -33,13 +33,15 @@
 //   Rich watches get file metadata and image thumbnail reads. Documents have a separate
 //   per-watch grant, and attachment services are looked up on demand.
 // - With RFC 0036 management, a live phone grant can read, edit or add a shown project Bot's
-//   own memory and manage its own scheduled tasks without a chat subscription. Each check uses
-//   the current team lock and one fresh home registry snapshot.
+//   own memory, manage its own scheduled tasks, and change its name and model without a chat
+//   subscription. Its permission level is shown read-only. Each check uses the current team lock
+//   and one fresh home registry snapshot.
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
 import { ATTACH_REQUEST_PREFIX, THUMBNAILS, attachmentCode, effectiveAttachments, positiveInt, sanitizeAttachmentName, validId } from './pocket-attach.js'
 import { startPocketSocket } from './pocket-socket.js'
+import { pocketSettingsOf } from './pocket-settings.js'
 import { homeRegistryPathOf, shownReader } from './shown.js'
 
 /** The Session Controller methods this source needs (DSH 0.2.2); all of them, or none is used. */
@@ -306,7 +308,7 @@ const globalOnly = bot => bot?.project == null
  *   carriesSignInCode?: (text: string) => boolean }} options
  */
 export class DshChatSource {
-  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, fileUploads, attachmentStore }) {
+  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore }) {
     Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, fileUploads, attachmentStore })
     /** Whether a text carries a Claude sign-in code the computer showed (cli-login.js). Never throws. */
     this.carriesSignInCode = (text) => { try { return carriesSignInCode(text) === true } catch { return false } }
@@ -314,6 +316,7 @@ export class DshChatSource {
     this.writable = writable === true && typeof adapter?.prompt === 'function' && typeof adapter?.cancel === 'function'
     this.management = management
     this.schedules = schedules
+    this.settings = settings
     this.chatOwner = chatOwner ?? (sessionId => [...this.entries.values()].find(entry => entry.sessionId === sessionId)?.botId)
     /** botId -> entry */
     this.entries = new Map()
@@ -365,6 +368,18 @@ export class DshChatSource {
 
   manageSchedules(method, args) {
     return this.schedules.run(method, args)
+  }
+
+  get managesSettings() {
+    return this.writable && this.settings?.enabled() === true
+  }
+
+  settingsAllowed(botId) {
+    return this.settings.allowed(botId)
+  }
+
+  manageSettings(method, args) {
+    return this.settings.run(method, args)
   }
 
   /**
@@ -1119,6 +1134,18 @@ function ownSchedules(rt, reader) {
   }
 }
 
+function ownSettings(rt, reader) {
+  const { enabled, readable, run } = pocketSettingsOf(rt)
+  return {
+    enabled,
+    allowed(botId) {
+      if (!enabled() || !readable()) return 'unavailable'
+      return ownShownBot(rt, reader, botId)
+    },
+    run,
+  }
+}
+
 /**
  * Wire the source when the runtime has DSH 0.2.2's Session API and the team has a home; else
  * register nothing (the source is absent, and Pocket Link lists no DSH chats). With DSH's prompt
@@ -1151,7 +1178,8 @@ export function install(rt) {
       source = new DshChatSource({
         adapter: createAdapter(controller), bots: ownBots(rt, reader), shown: reader.shown, registryIdOf: reader.registryIdOf,
         log: (...args) => rt.warn?.(...args), writable, chatOwner, management: ownMemory(rt, reader),
-        schedules: ownSchedules(rt, reader), fileUploads: () => ctx.get?.('fileUploads'), attachmentStore: () => ctx.get?.('attachments'),
+        schedules: ownSchedules(rt, reader), settings: ownSettings(rt, reader),
+        fileUploads: () => ctx.get?.('fileUploads'), attachmentStore: () => ctx.get?.('attachments'),
         stopOf: (id, turn) => rt.stopLineOfTurn?.(id, turn),
         carriesSignInCode: text => rt.loginTextMatches?.(text) === true,
       })
