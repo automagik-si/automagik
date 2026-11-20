@@ -128,6 +128,7 @@ export function install(rt) {
       }
     } catch { return {} }
   }
+  rt.runningOf = runningOf
   // Models come from DSH, not state.json, so a provider added in Harness settings
   // changes the view without a new revision. So do the permission presets DSH offers and
   // the Bots and groups whose Auto runs as workspace-write (permissions.js).
@@ -478,7 +479,8 @@ export function install(rt) {
     'rollbackAdoption']) {
     const original = rt[name]
     if (typeof original === 'function') {
-      rt[name] = (...args) => ownerTransaction(() => original(...args))
+      rt[name] = (...args) => ownerTransaction(() => name === 'switchRoute'
+        ? rt.withModelChange(args[0], () => original(...args)) : original(...args))
     }
   }
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),

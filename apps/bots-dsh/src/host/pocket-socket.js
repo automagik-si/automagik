@@ -26,7 +26,8 @@
 // Management (RFC 0036) also needs `manage: 1` in hello. The bridge opens a grant for each
 // phone connection and closes it when access ends. Management calls name that grant and a Bot's
 // terminal, and need no subscription. Reads have their own limit and writes share the chat
-// limit. A revoked grant stays revoked for queued requests, even if its id is opened again.
+// limit. Settings management adds a read and name or model changes for shown project Bots.
+// A revoked grant stays revoked for queued requests, even if its id is opened again.
 import { lstatSync, unlinkSync } from 'node:fs'
 import { chmod, lstat, mkdir } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
@@ -43,6 +44,7 @@ export const METHODS = Object.freeze(['hello', 'list', 'subscribe', 'unsubscribe
 export const WRITE_METHODS = Object.freeze(['send', 'interrupt', 'answer'])
 const MEMORY_METHODS = Object.freeze(['memory-read', 'memory-edit', 'memory-add'])
 const SCHEDULE_WRITES = Object.freeze(['schedule-pause', 'schedule-resume', 'schedule-rename'])
+const SETTINGS_METHODS = Object.freeze(['settings-read', 'settings-name', 'settings-model'])
 const MANAGE_GRANT = /^[A-Za-z0-9._:-]{1,64}$/
 const MEMORY_ID = /^[A-Za-z0-9_-]{1,32}$/
 const MANAGE_REV = /^[0-9a-f]{16}$/
@@ -73,6 +75,14 @@ export const socketPathOf = home => join(home, SOCKET_DIR, SOCKET_NAME)
 const readOnly = id => ({ id, error: { kind: 'read-only', message: 'This socket only reads; answer on the computer.' } })
 export const refusedWrite = (reason, extra = {}) => ({ ok: false, state: 'refused', reason, ...extra })
 export const scheduleReplyCheck = Symbol('schedule reply check')
+export const settingsReply = Symbol('settings reply')
+export const MODEL_REF_OK = (model) => {
+  // oxlint-disable-next-line eslint/no-control-regex
+  if (typeof model !== 'string' || /[\u0000-\u001f\u007f]/.test(model)) return false
+  const bytes = Buffer.byteLength(model)
+  const slash = model.indexOf('/')
+  return bytes >= 3 && bytes <= 512 && slash > 0 && slash < model.length - 1
+}
 
 export class ScheduleAdmissionRefusal extends Error {
   constructor(reason) {
@@ -341,6 +351,47 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
     }
   }
 
+  async function settingsRequest(id, method, params) {
+    const reply = (result) => { if (!ending) write({ id, result }) }
+    let applied
+    let pending
+    try {
+      const grant = grants.get(params.grant)
+      if (!grant?.open) return reply(refusedWrite('revoked'))
+      const { terminal, rev, name, model } = params
+      const reading = method === 'settings-read'
+      if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+        || (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev)))
+        || (method === 'settings-name' && (typeof name !== 'string' || Buffer.byteLength(name) > MAX_MANAGE_TEXT))
+        || (method === 'settings-model' && !MODEL_REF_OK(model))) return reply(refusedWrite('invalid'))
+      const botId = terminal.slice(4)
+      const key = `manage\0${grant.phone}\0${terminal}`
+      if (limits.busy(key)) return reply(refusedWrite('busy'))
+      if (!(reading ? limits.takeRead(grant.phone) : limits.take(grant.phone, terminal, false))) return reply(refusedWrite('rate'))
+      const allowed = () => {
+        if (!grant.open) return 'revoked'
+        try { return source.settingsAllowed(botId) } catch { return 'unavailable' }
+      }
+      limits.begin(key)
+      try {
+        const overhead = Buffer.byteLength(JSON.stringify({ id, result: null })) - 4 + 1
+        const { [settingsReply]: build, applied: changed, ...result } = await source.manageSettings(method.slice(9),
+          { botId, terminal, rev, name, model, allowed })
+        if (changed) applied = { applied: true }
+        if (result.state === 'unknown') pending = result
+        // The authority check, live projection and socket write share one turn.
+        const reason = allowed()
+        if (reason !== undefined) return reply(pending ?? refusedWrite(reason, applied))
+        return reply(build ? build(overhead) : result)
+      } finally {
+        limits.end(key)
+      }
+    } catch {
+      log('pocket settings: unavailable')
+      return reply(pending ?? refusedWrite('unavailable', applied))
+    }
+  }
+
   const isAttachment = message => ATTACH_METHODS.includes(message?.method)
     || (message?.method === 'send' && message.params && Object.hasOwn(message.params, 'uploads'))
   const pairedPhone = phone => typeof phone === 'string' && PHONE_KEY.test(phone)
@@ -401,6 +452,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
           if (source.manages === true) manageMethods.push(...MEMORY_METHODS)
           if (source.listsSchedules === true) manageMethods.push('schedule-list')
           if (source.writesSchedules === true) manageMethods.push(...SCHEDULE_WRITES)
+          if (source.managesSettings === true) manageMethods.push(...SETTINGS_METHODS)
           if (manageMethods.length > 0) manageMethods.unshift('manage-open', 'manage-close')
         }
         return writes
@@ -438,6 +490,11 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
       case 'schedule-rename':
         if (!manageMethods.includes(message.method)) return readOnly(id)
         return scheduleRequest(id, message.method, params)
+      case 'settings-read':
+      case 'settings-name':
+      case 'settings-model':
+        if (!manageMethods.includes(message.method)) return readOnly(id)
+        return settingsRequest(id, message.method, params)
       case 'list':
         return { id, result: { terminals: await source.list() } }
       case 'subscribe': {

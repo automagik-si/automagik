@@ -2,13 +2,16 @@
 // only in its settings or by a Main Bot. The team's first Main Bot has none until the
 // user picks one in its chat. The Session keeps the selection durably.
 import { BlockAssembler, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { cliRoute, leavesCli, piAiRoutes, routeOf } from '../shared/routes.js'
 import { refusal } from './refusal.js'
 import { normalize, splitRef } from './text.js'
 import { install as installHostModels } from './host-models.js'
 import { PI_AI_CLAUDE, claudeFamilyOf, supersededClaude } from './claude-models.js'
+import { SettingsSelectionRejected } from './pocket-settings.js'
 
 const CATALOG_TTL_MS = 10_000
+const quiet = new AsyncLocalStorage()
 // What a refused model says, by case; `{connection}` is the agent's name and route. The client
 // words each template in the interface language (i18n.js hostText).
 export const ACCESS_MESSAGES = Object.freeze({
@@ -184,6 +187,10 @@ export function install(rt) {
   // and nothing chooses it again until that provider serves different models.
   const refused = new Map()
   const answerable = entries => (refused.size === 0 ? entries : entries.filter(entry => !refused.has(entry.ref)))
+  const cachedCatalog = ({ current = false } = {}) => {
+    if (current && (catalogCache.at === 0 || Date.now() - catalogCache.at >= CATALOG_TTL_MS)) return undefined
+    return answerable(catalogCache.value)
+  }
   // The models a ref's provider serves, as a string to compare; undefined when it
   // cannot be listed, e.g. the provider is not registered.
   async function servedModels(ref) {
@@ -305,6 +312,9 @@ export function install(rt) {
   // that is about to be used asks for a `fresh` one. Entries for models a Bot uses
   // also carry their `reasoning`, so the picker can offer thinking levels.
   async function catalog({ fresh = false, remember = true } = {}) {
+    // Pocket's work can use the existing snapshot. Even a module-local catalog call
+    // must leave desktop enumeration, cache population and unblocking to the desktop.
+    if (quiet.getStore() === rt) return cachedCatalog({ current: true }) ?? []
     if (!fresh && Date.now() - catalogCache.at < CATALOG_TTL_MS && catalogCache.value.length > 0) return answerable(catalogCache.value)
     const epoch = catalogEpoch
     const listed = []
@@ -584,9 +594,10 @@ export function install(rt) {
   // The thinking level a Bot asked for, when the model it runs on serves it; else the
   // model's own default applies. A level the model does not have is ignored, never
   // sent: an explicit effort a provider does not know is a hard refusal there.
-  async function desiredEffort(bot, ref) {
+  async function desiredEffort(bot, ref, entry) {
     if (bot.effort === undefined || ref === undefined) return undefined
-    const reasoning = await reasoningOf(ref)
+    const reasoning = entry === undefined ? await reasoningOf(ref)
+      : entry.reasoning ?? reasoningCache.get(ref)?.value
     const efforts = reasoning?.efforts ?? []
     if (efforts.some(effort => effort.id === bot.effort)) return bot.effort
     // A model may name the same level with another id, as resolveEffort already reads.
@@ -627,15 +638,26 @@ export function install(rt) {
   // Recheck group Sessions after every restart: Bot-level applied fields cannot
   // prove that an older group Session received the member's thinking level.
   const sessionSelections = new Map()
-  function selectSessionModel(sessionId, { provider, model, reasoningEffort }) {
+  function selectSessionModel(sessionId, { provider, model, reasoningEffort }, pocket) {
     const run = selecting.then(async () => {
+      pocket?.check()
       rt.assertShellChoice?.(sessionId)
       const defaults = ctx.get?.('agentDefaultModel')
       const before = defaults?.currentSelection?.()
-      const result = await ctx.sessionController.selectModel({
-        sessionId, provider, model,
-        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-      })
+      const controller = ctx.sessionController
+      const select = controller?.selectModel
+      if (pocket !== undefined && typeof select !== 'function') throw new Error('Model selection is unavailable.')
+      let result
+      try {
+        result = await select.call(controller, {
+          sessionId, provider, model,
+          ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+        })
+      } catch (error) {
+        if (pocket !== undefined) throw new SettingsSelectionRejected()
+        throw error
+      }
+      pocket?.selected?.()
       const saved = result?.selected ?? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
       if (before?.provider && before?.model && !sameSelection(before, saved)) {
         await defaults.saveSelection(before).catch((error) => {
@@ -719,13 +741,21 @@ export function install(rt) {
 
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
-  async function applyModel(bot, { force = false } = {}) {
-    if (!modelTargetLive(bot)) return undefined
+  async function applyModel(bot, { force = false, modelEntry, selected } = {}) {
+    const pinned = modelEntry !== undefined
+    const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
+    const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
+    const check = () => {
+      if (!live() || rt.hostOwned(bot) || bot.model !== modelEntry.ref || rt.chatOf(bot.id) !== expectedChat) {
+        throw new Error('The Bot changed during model selection.')
+      }
+    }
+    if (pinned) check()
+    if (!live()) return undefined
     // The Bot's own part is in a route switch: selecting the new model there would move the
     // old conversation, and restore() would then leave that Session on the target route. A
     // plain fresh part has no target and keeps taking the pick on the old part.
-    if (rt.switchingChat?.(bot.id)) return undefined
-    const ref = await desiredModel(bot, { aside: true })
+    const ref = pinned ? modelEntry.ref : await desiredModel(bot, { aside: true })
     if (ref === undefined) return ref
     // A move off the Bot's coding CLI skips each Session that is at Full access; the others
     // take the model as before. When every one stays, nothing moved and the record stands.
@@ -734,25 +764,32 @@ export function install(rt) {
     const staying = offCli(bot, ref) ? wideAmong([chat, ...rt.groupSessionsOf(bot.id)]) : new Set()
     if (staying.size > 0) stays(bot, ref)
     if (staying.has(chat) && rt.groupSessionsOf(bot.id).every(sessionId => staying.has(sessionId))) return undefined
-    const effort = await desiredEffort(bot, ref)
+    const effort = await desiredEffort(bot, ref, modelEntry)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    if (ownChanged && !staying.has(chat) && !(await keepsCarriedRoute(chat, ref))) {
-      await selectSessionModel(chat, route)
+    if (ownChanged && !staying.has(chat) && (pinned || !(await keepsCarriedRoute(chat, ref)))) {
+      await selectSessionModel(chat, route, pinned ? { check, selected } : undefined)
     }
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
       if (staying.has(sessionId)) continue
       const applied = sessionSelections.get(sessionId)
       if (!force && applied !== undefined && sameSelection(applied, route)) continue
       if (await keepsCarriedRoute(sessionId, ref)) continue
-      await selectSessionModel(sessionId, route)
-        .catch(error => rt.warn('omni-ui: model for %s in a group not applied: %s', bot.name, error))
+      await selectSessionModel(sessionId, route, pinned ? { check: () => {
+        check()
+        if (!rt.groupSessionsOf(bot.id).includes(sessionId)) throw new Error('The group Session changed.')
+      } } : undefined)
+        .catch(error => {
+          if (pinned) rt.warn('pocket settings: group selection unavailable')
+          else rt.warn('omni-ui: model for %s in a group not applied: %s', bot.name, error)
+        })
     }
     // Some Sessions moved and some stayed, so no one model is applied to all of them. The
     // record, which is one per Bot, says what the Bot's own chat runs on: the model it just
     // took, or, when it is the chat that stayed, nothing unless the record already names that
     // model. A record left naming the CLI would skip the selection when the CLI is served
     // again, and the Sessions moved here would stay off it. Nothing is returned as applied.
+    if (pinned) check()
     if (!modelTargetLive(bot)) return undefined
     if (staying.size > 0 && staying.has(chat)) {
       if (bot.appliedModel === undefined || bot.appliedModel === ref) return undefined
@@ -765,7 +802,7 @@ export function install(rt) {
     bot.appliedModel = ref
     if (effort === undefined) delete bot.appliedEffort
     else bot.appliedEffort = effort
-    await rt.save()
+    await rt.save(pinned ? { required: true } : undefined)
     return staying.size > 0 ? undefined : ref
   }
 
@@ -830,7 +867,7 @@ export function install(rt) {
   Object.assign(rt, {
     assembleLlm,
     modelsEpoch: () => catalogEpoch,
-    catalog, cachedCatalog: () => answerable(catalogCache.value), cachedDefault: () => pickDefault(catalogCache.value),
+    catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
     selectSessionModel, keepsCarriedRoute, applyModel, waitForModel, syncModels, routeRefused,
