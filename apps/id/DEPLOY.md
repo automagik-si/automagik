@@ -122,7 +122,7 @@ the automation's private values nor its operator notes belong in public source.
 The Cloud confidential-client secret belongs
 in the Cloud backend's secret store; the identity database receives only its hash.
 
-Apply the checked-in migration before first traffic:
+Apply the checked-in migrations before first traffic:
 
 ```sh
 bun x --no-install wrangler d1 migrations apply DB --remote --config wrangler.local.toml
@@ -143,6 +143,68 @@ hash for known IDs. It does not delete unknown rows; investigate any row outside
 the reviewed list before taking traffic. Disabled product placeholders stay off.
 Only desktop and Cloud skip consent; a third-party entry must set it false. All
 entries receive `requirePKCE: true` and the supported grant/scope lists.
+
+## Admission keys: invite-only sign-up
+
+Sign-up is invite only (RFC 0032, Decided 9). Invitations are Automagik Cloud
+records; this service stores no invitation and no invite code. It creates an
+account only for a request carrying an admission ticket: a compact JWS signed
+with Ed25519 (`alg: EdDSA`, a `kid` in its header) that Cloud issues after it
+redeems an invitation. The ticket's claims are `iss` (exactly `ADMISSION_ISSUER`),
+`aud` (exactly this service's origin, `BETTER_AUTH_URL`), a random `jti` of 16 to
+128 base64url characters, `iat` and `exp` with a life of at most 15 minutes
+(30 seconds of clock skew allowed), and `use: "signup"`. A sign-up ticket names
+no account (`sub` absent). Every other value is refused.
+
+Two Worker variables configure it, both public:
+
+- `ADMISSION_KEYS`: a JWKS JSON string of Ed25519 public keys, each with a
+  unique `kid`, at most eight. A value that is malformed or holds a private key
+  (`d`) refuses every ticket.
+- `ADMISSION_ISSUER`: the HTTPS issuer URL the tickets name.
+
+With either missing, no account can be created: passkey sign-in, WhatsApp
+sign-in of an existing number and OIDC keep working. Put both in the operator's
+private environment and rerun `bun scripts/configure.ts`, which validates them,
+keeps only the public fields of each key and writes them to `wrangler.local.toml`.
+Apply both `0003_admission.sql` and `0004_session_sign_in_method.sql` before
+deploying this Worker. Migration 0003 records reservations and installs the
+triggers that spend them with the credential or phone account insert. Migration
+0004 supplies the session method checked when an existing user adds a passkey. Existing users can
+still sign in while deploying. Until the updated Worker is live, the new triggers
+can refuse registrations started by the previous Worker, including additional passkeys.
+
+D1 keeps each ticket's `jti` with the user row it reserved, its state and its
+ceremony count, so a ticket creates at most one account, and nothing else about
+the invitation. After the ticket's 30-second clock-skew allowance ends,
+the service refuses it; the orphan cleanup removes the user row an abandoned
+ceremony left. To rotate keys, list the new key beside the old one, switch the
+signer, then remove the old key once its last tickets have expired.
+
+### The stand-in signer
+
+Until Cloud mints tickets itself, an operator can, with `scripts/admission.ts`.
+It goes away when Cloud's own minting ships. Make the key once, to a file outside
+any git checkout (the script refuses a path inside one, and never overwrites):
+
+```sh
+bun scripts/admission.ts keygen <path outside any checkout>
+```
+
+The private JWK goes only to that file, mode 0600; move it into the operator's
+secret store. The command prints only the public JWKS, the value for
+`ADMISSION_KEYS`. To admit one person, mint a ticket with the private key in
+`ADMISSION_PRIVATE_KEY` (from the secret store, never typed, echoed or passed as
+an argument), `ADMISSION_ISSUER` and `ID_WORKER_ORIGIN` set as for configure:
+
+```sh
+bun scripts/admission.ts mint
+```
+
+It prints one ticket, good for 15 minutes and one account. Hand the person
+`https://<service name>/sign-in#ticket=<ticket>`, or a product's authorization
+URL with the same fragment. The ticket travels only in the fragment and the
+`X-Automagik-Admission` header, never in a query, so it stays out of request logs.
 
 ## Scheduled cleanup
 
@@ -177,7 +239,7 @@ store; it does not change later.
 Test a real passkey, desktop loopback sign-in with S256 and Cloud confidential
 sign-in on `https://id.automagik.si`. Confirm D1 migrations and seed records, secure cookies, correct
 issuer/audience/nonce checks in each client, and WhatsApp-disabled behavior. Apply every migration, including
-`0002_whatsapp.sql` and `0004_session_sign_in_method.sql`, before enabling the new configuration.
+`0002_whatsapp.sql`, `0003_admission.sql` and `0004_session_sign_in_method.sql`, before enabling the new configuration.
 Sessions issued before `0004` carry no sign-in method, so they can never add or delete a passkey;
 a new passkey sign-in can. Existing phone-account
 fields remain intact; the service does not migrate or link identities automatically. Never

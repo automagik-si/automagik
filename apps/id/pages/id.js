@@ -18,6 +18,17 @@
   const mustCreate = prompts.includes('create');
   const mustBeFresh = prompts.includes('login') || asked.has('max_age');
 
+  // Sign-up is by invitation. Its admission ticket arrives in the fragment (#ticket=…), which no
+  // server receives or logs; the page keeps it in memory only, sends it in a header, and takes
+  // it out of the address bar at once.
+  const TICKET_HEADER = 'X-Automagik-Admission';
+  let ticket = '';
+  if (document.body.dataset.page === 'sign-in' && window.location.hash) {
+    const given = new URLSearchParams(window.location.hash.slice(1)).get('ticket') || '';
+    ticket = /^[A-Za-z0-9_.-]{1,4096}$/.test(given) ? given : '';
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+
   const T = {
     moment: 'One moment…',
     passkey: 'A passkey is your fingerprint, face or screen lock. No password.',
@@ -33,6 +44,10 @@
     unsupported: 'This browser can’t use passkeys.',
     unsupportedNote: 'Open this page in an up-to-date Safari, Chrome, Edge or Firefox.',
     unsupportedWhatsApp: 'This browser can’t use passkeys. Use WhatsApp.',
+    invite: 'New accounts need an invitation. Open the link from yours.',
+    inviteBad: 'That invitation isn’t valid or has run out. Ask for a new one.',
+    inviteUsed: 'That invitation was already used. Sign in instead.',
+    waInvite: 'This number has no account yet. New accounts need an invitation.',
     saved: 'Passkey saved. You’re in!',
     in: 'You’re in!',
     here: 'You’re already signed in on this browser.',
@@ -121,7 +136,7 @@
     const seconds = Number(response.headers.get('X-Retry-After') || response.headers.get('Retry-After'));
     return Number.isFinite(seconds) && seconds > 0 ? Math.min(Math.ceil(seconds), 3600) : 30;
   }
-  async function call(path, body) {
+  async function call(path, body, extra) {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), 20000);
     let response;
@@ -133,8 +148,8 @@
         cache: 'no-store',
         redirect: 'manual',
         signal: abort.signal,
-        headers: body === undefined ? { Accept: 'application/json' } :
-          { Accept: 'application/json', 'Content-Type': 'application/json' },
+        headers: { Accept: 'application/json',
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...extra },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       text = await response.text();
@@ -338,6 +353,8 @@
   // Signed in. The service may already have resumed the request; otherwise ask it to.
   async function entered(result, created, omitted) {
     signedIn = true;
+    // A ticket is spent once it has made an account, and kept for nothing else.
+    ticket = '';
     if (!hasRequest) return done(created);
     mood('jump');
     say(created ? T.saved : T.in);
@@ -392,8 +409,15 @@
     }
     say(creating ? T.failedSave : T.failedUse, 'oops');
   }
+  // The service's refusal of an invitation, in the page's words; '' for any other refusal.
+  function invitation(code) {
+    if (code === 'INVITATION_REQUIRED') return T.invite;
+    if (code === 'INVITATION_USED') return T.inviteUsed;
+    return code === 'INVITATION_INVALID' ? T.inviteBad : '';
+  }
   async function refused(error, creating) {
     if (error.kind !== 'refused') return passkeyTrouble(error, creating);
+    if (invitation(error.code)) { mood('fail'); return say(invitation(error.code), 'oops'); }
     if (await requestEnded()) return ended();
     mood('fail');
     say(creating ? T.failedSave : T.failedUse, 'oops');
@@ -422,9 +446,11 @@
       say(T.promptSave);
       // Asked to create: the new account's sign-in is reported with `created`, not the query.
       const omitted = mustCreate;
+      // No invitation, no new account: say so before anything is asked of the device.
+      if (!ticket) { mood('hmm'); return say(T.invite); }
       try {
         if (signedIn) { await call('/api/auth/sign-out', {}); signedIn = false; }
-        const options = await call('/api/auth/passkey/generate-register-options');
+        const options = await call('/api/auth/passkey/generate-register-options', undefined, { [TICKET_HEADER]: ticket });
         const credential = await navigator.credentials.create({ publicKey: creationOptions(options) });
         mood('work');
         say(T.checking);
@@ -505,12 +531,15 @@
       let started;
       try {
         if (omitted && signedIn) { await call('/api/auth/sign-out', {}); signedIn = false; }
-        started = await call('/api/auth/whatsapp/start', hasRequest && !omitted ? { oauth_query: oauthQuery } : {});
+        // A ticket is needed only if the number has no account yet; send it when there is one.
+        started = await call('/api/auth/whatsapp/start', hasRequest && !omitted ? { oauth_query: oauthQuery } : {},
+          ticket ? { [TICKET_HEADER]: ticket } : undefined);
       } catch (error) {
         if (error.kind !== 'refused') {
           return trouble(error, first ? 'passkey-wait' : 'offer-wait',
             first ? [$('use-passkey'), $('create-passkey'), button] : [button]);
         }
+        if (invitation(error.code)) { mood('fail'); return say(invitation(error.code), 'oops'); }
         if (error.status === 403 || await requestEnded()) return ended();
         mood('fail');
         return say(T.broken, 'oops');
@@ -572,6 +601,7 @@
         if (error.kind === 'rate') { mood('hmm'); say(T.waSlow); run.held = true; return next(error.wait * 1000); }
         if (error.kind === 'refused') {
           stopWhatsApp();
+          if (invitation(error.code)) return offer(invitation(error.code), 'oops', true);
           return error.status === 403 || await requestEnded() ? ended() : offer(T.waExpired, '', true);
         }
         mood('fail');
@@ -583,6 +613,10 @@
       if (status === 'verified' || (result && result.redirect === true)) {
         stopWhatsApp();
         return entered(result, false, omitted);
+      }
+      if (status === 'invitation_required' || status === 'invitation_used') {
+        stopWhatsApp();
+        return offer(status === 'invitation_used' ? T.inviteUsed : T.waInvite, 'oops', true);
       }
       if (status !== 'pending') return offer(T.waExpired, '', true);
       if (!steady) { steady = true; mood('wait'); say(line); }
