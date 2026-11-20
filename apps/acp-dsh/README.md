@@ -158,6 +158,13 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   `agent-full-access`. Codex's own reviewer decides those steps, based on the
   [Codex 0.167.0 capture](test/fixtures/permission-payloads/README.md); later versions may
   decide differently. Any approval Codex still requests goes to the person.
+  Reads are not among those steps: in `agent` a read outside the workspace is no sandbox
+  escalation, so Codex's own tools read files outside the Bot's folder, wherever the OS user
+  running Codex can read, without its reviewer deciding and without asking the person. The
+  question before saving says so (RFC 0031, 2026-11-19 amendment, delivery 3; see the security
+  warning (#870) below). Delivery 4 moves Auto to an auto-reviewed mode of the Workspace profile
+  where the adapter offers one; where it does not (an older adapter, Windows, a Bot home whose
+  profile check failed), Auto keeps `agent` and these reads.
 - **An agent that stops answering never holds the chat.** Its start (`initialize`,
   `session/new`, the bridge's first list) has 60 seconds, and each request after that and
   before a prompt (a model, an effort, a mode, a fork, a close) has 15. Past the deadline, or

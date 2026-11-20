@@ -10268,7 +10268,7 @@ var ZH = {
   "Works as Workspace. Where Workspace would ask you, Codex decides first, with its own reviewer: it runs the step, refuses it, or asks you.": "按工作区内修改运行。需要询问你时，Codex 会先由自己的审查器决定：执行、拒绝或询问你。",
   "Put {name} on Auto?": "让{name}使用自动模式？",
   "Use Auto": "使用自动模式",
-  "On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps.": "在自动模式下，Codex 通过自己的审查器决定执行哪些步骤、拒绝哪些步骤或询问你。它可能不经询问就修改{name}文件夹之外的文件，Automagik 不会审查这些步骤。",
+  "On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps. With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads.": "在自动模式下，Codex 通过自己的审查器决定执行哪些步骤、拒绝哪些步骤或询问你。它可能不经询问就修改{name}文件夹之外的文件，Automagik 不会审查这些步骤。它还可能用自有工具不经询问就读取 Automagik 本身能打开的任何文件，包括该文件夹之外的文件，它的审查器和 Automagik 都不会检查这些读取。",
   "Any message that reaches {name}'s chat can lead to such a step: yours, another Bot's or a schedule's. Tasks and Bots it starts from that chat while on Auto start on Auto too.": "任何到达{name}聊天的消息都可能引发这样的步骤：你的消息、其他 Bot 的消息或定时任务的消息。在自动模式下从该聊天启动的任务和 Bot 也以自动模式启动。",
   "This replaces {level}. Based on Codex 0.167.0; a later Codex may decide differently.": "这将替换{level}。基于 Codex 0.167.0；后续版本可能作出不同决定。",
   "Auto counts here: Codex decides on its own.": "自动模式在此生效：Codex 自行决定。",
