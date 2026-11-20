@@ -185,7 +185,10 @@ fn sync_publication_payload_validates_before_and_after_cutting() {
     assert_eq!(projects.len(), 13);
     let untasked = projects.iter().find(|p| p["repo"].is_null()).unwrap();
     assert!(untasked.get("usd_per_task").is_none());
-    assert_eq!(untasked["untasked"], json!({"in": 10, "out": 20, "rs": null, "unpriced": 30}));
+    assert_eq!(
+        untasked["untasked"],
+        json!({"in": 10, "out": 20, "rs": null, "unpriced": 30})
+    );
 
     // Make room for only part of the project detail, even after all tasks have been cut.
     let task_bytes = serde_json::to_vec(&uncut["tasks"]).unwrap().len();
