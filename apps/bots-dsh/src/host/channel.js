@@ -22,6 +22,7 @@ import { installRoles } from './roles.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
+const VOICE_ACTIONS = new Set(['voice-pane', 'voice-wait', 'voice-spoken'])
 
 const LANGUAGES = {
   zh: 'Chinese (简体中文)',
@@ -66,6 +67,11 @@ export function install(rt) {
   installSide(rt)
   const { ctx, state } = rt
   installRoles(rt)
+  ctx.on('session/event', (session, event) => {
+    const sessionId = session?.id
+    rt.roleRuntime?.event?.(sessionId, event)
+    rt.publishChatEvent?.(sessionId, event)
+  })
 
   // The DSH interface language of the last browser that asked for the team.
   let uiLocale
@@ -280,6 +286,7 @@ export function install(rt) {
     computerLive: rt.computerLive?.() ?? {},
     roleCatalog: rt.roleCatalogView(),
     roleDetails: rt.roleDetailsView(),
+    roleRuntime: rt.roleRuntime.view(),
     // File checks may change a record's status without a state write.
     roles,
   })
@@ -484,7 +491,7 @@ export function install(rt) {
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),
     'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach',
-    'role-install', 'role-uninstall'])
+    'role-install', 'role-uninstall', 'role-grant', 'role-settings', 'role-settings-set'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
   const handle = async (endpoint, payload, signal, desktopWindow = false) => {
     try {
@@ -683,6 +690,12 @@ export function install(rt) {
         case 'role-uninstall':
           if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
           return ok(await rt.uninstallRole(body.id))
+        case 'role-grant':
+          return ok(await rt.grantRole(body))
+        case 'role-settings':
+          return ok(await rt.roleSettings(body))
+        case 'role-settings-set':
+          return ok(await rt.setRoleSettings(body))
         // A model on another route (parts.js): a new conversation with a handoff note.
         case 'switch-route':
           await rt.load()
@@ -964,6 +977,7 @@ export function install(rt) {
           await rt.load()
           await rt.sendUser({
             sessionId: body.sessionId,
+            voicePane: body.voicePane,
             content: [
               ...(text === '' ? [] : [{ type: 'text', text }]),
               ...images.map(({ mediaType, data }) => ({ type: 'image', mediaType, data })),
@@ -1031,6 +1045,12 @@ export function install(rt) {
         case 'browser-result':
           if (!rt.browserEnabled) return fail('Bot browsers are off on this host', 'bot/browser-off')
           return ok(rt.browserChannel.result(body))
+        case 'voice-pane':
+          return ok(rt.roleRuntime.voice.presence(body))
+        case 'voice-wait':
+          return ok(await rt.roleRuntime.voice.wait(body, signal))
+        case 'voice-spoken':
+          return ok(rt.roleRuntime.voice.acknowledge(body))
         // The Privacy page (privacy.js): what the desktop app may share, all off until switched on.
         // Images (imagegen.js): how they are made here, and a generation's progress for its card.
         case 'image-access':
@@ -1325,7 +1345,7 @@ export function install(rt) {
   // How a user message reaches a Session: a Bot id, a group chat's id, or an earlier
   // part of either resolves to its current part. `content` is the prompt blocks DSH
   // takes (text, image, file receipts); `requestId` lands on the message's source.
-  async function sendUser({ sessionId: ref, content, requestId = randomUUID() }) {
+  async function sendUser({ sessionId: ref, content, requestId = randomUUID(), voicePane }) {
     const past = rt.pastOwners.get(ref)
     const room = rt.roomOf(ref)
     const sessionId = rt.botOf(ref) ? rt.chatOf(ref)
@@ -1333,6 +1353,7 @@ export function install(rt) {
         : past?.roomId === undefined && past !== undefined ? rt.chatOf(past.botId)
           : past !== undefined ? rt.sessionOfRoom(rt.roomOf(past.roomId)) : ref
     await rt.ensureCapabilities(sessionId)
+    if (voicePane !== undefined && ref === sessionId) rt.roleRuntime.voice.originate(sessionId, voicePane, requestId)
     await ctx.sessionController.prompt({
       requestId,
       sessionId,
@@ -1398,7 +1419,8 @@ export function install(rt) {
         return handle(endpoint, body?.payload, request.signal, desktopWindow)
       }
       const result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
-      const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint)
+      const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint)
+        || ['role-settings', 'role-settings-set'].includes(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)
       return new Response(JSON.stringify(result), { status: 200, headers: {
         'content-type': 'application/json', ...(noStore ? { 'cache-control': 'no-store' } : {}),

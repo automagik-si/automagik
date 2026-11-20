@@ -764,6 +764,7 @@ export function install(rt) {
     // the scoped tools with this ownership (drops Sessions that left, scopes
     // live Agents that joined); both install after this.
     rt.indexAgents?.()
+    rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
     restoreCurrent()
   }

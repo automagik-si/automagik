@@ -80,3 +80,12 @@ test('the group relay and non-Bot sessions do not get progress instructions', (t
   assert.doesNotMatch(prompt('room'), /progress|milestone/)
   assert.equal(prompt('outside'), '')
 })
+
+test('an Agent with a different Session ID keeps its pre-role identity text', t => {
+  const { ctx, prompt } = start()
+  t.after(() => ctx.dispose())
+  const child = { id: 'child-agent', session: { id: 'worker' } }
+  const before = prompt(child.id)
+  const now = ctx.sections.get('bot-identity').text({ agent: child })
+  assert.equal(now, before)
+})

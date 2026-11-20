@@ -40,6 +40,7 @@ export function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useA
   useEffect(() => {
     if (previous.current === current) return
     previous.current = current
+    if (ui.voice && ui.voice !== current) actions.closeVoice()
     if (current) actions.followPanel?.(current)
   }, [current])
   const open = ui.details ? { id: ui.details, view: ui.view ?? 'details', renaming: ui.renaming, tab: ui.tab, side: ui.side } : null

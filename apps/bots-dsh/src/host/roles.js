@@ -5,6 +5,7 @@ import {
 import { refusal } from './refusal.js'
 import { createRoleCatalog } from './role-catalog.js'
 import { createRolePackages } from './role-package.js'
+import { createRoleRuntime } from './role-runtime.js'
 
 let roleQueue = Promise.resolve()
 const serialize = (edit) => {
@@ -17,18 +18,35 @@ export function installRoles(rt, deps = {}) {
   const { state } = rt
   const catalog = createRoleCatalog({
     ...deps,
-    canFetch: () => rt.readOnly() === undefined && rt.holdsLock(),
+    canFetch: () => rt.readOnly?.() === undefined && rt.holdsLock?.() === true,
     warn: (...args) => rt.warn?.(...args),
   })
   const packages = createRolePackages(rt, catalog, deps)
+  rt.roleRuntime?.dispose?.()
+  const runtime = rt.roleRuntime = createRoleRuntime(rt, packages, deps)
+  rt.ctx.effect(() => () => runtime.dispose(), 'omni-ui: role runtime')
+  const lastAttachmentTime = new Map()
   rt.roleCatalogView = catalog.view
   rt.roleCatalog = async () => (await catalog.snapshot()).view
   rt.roleRecordsView = packages.recordsView
   rt.roleDetailsView = packages.detailsView
-  rt.installRole = id => serialize(() => packages.install(id))
-  rt.uninstallRole = id => serialize(() => packages.uninstall(id))
+  rt.installRole = id => serialize(async () => {
+    const result = await packages.install(id, runtime.prepare)
+    runtime.reset(packages.recordOf(id))
+    runtime.reconcile()
+    return result
+  })
+  rt.uninstallRole = id => serialize(async () => {
+    const result = await packages.uninstall(id)
+    runtime.reconcile()
+    return result
+  })
   const commit = async (apply, beforeCommit) => {
-    await rt.saveCopy(apply, { beforeCommit, afterWrite: () => apply(state) })
+    await rt.saveCopy(apply, { beforeCommit, afterWrite: () => {
+      apply(state)
+      runtime.reconcile()
+      rt.syncScopedTools?.()
+    } })
     rt.reapplyToolMasks?.()
   }
   const editRole = (id, attach, roleId) => serialize(async () => {
@@ -86,7 +104,8 @@ export function installRoles(rt, deps = {}) {
           packages.requireOfficial(roleId, record)
         }
         check()
-        next = [{ id: roleId, version: record.version, attachedAt: new Date((deps.now ?? Date.now)()).toISOString(), grants: [] }]
+        const time = Math.max((deps.now ?? Date.now)(), (lastAttachmentTime.get(id) ?? -Infinity) + 1)
+        next = [{ id: roleId, version: record.version, attachedAt: new Date(time).toISOString(), grants: [] }]
       }
     } else if ((hasSlot && Array.isArray(bot.roles) && bot.roles.length === 0)
       || (!hasSlot && bot.kind !== BUILTIN_ROLES.genie.kind)) return effective
@@ -100,17 +119,69 @@ export function installRoles(rt, deps = {}) {
       if (next === undefined) delete target.roles
       else target.roles = next
     }, check)
-    if (attach && next?.length) return [roleId]
+    if (attach && next?.length) {
+      lastAttachmentTime.set(id, Date.parse(next[0].attachedAt))
+      await runtime.ready(id)
+      return [roleId]
+    }
+    if (slot) {
+      const time = Date.parse(JSON.parse(slot)?.[0]?.attachedAt ?? '')
+      if (Number.isFinite(time)) lastAttachmentTime.set(id, time)
+    }
     return effectiveRoleIds(rt.own(state.bots, id), state.prefs)
   })
 
   rt.attachRole = (id, roleId) => editRole(id, true, roleId)
   rt.detachRole = id => editRole(id, false)
+  const roleWrite = work => serialize(async () => {
+    await rt.load()
+    packages.requireWriter()
+    if (!rolesOn(state.prefs)) throw refusal('Roles are turned off for this team.')
+    return work()
+  })
+  rt.grantRole = ({ id, role, capability, on }) => roleWrite(async () => {
+    if (typeof id !== 'string' || typeof on !== 'boolean') throw refusal('Invalid role grant.')
+    await runtime.ready(id)
+    const held = runtime.requireAttachment(id, role)
+    if (!held.runtime.manifest.capabilities.includes(capability)) throw refusal('This role does not declare that capability.')
+    const before = held.bot.roles[0]
+    const check = () => {
+      packages.requireWriter()
+      if (runtime.requireAttachment(id, role) !== held || held.bot.roles[0] !== before) {
+        throw refusal("This Bot's role changed. Try again.")
+      }
+    }
+    check()
+    if (before.grants.includes(capability) === on) return before.grants
+    const grants = on ? [...before.grants, capability] : before.grants.filter(grant => grant !== capability)
+    const next = [{ ...before, grants }]
+    await commit(team => { team.bots[id].roles = next }, check)
+    return grants
+  })
+  const roleSettings = (id, role, values, write) => roleWrite(async () => {
+    if (typeof id !== 'string') throw refusal('No such Bot')
+    await runtime.ready(id)
+    const held = runtime.requireAttachment(id, role)
+    const declarations = held.runtime.manifest.settings
+    const check = () => {
+      packages.requireWriter()
+      if (runtime.requireAttachment(id, role) !== held) throw refusal("This Bot's role changed. Try again.")
+    }
+    check()
+    if (write) return runtime.settings.write(id, held.pin.id, declarations, values, check)
+    const saved = await runtime.settings.read(id, held.pin.id, declarations)
+    check()
+    return saved
+  })
+  rt.roleSettings = ({ id, role }) => roleSettings(id, role)
+  rt.setRoleSettings = ({ id, role, values }) => roleSettings(id, role, values, true)
   rt.setRolesPreference = value => serialize(async () => {
     if (value === false ? state.prefs.roles === false : !Object.hasOwn(state.prefs, 'roles')) return
     await commit((team) => {
       if (value === false) team.prefs.roles = false
       else delete team.prefs.roles
     })
+    if (value !== false) await runtime.ready()
   })
+  runtime.reconcile()
 }

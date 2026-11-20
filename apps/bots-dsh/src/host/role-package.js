@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fsPromises from 'node:fs/promises'
 import { dirname, isAbsolute, join, posix } from 'node:path'
 import { attachedRoleIds, isPackageRoleId, isRoleId, isRoleVersion, ROLE_SOURCE_UNCONFIRMED, rolesOn } from '../shared/roles.js'
-import { isSha256, parseRoleJson, plainObject, roleDescription, roleName, roleToolName, validCapabilities } from './role-catalog.js'
+import { isSha256, parseRoleJson, plainObject, ROLE_EVIDENCE_LIMITS, roleDescription, roleName, roleToolName, validCapabilities } from './role-catalog.js'
 import { MAX_ROLE_BYTES, MAX_ROLE_FILES, MAX_ROLE_FILE_SIZE, readRoleTar, roleFilePath } from './role-tar.js'
 import { refusal } from './refusal.js'
 
@@ -11,6 +11,9 @@ const MANIFEST_LIMIT = 64 * 1024
 const MANIFEST_FIELDS = new Set(['id', 'version', 'name', 'publisher', 'entry', 'prompt', 'tools', 'capabilities', 'settings', 'ui', 'description', 'requires'])
 const invalidManifest = detail => refusal(`Invalid role manifest (${detail}).`)
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+const evidencePaths = ({ verDir }) => [`${verDir}.tgz`, `${verDir}.roles.json`, `${verDir}.roles.json.sig`]
+const privateEvidence = stat => stat && (process.platform === 'win32' || (stat.mode & 0o777) === 0o600)
+const moduleDependency = /\b(?:import|require)\b|\bexport(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*)*(?:\*|\{[\s\S]*?\}(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*)*from\b)/u
 
 export function rolePaths(home, id, version) {
   if (typeof home !== 'string' || !isAbsolute(home) || home.includes('\0')) throw refusal('Invalid Bot team folder.')
@@ -47,11 +50,27 @@ function validateManifest(files, entry) {
   if (!validCapabilities(capabilities) || capabilities.length !== entry.capabilities.length
     || !capabilities.every(capability => entry.capabilities.includes(capability))) throw invalidManifest('capabilities')
   if (!Array.isArray(settings) || !Array.isArray(ui)) throw invalidManifest('settings or ui')
-  if (settings.length || ui.length) throw refusal('Role settings and ui are not supported yet.')
+  if (ui.length) throw refusal('Role settings and ui are not supported yet.')
+  if (settings.length > 8 || !settings.every(setting => plainObject(setting)
+    && Object.keys(setting).length === 3 && /^[a-z][a-z0-9-]{0,30}$/.test(setting.key ?? '')
+    && typeof setting.key === 'string' && ['voice', 'speed'].includes(setting.kind) && roleName(setting.label))
+    || new Set(settings.map(setting => setting.key)).size !== settings.length) {
+    throw refusal('These role settings are not supported yet.')
+  }
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let source, promptText
+  try {
+    source = decoder.decode(files.get(script))
+    promptText = decoder.decode(files.get(prompt))
+  } catch { throw invalidManifest('entry or prompt encoding') }
+  // P3 packages without runtime declarations stay inert. Executable entries are
+  // reviewed, single-module sources. Reject imports and re-exports before evaluating bytes.
+  if ((tools.length || settings.length) && moduleDependency.test(source)) throw invalidManifest('entry must be self-contained')
   if (requires !== undefined && (!Array.isArray(requires) || !requires.every(item => typeof item === 'string'))) throw invalidManifest('requires')
   if (requires?.length) throw refusal('Required role features are not supported yet.')
   if (description !== undefined && typeof description !== 'string') throw invalidManifest('description')
   return {
+    manifest, entryBytes: files.get(script), prompt: promptText,
     warnings: Object.keys(manifest).filter(key => !MANIFEST_FIELDS.has(key)),
     declarations: {
       name, ...(roleDescription(description) ? { description } : {}),
@@ -66,7 +85,7 @@ const validRecord = (map, id, record) => plainObject(map) && ownRecord(map, id)
   && isRoleId(id) && plainObject(record) && record.id === id && isRoleVersion(record.version) && isSha256(record.sha256)
 const sameFile = (a, b) => a === undefined || b === undefined ? a === b : a.dev === b.dev && a.ino === b.ino
 
-async function lstat(fs, path) {
+export async function lstat(fs, path) {
   try { return await fs.lstat(path) } catch (error) { if (error.code !== 'ENOENT') throw error }
 }
 
@@ -83,7 +102,7 @@ async function directories(fs, paths) {
   return found
 }
 
-async function readRegular(fs, path, stat, limit) {
+export async function readRegular(fs, path, stat, limit) {
   if (!stat?.isFile() || stat.nlink !== 1 || stat.size > limit) return undefined
   const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   try {
@@ -154,6 +173,7 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
   const fingerprints = new WeakMap()
   // Declarations here also attest that this exact record passed official install admission.
   const verified = new WeakMap()
+  const runtimeDamage = new WeakMap()
   const warn = (...args) => rt.warn?.(...args)
   const hasRecord = id => Boolean(ownRecord(state.roles, id))
   const recordOf = id => hasRecord(id) ? state.roles[id] : undefined
@@ -163,9 +183,9 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     }
   }
   const requireWriter = () => {
-    const readOnly = rt.readOnly()
+    const readOnly = rt.readOnly?.()
     if (readOnly !== undefined) throw refusal(readOnly, { code: 'bot/read-only' })
-    if (!rt.holdsLock()) throw refusal('This host does not hold the Bot team.')
+    if (rt.holdsLock?.() !== true) throw refusal('This host does not hold the Bot team.')
   }
   const requireDetached = id => {
     if (Object.values(state.bots).some(bot => attachedRoleIds(bot).includes(id))) {
@@ -177,6 +197,34 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
 
   function requireOfficial(id, record) {
     if (!attachable(id, record, catalog.entries()?.get(id))) throw refusal(ROLE_SOURCE_UNCONFIRMED)
+  }
+
+  async function authenticate(id, record) {
+    if (!validRecord(state.roles, id, record) || record.publisher !== 'automagik') {
+      throw refusal('The installed role record is invalid.')
+    }
+    const paths = rolePaths(rt.home, id, record.version)
+    const before = await directories(fs, paths)
+    if (!before[3]) throw refusal('The installed role folder is missing.')
+    const [archive, bytes, signature] = await Promise.all(evidencePaths(paths).map(async (path, i) => {
+      const stat = await lstat(fs, path)
+      if (privateEvidence(stat)) return readRegular(fs, path, stat, ROLE_EVIDENCE_LIMITS[i])
+    }))
+    if (!archive || !bytes || !signature) throw refusal('The signed role install evidence is missing or unreadable.')
+    const entry = catalog.retained(bytes, signature, id)
+    if (!entry?.display.installable || entry.display.version !== record.version || entry.source !== record.source
+      || entry.sha256 !== record.sha256.toLowerCase() || archive.length !== entry.size || digest(archive) !== entry.sha256) {
+      throw refusal('The installed role does not match its signed catalog.')
+    }
+    const files = readRoleTar(archive)
+    const details = validateManifest(files, entry.display)
+    const equal = await inspect(fs, paths.verDir, files)
+    const after = await directories(fs, paths)
+    if (!equal || !before.every((stat, i) => sameFile(stat, after[i]))) {
+      throw refusal('The installed role files differ from the signed package.')
+    }
+    if (recordOf(id) === record) verified.set(record, details.declarations)
+    return details
   }
 
   async function requireAttachable(id, record) {
@@ -239,7 +287,7 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     return status ?? 'damaged'
   }
 
-  async function install(id) {
+  async function install(id, prepare) {
     requireWriter()
     if (!rolesOn(state.prefs)) throw refusal('Roles are turned off for this team.')
     if (!isPackageRoleId(id)) throw refusal('Unknown role')
@@ -263,7 +311,10 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     const bytes = await catalog.download(entry)
     if (bytes.length !== entry.size || digest(bytes) !== sha256) throw refusal('The role download does not match the catalog size or checksum.')
     const files = readRoleTar(bytes)
-    const { warnings, declarations } = validateManifest(files, entry.display)
+    const details = validateManifest(files, entry.display)
+    const { warnings, declarations } = details
+    requireWriter()
+    await prepare?.(details, sha256)
     const expected = new Map([...files].map(([path, data]) => [path, { length: data.length, sha256: digest(data) }]))
     const remember = record => {
       verified.set(record, declarations)
@@ -278,6 +329,29 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     admit()
     statuses.delete(id)
     const { rolesDir, pkgDir, verDir } = paths
+    const evidence = [bytes, snapshot.bytes, snapshot.signature]
+    const sidecars = evidencePaths(paths)
+    const addedEvidence = []
+    async function retain() {
+      for (const [index, path] of sidecars.entries()) {
+        const stat = await lstat(fs, path)
+        const data = evidence[index]
+        if (privateEvidence(stat) && (await readRegular(fs, path, stat, ROLE_EVIDENCE_LIMITS[index]))?.equals(data)) continue
+        if (stat) throw refusal('The retained role install evidence conflicts with this package.')
+        const stagedEvidence = join(pkgDir, `.evidence-${randomUUID()}`)
+        admit()
+        try {
+          await fs.writeFile(stagedEvidence, data, { flag: 'wx', mode: 0o600 })
+          admit()
+          // Publish the complete file without replacing evidence owned by an
+          // earlier attempt. The staging name is removed before state commits.
+          await fs.link(stagedEvidence, path)
+          addedEvidence.push(path)
+        } finally {
+          await fs.unlink(stagedEvidence).catch(error => { if (error.code !== 'ENOENT') throw error })
+        }
+      }
+    }
     const current = await directories(fs, paths).catch(error => {
       if (!hadRecord) throw error
       return undefined
@@ -289,6 +363,9 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
       if (hadRecord) {
         statuses.set(id, { record: previous, status: equal ? 'ok' : current && !current[3] ? 'broken' : 'damaged' })
         if (equal) {
+          // The original signed evidence stays valid across catalog releases.
+          try { await authenticate(id, previous) } catch { await retain() }
+          runtimeDamage.delete(previous)
           remember(previous)
           return result
         }
@@ -337,6 +414,7 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
       admit()
       if (!published || !parents.slice(0, 3).every((stat, index) => sameFile(stat, before[index]))
         || !sameFile(published, before[3])) throw refusal(`A folder is in the way: ${verDir}`)
+      await retain()
       await rt.saveCopy(add, {
         beforeCommit: () => {
           try { admit() } catch (error) { refusedBeforeCommit = true; throw error }
@@ -353,6 +431,9 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
           admit()
           if (parents.slice(0, 3).every((stat, index) => sameFile(stat, before[index])) && sameFile(published, before[3])) {
             await fs.rm(verDir, { recursive: true })
+            for (const path of addedEvidence) await fs.unlink(path).catch(unlinkError => {
+              if (unlinkError.code !== 'ENOENT') throw unlinkError
+            })
             rolledBack = true
             await prune(fs, pkgDir)
           }
@@ -370,7 +451,7 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
           if (!stagingIdentity || !parents.slice(0, 3).every((stat, index) => sameFile(stat, before[index]))
             || !sameFile(stagingIdentity, stagedBefore)) throw refusal('The role staging folder changed.')
           await fs.rm(staged, { recursive: true })
-          if (!current[2] && rt.holdsLock()) await prune(fs, pkgDir)
+          if (!current[2] && rt.holdsLock?.() === true) await prune(fs, pkgDir)
         } catch {
           warn('Role staging cleanup could not finish at %s.', staged)
         }
@@ -416,14 +497,18 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     if (!paths) return { removed: true }
     try {
       if (!original) throw refusal('The package path is unsafe.')
-      if (!original[3]) return { removed: true }
-      if (!await inspect(fs, paths.verDir)) throw refusal('The package folder contains unsafe entries.')
+      if (!original[2]) return { removed: true }
+      if (original[3] && !await inspect(fs, paths.verDir)) throw refusal('The package folder contains unsafe entries.')
       const before = await directories(fs, paths)
       requireWriter()
       expectRecord(id, false, undefined)
       requireDetached(id)
       if (!original.every((stat, index) => sameFile(stat, before[index]))) throw refusal('The package folder changed.')
-      await fs.rm(paths.verDir, { recursive: true })
+      if (original[3]) await fs.rm(paths.verDir, { recursive: true })
+      for (const path of evidencePaths(paths)) {
+        const stat = await lstat(fs, path)
+        if (stat) await fs.unlink(path)
+      }
       await prune(fs, paths.pkgDir)
       return { removed: true }
     } catch {
@@ -443,10 +528,13 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
         publisher: roleName(record?.publisher) ? record.publisher : undefined,
         installedAt: typeof record?.installedAt === 'string' && record.installedAt.length <= 40 ? record.installedAt : undefined,
         status: await statusOf(id, record),
+        ...runtimeDamage.get(record),
       }]))
       if (map === state.roles) return Object.fromEntries(projected)
     }
   }
 
-  return { install, uninstall, recordsView, detailsView, hasRecord, recordOf, expectRecord, requireWriter, requireAttachable, requireOfficial }
+  const damage = (record, reason) => runtimeDamage.set(record, { status: 'damaged', reason })
+  return { install, uninstall, recordsView, detailsView, hasRecord, recordOf, expectRecord, requireWriter, requireAttachable, requireOfficial,
+    authenticate, damage, damaged: record => runtimeDamage.has(record) }
 }

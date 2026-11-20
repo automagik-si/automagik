@@ -126,6 +126,12 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     roleCatalog: () => after(call('role-catalog')),
     installRole: id => after(call('role-install', { id })),
     uninstallRole: id => after(call('role-uninstall', { id })),
+    grantRole: (id, role, capability, on) => after(call('role-grant', { id, role, capability, on })),
+    roleSettings: (id, role) => call('role-settings', { id, role }),
+    setRoleSettings: (id, role, values) => call('role-settings-set', { id, role, values }),
+    voicePane: (sessionId, paneId, open, active) => call('voice-pane', { sessionId, paneId, open, active }),
+    voiceWait: (sessionId, paneId, callId, signal) => call('voice-wait', { sessionId, paneId, callId }, signal),
+    voiceSpoken: (sessionId, paneId, callId, outcome) => call('voice-spoken', { sessionId, paneId, callId, outcome }),
     // A model on another route: the host starts a new conversation with a handoff note
     // (parts.js). `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),
@@ -210,7 +216,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     setPrefs: prefs => after(call('set-prefs', prefs)),
     setMain: (id, main = true, options = {}) => after(call('set-main', { id, main, ...options })),
     updateRoom: (id, patch) => after(call('update-room', { id, ...patch })),
-    send: (sessionId, text) => after(call('send', { sessionId: partFor(sessionId), text })),
+    send: (sessionId, text, voicePane) => after(call('send', { sessionId: partFor(sessionId), text, ...(voicePane ? { voicePane } : {}) })),
     answerQuestion: (sessionId, questionId, answer) => after(call('answer-question', { sessionId: partFor(sessionId), questionId, answer })),
     dismissQuestion: sessionId => after(call('dismiss-question', { sessionId })),
     answerView: (sessionId, viewId, action, values) => after(call('view-reply', { sessionId: partFor(sessionId), viewId, action, values })),

@@ -1057,7 +1057,7 @@ export function install(rt) {
     const held = scoped.get(id)
     if (held === undefined) return
     scoped.delete(id)
-    for (const dispose of [...held.disposers, ...(held.roleLifts ?? [])]) {
+    for (const dispose of [...(held.packageLifts ?? []), ...held.disposers, ...(held.roleLifts ?? [])]) {
       try {
         dispose()
       } catch (error) {
@@ -1081,6 +1081,40 @@ export function install(rt) {
   // A wanted Session whose Agent cannot take scoped tools yet is warned about
   // once; held.tools stays unset, so the next step's check tries again.
   const registerless = new WeakSet()
+  const packageToolCollision = name => [...scoped.values()].some(held => !held.relay
+    && !held.packageNames?.includes(name) && ctx.tools?.get?.(name, held.agent) !== undefined)
+  const syncPackageTools = (agent, held) => {
+    const role = rt.roleRuntime?.tools?.(agent, held.packageKey)
+    if (held.packageKey === role?.key) return
+    for (const dispose of held.packageLifts ?? []) dispose()
+    for (const name of held.packageNames ?? []) {
+      held.unlisted.delete(name)
+      ;(held.removedPackages ??= new Set()).add(name)
+    }
+    held.packageKey = undefined
+    held.packageLifts = []
+    held.packageNames = []
+    if (!role) return
+    const lifts = [role.dispose]
+    try {
+      for (const def of role.definitions) {
+        const dispose = agent.ctx?.tools?.register?.(def)
+        if (typeof dispose !== 'function') throw new Error('Role tools need a disposable Session registration.')
+        lifts.push(dispose)
+      }
+    } catch (error) {
+      for (const dispose of lifts) dispose()
+      rt.warn?.('omni-ui: role tools not served to %s: %s', agent.session?.id, error)
+      return
+    }
+    held.packageKey = role.key
+    held.packageLifts = lifts
+    held.packageNames = role.definitions.map(def => def.name)
+    for (const name of held.packageNames) {
+      held.removedPackages?.delete(name)
+      held.unlisted.add(name)
+    }
+  }
   const shareBotTools = (agent) => {
     if (agent === undefined) return
     const id = agent.session?.id
@@ -1325,6 +1359,7 @@ export function install(rt) {
     const held = scoped.get(id) ?? { relay: false, tools: false, restricted: false, filtered: false, disposers: [], unlisted: new Set() }
     held.agent = agent
     scoped.set(id, held)
+    syncPackageTools(agent, held)
     if (!nativeDshSession(id)) filterBotAssembly(agent, held)
     if (!nativeDshSession(id) && held.restricted !== true && typeof agent.ctx?.tools?.restrict === 'function') {
       maskHiddenTools(agent, held, new Set(ctx.tools.schemas(agent).map(schema => schema.name)))
@@ -1345,10 +1380,17 @@ export function install(rt) {
     const target = exec.arguments?.target
     return SCHEDULE_TARGET_TOOLS.includes(exec.name) && target !== undefined && target !== 'this_session' ? SCHEDULE_TARGET_REFUSAL : undefined
   })
+  const pendingRole = agent => {
+    const owner = rt.selfOf?.(agent?.session?.id)
+    return owner === undefined ? undefined : rt.roleRuntime?.ready?.(owner)
+  }
   // Creation waits for this listener, so the Agent's first step already lacks the tool.
   ctx.on('agent/created', async ({ agent }) => {
     try {
       await rt.load()
+      // Keep the hidden-tools filter in registration order when no role is loading.
+      const ready = pendingRole(agent)
+      if (ready) await ready
       hideBotUnusedTools(agent)
       // Creation runs before the first step collects the tool list, so the
       // names just registered will already be in it; nothing stays pending.
@@ -1369,12 +1411,18 @@ export function install(rt) {
     if (agent === undefined) return next()
     try {
       await rt.load()
+      const ready = pendingRole(agent)
+      if (ready) await ready
       hideBotUnusedTools(agent)
     } catch (error) {
       rt.warn('omni-ui: scoping the tools of %s failed: %s', agent.session?.id ?? agent.id, error)
     }
-    const assembled = await next()
+    let assembled = await next()
     const held = scoped.get(agent.session?.id)
+    if (held?.removedPackages?.size && Array.isArray(assembled.tools)) {
+      assembled = { ...assembled, tools: assembled.tools.filter(tool => !held.removedPackages.has(tool.name)) }
+      held.removedPackages.clear()
+    }
     if (held?.unlisted === undefined || held.unlisted.size === 0) return assembled
     // DSH 0.2.2 collects the scoped tools itself after this waterfall (#814).
     if (!Array.isArray(assembled.tools)) {
@@ -1543,5 +1591,5 @@ export function install(rt) {
     }))
   }
 
-  Object.assign(rt, { pickRoom, hideBotUnusedTools, syncScopedTools, addTeamTool, removeTeamTool, reapplyToolMasks })
+  Object.assign(rt, { pickRoom, hideBotUnusedTools, syncScopedTools, addTeamTool, removeTeamTool, reapplyToolMasks, packageToolCollision })
 }
