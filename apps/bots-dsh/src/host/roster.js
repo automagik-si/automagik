@@ -300,7 +300,7 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -312,7 +312,12 @@ export function install(rt) {
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
-    const modelRef = model ? await rt.resolveModel(model, { checkAccess: true, remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
+    const kind = BOT_KINDS.includes(requestedKind) ? requestedKind : undefined
+    const modelRef = model ? await rt.resolveModel(model, { remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
+    if (model) {
+      rt.assertRouteAllowed({ name: cleanName, kind }, modelRef, 'create-bot')
+      await rt.assertModelAccess(modelRef)
+    }
     // A thinking level needs a model to resolve against; with none it would be dropped
     // silently, so the create fails before a Session is made.
     if (effort && modelRef === undefined) throw refusal('Pick a model before choosing a thinking level')
@@ -383,7 +388,7 @@ export function install(rt) {
         // The host runs an adopted Session, so the Bot never moves to a fresh part (parts.js).
         ...(existingSessionId !== undefined ? { sessionPinned: true } : {}),
         // What a team member brought in by its own plugin is for (omni: Omni's channels).
-        ...(BOT_KINDS.includes(kind) ? { kind } : {}),
+        ...(kind === undefined ? {} : { kind }),
         // A private-folder Bot. Its shell defaults to off; changing `private` later never
         // changes a stored Bot's shell (updateBot).
         ...(isPrivate ? { private: true } : {}),
@@ -638,12 +643,17 @@ export function install(rt) {
     let modelRef = patch.model === '' ? null : patch.model
     if (modelRef != null) {
       try {
-        modelRef = await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+        modelRef = await rt.resolveModel(patch.model, { remember: false, keep: bot.model })
       } catch (error) {
         // Resolution can refuse before the crossing check below.
         rt.routeUnavailable?.(bot, patch.model, entry, error)
         throw error
       }
+    }
+    const modelBeforeAccess = bot.model ?? bot.appliedModel
+    if (modelRef != null) {
+      if (modelBeforeAccess === undefined || crossesHarness(modelBeforeAccess, modelRef)) rt.assertRouteAllowed(bot, modelRef, entry)
+      await rt.assertModelAccess(modelRef)
     }
     // The shell and the model are one boundary: a Bot without a shell cannot run on an
     // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
@@ -668,7 +678,12 @@ export function install(rt) {
     // old conversation across the harness. Other fields cannot ride along: the switch is its
     // own step, and the caller can update them after it.
     const currentModel = bot.model ?? bot.appliedModel
-    if (modelRef != null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
+    const crossing = modelRef != null && crossesHarness(currentModel, modelRef)
+    // Another pick may finish while the connection is checked.
+    if (modelRef != null && currentModel !== modelBeforeAccess && (currentModel === undefined || crossing)) {
+      rt.assertRouteAllowed(bot, modelRef, entry)
+    }
+    if (crossing) {
       // The host owns a pinned chat. Refuse before even resolving its agent, including
       // mixed edits whose permission validation could otherwise open that Session.
       if (bot.sessionPinned !== true) {
