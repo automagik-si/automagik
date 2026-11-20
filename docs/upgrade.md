@@ -212,21 +212,21 @@ Delivery 5a provides the supervisor. The setting and the “Update now” action
 
 ### One-time host setup
 
-As the service user, run `install-copy` with the unit's Node executable and DSH home. For example,
-on a host whose service user is `automagik`:
+As the service user, run `install-copy` with the unit's Node executable and DSH home. For example:
 
 ```sh
-/usr/bin/node /home/automagik/.automagik/web/dsh/profiles/web/node_modules/@automagik/bots-dsh/src/host/supervisor/main.js \
-  install-copy --dsh-home /home/automagik/.automagik/web/dsh --profile web
+/usr/bin/node $HOME/.automagik/web/dsh/profiles/web/node_modules/@automagik/bots-dsh/src/host/supervisor/main.js \
+  install-copy --dsh-home $HOME/.automagik/web/dsh --profile web
 ```
 
 Use the launcher path printed by `install-copy`. With your usual host administration tools, edit
 the unit's `ExecStart` to run the launcher with the same DSH home and profile. Put the unit's
-existing DSH command and every argument after `--`. Keep the unit's existing environment, user,
-working directory and stop timeout. Apply the unit edit and restart it with your usual tools.
+existing DSH command and every argument after `--`. In the example, `%h` is systemd's specifier
+for the service user's home folder. Keep the unit's existing environment, user, working directory
+and stop timeout. Apply the unit edit and restart it with your usual tools.
 
 ```ini
-ExecStart=/home/automagik/.automagik/web/dsh/update/web/supervisor/launcher.sh --dsh-home /home/automagik/.automagik/web/dsh --profile web -- /usr/bin/node /home/automagik/prod/automagik/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open --host 127.0.0.1 --port 8080
+ExecStart=%h/.automagik/web/dsh/update/web/supervisor/launcher.sh --dsh-home %h/.automagik/web/dsh --profile web -- /usr/bin/node %h/prod/automagik/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open --host 127.0.0.1 --port 8080
 ```
 
 The launcher runs the original DSH command under the first copy that passes its self-check,
