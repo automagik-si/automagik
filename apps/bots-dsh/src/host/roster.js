@@ -1317,7 +1317,10 @@ export function install(rt) {
     if (moving && workDir !== room.workDir) {
       delete room.folderNotice
       if (workDir === undefined) delete room.workDir
-      else room.workDir = workDir
+      else {
+        room.workDir = workDir
+        room.scoped = true
+      }
       // A member's own pick for this group gives way to the group's folder, and a
       // cleared one does not bring it back.
       delete room.memberDirs

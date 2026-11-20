@@ -186,7 +186,7 @@ export function install(rt) {
     // `sessionId` is the group's own Session's current part, `ownParts` its earlier
     // ones; `parts` the members' hidden group Sessions and their earlier segments,
     // for usage. `lateRounds` and `relays` are what an older team's rooms may still hold.
-    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, ...room }) => {
+    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, scoped: _scoped, legacySpeakers: _legacySpeakers, legacyUnproven: _legacyUnproven, ...room }) => {
       const parts = [...Object.values(sessions ?? {}), ...Object.values(segments ?? {}).flat().map(segment => segment.sessionId), ...(ownParts ?? []).map(segment => segment.sessionId)]
       const last = (log ?? []).filter(line => line.kind === undefined).at(-1)
       // The row's one line: the start of the last message, without its markdown marks (#1155).

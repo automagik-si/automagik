@@ -4,11 +4,11 @@ import { randomUUID } from 'node:crypto'
 import { createEditInput } from './image-input.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readAvatar } from './avatar.js'
-import { COLORS, EXTRA_COLORS, MESSAGE_INLINE_MAX, ROOM_MODES, SOURCE_KIND } from './constants.js'
+import { COLORS, EXTRA_COLORS, LONG_HEAD, MESSAGE_INLINE_MAX, ROOM_MODES, SOURCE_KIND } from './constants.js'
 import { within } from './folders.js'
 import { absoluteLinks } from './links.js'
 import { NAME_MAX } from './requests.js'
-import { unquote } from './text.js'
+import { headOf, unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
 import { BUILTIN_ROLES, genieDetached } from '../shared/roles.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
@@ -603,6 +603,7 @@ export function install(rt) {
       const result = await next()
       if (result?.isError !== true) {
         ;(room.memberDirs ??= {})[bot.id] = workDir ?? null
+        room.scoped = true
         await rt.save()
       }
       return result
@@ -814,7 +815,7 @@ export function install(rt) {
       try {
         // A post that wants the replies names the conversation it was written
         // from, so the report comes back there instead of the own chat.
-        await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}) }, long.files)
+        await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}), ...(long.files.length > 0 ? { excerpt: headOf(text, LONG_HEAD) } : {}) }, long.files)
       } catch (failure) {
         if (sub !== undefined) rt.dropWork(sub)
         return `Could not post in "${room.name}": ${failure.message}`

@@ -411,6 +411,13 @@ export function install(rt) {
       room.admin = admin
       migrated = true
     }
+    for (const room of Object.values(state.rooms)) {
+      if (room.scoped === true) continue
+      if (room.workDir !== undefined || Object.keys(room.memberDirs ?? {}).length > 0 || room.permission !== undefined) {
+        room.scoped = true
+        migrated = true
+      }
+    }
     // Teams from before #206 kept every long message whole in this file, written whole on
     // every save. A message between Bots is whole in its recipient's Session; a group
     // line's whole text moves to a file of its own, which only the writing host makes.
