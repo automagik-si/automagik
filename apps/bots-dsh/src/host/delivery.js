@@ -386,8 +386,8 @@ export function install(rt) {
         text += decoder.decode(chunk, { stream: true })
         if (text.length > TEXT_SHOW_MAX) return { text: headOf(text, TEXT_SHOW_MAX), whole: false }
       }
-    } catch (error) {
-      rt.warn('omni-ui: file %s not read: %s', file?.name, error)
+    } catch {
+      rt.warn('omni-ui: a file was not read')
       return undefined
     }
     text += decoder.decode()

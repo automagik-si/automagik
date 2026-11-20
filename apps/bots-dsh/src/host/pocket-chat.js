@@ -29,8 +29,9 @@
 //   `ctx.sessionController`, behind a capability check and a lazy import of the adapter
 //   (pocket-chat-adapter.js). On a runtime without the read methods the source is absent.
 // - Served to Pocket Link over a Unix socket in the team's home, owner-only (pocket-socket.js).
-// - RFC 0033 adds per-watch image uploads, thumbnail reads and queued sends with receipts.
-//   Each listener gets its own projection, and attachment services are looked up on demand.
+// - RFC 0033 adds per-watch image and document uploads and queued sends with receipts.
+//   Rich watches get file metadata and image thumbnail reads. Documents have a separate
+//   per-watch grant, and attachment services are looked up on demand.
 // - With RFC 0036 management, a live phone grant can read, edit or add a shown project Bot's
 //   own memory and manage its own scheduled tasks without a chat subscription. Each check uses
 //   the current team lock and one fresh home registry snapshot.
@@ -330,7 +331,7 @@ export class DshChatSource {
       const uploads = this.fileUploads?.()
       const store = this.attachmentStore?.()
       if (typeof uploads?.uploadImageStream === 'function' && typeof store?.readImageRequest === 'function') {
-        return { uploads, store, effective: effectiveAttachments(store.imageLimits) }
+        return { uploads, store, effective: effectiveAttachments(store.imageLimits, typeof uploads.uploadStream === 'function') }
       }
     } catch {}
   }
@@ -437,7 +438,7 @@ export class DshChatSource {
    * @returns {Promise<{ ok: true, close(): void, backfill(before: string, limit?: number): Promise<any[]>,
    *   send?: Function, interrupt?: Function, answer?: Function } | { ok: false, reason: string }>}
    */
-  async watch(terminal, listener, { after, attachments = false } = {}) {
+  async watch(terminal, listener, { after, attachments = false, documents = false } = {}) {
     const botId = botIdOf(terminal)
     if (botId === null) return { ok: false, reason: 'not-found' }
     const bot = (await this.bots()).find(item => item.id === botId)
@@ -475,14 +476,14 @@ export class DshChatSource {
       const live_ = () => !closed && !entry.gone
       Object.assign(handle, {
         send: (message, uploads, scope) => this.send_(entry, live_, writes.signal, message, uploads,
-          attachments && scope ? { ...scope, entry, sessionId: entry.sessionId, live: live_ } : undefined),
+          attachments && scope ? { ...scope, documents, entry, sessionId: entry.sessionId, live: live_ } : undefined),
         interrupt: () => this.interrupt_(entry, live_),
         answer: message => this.answer_(entry, live_, message),
       })
       if (attachments) {
         const signal = AbortSignal.any([writes.signal, entry.controller.signal])
         handle.attach = (method, params, uploads, scope, reply) => this.attach_(
-          method, params, uploads, { ...scope, entry, sessionId: entry.sessionId, live: live_, signal }, reply)
+          method, params, uploads, { ...scope, documents, entry, sessionId: entry.sessionId, live: live_, signal }, reply)
       }
     }
     return handle
@@ -707,7 +708,7 @@ export class DshChatSource {
     const authorize = () => this.attachmentGate(scope, uploads)
     switch (method) {
       case 'upload-begin':
-        return uploads.begin(params, scope, this.attachmentServices(), authorize)
+        return uploads.begin(params, scope, this.attachmentServices(), authorize, this.carriesSignInCode)
       case 'upload-chunk':
         return uploads.chunk(params, scope, reply)
       case 'upload-finish':
@@ -780,7 +781,7 @@ export class DshChatSource {
     const { reason, manifest, repeat } = prepare()
     if (reason) return refuse(reason)
     try {
-      if (!repeat) uploads.ledger.record(manifest)
+      if (!repeat) uploads.recordManifest(manifest)
     } catch {
       this.log('pocket upload: refused')
       return refuse('unavailable')

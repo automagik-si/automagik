@@ -1,5 +1,6 @@
 // RFC 0033 upload limits, byte ingress and the socket host's upload registry. DSH owns
-// stored images, variants and receipts; the registry owns admission charges and retries.
+// stored images, variants, documents and receipts; the registry owns admission charges and
+// separate image-only and document-bearing Retry manifests.
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -27,6 +28,10 @@ const MAX_PHONES = 64
 const MAX_MANIFESTS = 64
 const HEADER_BYTES = 64 * 1024
 const MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp']
+const DOCUMENT_EXTENSIONS = new Map([['text/plain', '.txt'], ['application/pdf', '.pdf']])
+const DOCUMENT_OFFER = Object.freeze({ mediaTypes: Object.freeze([...DOCUMENT_EXTENSIONS.keys()]), limits: Object.freeze({ fileBytes: 8 * MiB }) })
+const FILES_UNSUPPORTED = 'ATTACHMENT_FILES_UNSUPPORTED'
+const DOCUMENT_REASONS = new Set([FILES_UNSUPPORTED, 'SUBAGENT_FILE_UNSUPPORTED'])
 const IMAGE_REASONS = new Set(['IMAGE_TOO_LARGE', 'IMAGE_TOO_MANY_PIXELS', 'IMAGE_DIMENSION_TOO_LARGE', 'UNSUPPORTED_IMAGE_TYPE', 'INVALID_IMAGE'])
 const HASH = /^[a-f0-9]{64}$/
 const REQUEST_ID = /^pocket-a\/[a-f0-9]{40}$/
@@ -36,12 +41,13 @@ export const sha256 = value => createHash('sha256').update(value).digest('hex')
 export const validId = value => typeof value === 'string' && UPLOAD_ID.test(value)
 export const positiveInt = value => Number.isSafeInteger(value) && value > 0
 export const uploadRefusal = reason => ({ ok: false, state: 'refused', reason })
+export const isDocumentType = type => DOCUMENT_EXTENSIONS.has(type)
 export const attachmentCode = (error, prompt = false) => {
   const code = error?.details?.reason
   return IMAGE_REASONS.has(code) || code === 'timeout' || (prompt && ['MODEL_DOES_NOT_SUPPORT_IMAGES', 'FILE_NOT_STAGED'].includes(code)) ? code : undefined
 }
 
-export function effectiveAttachments(limits) {
+export function effectiveAttachments(limits, documents = false) {
   if (!limits || !Array.isArray(limits.mediaTypes)) return
   const mediaTypes = MEDIA_TYPES.filter(type => limits.mediaTypes.includes(type))
   const fileBytes = Math.min(8 * MiB, limits.maxImageBytes, limits.maxMessageImageBytes)
@@ -54,26 +60,52 @@ export function effectiveAttachments(limits) {
     version: 1, methods: ATTACH_METHODS, mediaTypes,
     limits: { fileBytes, files, messageBytes, deviceOutstanding: DEVICE_OUTSTANDING, deviceDailyBytes: DEVICE_DAILY_BYTES,
       deviceDailyCount: DEVICE_DAILY_COUNT, chunkBytes: CHUNK_BYTES, maxPixels, maxDimension, thumbnail: THUMBNAILS[0] },
+    ...(documents ? { documents: DOCUMENT_OFFER } : {}),
   }
+}
+
+const basename = name => name.split(/[/\\]/).at(-1)
+const stripControls = name => name.replace(/[\p{Cc}\p{Cf}]/gu, '')
+const trimStem = name => name.replace(/[. ]+$/, '')
+const usableName = name => name && name !== '.' && name !== '..'
+
+function cutName(name, limit) {
+  let clean = ''
+  let bytes = 0
+  for (const char of name) {
+    bytes += Buffer.byteLength(char)
+    if (bytes > limit) break
+    clean += char
+  }
+  return clean
 }
 
 export function sanitizeAttachmentName(name) {
   if (typeof name !== 'string') return
-  // eslint-disable-next-line no-control-regex
-  const leaf = name.split(/[/\\]/).at(-1).toWellFormed().replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-  let clean = ''
-  let bytes = 0
-  for (const char of leaf) {
-    bytes += Buffer.byteLength(char)
-    if (bytes > 128) break
-    clean += char
+  const leaf = cutName(stripControls(basename(name).toWellFormed()), 128)
+  return usableName(leaf) ? leaf : undefined
+}
+
+function documentLeaf(params) {
+  const extension = DOCUMENT_EXTENSIONS.get(params.mediaType)
+  if (!Object.hasOwn(params, 'name')) return `document${extension}`
+  const { name } = params
+  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024 || !name.isWellFormed()) return
+  let stem = trimStem(stripControls(basename(name)).normalize('NFC').replace(/[<>:"|?*]/g, '_').trim())
+  if (stem.toLowerCase().endsWith(extension)) stem = stem.slice(0, -extension.length)
+  do { stem = cutName(stem, 124).normalize('NFC') } while (Buffer.byteLength(stem) > 124)
+  stem = trimStem(stem)
+  if (!usableName(stem)) stem = 'document'
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(trimStem(stem.split('.')[0]))) {
+    stem = trimStem(cutName(`_${stem}`, 124))
   }
-  return clean && clean !== '.' && clean !== '..' ? clean : undefined
+  return stem + extension
 }
 
 const dimensions = (width, height) => positiveInt(width) && positiveInt(height) ? { width, height } : 'unsupported'
 const pngMagic = Buffer.from('89504e470d0a1a0a', 'hex')
 const jpegMagic = Buffer.from('ffd8ff', 'hex')
+const pdfMagic = Buffer.from('%PDF-')
 const matches = (data, at, value) => data.subarray(at, at + value.length).equals(value)
 function jpegDimensions(data) {
   for (let at = 2; at < data.length;) {
@@ -193,17 +225,28 @@ function manifestIsValid(manifest, phoneHash) {
     && manifest.receiptIds.every(id => typeof id === 'string' && id !== '' && !id.includes('\0'))
 }
 
+const documentManifestIsValid = (manifest, hash) => manifestIsValid(manifest, hash)
+  && Array.isArray(manifest.kinds) && manifest.kinds.length === manifest.uploadIds.length
+  && manifest.kinds.every(kind => kind === 'image' || kind === 'document') && manifest.kinds.includes('document')
+
+const manifestsAreValid = (manifests, validate) => Array.isArray(manifests) && manifests.length <= MAX_MANIFESTS
+  && manifests.every(validate) && new Set(manifests.map(manifest => manifest.id)).size === manifests.length
+
+const storeIsValid = data => isObject(data) && isObject(data.phones)
+  && (!Object.hasOwn(data, 'brokenAt') || timeIsValid(data.brokenAt))
+
+const documentsAreValid = data => storeIsValid(data) && Object.entries(data.phones).every(([hash, manifests]) =>
+  hashIsValid(hash) && manifestsAreValid(manifests, manifest => documentManifestIsValid(manifest, hash)))
+
 function ledgerIsValid(data) {
-  if (!isObject(data) || !isObject(data.phones) || (Object.hasOwn(data, 'brokenAt') && !timeIsValid(data.brokenAt))) return false
+  if (!storeIsValid(data)) return false
   const phones = Object.entries(data.phones)
   return phones.length <= MAX_PHONES && phones.every(([hash, phone]) => hashIsValid(hash)
     && isObject(phone) && timeIsValid(phone.lastCharge)
     && Array.isArray(phone.charges) && phone.charges.length <= DEVICE_DAILY_COUNT
     && phone.charges.every(charge => isObject(charge) && timeIsValid(charge.at) && charge.at <= phone.lastCharge
       && positiveInt(charge.bytes) && charge.bytes <= 8 * MiB)
-    && Array.isArray(phone.manifests) && phone.manifests.length <= MAX_MANIFESTS
-    && phone.manifests.every(manifest => manifestIsValid(manifest, hash))
-    && new Set(phone.manifests.map(manifest => manifest.id)).size === phone.manifests.length)
+    && manifestsAreValid(phone.manifests, manifest => manifestIsValid(manifest, hash) && !Object.hasOwn(manifest, 'kinds')))
 }
 
 function syncFile(path, flags, write) {
@@ -211,18 +254,18 @@ function syncFile(path, flags, write) {
   try { write?.(fd); fsyncSync(fd) } finally { closeSync(fd) }
 }
 
-export class UploadLedger {
-  constructor(path, now, log) {
-    Object.assign(this, { path, now, log })
+class UploadStore {
+  constructor(path, now, log, validate, unreadable) {
+    Object.assign(this, { path, now, log, validate, unreadable })
   }
 
   load() {
     if (this.data) return this.data
     try {
       const data = JSON.parse(readFileSync(this.path, 'utf8'))
-      if (ledgerIsValid(data)) return (this.data = data)
+      if (this.validate(data)) return (this.data = data)
     } catch (error) {
-      if (!this.broken && error?.code === 'ENOENT') {
+      if (!this.quarantine && error?.code === 'ENOENT') {
         // A crash can leave the quarantine file just before its replacement was published.
         try { lstatSync(`${this.path}.bad`) } catch (missing) {
           if (missing?.code === 'ENOENT') return (this.data = { phones: {} })
@@ -230,11 +273,11 @@ export class UploadLedger {
       }
     }
     // Do not reopen a daily allowance on corruption, even across a restart.
-    if (!this.broken) {
-      this.broken = { brokenAt: this.now(), phones: {} }
-      this.log('pocket upload: ledger unreadable')
+    if (!this.quarantine) {
+      this.quarantine = { brokenAt: this.now(), phones: {} }
+      this.log(this.unreadable)
     }
-    this.save(this.broken, () => {
+    this.save(this.quarantine, () => {
       try { renameSync(this.path, `${this.path}.bad`) } catch (error) { if (error?.code !== 'ENOENT') throw error }
     })
     return this.data
@@ -254,6 +297,20 @@ export class UploadLedger {
   }
 
   recent(at, now = this.now()) { return now - at < DAY_MS }
+
+  broken(now = this.now()) {
+    try {
+      const { brokenAt } = this.load()
+      return brokenAt !== undefined && this.recent(brokenAt, now)
+    } catch (error) {
+      if (this.quarantine && this.recent(this.quarantine.brokenAt, now)) return true
+      throw error
+    }
+  }
+}
+
+export class UploadLedger extends UploadStore {
+  constructor(path, now, log) { super(path, now, log, ledgerIsValid, 'pocket upload: ledger unreadable') }
 
   prune(now = this.now()) {
     const { brokenAt, phones } = this.load()
@@ -296,9 +353,26 @@ export class UploadLedger {
   record(manifest) {
     const data = this.prune()
     const phone = data.phones[manifest.phoneHash]
-    if (data.brokenAt !== undefined || !phone || !manifestIsValid(manifest, manifest.phoneHash)) throw new Error('Pocket manifest unavailable')
+    if (data.brokenAt !== undefined || !phone || !manifestIsValid(manifest, manifest.phoneHash) || Object.hasOwn(manifest, 'kinds')) throw new Error('Pocket manifest unavailable')
     phone.manifests = [...phone.manifests, manifest].slice(-MAX_MANIFESTS)
     this.save(data)
+  }
+}
+
+class DocumentManifests extends UploadStore {
+  constructor(path, now, log) { super(path, now, log, documentsAreValid, 'pocket upload: document manifests unreadable') }
+
+  manifests(phoneHash) {
+    return (this.load().phones[phoneHash] ?? []).filter(manifest => this.recent(manifest.at))
+  }
+
+  record(manifest) {
+    const { phoneHash } = manifest
+    if (this.broken() || !documentManifestIsValid(manifest, phoneHash)) throw new Error('Pocket manifest unavailable')
+    const phones = Object.fromEntries(Object.keys(this.load().phones).map(hash => [hash, this.manifests(hash)])
+      .filter(([, manifests]) => manifests.length))
+    phones[phoneHash] = [...(phones[phoneHash] ?? []), manifest].slice(-MAX_MANIFESTS)
+    this.save({ phones })
   }
 }
 
@@ -323,6 +397,7 @@ export class PocketUploads {
   constructor({ home, log = () => {}, now = Date.now, clock = timers, statfs = statfsSync }) {
     Object.assign(this, { home, log, now, clock, statfs })
     this.ledger = new UploadLedger(join(home, 'pocket', 'uploads.json'), now, log)
+    this.documents = new DocumentManifests(join(home, 'pocket', 'document-manifests.json'), now, log)
     this.records = new Map()
     this.settled = new WeakMap()
     this.reads = 0
@@ -379,17 +454,35 @@ export class PocketUploads {
     else this.stop(record, 'cancelled', record.refuse(reason, code))
   }
 
-  async begin(params, scope, services, authorize) {
+  async begin(params, scope, services, authorize, carriesSignInCode) {
     const { upload, mediaType, bytes } = params
     const refuse = (reason, code) => ({ ...uploadRefusal(reason), upload, ...(code === undefined ? {} : { code }) })
     const recordSet = this.records.get(scope.phoneHash)
-    if (!validId(upload) || Object.hasOwn(params, 'name') || recordSet?.has(upload)) return refuse('invalid')
-    try {
-      if (this.ledger.manifests(scope.phoneHash).some(manifest => manifest.uploadIds.includes(upload))) return refuse('invalid')
-    } catch { return refuse('unavailable') }
+    const document = isDocumentType(mediaType)
     const effective = services?.effective
-    if (!effective?.mediaTypes.includes(mediaType)) return refuse('unsupported')
-    if (!positiveInt(bytes) || bytes > effective.limits.fileBytes) return refuse('too-large')
+    if (!validId(upload) || (!document && Object.hasOwn(params, 'name'))) return refuse('invalid')
+    try {
+      if (this.documents.broken()) return refuse('quota')
+      if (this.ledger.broken()) {
+        // Preserve the images ledger's disk probe on quarantine without admitting or charging.
+        if (effective?.mediaTypes.includes(mediaType) && positiveInt(bytes) && bytes <= effective.limits.fileBytes) {
+          try { enoughDisk(this.home, services.store.root, bytes, this.statfs) } catch {}
+        }
+        return refuse('quota')
+      }
+      const retained = [...this.ledger.manifests(scope.phoneHash), ...this.documents.manifests(scope.phoneHash)]
+      if (recordSet?.has(upload) || retained.some(manifest => manifest.uploadIds.includes(upload))) return refuse('invalid')
+    } catch { return refuse('unavailable') }
+    if (document && this.filesUnsupported) return refuse('unsupported', FILES_UNSUPPORTED)
+    const offer = document ? effective?.documents : effective
+    if ((document && !scope.documents) || !offer?.mediaTypes.includes(mediaType)) return refuse('unsupported')
+    if (!positiveInt(bytes) || bytes > offer.limits.fileBytes) return refuse('too-large')
+    const name = document ? documentLeaf(params) : undefined
+    if (document && name === undefined) return refuse('invalid')
+    if (document && carriesSignInCode?.(name)) {
+      this.log('pocket upload: a name carried a sign-in code and was refused')
+      return { ...refuse('invalid'), message: 'sign-in-code' }
+    }
     if (this.admission || [...(recordSet?.values() ?? [])].some(item => item.state !== 'admitted')) return refuse('busy')
     const outstanding = [...(recordSet?.values() ?? [])].reduce((sum, item) => sum + item.bytes, 0)
     if (outstanding + bytes > DEVICE_OUTSTANDING) return refuse('quota')
@@ -397,7 +490,8 @@ export class PocketUploads {
     const controller = new AbortController()
     const record = {
       ...scope, upload, mediaType, bytes, effective, refuse, controller, ingress: ingress(), state: 'open', received: 0, ready: false,
-      header: undefined, original: undefined,
+      document, name, decoder: mediaType === 'text/plain' ? new TextDecoder('utf-8', { fatal: true }) : undefined,
+      header: undefined, original: undefined, pdfVerified: false,
     }
     record.done = new Promise(resolve => { record.settle = resolve })
     record.leave = () => this.cancelRecord(record, 'revoked')
@@ -434,13 +528,19 @@ export class PocketUploads {
   async admit(record, uploads, authorize) {
     let admitted
     try {
-      admitted = await uploads.uploadImageStream({
-        sessionId: record.sessionId, data: record.ingress.iterator, mediaType: record.mediaType, signal: record.controller.signal,
-      })
+      const request = { sessionId: record.sessionId, data: record.ingress.iterator, signal: record.controller.signal }
+      admitted = record.document
+        ? await uploads.uploadStream({ ...request, name: record.name })
+        : await uploads.uploadImageStream({ ...request, mediaType: record.mediaType })
     } catch (error) {
+      const code = error?.details?.reason
+      if (code === FILES_UNSUPPORTED) this.filesUnsupported = true
       if (record.state === 'open' || record.state === 'finishing') {
         this.log('pocket upload: admission failed')
-        this.stop(record, 'failed', record.refuse('rejected', attachmentCode(error)))
+        const result = !record.document ? record.refuse('rejected', attachmentCode(error))
+          : DOCUMENT_REASONS.has(code) ? record.refuse('unsupported', code)
+            : code === 'timeout' ? record.refuse('rejected', code) : record.refuse('unavailable')
+        this.stop(record, 'failed', result)
       }
       return
     } finally {
@@ -453,26 +553,38 @@ export class PocketUploads {
     const gate = await this.authorize(record, authorize)
     if (record.state !== 'finishing') return
     if (gate || !record.live()) { this.cancelRecord(record, gate ?? 'revoked'); return }
-    const { receiptId, image } = admitted ?? {}
-    if (typeof receiptId !== 'string' || !receiptId || receiptId.includes('\0') || !MEDIA_TYPES.includes(image?.mediaType)
-      || ![image.width, image.height, image.bytes].every(positiveInt)) {
+    const { receiptId, image, file } = admitted ?? {}
+    if (typeof receiptId !== 'string' || !receiptId || receiptId.includes('\0')) {
       this.stop(record, 'failed', record.refuse('rejected'))
       return
     }
+    let metadata
+    if (record.document) {
+      if (typeof file?.attachmentId === 'string' && /^sha256:[a-f0-9]{64}$/.test(file.attachmentId)
+        && file.name === record.name && file.bytes === record.bytes) {
+        metadata = { file: { mediaType: record.mediaType, bytes: file.bytes, name: file.name } }
+      }
+    } else if (MEDIA_TYPES.includes(image?.mediaType) && [image.width, image.height, image.bytes].every(positiveInt)) {
+      metadata = { image: { mediaType: image.mediaType, width: image.width, height: image.height, bytes: record.bytes, stored: image.bytes } }
+    }
+    if (!metadata) { this.stop(record, 'failed', record.refuse('rejected')); return }
     record.receiptId = receiptId
     record.expiry = this.timer(() => this.remove(record), UNSENT_MS)
     record.expiresAt = this.now() + UNSENT_MS
-    this.stop(record, 'admitted', { ok: true, state: 'admitted', upload: record.upload,
-      image: { mediaType: image.mediaType, width: image.width, height: image.height, bytes: record.bytes, stored: image.bytes } })
+    this.stop(record, 'admitted', { ok: true, state: 'admitted', upload: record.upload, ...metadata })
   }
 
   owns(record, scope) { return record && record.watch === scope.watch && record.generation === scope.generation }
 
   settledKey(scope, upload = scope.upload) { return `${scope.generation}:${scope.phoneHash}:${upload}` }
 
+  unknownUpload(scope, upload) {
+    return this.settled.get(scope.watch)?.get(this.settledKey(scope, upload)) ?? { ...uploadRefusal('invalid'), upload }
+  }
+
   chunk(params, scope, reply) {
     const record = this.find(scope.phoneHash, params.upload)
-    if (!this.owns(record, scope)) return { ...uploadRefusal('invalid'), upload: params.upload }
+    if (!this.owns(record, scope)) return this.unknownUpload(scope, params.upload)
     if (record.state !== 'open') return record.refuse('invalid')
     const fail = (reason) => { this.cancelRecord(record, reason); return record.result }
     if (!record.ready || record.ingress.busy() || params.offset !== record.received) return fail('invalid')
@@ -480,7 +592,14 @@ export class PocketUploads {
     const received = record.received + (data?.length ?? 0)
     const final = received === record.bytes
     if (!data || received > record.bytes || (!final && data.length !== CHUNK_BYTES)) return fail('invalid')
-    if (!record.original) {
+    if (record.decoder) {
+      if (data.includes(0)) return fail('unsupported')
+      try { record.decoder.decode(data, { stream: true }) } catch { return fail('unsupported') }
+    } else if (record.document) {
+      // A first chunk shorter than the magic can only be the entire file.
+      if (record.received === 0 && !matches(data, 0, pdfMagic)) return fail('unsupported')
+      record.pdfVerified = true
+    } else if (!record.original) {
       const remaining = HEADER_BYTES - (record.header?.length ?? 0)
       const prefix = data.subarray(0, remaining)
       const header = record.header ? Buffer.concat([record.header, prefix]) : prefix
@@ -498,19 +617,19 @@ export class PocketUploads {
 
   async finish(params, scope, authorize) {
     const record = this.find(scope.phoneHash, params.upload)
-    if (!record) {
-      const result = this.settled.get(scope.watch)?.get(this.settledKey(scope, params.upload))
-      if (result) return result
-    }
-    if (!this.owns(record, scope)) return { ...uploadRefusal('invalid'), upload: params.upload }
+    if (!this.owns(record, scope)) return this.unknownUpload(scope, params.upload)
     if (record.state !== 'open') return record.done
-    if (!record.ready || !record.original || record.received !== record.bytes || record.ingress.busy()) return record.refuse('invalid')
+    if (!record.ready || !(record.original || record.pdfVerified || record.decoder)
+      || record.received !== record.bytes || record.ingress.busy()) return record.refuse('invalid')
     record.state = 'finishing'
     this.clock.clearTimeout(record.idle)
     const gate = await Promise.race([this.authorize(record, authorize), record.done])
     if (record.state !== 'finishing') return record.done
     if (gate || !record.live()) this.cancelRecord(record, gate ?? 'revoked')
     else {
+      if (record.decoder) {
+        try { record.decoder.decode() } catch { this.cancelRecord(record, 'unsupported'); return record.done }
+      }
       this.clock.clearTimeout(record.total)
       record.deadline = this.timer(() => this.cancelRecord(record, 'rejected', 'timeout'), ADMISSION_MS)
       record.ingress.end()
@@ -535,10 +654,17 @@ export class PocketUploads {
     const { phone, phoneHash, sessionId } = scope
     const textHash = sha256(text)
     let previous
-    try { previous = this.ledger.manifests(phoneHash).find(manifest => manifest.id === id) } catch { return { reason: 'unavailable' } }
+    try {
+      if (this.documents.broken() || this.ledger.broken()) return { reason: 'quota' }
+      const image = this.ledger.manifests(phoneHash).find(manifest => manifest.id === id)
+      const document = this.documents.manifests(phoneHash).find(manifest => manifest.id === id)
+      if (image && document) return { reason: 'invalid' }
+      previous = document ?? image
+    } catch { return { reason: 'unavailable' } }
     if (previous) {
       if (previous.sessionId !== sessionId) return { reason: 'session-changed' }
       if (previous.textHash !== textHash || previous.uploadIds.length !== uploadIds.length || previous.uploadIds.some((upload, i) => upload !== uploadIds[i])) return { reason: 'changed' }
+      if (previous.kinds && (!scope.documents || this.filesUnsupported || !limits()?.documents)) return { reason: 'unsupported' }
       return { manifest: previous, repeat: true, records: [] }
     }
     const effective = limits()
@@ -547,17 +673,23 @@ export class PocketUploads {
     for (const upload of uploadIds) {
       const record = this.find(phoneHash, upload)
       if (!record || record.state !== 'admitted' || record.expiresAt <= this.now()) return { reason: 'expired' }
+      if (record.document && !scope.documents) return { reason: 'unsupported' }
       if (!this.owns(record, scope)) return { reason: 'invalid' }
       if (record.sessionId !== sessionId) return { reason: 'session-changed' }
-      if (!effective.mediaTypes.includes(record.mediaType)) return { reason: 'unsupported' }
-      if (record.bytes > effective.limits.fileBytes || exceedsDimensions(record.original, effective.limits)) return { reason: 'too-large' }
+      const offer = record.document ? effective.documents : effective
+      if ((record.document && this.filesUnsupported) || !offer?.mediaTypes.includes(record.mediaType)) return { reason: 'unsupported' }
+      if (record.bytes > offer.limits.fileBytes || (!record.document && exceedsDimensions(record.original, offer.limits))) return { reason: 'too-large' }
       records.push(record)
     }
     if (records.reduce((sum, record) => sum + record.bytes, 0) > effective.limits.messageBytes) return { reason: 'too-large' }
     const receiptIds = records.map(record => record.receiptId)
     const requestId = ATTACH_REQUEST_PREFIX + sha256([phone, sessionId, id, textHash, ...receiptIds].join('\0')).slice(0, 40)
-    return { records, manifest: { phoneHash, id, requestId, sessionId, textHash, uploadIds, receiptIds, at: this.now() } }
+    const manifest = { phoneHash, id, requestId, sessionId, textHash, uploadIds, receiptIds, at: this.now() }
+    if (records.some(record => record.document)) manifest.kinds = records.map(record => record.document ? 'document' : 'image')
+    return { records, manifest }
   }
+
+  recordManifest(manifest) { (manifest.kinds ? this.documents : this.ledger).record(manifest) }
 
   consume(scope, manifest) {
     manifest.uploadIds.forEach((upload, i) => {

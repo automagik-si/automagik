@@ -20,6 +20,8 @@
 // RFC 0033 also negotiates attachments with `attachments: 1`: upload-begin, upload-chunk,
 // upload-finish, upload-cancel, attachment-read, and an optional uploads list on send.
 // Each subscription also needs `attachments: 1` for attachment rows, reads and sends.
+// TXT and PDF upload and send also need `documents: 1` in both hello and subscribe.
+// Changing either effective offer closes the connection's watches and cancels their uploads.
 //
 // Management (RFC 0036) also needs `manage: 1` in hello. The bridge opens a grant for each
 // phone connection and closes it when access ends. Management calls name that grant and a Bot's
@@ -29,7 +31,7 @@ import { lstatSync, unlinkSync } from 'node:fs'
 import { chmod, lstat, mkdir } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
 import { join } from 'node:path'
-import { ATTACH_METHODS, PocketUploads, READ_LINE_BYTES, sha256, validId } from './pocket-attach.js'
+import { ATTACH_METHODS, PocketUploads, READ_LINE_BYTES, isDocumentType, sha256, validId } from './pocket-attach.js'
 
 export const SOCKET_DIR = 'pocket'
 export const SOCKET_NAME = 'chat.sock'
@@ -216,6 +218,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
   let ending = false
   let attachmentGeneration = 0
   let attachments = false
+  let documents = false
   let generation = 0
   const grants = new Map()
   const closeGrant = (id) => {
@@ -351,7 +354,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
     const ref = !reading && typeof params.upload === 'string' ? { upload: params.upload } : {}
     const refuse = reason => ({ id, result: refusedWrite(reason, ref) })
     if (!pairedPhone(params.phone)) return refuse('read-only')
-    if (Object.hasOwn(params, 'name')) return refuse('invalid')
+    if (Object.hasOwn(params, 'name') && !(method === 'upload-begin' && isDocumentType(params.mediaType))) return refuse('invalid')
     const sub = subs.get(params.channel)
     const handle = sub?.handle
     if (!sub?.attachments || typeof handle?.attach !== 'function') return refuse(reading || method === 'upload-begin' ? 'not-watching' : 'invalid')
@@ -383,8 +386,11 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
         // bridge, which drops any socket that is not `readOnly: true`, gets today's answer.
         writes = params.write === 1 && source.writable === true
         const offer = !ending && writes && params.attachments === 1 && source.attachments === true ? source.attachmentOffer?.() : undefined
-        if (Boolean(offer) !== attachments) {
+        const { documents: documentOffer, ...imageOffer } = offer ?? {}
+        const nextDocuments = Boolean(documentOffer) && params.documents === 1 && !uploads?.filesUnsupported
+        if (Boolean(offer) !== attachments || nextDocuments !== documents) {
           attachments = Boolean(offer)
+          documents = nextDocuments
           attachmentGeneration += 1
           clearSubs()
         }
@@ -398,7 +404,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
           if (manageMethods.length > 0) manageMethods.unshift('manage-open', 'manage-close')
         }
         return writes
-          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS, ...(offer ? ATTACH_METHODS : [])], dedupe: 'log', ...(manageMethods.length > 0 ? { manage: 1, manageMethods } : {}), ...(offer ? { attachments: offer } : {}) } }
+          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS, ...(offer ? ATTACH_METHODS : [])], dedupe: 'log', ...(manageMethods.length > 0 ? { manage: 1, manageMethods } : {}), ...(offer ? { attachments: documents ? offer : imageOffer } : {}) } }
           : { id, result: { protocol: PROTOCOL, readOnly: true, methods: METHODS } }
       }
       case 'upload-begin':
@@ -441,14 +447,16 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
         if (subs.has(channel)) return { id, error: { kind: 'invalid_params', message: 'channel in use' } }
         if (subs.size >= MAX_SUBSCRIPTIONS) return { id, error: { kind: 'too_many', message: `at most ${MAX_SUBSCRIPTIONS} subscriptions` } }
         const sub = { terminal, attachments: params.attachments === 1 && attachments }
+        const documentGrant = sub.attachments && documents && params.documents === 1
         subs.set(channel, sub)
         const current = () => !ending && subs.get(channel) === sub
         let handle
         try {
           handle = await source.watch(terminal, event => { if (current()) write({ channel, event }) },
-            { after: typeof after === 'string' ? after : undefined, attachments: sub.attachments })
+            { after: typeof after === 'string' ? after : undefined, attachments: sub.attachments, documents: documentGrant })
         } catch (error) {
-          if (current()) unsubscribe(channel)
+          if (!current()) return { id, error: { kind: 'closed', message: 'closed' } }
+          unsubscribe(channel)
           throw error
         }
         if (!current()) { handle.close?.(); return { id, error: { kind: 'closed', message: 'closed' } } }
