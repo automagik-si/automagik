@@ -331,11 +331,11 @@ export function install(rt) {
   // its Session in `state.tasks` only, which the store's `selfOf` does not read, so a task is
   // resolved here from the record the task run wrote. A subagent child is in none of the
   // team's maps: it follows its durable parent lineage, so a restricted Bot cannot reach its
-  // tools through one.
-  const botOfSession = (sessionId, agent) => {
+  // tools through one. The session classifier follows and checks each parent itself.
+  const botOfSession = (sessionId, agent, { followParents = true } = {}) => {
     let current = sessionId
-    let header = agent?.session?.header ?? headerOf(current)
-    for (let depth = 0; typeof current === 'string' && depth < 32; depth += 1) {
+    let header = followParents ? agent?.session?.header ?? headerOf(current) : undefined
+    for (let depth = 0; typeof current === 'string' && depth < (followParents ? 32 : 1); depth += 1) {
       const direct = rt.botOf(current)
       if (direct !== undefined) return direct
       const owner = rt.selfOf(current) ?? rt.state?.tasks?.[current]?.from
