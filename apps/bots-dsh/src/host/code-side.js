@@ -16,7 +16,8 @@ import { connectCore, HISTORY_LINES } from './code-core.js'
 import { readCodeTree, resolvePane } from './code-tree.js'
 import { createTypingService, typingRecordPath, typingRoutes } from './code-typing.js'
 import { appBrowserBridge } from './constants.js'
-import { verifiedWindow } from './desktop-window.js'
+import { fromWindow, verifiedWindow } from './desktop-window.js'
+import { windowEndpoint } from './extend.js'
 
 /** Exact GET under the shared API channel, so only the owner Peer reaches the terminal stream. */
 export const CODE_STREAM_ROUTE = '/api/omni-ui/code/stream'
@@ -353,9 +354,9 @@ async function openStream(targets, {
  */
 export function install(rt, { env = process.env, connect = connectCore, readFile, desktop = appBrowserBridge() } = {}) {
   const warn = (...args) => rt.warn?.(`omni-ui: ${args.map(value => (typeof value === 'string' ? value : String(value))).join(' ')}`)
-  const offTree = rt.hooks.endpoint(CODE_TREE_ENDPOINT, async (_body, _signal, desktopWindow = false) => {
+  const offTree = windowEndpoint(rt, CODE_TREE_ENDPOINT, async (_body, _signal, windowSeen = false) => {
     // RFC 0030 delivery 1 keeps standalone hosts from serving terminals (lines 129–130, 439–440).
-    if (!desktop || desktopWindow !== true) return { v: 1, machine: null, projects: [], reason: 'desktop-only' }
+    if (!desktop || !fromWindow(windowSeen)) return { v: 1, machine: null, projects: [], reason: 'desktop-only' }
     const answer = await readCodeTree({ env, warn, connect, readFile })
     if (answer.tree) return answer.tree
     return { v: 1, machine: null, projects: [], reason: answer.reason ?? 'unavailable' }
