@@ -92,7 +92,8 @@ RUN set -eux; \
     strip --strip-all /out/rootfs/nodejs/bin/node; \
     chmod 0555 /out/rootfs/nodejs/bin/node; \
     echo "node: stripped ${node_before} -> $(stat -c %s /out/rootfs/nodejs/bin/node) bytes"; \
-    mkdir -p /out/bin /out/lib /out/data/dsh /out/data/bots /out/data/workspace /out/data/secrets; \
+    mkdir -p /out/bin /out/lib /out/data/dsh /out/data/bots \
+      /out/data/workspace /out/data/secrets /out/data/gate-view; \
     for f in /bin/bash /bin/dash /usr/bin/env /usr/bin/printenv /usr/bin/git /usr/bin/rg /usr/bin/flock /bin/tar /bin/gzip /usr/bin/find /usr/lib/git-core/*; do ldd "$f" 2>/dev/null || true; done \
       | awk '/=>/ {print $3}' | sort -u > /tmp/libs; \
     while read -r lib; do \
@@ -123,7 +124,7 @@ RUN set -eux; \
     rm -f /tmp/herdr-core.tar.gz /tmp/herdr-core; \
     /out/bin/hc --version | grep -qx "hc ${HERDR_CORE_VERSION}"; \
     install -d -o 1000 -g 1000 -m 0700 /out/rootfs/run/automagik; \
-    chmod 0700 /out/data/secrets; \
+    chmod 0700 /out/data/secrets /out/data/gate-view; \
     chown -R 1000:1000 /out/data
 
 # Exact WebAuthn library and transitive lock, installed with the repository's Bun version.

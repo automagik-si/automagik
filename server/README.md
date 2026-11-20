@@ -274,17 +274,17 @@ docker exec automagik /nodejs/bin/node \
   --project /data/workspace --home /data
 ```
 
-`/opt/automagik` is read-only code. The image bakes nothing into `/data`: the profile is seeded
-at first start. An image-managed seed follows newer image releases on subsequent starts, as
-described below; a profile whose `package.json` the owner changed stays owner-managed.
+`/opt/automagik` is read-only code. The image ships empty directories in `/data`, including
+`gate-view/`. DSH seeds the profile at first start. An image-managed seed follows newer image
+releases on subsequent starts. A profile whose `package.json` the owner changed stays owner-managed.
 
 ## Measurement access (read-only)
 
 A DSH container mounts **one volume, at `/data`** (the `--volume` in Run). `/data/workspace` is a
 directory inside it, not a second mount, and the vendor homes and the meter's state default into
 it too: the image sets `HOME=/data`. The optional gate container has its own `/data`
-(`gate-data`) and reads only the DSH volume's `dsh/` folder (`DSH_HOME`), read-only at `/dsh/dsh`;
-that view is the gate's, not the workspace's measurement view.
+(`gate-data`) and reads only the DSH volume's `gate-view/` folder, read-only at `/dsh-view`.
+Workspace measurement uses the DSH volume's host path.
 
 The image bakes no host path. Resolve the workspace volume's host path per runtime:
 
@@ -748,14 +748,15 @@ misrouted to DSH on port 3081 fails at that fence. The gate sends DSH its loopba
 legitimate traffic. Point the tunnel at the gate on port 3082 and keep DSH's public Host
 untrusted.
 
-Only the network namespace is shared. The gate has its own `gate-data` volume at `/data`,
-never mounted into DSH; it reads only `dsh-data`'s `dsh/` folder, read-only at `/dsh/dsh`, for the
-launch credential and the profile (Compose `volume.subpath`: Docker Engine 26 and Compose 2.26 or
-later). The gate runs as the same uid 1000 as DSH, so the rest of the volume (the model key, the
-agents' logins, the team and Pocket's owner-only chat socket) stays out of its mount: a read-only
-mount would still let it read those files and connect to that socket. It has no model key. With Access unset it connects only to the fixed loopback DSH listener and never
-follows a launch file's destination or any upstream redirect. Tests use temporary stores and
-listeners; they do not touch a running installation.
+The gate shares DSH's network namespace and has its own `gate-data` volume at `/data`. DSH
+publishes the launch credential and a profile health summary to `dsh-data`'s `gate-view/` folder,
+which the gate mounts read-only at `/dsh-view` (Docker Engine 26 and Compose 2.26 or later). The
+gate never mounts `DSH_HOME`, so DSH's own credential store stays out of its reach. The model key,
+agents' logins, team and Pocket's owner-only chat socket also stay outside the view. This isolation
+covers stored credentials. A key typed into Connect AI still passes through the gate in the proxied
+request because the gate fronts DSH's HTTPS traffic. With Access unset it connects only to the
+fixed loopback DSH listener and never follows a launch file's destination or any upstream
+redirect. Tests use temporary stores and listeners.
 
 Workspace HTTP requests and every WebSocket upgrade need a gate session; otherwise they get
 `401`, including static assets, `/connect` and unknown paths. Only the sign-in ceremonies below

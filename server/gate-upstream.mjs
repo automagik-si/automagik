@@ -1,11 +1,13 @@
 // Only this module talks to DSH, always on loopback. No discovery or Cloud connection.
 import http from 'node:http'
 import { readFileSync } from 'node:fs'
-import { PORT } from './lib.mjs'
+import { join } from 'node:path'
+import { LAUNCH_FILE } from './gate-view.mjs'
+import { GATE_VIEW_MOUNT, PORT } from './lib.mjs'
 
 export const DSH_HOST = '127.0.0.1'
 export class DshCredentials {
-  constructor({ launchFile, port = PORT }) {
+  constructor({ launchFile = join(GATE_VIEW_MOUNT, LAUNCH_FILE), port = PORT } = {}) {
     this.launchFile = launchFile
     this.port = port
     this.authority = `${DSH_HOST}:${port}`

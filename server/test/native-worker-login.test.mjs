@@ -85,6 +85,9 @@ const harness = `
   const lstat = fs.lstatSync
   fs.lstatSync = (path, options) => path === globalThis.testCoreSocket
     ? { isSocket: () => true } : lstat(path, options)
+  // A host's own /data is never this test's: the view stays in the fixture's home.
+  const exists = fs.existsSync
+  fs.existsSync = (path) => path !== '/data' && exists(path)
   syncBuiltinESMExports()
   const lib = await import(${JSON.stringify(`${LIB}?test-original`)})
   globalThis.serverTestLib = {
