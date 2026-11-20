@@ -239,9 +239,15 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   const acp = ref => routeOf(String(ref ?? '').split('/')[0]).connectedBy === 'acp'
+  const reaches = ref =>
+    rt.acpRolePromptProviders?.includes?.(String(ref ?? '').split('/')[0]) === true
   function partOf(held) {
     if (!held?.runtime.prompt) return undefined
     return `<role-prompt id="${held.pin.id}">\n${held.runtime.prompt.trimEnd()}\n</role-prompt>`
+  }
+  function partFor(sessionId, id) {
+    const turn = turnPrompts.get(sessionId)
+    return turn?.id === id ? turn.part : partOf(active(id))
   }
   function prompt(sessionId, agent) {
     const id = owner(sessionId)
@@ -250,8 +256,11 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     if (!bot) return undefined
     const provider = agent?.model?.current?.()?.provider
     if (provider ? acp(provider) : acp(bot.appliedModel ?? bot.model)) return undefined
-    const turn = turnPrompts.get(sessionId)
-    return turn?.id === id ? turn.part : partOf(active(id))
+    return partFor(sessionId, id)
+  }
+  function acpPrompt(sessionId, botId) {
+    if (owner(sessionId) !== botId || !ownBot(botId)) return undefined
+    return partFor(sessionId, botId)
   }
   function event(sessionId, event) {
     if (disposed) return
@@ -271,7 +280,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   return {
-    voice, event, reconcile, tools, prompt, requireAttachment, settings,
+    voice, event, reconcile, tools, prompt, acpPrompt, requireAttachment, settings,
     async prepare(details, sha256) {
       try {
         const runtime = await stage(details, sha256)
@@ -285,10 +294,15 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       if (record) pins.delete(record)
     },
     ready: id => id === undefined ? Promise.all([...attachments.values()].map(held => held.ready)) : attachments.get(id)?.ready,
-    view: () => Object.fromEntries([...attachments].flatMap(([id, held]) => current(id, held) && held.runtime ? [[id, {
-      pin: held.pin, settings: held.runtime.manifest.settings, capabilities: held.runtime.manifest.capabilities,
-      tools: held.runtime.tools.map(tool => tool.definition.name), acp: acp(held.bot.appliedModel ?? held.bot.model),
-    }]] : [])),
+    view: () => Object.fromEntries([...attachments].flatMap(([id, held]) => {
+      if (!current(id, held) || !held.runtime) return []
+      const ref = held.bot.appliedModel ?? held.bot.model
+      return [[id, {
+        pin: held.pin, settings: held.runtime.manifest.settings,
+        capabilities: held.runtime.manifest.capabilities,
+        tools: held.runtime.tools.map(tool => tool.definition.name), acp: acp(ref) && !reaches(ref),
+      }]]
+    })),
     dispose() {
       disposed = true
       turnPrompts.clear()

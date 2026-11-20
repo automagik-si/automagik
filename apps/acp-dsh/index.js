@@ -30,6 +30,7 @@ import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
 import { adaptersHome, AdapterStore, CHECK_TICK_MS, homeRelativeText, redactInstallerOutput } from './src/host/install.js'
 import { installationCliHome } from './src/host/installation.js'
 import { handshake } from './src/host/handshake.js'
+import { createIdentityReaders, IDENTITY_PROVIDERS } from './src/host/identity.js'
 import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNAVAILABLE, unsupported } from './src/host/image.js'
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
@@ -216,7 +217,7 @@ export function apply(ctx, config = {}, {
   // The chat's image keeper (`keepImages`): where an image an agent makes in a chat is kept so the
   // chat can show it. One at a time; the Bot team registers its images folder.
   let imageKeeper
-  const identityReaders = new Set()
+  const identityReaders = createIdentityReaders(message => warn(ctx, message))
   // The turn gates (`holdTurns`): each registrant's own entry, so one never replaces another's.
   const turnGates = new Set()
   let ownAnswerer
@@ -241,23 +242,7 @@ export function apply(ctx, config = {}, {
     holds: () => [...turnGates].map(entry => entry.gate),
     images: () => imageKeeper,
     hostStopping: () => hostStopping.now,
-    botIdentity: sessionId => {
-      let identity
-      for (const { reader } of identityReaders) {
-        let found
-        try { found = reader(sessionId) } catch {
-          warn(ctx, 'a Bot identity reader failed; no identity is sent')
-          return undefined
-        }
-        if (found === undefined) continue
-        if (identity !== undefined) {
-          warn(ctx, 'competing Bot identities for one Session; no identity is sent')
-          return undefined
-        }
-        identity = found
-      }
-      return identity
-    },
+    botIdentity: identityReaders.read,
     // The raw tri-state: an absent setting takes each agent's own switch in AcpAdapter.
     dshTools: () => flagOf(config.dshTools),
     // The raw native-tools setting: AcpAdapter.nativeOn reads it per Session.
@@ -1375,6 +1360,7 @@ export function apply(ctx, config = {}, {
   const service = {
     ...(homes ? { authScope: 'isolated' } : {}),
     reservationEvidence: 2,
+    rolePromptProviders: IDENTITY_PROVIDERS,
     settingsEntry: name,
     status,
     // Sign-in, for the DSH owner's views only (the Bot team's owner-only route): never tools,
@@ -1517,12 +1503,7 @@ export function apply(ctx, config = {}, {
       return out
     },
     /** Read only the Bot that owns this Session. Returns this registration's disposer. */
-    botIdentity(reader) {
-      if (typeof reader !== 'function') return () => {}
-      const entry = { reader }
-      identityReaders.add(entry)
-      return () => { identityReaders.delete(entry) }
-    },
+    botIdentity: identityReaders.register,
     /**
      * Where an image an agent makes in a chat goes (agent-image.js): `keeper` is
      * { start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) ->

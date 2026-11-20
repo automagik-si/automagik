@@ -338,6 +338,22 @@ moves Claude Bots once per team to `acp-claude` (the Bot team's README,
 
 The transcript replay is independent of the bridge: only an explicit `false` turns it off.
 
+The Bot team's identity can carry a `rolePrompt` after the Bot's instructions.
+`acp-claude` and `acp-codex` receive it, and the `acpAgents` service lists them in
+`rolePromptProviders`. The adapter compares roles at the first non-continuing step after
+`turn/start`. The running agent session keeps its role for the rest of that turn, including
+steers, interrupted mirror calls and reader failures. If the turn is unknown, each
+non-continuing step counts as a new turn. An attach, detach or change starts a new agent session
+with the existing renewed replay, which clips the transcript, drops the oldest messages as
+needed and omits Bot relay rows. If the peer rejects or cancels the first prompt carrying a role
+preamble, the next non-continuing step retires that agent session and starts fresh with the
+current identity and replay. With `dshTools: false` the ordinary replay is off and the chat shows
+the new-session notice. Interrupted-turn recovery still sends the cut turn's own user rows to
+the new session, as on any new session. ACP writes no role text into its own log lines, its
+`live` state fields or diagnostics. The peer's output, including stderr in an exit error or a
+rejection message, passes through to the turn's error text and to existing log lines that carry
+peer output, as it does for instructions.
+
 | `dshTools` | Claude Code: tools | Claude Code: replay | Codex: tools | Codex: replay |
 |---|---|---|---|---|
 | absent | DSH bridge, its own off | yes | its own only, a team Bot: DSH extras too | yes |

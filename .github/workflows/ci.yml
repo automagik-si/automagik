@@ -1617,6 +1617,12 @@ jobs:
           bun install --frozen-lockfile
           [ -d dev/harness/node_modules ] || bun run harness
 
+      - name: ACP plugin dependencies for the role identity test
+        # role-runtime.test.js drives acp-dsh's adapter with the Bot team's identity reader.
+        if: matrix.app == 'bots-dsh'
+        working-directory: apps/acp-dsh
+        run: bun install --frozen-lockfile
+
       - name: Desktop dependencies for ACP lifecycle tests
         # The app-build upgrade case calls Desktop's profile merger, which resolves yaml here.
         if: matrix.app == 'acp-dsh'
