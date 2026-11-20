@@ -550,3 +550,74 @@ for (const [width, dark] of [[1440, false], [1440, true], [420, false], [420, tr
     assert.equal(await loginNodes(page), 0)
   })
 }
+
+test('the consent-mode account card reserves, renames and makes shared through the real client actions', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showReservationAccounts())
+  await page.getByText('Bots: owner@example.test', { exact: true }).waitFor()
+  await page.getByText('Workspace plan: covers every ChatGPT workspace of this email', { exact: true }).waitFor()
+  await page.getByText('Shared with other instances (default).', { exact: true }).waitFor()
+  for (const name of ['Switch account', 'Sign out', 'Reset Bot sign-in']) {
+    assert.equal(await page.getByRole('button', { name, exact: true }).count(), 0)
+  }
+  const reserve = page.getByRole('button', { name: 'Reserve for a project', exact: true })
+  const project = page.getByRole('textbox', { name: 'Project name', exact: true })
+  const next = page.getByRole('button', { name: 'Continue', exact: true })
+  await reserve.click()
+  await project.fill('My project')
+  await page.getByText(/Anyone who can read this team's files and the key could test a guessed email/).waitFor()
+  await next.click()
+  await page.getByText('Reserved for My project. This holds in this installation only for now; other installations are not checked yet.', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  assert.equal(await project.inputValue(), 'My project')
+  await project.fill('Renamed project')
+  await project.press('Enter')
+  await page.getByText('Reserved for Renamed project. This holds in this installation only for now; other installations are not checked yet.', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Make shared', exact: true }).click()
+  await page.getByText('Shared with other instances (default).', { exact: true }).waitFor()
+  assert.equal(await project.count(), 0)
+
+  const [created, renamed] = (await calls(page, 'cli-login-reserve')).map(call => call.payload)
+  assert.deepEqual(created, { offerId: created.offerId, label: 'My project' })
+  assert.deepEqual(renamed, { offerId: renamed.offerId, label: 'Renamed project', claimId: renamed.claimId, rev: renamed.rev })
+  assert.notEqual(renamed.offerId, created.offerId)
+  const [released] = (await calls(page, 'cli-login-release')).map(call => call.payload)
+  assert.deepEqual(released, { claimId: renamed.claimId, rev: released.rev })
+  assert.notEqual(released.rev, renamed.rev)
+  for (const action of ['switch', 'signout', 'reset']) assert.deepEqual(await calls(page, `cli-login-${action}`), [])
+})
+
+test('the isolated account card disables Reserve with a reason and closes a replaced offer form', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showReservationAccounts({ isolated: true, instance: '' }))
+  const codex = page.locator('.bt-set-row').filter({ has: page.getByText('Codex', { exact: true }) })
+  const reserve = codex.getByRole('button', { name: 'Reserve for a project', exact: true })
+  const label = codex.getByRole('textbox', { name: 'Project name', exact: true })
+  await codex.getByText('This installation has no instance id; reservations are off.', { exact: true }).waitFor()
+  assert.equal(await reserve.isDisabled(), true)
+  for (const [state, message] of [
+    ['unknown', 'The sign-in could not be read; reservations wait.'],
+    ['recovery', 'Recover the Bot sign-in before reserving this account.'],
+    ['unsupported', 'This version cannot read the account evidence needed for reservations.'],
+    ['signed-out', 'Sign in to reserve this account.'],
+    ['ambiguous', 'This Codex plan is not known to this version.'],
+    ['unread', 'The account could not be read for reservations. Try again.'],
+    ['changed', 'This reservation changed. Look again.'],
+  ]) {
+    await page.evaluate(state => window.refreshReservations({ instance: 'test-instance', state }), state)
+    await codex.getByText(message, { exact: true }).waitFor()
+    assert.equal(await reserve.isDisabled(), true, state)
+  }
+  await page.evaluate(() => window.refreshReservations({ state: 'complete' }))
+  await reserve.click()
+  await label.fill('Do not send')
+  await page.evaluate(() => window.refreshReservations({ exact: 'c'.repeat(43) }))
+  await label.waitFor({ state: 'detached' })
+  assert.deepEqual(await calls(page, 'cli-login-reserve'), [])
+  await reserve.click()
+  assert.equal(await label.inputValue(), '')
+  await codex.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await label.waitFor({ state: 'detached' })
+})
