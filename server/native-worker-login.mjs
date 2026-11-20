@@ -16,6 +16,8 @@ export const NATIVE_WORKER_LOGIN_REQUIRED = 'required'
 // claim it at its start) or names this DSH home; any other claim, or one that cannot be read,
 // means the panel signs in under its own installations/<digest>/cli-homes. Exporting the shared
 // root then would put a worker on another installation's account. The parity test runs both.
+// This is the best guess before the panel starts; the reader (am's loginRecord.js) retakes the
+// decision at each launch, after the panel published its claim, and refuses any difference.
 const CLAIM_LIMIT = 4096
 
 export function installationIdentity(dshHome) {
@@ -51,7 +53,7 @@ function claimedIdentity(path) {
   } catch (error) {
     return error.code === 'ENOENT' ? undefined : null
   } finally {
-    if (fd !== undefined) closeSync(fd)
+    if (fd !== undefined) try { closeSync(fd) } catch {}
   }
 }
 

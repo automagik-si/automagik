@@ -36,9 +36,10 @@ const CASES = {
   'this installation owns the claim': ({ claim, dsh }) => writeFileSync(claim, claimOf(installationIdentity(dsh))),
   'another installation owns the claim': ({ claim, other }) => writeFileSync(claim, claimOf(installationIdentity(other))),
   'a corrupt claim': ({ claim }) => writeFileSync(claim, '{'),
-  'a claim that is a link': ({ claim, other }) => {
-    writeFileSync(`${other}.claim`, claimOf(installationIdentity(other)))
-    symlinkSync(`${other}.claim`, claim)
+  // A link to this installation's own claim: following it would wrongly take the shared root.
+  'a claim that is a link': ({ claim, dsh }) => {
+    writeFileSync(`${dsh}.claim`, claimOf(installationIdentity(dsh)))
+    symlinkSync(`${dsh}.claim`, claim)
   },
   'an oversized claim': ({ claim, dsh }) => writeFileSync(claim, claimOf(installationIdentity(dsh)) + ' '.repeat(5000)),
   'a claim that is a folder': ({ claim }) => mkdirSync(claim),
