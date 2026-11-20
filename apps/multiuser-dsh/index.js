@@ -1,10 +1,11 @@
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { createCarrier, DEFAULT_MAX_REQUEST_BODY_BYTES } from './src/carrier.js'
 import { createStaticFrontend } from './src/frontend-static.js'
 import { createKeySource } from './src/keys.js'
 import { createNonces } from './src/nonces.js'
+import { createPrincipalRecord } from './src/record.js'
 import { namespace, reservationOf, reserved } from './src/reservation.js'
 import { createScope } from './src/scope.js'
 
@@ -26,14 +27,86 @@ function wrapMethod(webServer, name, wrap) {
   }
 }
 
+// Match bots-dsh's dshHomeOf, including spaces in a nonblank path.
+function principalRecordHome(value) {
+  const path = value?.trim() ? value : join(homedir(), '.dsh')
+  return resolve(path === '~' ? homedir() : /^~[\\/]/.test(path) ? join(homedir(), path.slice(2)) : path)
+}
+
+function installPrincipalRecord(ctx, home, instance) {
+  let record
+  let unavailable
+  try {
+    record = createPrincipalRecord({
+      dshHome: principalRecordHome(home), instance,
+      warn: message => ctx.logger.warn('multiuser-dsh: %s', message),
+    })
+  } catch (cause) {
+    unavailable = cause
+    ctx.logger.warn('multiuser-dsh: principal record off: %s', cause.message)
+  }
+  if (record !== undefined) {
+    ctx.effect(() => record.dispose)
+    ctx.provide('automagikPrincipalRecord', Object.freeze({
+      version: 1, file: record.file, instance, folder: record.folderIdentity,
+    }))
+  }
+  const recordAgent = agent => {
+    const sessionId = agent?.id ?? agent?.session?.id
+    const service = ctx.get('automagikBotSessions')
+    let id
+    try {
+      if (service?.version === 1) id = service.botOf(sessionId, agent)
+    } catch {
+      return
+    }
+    if (typeof id !== 'string') return
+    if (unavailable !== undefined) {
+      throw new Error(`multiuser-dsh: the principal record is unavailable: ${unavailable.message}`, { cause: unavailable })
+    }
+    try {
+      record.recordBot(sessionId, id)
+    } catch (cause) {
+      throw new Error(`multiuser-dsh: could not record Bot session ${sessionId}: ${cause.message}`, { cause })
+    }
+  }
+  // Cordis disposes these listeners with the plugin's fiber.
+  ctx.on('agent/created', ({ agent }) => {
+    try {
+      recordAgent(agent)
+    } catch (error) {
+      if (record !== undefined) ctx.logger.warn('%s', error.message)
+      // DSH announces creation serially and allows a listener to reject it.
+      throw error
+    }
+  }, { prepend: true })
+  const recordBefore = ({ agent }, next) => {
+    recordAgent(agent)
+    return next()
+  }
+  ctx.on('agent/pre-step', recordBefore, { prepend: true })
+  ctx.on('tools/pre-execute', recordBefore, { prepend: true })
+}
+
 export function apply(ctx, config) {
   const value = process.env.AUTOMAGIK_MULTIUSER
   const multiuser = value !== undefined && value !== '' && value !== '0'
   const file = process.env.AUTOMAGIK_CALLER_KEYS
-  const keys = createKeySource({ file, expectedInstance: process.env.AUTOMAGIK_INSTANCE_ID })
+  const configuredInstance = process.env.AUTOMAGIK_INSTANCE_ID
+  const keys = createKeySource({ file, expectedInstance: configuredInstance })
   const startedAtSec = Math.floor(Date.now() / 1000)
-  const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  const home = process.env.DSH_HOME
+  const dshHome = home?.trim() || join(homedir(), '.dsh')
   ctx.inject(['webServer'], c => { reservationOf(c.webServer) })
+  const instance = multiuser && configuredInstance?.trim() ? configuredInstance : undefined
+  let recordStarted = false
+  const startRecord = () => {
+    if (!instance || recordStarted || ctx.get('automagikPrincipalRecord', false) !== undefined) return
+    recordStarted = true
+    ctx.effect(() => installPrincipalRecord(ctx, home, instance))
+  }
+  if (multiuser && !instance) ctx.logger.warn('multiuser-dsh: principal record off: no AUTOMAGIK_INSTANCE_ID')
+  startRecord()
   ctx.inject(['connection', 'webServer'], c => c.effect(() => {
     const { webServer } = c
     const reservation = reservationOf(webServer)
@@ -52,6 +125,13 @@ export function apply(ctx, config) {
       for (const cleanup of cleanups.reverse()) cleanup()
     }
     try {
+      startRecord()
+      if (instance && !recordStarted) {
+        // The current writer can leave while this carrier's connection stays active.
+        c.on('internal/service', (name, value) => {
+          if (name === 'automagikPrincipalRecord' && value === undefined && owner.live()) startRecord()
+        })
+      }
       const scope = createScope()
       const nonces = createNonces({
         startedAtSec, anchorSec: Math.floor(Date.now() / 1000),

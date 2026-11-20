@@ -8968,6 +8968,11 @@ var PT_BR = {
   // Installs and their errors
   "The install was cancelled.": "A instalação foi cancelada.",
   "Omni's installer stopped (exit code {code}). What it printed is above.": "O instalador do Omni parou (código de saída {code}). A saída está acima.",
+  "Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.": "O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.",
+  "Omni {github} is out on GitHub and not on npm yet.": "O Omni {github} já saiu no GitHub e ainda não chegou ao npm.",
+  "Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.": "Desligue e ligue o Omni novamente para usar os plugins compatíveis com essa versão ou use um Omni em outro computador.",
+  "Omni's installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.": "O instalador do Omni precisa do systemd, que não está disponível neste computador (como acontece em um contêiner, por exemplo). Use um Omni em outro computador.",
+  "unknown": "desconhecida",
   // A found Omni, and where Omni comes from
   "Your Omni on this Mac": "Seu Omni neste Mac",
   "Your Omni on this computer": "Seu Omni neste computador",
@@ -10849,7 +10854,22 @@ async function botPowerOn(kind, { show, signal, ai: ai2, wait = sleep, quick = r
 }
 var SANDBOX_LOG_MAX = 48e3;
 var TERMINAL_ENDED = /* @__PURE__ */ new Set(["done", "exited", "failed", "cancelled", "closed"]);
-async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep, poll = 400 }) {
+var OMNI_COMMAND_VERSION = /(?:^|\s)@automagik\/omni@(\d+\.\d{6}\.\d+(?:-[0-9A-Za-z.]+)?)(?=\s|$)/;
+var OMNI_RELEASE_TAG = /^v?(\d+)\.(\d{6})\.(\d+)$/;
+function newerOmniTag(github, npm) {
+  const left = OMNI_RELEASE_TAG.exec(github)?.slice(1).map(BigInt);
+  const right = OMNI_RELEASE_TAG.exec(npm)?.slice(1).map(BigInt);
+  if (!left || !right) return false;
+  const at2 = left.findIndex((part, i) => part !== right[i]);
+  return at2 !== -1 && left[at2] > right[at2];
+}
+function serverRefusal({ reason, version, npm, github }) {
+  if (reason === "no-systemd") return t("Omni's installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.");
+  const message = t("Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.", { version, npm: npm ?? t("unknown") });
+  const newer = newerOmniTag(github, npm) ? ` ${t("Omni {github} is out on GitHub and not on npm yet.", { github })}` : "";
+  return `${message}${newer} ${t("Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.")}`;
+}
+async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep, poll = 400, check: checkVersion }) {
   const check = () => {
     if (signal?.aborted) throw abortError();
   };
@@ -10859,14 +10879,6 @@ async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep,
   let log = "";
   let from = 0;
   show("sandbox", { terminal, log, step: null });
-  let started = false;
-  const start = async (state) => {
-    if (started || state !== "ready") return;
-    check();
-    const written = await omniUi("omni-terminal-write", { terminal, data: "\r" });
-    started = written?.ok === true;
-  };
-  await start(opened.state);
   const end = (phase, detail) => {
     void omniUi("omni-terminal-close", { terminal }).catch(() => {
     });
@@ -10874,6 +10886,27 @@ async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep,
     show(phase, detail);
     return phase;
   };
+  let started = false;
+  let checked = false;
+  const start = async ({ state, command }) => {
+    if (started || state !== "ready") return;
+    check();
+    const version = checkVersion && OMNI_COMMAND_VERSION.exec(command)?.[1];
+    if (version && !checked) {
+      checked = true;
+      let answer;
+      try {
+        answer = await checkVersion(version);
+      } catch {
+      }
+      check();
+      if (answer?.ok === false) return serverRefusal({ ...answer, version });
+    }
+    const written = await omniUi("omni-terminal-write", { terminal, data: "\r" });
+    started = written?.ok === true;
+  };
+  const openRefusal = await start(opened);
+  if (openRefusal) return end("failed", { message: openRefusal });
   for (; ; ) {
     check();
     const read = await omniUi("omni-terminal-read", { terminal, from });
@@ -10886,7 +10919,8 @@ async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep,
     if (exited && read.exitCode === 0) return end("linked", { origin: null });
     if (exited) return end("failed", { message: read.error ?? (read.exitCode === 130 ? t("The install was cancelled.") : t("Omni's installer stopped (exit code {code}). What it printed is above.", { code: read.exitCode ?? "?" })), log });
     show("sandbox", { terminal, log, step: read.step ?? null });
-    await start(read.state);
+    const refusal = await start(read);
+    if (refusal) return end("failed", { message: refusal });
     await wait(poll, signal);
   }
 }
@@ -11520,7 +11554,7 @@ function usePower() {
     sandbox: () => {
       setProblem(null);
       back.current = { phase, detail };
-      runPower("omni", sandboxInstall);
+      runPower("omni", (args) => sandboxInstall({ ...args, check: (version) => call("omni-server-check", { version }) }));
     },
     remote: (wanted) => wanted.kind === "bad-link" ? setProblem(t("That is not a link your Omni sends. It looks like https://your-omni/api/login/app?grant=…")) : wanted.kind === "claim" ? (setProblem(null), setUnowned({ url: wanted.url, claimUrl: wanted.claimUrl }), window.open(wanted.claimUrl, "_blank", "noreferrer")) : wanted.kind === "grant" ? connect("remote", "omni-connect-grant", { url: wanted.url, grant: wanted.grant }) : connect("remote", "omni-pair-start", { url: wanted.url }),
     cancelPairing: () => {

@@ -5,10 +5,11 @@ name: Follow Omni
 # Release workflow (release.yml) completing on dev also checks after every Automagik merge.
 # Any release conclusion qualifies: this reads Omni's releases itself, independently of whether
 # Automagik's release succeeded. The every-30-minute schedule is the last fallback; a dispatch
-# by hand also checks. This looks for the newest Omni release (`v<version>`, prereleases
-# included) above the one omni.json pins (and the welcome's package.json, which installs the
-# same release in a plain DSH). Each of Omni's
-# plugins carries the Omni release of its own last change (omni#1356), so a plugin may be
+# by hand also checks. This follows the newest Omni release (`v<version>`, prereleases
+# included) whose channels plugin accepts the newest Omni server on npm (#1905), because
+# Omni's installer takes the server from npm. The desktop and the welcome pin the same
+# release. Each of Omni's plugins carries the Omni release of its own last change
+# (omni#1356), so a plugin may be
 # behind the release but never ahead of it. When the channels and canvas plugins are at or
 # below its version and admit the desktop runtime in the same DSH patch series as their
 # harness, it boots that Omni with dev's plugins (boot-check.yml, the check CI runs), and only
@@ -154,7 +155,7 @@ jobs:
             newest="${WANT_VERSION}"
           else
             lookup() {
-              gh api "repos/${OMNI}/releases?per_page=30" \
+              gh api --paginate "repos/${OMNI}/releases?per_page=100" \
                 --jq '.[] | select(.draft | not) | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | .tag_name | ltrimstr("v")' \
                 > releases.txt
               newest=$(sort -V releases.txt | tail -1)
@@ -184,10 +185,30 @@ jobs:
                 echo "::warning ::Omni dispatched ${wanted}, but its releases still list ${newest:-none} after 2 minutes"
               fi
             fi
-            if [[ -z "${newest}" || "${newest}" == "${current}" || "$(printf '%s\n%s\n' "${current}" "${newest}" | sort -V | tail -1)" != "${newest}" ]]; then
-              echo "Omni ${newest:-none}: omni.json is at ${current}, nothing to follow"
+            # pair: start
+            if ! server=$(curl -fsS --max-time 20 'https://registry.npmjs.org/-/package/@automagik%2fomni/dist-tags' |
+              jq -er '.latest | strings | select(test("\\A[0-9]+\\.[0-9]{6}\\.[0-9]+\\z"))'); then
+              echo "::warning ::Could not read npm's latest Omni server version: nothing to follow"
               exit 0
             fi
+            newest=''
+            while IFS= read -r candidate; do
+              above "${candidate}" "${current}" || break
+              if ! minimum=$(curl -fsS --max-time 20 "https://raw.githubusercontent.com/${OMNI}/v${candidate}/apps/omni-channels-dsh/package.json" |
+                jq -er '((.engines.omni? | strings | capture("\\A\\s*>=\\s*(?<version>[0-9]+\\.[0-9]{6}\\.[0-9]+)(?:\\s|\\z)").version) // .version) |
+                  strings | select(test("\\A[0-9]+\\.[0-9]{6}\\.[0-9]+\\z"))'); then
+                continue
+              fi
+              if ! above "${minimum}" "${server}"; then
+                newest="${candidate}"
+                break
+              fi
+            done < <(sort -Vr releases.txt)
+            if [[ -z "${newest}" ]]; then
+              echo "no Omni release above ${current} has a channels plugin that accepts npm's server ${server}: nothing to follow"
+              exit 0
+            fi
+            # pair: end
           fi
           read_json() { gh api "repos/${OMNI}/contents/$1?ref=v${newest}" --jq .content 2>/dev/null | base64 -d 2>/dev/null || true; }
           for app in omni-channels-dsh omni-canvas-dsh; do

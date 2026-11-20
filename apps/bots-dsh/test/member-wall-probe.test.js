@@ -115,6 +115,10 @@ async function world(t, p, { provider = true, config, skills } = {}) {
     home: p.effectiveTeam, dshHome: p.dshHome,
   }
   const mount = () => ctx.plugin(function botSessionFixture(child) { provideBotSessions(child, rt) })
+  const { dev, ino } = statSync(dirname(p.principals), { bigint: true })
+  ctx.provide('automagikPrincipalRecord', Object.freeze({
+    version: 1, file: p.principals, instance: INSTANCE, folder: `${dev}:${ino}`,
+  }))
   await ctx.plugin(MemberWallFileSystem, configFor(p, config))
   if (provider) await mount()
   await ctx.plugin(LocalSubprocessRuntime)
@@ -373,9 +377,13 @@ test('records with the wrong instance, open permissions, foreign uid or an array
   const owner = join(p.owner, 'secret.txt')
   const own = join(p.own, 'own.txt')
   const grant = join(p.grant, 'guide.txt')
-  const invalid = async label => {
+  const invalid = async (label, rejectedLeaf = false) => {
     refused(await read(ctx, OWNER, owner), `${label}: owner entry`)
-    allowed(await read(ctx, OWNER, grant), `${label}: verified person falls back to member`, /grant canary/)
+    if (rejectedLeaf) {
+      refused(await read(ctx, OWNER, grant), `${label}: rejected leaf denies shared access`)
+    } else {
+      allowed(await read(ctx, OWNER, grant), `${label}: verified person falls back to member`, /grant canary/)
+    }
     refused(await read(ctx, A, own), `${label}: Bot entry`)
   }
   allowed(await read(ctx, OWNER, owner), 'owner positive control', /f45a/)
@@ -383,7 +391,7 @@ test('records with the wrong instance, open permissions, foreign uid or an array
   p.record(entries, { instance: 'other-instance' })
   await invalid('wrong instance')
   p.record(entries, { mode: 0o644 })
-  await invalid('open mode')
+  await invalid('open mode', true)
   sessions.set('0', { header: {} })
   p.record({ '0': 'owner' })
   allowed(await read(ctx, '0', owner), 'verified session 0 with an owner entry', /f45a/)
@@ -394,7 +402,7 @@ test('records with the wrong instance, open permissions, foreign uid or an array
   allowed(await read(ctx, OWNER, owner), 'owner positive control before UID change', /f45a/)
   const uid = process.getuid()
   t.mock.method(process, 'getuid', () => uid + 1)
-  await invalid('foreign uid')
+  await invalid('foreign uid', true)
 })
 
 test('construction refuses forbidden grants, a linked Bot root and disabled prerequisites', async t => {

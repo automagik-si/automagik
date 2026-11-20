@@ -121,10 +121,17 @@ release without a signed lane, stops the install before anything is installed; t
 tarballs are kept, 0600, under `<AUTOMAGIK_HOME>/welcome/tarballs`, where the profile
 installs them from. A DSH that has the team under its former name,
 `@automagik/omni-dsh`, has the team: it is switched on, not installed over. Omni's channels
-and canvases (`@automagik/omni-channels-dsh`, `@automagik/omni-canvas-dsh`) are Omni's, at
-Omni's version: they install as a git source from Omni's repository at the release
-`package.json` pins under `automagik.omni`, the same one the desktop app carries
-(`apps/desktop/omni.json`; `follow-omni.yml` moves both).
+and canvases (`@automagik/omni-channels-dsh`, `@automagik/omni-canvas-dsh`) install from one
+commit in Omni's repository. `follow-omni.yml` keeps `automagik.omni` and the desktop app's
+pin at the newest Omni release whose channels plugin accepts npm's newest Omni server.
+On a fresh install the welcome compares that pin with Omni's signed plugin lane. It picks
+the newest candidate that works with this DSH, the Bot team, and the latest Omni server on npm.
+If no candidate pairs with the server, it picks the newest one compatible with DSH and the Bot
+team. With one Omni plugin already installed, it looks for a candidate with that exact plugin
+version. The shared pin is the fallback.
+Genie installs from its signed lane when the plugin is compatible and at least as new as
+`automagik.genie`, its fallback pin. Both lanes are checked with their publishers' public keys,
+and the welcome records their installed sequences in `<AUTOMAGIK_HOME>/welcome/lanes.json`.
 
 ### One way to each AI
 
@@ -280,7 +287,9 @@ The shape was read from DSH 0.2.1-rc.2:
 | `ai-subscription` | `{ provider, on }` | Shows or hides a dsh-subscriptions vendor's models. |
 | `provider-key`, `signin-*` | see `src/host/providers.js` | A key, or a sign-in run through DSH's authorization service. |
 | `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, and the install in progress. |
-| `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager (`installBundle`: the Bot team from this plugin's own source pointed at its sibling, else this release's tarball; Omni's from Omni's repository at the pinned release), switching on any that are off. Pressing Omni's power button in the team step calls it. |
+| `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager. The Bot team comes from this plugin's sibling source or checked release tarball. Omni's plugins come from the release chosen above. Switches on installed plugins that are off. |
+| `genie-plugin-install` | none | Installs the Bot team if needed, then installs Genie from its signed lane or its pin. Switches on installed plugins that are off. |
+| `omni-server-check` | `{ version }` | Checks the version named by the card's installer command on its npm registry. Reports `unpublished` with the latest npm version and GitHub tag when available, or `no-systemd` on Linux without `systemctl`. An unavailable registry check lets the installer continue. |
 | `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, signInCheck?, listed, restartNeeded }] }`. `signInCheck` is `timeout` or `unreadable`: why the last check could not tell, only while `signedIn` is absent. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |

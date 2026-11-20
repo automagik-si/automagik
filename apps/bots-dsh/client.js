@@ -1984,6 +1984,7 @@ var ZH = {
   "{name} started on it": "{name} 开始做了",
   "You stopped {name}'s work": "你停下了 {name} 的工作",
   "{name} finished its work": "{name} 做完了",
+  "{name} was interrupted by an Automagik update and picked its work back up": "{name} 的工作被 Automagik 更新打断，已经接着做",
   "{name} was cut off by a restart and picked its work back up": "{name} 的工作被重启打断，已经接着做",
   "{name} was cut off by a restart again and stopped": "{name} 的工作又被重启打断，已停下",
   "Picked up its work after a restart": "重启后接着做之前的工作",
@@ -2519,6 +2520,34 @@ var ZH = {
   "The check was interrupted. Check again.": "更新检查已中断。请重新检查。",
   "A check is already running. Try again shortly.": "正在进行更新检查。请稍后重试。",
   "the update check could not be completed.": "无法完成更新检查。",
+  "An update is running. Your message waits until it is done.": "正在更新。你的消息会等到更新完成后再处理。",
+  "this instance is not run by the update supervisor.": "此实例不是由更新监督程序运行的。",
+  "there is no writable folder to keep the previous version in.": "没有可写入的文件夹来保留上一个版本。",
+  "in-app updates are turned off for this instance.": "此实例已关闭应用内更新。",
+  "an update is already running.": "已有更新正在进行。",
+  "the last check is too old. Check for updates again.": "上次检查已过时。请重新检查更新。",
+  "the team is kept in a custom folder the update cannot snapshot.": "团队保存在自定义文件夹中，更新无法为其创建快照。",
+  "the update supervisor did not answer.": "更新监督程序没有响应。",
+  "Automagik is still picking up work from startup. Try again shortly.": "Automagik 仍在恢复启动前的工作。请稍后重试。",
+  "the notes needed to recover stopped work could not be saved.": "无法保存恢复已停止工作所需的记录。",
+  "The update status could not be confirmed. Check again shortly.": "无法确认更新状态。请稍后再检查。",
+  "the new version could not be installed beside the current one.": "无法在当前版本旁安装新版本。",
+  "the installed plugins changed while the update was being prepared.": "准备更新期间，已安装的插件发生了变化。",
+  "the update supervisor restarted before the switch.": "更新监督程序在切换前重新启动了。",
+  "the new version did not answer its health check.": "新版本没有通过健康检查。",
+  "going back to the previous version failed.": "回退到上一个版本失败。",
+  "Updating: checking the release…": "正在更新：检查发行版本…",
+  "Updating: downloading…": "正在更新：下载中…",
+  "Updating: verifying the signature and hashes…": "正在更新：验证签名和哈希…",
+  "Updating: installing beside the current version…": "正在更新：在当前版本旁安装…",
+  "Updating: switching versions…": "正在更新：切换版本…",
+  "Updating: restarting…": "正在更新：重新启动…",
+  "Updating: checking that the new version answers…": "正在更新：检查新版本是否响应…",
+  "Updating: going back to the previous version…": "正在更新：回退到上一个版本…",
+  "Updated to Automagik {version}.": "已更新到 Automagik {version}。",
+  "The update was undone: Automagik {version} is back. Nothing was lost.": "更新已撤销：Automagik {version} 已恢复。没有丢失任何内容。",
+  "Not updated: {reason} The work that was stopped goes on.": "未更新：{reason}被停止的工作会继续。",
+  'The update needs manual recovery. See "In-app updates" in docs/upgrade.md.': "此次更新需要手动恢复。请参阅 docs/upgrade.md 中的“In-app updates”。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
   "Update checks are off.": "已关闭更新检查。",
@@ -20835,7 +20864,7 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
     return (0, import_react48.createElement)("div", { className: "bt-event" }, reply.idle ? t("{names} went back and forth {count} times without progress and paused. Write here to go on", { count: reply.count, names: [bot.name, ...reply.names ?? []].join(t(" and ")) }) : t("Paused after {count} Bot relays. Waiting: {names}", { count: reply.count, names: (reply.names ?? []).join(t(" and ")) }));
   }
   if (reply.kind === "resumed") {
-    return (0, import_react48.createElement)("div", { className: "bt-event" }, t("{name} was cut off by a restart and picked its work back up", { name: bot.name }));
+    return (0, import_react48.createElement)("div", { className: "bt-event" }, reply.resumedByUpdate ? t("{name} was interrupted by an Automagik update and picked its work back up", { name: bot.name }) : t("{name} was cut off by a restart and picked its work back up", { name: bot.name }));
   }
   if (reply.kind === "cut") {
     return (0, import_react48.createElement)("div", { className: "bt-event" }, t("{name} was cut off by a restart again and stopped", { name: bot.name }));
@@ -22216,6 +22245,8 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     repoStars: () => call2("repo-stars"),
     checkSelfUpdate: () => call2("self-update-check"),
     selfUpdateResult: (runId) => call2("self-update-check-result", { runId }),
+    selfUpdateStatus: () => call2("self-update-status"),
+    startSelfUpdate: () => call2("self-update-start"),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = "action") => {
       noteClientError(where, error);
@@ -27352,9 +27383,11 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
   const memoryIds = bot ? [bot.id] : room2 ? [room2.id, ...room2.members] : [];
   const notice = useMemoryNotice(memoryIds, useNews);
   const changed = useNews((map) => latestMemoryChange(map, memoryIds));
+  const updateHold = useRoster((value) => value.updateHold === true);
+  const holdText = t("An update is running. Your message waits until it is done.");
   (0, import_react63.useEffect)(() => {
-    document.body.style.setProperty("--bt-placeholder", JSON.stringify(name ? t("Message {name}", { name }) : t("Message")));
-  }, [name, t("Message")]);
+    document.body.style.setProperty("--bt-placeholder", JSON.stringify(updateHold ? holdText : name ? t("Message {name}", { name }) : t("Message")));
+  }, [name, t("Message"), updateHold, holdText]);
   (0, import_react63.useEffect)(() => {
     document.body.style.setProperty("--bt-steer-unread", JSON.stringify(t("Not read yet")));
   }, [t("Not read yet")]);
@@ -34970,6 +35003,9 @@ var FEEDBACK_CSS = `
 @media (prefers-reduced-motion:reduce){.bt-toast{animation:none}.bt-toast[data-leaving]{transition:none}}
 `;
 
+// src/shared/self-update.js
+var CHECK_FRESH_MS = 10 * 6e4;
+
 // src/client/about.js
 var import_react89 = require("react");
 var CHEER_MS = 1800;
@@ -35142,14 +35178,137 @@ function selfUpdateReason(reason) {
       return t("this window does not hold the team lock.");
     case "check-timeout":
       return t("the update check is taking too long. Try again.");
+    case "no-supervisor":
+      return t("this instance is not run by the update supervisor.");
+    case "no-writable-home":
+      return t("there is no writable folder to keep the previous version in.");
+    case "self-update-off":
+      return t("in-app updates are turned off for this instance.");
+    case "update-running":
+      return t("an update is already running.");
+    case "check-stale":
+      return t("the last check is too old. Check for updates again.");
+    case "team-home-custom":
+      return t("the team is kept in a custom folder the update cannot snapshot.");
+    case "request-unanswered":
+      return t("the update supervisor did not answer.");
+    case "starting-up":
+      return t("Automagik is still picking up work from startup. Try again shortly.");
+    case "notes-unwritable":
+      return t("the notes needed to recover stopped work could not be saved.");
+    case "stage-failed":
+      return t("the new version could not be installed beside the current one.");
+    case "switch-refused":
+      return t("the installed plugins changed while the update was being prepared.");
+    case "supervisor-restarted":
+      return t("the update supervisor restarted before the switch.");
+    case "health-failed":
+      return t("the new version did not answer its health check.");
+    case "rollback-failed":
+      return t("going back to the previous version failed.");
     default:
       return t("the update check could not be completed.");
   }
 }
+var RUNNING_PHASES = /* @__PURE__ */ new Set(["checking", "downloading", "verifying", "staging", "switching", "restarting", "health", "rollingBack"]);
+var UPDATE_POLL_DEADLINE_MS = 15 * 6e4;
+var VERDICT_PHASES = /* @__PURE__ */ new Set(["healthy", "rolledBack", "notUpdated", "manualRecovery"]);
+function runStep(phase) {
+  switch (phase) {
+    case "checking":
+      return t("Updating: checking the release…");
+    case "downloading":
+      return t("Updating: downloading…");
+    case "verifying":
+      return t("Updating: verifying the signature and hashes…");
+    case "staging":
+      return t("Updating: installing beside the current version…");
+    case "switching":
+      return t("Updating: switching versions…");
+    case "restarting":
+      return t("Updating: restarting…");
+    case "health":
+      return t("Updating: checking that the new version answers…");
+    case "rollingBack":
+      return t("Updating: going back to the previous version…");
+    default:
+      return null;
+  }
+}
+function runMessage(run3) {
+  if (!run3) return null;
+  if (RUNNING_PHASES.has(run3.phase)) return runStep(run3.phase);
+  switch (run3.phase) {
+    case "healthy":
+      return t("Updated to Automagik {version}.", { version: run3.to });
+    case "rolledBack":
+      return t("The update was undone: Automagik {version} is back. Nothing was lost.", { version: run3.from });
+    case "notUpdated":
+      return t("Not updated: {reason} The work that was stopped goes on.", { reason: selfUpdateReason(run3.reason) });
+    case "manualRecovery":
+      return t('The update needs manual recovery. See "In-app updates" in docs/upgrade.md.');
+    default:
+      return null;
+  }
+}
 var failedCheck = (error) => ({ reason: error?.code === "bot/read-only" ? error.code : null });
-function SelfUpdateRow({ Row: Row3, check, readResult }) {
+function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2 }) {
   const [starting, setStarting] = (0, import_react89.useState)(false);
   const [result, setResult] = (0, import_react89.useState)(null);
+  const [checkExpired, setCheckExpired] = (0, import_react89.useState)(false);
+  const [status, setStatus] = (0, import_react89.useState)(null);
+  const [confirming, setConfirming] = (0, import_react89.useState)(false);
+  const [updating, setUpdating] = (0, import_react89.useState)(false);
+  const [refused, setRefused] = (0, import_react89.useState)(null);
+  const [attempt, setAttempt] = (0, import_react89.useState)(null);
+  const [expired2, setExpired] = (0, import_react89.useState)(false);
+  const run3 = attempt === null || status?.run?.requestId === attempt.requestId ? status?.run : null;
+  const runLive = RUNNING_PHASES.has(run3?.phase);
+  const hasVerdict = VERDICT_PHASES.has(run3?.phase);
+  const awaitingVerdict = attempt !== null && !hasVerdict && !expired2;
+  const checkedAt = Date.parse(result?.checkedAt);
+  const checkFresh = () => result?.state === "available" && checkedAt <= Date.now() && Date.now() < checkedAt + CHECK_FRESH_MS;
+  (0, import_react89.useEffect)(() => {
+    if (result?.state !== "available" || attempt !== null || !Number.isFinite(checkedAt)) return;
+    const timer = setTimeout(() => {
+      setCheckExpired(true);
+      setConfirming(false);
+    }, Math.max(0, checkedAt + CHECK_FRESH_MS - Date.now()));
+    return () => clearTimeout(timer);
+  }, [result, checkedAt, attempt]);
+  (0, import_react89.useEffect)(() => {
+    if (typeof readStatus !== "function") return;
+    let stopped = false;
+    let timer;
+    let following = false;
+    const expire = attempt === null ? void 0 : setTimeout(() => {
+      stopped = true;
+      clearTimeout(timer);
+      setExpired(true);
+    }, Math.max(0, attempt.deadline - Date.now()));
+    const poll = async () => {
+      let next;
+      try {
+        next = await readStatus();
+      } catch {
+      }
+      if (stopped) return;
+      if (next !== void 0) setStatus(next);
+      if (attempt !== null) {
+        if (next?.run?.requestId === attempt.requestId && VERDICT_PHASES.has(next.run.phase)) clearTimeout(expire);
+        else timer = setTimeout(poll, CHECK_POLL_MS);
+      } else {
+        if (next !== void 0) following = RUNNING_PHASES.has(next?.run?.phase);
+        if (following) timer = setTimeout(poll, CHECK_POLL_MS);
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      clearTimeout(expire);
+    };
+  }, [readStatus, attempt, result]);
   const runId = result?.state === "checking" ? result.runId : void 0;
   const waiting = runId !== void 0;
   const checking = starting || waiting;
@@ -35185,6 +35344,10 @@ function SelfUpdateRow({ Row: Row3, check, readResult }) {
   }, [runId, readResult]);
   const onCheck = async () => {
     setStarting(true);
+    setAttempt(null);
+    setExpired(false);
+    setCheckExpired(false);
+    setRefused(null);
     setResult(null);
     try {
       setResult(await check());
@@ -35194,13 +35357,67 @@ function SelfUpdateRow({ Row: Row3, check, readResult }) {
       setStarting(false);
     }
   };
-  const message = result === null || waiting ? null : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : result.state === "interrupted" ? t("The check was interrupted. Check again.") : result.state === "checking" ? t("A check is already running. Try again shortly.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
+  const onConfirm = async () => {
+    setUpdating(true);
+    setRefused(null);
+    try {
+      const latest = await readStatus();
+      setStatus(latest);
+      if (!checkFresh()) setCheckExpired(true);
+      else if (latest?.startEnabled === true && latest.startRefusal === null && !RUNNING_PHASES.has(latest.run?.phase)) setConfirming(true);
+      else setRefused(latest?.startRefusal ?? null);
+    } catch (error) {
+      setStatus(null);
+      setRefused(error?.code === "bot/read-only" ? error.code : "update-running");
+    } finally {
+      setUpdating(false);
+    }
+  };
+  const onUpdate = async () => {
+    setConfirming(false);
+    if (!checkFresh()) {
+      setCheckExpired(true);
+      return;
+    }
+    setUpdating(true);
+    setRefused(null);
+    try {
+      const answer = await start2();
+      if (answer?.started === true) {
+        setExpired(false);
+        setAttempt({ requestId: answer.requestId, deadline: Date.now() + UPDATE_POLL_DEADLINE_MS });
+      } else setRefused(answer?.reason ?? null);
+    } catch (error) {
+      setRefused(error?.code === "bot/read-only" ? error.code : "update-running");
+    } finally {
+      setUpdating(false);
+    }
+  };
+  const canStart = !checkExpired && checkFresh() && status?.startEnabled === true && status.startRefusal === null && !awaitingVerdict && !runLive && typeof start2 === "function";
+  const runText = runMessage(run3);
+  if (confirming && checkFresh()) {
+    return (0, import_react89.createElement)(
+      Row3,
+      {
+        label: "Automagik",
+        hint: (0, import_react89.createElement)("span", { role: "status" }, t("Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost."))
+      },
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onUpdate }, t("Update now")),
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setConfirming(false) }, t("Cancel"))
+    );
+  }
+  const message = refused !== null ? t("Cannot update: {reason}", { reason: selfUpdateReason(refused) }) : runText !== null && (hasVerdict && attempt !== null || runLive && !expired2 || result === null) ? runText : expired2 ? t("The update status could not be confirmed. Check again shortly.") : awaitingVerdict ? null : result === null || waiting ? null : result.state === "available" && checkExpired ? t("Cannot update: {reason}", { reason: selfUpdateReason("check-stale") }) : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : result.state === "interrupted" ? t("The check was interrupted. Check again.") : result.state === "checking" ? t("A check is already running. Try again shortly.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
   return (0, import_react89.createElement)(
     Row3,
     { label: "Automagik", hint: (0, import_react89.createElement)("span", { role: "status" }, message) },
+    ...canStart ? [(0, import_react89.createElement)(
+      "button",
+      { type: "button", className: "bt-soft bt-soft-sm", disabled: updating, onClick: onConfirm },
+      t("Update now")
+    )] : [],
     (0, import_react89.createElement)(
       "button",
-      { type: "button", className: "bt-soft bt-soft-sm", disabled: checking, onClick: onCheck },
+      { type: "button", className: "bt-soft bt-soft-sm", disabled: checking || runLive && !expired2 || updating || awaitingVerdict, onClick: onCheck },
       checking ? t("Checking…") : t("Check for updates")
     )
   );
@@ -35319,7 +35536,7 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
     (0, import_react89.createElement)(
       Section3,
       { key: "updates", title: t("Updates") },
-      !ours && update.hostAnswered ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
+      !ours && update.hostAnswered ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate }) : null,
       (0, import_react89.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react89.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),
@@ -43059,6 +43276,7 @@ function apply(ctx) {
     if (value.connectors !== void 0 && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live2.connectors = value.connectors;
     if (value.secretSources !== void 0 && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live2.secretSources = value.secretSources;
     if (value.secretSourcesPresent !== void 0 && value.secretSourcesPresent !== current.secretSourcesPresent) live2.secretSourcesPresent = value.secretSourcesPresent;
+    if (value.updateHold !== void 0 && value.updateHold !== (current.updateHold === true)) live2.updateHold = value.updateHold;
     if (value.capabilityStatuses !== void 0 && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live2.capabilityStatuses = value.capabilityStatuses;
     if (value.learning !== void 0 && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live2.learning = value.learning;
     if (value.learningSettled !== void 0 && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live2.learningSettled = value.learningSettled;

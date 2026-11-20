@@ -121,10 +121,14 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
   const notice = useMemoryNotice(memoryIds, useNews)
   // While the notice shows, the pill opens the memory that changed: a Bot's, or the group's.
   const changed = useNews(map => latestMemoryChange(map, memoryIds))
+  // While the web self-update holds new work, a message waits until the update is done (RFC 0041).
+  const updateHold = useRoster(value => value.updateHold === true)
+  const holdText = t('An update is running. Your message waits until it is done.')
   // The composer placeholder is not localizable per Session, so CSS reads it from here.
   useEffect(() => {
-    document.body.style.setProperty('--bt-placeholder', JSON.stringify(name ? t('Message {name}', { name }) : t('Message')))
-  }, [name, t('Message')])
+    document.body.style.setProperty('--bt-placeholder', JSON.stringify(updateHold ? holdText
+      : name ? t('Message {name}', { name }) : t('Message')))
+  }, [name, t('Message'), updateHold, holdText])
   // The unread label under a pending steering bubble reads its text from here.
   useEffect(() => {
     document.body.style.setProperty('--bt-steer-unread', JSON.stringify(t('Not read yet')))

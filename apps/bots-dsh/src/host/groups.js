@@ -112,6 +112,7 @@ export const noticeText = (line) => {
 // `text` is what to show of a message line, by default what the log keeps of it.
 export const lineText = (line, text = line.text) => {
   if (line.kind === 'lookup') return `[${speakerOf(line)} looked up its own chat${line.text ? ` for "${line.text}"` : ''}]`
+  if (line.kind === 'resumed' && line.resumedByUpdate) return `[An Automagik update stopped ${speakerOf(line)}'s work here. It is picking it back up and posts when done]`
   if (line.kind === 'resumed') return `[${speakerOf(line)}'s work here was cut off when DeepSeek Harness restarted; it is picking it back up and posts when done]`
   if (line.kind === 'cut') return `[${speakerOf(line)}'s work here was cut off by a restart again, so it stopped; ask it to go on if it still matters]`
   if (line.kind === 'stopped') return `[The user stopped ${speakerOf(line)}'s work here]`
@@ -385,7 +386,8 @@ export function install(rt) {
     }
     if (record.kind === 'lookup') return { kind: 'lookup', ...who, text: record.text, time }
     if (record.kind === 'permission-stop') return { kind: 'permission-stop', ...who, why: record.why, count: record.count, time }
-    if (record.kind !== 'notice') return { kind: record.kind, ...who, time }
+    if (record.kind !== 'notice') return { kind: record.kind, ...who, time,
+      ...(record.resumedByUpdate ? { resumedByUpdate: true } : {}) }
     switch (record.reason) {
       case 'failed': return { kind: 'failed', ...who, code: record.code, ...(record.status ? { status: record.status } : {}), text: record.message ?? record.detail, time }
       case 'missed': return { kind: 'missed', ...who, time }
@@ -1360,7 +1362,9 @@ export function install(rt) {
       if (sender !== undefined) {
         const text = [post.text, ...(post.files ?? []).map(fileLine)].filter(Boolean).join('\n')
         if (post.failed !== undefined) round.failed.push(sender.name)
-        else if (post.resumed || post.stopped || post.done) say(room, { who: sender.name, botId: sender.id, kind: post.done ? 'done' : post.stopped ? 'stopped' : post.again ? 'cut' : 'resumed', text: '' })
+        else if (post.resumed || post.stopped || post.done) say(room, { who: sender.name, botId: sender.id,
+          kind: post.done ? 'done' : post.stopped ? 'stopped' : post.again ? 'cut' : 'resumed', text: '',
+          ...(post.resumedByUpdate ? { resumedByUpdate: true } : {}) })
         else {
           say(room, { who: sender.name, botId: sender.id, text, ...(post.files === undefined ? {} : { files: post.files }), ...(post.files?.length ? captionOf(post) : {}), session: true })
           if (post.batch !== undefined && text !== '') recordResult(post.batch, sender.name, room.seq)
@@ -1541,7 +1545,7 @@ export function install(rt) {
     for (const post of posts.filter(item => (item.resumed || item.stopped || item.done) && item.logged === undefined)) {
       const name = rt.botOf(post.botId)?.name ?? post.name
       const kind = post.done ? 'done' : post.stopped ? 'stopped' : post.again ? 'cut' : 'resumed'
-      say(room, { who: name, botId: post.botId, kind, text: '' })
+      say(room, { who: name, botId: post.botId, kind, text: '', ...(post.resumedByUpdate ? { resumedByUpdate: true } : {}) })
     }
     if (posts.some(post => post.resumed || post.stopped || post.done)) await rt.save()
     for (const post of posts) if (post.batchEnd) closeBatch(post.batch)
@@ -1799,7 +1803,8 @@ export function install(rt) {
   // While a round runs, the post goes into the group's log and that round's replies at
   // once, and the members it calls start in that round, so it is not held back until
   // the round ends and never sits in the group Session's QueueDock (#663).
-  async function postToRoom(room, sender, text, extra = {}, files = []) {
+  async function postToRoom(room, sender, text, extra = {}, files = [], ownsTeam = () => true) {
+    if (!ownsTeam()) return
     const running = [...rt.roomProgress.values()].find(round => round.roomId === room.id && round.nudge !== undefined)
     if (running !== undefined) {
       if (extra.failed !== undefined) {
@@ -1807,7 +1812,7 @@ export function install(rt) {
         running.failed.push(sender.name)
       } else if (extra.resumed === true || extra.stopped === true || extra.done === true) {
         const kind = extra.done === true ? 'done' : extra.stopped === true ? 'stopped' : extra.again === true ? 'cut' : 'resumed'
-        say(room, { who: sender.name, botId: sender.id, kind, text: '' })
+        say(room, { who: sender.name, botId: sender.id, kind, text: '', ...(extra.resumedByUpdate ? { resumedByUpdate: true } : {}) })
       } else {
         const line = [text, ...files.map(fileLine)].filter(Boolean).join('\n')
         say(room, { who: sender.name, botId: sender.id, text: line, ...(files.length > 0 ? { files, ...captionOf({ text, excerpt: extra.excerpt }) } : {}) })
@@ -1820,6 +1825,7 @@ export function install(rt) {
       return
     }
     const agent = await rt.resolveAgent(rt.sessionOfRoom(room))
+    if (!ownsTeam()) return
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: `[Group post from ${sender.name}]\n${text}` }, ...files.map(attachment => ({ type: 'file', attachment }))],
       source: { kind: SOURCE_KIND, form: 'relay', role: 'post', exchangeId: randomUUID(), senderName: sender.name, senderSessionId: sender.id, roomId: room.id, ...extra },

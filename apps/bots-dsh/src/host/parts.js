@@ -1802,11 +1802,16 @@ export function install(rt) {
   // room before the step (condensed in place, or it stops and goes on in a fresh
   // part), and the backend's own pre-step listener sees the wrapper.
   ctx.on('agent/pre-step', async (payload, next) => {
-    const leave = rt.enterOwnership?.() ?? (() => {})
+    let leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      // A message carrying a shown sign-in code never reaches a model, a note or a fresh part
-      // (cli-login.js).
+      // Filter sign-in codes while ownership is fenced, before admission waits or a switch can carry the batch.
       rt.dropLoginCodes?.(payload)
+      if (rt.updateHold?.closed) {
+        leave()
+        await rt.updateHold.wait(payload.signal)
+        payload.signal?.throwIfAborted()
+        leave = rt.enterOwnership?.() ?? (() => {})
+      }
       const pass = () => { leave(); return next() }
       await (rt.refreshShellChoice?.() ?? rt.load())
       const { agent } = payload

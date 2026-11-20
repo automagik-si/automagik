@@ -208,7 +208,8 @@ CLI cannot authenticate, and the script does not mint a login URL.
 The supervisor starts the web profile as its child. On an update request it verifies the signed
 plugin lane, stages the installed Automagik plugin set through DSH, and switches the profile's
 installer files with the child stopped. It then starts the child with the same DSH command.
-Delivery 5a provides the supervisor. The setting and the “Update now” action arrive in 5b.
+The owner starts an update from Settings > About with **Update now**, once in-app updates are turned on
+(below).
 
 ### One-time host setup
 
@@ -235,6 +236,45 @@ no `state.json` or the state records a completed verdict with a valid journal in
 The launcher redacts launch tokens from both output streams during direct startup.
 An unreadable state, unfinished update or `manualRecovery` verdict stops startup and points to
 `state.json`. Direct startup runs without the update capability.
+
+### Turn on in-app updates
+
+In-app updates are off by default. To offer **Update now**, set `selfUpdate: true` in the Bots plugin's
+config through the profile's own `cordis.patch.yml` (see "Configuration layers" below), then restart the
+service with your usual tools. A patch replaces the entry's whole `config`, so repeat the keys the
+plugin's own patch sets (today `updateCheck: false`):
+
+```yaml
+- id: omni-ui
+  config:
+    updateCheck: false
+    selfUpdate: true
+```
+
+**Update now** appears in Settings > About only when all of these hold: the setting is on, the
+instance runs under the supervisor, a check from the last 10 minutes found a signed, checked update,
+and the team lives at the home the service's environment names (`$AUTOMAGIK_BOTS_HOME`, else
+`$AUTOMAGIK_HOME/bots`), because the supervisor snapshots that team file. Only the window that holds
+the team can start it; it is not a Bot tool.
+
+What the click does, in order:
+
+1. New work is held: every step of every agent waits before its next model call or tool, and the
+   composer says an update is running. A message sent meanwhile waits and is not lost.
+2. The team's running turns (Bot chats and groups, tasks, DSH bots, automation runs) are noted as
+   stopped by an update and stopped at once. A tool call already running finishes its current step.
+3. The plugin writes `request.json` in the store. The supervisor takes it within a second.
+4. The held work goes on after the supervisor's verdict: on `healthy` in the new version, on
+   `rolledBack` in the restored version, and `notUpdated` in the unchanged one (in the same DSH
+   process when the child was never stopped). The
+   stopped turns are picked up with a note that an update stopped them, and an update's stop does not
+   count toward the daily limit of restart resumes. On `manualRecovery` the work stays held and its
+   notes stay on disk until the instance is recovered.
+
+The hold also opens, with a warning in the log, when the supervisor does not answer the request
+within about a minute (`request-unanswered`). If a running phase records no progress for 20 minutes,
+the plugin warns and keeps work held. Restart the service to recover a supervisor that has stopped
+progressing. A fresh boot with no live run of its own can pick up the saved work.
 
 ### Store and state
 

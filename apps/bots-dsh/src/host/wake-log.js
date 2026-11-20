@@ -1,7 +1,7 @@
 import { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, readFileSync, readdirSync, fchmodSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { HISTORY_PAGE, HISTORY_TIMEOUT_MS, LATE_ANSWER, SOURCE_KIND } from './constants.js'
-import { readNotes } from './resume.js'
+import { HISTORY_TIMEOUT_MS, LATE_ANSWER, SOURCE_KIND } from './constants.js'
+import { historyBack, readNotes } from './resume.js'
 
 export const io = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, readFileSync, readdirSync, fchmodSync, existsSync }
 
@@ -91,27 +91,6 @@ async function bounded(run) {
     return await Promise.race([timeout, run(controller.signal)])
   } finally {
     clearTimeout(timer)
-  }
-}
-
-async function* historyBack(controller, sessionId, signal) {
-  const read = typeof controller?.events === 'function' ? controller.events : controller?.page
-  if (typeof read !== 'function') throw Object.assign(new Error('no history reader'), { code: 'wake/unreadable' })
-  let throughSeq, beforeSeq
-  for (;;) {
-    signal.throwIfAborted()
-    const page = await read.call(controller, {
-      address: { kind: 'session', sessionId },
-      ...(throughSeq === undefined ? {} : { throughSeq }),
-      ...(beforeSeq === undefined ? {} : { beforeSeq }),
-      maxMessages: HISTORY_PAGE,
-    }, signal)
-    const events = page.records.map(record => record.event)
-    if (throughSeq === undefined && events.length > 0) throughSeq = events.at(-1).seq
-    for (let i = events.length - 1; i >= 0; i -= 1) yield events[i]
-    if (!page.hasMore || events.length === 0) return
-    if (beforeSeq !== undefined && events[0].seq >= beforeSeq) throw new Error('history did not advance')
-    beforeSeq = events[0].seq
   }
 }
 
@@ -371,7 +350,7 @@ export function install(rt) {
 
   const flush = session => bounded(() => ctx.sessions.flush(session)).catch(() => false)
 
-  async function observe(sessionId, report, still) {
+  async function observe(sessionId, report, still, waitForIdle) {
     let agent
     try {
       agent = await bounded(() => rt.resolveAgent(sessionId))
@@ -385,7 +364,7 @@ export function install(rt) {
     }
     if (!still()) return { result: 'unreadable' }
     try {
-      if (agent?.status === 'running') await bounded(() => agent.whenIdle())
+      if (waitForIdle && agent?.status === 'running') await bounded(() => agent.whenIdle())
       if (!still()) return { result: 'unreadable' }
       const held = heldBy(agent, report.id)
       const result = await bounded(async (signal) => {
@@ -422,9 +401,13 @@ export function install(rt) {
   const cancelWithdrawal = ({ agent, message } = {}) => {
     withdrawals.delete(claimKey(sessionOf(agent), message?.id))
   }
-  ctx.on('agent/inbox/inserted', cancelWithdrawal)
+  ctx.on('agent/inbox/inserted', (payload) => {
+    cancelWithdrawal(payload)
+    rt.noteUpdateInbox?.(payload)
+  })
   ctx.on('agent/inbox/claimed', ({ agent, message } = {}) => {
     cancelWithdrawal({ agent, message })
+    rt.noteUpdateInbox?.({ agent, message }, true)
     const id = idOf(message)
     const report = reports.get(id)
     if (!open(report)) return
@@ -447,7 +430,7 @@ export function install(rt) {
   })
 
   ctx.on('agent/inbox/discarded', ({ message, agent } = {}) => {
-    if (quietDepth > 0 || !owned()) return
+    if (quietDepth > 0 || rt.updateShuttingDown?.() || !owned()) return
     const id = idOf(message)
     const report = reports.get(id)
     if (!open(report) || unmarked(id)) return
@@ -499,8 +482,10 @@ export function install(rt) {
       if (!still() || !open(report) || unmarked(id) || pending(id)) return
     }
 
+    // Give-back runs after the cut's claims retire. A new continuation can already be
+    // running; the report can queue behind it once its own receipt and inbox are checked.
     const observations = new Map(await Promise.all([...sessions].map(async sessionId =>
-      [sessionId, await observe(sessionId, report, still)])))
+      [sessionId, await observe(sessionId, report, still, kind !== 'update')])))
     if (!still() || !open(report) || unmarked(id) || pending(id)) return
     const results = [...observations.values()]
     if (results.some(({ result }) => result === 'found')) {
@@ -559,7 +544,7 @@ export function install(rt) {
     return { ready: ready.promise, sent }
   }
 
-  async function resend(items, still) {
+  async function resend(items, still, waitForIdle) {
     const stages = []
     try {
       const ready = await bounded(async (signal) => {
@@ -571,7 +556,7 @@ export function install(rt) {
       })
       if (!still() || ready.length === 0) return
       const { agent } = ready[0]
-      if (ready.length > 1 && agent.status === 'running') await bounded(() => agent.whenIdle())
+      if (waitForIdle && ready.length > 1 && agent.status === 'running') await bounded(() => agent.whenIdle())
       if (!still()) return
       const reserved = ready.filter(({ item, agent }) => sendable(item, still)
         && !heldBy(agent, item.report.id) && writeRecord(item.report, 'attempt', { sessionId: item.target }))
@@ -597,7 +582,7 @@ export function install(rt) {
     read()
   }
 
-  async function pass(kind, mine, adoption) {
+  async function pass(kind, mine, adoption, cut) {
     if (mine !== epoch || stopping) return
     if (kind === 'start') {
       await rt.load()
@@ -609,12 +594,13 @@ export function install(rt) {
       adoptNotes(readNotes(inflight))
     }
     if (kind === 'takeover' && (await adoption === undefined || mine !== epoch)) return
-    const still = guard()
+    const owns = guard()
+    const still = () => owns() && (cut?.ownsTeam() ?? true)
     if (!still()) return
     const botsAtStart = new Set(Object.keys(state.bots))
     const byDestination = new Map()
     for (const report of reports.values()) {
-      if (!open(report) || (kind === 'hourly' && !old(report))) continue
+      if (!open(report) || (kind === 'hourly' && !old(report)) || (cut && !cut.ids.has(report.id))) continue
       const target = currentTarget(report)
       if (!byDestination.has(target)) byDestination.set(target, [])
       byDestination.get(target).push(report)
@@ -632,14 +618,14 @@ export function install(rt) {
       }
       for (const items of batches.values()) {
         if (!still()) return
-        await resend(items, still)
+        await resend(items, still, kind !== 'update')
       }
     }))
     if (!still()) return
     for (const result of results) {
       if (result.status === 'rejected') warn(`wake replay for a destination failed (${errorCode(result.reason)})`)
     }
-    if (kind === 'hourly') return
+    if (kind === 'hourly' || cut) return
     for (const report of reports.values()) {
       if (!known(report) || report.open || unmarked(report.id)) continue
       const { work, replyTo } = report.intent?.report ?? report.terminal
@@ -659,11 +645,11 @@ export function install(rt) {
     await loading
   }).catch(error => warn(`wake log could not start (${errorCode(error)})`))
   let passing = false
-  const queue = (kind, adoption) => {
+  const queue = (kind, adoption, cut) => {
     const mine = epoch
     chain = chain.then(async () => {
       passing = true
-      try { await pass(kind, mine, adoption) } finally { passing = false }
+      try { await pass(kind, mine, adoption, cut) } finally { passing = false }
     }).catch(error => warn(`wake replay failed (${errorCode(error)})`))
     return chain
   }
@@ -729,7 +715,13 @@ export function install(rt) {
       return true
     },
     retireClaim(sessionId, message) {
-      claimed.get(idOf(message))?.delete(claimKey(sessionId, message.id))
+      const id = idOf(message)
+      const claims = claimed.get(id)
+      claims?.delete(claimKey(sessionId, message.id))
+      if (claims?.size === 0) claimed.delete(id)
+    },
+    replayCutReports(ids, ownsTeam) {
+      if (ids?.size > 0) void queue('update', undefined, { ids, ownsTeam })
     },
     firstOptions(id) {
       const term = firstSends.get(id)
