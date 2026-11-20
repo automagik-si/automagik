@@ -322,7 +322,7 @@ export function install(rt) {
   // Updates change the dsh profile, not the team, so a reading host may run them too.
   const privacy = createPrivacy()
   const pets = createPets({ home: () => rt.home, warn: (...args) => rt.warn?.(...args) })
-  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'self-update-status', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
+  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
   READS.add('role-catalog')
   // Sign-in (cli-login.js): its replies are never cached by the browser.
   const CLI_LOGIN = new Set([
@@ -502,8 +502,6 @@ export function install(rt) {
   const handle = async (endpoint, payload, signal, windowSeen = false) => {
     try {
       const body = payload ?? {}
-      // The supervisor can read update status while the team is still loading.
-      if (endpoint === 'self-update-status') return ok(rt.selfUpdateStatus())
       // The permission section of the diagnostics page (permission-diagnostics.js): answered
       // from memory before the refresh below, which may load the team or take its lock. It
       // takes no input.
@@ -1029,6 +1027,8 @@ export function install(rt) {
           const fresh = body.fresh === true
           return ok({ ...(await rt.updateCheck({ fresh })), dsh: (await rt.dshUpdateCheck?.({ fresh })) ?? null })
         }
+        case 'self-update-status':
+          return ok(rt.selfUpdateStatus())
         case 'update-install':
           return ok(rt.updateStart())
         case 'dsh-update-install':
