@@ -654,6 +654,8 @@ test('a task a restart cut stays running and reports only when it really ends', 
   host.emit('cut', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
   await settle(() => host.agentOf('a').calls.length === 1)
   assert.match(text(host.agentOf('a').calls[0]), /^\[Task "Ranking" finished/)
+  const { exchangeId } = host.agentOf('a').calls[0].source
+  await settle(() => notes(home).queued.a?.some(({ args }) => args.exchangeId === exchangeId && args.wake === true))
 })
 
 // #164. A task the restart pass does not set going has no other way to end: nothing is

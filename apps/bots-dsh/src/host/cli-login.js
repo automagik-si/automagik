@@ -658,11 +658,18 @@ export function install(rt, reservationDeps) {
         payload.messages.splice(index, 1)
         const exchangeId = message.source?.exchangeId
         if (typeof exchangeId === 'string' && exchangeId !== '') {
-          try { rt.forgetDelivery?.(exchangeId) } catch {}
+          try {
+            if (!rt.wakeLog?.discardLoginCode(payload.agent, message)) rt.forgetDelivery?.(exchangeId)
+          } catch {}
         }
         rt.warn('ds-bot: a message in %s carried a sign-in code and was not sent', agentId)
       }
     }
+  }
+
+  const reportHasLoginCode = (args) => {
+    if (args?.role !== 'task-done' && args?.role !== 'report') return false
+    return loginTextMatches(args.note) || loginTextMatches(rt.reportHeader?.(args))
   }
 
   // Every delivery between Bots, groups, schedules and reports: one that carries a shown
@@ -671,14 +678,14 @@ export function install(rt, reservationDeps) {
   // so this check runs first.
   const deliver = rt.deliver
   if (typeof deliver === 'function') {
-    rt.deliver = async (args) => {
-      if (loginTextMatches(args?.text)) {
+    rt.deliver = async (args, options) => {
+      if (loginTextMatches(args?.text) || reportHasLoginCode(args)) {
         rt.warn('ds-bot: a delivery to %s carried a sign-in code and was not sent', args?.toId)
         throw failed(CODE_REFUSED)
       }
-      return await deliver(args)
+      return await deliver(args, options)
     }
   }
 
-  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, dropLoginCodes, cliLoginChoice: choiceOf })
+  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, reportHasLoginCode, dropLoginCodes, cliLoginChoice: choiceOf })
 }

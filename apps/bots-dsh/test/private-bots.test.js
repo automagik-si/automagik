@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeApproval, fakeContext } from './fake-ctx.js'
+import { hostOnlyTargets } from '../src/host/private-bots.js'
 
 let rt
 
@@ -656,4 +658,101 @@ test('with no private Bot the tools run as they did', async (t) => {
   assert.deepEqual(await run('read', { file_path: join(diary, 'notes.txt') }, 'b'), { ran: true })
   assert.deepEqual(await run('message_bot', { to: 'Diary', message: 'hi' }, 'a'), { ran: true })
   assert.deepEqual(await run('glob', { pattern: '*', path: join(diary, '..') }, 'b'), { ran: true })
+})
+
+test('wake log and rewrite files are refused by file tools even with no private Bot', async (t) => {
+  const { home, team, run, stop } = await start({ privateBot: false })
+  t.after(stop)
+  const current = { id: 'a', session: { id: 'a', header: { cwd: home } } }
+  const refused = { ran: false, error: "That path belongs to the Bot team's host; no Bot reads it." }
+  for (const file of ['wake.jsonl', 'wake.jsonl.123.tmp']) {
+    const absolute = join(home, file)
+    writeFileSync(absolute, 'host only')
+    for (const path of [absolute, file]) {
+      for (const name of ['read', 'write', 'edit', 'str_replace_editor', 'read_image']) {
+        const key = name === 'str_replace_editor' ? 'path' : 'file_path'
+        assert.deepEqual(await run(name, { [key]: path }, 'a', current), refused, `${name} ${path}`)
+      }
+    }
+    assert.deepEqual(await run('apply_patch', { input: `*** Begin Patch\n*** Update File: ${absolute}\n@@\n-host only\n+changed\n*** End Patch` }, 'a'), refused)
+    assert.deepEqual(await run('apply_patch', { input: `*** Begin Patch\n*** Update File: allowed\n*** Move to: ${absolute}\n@@\n+changed\n*** End Patch` }, 'a'), refused)
+    assert.deepEqual(await run('grep', { path: absolute }, 'a'), refused)
+    assert.deepEqual(await run('glob', { pattern: absolute }, 'a'), refused)
+  }
+  assert.deepEqual(await run('grep', { path: home, pattern: join(home, 'wake.jsonl') }, 'a'), { ran: true })
+  for (const name of ['grep', 'glob']) assert.deepEqual(await run(name, { path: team }, 'a'), { ran: true })
+  const sibling = join(home, 'wake.jsonl-notes')
+  writeFileSync(sibling, 'ordinary notes')
+  assert.deepEqual(await run('read', { file_path: sibling }, 'a'), { ran: true })
+})
+
+test('astra-code #9: the wake guard checks paths in DSH-normalized patch headers', async (t) => {
+  const { home, run, stop } = await start({ privateBot: false })
+  t.after(stop)
+  const wake = join(home, 'wake.jsonl')
+  const refused = { ran: false, error: "That path belongs to the Bot team's host; no Bot reads it." }
+  for (const lines of [
+    [`  *** Delete File: ${wake}\t`],
+    ['  *** Update File: allowed', `*** Move to: ${wake}  `, '@@', '+changed'],
+  ]) {
+    const input = ['*** Begin Patch', ...lines, '*** End Patch'].join('\r\n')
+    assert.deepEqual(await run('apply_patch', { input }, 'a'), refused)
+  }
+  const input = '*** Begin Patch\n*** Add File: allowed\n+*** Delete File: wake.jsonl\n*** End Patch'
+  assert.deepEqual(await run('apply_patch', { input }, 'a'), { ran: true })
+  assert.deepEqual(await run('apply_patch', { input: `*** Unknown File: ${wake}` }, 'a'), refused)
+})
+
+test('the wake guard scans patch headers when the optional parser cannot load', async (t) => {
+  let imports = 0
+  const hook = registerHooks({
+    resolve(specifier, context, next) {
+      if (specifier === '@deepseek-ai/dsh-fs-patch') {
+        imports++
+        throw Object.assign(new Error('Patch parser missing'), { code: 'ERR_MODULE_NOT_FOUND' })
+      }
+      return next(specifier, context)
+    },
+  })
+  t.after(() => hook.deregister())
+  await import('../src/host/private-bots.js?missing-patch-parser')
+  const { home, run, stop } = await start({ privateBot: false })
+  t.after(stop)
+  assert.deepEqual(await run('read', { file_path: 'allowed' }, 'a'), { ran: true })
+  assert.equal(imports, 0)
+
+  const wake = join(home, 'wake.jsonl')
+  const refused = { ran: false, error: "That path belongs to the Bot team's host; no Bot reads it." }
+  const patch = (...lines) => ({ input: ['*** Begin Patch', ...lines, '*** End Patch'].join('\r\n') })
+  for (const args of [
+    patch(`\t*** Add File: ${wake}\u0085`, '+changed'),
+    patch(`\t*** Update File: ${wake}\u0085`, '@@', '+changed'),
+    patch(`\t*** Delete File: ${wake}\u0085`),
+    patch('\t*** Update File: allowed', `*** Move to: ${wake}\u0085`, '@@', '+changed'),
+    patch(`*** Unknown File: ${wake}`),
+  ]) {
+    assert.deepEqual(await run('apply_patch', args, 'a'), refused)
+  }
+  assert.deepEqual(await run('apply_patch', patch('\t*** Update File: allowed\u0085', '@@', ` *** Delete File: ${wake}`, '+changed'), 'a'), { ran: true })
+  assert.deepEqual(await run('apply_patch', { input: 'unrecognized patch for allowed' }, 'a'), { ran: true })
+  assert.equal(imports, 1)
+})
+
+test('host-only path resolution expands a home, checks the fallback cwd and resolves a linked folder', async (t) => {
+  const { rt, home, root, team, project, run, stop } = await start({ privateBot: false })
+  t.after(stop)
+  const file = join(home, 'wake.jsonl')
+  const alias = join(root, 'alias')
+  writeFileSync(file, 'host only')
+  symlinkSync(home, alias, 'junction')
+  const fold = path => process.platform === 'linux' ? path : path.toLowerCase()
+  const options = { bases: [project, home], homedir: () => root, realBeyond: rt.realBeyond }
+  assert.ok((await hostOnlyTargets(`~/${relative(root, file)}`, options)).includes(fold(file)))
+  assert.ok((await hostOnlyTargets('wake.jsonl', options)).includes(fold(file)))
+  assert.ok((await hostOnlyTargets(join(alias, 'wake.jsonl'), options)).includes(fold(file)))
+  const found = { id: 'a', session: { id: 'a', header: { cwd: home } } }
+  t.mock.method(rt, 'sessionFolder', () => team)
+  for (const path of ['wake.jsonl', join(alias, 'wake.jsonl')]) {
+    assert.match((await run('read', { file_path: path }, 'a', found)).error, /belongs to the Bot team's host/)
+  }
 })

@@ -50,6 +50,7 @@ import * as stops from './src/host/stops.js'
 import * as whoRefused from './src/host/who-refused.js'
 import * as subagentAsks from './src/host/subagent-asks.js'
 import * as resume from './src/host/resume.js'
+import * as wakeLog from './src/host/wake-log.js'
 import * as memory from './src/host/memory.js'
 import * as parts from './src/host/parts.js'
 import * as images from './src/host/images.js'
@@ -97,7 +98,7 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
   turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
-  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks,
+  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory, parts, fallback, modelState, modelAccessHooks,
   { install: rt => cliLogin.install(rt, {
     path: join(rt.home, RESERVATION_FILE), fs, pid: process.pid,
     random: (size, encoding) => randomBytes(size).toString(encoding),
@@ -128,7 +129,7 @@ export function apply(ctx, config = {}) {
 // when the home has no team yet. Only on request: the source is left as it was.
 function importTeam(home, from) {
   if (!from || existsSync(join(home, 'state.json')) || !existsSync(join(from, 'state.json'))) return false
-  cpSync(from, home, { recursive: true, force: false, filter: source => !source.endsWith('state.lock') })
+  cpSync(from, home, { recursive: true, force: false, filter: source => !source.endsWith('state.lock') && !/[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source) })
   return true
 }
 

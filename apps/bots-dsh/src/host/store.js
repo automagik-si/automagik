@@ -83,11 +83,24 @@ export function install(rt) {
     }
   }
   const lock = homeLock(join(home, 'state.lock'))
+  let lockTerm = 0
+  const gainedListeners = new Set()
+  const onLockGained = (fn) => {
+    gainedListeners.add(fn)
+    return () => gainedListeners.delete(fn)
+  }
+  const lockGained = () => {
+    for (const fn of gainedListeners) {
+      try { fn() } catch (error) { warn('ds-bot: a lock listener failed: %s', error) }
+    }
+  }
   const claimLock = () => {
     if (lockBroken) return
     try {
+      const held = holder === undefined && lock.owns()
       mkdirSync(home, { recursive: true })
       holder = lock.claim()
+      if (!held && holder === undefined && lock.owns()) lockTerm += 1
     } catch (error) {
       // An unusable lock (a read-only or odd file system) must not stop the team; a
       // save that then cannot write still rejects.
@@ -488,6 +501,7 @@ export function install(rt) {
         warn('omni-ui: the other dsh has closed; this one now saves the Bot team')
         warnedReadOnly = false
         adopt(readFileState())
+        lockGained()
         return
       }
     } else if (!lockBroken && !lock.owns()) {
@@ -498,6 +512,7 @@ export function install(rt) {
       if (lockBroken) return
       if (holder === undefined) {
         await reclaimHeld()
+        lockGained()
         return
       }
       warn('omni-ui: %s', readOnly())
@@ -531,7 +546,8 @@ export function install(rt) {
       if (holder === undefined) {
         // A changed file is adopted first; the save queues behind that adopt.
         const pending = reclaimHeld()
-        if (pending !== undefined) void pending.catch(() => {})
+        if (pending !== undefined) void pending.then(lockGained, lockGained)
+        else queueMicrotask(lockGained)
         return true
       }
     }
@@ -831,7 +847,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, teamLoaded, own, onSaved, closeCard, assertShellChoice, refreshShellChoice,
+    state, load, save, refresh, readOnly, teamLoaded, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,
