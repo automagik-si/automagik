@@ -78,10 +78,8 @@ async function main() {
   await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c',
     'test ! -e /data/acp'])
   await docker(['run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e', 'process.exit(process.getuid() === 1000 ? 0 : 1)'])
-  await docker(['run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e', `
-    const { mode, uid, gid } = require('node:fs').statSync('/data/${GATE_VIEW}')
-    if ((mode & 0o777) !== 0o700 || uid !== 1000 || gid !== 1000) process.exit(1)
-  `])
+  // The gate view is not baked into /data either: DSH creates it at start (checked below).
+  await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c', `test ! -e /data/${GATE_VIEW}`])
 
   await docker(['volume', 'create', volume])
   // First boot must prepare the profile and am without network access.
@@ -93,6 +91,11 @@ async function main() {
   const startTo401 = await waitForFence()
   await waitForHealthy()
   say(`401 after ${startTo401} ms; Docker health: healthy`)
+  // DSH created the gate view before its first healthy check: its own 0700 folder.
+  await docker(['exec', name, '/nodejs/bin/node', '-e', `
+    const { mode, uid, gid } = require('node:fs').lstatSync('/data/${GATE_VIEW}')
+    if ((mode & 0o7777) !== 0o700 || uid !== 1000 || gid !== 1000) process.exit(1)
+  `])
 
   const logs = await logsOf()
   check(/automagik-web: startup: http:\/\/127\.0\.0\.1:3081\//.test(logs), 'no startup line')
