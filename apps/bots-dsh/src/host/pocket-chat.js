@@ -636,7 +636,9 @@ export class DshChatSource {
   emitTo(listener, event) { try { listener(event) } catch {} }
   emit(entry, event) {
     const legacy = event.type === 'rows' ? legacyRows(event.rows) : undefined
-    for (const { listener, attachments } of entry.listeners) {
+    for (const subscription of entry.listeners) {
+      // A bare function is a listener without the attachment opt-in (callers outside watch()).
+      const { listener, attachments } = typeof subscription === 'function' ? { listener: subscription, attachments: false } : subscription
       if (!attachments && legacy) {
         if (legacy.length) this.emitTo(listener, { ...event, rows: legacy })
       } else this.emitTo(listener, event)
