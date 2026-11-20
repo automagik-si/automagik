@@ -900,3 +900,34 @@ test('findBot unquotes a Bot ref before matching the name', async (t) => {
   assert.equal(rt.findBot('"Nobody"'), undefined)
   assert.equal(rt.findBot(undefined), undefined)
 })
+
+test('rfc0039 [P] S1 save resolves true only for its committed write', async t => {
+  const { rt, home } = runtime(t)
+  await rt.load()
+  assert.equal(await rt.save(), true)
+  fs.writeFileSync(join(home, 'state.lock'), JSON.stringify({ pid: process.ppid, host: hostname(), token: 'new-owner' }))
+  assert.equal(await rt.save(), undefined)
+})
+
+test('rfc0039 [P] S2 lock reclaim moves the term not the epoch', async t => {
+  const { rt, home } = runtime(t)
+  await rt.load()
+  const gen = rt.teamGeneration?.()
+  assert.equal(rt.sameTeam?.(gen), true)
+  fs.rmSync(join(home, 'state.lock'))
+  assert.equal(await rt.save(), true)
+  assert.deepEqual(rt.teamGeneration?.(), { epoch: gen.epoch, term: gen.term + 1 })
+  assert.equal(rt.sameTeam?.(gen), false)
+})
+
+test('rfc0039 [P] S3 adopt moves the epoch not the term', async t => {
+  const { rt, statePath } = runtime(t)
+  await rt.load()
+  const gen = rt.teamGeneration?.()
+  assert.equal(rt.sameTeam?.(gen), true)
+  fs.writeFileSync(statePath, JSON.stringify({ version: 1, revision: 900, prefs: { marker: 'outside edit' } }))
+  await rt.save().catch(() => {})
+  await rt.save()
+  assert.deepEqual(rt.teamGeneration?.(), { epoch: gen.epoch + 1, term: gen.term })
+  assert.equal(rt.sameTeam?.(gen), false)
+})

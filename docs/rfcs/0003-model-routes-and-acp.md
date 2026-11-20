@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); delivery 7's replay at a harness change to be replaced by [RFC 0030](0030-code-mode-in-the-app.md)'s handoff note, owner 2026-11-10, its Q7) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -45,8 +45,9 @@ Every model entry gets a descriptor `{ harness, connectedBy }`, derived from its
 
 ### The ACP plugin
 
-- **Agents as DSH models.** Each configured agent is a provider route. A Bot or a chat picks it
-  like any model. DSH keeps the Session, history and sidebar.
+- **Agents as DSH models.** Each configured agent is a provider route. A Bot or a chat can pick
+  it as a model. DSH keeps the Session's record and sidebar. An explicit harness change in a
+  populated Bot own chat follows RFC 0030 Q7a.
 - **DSH tool cards and approvals.** The agent's tool calls render as DSH tool cards. Every call
   the agent asks permission for goes through DSH's approval dialog under the Session's level
   (what the agent's own settings already allow does not ask; see the Session's level below),
@@ -140,8 +141,9 @@ and D17). Claude runs on pi-ai's `anthropic` route until `acp-claude` ships.
   over a per-session stdio MCP bridge; every DSH tool call is approved by DSH, whatever the
   agent's own rules say; the agent's built-in tools are off where its adapter has a switch
   (owner, 2026-11-06, #516). Both ship behind `dshTools`, whose absent default is per agent (the
-  default flipped, see Amendments, "Default and kill switch"); live switching carries history
-  each way, redacted, with a visible provider-boundary notice (owner, 2026-11-06, #516). The
+  default flipped, see Amendments, "Default and kill switch"). Delivery 7 introduced redacted
+  replay and a visible provider-boundary notice (owner, 2026-11-06, #516). RFC 0030 Q7a
+  supersedes the explicit history-carrying route change for a Bot's own chat. The
   council behind this: [dsh-022-council.md](../research/dsh-022-council.md).
 
 ### Per-teammate models (status note)
@@ -293,12 +295,12 @@ means the per-agent default (Contracts).
    before the prompt runs. The check runs at EVERY session start, not only at delivery 6's start
    or in CI: every spike fact is tied to adapter versions that update themselves (D17). Rollback:
    turn the setting off (the 2026-11-03 behaviour).
-7. **Live switching** (amended, 2026-11-06). A Session moves between providers with its history,
-   each way: the transcript is replayed (redacted) into the target, and what the agent streams is
-   written back into the Session's log. Lane: plugin, behind `dshTools`. Check: a Session moves
-   DSH → `acp-claude` → DSH with its transcript intact; a stored secret in that transcript never
-   appears in an outbound prompt; a provider-boundary row shows at each crossing. Rollback:
-   turn the setting off; the Session keeps the transcript it already has.
+7. **Live switching** (shipped 2026-11-06). Delivery 7 introduced redacted replay between
+   providers and wrote streamed replies and provider-boundary rows back into the Session log.
+   RFC 0030 Q7a refuses the explicit managed harness change for a Bot's own chat with history.
+   Check replay and redaction on same-harness restarts. Check that a refused crossing keeps the
+   original Session and selection. Lane: plugin. The existing `dshTools` setting still
+   governs replay and the bridge as described in the amendments.
 
 Delivery 1 is in milestone 2 (One message box), because the picker needs it. Deliveries 2 to 7
 are milestone 3 (Other agents in the same chat).
@@ -419,15 +421,16 @@ called it), so the fork path stays behind that proof. That the fork continues th
 conversation is not evidenced by the spike; delivery 6 must prove it before the fork counts as a
 refresh.
 
-**Live switching.** DSH keeps the record. A Session moving to an agent has its transcript replayed
-into `session/prompt` content, in order; moving back, what the agent streamed is written into the
-log with its tool calls keeping their cards. Before any text crosses, it passes the redactor: the
-Bot team's secret store for a Bot's Session (`apps/bots-dsh/src/host/secrets.js`), and the
+**Replay and the Session record.** Delivery 7 replayed a moved Session's transcript into an
+agent's `session/prompt` content in order. DSH logged streamed responses and tool cards back to
+the Session. RFC 0030 Q7a supersedes that live move for a populated Bot own chat. Before
+replay text goes into a prompt, it passes the redactor for
+the Bot team's secret store for a Bot's Session (`apps/bots-dsh/src/host/secrets.js`) and the
 credential shapes the Bot team's diagnostics already mask otherwise
 (`apps/bots-dsh/src/host/diagnostics.js`). A stored secret's value never reaches an outbound
-prompt; the test is a saved secret sitting in the transcript. Each crossing writes a
-provider-boundary row into the Session log ("Claude Code via acp-claude", "DSH"), so the chat
-shows who answered, not only a log file.
+prompt. The test puts a saved secret in the transcript. Delivery 7 wrote provider-boundary
+rows into the Session log ("Claude Code via acp-claude", "DSH"). Those rows stay in the
+record of sessions that crossed.
 
 **Setting and order.** Deliveries 4, 6 and 7 shipped behind `dshTools`, off unless set, until
 the owner tried them; off is the 2026-11-03 behaviour and the rollback. The default flipped to on
@@ -471,7 +474,7 @@ keeps the 2026-11-03 path, where an agent sees only its own session.
 | `false` | its own only | no | its own only | no |
 
 With the key absent, Codex therefore sees the chat but not the team's tools, which still need an
-explicit `true`. Beyond a move from another provider, three cases now replay, under the same
+explicit `true`. The November 8 implementation added three replay cases under the same
 redactor and 120,000-character cap: a new agent session in a chat that already has answers (a
 restart, or a session a crossing or a flip ended), with no boundary row since the chat did not
 change provider; a live session resumed after the chat answered elsewhere (a move off Codex keeps
@@ -479,16 +482,19 @@ its session), which gets the turns it missed, from its own last answer on, and t
 its "Switching to X" row, so Codex → API → Codex loses nothing; and a Bot part's handoff package
 (the Bot team's relay marked `handoff`), which stays in the part's first prompt beside the
 person's words and is carried in the replay once the Bot team has answered that first turn itself.
-A move off Claude Code still ends its session (and bridge), and the new session on the way back
-gets the chat; the agent's own context beyond the replay cap is the accepted cost.
+That implementation ended the Claude Code session and bridge on departure and replayed the
+chat on return. The agent's own context beyond the replay cap was the accepted cost.
+RFC 0030 Q7a refuses populated own-chat route picks before the managed move and keeps
+same-harness replay.
 
 **Team Bots on Codex get DSH's extras (2026-11-19, #1544).** With `dshTools` absent, a team Bot's
 current own chat and group Sessions get DSH's extras over the bridge, including `message_bot`
 and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions
 keep their default. An explicit `true` gives Codex the whole DSH preset, including on a Genie.
-An explicit `false` still turns the bridge and replay off. A move off Codex keeps its session
-only while that Session has no bridge. A move to DSH from a bridged Codex Session ends the run
-with a "Switching to DSH" row, and the new run on return gets the redacted replay.
+An explicit `false` still turns the bridge and replay off. The historical move away from
+Codex kept its session only while that Session had no bridge. A move to DSH from a bridged
+Codex Session ended the run with a "Switching to DSH" row, and the return path replayed the
+redacted transcript. Explicit route picks in a Bot's own chat now follow RFC 0030 Q7a.
 
 ## Amendment: Bots on Claude Code and Codex, switching and sign-in (2026-11-09)
 
@@ -507,17 +513,29 @@ wrapper delegates to whatever is below it at call time and, on dispose, unwinds 
 top. The method is private to `compaction-basic`, so a guard test pins it. An agent gets the chat
 as the bounded, redacted replay above instead.
 
-**Off an agent, onto an API model (the Bot team).** Before DSH's guard runs, the Bot team measures
-the chat against the destination's own switch threshold, computed as `compaction-basic` does
-(`apps/bots-dsh/src/host/parts.js`). Below it nothing happens. Above it, the chat is condensed into
-a checkpoint only when the team chose a background model in Settings (`prefs.backgroundModel`) and
-the chat fits that model, which is the one charged; the automatic background pick never starts a
-paid call without that choice. Otherwise the Bot continues in a new part that carries the latest
-messages that fit, with no handoff note and no model call. The part it leaves is archived only
-after the new part's first answer from the chosen model; if that first call fails, the Bot goes back
-to it. A team with no model that answers beside its agents skips the steward, the note and the
-checkpoint (it says so once in the log) and, past the hard line, continues in a new part the same
-way. A switch between two agents needs none of this.
+**Explicit harness changes in a Bot's own chat (RFC 0030 Q7a).** `switchRoute` refuses a
+pick for a chat with history and keeps the old route and Session. Start New conversation,
+then pick the route. If the Bot has an active goal, pause it before New conversation.
+A crossing on a part with nothing said can apply in place, including a move between ACP
+agents. RFC 0030 defines what counts as history for that decision. The earlier managed
+path could open a new part with the latest messages. Automatic moves, effort, rollback
+and default fallbacks, the in-place path's races, and other writers remain owed under
+RFC 0030.
+
+**Off an agent, onto an API model (the Bot team).** For route writers that remain, including
+the native Session picker and fallback selection, the Bot team measures the chat against
+the destination's own switch threshold before DSH's guard runs, computed as
+`compaction-basic` does (`apps/bots-dsh/src/host/parts.js`). Below the threshold the step goes
+on in the same part. The chat can be condensed into a checkpoint only when the team chose a
+background model in Settings (`prefs.backgroundModel`) and the chat fits that model. The
+chosen background model is the one charged. An automatic background pick cannot start
+a paid call. If a checkpoint is unavailable or the chat still reaches the threshold, the Bot
+continues in a new part that carries the latest messages that fit, with no handoff note and
+no model call. The old part is archived only after the new part's first answer. If that
+first call fails before any answer and no fallback answers, the Bot returns to the old
+part. A team with no model that answers beside its agents skips the steward, note and
+checkpoint, and rolls over without a model call past the hard line. An agent-to-agent move
+has no API destination threshold.
 
 **A switch that fails goes back.** The Bot keeps the last model that answered in its chat as
 `previousModel` (a model that only started a call is never recorded) until the new one answers. A
@@ -532,7 +550,7 @@ own. A signed-out agent
 (ACP's `auth_required`) fails the turn as `MODEL_ACCESS_REQUIRED`, never `ACP_AGENT`, so it never
 moves to the fallback model; the fallback never changes the Bot's model.
 
-**No row claims an answer.** The provider-boundary row (Live switching, above) is written before
+**No row claims an answer.** The provider-boundary row (Replay and the Session record, above) is written before
 the reply, and the call can still fail after it, so it now reads "Switching to X (provider)",
 never "Now answered by X". Whether X answered is derived, never stored as a claim: from the next
 assistant message whose source is X. The Bot's settings show that state (switching and not answered
@@ -719,8 +737,8 @@ three CLIs before their switches default to on.
 The owner's GO adds **Remote Hermes** as a fourth route, after Native, ACP and Herdr. This
 amends the three-route selector approved in #1016. Local Hermes remains `acp-hermes`;
 remote Hermes is `hermes-remote`, a native `hermes serve` JSON-RPC/WebSocket adapter,
-never an ACP SDK transport. Crossing to or from it starts a new conversation with the
-existing handoff flow (#1007); changing only its model keeps that conversation.
+never an ACP SDK transport. A crossing to or from it follows RFC 0030 Q7a for an explicit
+own-chat pick. Changing only its model keeps the conversation.
 
 One connection, off by default, holds a remote HTTPS address (path prefixes allowed) or SSH
 connection settings, a profile, Bot-secret reference and discovered models. The standing credential is in the mode-0600 Bot secret store with no
@@ -915,7 +933,7 @@ fake-acp tests cover the inheritance contract, and opened work runs as Workspace
 
 ## Amendment: Auto on every route (RFC 0031, 2026-11-11)
 
-Auto runs at Workspace. Codex uses its own reviewer; Claude Code uses its `auto` mode. Both can take their own mode while bridged. API Bots decide sandbox escalations through their own model in a separate, tool-free compaction request. Hermes, Antigravity and omp use the team's background model and require one to offer Auto. A bridged call keeps its dialog or the background model decides it; a CLI permission question sends the remaining bridge calls of that prompt to the person.
+Auto runs at Workspace. Codex uses its own reviewer, including while bridged. Claude Code is withheld from Auto until its `auto` mode is captured; a saved Claude Code Auto mark is cleared and the Bot runs as Workspace. API Bots decide sandbox escalations through their own model in a separate, tool-free compaction request. Hermes, Antigravity and omp use the team's background model and require one to offer Auto. A bridged call keeps its dialog or the background model decides it; a CLI permission question sends the remaining bridge calls of that prompt to the person.
 
 API marks bind the exact provider/model; own-mode and team marks bind the agent route. Only the person enables Auto. Current chat ownership or explicit inherited task records, revision, Workspace, and route must still match when a decision returns. Grants bind one call, tool and escalation reason and are consumed once. A failure or missing model asks the person. Model decisions never widen saved permissions or answer as the person.
 
@@ -923,7 +941,7 @@ Automagik's judge asks the person for hard-to-undo steps and after three consecu
 
 Codex's reviewer is a single CLI switch; global rules or reviewer policy would also change other Bots. No CLI home is written. Codex review counts can produce a refusal-stop notice, but the actual denial-limit ending and Claude Code auto mode still need captures. The host notice and tool result remain English like their neighbors. The permission questions explain that an allowed API escalation and native-agent tools may change files outside the Bot's folder. Existing Codex wording remains unchanged.
 
-RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Questions 4 and 5 are answered by the own model/background model split and explicit failure-to-person behavior. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
+RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Question 4 is answered by the own model/background model split and explicit failure-to-person behavior. For question 5, Claude Code is withheld from Auto until its `auto` mode is captured from a signed-in CLI. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
 
 ### Bot identity on ACP (amended 2026-11-14, #1269)
 

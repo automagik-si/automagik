@@ -83,9 +83,9 @@ export { redactText }
  * What the row says under its name, line by line: the CLI, the connector, the sign-in, and
  * where to find the model. Each line: { tone: ok|wait|bad|muted, text, link?, action? }, an
  * action being 'check' (look again), 'login' (the sign-in row in a Bot's chat) or 'retry' (the
- * connector's install, or the CLI's).
+ * connector's install, or the CLI's). An account in Settings can also offer 'switch'.
  */
-export function agentLines(agent) {
+export function agentLines(agent, entry) {
   const name = agent.name
   const cli = CLI_OF[agent.id] ?? agent.key
   const lines = []
@@ -104,7 +104,16 @@ export function agentLines(agent) {
     return lines
   }
   lines.push({ tone: 'ok', text: agent.cli.version ? t('Found the {cli} CLI on this computer (version {version}).', { cli, version: agent.cli.version }) : t('Found the {cli} CLI on this computer.', { cli }) })
-  if (agent.signedIn === true && agent.consent !== 'needed') lines.push({ tone: 'ok', text: t('Signed in to {name}.', { name }) })
+  if (agent.signedIn === true && agent.consent !== 'needed') {
+    const canSwitch = isolatedSignIn(agent) && entry?.authScope === 'isolated' && entry.signedIn === true
+    const account = canSwitch && entry.account?.kind === 'account' ? entry.account.email ?? entry.account.org : undefined
+    lines.push({
+      tone: 'ok',
+      text: account ? t('Signed in to {name} as {account}.', { name, account }) : t('Signed in to {name}.', { name }),
+      ...(canSwitch ? { action: 'switch' } : {}),
+    })
+    if (canSwitch) lines.push({ tone: 'muted', text: t('Bots in this installation share this account. Your terminal sign-in stays as it is.') })
+  }
   // Already signed in on this computer (the terminal's sign-in): the Bot's chat shows the
   // account and asks before any Bot uses it.
   if (agent.signedIn === true && agent.consent === 'needed' && !cliBusy(agent)) lines.push({ tone: 'bad', text: t('{name} is signed in on this computer. Confirm its account in a Bot\'s chat before Bots use it.', { name }), action: 'login', label: t('Confirm account') })
@@ -212,6 +221,7 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     view,
     busy,
     problems,
+    setProblem: say,
     isOn: agent => wanted[agent.id] ?? agent.on,
     flip: async (agent) => {
       const on = !(wanted[agent.id] ?? agent.on)
@@ -241,25 +251,31 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
   }
 }
 
-export function AcpLine({ line, agent, acp, busy }) {
+export function AcpLine({ line, agent, acp, busy, accountControls }) {
+  const canSwitch = line.action === 'switch' && accountControls !== undefined
+  const confirming = canSwitch && accountControls.pending === agent.id
+  const accountButton = (label, onClick) => h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick }, label)
   return h('div', { className: 'oai-acp-line-block' },
     h('p', { className: `oai-acp-line oai-acp-${line.tone}${line.tone === 'wait' ? ' oai-waiting' : ''}`, ...(line.tone === 'bad' ? { role: 'status' } : {}) },
-      line.text,
+      confirming ? t('This stops running Bot work for this account. Continue?') : line.text,
       line.link ? [' ', h('a', { key: 'link', className: 'oai-link', href: line.link.href, target: '_blank', rel: 'noreferrer' }, line.link.text)] : null,
       line.action === 'retry' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.retry(agent) }, t('Retry')) : null,
       line.action === 'login' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t('Sign in')) : null,
-      line.action === 'check' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.check(agent) }, t('Check again')) : null),
+      line.action === 'check' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.check(agent) }, t('Check again')) : null,
+      canSwitch && !confirming ? accountButton(t('Switch account'), () => accountControls.ask(agent)) : null,
+      confirming ? accountButton(t('Continue'), () => accountControls.confirm(agent)) : null,
+      confirming ? accountButton(t('Cancel'), accountControls.cancel) : null),
     line.details ? h('details', { className: 'oai-acp-details' },
       h('summary', null, t('Install details')),
       h('pre', { className: 'oai-acp-diagnostic' }, line.details.diagnostic),
       line.details.logPath ? h('p', { className: 'oai-acp-log' }, t('Log: {path}', { path: line.details.logPath })) : null) : null)
 }
 
-export function AcpAgentRow({ agent, acp }) {
+export function AcpAgentRow({ agent, acp, accountControls }) {
   const on = acp.isOn(agent)
-  const busy = acp.busy !== null
+  const busy = acp.busy !== null || accountControls?.busy === true
   const badge = badgeOf({ ...agent, on })
-  const lines = agentLines(agent)
+  const lines = agentLines(agent, accountControls?.accounts[agent.id])
   return h('div', { className: `oai-ai oai-acp${on ? ' oai-ai-on' : ''}`, 'data-acp': agent.id, 'data-state': stateOf({ ...agent, on }) },
     h('div', { className: 'oai-ai-row' },
       h('div', { className: 'oai-logo', 'aria-hidden': true }, LOGO_OF[agent.id] ?? agent.name.slice(0, 1)),
@@ -268,27 +284,82 @@ export function AcpAgentRow({ agent, acp }) {
         h('span', null, t('Your own {cli} CLI, as a model in DSH', { cli: CLI_OF[agent.id] ?? agent.key }))),
       badge ? h('em', { className: 'oai-found' }, badge) : null,
       h('button', { type: 'button', role: 'switch', className: 'oai-switch', 'aria-checked': on ? 'true' : 'false', 'aria-label': agent.name, disabled: busy, onClick: () => acp.flip(agent) })),
-    h('div', { className: 'oai-acp-lines' }, lines.map((line, i) => h(AcpLine, { key: i, line, agent, acp, busy }))),
+    h('div', { className: 'oai-acp-lines' }, lines.map((line, i) => h(AcpLine, { key: i, line, agent, acp, busy, accountControls }))),
     acp.problems[agent.id] ? h('p', { className: 'oai-error oai-ai-problem', role: 'alert' }, acp.problems[agent.id]) : null)
 }
 
 /** The agents' list, or nothing while loading or without acp-dsh. */
-export function AcpAgents({ acp }) {
+export function AcpAgents({ acp, accountControls }) {
   if (acp.view?.available !== true || acp.view.agents.length === 0) return null
-  return h('section', { className: 'oai-group oai-acp-group', 'aria-label': t('Claude Code and Codex') },
-    h('div', { className: 'oai-list' }, acp.view.agents.map(agent => h(AcpAgentRow, { key: agent.id, agent, acp }))))
+  return h('section', { className: 'oai-group oai-acp-group', 'aria-label': t('Coding agents') },
+    h('div', { className: 'oai-list' }, acp.view.agents.map(agent => h(AcpAgentRow, { key: agent.id, agent, acp, accountControls }))))
 }
 
-/** Settings → Claude Code and Codex: the same rows, after onboarding. Signing in closes the
+const BOTS_CLIENT = '@automagik/bots-dsh/client'
+const loadBots = () => require(BOTS_CLIENT)
+
+async function readAccounts(load) {
+  try {
+    const omni = load()?.omni
+    const face = omni?.face?.()
+    if (typeof face?.actions?.cliLoginAccounts !== 'function' || typeof face.actions.cliLoginSwitch !== 'function') return null
+    const result = await face.actions.cliLoginAccounts()
+    return { face, hostText: face.hostText ?? omni.hostText, accounts: result?.accounts ?? {} }
+  } catch {
+    return null
+  }
+}
+
+/** Settings → Coding agents: the same rows, after onboarding. Signing in closes the
  * settings panel (its `close`), so the Bot's chat with the sign-in row is in view. */
-export function AcpSettingsSection({ close } = {}) {
+export function AcpSettingsSection({ close, load = loadBots } = {}) {
   const acp = useAcp(undefined, { onLoginOpen: () => close?.() })
+  const [accountView, setAccountView] = useState(null)
+  const [pending, setPending] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const switchBusy = useRef(false)
+  // Read both accounts when Settings opens, apart from the agent status poll.
+  useEffect(() => {
+    let live = true
+    void readAccounts(load).then(view => { if (live) setAccountView(view) })
+    return () => { live = false }
+  }, [])
+  const confirm = async (agent) => {
+    if (switchBusy.current) return
+    switchBusy.current = true
+    setBusy(true)
+    acp.setProblem(agent.id, null)
+    try {
+      const { face } = accountView
+      const snapshot = face.hooks?.roster?.getSnapshot?.()
+      const main = [...(snapshot?.mainBotIds ?? []), snapshot?.mainBotId].find(id => id && snapshot.byId?.[id])
+      if (!main) {
+        acp.setProblem(agent.id, t('Sign-in needs a Bot chat. If you have no Bot yet, set one up first.'))
+        return
+      }
+      await face.actions.cliLoginSwitch(main, agent.id)
+      await face.actions.refreshModels?.()
+      acp.login(agent)
+    } catch (error) {
+      const message = error?.message ?? String(error)
+      acp.setProblem(agent.id, accountView.hostText?.(message) ?? message)
+    } finally {
+      setPending(null)
+      setBusy(false)
+      switchBusy.current = false
+    }
+  }
+  const accountControls = accountView === null ? undefined : {
+    accounts: accountView.accounts, pending, busy, confirm,
+    ask: agent => { acp.setProblem(agent.id, null); setPending(agent.id) },
+    cancel: () => setPending(null),
+  }
   return h('div', { className: 'oai-acp-page' },
     h('div', { className: 'oai-card' },
-      h('h1', null, t('Claude Code and Codex')),
+      h('h1', null, t('Coding agents')),
       h('p', null, t('Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.')),
       acp.view === null ? h('p', { className: 'oai-muted oai-waiting' }, t('Looking at what this computer has…'))
-        : acp.view.available ? h(AcpAgents, { acp })
+        : acp.view.available ? h(AcpAgents, { acp, accountControls })
           : h('p', { className: 'oai-muted' }, t('The ACP agents plugin is not running in this DSH.'))))
 }
 
@@ -310,11 +381,11 @@ export function AcpSectionIcon({ size = 16 }) {
   h('path', { d: 'M4.6 6.2 6.8 8l-2.2 1.8M8.3 10.2h3.1' }))
 }
 
-// Settings → Claude Code and Codex, after onboarding too: DSH's settings and the
+// Settings → Coding agents, after onboarding too: DSH's settings and the
 // Bot team's both list it. Always there, so an acp-dsh turned on after the page loaded has its
 // page without a reload; without acp-dsh the page says the plugin is not running.
 export function installAcpSection(ctx) {
-  const section = ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: SETTINGS_SECTION, order: 30, label: () => t('Claude Code and Codex') }, AcpSettingsSection)) ?? (() => {})
+  const section = ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: SETTINGS_SECTION, order: 30, label: () => t('Coding agents') }, AcpSettingsSection)) ?? (() => {})
   const icon = ctx.slots.inject('settings.section.icon', () => ctx.slots.register({ name: 'settings.section.icon', id: SETTINGS_SECTION, order: 30 }, AcpSectionIcon)) ?? (() => {})
   return () => {
     section()

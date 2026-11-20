@@ -43,8 +43,8 @@ How they fit:
 
 - **Permission presets**: each Bot runs with its own dsh permission preset (Read only, Workspace or Full access), set in its details panel. A group chat can run all its members with one preset there, in place of their own: turn on **Same for every member** under Permissions in the group's settings. A new Bot starts with the team default, set under Permissions in Settings > Bots. Work a Bot opens never runs wider than the conversation that opens it. A task (`start_task`, a Genie wish) runs at the narrower of its own level and the level that conversation runs at when it starts it, such as a chat lowered with `/permission` or a read-only automation run. A Bot made with `create_bot` starts at the narrowest of its creator's level, that conversation's and its group's, and never gets a tool its creator does not have. A fresh Session a Bot's scheduled task opens starts no wider than that Bot. While a task you scheduled yourself also opens fresh Sessions, DeepSeek Harness does not say which task a fresh Session is for, so those keep the level they start with. A level that cannot be read or compared gives the narrowest one offered. What you start yourself is as before. While DSH's experimental Auto review plugin is on, **Auto review** is a preset too, marked Experimental and confirmed once when picked. Where Auto cannot hold (the plugin is off, or DSH refuses it), the Bot or group runs as Workspace and says so; a chat whose Session was left on Auto opens again once Auto review is back on. When DSH stops offering a saved level (an upgrade renames or drops it), the level stays saved and is not rewritten: a conversation that already runs is lowered to the narrowest level DSH still offers when that is known to allow less than what it has, and is otherwise left as it is; nothing new starts (a task, a greeting, a first turn in a group) until a level is picked or DSH offers the saved one again. Details and Settings → Feedback say which of these happened. Only you set permissions; Bots cannot change them.
 
-  Auto works as Workspace on every supported route. Codex uses its own reviewer and Claude Code uses its `auto` mode. API Bots use their own model in a separate request for sandbox escalations; a granted step can leave the sandbox. Hermes, Antigravity and omp use the team's background model and are offered Auto only while one is available. Their own tools run outside DSH's sandbox.
-  For bridged Codex and Claude Code, the team's background model decides DSH tool calls. If the CLI asks for permission, the rest of that prompt's bridge calls reach the person. Without a background model, bridge calls reach the person. Hard-to-undo steps and the rest of a turn after three consecutive refusals or ten total refusals always reach the person when Automagik judges. Plugin, folder and website approvals remain with the person. A request the judge decides never shows as a card, on the computer or on Pocket; only one it passes on does. A model failure asks; it never allows. Only the person turns Auto on. API marks bind the exact model; native agent marks bind their route. Bots outside Auto keep their existing behavior.
+  Auto works as Workspace on every supported route. Codex uses its own reviewer. Claude Code is withheld from Auto until its `auto` mode is captured; a saved Claude Code Auto mark is cleared and the Bot runs as Workspace. API Bots use their own model in a separate request for sandbox escalations; a granted step can leave the sandbox. Hermes, Antigravity and omp use the team's background model and are offered Auto only while one is available. Their own tools run outside DSH's sandbox.
+  For bridged Codex in Auto, the team's background model decides DSH tool calls. If the CLI asks for permission, the rest of that prompt's bridge calls reach the person. Without a background model, bridge calls reach the person. Hard-to-undo steps and the rest of a turn after three consecutive refusals or ten total refusals always reach the person when Automagik judges. Plugin, folder and website approvals remain with the person. A request the judge decides never shows as a card, on the computer or on Pocket; only one it passes on does. A model failure asks; it never allows. Only the person turns Auto on. API marks bind the exact model; native agent marks bind their route. Bots outside Auto keep their existing behavior.
 
   **Auto** is Workspace plus a saved mark, chosen only by you after a confirmation in Details,
   the composer menu or the chat's permission card; the question names who decides for that Bot.
@@ -538,6 +538,23 @@ enter team state, messages, tools, model calls or logs. The earlier confirm step
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
+**Account reservations (RFC 0024 R4)**: Accounts are shared by default. In Bot settings the owner
+can reserve a signed-in Claude Code or Codex account for a project, rename it, or make it shared.
+The machine folder is `/var/lib/automagik/reservations` on Linux and
+`/Users/Shared/Automagik/reservations` on macOS. Set `AUTOMAGIK_RESERVATIONS_DIR` to override it.
+See the [administrator setup](../../docs/cloud/0024-reservations-setup.md). With a missing or
+unreadable folder, reservations hold only in this installation and the card says so.
+
+The check runs at sign-in, startup, a card read, and a new Bot Session or its first turn on that
+provider. An admitted turn can finish. When the check refuses an isolated Bot account, the app
+signs that account out once its work is idle. The terminal's sign-in stays untouched.
+
+A Codex workspace reservation covers every ChatGPT workspace of that email. The record identifies
+accounts by keyed digests. Group members can test a guessed email. Instances running as the same
+OS user can modify each other's files, and a group member can reserve an account they can name.
+The card shows the file owner. A copied home shares its instance id. Reservations cover one
+machine, and Windows support awaits an ACL design.
+
 **Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table). With it absent, both get the chat's history as a redacted replay. Claude Code gets the team's tools over the bridge. A team Bot on Codex gets DSH's extras in its current own chat and in group Sessions, including `message_bot` and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions on Codex keep only its own tools by default. An explicit `dshTools: true` gives Codex the whole DSH preset, including on a Genie.
 
 - Give every model a `contextWindow`. DS Bot takes its lines from it: the usable window is the window minus the reply reserve (`maxTokens`), the hard line is 95% of that, and the check line is `checkRatio` of it. A model without `contextWindow` gets the adapter's default (262,144 tokens for `llm-pi-ai`), which may be wrong for that model; a model that reports no window at all counts as 500,000.
@@ -639,7 +656,7 @@ piece.
 
 Every Bot has a browser of its own, on by default (`browserPlugin: false` turns it off). It is the Chrome, Edge, Chromium or Brave already on this computer, driven through `playwright-core`: nothing is downloaded. Without one, a Bot that needs a browser says so and asks you to install Chrome.
 
-- **A profile per Bot**, in `browser-profiles/<id>/`: its sign-ins and cookies stay between runs and belong to that Bot only. Deleting a Bot deletes its profile.
+- **A profile per Bot**, in `browser-profiles/<id>/`. With launched Chrome, sign-ins live in that profile. Persistent sign-ins survive a browser restart. The old `cookies.json` is removed at plugin startup or when the browser opens. Sites that rely on session cookies may ask you to sign in again. Deleting a Bot deletes its profile.
 - **Tabs come back**: the Bot's open tabs (address and title) are saved there as they change and reopen at its next browser call after a crash or a restart. A browser that went away (closed, crashed) opens again at that call.
 - **What a Bot does**: `browser_open`, `browser_snapshot` (the page as an accessibility tree, each element with a ref), `browser_click`, `browser_type`, `browser_select`, `browser_press`, `browser_upload`, `browser_tabs`, `browser_back` and `browser_screenshot`. Page content is treated as data, never as instructions.
 - **What asks you first**: posting, uploading, downloading and deleting, each through dsh's approval. A delete needs a second, confirmed click. Settings → Browser lets a Bot do some of these on a site for an hour, until the end of the day, for 7 days or for good. Card fields are never typed, and a payment always goes back to you.
@@ -659,7 +676,7 @@ Every Bot has a browser of its own, on by default (`browserPlugin: false` turns 
 - **Files**: downloads go to the Bot's working folder or the team folder; uploads come only from those.
 - **Handing over**: for a sign-in, a payment or a check, the Bot calls `browser_handoff` and a card in its chat asks you to take over, skip, or say you are done. While you hold the browser, its tools refuse; the window is a normal browser window on your screen.
 - **The window**: on macOS and Windows, and on Linux with a display, the browser opens as a window you can watch. On Linux without a display it runs headless (`browserHeadless`).
-- **In the Automagik app** the Bot's browser is inside the app instead: the globe button in its chat header opens the same tabs the Bot drives, in a panel you can watch and take over. Its sign-ins stay in the app's own storage for that Bot; `read_browser` is not offered there, since the Bot reads its pages with its own browser tools.
+- **In the Automagik desktop app** the globe button in the Bot's chat header opens the same tabs the Bot drives, in a panel you can watch and take over. Sign-ins live in the Bot's persistent partition. The Bot reads its pages with its own browser tools, and the app omits `read_browser`.
 
 ### Browser panel (dsh Desktop)
 
@@ -676,7 +693,7 @@ In dsh Desktop, a Bot's chat header also has a globe button. It opens that Bot's
 - **Addresses**: http and https only. localhost and LAN addresses are allowed; cloud metadata addresses (such as `169.254.x.x`) and dsh's own ports are not.
 - The browser panel and the details drawer share the right column; opening one closes the other. Switching chats switches the panel to that Bot.
 
-The Automagik desktop app and dsh Web have no browser panel and no `read_browser`; their Bots use the browser above.
+dsh Web has no browser panel or `read_browser`. Its Bots use the browser above.
 
 ## Secrets
 
@@ -689,7 +706,19 @@ When a Bot needs an API key, token or password, it calls `request_secret`, and a
 - **Manage**: Settings → Secrets lists every secret by name, purpose, the Bot that asked and the last use. You can change who may use it, replace the value, delete it or add one. Deleting a Bot removes it from every secret.
 - **Storage**: `<DSH_HOME>/bot/secrets.json`, file mode 600, written atomically. Values are never in `state.json` or logs.
 
-Vault mappings live in a separate `vault-sources.json` in the team home, written atomically with file mode 600. This version reserves mapped names even when the vault plugin is off. Mapped keys are unavailable in this version. If a name appears in both files, remove one definition in Settings → Secrets to resolve the conflict. You can remove a mapping there with the vault plugin off. If the mapping file cannot be read, secret use stops until the file is fixed.
+HashiCorp Vault uses a supported Vault CLI to browse KV v1 and v2 mounts. In local Settings › Secrets › Vault, connect with the server address, token and optional namespace. Enter them again after restarting. The mapping binds to the address and namespace through a hash, and replacement cancels pending approvals and grants. Reads assume a direct Vault server or a non-caching Vault Proxy that forwards the supplied token. Caching cannot be detected. The CLI uses OS TLS trust with no forward proxy, custom CA or redirect support. Before rolling back to a Bot team version that predates this provider, remove the HashiCorp Vault mappings.
+
+On a local Linux desktop, select **Secret Service (GNOME Keyring)** in Settings › Secrets › Vault.
+**Unlock** opens Automagik’s access without asking for a password. Unlock the actual keyring in
+GNOME when needed. Search the picker and select an item from an unlocked collection. Settings
+and the approval card show the item and collection labels for your selection. The mapping stores
+the item reference, which can include the collection name as part of the object path. Remove
+Secret Service mappings before rolling back to a Bot team version that predates this provider.
+Auto asks before recognized Secret Service reads, monitors and captures.
+
+Remove Proton Pass mappings before rolling back to a Bot team version that predates this provider.
+
+Vault mappings live in a separate `vault-sources.json` in the team home, written atomically with file mode 600. Mapped names stay reserved even when the vault plugin is off. When the vault is unlocked, a Bot in scope can ask for approval in its own chat. Each approval covers one attempt at the exact command, in the shell and folder shown on the card. Vault values cannot reach a shell in this version. If a name appears in both files, remove one definition in Settings → Secrets to resolve the conflict. You can remove a mapping there with the vault plugin off. If the mapping file cannot be read, secret use stops until the file is fixed.
 
 Limits:
 
@@ -734,7 +763,7 @@ Files in `ui/`:
 | `side/` | Side chats, one file per Bot; `btw/` keeps the asides of earlier versions, read only |
 | `avatars/` | The photos added for Bots to wear (up to 500), with `index.json` |
 | `handoff-results/` | Whole results of delegated work longer than `state.json` keeps, until the work is answered |
-| `browser-profiles/` | Each Bot's browser profile: its sign-ins and cookies. Treat backups of it like passwords. |
+| `browser-profiles/` | Each Bot's saved tabs and, with launched Chrome, its sign-ins and cookies. Treat backups of it like passwords. |
 | `browser-downloads/` | A folder per Bot that its browser may also upload from |
 | `update.json` | Left by an update that reinstalled the plugin, for the start that follows it |
 | `workspace` | The team workspace: the working folder of every Bot without one of its own (`config.workspace` changes it) |
@@ -769,6 +798,78 @@ node /opt/automagik/profile/node_modules/@automagik/bots-dsh/scripts/seed-regist
 ```
 
 It creates a missing file and leaves an identical one untouched, so re-running is safe. A repo file that differs is refused rather than overwritten; an existing home file is merged, keeping its other projects, picks and unknown fields, and a conflicting project entry or main Bot in it is refused. It never mints Bot ids: a project with no `.herdr/bots.json` is refused, because creating a team and its ids is Herdr's job. It keeps unknown fields, checks that the roster has exactly one main Bot, and removes `sessionId`, `sessions` and `segments` at every depth (including under `dsh`) before writing. The report it prints is the read-back: both files' Bot counts, any parser warnings and each file's `sha256`.
+
+## Role packages
+
+Bot settings discover the role catalog on first open. A host holding the team lock fetches
+`roles.json` and `roles.json.sig` from the GitHub release for the running bots-dsh version.
+If the index returns 404, the Roles card stays hidden on a team with no installed records.
+The catalog is bound to that release. Versioned releases are immutable and the consumer does
+not support replacing a catalog on the same tag.
+
+The release producer signs the exact `roles.json` bytes with the plugin lane's Ed25519 key
+and attaches the detached signature as base64 in `roles.json.sig`. The catalog schema is:
+
+```json
+{
+  "schemaVersion": 1,
+  "publisher": "automagik",
+  "keyId": "<plugin lane key ID>",
+  "version": "3.159.1",
+  "repository": "https://github.com/automagik-si/automagik",
+  "roles": [
+    {
+      "id": "example",
+      "version": "1.0.0",
+      "name": "Example role",
+      "publisher": "automagik",
+      "official": true,
+      "sha256": "<64 hexadecimal digits>",
+      "size": 1024,
+      "capabilities": [],
+      "source": "https://github.com/automagik-si/automagik/releases/download/v3.159.1/automagik-role-example-1.0.0.tgz"
+    }
+  ]
+}
+```
+
+`roles` allows up to 200 entries. IDs are lowercase ASCII letters, digits and hyphens,
+start with a letter or digit, and have at most 41 characters. `data` is reserved for
+per-Bot role data. Windows device names are reserved as well. Each of the three version
+components has 1–9 decimal digits. Name and publisher have 1–60 characters. `size` is the
+exact compressed byte count (1 byte to 16 MiB) and `sha256` covers those bytes. The consumer drops
+malformed entries and all entries sharing a duplicate ID. Only entries with `official: true`
+and publisher `automagik` are installable. Downloads follow GitHub release redirects only
+to `https://release-assets.githubusercontent.com`.
+
+Each `automagik-role-<id>-<version>.tgz` is a gzip-compressed POSIX ustar archive rooted
+at `package/`. Attach each archive and its `.sha256` beside the signed catalog.
+The archive contains regular files and directories, with at most 512 entries, 8 MiB per
+file and 32 MiB expanded. Paths are at most 200 bytes including the root. Components match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, exclude Windows device names and trailing dots, and
+use one spelling per case-folded path, including implied directories. The archive ends with
+two zero blocks and may pad with additional complete zero blocks.
+
+The required `package/role.json` (up to 64 KiB) contains `id`, `version`, `name` (1–60
+characters), `publisher`, `entry` (a relative `.js` or `.mjs` file), `prompt` (a relative
+`.md` or `.txt` file up to 16 KiB), `tools`, `capabilities`, `settings` and `ui`. IDs,
+versions and publishers match the catalog entry. Tools have a unique `name` matching
+`[a-z][a-z0-9_]{0,63}`, a 1–1024 character `description` and a JSON object
+`parameters`. At most 16 tools are allowed. The capability set matches the catalog and
+comes from `audio-out`, `task-start`, `route-policy` and `history-read`. P2 requires empty
+`settings` and `ui` arrays. Optional `description` is a string and optional `requires` is
+an array of feature names, which must be empty in P2. Unknown manifest fields produce
+warnings. Installation copies package files and records them without running package code.
+
+The team home is private and owner-controlled. The consumer refuses symlinked or
+non-directory package ancestors and linked or special entries within a package version
+directory. Its checks assume the team lock and owner control of concurrent filesystem writes.
+A missing version folder shows as broken. The host checks files against verified digests
+while it has them in memory and checks the local package structure after a restart. An
+explicit reinstall compares exact file contents against the verified archive. An
+orphan folder can be adopted only when those bytes match. To replace a damaged install,
+uninstall and install again. Uninstall works offline once the role has been detached from
+every Bot, and leaves `roles/data/` in place.
 
 ## Development
 

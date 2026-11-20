@@ -2,7 +2,7 @@
 title: "RFCs"
 type: moc
 created: 2026-11-01
-updated: 2026-11-07
+updated: 2026-11-20
 tags: [moc, rfcs]
 ---
 # RFCs
@@ -38,8 +38,19 @@ Monorepo RFCs that change Pocket's contract, privacy or permissions (they live i
 
 | RFC | Title | Status | Pocket's part |
 |---|---|---|---|
-| [0015](../../../../docs/rfcs/0015-live-chat-projection.md) | Live chat projection: an agent terminal as a chat, Pocket Link's chat route | Accepted | Delivery 5: the Chat tab; transcripts reach the phone, in memory only ([privacy](../privacy.md)) |
-| [0015, amendment](../../../../docs/rfcs/0015-live-chat-projection.md#amendments) | Writes on DSH chats: send, interrupt and approve from the phone | Accepted (2026-11-07) | `dshWrite` in the chat `hello`; first answer wins, the other card closes with a receipt; the per-project yes still gates project Bots; global Bots (Main Bot included) writable under the same limits; allow for session stays on the computer; privacy.md changes with the pocket PR |
-| [0033](../../../../docs/rfcs/0033-attachments-from-pocket.md) | Attachments from Pocket | Queued | Picker, upload, attachment rows; privacy.md changes with the pocket delivery |
+| [0003](../../../../docs/rfcs/0003-model-routes-and-acp.md) | Model routes and ACP | In delivery | Sign-in amendment: Pocket refuses a pasted Claude sign-in code before anything records it, as the team's send endpoints do |
+| [0011](../../../../docs/rfcs/0011-monorepo-parts-and-releases.md) | Monorepo parts and releases | Accepted | The `pocket` lane: one version for every part (versionCode from the root `package.json`), the APK and `latest.json` on each release that rebuilds Pocket and, from stable releases only, the rolling `pocket-lane` that installed phones read; the app ID, the signing key and `latest.json`'s place and fields change only with an RFC ("Pocket") |
+| [0012](../../../../docs/rfcs/0012-am-cli-and-parts.md) | am, the one command, and its parts | In delivery | Proposed: Pocket Link becomes its own part, owned by Pocket; Pocket installs nothing on a computer, its `am doctor` entry reports that, and `am pocket pair` is how a phone joins (delivery 8, the `apps/*` parts) |
+| [0014](../../../../docs/rfcs/0014-shared-bot-registry.md) | Shared Bot registry | In delivery | Universal-Bot amendment: a project's orchestrator is one Bot; the phone shows it once, as the DSH chat `dsh:<botId>`, with approvals through DSH |
+| [0015](../../../../docs/rfcs/0015-live-chat-projection.md) | Live chat projection: an agent terminal as a chat, Pocket Link's chat route | In delivery; amended 2026-11-07 (writes), 2026-11-19 (RFC 0036) and 2026-11-20 (RFC 0033) | Delivery 5: the Chat tab; transcripts reach the phone, in memory only ([privacy](../privacy.md)) |
+| [0015, amendment](../../../../docs/rfcs/0015-live-chat-projection.md#amendments) | Writes on DSH chats: send, interrupt and approve from the phone | Accepted (2026-11-07) | `dshWrite` in the chat `hello`; first answer wins: the phone shows a receipt when the computer answered first, and the computer's dialog closes when the phone did (its receipt there waits on RFC 0015's open question 4); the per-project yes still gates project Bots; global Bots (Main Bot included) writable under the same limits; allow for session stays on the computer; privacy.md changes with the pocket PR |
+| [0017](../../../../docs/rfcs/0017-usagemeter-crate.md) | usagemeter crate | In delivery | This repository keeps the `herdr-meter` doc contract the phone reads (`Spend.kt` for the numbers, `SpaceFeed.kt` for the `space` block), the doc at `schema_version` 2; its schema and fixtures under `meter/schema`, with Pocket's tests on them, are delivery 3 (open) |
+| [0022](../../../../docs/rfcs/0022-desktop-chat-view.md) | Desktop chat view | In delivery | One rendering contract for the desktop and the phone: Pocket's `ChatRenderTest.kt` must read a byte-equal copy of `herdr/test/fixtures/chat-render-cases.json` in the pocket patch after the fixture lands (phase 1) (markup as text, link targets, ANSI removed, a tagged row's provenance); the later revision changes nothing else in Pocket |
+| [0025](../../../../docs/rfcs/0025-cloud-economics.md) | Cloud economics | Accepted | A Pocket tap is never an approval of a Cloud money grant: creating or raising one needs the Owner's passkey step-up |
+| [0028](../../../../docs/rfcs/0028-code-workers.md) | Code workers | Accepted | The durable worker-report log (`wake.jsonl`) is read only by the team's host: Pocket never reads it |
+| [0031](../../../../docs/rfcs/0031-auto-permission-level.md) | Auto permission level | In delivery | Auto covers every turn of the Bot's own chat, prompts sent from Pocket included: any message that reaches the chat can lead to a step Auto's judge allows |
+| [0033](../../../../docs/rfcs/0033-attachments-from-pocket.md) | Attachments from Pocket | Accepted. Delivery 0 writes the images contract into RFC 0015 and delivery 4a writes the documents contract there. Pocket images are delivery 3 and Pocket documents are delivery 4d. | Picker, upload, attachment rows; privacy.md changes with the pocket delivery |
+| [0034](../../../../docs/rfcs/0034-vault-plugin-bitwarden-first.md) | Vault plugin, Bitwarden first | Accepted | From Pocket a person may approve a Bot's use of a secret; the vault is never unlocked from the phone (a host-side Settings action) |
+| [0036](../../../../docs/rfcs/0036-bot-management-from-pocket.md) | Bot management from Pocket: memory, schedules, settings | In delivery (accepted 2026-11-19; amends RFC 0015) | In the chat of a project Bot the computer shows (never a global Bot or the Main Bot, which keep RFC 0015's chat writes only): its memory, not for a private Bot (read, add, edit; delivery 1), its scheduled tasks (list, pause, resume, rename; delivery 2), its name and model, the level read-only (delivery 3). Each on its own short-lived Pocket Link connection, negotiated in the chat `hello`; privacy.md changes with each pocket delivery |
 
 Back to the [docs home](../_index.md).

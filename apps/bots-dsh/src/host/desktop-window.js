@@ -7,3 +7,20 @@ export function verifiedWindow(request, env = process.env) {
   if (!/^[0-9a-f]{64}$/.test(digest ?? '') || !/^[0-9a-f]{64}$/.test(secret ?? '')) return false
   return timingSafeEqual(createHash('sha256').update(secret, 'ascii').digest(), Buffer.from(digest, 'hex'))
 }
+
+// What the shared /api/omni-ui route hands a window-only endpoint for a request from the desktop's
+// own window. A plain `true` could be passed by anyone holding the endpoint: the team runtime is a
+// service other plugins read (`omniTeam`, index.js), and its endpoint table hands out each
+// endpoint's function (extend.js `endpointOf`). Only this module makes a proof, once per verified
+// request; the route revokes it when the request ends, and hands it only to endpoints the team
+// registered as window-only (extend.js `windowEndpoint`), never to another plugin's endpoint.
+const proofs = new WeakSet()
+// It reads the digest from this process's environment only: a caller cannot supply its own.
+export function windowProof(request) {
+  if (!verifiedWindow(request, process.env)) return false
+  const proof = Object.freeze({})
+  proofs.add(proof)
+  return proof
+}
+export const revokeWindowProof = (proof) => { if (typeof proof === 'object' && proof !== null) proofs.delete(proof) }
+export const fromWindow = proof => typeof proof === 'object' && proof !== null && proofs.has(proof)

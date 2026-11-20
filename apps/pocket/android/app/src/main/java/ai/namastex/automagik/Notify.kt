@@ -1,6 +1,7 @@
 package ai.namastex.automagik
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -92,7 +93,7 @@ object Notify {
              choices: List<Prompt.Choice> = emptyList(), options: List<String> = emptyList(), msg: String = "", dialog: String = "") {
         if (!allowed(context)) return
         synchronized(AppLock.notifyLock) {
-            val n = if (AppLock.enabled) generic(context, ref, kind, silent, sent)
+            val n = if (AppLock.enabled || sent == UNLOCK_OUTCOME) generic(context, ref, kind, silent, sent)
                 else detailed(context, ref, kind, title, detail, silent, lockScreen, sent, choices, options, msg, dialog)
             if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
             runCatching { NotificationManagerCompat.from(context).notify(id(ref), n) }
@@ -100,12 +101,16 @@ object Notify {
     }
 
     private const val LOCKED_OUTCOME = "Not sent: Automagik is locked. Open it to answer."
+    private const val UNLOCK_OUTCOME = "Not sent: unlock the phone to answer."
+
+    internal fun needsUnlock(lockAnswers: Boolean, keyguardLocked: Boolean) = !lockAnswers && keyguardLocked
 
     private fun alertBuilder(context: Context, kind: String) = NotificationCompat.Builder(context, if (kind == Alerts.BLOCKED) NEEDS_YOU else DONE)
 
     private fun generic(context: Context, ref: TerminalRef, kind: String, silent: Boolean, sent: String?): Notification {
         val text = when {
             sent == LOCKED_OUTCOME -> LOCKED_OUTCOME
+            sent == UNLOCK_OUTCOME -> UNLOCK_OUTCOME
             kind == Alerts.BLOCKED -> "An agent needs you."
             else -> "An agent finished."
         }
@@ -162,6 +167,10 @@ object Notify {
             fun show(outcome: String) = post(context, ref, kind, title, detail, silent = true,
                 lockScreen = PocketViewModel.current?.state?.value?.lockAnswers ?: false, sent = outcome)
             val vm = PocketViewModel.current ?: run { show("Not sent: open Automagik and connect first."); return }
+            if (needsUnlock(vm.state.value.lockAnswers, context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)) {
+                show(UNLOCK_OUTCOME)
+                return
+            }
             val pending = goAsync()
             scope.launch {
                 try {
@@ -185,9 +194,12 @@ object Notify {
             fun show(outcome: String) = post(context, ref, kind, title, detail, silent = true,
                 lockScreen = PocketViewModel.current?.state?.value?.lockAnswers ?: false, sent = outcome)
             if (text.isBlank()) return
+            val vm = PocketViewModel.current ?: run { show("Not sent: open Automagik and connect first."); return }
+            if (needsUnlock(vm.state.value.lockAnswers, context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)) {
+                show(UNLOCK_OUTCOME)
+                return
+            }
             val pending = goAsync()
-            val vm = PocketViewModel.current
-            if (vm == null) { show("Not sent: open Automagik and connect first."); pending.finish(); return }
             scope.launch {
                 try { show(vm.reply(ref, text)) } finally { pending.finish() }
             }

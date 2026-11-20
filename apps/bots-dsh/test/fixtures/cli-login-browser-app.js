@@ -79,6 +79,7 @@ window.finishSignIn = (provider) => {
 const call = async (endpoint, payload) => {
   window.calls.push({ endpoint, payload: structuredClone(payload) })
   await pause(endpoint)
+  if (window.reservationActions?.[endpoint]) return window.reservationActions[endpoint](payload)
   const { provider, botId } = payload ?? {}
   switch (endpoint) {
     case 'cli-login-connections': return { available: true, connections: Object.fromEntries(Object.entries(window.host.signedIn).map(([id, signedIn]) => [id, { id, signedIn }])) }
@@ -267,6 +268,106 @@ window.showRecoveryAccounts = evidence => {
     openCliLogin: () => window.accountCalls.push('open'),
   }
   root.render(h(CliAccounts, { bot, actions }))
+}
+
+// The card uses the real team actions and host handlers. The browser keeps the fixture's
+// reservation file in memory and reads a fake account instead of running a CLI.
+function reservationFs() {
+  const files = new Map()
+  const open = new Map()
+  let sequence = 0
+  const fileOf = path => {
+    if (!files.has(path)) throw Object.assign(new Error('Missing fixture file'), { code: 'ENOENT' })
+    return files.get(path)
+  }
+  const stat = file => ({ isFile: () => true, mode: file.mode, dev: 1, ino: file.ino })
+  return {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 1, O_NONBLOCK: 2 },
+    lstatSync: path => stat(fileOf(path)),
+    openSync: (path, flags, mode) => {
+      if (flags === 'wx') {
+        if (files.has(path)) throw Object.assign(new Error('Fixture file exists'), { code: 'EEXIST' })
+        files.set(path, { mode, ino: ++sequence })
+      }
+      const fd = ++sequence
+      open.set(fd, fileOf(path))
+      return fd
+    },
+    fstatSync: fd => stat(open.get(fd)),
+    fchmodSync: (fd, mode) => { open.get(fd).mode = mode },
+    readFileSync: fd => open.get(fd).bytes,
+    writeFileSync: (fd, value) => { open.get(fd).bytes = new TextEncoder().encode(value) },
+    fsyncSync() {},
+    closeSync: fd => open.delete(fd),
+    unlinkSync: path => files.delete(path),
+    renameSync: (from, to) => { files.set(to, fileOf(from)); files.delete(from) },
+  }
+}
+
+window.showReservationAccounts = ({
+  isolated = false, instance = 'test-instance', machine,
+} = {}) => {
+  const id = 'acp-codex'
+  const seen = { id, signedIn: true, consent: 'given', ref: 'fixture-ref',
+    account: { kind: 'account', email: 'owner@example.test', plan: 'team' } }
+  const fixture = { instance, state: 'complete', exact: 'a'.repeat(43), machine }
+  const acp = {
+    authScope: isolated ? 'isolated' : 'consent',
+    status: async () => ({ agents: [seen] }),
+    account: async provider => provider === id && !fixture.machine?.signedOut
+      ? seen : { id: provider, signedIn: false },
+    accountEvidence: async provider => {
+      if (provider !== id || fixture.state === 'signed-out') return { id: provider, signedIn: false }
+      if (fixture.state === 'unknown') return { id }
+      if (fixture.state === 'unsupported') return { id, supported: false }
+      if (fixture.state === 'ambiguous') return { id, signedIn: true, outcome: 'ambiguous', why: 'unknown-plan' }
+      if (fixture.state === 'recovery') return { id, recoveryRequired: true }
+      return { id, signedIn: true, vendor: 'codex', ref: seen.ref, outcome: fixture.state,
+        reservable: true, class: 'workspace', exact: fixture.exact, loose: 'b'.repeat(43) }
+    },
+  }
+  const rt = { ctx: { get: () => acp, on: () => {} }, holdsLock: () => true, readOnly: () => undefined }
+  installAccountActions(rt, {
+    path: 'reservation.json', fs: reservationFs(), pid: 1, instanceId: () => fixture.instance,
+    random: (size, encoding) => {
+      const bytes = crypto.getRandomValues(new Uint8Array(size))
+      if (encoding === 'hex') return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+      return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+    },
+    decodeKey: key => Uint8Array.from(atob(key.replaceAll('-', '+').replaceAll('_', '/')), char => char.charCodeAt(0)),
+  })
+  const host = rt.cliLoginActions
+  window.reservationActions = machine ? {
+    ...host,
+    async 'cli-login-accounts'(payload) {
+      const value = await host['cli-login-accounts'](payload)
+      value.accounts[id].machine = fixture.machine
+      return value
+    },
+    async 'cli-login-reserve'(payload) {
+      if (!payload.machineId) return host['cli-login-reserve'](payload)
+      fixture.machine.claims.find(claim => claim.machineId === payload.machineId).label =
+        payload.label
+      return { state: 'complete', claims: [] }
+    },
+    async 'cli-login-release'(payload) {
+      if (!payload.machineId) return host['cli-login-release'](payload)
+      fixture.machine = { state: 'shared', claims: [] }
+      return { state: 'unknown', claims: [] }
+    },
+  } : host
+  let refresh
+  window.refreshReservations = change => {
+    Object.assign(fixture, change)
+    refresh()
+  }
+  root.render(h(CliAccounts, { bot: { id: 'alpha' }, actions: {
+    ...actions,
+    cliLogin: {
+      subscribe: fn => { refresh = fn; return () => { refresh = undefined } },
+      getSnapshot: () => ({ rows: { alpha: { stage: 'done' } } }),
+    },
+  } }))
 }
 root.render(slots.renderSlot('root', {}))
 

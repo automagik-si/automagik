@@ -230,3 +230,30 @@ test('a CLI that is not on this computer shows where it stands in the setup inst
     run.done()
   }
 })
+
+test('Connect AI shows no account details or switch for an isolated CLI', async () => {
+  acpRows = [{ ...signedOutCodex, authScope: 'isolated', signedIn: true }]
+  let accountReads = 0
+  const require = sandbox.require
+  sandbox.require = name => name === '@automagik/bots-dsh/client' ? {
+    omni: { face: () => ({ actions: {
+      cliLoginAccounts: async () => {
+        accountReads++
+        return { accounts: { 'acp-codex': { authScope: 'isolated', signedIn: true, account: { kind: 'account', email: 'a@example.test' } } } }
+      },
+      cliLoginSwitch: async () => {},
+    } }) },
+  } : require(name)
+  const run = runHook(() => ui.ConnectAiStep({ stepId: 'omni-connect-ai', complete: () => {}, openSection: () => {} }))
+  try {
+    await run.settle()
+    const tree = render(run.current)
+    assert.ok(switchOf(tree, 'ChatGPT'))
+    assert.doesNotMatch(textOf(tree), /a@example\.test|share this account/)
+    assert.equal(buttons(tree, 'Switch account').length, 0)
+    assert.equal(accountReads, 0)
+  } finally {
+    run.done()
+    sandbox.require = require
+  }
+})

@@ -44,6 +44,7 @@
 import {
   ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT, installationNameOf,
 } from '../shared/cli-account.js'
+import { createAccountReservations } from './account-reservations.js'
 
 const PROVIDERS = new Set(['acp-codex', 'acp-claude'])
 const STATUS = new Set(['starting', 'waiting', 'ready', 'failed', 'cancelled', 'expired'])
@@ -289,8 +290,10 @@ const textOf = message => (Array.isArray(message?.content)
   ? message.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n')
   : typeof message?.content === 'string' ? message.content : '')
 
-export function install(rt) {
+export function install(rt, reservationDeps) {
   const { ctx } = rt
+  const reservationStore = reservationDeps && createAccountReservations(rt, reservationDeps)
+  if (reservationDeps?.machine) rt.reservationWritesIdle = reservationStore.idle
   const acp = () => {
     try { return ctx.get?.('acpAgents') } catch { return undefined }
   }
@@ -429,11 +432,13 @@ export function install(rt) {
     return { id: body.provider, status: 'ready', ...(choice ? { choice } : {}) }
   }
 
-  // The vendors Bots use on a sign-in that was already there before this version (carried), for
-  // the one-time notice. acp-dsh's last answer is read first; the CLI is asked only for a vendor
-  // that may be due its notice.
+  // The owner card and the one-time carried-consent notice share this list.
   const accounts = async (payload) => {
-    if (payload !== undefined && payload !== null && (typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 0)) throw invalid()
+    if (payload !== undefined && payload !== null && (typeof payload !== 'object' || Array.isArray(payload)
+      || !(Object.keys(payload).length === 0 || (Object.keys(payload).length === 1 && payload.reservations === true)))) throw invalid()
+    // Only the card asks for reservations: each one is another CLI read, and the start-up notice
+    // (announceCarried) must not pay for it.
+    const reservations = payload?.reservations === true ? reservationStore : undefined
     const out = {}
     const service = acp()
     // The card names the installation it is in (#1399): the Bot sign-in may be shared with
@@ -441,16 +446,28 @@ export function install(rt) {
     // which one this window is. A name, never a path; omitted when the host does not say.
     const name = installation()
     const view = accounts => ({ accounts, ...(name === undefined ? {} : { installation: name }) })
-    if (typeof service?.account !== 'function' || typeof service.status !== 'function') return view(out)
+    const withMachine = async () => {
+      const check = payload?.reservations === true && rt.machineReservations
+      if (check) {
+        for (const id of Object.keys(out)) {
+          await check.fresh(id, 'card')
+          out[id].machine = { ...check.status(id), claims: reservations?.machineClaims(id) ?? [] }
+        }
+      }
+      return view(out)
+    }
+    if (typeof service?.account !== 'function') return view(out)
     if (service.authScope === 'isolated') {
       for (const id of PROVIDERS) {
-        let seen, terminal, recoveryRequired = false
+        let seen, terminal, recoveryRequired = false, unread = false
         try {
           recoveryRequired = (await service.accountRecovery?.(id))?.required === true
           if (!recoveryRequired) seen = await service.account(id, { fresh: true })
         } catch (error) {
           recoveryRequired = error?.code === 'acp-account/unverified-login'
+          unread = !recoveryRequired
         }
+        const reservation = await reservations?.list(service, id, seen, { recoveryRequired, unread })
         // An unreadable vendor never hides the other vendor or leaks its diagnostics.
         try { terminal = await service.terminalAccount?.(id) } catch {}
         out[id] = {
@@ -458,25 +475,51 @@ export function install(rt) {
           ...(recoveryRequired ? { recoveryRequired: true } : {}),
           ...(seen?.signedIn === true ? { account: cliAccountView(seen) } : {}),
           ...(terminal?.account ? { terminal: cliAccountView(terminal) } : {}),
+          ...(reservation === undefined ? {} : { reservation }),
         }
       }
-      return view(out)
+      return withMachine()
     }
     let rows
-    try { rows = (await service.status())?.agents } catch {}
+    try { rows = (await service.status?.())?.agents } catch {}
     for (const id of PROVIDERS) {
       const row = Array.isArray(rows) ? rows.find(agent => agent?.id === id) : undefined
       if (row === undefined || row.on === false || row.cli?.found === false || row.signedIn === false) continue
-      if (row.signedIn === true && row.consent !== 'carried') {
-        if (CONSENTS.has(row.consent)) out[id] = { consent: row.consent }
+      if (reservations && typeof service.accountEvidence === 'function') {
+        let seen, unread = false, recoveryRequired = false
+        try { seen = await service.account(id, { fresh: true }) } catch (error) {
+          recoveryRequired = error?.code === 'acp-account/unverified-login'
+          unread = !recoveryRequired
+        }
+        if (seen?.id === id && seen.signedIn === true || seen?.signedIn === undefined && row.signedIn === true) {
+          const consent = seen?.consent ?? row.consent
+          if (consent === 'given' || consent === 'carried') {
+            out[id] = {
+              consent, signedIn: true,
+              ...(seen?.signedIn === true ? { account: cliAccountView(seen) } : {}),
+              ...(consent === 'carried' && seen?.notice === true ? { notice: true } : {}),
+              reservation: await reservations.list(service, id, seen, { unread, recoveryRequired }),
+            }
+          } else if (consent === 'needed') out[id] = { consent }
+        }
         continue
       }
-      let seen
-      try { seen = await service.account(id) } catch { continue }
-      if (seen?.id !== id || seen.signedIn !== true || !CONSENTS.has(seen.consent)) continue
-      out[id] = { consent: seen.consent, ...(seen.consent === 'carried' && seen.notice === true ? { notice: true, account: cliAccountView(seen) } : {}) }
+      // Older ACP hosts still serve the notice without new account probes. The card supplies
+      // the unsupported line, and any existing reservations still come from the local record.
+      if (row.signedIn === true && row.consent !== 'carried') {
+        if (CONSENTS.has(row.consent)) out[id] = { consent: row.consent }
+      } else {
+        let seen
+        try { seen = await service.account(id) } catch { continue }
+        if (seen?.id !== id || seen.signedIn !== true || !CONSENTS.has(seen.consent)) continue
+        out[id] = { consent: seen.consent, ...(seen.consent === 'carried' && seen.notice === true ? { notice: true, account: cliAccountView(seen) } : {}) }
+      }
+      if (out[id]?.consent === 'given' || out[id]?.consent === 'carried') {
+        const reservation = await reservations?.list(service, id)
+        if (reservation && (reservation.state !== 'unsupported' || reservation.claims.length > 0)) out[id].reservation = reservation
+      }
     }
-    return view(out)
+    return withMachine()
   }
 
   const noticed = async (payload) => {
@@ -600,6 +643,10 @@ export function install(rt) {
     'cli-login-connections': connections,
     'cli-login-confirm': confirm,
     'cli-login-accounts': accounts,
+    ...(reservationStore ? {
+      'cli-login-reserve': payload => reservationStore.reserve(acp(), payload),
+      'cli-login-release': reservationStore.release,
+    } : {}),
     'cli-login-noticed': noticed,
     ...Object.fromEntries(Object.keys(METHODS).map(action => [`cli-login-${action}`, run(action)])),
   }
@@ -622,11 +669,18 @@ export function install(rt) {
         payload.messages.splice(index, 1)
         const exchangeId = message.source?.exchangeId
         if (typeof exchangeId === 'string' && exchangeId !== '') {
-          try { rt.forgetDelivery?.(exchangeId) } catch {}
+          try {
+            if (!rt.wakeLog?.discardLoginCode(payload.agent, message)) rt.forgetDelivery?.(exchangeId)
+          } catch {}
         }
         rt.warn('ds-bot: a message in %s carried a sign-in code and was not sent', agentId)
       }
     }
+  }
+
+  const reportHasLoginCode = (args) => {
+    if (args?.role !== 'task-done' && args?.role !== 'report') return false
+    return loginTextMatches(args.note) || loginTextMatches(rt.reportHeader?.(args))
   }
 
   // Every delivery between Bots, groups, schedules and reports: one that carries a shown
@@ -635,14 +689,14 @@ export function install(rt) {
   // so this check runs first.
   const deliver = rt.deliver
   if (typeof deliver === 'function') {
-    rt.deliver = async (args) => {
-      if (loginTextMatches(args?.text)) {
+    rt.deliver = async (args, options) => {
+      if (loginTextMatches(args?.text) || reportHasLoginCode(args)) {
         rt.warn('ds-bot: a delivery to %s carried a sign-in code and was not sent', args?.toId)
         throw failed(CODE_REFUSED)
       }
-      return await deliver(args)
+      return await deliver(args, options)
     }
   }
 
-  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, dropLoginCodes, cliLoginChoice: choiceOf })
+  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, reportHasLoginCode, dropLoginCodes, cliLoginChoice: choiceOf })
 }

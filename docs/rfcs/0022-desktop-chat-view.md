@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Draft): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); amends RFC 0024 (f)) |
+| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); 2L amended 2026-11-20, approved by the owner's delegate on 2026-11-20: a local seat's rendered face sends only to an idle seat with an empty input row, see (b); (f) amended 2026-11-20, decided by the owner's delegate: client plugins in the window's page are trusted, as in RFC 0013; amends RFC 0024 (f)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) for the shell; herdr (3.N.P) for the chat engine |
 | Created | 2026-11-09 |
@@ -218,6 +218,19 @@ What the person writes in the rendered face is RFC 0015's "Input":
   refuses it, and the message waits.
 - **Interrupt** is one `terminal.interrupt`, which never escalates.
 
+**2L, on this computer (amended 2026-11-20, approved by the owner's delegate on 2026-11-20).**
+For a local seat (delivery 2L) the rendered face writes less than the two bullets above. It
+sends a message only when the seat is idle and its input row reads empty, as one
+`terminal.send` with `if: idle` and no caller, after the cleaner and the hc-tag check ((f)).
+Otherwise (the seat working or blocked, a half-typed draft, an input row that cannot be read, or
+a status that changed before the send) it sends nothing and says so: "Check the terminal." The
+composer keeps the text. There is no hold, no queue, no Send now and no Cancel, so nothing is
+ever typed later on the person's behalf. It also has no interrupt: `terminal.interrupt` has no
+condition, so a Stop pressed as a permission dialog opens would answer it (Decided, 6); it
+comes back once herdr-core gives `terminal.interrupt` a condition (herdrdev/herdr-core#122
+covers `terminal.keys` only). This narrows the Text bullet above and RFC 0015's Send now (Q2)
+for 2L only; the hold with Send now stays the rule for phase 2 and the phone.
+
 **Approvals are shown, never answered, from the rendered face** (Decided, 6). An approval card
 appears under RFC 0015's guards (herdr-core `blocked` with kind `permission`; the dialog read only
 from the bottom of the screen; exactly one open call in the transcript with the dialog's tool, or
@@ -371,6 +384,17 @@ it is never a tool or an automation's. So no DSH Bot reaches Chat's terminal **t
 view**, whatever a page, a file or a prompt tells it. A test pins this (phase 1). That is a
 claim about the view only: the machine link the view needs gives other paths to the same
 terminal, below ("The link's reach").
+
+**Client plugins in the window are trusted (amended 2026-11-20, decided by the owner's delegate
+on 2026-11-20).** "Another plugin" above means a host plugin, an automation or anything outside
+the window's page. The desktop marks a request as the window's by the page, its origin and the
+path (`apps/desktop/src/dsh.js`), so any DSH client plugin running in that page can make a
+request the route takes as the window's, and with it reach the view's reads and writes. As in
+RFC 0013's threat model ("Who reaches the bridge"), client plugins are trusted code; the same
+rule already holds for the vault's unlock, the Code tree and automations. This is a named
+residual, not a guarantee: if client plugins stop being trusted, the fix is an authorization
+outside the renderer for each write (a check in the desktop's main process), proposed in its
+own RFC.
 
 **The desktop has one author today, so it needs no author gate.** When the view is ever shared
 with other people (teams of humans, an instance rail), the gate Buzz uses is the model to follow
@@ -679,8 +703,8 @@ reader of a remote seat's transcript on the owner's computer, and it needs a mac
 that computer to the box. (f) gives the detail; in short:
 
 - **Who can reach the view.** Only the person in the desktop app's own window. No DSH tool,
-  automation, schedule, plugin or Bot reaches the engine's send or interrupt, or Code mode's
-  attach.
+  automation, schedule, host plugin or Bot reaches the engine's send or interrupt, or Code mode's
+  attach. DSH client plugins in the window's page are trusted, as in RFC 0013 ((f)).
 - **Who can reach Chat's terminal anyway: anything that can use the link.** The machine link
   gives every process of the owner's account on that computer `hc send`, `hc keys` and
   `hc exec --on <box>`, the shells of DSH Bots in the same app included. Today's guards (the
@@ -700,7 +724,8 @@ that computer to the box. (f) gives the detail; in short:
 - **Provenance.** Tagged rows are a bot's and are data; rows the view sent are the owner's; other
   untagged rows are "typed in the terminal", never claimed as the owner's.
 - **The window's other code.** The desktop host runs plugins, tools and automations. They never
-  get the engine; a test fails if the engine is reachable as a tool.
+  get the engine; a test fails if the engine is reachable as a tool. Client plugins in the
+  window's page are the exception, trusted as in RFC 0013 ((f)).
 - **Undo.** In (f).
 
 ## Deliveries
@@ -814,7 +839,15 @@ becomes 0, 1L, 2L, B, then H, 1, 2, 3, 4 as decided, and I after H and RFC 0024 
    names a machine. On the owner's computer: the General Orchestrator's pane in both faces.
    *Rollback:* a plugin release without the view; `front` is ignored.
 2L. **Writes from the rendered face, on this computer** (plugin; after 1L). Phase 2 for local
-   seats. *Check:* phase 2's checks on a local seat. *Rollback:* as phase 2.
+   seats, as amended in (b) on 2026-11-20: a send only to an idle seat with an empty input row,
+   otherwise "Check the terminal" and nothing sent; no hold, queue, Send now, Cancel or
+   interrupt. *Check:* with a fake hc on a local seat: a seat that is working or blocked, or has
+   a half-typed draft or an unreadable input row, gets no `terminal.send` and the message is
+   refused; a status that changes before the send (`if: idle`) is refused and nothing is
+   retried; the draft is never cleared and no key is sent; phase 2's hc-tag checks. On the
+   owner's computer: a message from the rendered face is answered in the seat's terminal and
+   both faces show the same turn; with a draft typed in Code mode, a rendered-face send is
+   refused and the draft stays. *Rollback:* as phase 2.
 B. **The Team and Code bar** (plugin; after 1L; the drawing approved by the owner first). (i)'s
    model: the side switch replacing RFC 0013's Work and Code segments, Team's sections, Code's tree
    of this computer from the registry and the two ledgers, humanized bots ((j)) as Team rows.

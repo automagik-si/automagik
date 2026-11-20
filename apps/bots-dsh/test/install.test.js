@@ -1,10 +1,25 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { createRuntimeResolution } from '@deepseek-ai/dsh-app-boot'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
+
+test('a linked checkout declares the DSH patch parser as an optional peer', (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'ds-bot-profile-resolution-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const name = '@deepseek-ai/dsh-fs-patch'
+  assert.equal(manifest.peerDependencies[name], '*')
+  assert.equal(manifest.peerDependenciesMeta?.[name]?.optional, true)
+  const installAnchor = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json'))
+  return createRuntimeResolution({ installAnchor, home }).then(({ entries }) => {
+    assert.equal(entries.find(entry => entry.name === name)?.scope, 'installation')
+  })
+})
 
 let rt
 function start(state, { config = {}, services } = {}) {
@@ -125,6 +140,11 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/inbox/discarded',
     'on session/event',
     'effect omni-ui: resume interrupted turns',
+    'on agent/inbox/inserted',
+    'on agent/inbox/claimed',
+    'on session/event',
+    'on agent/inbox/discarded',
+    'effect omni-ui: durable wake log',
     'effect ds-bot: memory recovery',
     'effect ds-bot: memory section',
     'prompt bot-memory 645',
@@ -157,6 +177,11 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/request-error (prepend)',
     // A Bot on a signed-out agent fails before dispatch (model-access-hooks.js).
     'on llm/stream',
+    // The machine reservation check observes sign-in and the Bot turn lifecycle.
+    'on acp-dsh/login-ready',
+    'on session/event',
+    'on session/disposed',
+    'on session/created',
     // A CLI sign-in's chosen model, dropped by a turn on another, applied on ready (cli-login.js).
     'on session/event',
     'on acp-dsh/login-ready',
@@ -217,6 +242,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: genui feed nudge',
     'effect omni-ui: genui media route',
     'route GET /api/omni-ui/genui-media',
+    'effect omni-ui: role runtime',
+    'on session/event',
     'effect ds-bot: agent access',
     'effect ds-bot: pet route',
     'route GET /api/omni-ui/pet',

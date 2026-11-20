@@ -344,3 +344,21 @@ test('the native Claude Code subagents of a Bot hang under its row next to its t
   assert.deepEqual(under.props.children.map(node => node?.type?.name), ['BotThreads', 'BotWorkers', 'BotChildren'])
   assert.ok(threadsOf('pip'))
 })
+
+test('rfc0039 [P] T1 ended task in unanswered shows the line', () => {
+  const card = TaskCard({
+    sessionId: 'session-a', title: 'Check API', task: task('pip', 'Check API', 2, 'done'),
+    useWork: pick => pick({ unanswered: ['session-a'] }),
+  })
+  assert.match(textOf(card), /The task ended with an approval unanswered/)
+})
+
+test('rfc0039 [C] T2 working or unlisted task shows no line', () => {
+  for (const [status, unanswered] of [['working', ['session-a']], ['done', ['session-b']], ['done', undefined]]) {
+    const card = TaskCard({
+      sessionId: 'session-a', title: 'Check API', task: task('pip', 'Check API', 2, status),
+      useWork: pick => pick({ unanswered }),
+    })
+    assert.doesNotMatch(textOf(card), /The task ended with an approval unanswered/)
+  }
+})

@@ -349,3 +349,33 @@ test('a baked character is fitted by its own box, drawn a twentieth larger, as t
   assert.ok(paints > 26.5 && paints < 27.5, `Omni's character paints ${paints.toFixed(2)} px of an art box of 28`)
   assert.deepEqual(bakedFit(undefined), pet)
 })
+
+test('a Herdr seat carrying role-shaped input gets no package tag in the Team rows', () => {
+  const pin = { id: 'fixture-role', version: '1.0.0', attachedAt: '', grants: [] }
+  const seat = { id: 'fixture', name: 'Fixture seat', roles: [pin], roleTag: 'Fixture role' }
+  const team = teamOf({ roster: {}, order: [], seats: [seat], status: { bots: new Map() } })
+  assert.ok(team.bots[0].seat)
+  assert.equal(team.bots[0].roleTag, undefined)
+  const tree = render(TeamRows({ team, folded: new Set() }))
+  assert.equal(findAll(tree, hasClass('bt-tag')).length, 0)
+})
+
+test('a team Bot keeps its package name literal in the left bar and hides it with roles off', () => {
+  const id = 'fixture-role'
+  const pin = { id, version: '1.0.0', attachedAt: '', grants: [] }
+  const member = bot('fixture', { roles: [pin] })
+  const digest = 'a'.repeat(64)
+  const base = {
+    byId: { [member.id]: member },
+    roleCatalog: { roles: [{ id, version: pin.version, name: '<Catalog fixture>', capabilities: [] }] },
+    roleDetails: { [id]: { installed: { version: pin.version, sha256: digest },
+      catalog: { version: pin.version, sha256: digest } } },
+  }
+  const shown = prefs => {
+    const team = teamOf({ roster: { ...base, prefs }, order: [{ kind: 'bot', item: member }],
+      status: { bots: new Map() } })
+    return findAll(render(TeamRows({ team, folded: new Set() })), hasClass('bt-tag')).map(textOf)
+  }
+  assert.deepEqual(shown({}), ['<Catalog fixture>'])
+  assert.deepEqual(shown({ roles: false }), [])
+})

@@ -14,6 +14,7 @@ import { ProjectRail } from './left-bar-rail.js'
 import { TeamRows, drawBot } from './left-bar-team.js'
 import { LEFT_BAR_SKIN } from './left-bar-css.js'
 import { mock1540On } from './self-update-flag.js'
+import { roleTagOf } from '../shared/roles.js'
 
 // A channel's glyph in its kind's shape, in one colour: colour in the bar only ever means a
 // status, so the glyph says what kind of channel a row is. Anything unknown wears a chat bubble.
@@ -137,7 +138,7 @@ function currentKey(roster, shownId) {
  * the DSH bots in today's order, then the group chats. `order` is the sidebar's own order of
  * everything but the Main Bot ({ kind: 'bot' | 'room' | 'agent', item }).
  */
-export function teamOf({ roster, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
+export function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
   const main = roster.byId?.[roster.mainBotId]
   const shown = key => key === current
   const unread = (id, key, own) => !shown(key) && (own || marked[id] === true)
@@ -148,7 +149,8 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
     // A Bot's channels come from the one plugin that serves it (extend.js's botChannels): with
     // a source the bar draws them under its row, and while there is none the team's own
     // botChildren rows stay exactly as today. Never both.
-    return { ...item, channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
+    const roleTag = roleTagOf(roster.byId?.[item.id] ?? item, roster.prefs, roster, t)
+    return { ...item, ...(roleTag ? { roleTag } : {}), channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
   }
   const agent = (item) => {
     const tasks = item.kind === 'tasks'

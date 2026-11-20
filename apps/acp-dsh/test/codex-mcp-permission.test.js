@@ -117,14 +117,14 @@ for (const server of ['dsh', 'personal', undefined]) {
   })
 }
 
-test('fork bridge MCP permission falls back to allow_always', async () => {
+test('fork bridge MCP permission never answers allow_always', async () => {
   const run = new AgentRun({ dshTools: true, refresh: 'fork' })
   const answer = await run.onPermission({
     _meta: { is_mcp_tool_approval: true },
     toolCall: { toolCallId: 'standalone', rawInput: { serverName: 'dsh' } },
     options: [{ optionId: 'always', kind: 'allow_always' }],
   })
-  assert.deepEqual(answer, { outcome: { outcome: 'selected', optionId: 'always' } })
+  assert.deepEqual(answer, { outcome: { outcome: 'cancelled' } })
   assert.equal(run.tools.get('standalone').bridge, undefined)
 })
 
@@ -249,7 +249,7 @@ test('#969 resume: A known-live post-end control', { timeout: 5_000 }, async t =
   const always = await resumeSoon(run.onPermission({ toolCall: { toolCallId: tool.id }, options: resumeOptions('always-only', 'live') }))
   assert.deepEqual([both, always], [
     { outcome: { outcome: 'selected', optionId: 'live-once' } },
-    { outcome: { outcome: 'selected', optionId: 'live-always' } },
+    RESUME_CANCELLED,
   ])
   assert.equal(tool.permission, undefined)
 })

@@ -49,6 +49,8 @@ import { headerNavigation, installHeaderNavigation } from './header-navigation.j
 import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
+import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
+import { PAGE_ICONS, PageBoundary, SettingsPage } from './settings.js'
 import { BotBrowserBody, installBotBrowserTab } from './bot-browser-tab.js'
 import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
@@ -284,6 +286,7 @@ export function apply(ctx) {
     const live = {}
     if (value.connectors !== undefined && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live.connectors = value.connectors
     if (value.secretSources !== undefined && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live.secretSources = value.secretSources
+    if (value.secretSourcesPresent !== undefined && value.secretSourcesPresent !== current.secretSourcesPresent) live.secretSourcesPresent = value.secretSourcesPresent
     if (value.capabilityStatuses !== undefined && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live.capabilityStatuses = value.capabilityStatuses
     if (value.learning !== undefined && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live.learning = value.learning
     if (value.learningSettled !== undefined && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live.learningSettled = value.learningSettled
@@ -670,8 +673,8 @@ export function apply(ctx) {
       seatChatView.set({ seat })
       try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
     },
-    openCodePane: (selected) => {
-      try { codePanel.open(selected) } catch (error) { noteClientError('code-side', error) }
+    openCodePane: (selected, options) => {
+      try { codePanel.open(selected, options) } catch (error) { noteClientError('code-side', error) }
     },
     closeCodePane: codePanel.close,
     seatList: () => call('seat-chat-list'),
@@ -1202,6 +1205,8 @@ export function apply(ctx) {
     () => installCompiledStyles(GOAL_CSS, 'goal'),
     () => installCompiledStyles(USER_MESSAGE_CSS, 'user-messages'),
     () => installCompiledStyles(TASK_CSS, 'tasks'),
+    () => installCompiledStyles(SETTINGS_CARD_CSS, 'settings-card'),
+    () => setSettingsPages({ PAGE_ICONS, PageBoundary, SettingsPage }),
     () => installCompiledStyles(DESKTOP_UPDATE_CSS, 'desktop-update'),
     () => installCompiledStyles(WORK_CODE_SWITCH_CSS, 'work-code-switch'),
     () => installCompiledStyles(PRIVACY_CSS, 'privacy'),

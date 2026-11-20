@@ -23,6 +23,7 @@ const keyPaths = [
   'herdr/install.sh',
   'apps/welcome-dsh/src/host/lane-keys.json',
   'apps/desktop/src/lane-keys.js',
+  'apps/bots-dsh/src/host/role-keys.json',
 ];
 const withoutKey: Rules = {
   ...rules,

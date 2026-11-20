@@ -246,8 +246,8 @@ export const PT_BR = {
   'Continue with just {name}': 'Continuar só com {name}',
   'Continue with {who}': 'Continuar com {who}',
   ' and ': ' e ',
-  // Claude Code and Codex (acp-agents.js), in Connect AI and in Settings
-  'Claude Code and Codex': 'Claude Code e Codex',
+  // Coding agents (acp-agents.js), in Connect AI and in Settings
+  'Coding agents': 'Agentes de código',
   'Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.': 'Use os agentes de código que você já tem como modelos no DSH. Cada um roda a sua própria CLI, com o seu login e as suas configurações.',
   'Looking at what this computer has…': 'Vendo o que este computador tem…',
   'The ACP agents plugin is not running in this DSH.': 'O plugin de agentes ACP não está rodando neste DSH.',
@@ -273,6 +273,10 @@ export const PT_BR = {
   'The {name} installation or update failed: {error}': 'A instalação ou atualização do {name} falhou: {error}',
   'The {name} installation or update failed.': 'A instalação ou atualização do {name} falhou.',
   'Signed in to {name}.': 'Login feito no {name}.',
+  'Signed in to {name} as {account}.': 'Login feito no {name} como {account}.',
+  'Switch account': 'Trocar de conta',
+  'Bots in this installation share this account. Your terminal sign-in stays as it is.': 'Os Bots desta instalação compartilham esta conta. O login no terminal continua como está.',
+  'This stops running Bot work for this account. Continue?': 'Isso interrompe o trabalho dos Bots nesta conta. Continuar?',
   'Not signed in to {name}. Sign in from a Bot\'s chat.': 'Sem login no {name}. Entre pelo chat de um Bot.',
   'Or run {command} in a terminal, then check again.': 'Ou rode {command} em um terminal e verifique de novo.',
   'Not signed in to {name}. Run {command} in a terminal, then check again.': 'Sem login no {name}. Rode {command} em um terminal e verifique de novo.',

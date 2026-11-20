@@ -7,6 +7,7 @@
 //   FAKE_CORE_LOG        JSONL of what the host said: hello, calls, frames (payload base64)
 //   FAKE_CORE_TERMINALS  JSON array of Terminal rows; a fitting default when unset
 //   FAKE_CORE_OUTPUT     the text the attach sends (default "fake-pane\n")
+//   FAKE_CORE_RESIZE_TO  send a resize hint after the first credit, then paint at COLSxROWS
 //
 // The core closes its stream after the first credit by default; FAKE_CORE_KEEP_OPEN=1 keeps
 // it open until the host detaches, for a test that reads more than one event.
@@ -30,6 +31,7 @@ const terminals = (() => {
 })()
 const output = Buffer.from((process.env.FAKE_CORE_OUTPUT ?? 'fake-pane\r\n').replace(/\n/g, '\r\n'), 'utf8')
 const keepOpen = process.env.FAKE_CORE_KEEP_OPEN === '1'
+const resizeTo = /^(\d+)x(\d+)$/.exec(process.env.FAKE_CORE_RESIZE_TO ?? '')?.slice(1).map(Number)
 
 const frame = (channel, kind, payload = Buffer.alloc(0)) => {
   const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload)
@@ -47,8 +49,10 @@ const find = address => terminals.find(terminal => terminal.address === address)
 let buffer = Buffer.alloc(0)
 let started = false
 let attachChannel = 7
+let attachedTerminal = null
 let outputSent = false
 let closedSent = false
+let resized = false
 
 function answer(id, result) {
   say(frame(0, 0, Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, result }))))
@@ -77,9 +81,11 @@ function handleCall(call) {
     case 'terminal.attach': {
       const terminal = find(call.params?.terminal)
       if (!terminal) return refuse(call.id, 'not_found')
+      attachedTerminal = terminal
+      if (resized) attachChannel += 1
       log({ dir: 'out', type: 'attach', channel: attachChannel, terminal: terminal.address })
       answer(call.id, { channel: attachChannel, terminal, resize_notifications: true, automatic_input: false })
-      say(frame(attachChannel, 0, output))
+      say(frame(attachChannel, 0, resized ? 'resized-paint\r\n' : output))
       outputSent = true
       if (!keepOpen) {
         // A credit means the host took the first paint: hand it the rest, then say why the
@@ -104,6 +110,13 @@ function handleFrame(header, payload) {
     try { call = JSON.parse(payload.toString('utf8')) } catch { return }
     return handleCall(call)
   }
+  if (resizeTo && !resized && attachedTerminal && header.channel === attachChannel && header.kind === 1) {
+    resized = true
+    attachedTerminal.cols = resizeTo[0]
+    attachedTerminal.rows = resizeTo[1]
+    say(frame(attachChannel, 3, 'opaque resize hint'))
+    return
+  }
   if (header.channel === attachChannel && header.kind === 1 && outputSent && !keepOpen && !closedSent) {
     // The first credit: send a second line and close, so a test sees data then close.
     closedSent = true
@@ -113,6 +126,7 @@ function handleFrame(header, payload) {
   }
   if (header.channel === attachChannel && header.kind === 2) {
     log({ dir: 'out', type: 'detached', channel: attachChannel })
+    if (resized && attachChannel === 7) say(frame(attachChannel, 0, 'late old bytes'))
   }
 }
 

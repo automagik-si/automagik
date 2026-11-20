@@ -12,7 +12,7 @@
 //                                 the URL it is given: it writes "hello <token>\n" and reports the
 //                                 line that comes back as smoke:endpoint-result {url, reply}
 //   smoke:open {url}           -> runs `xdg-open <url>`, reports smoke:open-result {url, code}
-//   smoke:env                  -> smoke:env {BROWSER, AUTOMAGIK_OPEN_SOCKET, PATH, argv, pid}
+//   smoke:env                  -> smoke:env {BROWSER, AUTOMAGIK_OPEN_SOCKET, AUTOMAGIK_INSTANCE_ID, PATH, argv, pid}
 //   smoke:package-manager      -> runs the package manager it was given (or `pnpm` on PATH when
 //                                 it was given none, as a direct start would), reports
 //                                 smoke:package-manager-result {via, version} or {error}
@@ -84,8 +84,8 @@ export async function runCli(options = {}) {
   process.on('message', async (message) => {
     if (message?.type === 'smoke:echo') return process.send({ type: 'smoke:echoed', payload: message.payload })
     if (message?.type === 'smoke:env') {
-      const { BROWSER, AUTOMAGIK_OPEN_SOCKET, PATH } = process.env
-      return process.send({ type: 'smoke:env', BROWSER, AUTOMAGIK_OPEN_SOCKET, PATH, argv, pid: process.pid })
+      const { BROWSER, AUTOMAGIK_OPEN_SOCKET, AUTOMAGIK_INSTANCE_ID, PATH } = process.env
+      return process.send({ type: 'smoke:env', BROWSER, AUTOMAGIK_OPEN_SOCKET, AUTOMAGIK_INSTANCE_ID, PATH, argv, pid: process.pid })
     }
     if (message?.type === 'smoke:package-manager') {
       const manager = options.packageManager

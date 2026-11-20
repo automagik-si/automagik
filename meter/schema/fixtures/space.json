@@ -1,0 +1,123 @@
+{
+  "kind": "herdr-meter",
+  "schema_version": 2,
+  "rows_schema": "ae/1 agent.usage",
+  "meter_version": "3.0.0",
+  "generatedAt": "2026-11-02T18:30:00Z",
+  "machine": "example-core",
+  "counted_from": "2026-10-01T00:00:00Z",
+  "complete": true,
+  "pending": {"bytes": 0, "files": 0},
+  "prices": {"date": "2026-10-06", "source": "bundled", "label": "API-equivalent estimate at list price, not an amount billed"},
+  "sources": {
+    "claude-code": {"status": "ok", "last_success": "2026-11-02T18:30:00Z", "usage_lines": 1, "events": 1, "duplicates": 0, "skipped_lines": 0, "rewrites": 0, "unknown_models": []},
+    "dsh-tui": {"status": "ok", "last_success": "2026-11-02T18:30:00Z", "usage_lines": 1, "events": 1, "duplicates": 0, "skipped_lines": 0, "rewrites": 0, "unknown_models": ["example-unpriced-model"]}
+  },
+  "windows": {"d1": "2026-11-01T19:00:00Z", "d7": "2026-10-26T19:00:00Z", "d30": "2026-10-03T19:00:00Z"},
+  "models": [
+    {"harness": "claude-code", "model": "example-claude-model", "d1": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}, "d7": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}, "d30": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}},
+    {"harness": "dsh-tui", "model": "example-unpriced-model", "priced": false, "d1": {"in": 5, "out": 15, "rs": null, "unpriced": 20}, "d7": {"in": 5, "out": 15, "rs": null, "unpriced": 20}, "d30": {"in": 5, "out": 15, "rs": null, "unpriced": 20}}
+  ],
+  "projects": [
+    {"repo": "github.com/example/app", "tasks": 1, "hours": 1, "usd_per_task": 2.0, "last": "2026-11-02T17:00:00Z", "d1": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}, "d7": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}, "d30": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}},
+    {"repo": null, "tasks": 0, "hours": 1, "last": "2026-11-02T17:00:00Z", "d1": {"in": 5, "out": 15, "rs": null, "unpriced": 20}, "d7": {"in": 5, "out": 15, "rs": null, "unpriced": 20}, "d30": {"in": 5, "out": 15, "rs": null, "unpriced": 20}, "untasked": {"in": 5, "out": 15, "rs": null, "unpriced": 20}}
+  ],
+  "tasks": [
+    {"repo": "github.com/example/app", "branch": "feat/example", "agents": ["claude-code"], "first": "2026-11-02T17:00:00Z", "last": "2026-11-02T17:00:00Z", "hours": 1, "d1": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}, "d7": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}, "d30": {"in": 120, "cr": 50, "cw": 10, "out": 20, "usd": 2.0}}
+  ],
+  "hourly": {
+    "from": "2026-10-31T19:00:00Z",
+    "hours": 48,
+    "series": [
+      {
+        "harness": "claude-code",
+        "in": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120, 0],
+        "cr": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 0],
+        "cw": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0],
+        "out": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20, 0],
+        "usd": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2.0, 0]
+      },
+      {
+        "harness": "dsh-tui",
+        "in": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0],
+        "cr": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "cw": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "out": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15, 0],
+        "usd": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      }
+    ]
+  },
+  "daily": {
+    "from": "2026-10-04",
+    "days": 30,
+    "series": [
+      {
+        "harness": "claude-code",
+        "in": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120],
+        "cr": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50],
+        "cw": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10],
+        "out": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20],
+        "usd": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2.0]
+      },
+      {
+        "harness": "dsh-tui",
+        "in": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5],
+        "cr": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "cw": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "out": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15],
+        "usd": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      }
+    ]
+  },
+  "truncated": [],
+  "space": {
+    "version": 1,
+    "window": { "from": "2026-11-01T18:30:00Z", "to": "2026-11-02T18:30:00Z", "prev_from": "2026-10-31T18:30:00Z" },
+    "truncated": false,
+    "projects": {
+      "/work/example-project": {
+        "merges": {
+          "n": 7, "prev_n": 5,
+          "by_type": { "feat": 3, "fix": 3, "test": 1 },
+          "items": [
+            { "task": "gh-45", "branch": "feat/example", "type": "feat", "forge": "github", "url": "https://github.com/example/example-project/pull/45", "lead_min": 42 }
+          ]
+        },
+        "time": {
+          "median_min": 38, "prev_median_min": 55,
+          "bands": [1, 2, 2, 1, 1, 0],
+          "bands_labels": ["<15m", "15-30m", "30m-1h", "1-2h", "2-6h", ">6h"],
+          "fastest": { "task": "gh-50", "min": 9, "url": "https://github.com/example/example-project/pull/50" },
+          "avg_min": 61,
+          "slowest": { "task": "gh-31", "min": 240, "url": "https://github.com/example/example-project/pull/31" }
+        },
+        "first_pass": { "share": 0.57, "prev_share": 0.4, "fixes": [4, 2, 1, 0] },
+        "spent": {
+          "real_usd": 18.4, "prev_real_usd": 22.1,
+          "by_model": { "example-codex-model": 12.0, "example-claude-model": null, "example-deepseek-model": 6.4 },
+          "codex_week_share": 0.09
+        },
+        "tokens": {
+          "total": 10290000, "prev_total": 8700000, "cache_hit": 0.88,
+          "by_model": {
+            "example-codex-model": { "input": 1200000, "output": 90000, "cache_read": 9000000, "turns": 310, "reasoning_share": 0.31, "cache_hit": 0.88 }
+          }
+        },
+        "bots": {
+          "b-example-captain": {
+            "usd_per_task": 2.6, "min_per_task": 38, "usd_24h": 18.4, "other_usd": 1.2,
+            "parts_kind": "member",
+            "parts": [ { "key": "b-example-dev", "usd": 9.1 }, { "key": "b-example-test", "usd": 8.1 }, { "key": "other", "usd": 1.2 } ]
+          },
+          "b-example-leaf": {
+            "usd_per_task": null, "min_per_task": null, "usd_24h": 0.0, "other_usd": null,
+            "parts_kind": "model", "parts": []
+          }
+        },
+        "tasks": [
+          { "task": "gh-45", "usd": 3.1, "lead_min": 42, "bots": [ { "bot": "b-example-dev", "usd": 1.9, "work_min": 25 }, { "bot": "b-example-test", "usd": 1.2, "work_min": 11 } ] }
+        ]
+      }
+    }
+  }
+}

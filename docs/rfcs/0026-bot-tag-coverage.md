@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued |
+| Status | In delivery (accepted 2026-11-19, approved by the owner's delegate; deliveries 1-3, 4b, 5 and 6 merged before it: #914, #945, #949, #1018, #990, #1060, and #897 closed; 4a is DSH's, [0023](0023-dsh-upstream-agent-context-and-chat-rows.md) section 4, not tracked here; amends RFC 0021: Decided 5 and 6) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); meter (3.N.P); herdr (3.N.P) for the fleet step; DSH upstream |
 | Created | 2026-11-10 |
@@ -676,10 +676,24 @@ umbrella, and its movement is measured in its own pull request.
   `claimants_differ` text not covering an unreadable tag, and the 96-JSON-byte tag rule. It lands
   no later than delivery 4 ((b) and delivery 4).
 
+## Approved by the owner's delegate, 2026-11-19
+
+The RFC is approved by the owner's delegate on 2026-11-19. The approval came after deliveries 1
+to 3, 4b, 5 and 6 had merged (#914, #945, #949, #1018, #990, #1060) and after #897 closed with
+delivery 6's table, so the status moves straight to In delivery: 4a is DSH's and its state is not
+tracked in this repository.
+
+- **C1 to C4 and G1 to G4 stand as ruled and acked** on 2026-11-10, above. The approval changes
+  none of them.
+- **C4's target stays the owner's.** The RFC recommends no number past its floor (`d7` doubles,
+  `d30` does not fall), so the approval takes the most conservative option: it sets no target,
+  and the floor stays the closing bar that (i) records as met.
+
 ## Open questions
 
-None: Chat ruled C1 to C4 and genie acked G1 to G4 on 2026-11-10, above, and the delivery checks
-carry what the acks added.
+None: Chat ruled C1 to C4 and genie acked G1 to G4 on 2026-11-10, above, the delivery checks
+carry what the acks added, and the owner's delegate approved the RFC on 2026-11-19 with no new
+question.
 
 ## Links
 

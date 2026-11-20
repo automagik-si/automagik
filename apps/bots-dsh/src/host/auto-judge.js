@@ -53,7 +53,7 @@ const secretPath = raw => {
   const parts = value.replace(/\\/g, '/').split('/')
   const name = parts.at(-1)
   if (value.includes('<') && !value.startsWith('<')) return value.split('<').some(part => part !== '' && secretPath(part))
-  if (name === '.envrc' || /^\/proc\/(self|\d+)\/environ$/.test(value)) return true
+  if (name === '.envrc' || name.toLowerCase() === '.vault-token' || /^\/proc\/(self|\d+)\/environ$/.test(value)) return true
   if (/^\.env(?:\..+)?$/.test(name) && !/^\.env\.(example|sample|template|dist)$/.test(name) && !/\.(d\.ts|[cm]?[jt]s|py|go|rs|md)$/.test(name)) return true
   if (['.netrc', '.git-credentials', '.npmrc', '.pypirc', 'application_default_credentials.json'].includes(name)) return true
   if (parts.includes('.ssh') && !name.endsWith('.pub') && /^(id_.+|.+\.(pem|key))$/.test(name)) return true
@@ -65,9 +65,11 @@ const MANAGER_READS = new Map([
   ['bw', ['get', 'list', 'export', 'unlock', 'serve']],
   ['bws', ['secret get', 'secret list', 'run']],
   ['op', ['read', 'run', 'inject', 'item get']],
-  ['pass-cli', ['item view', 'item get', 'item run', 'run']],
+  ['vault', ['read', 'kv get', 'kv list', 'list', 'token lookup', 'token create', 'print token']],
+  ['pass-cli', ['item view', 'item get', 'item run', 'run', 'item show', 'item totp', 'inject', 'export',
+    'item attachment', 'pat create', 'pat renew', 'personal-access-token create', 'personal-access-token renew', 'agent create', 'agent renew']],
   ['keepassxc-cli', ['show', 'export']],
-  ['secret-tool', ['lookup']],
+  ['secret-tool', ['lookup', 'search']],
 ])
 const MANAGER_OPTIONS = new Map([
   ['bw', ['--session']],
@@ -77,10 +79,19 @@ const MANAGER_OPTIONS = new Map([
 // Read past global options first, then also ask when an unfamiliar option may have shifted the verbs.
 function managerRead(words) {
   const executable = words[0]?.split(/[/\\]/).at(-1).toLowerCase().replace(/\.(exe|cmd)$/, '')
+  const args = words.slice(1)
+  if (executable === 'dbus-monitor') return true
+  if (['gdbus', 'busctl', 'dbus-send'].includes(executable)) {
+    if (args.some(word => /(?:^|[^\w.])org\.freedesktop\.secrets(?![\w.])|\bGetSecret\b/.test(word))) return true
+    if (executable !== 'dbus-send' && args.includes('monitor')) return true
+    if (executable === 'busctl' && args.includes('capture')) return true
+  }
+  if (/^python(?:[23](?:\.\d+)?)?$/.test(executable) && /\b(?:secretstorage|keyring)\b/.test(args.join(' '))) return true
+  if (executable === 'keyring' && args.includes('get')) return true
   const verbs = MANAGER_READS.get(executable)
   if (!verbs) return false
   const options = MANAGER_OPTIONS.get(executable) ?? []
-  const args = words.slice(1)
+  if (executable === 'pass-cli' && args.includes('--show-secrets')) return true
   const operands = []
   for (let at = 0; at < args.length && operands.length < 2; at++) {
     const word = args[at]
@@ -95,7 +106,7 @@ function secretCommand(words) {
   const text = words.join(' ')
   if (/^(export|declare -[a-z]*x[a-z]*)( -p)?$/.test(text)) return true
   if (/^git credential fill\b/.test(text) || (/^gh auth status\b/.test(text) && words.some(word => /^(-t|--show-token)$/.test(word)))) return true
-  if (/^(gh auth token|gcloud auth print-(access|identity)-token|op read|vault (kv get|read)|aws secretsmanager get-secret-value|kubectl get secrets?)\b/.test(text)) return true
+  if (/^(gh auth token|gcloud auth print-(access|identity)-token|op read|aws secretsmanager get-secret-value|kubectl get secrets?)\b/.test(text)) return true
   if (/^security find-(generic|internet)-password\b/.test(text) && words.some(word => /^-[wg]$/.test(word))) return true
   if (/^aws ssm get-parameters?\b/.test(text) || /^aws ssm get-parameters-by-path\b/.test(text)) return words.includes('--with-decryption')
   return /^(env|printenv)$/.test(words[0]) && (words.length === 1 || words.slice(1).some(word => /TOKEN|SECRET|PASSWORD|API_KEY|KEY$/i.test(word)))

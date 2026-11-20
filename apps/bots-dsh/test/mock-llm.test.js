@@ -35,10 +35,10 @@ function fold(messages, out) {
   )
 }
 
-async function startMock(t) {
+async function startMock(t, env = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsb-mock-'))
   const mock = spawn(process.execPath, [MOCK], {
-    env: { ...process.env, MOCK_PORT: '0', MOCK_LOG: join(home, 'mock.jsonl'), MOCK_DELAY_MS: '5', MOCK_JITTER_MS: '0' },
+    env: { ...process.env, MOCK_PORT: '0', MOCK_LOG: join(home, 'mock.jsonl'), MOCK_DELAY_MS: '5', MOCK_JITTER_MS: '0', ...env },
   })
   t.after(() => { mock.kill(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
   // MOCK_PORT=0 lets the kernel pick a free port; the mock prints the real one.
@@ -91,4 +91,64 @@ test('a Bot message hands work on with 转告 and takes its time with 慢慢做'
   assert.equal(slow.text, '给 Writer 的回复：做完了，用了 1 秒。')
   const back = await call(url, [{ role: 'user', content: '[Reply from Coder · for the work Omni asked you for; your answer goes to Omni once everything you handed on is back]\n做完了' }], tools)
   assert.deepEqual([back.text, back.tools], ['Coder 交回了，我把结果交给 Omni。', []])
+})
+
+async function command(url, first, tools) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    signal: AbortSignal.timeout(5000),
+    body: JSON.stringify({
+      model: 'mock', stream: true, tools: tools.map(name => ({ name })),
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: first },
+        { type: 'text', text: '[Runtime context] A reminder from DSH.' },
+      ] }],
+    }),
+  })
+  assert.equal(res.status, 200)
+  const events = (await res.text()).split('\n\n')
+    .map(chunk => /^data: (.+)$/m.exec(chunk)?.[1]).filter(Boolean).map(line => JSON.parse(line))
+  const tool = events.find(event => event.content_block?.type === 'tool_use')
+  assert.ok(tool, 'the mock should call a tool')
+  const input = events
+    .filter(event => event.index === tool.index && event.delta?.type === 'input_json_delta')
+    .map(event => event.delta.partial_json).join('')
+  return { name: tool.content_block.name, input: JSON.parse(input) }
+}
+
+const subagentResult = [
+  { role: 'user', content: 'Start a background subagent' },
+  { role: 'assistant', content: [{ type: 'tool_use', id: 'child', name: 'subagent', input: {} }] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'child', content: 'Started' }] },
+]
+
+test('rfc0039 [P] M1 call command reads only the first text block', { timeout: 5000 }, async t => {
+  const url = await startMock(t)
+  assert.deepEqual(await command(url, '调用 bash {"command":"echo ok"}', ['bash']), {
+    name: 'bash', input: { command: 'echo ok' },
+  })
+})
+
+test('rfc0039 [P] M2 task command reads only the first text block', { timeout: 5000 }, async t => {
+  const url = await startMock(t)
+  assert.deepEqual(await command(url, '开任务 Fix: Check API', ['start_task']), {
+    name: 'start_task', input: { title: 'Fix', instructions: 'Check API' },
+  })
+})
+
+test('rfc0039 [P] M3 subagent wait delays the reply', { timeout: 5000 }, async t => {
+  const url = await startMock(t, { MOCK_SUBAGENT_WAIT_MS: '1500' })
+  const started = performance.now()
+  const reply = await call(url, subagentResult, ['subagent'])
+  assert.ok(performance.now() - started >= 1400)
+  assert.equal(reply.text, '好了。')
+})
+
+test('rfc0039 [C] M4 no subagent wait replies at once', { timeout: 5000 }, async t => {
+  const url = await startMock(t, { MOCK_SUBAGENT_WAIT_MS: undefined })
+  const started = performance.now()
+  const reply = await call(url, subagentResult, ['subagent'])
+  assert.ok(performance.now() - started < 1000)
+  assert.equal(reply.text, '好了。')
 })

@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://automagik.si/schema/meter/herdr-meter.v2.schema.json",
+  "title": "herdr-meter summary, version 2",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "rows_schema", "meter_version", "generatedAt", "machine",
+    "counted_from", "complete", "pending", "prices", "sources", "windows", "models",
+    "projects", "tasks", "hourly", "daily", "truncated"
+  ],
+  "properties": {
+    "kind": { "const": "herdr-meter" },
+    "schema_version": { "const": 2 },
+    "rows_schema": { "type": "string" },
+    "meter_version": { "type": "string" },
+    "generatedAt": { "$ref": "#/$defs/timestamp" },
+    "machine": { "type": "string" },
+    "counted_from": { "$ref": "#/$defs/timestamp" },
+    "complete": { "type": "boolean" },
+    "pending": {
+      "type": "object",
+      "required": ["bytes", "files"],
+      "properties": {
+        "bytes": { "type": "integer" },
+        "files": { "type": "integer" }
+      }
+    },
+    "prices": {
+      "type": "object",
+      "required": ["date", "source", "label"],
+      "properties": {
+        "date": { "type": "string" },
+        "source": { "type": "string" },
+        "label": { "type": "string" }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/source" }
+    },
+    "windows": {
+      "type": "object",
+      "required": ["d1", "d7", "d30"],
+      "properties": {
+        "d1": { "$ref": "#/$defs/timestamp" },
+        "d7": { "$ref": "#/$defs/timestamp" },
+        "d30": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "models": { "type": "array", "items": { "$ref": "#/$defs/model" } },
+    "projects": { "type": "array", "items": { "$ref": "#/$defs/project" } },
+    "projects_other": { "$ref": "#/$defs/projectsOther" },
+    "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
+    "tasks_other": { "$ref": "#/$defs/tasksOther" },
+    "hourly": { "$ref": "#/$defs/hourly" },
+    "daily": { "$ref": "#/$defs/daily" },
+    "truncated": { "$ref": "#/$defs/strings" },
+    "space": { "$ref": "#/$defs/space" }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+    },
+    "strings": { "type": "array", "items": { "type": "string" } },
+    "tokens": {
+      "type": "object",
+      "properties": {
+        "in": { "type": "integer" },
+        "cr": { "type": "integer" },
+        "cw": { "type": "integer" },
+        "out": { "type": "integer" },
+        "rs": { "type": ["integer", "null"] },
+        "un": { "type": "integer" },
+        "usd": { "type": "number" },
+        "usd_rep": { "type": "number" },
+        "unpriced": { "type": "integer" }
+      }
+    },
+    "tokenWindows": {
+      "type": "object",
+      "properties": {
+        "d1": { "$ref": "#/$defs/tokens" },
+        "d7": { "$ref": "#/$defs/tokens" },
+        "d30": { "$ref": "#/$defs/tokens" }
+      }
+    },
+    "model": {
+      "$ref": "#/$defs/tokenWindows",
+      "required": ["harness", "model"],
+      "properties": {
+        "harness": { "type": "string" },
+        "model": { "type": "string" },
+        "priced": { "type": "boolean" }
+      }
+    },
+    "project": {
+      "$ref": "#/$defs/tokenWindows",
+      "required": ["repo", "tasks", "hours", "last"],
+      "properties": {
+        "repo": { "type": ["string", "null"] },
+        "tasks": { "type": "integer" },
+        "hours": { "type": "integer" },
+        "usd_per_task": { "type": "number" },
+        "last": { "$ref": "#/$defs/timestamp" },
+        "untasked": { "$ref": "#/$defs/tokens" }
+      }
+    },
+    "task": {
+      "$ref": "#/$defs/tokenWindows",
+      "required": ["repo", "branch", "agents", "first", "last", "hours"],
+      "properties": {
+        "repo": { "type": ["string", "null"] },
+        "branch": { "type": "string" },
+        "agents": { "$ref": "#/$defs/strings" },
+        "bots": { "$ref": "#/$defs/strings" },
+        "first": { "$ref": "#/$defs/timestamp" },
+        "last": { "$ref": "#/$defs/timestamp" },
+        "hours": { "type": "integer" }
+      }
+    },
+    "projectsOther": {
+      "$ref": "#/$defs/tokenWindows",
+      "required": ["count", "tasks"],
+      "properties": {
+        "count": { "type": "integer" },
+        "tasks": { "type": "integer" }
+      }
+    },
+    "tasksOther": {
+      "$ref": "#/$defs/tokenWindows",
+      "required": ["count"],
+      "properties": {
+        "count": { "type": "integer" }
+      }
+    },
+    "series": {
+      "type": "object",
+      "required": ["harness", "in", "cr", "cw", "out", "usd"],
+      "properties": {
+        "harness": { "type": "string" },
+        "in": { "$ref": "#/$defs/integers" },
+        "cr": { "$ref": "#/$defs/integers" },
+        "cw": { "$ref": "#/$defs/integers" },
+        "out": { "$ref": "#/$defs/integers" },
+        "un": { "$ref": "#/$defs/integers" },
+        "usd": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "integers": { "type": "array", "items": { "type": "integer" } },
+    "hourly": {
+      "type": "object",
+      "required": ["from", "hours", "series"],
+      "properties": {
+        "from": { "$ref": "#/$defs/timestamp" },
+        "hours": { "type": "integer" },
+        "series": { "type": "array", "items": { "$ref": "#/$defs/series" } }
+      }
+    },
+    "daily": {
+      "type": "object",
+      "required": ["from", "days", "series"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "days": { "type": "integer" },
+        "series": { "type": "array", "items": { "$ref": "#/$defs/series" } }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "status", "last_success", "usage_lines", "events", "duplicates",
+        "skipped_lines", "rewrites", "unknown_models"
+      ],
+      "properties": {
+        "status": { "enum": ["ok", "degraded", "unsupported", "absent"] },
+        "reason": { "type": "string" },
+        "last_success": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "usage_lines": { "type": "integer" },
+        "events": { "type": "integer" },
+        "duplicates": { "type": "integer" },
+        "skipped_lines": { "type": "integer" },
+        "rewrites": { "type": "integer" },
+        "unknown_models": { "$ref": "#/$defs/strings" },
+        "threads": {
+          "type": "object",
+          "required": ["exact", "total_only"],
+          "properties": {
+            "exact": { "type": "integer" },
+            "total_only": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "space": {
+      "type": "object",
+      "required": ["version"],
+      "properties": {
+        "version": { "const": 1 },
+        "window": {
+          "type": "object",
+          "properties": {
+            "from": { "$ref": "#/$defs/timestamp" },
+            "to": { "$ref": "#/$defs/timestamp" },
+            "prev_from": { "$ref": "#/$defs/timestamp" }
+          }
+        },
+        "truncated": { "type": "boolean" },
+        "projects": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/spaceProject" }
+        }
+      }
+    },
+    "spaceProject": {
+      "type": "object",
+      "properties": {
+        "merges": { "type": "object" },
+        "time": { "type": "object" },
+        "first_pass": { "type": "object" },
+        "spent": {
+          "type": "object",
+          "properties": {
+            "real_usd": { "$ref": "#/$defs/nullableNumber" },
+            "prev_real_usd": { "$ref": "#/$defs/nullableNumber" },
+            "by_model": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/nullableNumber" }
+            },
+            "codex_week_share": { "$ref": "#/$defs/nullableNumber" }
+          }
+        },
+        "tokens": { "type": "object" },
+        "bots": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "usd_per_task": { "$ref": "#/$defs/nullableNumber" },
+              "min_per_task": { "$ref": "#/$defs/nullableNumber" },
+              "usd_24h": { "$ref": "#/$defs/nullableNumber" },
+              "other_usd": { "$ref": "#/$defs/nullableNumber" },
+              "parts_kind": { "type": "string" },
+              "parts": { "type": "array", "items": { "type": "object" } }
+            }
+          }
+        },
+        "tasks": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "nullableNumber": { "type": ["number", "null"] }
+  }
+}

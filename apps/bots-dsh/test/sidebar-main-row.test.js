@@ -111,6 +111,46 @@ test('rows other plugins hang under a Bot get the rows\' own props, and opening 
   assert.deepEqual(calls, [['open', 'thread-1'], ['fold']])
 })
 
+test('the Team row and legacy sidebar show the Genie tag and the shared child outlet follows the role', (t) => {
+  const WishRows = () => null
+  const OtherRows = () => null
+  t.after(botChildren.register({ id: 'genie-wishes', Component: WishRows }))
+  t.after(botChildren.register({ id: 'other-rows', Component: OtherRows }))
+  const tagged = tree => find(tree, node => node.props?.className === 'bt-tag' && node.props.children.includes('Genie')).length === 1
+  for (const [kind, roles, prefs, showTag, showWishes] of [
+    ['genie', undefined, {}, true, true],
+    ['genie', [], {}, false, false],
+    ['genie', [], { roles: false }, false, true],
+    [undefined, undefined, {}, false, false],
+  ]) {
+    const record = { id: 'role-fixture', name: 'Bot', kind, ...(roles === undefined ? {} : { roles }) }
+    const team = { ...roster, bots: [record], byId: { [record.id]: record }, mainBotId: record.id, mainBotIds: [record.id], prefs }
+    const wide = sidebar({ team })
+    const rows = wide.teamRows()
+    const row = find(rows.type(rows.props), node => node.type === 'button' && node.props['data-id'] === record.id)[0]
+    assert.equal(tagged(row), showTag)
+    const outlet = find(wide.after(record.id), named('BotChildren'))[0]
+    const children = outlet.type(outlet.props)
+    assert.equal(find(children, node => node.type === WishRows).length, Number(showWishes))
+    assert.equal(find(children, node => node.type === OtherRows).length, 1)
+    const [legacy] = sidebar({ wide: false, team }).rows
+    assert.equal(tagged(legacy.type({ ...legacy.props, wide: true })), showTag)
+  }
+})
+
+test('the child outlet keeps registered rows when the roster is missing', (t) => {
+  const WishRows = () => null
+  const OtherRows = () => null
+  t.after(botChildren.register({ id: 'genie-wishes', Component: WishRows }))
+  t.after(botChildren.register({ id: 'other-rows', Component: OtherRows }))
+  const record = { id: 'detached', name: 'Genie', kind: 'genie', roles: [] }
+  const { after } = sidebar({ team: { ...roster, bots: [record], byId: { [record.id]: record } } })
+  const outlet = find(after(record.id), named('BotChildren'))[0]
+  const children = outlet.type({ ...outlet.props, roster: undefined })
+  assert.equal(find(children, node => node.type === WishRows).length, 1)
+  assert.equal(find(children, node => node.type === OtherRows).length, 1)
+})
+
 test('badges other plugins add still end a Bot\'s row, with the row\'s Bot, and never a DSH bot\'s', (t) => {
   const Badge = () => null
   t.after(badges.register({ id: 'events', Component: Badge }))
@@ -186,4 +226,28 @@ test('a DSH bot row wears DSH\'s blue whale, not a generic terminal mark', () =>
   assert.equal(mark.props.look.color, 'blue')
   // The tasks row keeps its own mark; only a DSH bot wears the whale.
   assert.equal(rows.props.renderArt({ id: 'tasks', dsh: 'tasks' }, 28, 'idle').type.name, 'TasksIcon')
+})
+
+test('both sidebar variants use the exact package name and hide it with roles off', () => {
+  const record = { id: 'fixture', name: 'Fixture', roles: [{ id: 'constructor', version: '1.0.0', attachedAt: '', grants: [] }] }
+  const key = 'constructor'
+  const details = { version: '1.0.0', sha256: 'a'.repeat(64) }
+  const team = {
+    ...roster, bots: [record], byId: { [record.id]: record }, mainBotId: record.id, mainBotIds: [record.id],
+    roleCatalog: { roles: [{ id: key, version: details.version, name: '<Catalog fixture>', capabilities: [] }] },
+    roleDetails: { [key]: { installed: details, catalog: details } },
+  }
+  const tags = tree => find(tree, node => node.props?.className === 'bt-tag').map(node => node.props.children[0])
+  for (const [prefs, catalogDigest, expected] of [
+    [{}, details.sha256, ['<Catalog fixture>']],
+    [{}, 'b'.repeat(64), [key]],
+    [{ roles: false }, details.sha256, []],
+  ]) {
+    const live = { ...team, prefs, roleDetails: { [key]: { installed: details, catalog: { ...details, sha256: catalogDigest } } } }
+    const rows = sidebar({ team: live }).teamRows()
+    const row = find(rows.type(rows.props), node => node.type === 'button' && node.props['data-id'] === record.id)[0]
+    assert.deepEqual(tags(row), expected)
+    const [legacy] = sidebar({ wide: false, team: live }).rows
+    assert.deepEqual(tags(legacy.type({ ...legacy.props, wide: true })), expected)
+  }
 })

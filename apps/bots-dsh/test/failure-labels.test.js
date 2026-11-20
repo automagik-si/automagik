@@ -24,3 +24,12 @@ test('an unknown code has no short words, and its label falls back to the messag
   assert.equal(failureLabel('SOMETHING_NEW', 'raw text'), 'raw text')
   assert.equal(failureLabel('SOMETHING_NEW', ''), 'SOMETHING_NEW')
 })
+
+test('both ACP usage limit codes have a short label and Chinese copy', () => {
+  const label = 'The coding agent reached its usage limit'
+  for (const code of ['ACP_CLAUDE_USAGE_LIMIT', 'ACP_CODEX_USAGE_LIMIT']) {
+    assert.equal(knownFailure(code), label)
+  }
+  assert.equal(DICTIONARY.zh[label], '编程助手已达到使用限额')
+  assert.equal(DICTIONARY.zh['{provider} reached its usage limit.'], '{provider} 已达到使用限额。')
+})

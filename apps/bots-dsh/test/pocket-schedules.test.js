@@ -41,10 +41,11 @@ const OLD_WRITE = { protocol: 1, readOnly: false, write: 1, methods: [...READ_ME
 const GRANTS = ['manage-open', 'manage-close']
 const MEMORY = ['memory-read', 'memory-edit', 'memory-add']
 const SCHEDULES = ['schedule-list', 'schedule-pause', 'schedule-resume', 'schedule-rename']
+const SETTINGS = ['settings-read', 'settings-name', 'settings-model']
 const READ_ONLY = { kind: 'read-only', message: 'This socket only reads; answer on the computer.' }
 const refused = reason => ({ ok: false, state: 'refused', reason })
 const unknown = { ok: false, state: 'unknown', reason: 'pending' }
-const managed = methods => ({ ...OLD_WRITE, manage: 1, manageMethods: [...GRANTS, ...methods] })
+const managed = methods => ({ ...OLD_WRITE, manage: 1, manageMethods: [...GRANTS, ...methods, ...SETTINGS] })
 const saved = task => ({ ok: true, state: 'saved', task })
 const unchanged = task => ({ ok: true, state: 'unchanged', task })
 const read = (tasks, truncated = false) => ({ ok: true, state: 'read', schedules: { terminal: TERMINAL, tasks, truncated } })
@@ -295,7 +296,7 @@ test('hello adds only available method families and keeps the old wire replies',
     for (const [params, result] of [[{}, OLD_READ], [{ manage: 1 }, OLD_READ], [{ write: 1 }, options.writable === false ? OLD_READ : OLD_WRITE], [HELLO, expected]]) {
       const { line } = await c.exchange('hello', params, 42)
       assert.equal(line, `${JSON.stringify({ id: 42, result })}\n`)
-      for (const method of [...GRANTS, ...MEMORY, ...SCHEDULES]) {
+      for (const method of [...GRANTS, ...MEMORY, ...SCHEDULES, ...SETTINGS]) {
         const { wire } = await c.exchange(method, {}, 42)
         if (method === 'manage-close') assert.deepEqual(wire, { id: 42, result: {} })
         else if (!result.manageMethods?.includes(method)) assert.deepEqual(wire, { id: 42, error: READ_ONLY })

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
-import { connectCore } from '../src/host/code-core.js'
+import { connectCore, CoreConnection, encodeFrame, KINDS } from '../src/host/code-core.js'
 import { coreSockets } from '../src/host/core-probe.js'
 import { listenForCoreStatus } from './fixtures/fake-core-probe.mjs'
 
@@ -95,4 +97,41 @@ test('a listener that refuses server.status does not count as an answer', async 
   await new Promise((resolve, reject) => server.once('error', reject).listen(path, resolve))
   await assert.rejects(f.connect, { kind: 'no-core' })
   assert.equal(f.spawn.mock.callCount(), 0)
+})
+
+test('watch replays at most eight early resize hints in order and delivers live hints without arguments', async (t) => {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+    kill() { this.emit('exit') },
+  })
+  const core = new CoreConnection(child)
+  t.after(() => core.close())
+  const hello = core.start()
+  child.stdout.write('{"result":{"framed":true,"generation":1}}\n')
+  await hello
+
+  const attached = core.attach({ terminal: 'fake', cols: 80, rows: 24 })
+  const channel = 7
+  const data = text => encodeFrame(channel, KINDS.data, text)
+  const hint = payload => encodeFrame(channel, KINDS.resize, payload)
+  child.stdout.write(Buffer.concat([
+    data('old'), hint('opaque'),
+    encodeFrame(0, KINDS.data, JSON.stringify({ id: 1, result: { channel } })),
+    data('next'),
+    ...Array.from({ length: 9 }, () => hint(Buffer.alloc(0))), data('last'),
+  ]))
+  await attached
+  assert.equal(core.earlyBytes, Buffer.byteLength('oldnextlast'))
+  const events = []
+  core.watch(channel, {
+    onData: bytes => events.push(bytes.toString()),
+    onResize: (...args) => { assert.deepEqual(args, []); events.push('hint') },
+  })
+  assert.deepEqual(events, ['old', 'hint', 'next', ...Array(7).fill('hint'), 'last'])
+  assert.equal(core.earlyBytes, 0)
+  child.stdout.write(hint(Buffer.alloc(29, 255)))
+  assert.equal(events.at(-1), 'hint')
+  core.detach(channel)
+  child.stdout.write(data('unread'))
+  assert.equal(core.earlyBytes, 0, 'a detached channel cannot buffer more data')
 })

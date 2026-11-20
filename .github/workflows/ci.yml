@@ -26,8 +26,8 @@ env:
   HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
   SCHEDULER_CHANGED_PATHS: '^(herdr/scheduler/|\.github/workflows/ci\.yml$)'
   AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
-  POCKET_CHANGED_PATHS: '^(apps/pocket/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
-  POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|\.github/workflows/ci\.yml$)'
+  POCKET_CHANGED_PATHS: '^(apps/pocket/|meter/schema/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
+  POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|docs/rfcs/fixtures/0033-document-names\.json$|\.github/workflows/ci\.yml$)'
   METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
   USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
@@ -1587,7 +1587,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, welcome-dsh]
+        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, vault-dsh, welcome-dsh]
     defaults:
       run:
         working-directory: apps/${{ matrix.app }}
@@ -1616,6 +1616,12 @@ jobs:
         run: |
           bun install --frozen-lockfile
           [ -d dev/harness/node_modules ] || bun run harness
+
+      - name: ACP plugin dependencies for the role identity test
+        # role-runtime.test.js drives acp-dsh's adapter with the Bot team's identity reader.
+        if: matrix.app == 'bots-dsh'
+        working-directory: apps/acp-dsh
+        run: bun install --frozen-lockfile
 
       - name: Desktop dependencies for ACP lifecycle tests
         # The app-build upgrade case calls Desktop's profile merger, which resolves yaml here.
@@ -1684,6 +1690,31 @@ jobs:
           bin="$(node -p "require('electron')")"
           test -x "${bin}"
           echo "ELECTRON_BIN=${bin}" >> "$GITHUB_ENV"
+
+      - name: Two OS users for the machine reservation record
+        # RFC 0024 R4: exercise sticky-bit and group permissions with two distinct users.
+        if: matrix.app == 'bots-dsh'
+        run: |
+          set -euo pipefail
+          shellcheck -s sh scripts/reservations-setup.sh
+          root=/srv/automagik-ci
+          sudo groupadd automagik-ci
+          sudo useradd -M -N -g automagik-ci -s /usr/sbin/nologin amres-a
+          sudo useradd -M -N -g automagik-ci -s /usr/sbin/nologin amres-b
+          sudo sh scripts/reservations-setup.sh --group automagik-ci "${root}/reservations"
+          sudo install -d -m 0755 "${root}/bin" "${root}/plugin" \
+            "${root}/acp/src/host" "${root}/run"
+          sudo install -m 0755 "$(command -v node)" "${root}/bin/node"
+          sudo cp -R src "${root}/plugin/src"
+          sudo install -m 0644 test/fixtures/reservation-driver.mjs "${root}/plugin/"
+          sudo install -m 0644 ../acp-dsh/src/host/reservation-evidence.js "${root}/acp/src/host/"
+          sudo chmod -R a+rX "${root}/plugin" "${root}/acp"
+          for u in amres-a amres-b; do
+            (cd "${root}/run" && sudo -n -u "$u" -- "${root}/bin/node" \
+              "${root}/plugin/reservation-driver.mjs" probe "{\"dir\":\"${root}/reservations\"}")
+          done
+          printf 'RESERVATION_TWO_USERS={"root":"%s","dir":"%s","a":"%s","b":"%s"}\n' \
+            "$root" "${root}/reservations" amres-a amres-b >> "$GITHUB_ENV"
 
       - name: Generated files are current
         # A package with no browser half has no client to build.
@@ -1902,6 +1933,31 @@ jobs:
       - name: Test
         run: node --test test/batch-spawn.test.js test/process-identity.test.js
 
+      - name: Test native Windows vault keychain
+        working-directory: apps/vault-dsh
+        run: node --test test/keychain-windows-native.test.js
+
+  vault-keychain-macos:
+    name: vault-keychain-macos
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Test disposable macOS vault keychain
+        working-directory: apps/vault-dsh
+        run: node --test test/keychain-macos-native.test.js
+
   boot:
     # The plugins booted for real with Omni's channels and canvases (the release omni.json
     # pins): boot-check.yml, which Follow Omni also runs on a candidate Omni before carrying it.
@@ -1917,7 +1973,7 @@ jobs:
     name: CI result
     needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
-            plugin, acp-image-read, pets, desktop, acp-windows, boot]
+            plugin, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

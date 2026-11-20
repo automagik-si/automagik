@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
@@ -16,6 +18,7 @@ import {
   serveDsh, servesOrigin, SHIPPED_STORE, startDsh, startDshOnPort, stopDsh, storedPort,
   storeLayoutOf, toolFileOf, writeTools,
 } from '../src/dsh.js'
+import { ensureOwnerRecord, launchInstance, ownerFileOf } from '../src/owner-record.js'
 import { batchSafe } from '../scripts/batch-spawn.mjs'
 
 const posixOnly = { skip: process.platform === 'win32' ? 'the tools are sh scripts here' : false }
@@ -1376,3 +1379,128 @@ test('main.js guards the origin as it is now, and loads only the URL pageUrlOf h
   assert.match(main, /urlFile/)
   assert.equal(/stopDsh\(|dshChild/.test(main), false, 'every way out stops dshProcess, the current dsh')
 })
+
+test('only the launcher sets the instance id in a copy of the DSH environment', () => {
+  const base = {
+    AUTOMAGIK_INSTANCE_ID: 'inherited',
+    Automagik_Instance_Id: 'mixed case',
+    automagik_instance_id: 'lower case',
+  }
+  const linux = { base, home: '/fixture', platform: 'linux' }
+  const windows = { ...linux, platform: 'win32' }
+  const keys = env => Object.keys(env).filter(key => key.toUpperCase() === 'AUTOMAGIK_INSTANCE_ID')
+  assert.equal(dshEnv({ ...linux, instanceId: 'from the record' }).AUTOMAGIK_INSTANCE_ID, 'from the record')
+  assert.equal(Object.hasOwn(dshEnv(linux), 'AUTOMAGIK_INSTANCE_ID'), false)
+  assert.equal(Object.hasOwn(dshEnv({ ...linux, instanceId: 123 }), 'AUTOMAGIK_INSTANCE_ID'), false)
+  assert.equal(dshEnv(linux).Automagik_Instance_Id, 'mixed case')
+  assert.deepEqual(keys(dshEnv(windows)), [])
+  const env = dshEnv({ ...windows, instanceId: 'from the record' })
+  assert.deepEqual(keys(env), ['AUTOMAGIK_INSTANCE_ID'])
+  assert.equal(env.AUTOMAGIK_INSTANCE_ID, 'from the record')
+  assert.deepEqual(base, {
+    AUTOMAGIK_INSTANCE_ID: 'inherited',
+    Automagik_Instance_Id: 'mixed case',
+    automagik_instance_id: 'lower case',
+  })
+})
+
+function listeningInstance(root, withId) {
+  const bin = join(root, 'fake-dsh.mjs')
+  const matches = withId
+    ? `process.env.AUTOMAGIK_INSTANCE_ID === JSON.parse(readFileSync(${JSON.stringify(ownerFileOf(root))}, 'utf8')).instance_id`
+    : "!Object.keys(process.env).some(key => key.toUpperCase() === 'AUTOMAGIK_INSTANCE_ID')"
+  writeFileSync(bin, `
+import { readFileSync } from 'node:fs'
+await new Promise(done => process.send(${matches}, done))
+if (process.argv.includes('--instance-only')) process.exit(0)
+${LISTENING_DSH}`)
+  return bin
+}
+
+const childReport = async child => (await once(child, 'message'))[0]
+const transportId = 'A\tUnicode id 🪄\n' + 'x'.repeat(257)
+
+test('a stand-in child receives the persisted id verbatim, or no inherited id', async (t) => {
+  const { fork } = await import('node:child_process')
+  const { root: home } = scratch(t, 'omni-desktop-instance-env-')
+  writeFileSync(ownerFileOf(home), JSON.stringify({ version: 2, instance_id: transportId }))
+  const base = { ...process.env, AUTOMAGIK_INSTANCE_ID: 'inherited' }
+  for (const id of [ensureOwnerRecord(home).instanceId, undefined]) {
+    const bin = listeningInstance(home, id !== undefined)
+    const child = fork(bin, ['--instance-only'], {
+      cwd: home, env: dshEnv({ base, home, instanceId: id }), execArgv: [], stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+    })
+    const exited = once(child, 'exit')
+    assert.equal(await childReport(child), true)
+    assert.deepEqual(await exited, [0, null])
+  }
+})
+
+test('the first DSH child, the port retry and a DSH-only restart receive the persisted instance id', async (t) => {
+  const scope = scratch(t, 'omni-desktop-instance-')
+  const home = scope.root
+  writeFileSync(ownerFileOf(home), JSON.stringify({ version: 2, instance_id: transportId }))
+  const bin = listeningInstance(home, true)
+  let reads = 0
+  const launch = { home, ensure: home => { reads += 1; return ensureOwnerRecord(home) } }
+  const instance = launchInstance(launch)
+  const env = () => dshEnv({ home, instanceId: instance.instanceId })
+  const reports = []
+  const onSpawn = child => reports.push(childReport(child))
+  const portFile = portFileOf(home)
+  const first = dshRun()
+  scope.stop = () => first.stop()
+  const taken = await squat(t)
+  const running = await serveDsh({ run: first, portFile, node: process.execPath, bin, env, port: taken, cwd: home, onSpawn })
+  assert.notEqual(Number(new URL(running.url).port), taken)
+  assert.deepEqual(await Promise.all(reports), [true, true])
+  await first.stop()
+
+  const restarted = dshRun()
+  scope.stop = () => restarted.stop()
+  await serveDsh({ run: restarted, portFile, node: process.execPath, bin, env, port: await freePort(), cwd: home, onSpawn })
+  assert.deepEqual(await Promise.all(reports), [true, true, true])
+  assert.equal(launchInstance(launch), instance)
+  assert.equal(reads, 1)
+})
+
+for (const reason of ['invalid', 'unreadable', 'create-failed']) {
+  test(`DSH starts without an instance id when the owner record is ${reason}`, async (t) => {
+    const scope = scratch(t, 'omni-desktop-owner-')
+    const home = scope.root
+    const file = ownerFileOf(home)
+    const sentinel = 'owner-only sentinel'
+    const bytes = JSON.stringify({ version: 1, instance_id: sentinel })
+    if (reason !== 'create-failed') writeFileSync(file, bytes)
+    const fail = code => () => { throw Object.assign(new Error(sentinel), { code }) }
+    const faults = {
+      invalid: {},
+      unreadable: { readFileSync: fail('EACCES') },
+      'create-failed': { linkSync: fail('EIO') },
+    }
+    const lines = []
+    const launch = {
+      home,
+      log: line => lines.push(line),
+      ensure: home => ensureOwnerRecord(home, { fs: { ...fs, ...faults[reason] } }),
+    }
+    const instance = launchInstance(launch)
+    const base = { ...process.env, AUTOMAGIK_INSTANCE_ID: 'inherited', Automagik_Instance_Id: 'mixed', automagik_instance_id: 'lower' }
+    const env = () => dshEnv({ base, home, platform: 'win32', instanceId: instance.instanceId })
+    const run = dshRun()
+    scope.stop = () => run.stop()
+    const bin = listeningInstance(home, false)
+    const port = await freePort()
+    let report
+    const running = await serveDsh({
+      run, portFile: portFileOf(home), node: process.execPath, bin, env, port, cwd: home,
+      onSpawn: child => { report = childReport(child) },
+    })
+    assert.equal(Number(new URL(running.url).port), port)
+    assert.equal(await report, true)
+    assert.equal(launchInstance(launch), instance)
+    assert.deepEqual(lines, [`owner record ${reason}; reservations are off`])
+    if (reason === 'create-failed') assert.equal(existsSync(file), false)
+    else assert.equal(readFileSync(file, 'utf8'), bytes)
+  })
+}

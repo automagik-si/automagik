@@ -29,13 +29,19 @@
 //   `ctx.sessionController`, behind a capability check and a lazy import of the adapter
 //   (pocket-chat-adapter.js). On a runtime without the read methods the source is absent.
 // - Served to Pocket Link over a Unix socket in the team's home, owner-only (pocket-socket.js).
+// - RFC 0033 adds per-watch image and document uploads and queued sends with receipts.
+//   Rich watches get file metadata and image thumbnail reads. Documents have a separate
+//   per-watch grant, and attachment services are looked up on demand.
 // - With RFC 0036 management, a live phone grant can read, edit or add a shown project Bot's
-//   own memory and manage its own scheduled tasks without a chat subscription. Each check uses
-//   the current team lock and one fresh home registry snapshot.
+//   own memory, manage its own scheduled tasks, and change its name and model without a chat
+//   subscription. Its permission level is shown read-only. Each check uses the current team lock
+//   and one fresh home registry snapshot.
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
+import { ATTACH_REQUEST_PREFIX, THUMBNAILS, attachmentCode, effectiveAttachments, positiveInt, sanitizeAttachmentName, validId } from './pocket-attach.js'
 import { startPocketSocket } from './pocket-socket.js'
+import { pocketSettingsOf } from './pocket-settings.js'
 import { homeRegistryPathOf, shownReader } from './shown.js'
 
 /** The Session Controller methods this source needs (DSH 0.2.2); all of them, or none is used. */
@@ -141,6 +147,50 @@ const textOf = (content) => {
 }
 const count = value => (Number.isFinite(value) && value >= 0 ? value : 0)
 
+const imageType = type => ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(type)
+const mediaPart = part => part?.type === 'image' || part?.type === 'file'
+
+function blocksOf(content) {
+  if (!Array.isArray(content) || !content.some(mediaPart)) return
+  const blocks = []
+  let media = 0
+  let textLeft = TEXT_MAX
+  // Bound the JSON overhead from many short blocks as well as the text they contain.
+  let jsonLeft = PAGE_BYTES / 2
+  for (const [block, part] of content.entries()) {
+    if (part?.type === 'text' && typeof part.text === 'string' && textLeft > 0 && jsonLeft > 0) {
+      const text = part.text.slice(0, textLeft)
+      const projected = { type: 'text', text }
+      jsonLeft -= bytes(JSON.stringify(projected)) + 1
+      if (jsonLeft >= 0 && text) {
+        blocks.push(projected)
+        textLeft -= text.length
+      }
+    }
+    if (!mediaPart(part)) continue
+    if (++media > 16) continue
+    const ref = part.attachment
+    if (part.type === 'image') {
+      if (imageType(ref?.mediaType) && positiveInt(ref.width) && positiveInt(ref.height)) {
+        blocks.push({ type: 'image', block, mediaType: ref.mediaType, width: ref.width, height: ref.height })
+      }
+    } else if (ref && Number.isSafeInteger(ref.bytes) && ref.bytes >= 0) {
+      const name = sanitizeAttachmentName(ref.name)
+      blocks.push({ type: 'file', block, ...(name === undefined ? {} : { name }), bytes: ref.bytes })
+    }
+  }
+  if (media > 16) blocks.push({ type: 'more', count: media - 16 })
+  return blocks
+}
+
+const legacyVisible = row => !(row.kind === 'text' && row.blocks && row.text.trim() === '')
+const legacyRows = rows => rows.filter(legacyVisible).map(row => {
+  if (!row.blocks) return row
+  const { blocks, ...legacy } = row
+  return legacy
+})
+const rowsFor = (rows, attachments) => attachments ? rows : legacyRows(rows)
+
 /**
  * The Pocket rows one committed Session event makes (Pocket Link chat/types.js row kinds).
  * `scope` carries what the fold needs across events: the open turn and the tool-call rows by call id.
@@ -157,7 +207,10 @@ export function rowsOf(event, scope) {
       // A person's prompt only: injected context (file notices, skills, reminders) is not chat.
       if (data.role !== 'user' || data.source?.kind !== 'user') return []
       const text = textOf(data.content)
-      return text.trim() ? [{ ...base(), kind: 'text', role: 'user', text: cut(text, TEXT_MAX) }] : []
+      const blocks = blocksOf(data.content)
+      return text.trim() || blocks
+        ? [{ ...base(), kind: 'text', role: 'user', text: text.trim() ? cut(text, TEXT_MAX) : '', ...(blocks ? { blocks } : {}) }]
+        : []
     }
     case 'assistant/message': {
       const rows = []
@@ -226,7 +279,7 @@ export function pageOf(rows, limit = PAGE_ROWS) {
   return out
 }
 
-const seqOf = row => cursorOf(row.id)?.seq ?? -1
+const seqOf = row => cursorOf(row?.id)?.seq ?? -1
 
 /** What the phone may never do by terminal name, and why: writes exist only on a watch handle. */
 export function refusal(id) {
@@ -250,18 +303,20 @@ const globalOnly = bot => bot?.project == null
  *   timers?: typeof realTimers, pollMs?: number, listMs?: number,
  *   keep?: number, maxFollowed?: number, log?: (...args: any[]) => void, writable?: boolean,
  *   shown?: (bot: { id: string, project?: string | null, machine?: string, placeUnknown?: true }) => boolean, chatOwner?: (sessionId: string) => string | undefined, now?: () => number,
+ *   fileUploads?: () => any, attachmentStore?: () => any,
  *   stopOf?: (sessionId: string, turn: number) => string | undefined,
  *   carriesSignInCode?: (text: string) => boolean }} options
  */
 export class DshChatSource {
-  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules }) {
-    Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf })
+  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore }) {
+    Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, fileUploads, attachmentStore })
     /** Whether a text carries a Claude sign-in code the computer showed (cli-login.js). Never throws. */
     this.carriesSignInCode = (text) => { try { return carriesSignInCode(text) === true } catch { return false } }
     /** Writes need the adapter's prompt and cancel, and the answerer listeners wired (install). */
     this.writable = writable === true && typeof adapter?.prompt === 'function' && typeof adapter?.cancel === 'function'
     this.management = management
     this.schedules = schedules
+    this.settings = settings
     this.chatOwner = chatOwner ?? (sessionId => [...this.entries.values()].find(entry => entry.sessionId === sessionId)?.botId)
     /** botId -> entry */
     this.entries = new Map()
@@ -272,6 +327,20 @@ export class DshChatSource {
     /** sessionId -> request ids already prompted (KEEP_SENT_IDS), the phone's and the log's. */
     this.sent = new Map()
   }
+
+  attachmentServices() {
+    if (!this.writable || this.adapter.supportsReceipts !== true) return
+    try {
+      const uploads = this.fileUploads?.()
+      const store = this.attachmentStore?.()
+      if (typeof uploads?.uploadImageStream === 'function' && typeof store?.readImageRequest === 'function') {
+        return { uploads, store, effective: effectiveAttachments(store.imageLimits, typeof uploads.uploadStream === 'function') }
+      }
+    } catch {}
+  }
+
+  attachmentOffer() { return this.attachmentServices()?.effective }
+  get attachments() { return this.attachmentOffer() !== undefined }
 
   get manages() {
     return this.writable && this.management?.enabled() === true
@@ -299,6 +368,18 @@ export class DshChatSource {
 
   manageSchedules(method, args) {
     return this.schedules.run(method, args)
+  }
+
+  get managesSettings() {
+    return this.writable && this.settings?.enabled() === true
+  }
+
+  settingsAllowed(botId) {
+    return this.settings.allowed(botId)
+  }
+
+  manageSettings(method, args) {
+    return this.settings.run(method, args)
   }
 
   /**
@@ -372,7 +453,7 @@ export class DshChatSource {
    * @returns {Promise<{ ok: true, close(): void, backfill(before: string, limit?: number): Promise<any[]>,
    *   send?: Function, interrupt?: Function, answer?: Function } | { ok: false, reason: string }>}
    */
-  async watch(terminal, listener, { after } = {}) {
+  async watch(terminal, listener, { after, attachments = false, documents = false } = {}) {
     const botId = botIdOf(terminal)
     if (botId === null) return { ok: false, reason: 'not-found' }
     const bot = (await this.bots()).find(item => item.id === botId)
@@ -388,9 +469,10 @@ export class DshChatSource {
     let opened
     try { opened = await entry.ready } catch { opened = { ok: false, reason: 'unavailable' } }
     if (!opened.ok) { this.drop(entry); return opened }
-    entry.listeners.add(listener)
+    const subscription = { listener, attachments }
+    entry.listeners.add(subscription)
     const live = this.writable ? [...(this.open.get(entry.sessionId)?.values() ?? [])].map(request => request.row) : []
-    const snapshot = await this.snapshotFor(entry, after)
+    const snapshot = await this.snapshotFor(entry, after, attachments)
     const firstApproval = live.find(row => row.kind === 'approval')
     this.emitTo(listener, this.writable ? { ...snapshot, approval: firstApproval ?? null, settled: [...(this.settled.get(entry.sessionId) ?? [])] } : snapshot)
     if (this.writable) {
@@ -402,16 +484,22 @@ export class DshChatSource {
     let closed = false
     const handle = {
       ok: true,
-      close: () => { closed = true; writes.abort(new Error('the phone left this chat')); this.leave(entry, listener) },
-      backfill: (before, limit) => this.backfill(entry, before, limit),
+      close: () => { closed = true; writes.abort(new Error('the phone left this chat')); this.leave(entry, subscription) },
+      backfill: (before, limit) => this.backfill(entry, before, limit, attachments),
     }
     if (this.writable) {
       const live_ = () => !closed && !entry.gone
       Object.assign(handle, {
-        send: message => this.send_(entry, live_, writes.signal, message),
+        send: (message, uploads, scope) => this.send_(entry, live_, writes.signal, message, uploads,
+          attachments && scope ? { ...scope, documents, entry, sessionId: entry.sessionId, live: live_ } : undefined),
         interrupt: () => this.interrupt_(entry, live_),
         answer: message => this.answer_(entry, live_, message),
       })
+      if (attachments) {
+        const signal = AbortSignal.any([writes.signal, entry.controller.signal])
+        handle.attach = (method, params, uploads, scope, reply) => this.attach_(
+          method, params, uploads, { ...scope, documents, entry, sessionId: entry.sessionId, live: live_, signal }, reply)
+      }
     }
     return handle
   }
@@ -419,7 +507,7 @@ export class DshChatSource {
   open_(bot) {
     const controller = new AbortController()
     const entry = {
-      botId: bot.id, sessionId: bot.sessionId, controller, listeners: new Set(), rows: [], floorSeq: 0, cursor: -1,
+      botId: bot.id, sessionId: bot.sessionId, controller, listeners: new Set(), rows: [], floorSeq: 0, mediaFloorSeq: 0, cursor: -1,
       scope: { sessionId: bot.sessionId, turn: 0, calls: new Map(), stopOf: turn => this.stopOf(bot.sessionId, turn) }, status: statusOf(null), approval: null, question: null, poller: null, gone: false,
     }
     entry.ready = this.start(entry)
@@ -435,6 +523,7 @@ export class DshChatSource {
     if (opening.header?.origin === 'subagent') return { ok: false, reason: 'subagent' }
     const records = Array.isArray(opening.records) ? opening.records : []
     entry.floorSeq = records.length ? records[0].event.seq : (Number.isSafeInteger(opening.cursor) ? opening.cursor + 1 : 0)
+    entry.mediaFloorSeq = entry.floorSeq
     entry.cursor = Number.isSafeInteger(opening.cursor) ? opening.cursor : -1
     for (const record of records) this.noteRequestId(entry.sessionId, record.event)
     this.keepRows(entry, records.flatMap(record => rowsOf(record.event, entry.scope)))
@@ -449,10 +538,22 @@ export class DshChatSource {
   keepRows(entry, rows) {
     if (!rows.length) return
     entry.rows.push(...rows)
-    if (entry.rows.length > this.keep) {
-      entry.rows.splice(0, entry.rows.length - this.keep)
-      entry.floorSeq = seqOf(entry.rows[0])
+    let legacy = entry.rows.reduce((total, row) => total + Number(legacyVisible(row)), 0)
+    if (legacy > this.keep) {
+      let trim = 0
+      while (legacy > this.keep) legacy -= Number(legacyVisible(entry.rows[trim++]))
+      entry.rows.splice(0, trim)
+      entry.floorSeq = seqOf(entry.rows.find(legacyVisible))
+      entry.mediaFloorSeq = Math.max(entry.mediaFloorSeq, seqOf(entry.rows[0]))
     }
+    // Media-only history may fill the extra window, but never displace a legacy row.
+    let extra = entry.rows.length - 2 * this.keep
+    if (extra > 0) entry.rows = entry.rows.filter(row => {
+      if (extra === 0 || legacyVisible(row)) return true
+      extra--
+      entry.mediaFloorSeq = Math.max(entry.mediaFloorSeq, seqOf(row) + 1)
+      return false
+    })
   }
 
   async pump(entry, stream) {
@@ -516,37 +617,49 @@ export class DshChatSource {
    * older events when it is below the rows kept); a cursor from another Session (the Bot moved to
    * a new part), or one too old for a page, gets `reset` and the latest page.
    */
-  async snapshotFor(entry, after) {
+  async snapshotFor(entry, after, attachments = false) {
     const base = { type: 'snapshot', screen: [], status: entry.status, approval: entry.approval, held: [] }
-    const latest = { ...base, reset: Boolean(after), rows: pageOf(entry.rows) }
+    const retained = rowsFor(entry.rows, attachments)
+    const floor = attachments ? entry.mediaFloorSeq : entry.floorSeq
+    const latest = { ...base, reset: Boolean(after), rows: pageOf(retained) }
     if (!after) return { ...latest, reset: false }
     const cursor = cursorOf(after)
     if (!cursor || cursor.sessionId !== entry.sessionId || cursor.seq > entry.cursor) return latest
-    if (cursor.seq >= entry.floorSeq - 1) return { ...base, reset: false, rows: pageOf(entry.rows.filter(row => seqOf(row) > cursor.seq)) }
+    if (cursor.seq >= floor - 1) return { ...base, reset: false, rows: pageOf(retained.filter(row => seqOf(row) > cursor.seq)) }
     let older
-    try { older = await this.adapter.events(entry.sessionId, { beforeSeq: entry.floorSeq, maxMessages: PAGE_ROWS }, entry.controller.signal) } catch { return latest }
+    try { older = await this.adapter.events(entry.sessionId, { beforeSeq: floor, maxMessages: PAGE_ROWS }, entry.controller.signal) } catch { return latest }
     const records = Array.isArray(older?.records) ? older.records : []
     if (!records.length || records[0].event.seq > cursor.seq + 1) return latest
     const scope = { sessionId: entry.sessionId, turn: 0, calls: new Map(entry.scope.calls), stopOf: turn => this.stopOf(entry.sessionId, turn) }
-    const missed = records.filter(record => record.event.seq > cursor.seq).flatMap(record => rowsOf(record.event, scope))
-    const rows = [...missed, ...entry.rows]
+    const missed = records.filter(record => record.event.seq > cursor.seq && (!attachments || record.event.seq < floor)).flatMap(record => rowsOf(record.event, scope))
+    const current = rowsFor(entry.rows, attachments)
+    const rows = [...rowsFor(missed, attachments), ...(attachments ? current.filter(row => seqOf(row) >= floor) : current)]
     // Everything missed must fit one page; otherwise the phone starts over from the latest page.
     return rows.length > PAGE_ROWS ? latest : { ...base, reset: false, rows: pageOf(rows) }
   }
 
   /** Rows before a row id, newest last: at most `limit`, read from the log (cold-safe). */
-  async backfill(entry, before, limit = 50) {
+  async backfill(entry, before, limit = 50, attachments = false) {
     const cursor = cursorOf(before)
     if (!cursor || cursor.sessionId !== entry.sessionId || entry.gone) return []
     const max = Math.min(Math.max(1, Number.isInteger(limit) ? limit : 50), PAGE_ROWS)
     const page = await this.adapter.events(entry.sessionId, { beforeSeq: cursor.seq, maxMessages: max }, entry.controller.signal)
     const scope = { sessionId: entry.sessionId, turn: 0, calls: new Map(), stopOf: turn => this.stopOf(entry.sessionId, turn) }
     const rows = (page?.records ?? []).filter(record => record.event.seq < cursor.seq).flatMap(record => rowsOf(record.event, scope))
-    return pageOf(rows, max)
+    return pageOf(rowsFor(rows, attachments), max)
   }
 
   emitTo(listener, event) { try { listener(event) } catch {} }
-  emit(entry, event) { for (const listener of entry.listeners) this.emitTo(listener, event) }
+  emit(entry, event) {
+    const legacy = event.type === 'rows' ? legacyRows(event.rows) : undefined
+    for (const subscription of entry.listeners) {
+      // A bare function is a listener without the attachment opt-in (callers outside watch()).
+      const { listener, attachments } = typeof subscription === 'function' ? { listener: subscription, attachments: false } : subscription
+      if (!attachments && legacy) {
+        if (legacy.length) this.emitTo(listener, { ...event, rows: legacy })
+      } else this.emitTo(listener, event)
+    }
+  }
   emitSession(sessionId, event) {
     for (const entry of this.entries.values()) if (entry.sessionId === sessionId && !entry.gone) this.emit(entry, event)
   }
@@ -584,6 +697,7 @@ export class DshChatSource {
   }
 
   remember(sessionId, requestId) {
+    if (requestId.startsWith(ATTACH_REQUEST_PREFIX)) return
     const ids = this.sent.get(sessionId) ?? []
     if (!ids.includes(requestId)) ids.push(requestId)
     if (ids.length > KEEP_SENT_IDS) ids.splice(0, ids.length - KEEP_SENT_IDS)
@@ -591,11 +705,116 @@ export class DshChatSource {
   }
 
   /** Whether the Bot this chat follows is still served, on the Session the chat follows. */
-  async stillServed(entry) {
+  async stillServed(entry, moved = 'not-watching') {
     const bot = (await this.bots()).find(item => item.id === entry.botId)
-    if (!bot || bot.sessionId !== entry.sessionId) return 'not-watching'
+    if (!bot) return 'not-watching'
+    if (bot.sessionId !== entry.sessionId) return moved
     if (this.shown(bot) !== true) return 'not-shown'
     return null
+  }
+
+  async attachmentGate(scope, uploads, moved) {
+    const reason = await this.stillServed(scope.entry, moved)
+    if (reason && scope.live()) uploads.revokeEntry(scope.entry, reason)
+    return reason
+  }
+
+  attach_(method, params, uploads, scope, reply) {
+    const authorize = () => this.attachmentGate(scope, uploads)
+    switch (method) {
+      case 'upload-begin':
+        return uploads.begin(params, scope, this.attachmentServices(), authorize, this.carriesSignInCode)
+      case 'upload-chunk':
+        return uploads.chunk(params, scope, reply)
+      case 'upload-finish':
+        return uploads.finish(params, scope, authorize)
+      case 'upload-cancel':
+        return uploads.cancel(params, scope)
+      case 'attachment-read':
+        return this.readAttachment(scope, params, uploads, authorize, reply)
+    }
+  }
+
+  readAttachment(scope, { row, block }, uploads, authorize, reply) {
+    const { entry, sessionId, live, signal } = scope
+    const cursor = cursorOf(row)
+    if (!cursor || row.includes('#') || rowIdOf(cursor.sessionId, cursor.seq) !== row || !Number.isSafeInteger(cursor.seq + 1)
+      || !Number.isSafeInteger(block) || block < 0) return refused('invalid')
+    if (cursor.sessionId !== sessionId || !live()) return refused('not-watching')
+    if (cursor.seq > entry.cursor) return refused('not-found')
+    return uploads.read(signal, async (active) => {
+      const gate = await authorize()
+      if (gate) return refused(gate)
+      active.throwIfAborted()
+      const store = this.attachmentServices()?.store
+      if (!store) return refused('unavailable')
+      const page = await this.adapter.events(sessionId, { beforeSeq: cursor.seq + 1, maxMessages: 1 }, active)
+      active.throwIfAborted()
+      const event = page?.records?.find(record => record.event?.seq === cursor.seq)?.event
+      const projection = rowsOf(event, { sessionId, turn: 0, calls: new Map() })
+      if (!projection.some(row => row.blocks?.some(part => part.type === 'image' && part.block === block))) return refused('not-found')
+      const ref = event.data.content[block].attachment
+      for (const { edge, bytes } of THUMBNAILS) {
+        const thumbnail = await store.readImageRequest(ref, { width: edge, height: edge, maxBytes: bytes }, active)
+        active.throwIfAborted()
+        const { data, mediaType, width, height } = thumbnail ?? {}
+        if (!(data instanceof Uint8Array) || data.byteLength === 0 || !imageType(mediaType) || !positiveInt(width) || !positiveInt(height)) return refused('unavailable')
+        if (data.byteLength > bytes || width > edge || height > edge) continue
+        const encoded = Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64')
+        const gate = await authorize()
+        if (gate) return refused(gate)
+        active.throwIfAborted()
+        if (!live()) return refused('revoked')
+        // Check authority and emit the thumb in the same turn, before a channel can be reused.
+        reply({ ok: true, mediaType, width, height, data: encoded })
+        return
+      }
+      return refused('too-large')
+    })
+  }
+
+  async sendAttachments(entry, signal, { id, text = '', uploads: ids }, uploads, scope) {
+    const refuse = (reason, extra) => refused(reason, { id, ...extra })
+    if (!scope || !uploads || !validId(id) || typeof text !== 'string' || !Array.isArray(ids)
+      || ids.length < 1 || ids.length > 4 || !ids.every(validId) || new Set(ids).size !== ids.length) return refuse('invalid')
+    if (!scope.live() || signal.aborted) return refuse('not-watching')
+    if (bytes(text) > SEND_TEXT_MAX) return refuse('too-long')
+    const cleanedText = cleanChatText(text).text ?? ''
+    if (text && this.carriesSignInCode(text)) {
+      this.log('pocket chat: a send carried a sign-in code and was not sent')
+      return refuse('invalid', { message: 'sign-in-code' })
+    }
+    const prepare = () => uploads.prepare(scope, id, cleanedText, ids, () => this.attachmentOffer())
+    const initial = prepare()
+    if (initial.reason) return refuse(initial.reason)
+    let running = entry.running === true
+    try { running = (await this.adapter.state(entry.sessionId, signal))?.running === true } catch {}
+    const gate = await this.attachmentGate(scope, uploads, 'session-changed')
+    if (gate) return refuse(gate)
+    if (!scope.live() || signal.aborted) return refuse('revoked')
+    // State and authority reads can race cancellation, expiry and other watches' sends.
+    const { reason, manifest, repeat } = prepare()
+    if (reason) return refuse(reason)
+    try {
+      if (!repeat) uploads.recordManifest(manifest)
+    } catch {
+      this.log('pocket upload: refused')
+      return refuse('unavailable')
+    }
+    try {
+      const result = await this.adapter.prompt(entry.sessionId, {
+        requestId: manifest.requestId, text: cleanedText, receipts: manifest.receiptIds,
+      }, signal)
+      if (result?.accepted !== true) throw new Error('Pocket send refused')
+    } catch (error) {
+      this.log('pocket chat: a send was not accepted')
+      if (signal.aborted) return refuse('revoked')
+      const code = attachmentCode(error, true)
+      if (code === 'FILE_NOT_STAGED') return refuse('expired', { code })
+      return code ? refuse('rejected', { code }) : refuse('offline')
+    }
+    uploads.consume(scope, manifest)
+    return { ok: true, state: running ? 'queued' : 'sent', id, ...(repeat ? { repeat: true } : {}) }
   }
 
   /**
@@ -603,7 +822,8 @@ export class DshChatSource {
    * A known id is answered `sent` and prompts nothing: this memory, the Session log the follow
    * read, and DSH's own check (it skips a prompt whose request id the inbox or log holds).
    */
-  async send_(entry, live, signal, message) {
+  async send_(entry, live, signal, message, uploads, scope) {
+    if (message && Object.hasOwn(message, 'uploads')) return this.sendAttachments(entry, signal, message, uploads, scope)
     const id = message?.id
     if (typeof id !== 'string' || !PHONE_ID.test(id)) return refused('invalid', { message: 'id' })
     if (!live()) return refused('not-watching', { id })
@@ -914,6 +1134,18 @@ function ownSchedules(rt, reader) {
   }
 }
 
+function ownSettings(rt, reader) {
+  const { enabled, readable, run } = pocketSettingsOf(rt)
+  return {
+    enabled,
+    allowed(botId) {
+      if (!enabled() || !readable()) return 'unavailable'
+      return ownShownBot(rt, reader, botId)
+    },
+    run,
+  }
+}
+
 /**
  * Wire the source when the runtime has DSH 0.2.2's Session API and the team has a home; else
  * register nothing (the source is absent, and Pocket Link lists no DSH chats). With DSH's prompt
@@ -946,7 +1178,8 @@ export function install(rt) {
       source = new DshChatSource({
         adapter: createAdapter(controller), bots: ownBots(rt, reader), shown: reader.shown, registryIdOf: reader.registryIdOf,
         log: (...args) => rt.warn?.(...args), writable, chatOwner, management: ownMemory(rt, reader),
-        schedules: ownSchedules(rt, reader),
+        schedules: ownSchedules(rt, reader), settings: ownSettings(rt, reader),
+        fileUploads: () => ctx.get?.('fileUploads'), attachmentStore: () => ctx.get?.('attachments'),
         stopOf: (id, turn) => rt.stopLineOfTurn?.(id, turn),
         carriesSignInCode: text => rt.loginTextMatches?.(text) === true,
       })

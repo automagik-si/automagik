@@ -1,5 +1,6 @@
 // The /api channel answers a deliberate refusal by its own sentence (refusal(), code bot/refused):
-// connector, mail and Computer use validation, and the mail sign-in sentences mailError() fixes.
+// connector, mail and Computer use validation, the connector and Google mailbox sign-in answers,
+// and the mail sign-in sentences mailError() fixes.
 // A mail failure that names its server stays a plain error and answers by kind.
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -56,6 +57,9 @@ test('connector, mail and computer validation answer with their own sentences', 
     ['connector-remove', { id: 'notion' }, 'Only added connectors can be removed'],
     ['mail-account-add', { address: 'a@b', password: 'x' }, 'Enter an email address'],
     ['computer-takeover', { botId: 'nope' }, 'Unknown Bot'],
+    ['connector-connect', { id: 'github' }, 'No such connector'],
+    ['connector-sign-in-code', { id: 'notion', input: 'x' }, 'No sign-in is waiting'],
+    ['mail-sign-in-code', { input: 'x' }, 'No Google sign-in is waiting'],
   ]) {
     await t.test(endpoint, async () => {
       assert.deepEqual(await call(endpoint, payload), { ok: false, error: { code: 'bot/refused', message, details: {} } })
@@ -66,6 +70,9 @@ test('connector, mail and computer validation answer with their own sentences', 
 
 for (const [transportError, message] of [
   ['Unsafe Login', 'The mail service refused the login (Unsafe Login). Enable IMAP/SMTP in the mailbox settings and use its authorization code, not the account password.'],
+  ['SMTP connection timeout', 'SMTP connection timeout'],
+  ['The SMTP connection closed', 'The SMTP connection closed'],
+  ['The mail connection is closed', 'The mail connection is closed'],
   ['connect ECONNREFUSED 127.0.0.1:993', 'Something went wrong (Error).'],
 ]) {
   test(`mail-account-add answers ${transportError}`, async (t) => {

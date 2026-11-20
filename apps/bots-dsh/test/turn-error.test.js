@@ -475,3 +475,93 @@ test('a provider that is not in the catalog yet keeps a readable name in the key
   assert.equal(card.props.model.provider, 'deepseek-official')
   assert.equal(card.props.model.providerName, 'DeepSeek')
 })
+
+function withAccountSwitch(side) {
+  side.actions.cliLoginSwitch = async (...args) => { side.calls.push(['switch', ...args]) }
+  side.actions.refreshModels = async () => { side.calls.push(['refresh']) }
+  side.actions.openCliLogin = (...args) => { side.calls.push(['open', ...args]) }
+  return side
+}
+
+test('a current usage limit names the CLI from the code and offers Switch account before Retry', () => {
+  for (const [code, name, model] of [
+    ['ACP_CLAUDE_USAGE_LIMIT', 'Claude Code', 'acp-codex/default'],
+    ['ACP_CODEX_USAGE_LIMIT', 'Codex', 'acp-claude/default'],
+  ]) {
+    const side = withAccountSwitch(cell({ code, model }))
+    const tree = side.render()
+    assert.equal(textOf(walk(tree, node => node.props?.className === 'bt-fail-text')[0]), `${name} reached its usage limit.`)
+    const list = side.buttons(tree)
+    assert.deepEqual(labels(list), ['Switch account', 'Retry'])
+    assert.deepEqual(list.slice(0, 2).map(entry => entry.primary), [true, false])
+  }
+})
+
+test('confirmation switches only the CLI from the failure code and opens its sign-in once', async () => {
+  const side = withAccountSwitch(cell({ code: 'ACP_CODEX_USAGE_LIMIT', model: 'acp-claude/default', bot: { id: 'bot-1' } }))
+  side.buttons(side.render()).find(entry => entry.label === 'Switch account').node.props.onClick()
+  let tree = side.render()
+  assert.match(textOf(tree), /This stops running Bot work for this account\. Continue\?/)
+  assert.deepEqual(side.calls, [])
+  side.buttons(tree).find(entry => entry.label === 'Cancel').node.props.onClick()
+  assert.deepEqual(side.calls, [])
+  side.buttons(side.render()).find(entry => entry.label === 'Switch account').node.props.onClick()
+  tree = side.render()
+  const confirm = side.buttons(tree).find(entry => entry.label === 'Continue').node.props.onClick
+  confirm()
+  confirm()
+  await tick()
+  assert.deepEqual(side.calls, [['switch', 'bot-1', 'acp-codex'], ['refresh'], ['open', 'bot-1', 'acp-codex']])
+})
+
+test('a settled usage limit offers only a small switch in the current part on the saved provider', () => {
+  const side = withAccountSwitch(cell({ code: 'ACP_CODEX_USAGE_LIMIT', model: 'acp-codex/default', later: true }))
+  let tree = side.render()
+  assert.equal(tree.props['data-settled'], '')
+  assert.deepEqual(labels(side.buttons(tree)), ['Switch account'])
+  assert.equal(side.buttons(tree)[0].node.props.className, 'bt-soft bt-soft-sm')
+  side.bot.model = 'acp-claude/default'
+  tree = side.render()
+  assert.deepEqual(labels(side.buttons(tree)), [])
+
+  const old = withAccountSwitch(cell({ code: 'ACP_CODEX_USAGE_LIMIT', model: 'acp-codex/default', sessionId: 'old-part', bot: { sessionId: 'new-part', parts: ['old-part', 'new-part'] } }))
+  assert.deepEqual(labels(old.buttons(old.render())), [])
+})
+
+test('both switch actions are needed and Retry follows its existing rules', () => {
+  for (const action of ['cliLoginSwitch', 'openCliLogin']) {
+    const side = withAccountSwitch(cell({ code: 'ACP_CLAUDE_USAGE_LIMIT' }))
+    delete side.actions[action]
+    assert.deepEqual(labels(side.buttons(side.render())), ['Retry'])
+  }
+  const hidden = withAccountSwitch(cell({ code: 'ACP_CLAUDE_USAGE_LIMIT', asked: true }))
+  assert.deepEqual(labels(hidden.buttons(hidden.render())), ['Switch account'])
+  const noResume = withAccountSwitch(cell({ code: 'ACP_CLAUDE_USAGE_LIMIT' }))
+  delete noResume.actions.resume
+  assert.deepEqual(labels(noResume.buttons(noResume.render())), ['Switch account'])
+})
+
+test('a switch refusal shows the host sentence and opens no sign-in', async () => {
+  const side = withAccountSwitch(cell({ code: 'ACP_CLAUDE_USAGE_LIMIT' }))
+  const sentence = 'The Bot account cannot be changed from this session. Use the app on this computer.'
+  side.actions.cliLoginSwitch = async () => { throw new Error(sentence) }
+  side.buttons(side.render()).find(entry => entry.label === 'Switch account').node.props.onClick()
+  await side.buttons(side.render()).find(entry => entry.label === 'Continue').node.props.onClick()
+  const [problem] = walk(side.render(), node => node.props?.className === 'bt-fail-error')
+  assert.equal(textOf(problem), sentence)
+  assert.deepEqual(side.calls, [])
+})
+
+test('switching opens sign-in when refresh is unavailable, and a settled card needs both actions', async () => {
+  const current = withAccountSwitch(cell({ code: 'ACP_CODEX_USAGE_LIMIT' }))
+  delete current.actions.refreshModels
+  current.buttons(current.render()).find(entry => entry.label === 'Switch account').node.props.onClick()
+  await current.buttons(current.render()).find(entry => entry.label === 'Continue').node.props.onClick()
+  assert.deepEqual(current.calls, [['switch', current.bot.id, 'acp-codex'], ['open', current.bot.id, 'acp-codex']])
+
+  for (const action of ['cliLoginSwitch', 'openCliLogin']) {
+    const settled = withAccountSwitch(cell({ code: 'ACP_CODEX_USAGE_LIMIT', model: 'acp-codex/default', later: true }))
+    delete settled.actions[action]
+    assert.deepEqual(labels(settled.buttons(settled.render())), [])
+  }
+})

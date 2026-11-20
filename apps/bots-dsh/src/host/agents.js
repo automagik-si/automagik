@@ -983,6 +983,8 @@ export function install(rt) {
       }
       void rt.save().catch(error => rt.warn('ds-bot: saving a task failed: %s', error))
     } else if (event?.type === 'turn/end') {
+      // RFC 0039 delivery 3: the team and task record this end happens in, at event time.
+      const gen = rt.teamGeneration?.()
       // A restart cut the turn: the task is not done. resume.js sets it going again, or
       // ends it as stopped when it will not.
       if (rt.cutByRestart?.(event.data?.reason)) return
@@ -994,28 +996,53 @@ export function install(rt) {
         && routeOf(provider).connectedBy === 'acp'
       const stopped = reason?.kind === 'aborted' || cancelled
       const failed = reason?.kind === 'error' && !stopped
-      task.status = failed ? 'failed' : stopped ? 'stopped' : 'done'
-      task.endedAt = Date.now()
+      let status = failed ? 'failed' : stopped ? 'stopped' : 'done'
+      let endedAt = Date.now()
       const words = lastWords.get(id) ?? ''
       lastWords.delete(id)
       const problem = event.data?.reason?.error?.message || 'unknown error'
-      task.summary = (failed ? problem : words || (stopped ? 'Stopped before it finished.' : ''))
+      let summary = (failed ? problem : words || (stopped ? 'Stopped before it finished.' : ''))
         .slice(0, TASK_SUMMARY_MAX)
-      void rt.save().catch(error => rt.warn('ds-bot: saving a task failed: %s', error))
-      if (rt.botOf(task.from) === undefined) return
-      const said = failed ? `It failed: ${problem}`
-        : stopped ? `It was stopped before it finished.${words ? ` Its last words: ${words}` : ''}`
-        : words || 'It ended without a reply.'
-      // A task a group Session asked for reports into that group, where the user saw the
-      // request: the report arrives as a group post, not as an orphan in the Bot's own
-      // chat. A task whose caller named a report group (`reportRoomId`) reports there the
-      // same way. A group or Session that is gone falls back to the Bot's own chat.
-      const roomId = task.reportRoomId ?? task.roomId
-      const room = roomId === undefined ? undefined : rt.roomOf(roomId)
-      const inRoom = room !== undefined && room.members?.includes(task.from) ? room.sessions?.[task.from] : undefined
-      if (task.reportRoomId !== undefined && inRoom === undefined) rt.warn('ds-bot: the report of task %s goes to its Bot\'s own chat: the group %s is gone or the Bot has no Session there', task.title, task.reportRoomId)
-      void rt.deliver({ toId: task.from, ...(inRoom !== undefined ? { sessionId: inRoom, roomId: room.id } : {}), text: said.slice(0, TASK_REPORT_MAX), role: 'task-done', note: task.title, taskSessionId: id })
+      let delivery
+      let written = false
+      if (rt.botOf(task.from) !== undefined) {
+        const said = failed ? `It failed: ${problem}`
+          : stopped ? `It was stopped before it finished.${words ? ` Its last words: ${words}` : ''}`
+          : words || 'It ended without a reply.'
+        // A task reports to the group that asked for it, falling back to the Bot's own chat.
+        const roomId = task.reportRoomId ?? task.roomId
+        const room = roomId === undefined ? undefined : rt.roomOf(roomId)
+        const inRoom = room !== undefined && room.members?.includes(task.from) ? room.sessions?.[task.from] : undefined
+        if (task.reportRoomId !== undefined && inRoom === undefined) rt.warn('ds-bot: the report of task %s goes to its Bot\'s own chat: the group %s is gone or the Bot has no Session there', task.title, task.reportRoomId)
+        const key = `task:${id}`
+        const prior = rt.wakeLog?.byKey(key)
+        if (prior !== undefined) {
+          if (prior.outcome !== undefined) ({ status, endedAt, summary } = prior.outcome)
+        } else {
+          const exchangeId = rt.wakeLog && randomUUID()
+          const report = { role: 'task-done', note: task.title, text: said.slice(0, TASK_REPORT_MAX), taskSessionId: id }
+          written = rt.wakeLog?.intent({
+            id: exchangeId, kind: 'task-report', botId: task.from, key,
+            sessionId: inRoom ?? rt.chatOf(task.from),
+            ...(inRoom !== undefined ? { roomId: room.id, returnRoomId: room.id } : {}),
+            report, outcome: { status, endedAt, summary },
+          }) === 'written'
+          delivery = { toId: task.from, ...report, ...(inRoom !== undefined ? { sessionId: inRoom, roomId: room.id } : {}),
+            ...(exchangeId ? { exchangeId } : {}), ...(written ? { wake: true } : {}) }
+        }
+      }
+      Object.assign(task, { status, endedAt, summary })
+      // RFC 0039 delivery 3: publish after this end's own write commits, while its team and task record still hold.
+      void rt.save().then((committed) => {
+        const valid = () => rt.sameTeam?.(gen) === true && state.tasks?.[id] === task && task.status === status
+        if (committed === true && valid()) return rt.endApprovals?.(id, 'task', { task }, valid)
+      }, error => rt.warn('ds-bot: saving a task failed: %s', error))
+        .catch(error => rt.warn('ds-bot: the asks of task %s were not withdrawn: %s', id, error))
+      if (delivery === undefined) return
+      const options = written ? rt.wakeLog.firstOptions(delivery.exchangeId) : undefined
+      void rt.deliver(delivery, options)
         .catch(error => rt.warn('ds-bot: the report of task %s did not reach its Bot: %s', task.title, error?.message ?? error))
+        .finally(() => { if (written) rt.wakeLog.firstFinished(delivery.exchangeId) })
     }
   })
 

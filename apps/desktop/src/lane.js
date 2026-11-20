@@ -37,7 +37,7 @@ export const LANE_URL = 'https://github.com/automagik-si/automagik/releases/down
 // versions, and its base is the oldest app it runs on. Automagik's lane also carries the add-ons
 // the profile pins that have no dependencies of their own (its `addons`, scripts/lane.ts
 // LANE_ADDONS), so a pin move needs no new app either. Besides the profile's own three, it updates
-// the Automagik plugins a person added from the market (Portuguese). It names no Unfold plugin:
+// the Automagik plugins a person added from the market (Portuguese and Vault). It names no Unfold plugin:
 // none is preinstalled and this lane does not carry them, Unfold's own release ships them
 // (Refs marketplace/unfold); an installed one is left exactly as it is, as Genie's lane does
 // Genie; a plugin that is not installed is never taken. A lane patch never changes what a plugin
@@ -49,7 +49,7 @@ export const LANE_URL = 'https://github.com/automagik-si/automagik/releases/down
 // no more than this: a dependency whose package folder was found from the plugin's folder before
 // the swap is still found after it, or the swap is undone (lostDependencies). What a carried
 // package holds is not looked at again: it is a copy of the one that worked.
-export const AUTOMAGIK_PLUGINS = Object.freeze(['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh', '@automagik/locale-pt-br-dsh'])
+export const AUTOMAGIK_PLUGINS = Object.freeze(['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh', '@automagik/locale-pt-br-dsh', '@automagik/vault-dsh'])
 export const PUBLISHERS = Object.freeze([
   { publisher: 'automagik', url: LANE_URL, keys: LANE_KEYS.automagik, sameLine: true, plugins: AUTOMAGIK_PLUGINS },
   { publisher: 'genie', url: 'https://raw.githubusercontent.com/automagik-si/genie/lane/lane.json', keys: LANE_KEYS.genie, sameLine: false, plugins: ['@automagik/genie-dsh'] },
