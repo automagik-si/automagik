@@ -56,7 +56,7 @@ async function rawRequest(port, line, headers, body = '') {
 }
 const websocketHeaders = { origin: ORIGIN, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': randomBytes(16).toString('base64'), 'sec-websocket-version': '13' }
 
-async function fixture(t) {
+async function fixture(t, { handleRequest, handleUpgrade } = {}) {
   let now = 1000
   const state = store(t, { now: () => now })
   const owner = createOwner(state.dir)
@@ -77,6 +77,7 @@ async function fixture(t) {
     }
     seen.push({ url: req.url, headers: req.headers, method: req.method })
     if (req.headers.cookie !== `dsh-credential=${generation}`) { res.writeHead(401).end(); return }
+    if (handleRequest?.(req, res)) return
     let body = ''
     req.on('data', chunk => { body += chunk })
     req.on('end', () => res.writeHead(200, { 'set-cookie': 'dsh-hidden=secret', 'content-type': 'text/plain' }).end(body || 'DSH'))
@@ -87,6 +88,7 @@ async function fixture(t) {
     socket.on('error', () => {})
     socket.on('end', () => socket.end())
     if (req.headers.cookie !== `dsh-credential=${generation}`) { socket.end('HTTP/1.1 401 Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'); return }
+    if (handleUpgrade?.(req, socket)) return
     socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSet-Cookie: dsh-hidden=secret\r\n\r\n')
     socket.on('data', data => { entry.chunks.push(data.toString()); socket.write(data) })
   })
@@ -742,4 +744,135 @@ test('gate handlers refuse private paths and revoked owner families before reque
     } finally { await gate.closeGate() }
   }
   assert.deepEqual(events, [])
+})
+
+test('owner browser requests cannot reach the DSH /connect exchange', async t => {
+  const f = await fixture(t)
+  for (const path of ['/connect', '/connect?next=x', '/x/../connect', '/%2E/connect']) {
+    assert.equal(new URL(path, ORIGIN).pathname, '/connect', path)
+    assert.equal((await request(f.gatePort, path, { headers: { ...websocketHeaders, ...f.headers }, upgrade: true })).status, 401, path)
+  }
+  assert.equal(f.exchanges(), 0)
+  assert.equal(f.seen.length, 0)
+  assert.equal((await request(f.gatePort, '/connect', { headers: f.headers })).status, 401)
+  assert.equal(f.exchanges(), 0)
+  assert.equal(f.seen.length, 0)
+})
+
+test('/connect upgrades preserve role refusals with multiuser on and off', async t => {
+  const f = await callerFixture(t)
+  for (const port of [f.gatePort, await f.makeGate(false)]) {
+    for (const [role, status] of [['owner', 401], ['admin', 401], ['member', 403], ['guest', 403]]) {
+      const { headers } = f.issue(role)
+      const response = await request(port, '/connect', { headers: { ...websocketHeaders, ...headers }, upgrade: true })
+      assert.equal(response.status, status, role)
+    }
+    assert.deepEqual(f.cookieCalls, [])
+    assert.deepEqual(f.seen, [])
+    assert.deepEqual(f.signs, [])
+  }
+})
+
+test('a late owner HTTP 401 clears the cookie without minting after revocation', async t => {
+  const held = Promise.withResolvers()
+  const f = await fixture(t, { handleRequest(req, res) {
+    if (req.url !== '/held') return false
+    held.resolve(res)
+    return true
+  } })
+  const mint = t.mock.method(f.credentials, 'mint')
+  const response = request(f.gatePort, '/held', { headers: f.headers })
+  const upstream = await Promise.race([held.promise, response.then(() => assert.fail('DSH did not hold the request'))])
+  assert.equal(mint.mock.callCount(), 1)
+  f.sessions.revoke(f.issued.family)
+  upstream.writeHead(401).end()
+  assert.equal((await response).status, 401)
+  assert.equal(mint.mock.callCount(), 1)
+  assert.equal(f.credentials.cached, undefined)
+  const next = f.sessions.issue(ORIGIN, f.principal)
+  assert.equal((await request(f.gatePort, '/', { headers: { ...f.headers, cookie: `${COOKIE}=${next.secret}` } })).status, 200)
+  assert.equal(mint.mock.callCount(), 2)
+})
+
+test('an owner upgrade 401 leaves minting to the next authorized request', async t => {
+  const f = await fixture(t)
+  const mint = t.mock.method(f.credentials, 'mint')
+  assert.equal((await request(f.gatePort, '/', { headers: f.headers })).status, 200)
+  assert.equal(mint.mock.callCount(), 1)
+  f.restart()
+  const response = await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...f.headers }, upgrade: true })
+  assert.equal(response.status, 401)
+  assert.equal(mint.mock.callCount(), 1)
+  assert.equal(f.credentials.cached, undefined)
+  assert.equal((await request(f.gatePort, '/', { headers: f.headers })).status, 200)
+  assert.equal(mint.mock.callCount(), 2)
+})
+
+test('revoking an owner while DSH holds the upgrade closes the client without minting', async t => {
+  const held = Promise.withResolvers()
+  const f = await fixture(t, { handleUpgrade() { held.resolve(); return true } })
+  const mint = t.mock.method(f.credentials, 'mint')
+  const headers = Object.entries({ host: HOST, ...websocketHeaders, ...f.headers }).map(([name, value]) => `${name}: ${value}`)
+  const socket = net.connect({ host: DSH_HOST, port: f.gatePort })
+  socket.setTimeout(5000, () => socket.destroy(new Error('Raw test request timed out')))
+  socket.setEncoding('utf8')
+  let received = ''
+  let status
+  socket.on('data', chunk => {
+    if (status !== undefined) return
+    received += chunk
+    const match = /^HTTP\/1\.1 (\d+)(?=[ \r\n])/.exec(received)
+    if (match) status = Number(match[1])
+  })
+  const response = once(socket, 'close').catch(error => {
+    if (error.code !== 'ECONNRESET') throw error
+  })
+  socket.write(['GET /api/remote.mux HTTP/1.1', ...headers, '', ''].join('\r\n'))
+  await Promise.race([held.promise, response.then(() => assert.fail('DSH did not hold the upgrade'))])
+  assert.equal(mint.mock.callCount(), 1)
+  f.sessions.revoke(f.issued.family)
+  await response
+  assert.notEqual(status, 101)
+  assert.equal(mint.mock.callCount(), 1)
+  await f.seen[0].closed
+})
+
+test('an owner upgrade 401 that arrives after the family went inactive starts no mint', async t => {
+  const f = await fixture(t, { handleUpgrade(_req, socket) {
+    socket.end('HTTP/1.1 401 Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+    return true
+  } })
+  const mint = t.mock.method(f.credentials, 'mint')
+  const originalRequest = http.request
+  t.mock.method(http, 'request', (options, ...args) => {
+    const req = originalRequest(options, ...args)
+    if (options.hostname === DSH_HOST && options.port === f.credentials.port && options.method === 'GET' && options.path === '/api/remote.mux') {
+      req.prependOnceListener('response', () => f.advance(13 * 60 * 60 * 1000))
+    }
+    return req
+  })
+  const response = await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...f.headers }, upgrade: true })
+  response.socket?.destroy()
+  assert.equal(f.sessions.active(f.issued.family), false, 'the family went inactive before the 401')
+  assert.equal(response.status, 401)
+  assert.equal(f.seen.length, 1)
+  assert.equal(f.credentials.cached, undefined)
+  // On origin/dev, the upgrade response callback calls credentials.cookie(true), starting a second mint.
+  assert.equal(mint.mock.callCount(), 1)
+})
+
+test('DshCredentials invalidates only the matching cached cookie without exchanging', async t => {
+  const f = await fixture(t)
+  const cookie = await f.credentials.cookie()
+  assert.equal(f.exchanges(), 1)
+  f.credentials.invalidate('other')
+  assert.equal(f.credentials.cached, cookie)
+  assert.equal(f.exchanges(), 1)
+  f.credentials.invalidate(cookie)
+  assert.equal(f.credentials.cached, undefined)
+  assert.equal(f.credentials.pending, undefined)
+  assert.equal(f.exchanges(), 1)
+  f.restart()
+  assert.notEqual(await f.credentials.cookie(), cookie)
+  assert.equal(f.exchanges(), 2)
 })

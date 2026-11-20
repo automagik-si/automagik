@@ -110,6 +110,7 @@ function refuseSocket(socket, status = 401) {
 
 const ownerEquivalent = family => family.principal.roles.some(role => role === 'owner' || role === 'admin')
 const apiPath = path => path === '/api' || path.startsWith('/api/')
+const exchangePath = url => url.pathname === '/connect'
 
 export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, multiuser = false, caller, auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
   if (multiuser && !caller) throw new Error('Multiuser requires a caller signer')
@@ -313,13 +314,13 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       }
       // The gate-held browser credential also admits DSH's /api and WebSocket owner peer.
       // /connect is a DSH bearer exchange, never a second browser sign-in path.
-      if (url.pathname === '/connect') { answer(res, 401, { error: 'Session exchanges belong to the gate' }); return }
+      if (exchangePath(url)) { answer(res, 401, { error: 'Session exchanges belong to the gate' }); return }
       const owner = ownerEquivalent(family)
       if (!owner && !multiuser) { answer(res, 403, { error: 'Owner access required' }); return }
       if (!sessions.active(family)) { answer(res, 401, { error: 'Session required' }); return }
-      let path = req.url, headers
+      let path = req.url, headers, cookie
       if (owner) {
-        const cookie = await credentials.cookie()
+        cookie = await credentials.cookie()
         if (!sessions.active(family) || res.destroyed) { answer(res, 401, { error: 'Session required' }); return }
         headers = upstreamHeaders(req, credentials, cookie, family.principal)
       } else {
@@ -335,8 +336,9 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         headers = callerHeaders(req, credentials, family.principal, assertion)
       }
       const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: req.method, path, headers, timeout: 30_000 }, upstream => {
-        // Refresh credentials for the next owner request on 401. Never replay a mutating body.
-        if (owner && upstream.statusCode === 401) credentials.cookie(true).catch(() => {})
+        // A 401 drops the refused cookie. The next owner request checks its family before minting.
+        // Never replay a body.
+        if (owner && upstream.statusCode === 401) credentials.invalidate(cookie)
         res.writeHead(upstream.statusCode, responseHeaders(upstream.headers))
         upstream.pipe(res)
         upstream.on('error', () => res.destroy())
@@ -367,6 +369,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       if (multiuser && isMcpTarget(req.url)) { refuseSocket(socket, 403); return }
       if (!req.url.startsWith('/') || req.url.startsWith('//') || new URL(req.url, origin).searchParams.has('token') || req.headers.upgrade?.toLowerCase() !== 'websocket') { refuseSocket(socket); return }
       if (!ownerEquivalent(family)) { refuseSocket(socket, 403); return }
+      if (exchangePath(new URL(req.url, origin))) { refuseSocket(socket, 401); return }
       if (!sessions.active(family)) { refuseSocket(socket, 401); return }
       const cookie = await credentials.cookie()
       if (!sessions.active(family) || socket.destroyed) { refuseSocket(socket); return }
@@ -379,7 +382,8 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       proxy.on('timeout', () => proxy.destroy())
       proxy.on('response', response => {
         response.resume()
-        if (response.statusCode === 401) credentials.cookie(true).catch(() => {})
+        // Drop the refused cookie and leave minting to a later request that passes its activity check.
+        if (response.statusCode === 401) credentials.invalidate(cookie)
         refuseSocket(socket, response.statusCode === 401 ? 401 : 502)
       })
       proxy.on('upgrade', (response, upstream, upstreamHead) => {

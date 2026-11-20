@@ -30,6 +30,8 @@ export class DshCredentials {
     if (!this.pending) this.pending = this.mint().finally(() => { this.pending = undefined })
     return this.pending
   }
+  // Drop only the refused credential, preserving any newer cookie and in-flight mint without starting an exchange.
+  invalidate(stale) { if (this.cached === stale) this.cached = undefined }
   async mint() {
     const launch = new URL(readFileSync(this.launchFile, 'utf8').trim())
     const value = launch.searchParams.get('token')
