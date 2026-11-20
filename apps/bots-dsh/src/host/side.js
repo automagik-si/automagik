@@ -299,6 +299,7 @@ export function install(rt) {
       const snapshot = snapshotOf(agent.session, ctx.get?.('sessionProjections'))
       const route = snapshot.header?.config
       if (!route?.provider || !route?.model) throw refusal('This Bot has not called a model yet. Send a normal message first.')
+      rt.assertBotRunnerProvider?.(route.provider, sessionId, agent)
       if (chat === undefined) {
         chat = newChat(botId)
         list.push(chat)

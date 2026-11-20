@@ -16,6 +16,7 @@
 // it started, or that is called while still at earlier work, lets the round go on. Its
 // turn keeps running in its group Session, and what it ends with is posted to the group,
 // where the member that asked for it answers.
+import { isBotGroupPost, NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
@@ -473,6 +474,7 @@ export function install(rt) {
         await rt.ensureCapabilities(known)
         return { id: known, brief: undefined }
       }
+      rt.assertBotRunnerProvider?.(member.model, rt.chatOf(member.id))
       // A saved level DSH no longer offers refuses the member's first turn here before a
       // Session is made for it.
       rt.assertLevelOffered?.(room.permission ?? member.permission)
@@ -518,8 +520,9 @@ export function install(rt) {
       await rt.applyToolDeny(member, [id])
         .catch(error => rt.warn('ds-bot: tool deny for %s in %s not applied: %s', member.name, room.name, error?.message ?? error))
       delete room.seen[member.id]
-      const ref = await rt.desiredModel(member, { sessionId: id })
+      const ref = await rt.desiredModel(member, { sessionId: id, noCommands: rt.botRunnerRequired?.(id) })
       if (ref !== undefined) {
+        rt.assertBotRunnerProvider?.(ref, id)
         const effort = await rt.desiredEffort(member, ref)
         try {
           await rt.selectSessionModel(id, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
@@ -1200,7 +1203,8 @@ export function install(rt) {
       const own = batchOfSlot(room.id, slot)
       if (own !== undefined) leaveBatch(room, own, member.id)
       round.failed.push(member.name)
-      noteFailure(room, member, { code: error?.levelNotSet === true ? 'PERMISSION' : 'SESSION', message: String(error?.message ?? error).slice(0, 300) })
+      const code = error?.code === NO_BOT_RUNNER ? NO_BOT_RUNNER : error?.levelNotSet === true ? 'PERMISSION' : 'SESSION'
+      noteFailure(room, member, { code, message: String(error?.message ?? error).slice(0, 300) })
       return
     }
     if (session === undefined) {
@@ -2157,7 +2161,12 @@ export function install(rt) {
       const roundId = `${Date.now()}-${randomUUID()}`
       // Only for a group made under the PTC preset, which can call nothing but run_code;
       // new group Sessions get the standard preset.
-      const [name, args] = declared.has('run_code') && !declared.has('group_relay')
+      const usePtc = declared.has('run_code') && !declared.has('group_relay')
+      if (usePtc && rt.botRunnerRequired !== undefined) {
+        const previousStep = options.messages.findLastIndex(message => message.role === 'assistant' || message.role === 'tool')
+        if (options.messages.slice(previousStep + 1).some(message => isBotGroupPost(rt, message))) throw noBotRunner()
+      }
+      const [name, args] = usePtc
         ? ['run_code', JSON.stringify({ description: `Relay the group chat to its Bots (${roundId})`, code: `return await tools.group_relay({ roundId: ${JSON.stringify(roundId)} })`, timeoutMs: 600_000 })]
         : ['group_relay', JSON.stringify({ roundId })]
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }

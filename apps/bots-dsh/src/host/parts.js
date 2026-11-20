@@ -14,6 +14,7 @@
 // The next part opens with the handoff package: the note, the latest messages word for
 // word, and where the rest is. Input that arrives meanwhile waits and moves along.
 // read_own_chat searches every part, the condensed messages included.
+import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -312,9 +313,10 @@ export function install(rt) {
 
   // Lines for the model the Session last routed to; undefined while it has not
   // routed yet.
-  async function contextLines(session) {
+  async function contextLines(session, { inspect = false } = {}) {
     const route = session.requestHeader()?.config
     if (!route?.provider || !route?.model) return undefined
+    if (!inspect) rt.assertBotRunnerProvider?.(route.provider, session.id)
     const info = await ctx.llm.resolveModelInfo(route.provider, route.model)
     return linesFor({ window: info.context?.contextWindow, reserve: route.maxTokens ?? info.defaultMaxTokens, checkRatio: policyOf(session.id).checkRatio })
   }
@@ -555,10 +557,13 @@ export function install(rt) {
   // from cache. A chat on an agent over ACP cannot take a request beside its turn (the agent
   // answers only in its own chat), so they run on the team's background model then, with that
   // model's own effort and output limit. No background model: the route as it is.
-  async function asideRoute(route) {
-    if (!route?.provider || !route?.model || rt.answersAside?.(`${route.provider}/${route.model}`) !== false) return route
-    const background = splitRef(await rt.backgroundModel?.())
-    return background === undefined ? route : { provider: background.provider, model: background.model }
+  async function asideRoute(route, sessionId) {
+    if (!route?.provider || !route?.model) return route
+    const resolved = rt.answersAside?.(`${route.provider}/${route.model}`) === false
+      ? splitRef(await rt.backgroundModel?.(sessionId)) ?? route
+      : route
+    rt.assertBotRunnerProvider?.(resolved.provider, sessionId)
+    return resolved
   }
 
   // A Bot whose only models are agents over ACP has no route that answers a request
@@ -567,7 +572,7 @@ export function install(rt) {
   // answers aside; otherwise they are skipped, and noted once per Session.
   const asideSkipped = new Set()
   async function asideReady(session, what) {
-    const route = await asideRoute(session.requestHeader()?.config)
+    const route = await asideRoute(session.requestHeader()?.config, session.id)
     if (!route?.provider || !route?.model || rt.answersAside?.(`${route.provider}/${route.model}`) !== false) return true
     if (!asideSkipped.has(session.id)) {
       asideSkipped.add(session.id)
@@ -644,10 +649,10 @@ export function install(rt) {
   // The team's own pick of a background model (prefs.backgroundModel), when it is the
   // one that runs. The automatic pick (pickDefault) does not authorise a paid checkpoint
   // the person was never told about (D19).
-  async function explicitBackground() {
+  async function explicitBackground(sessionId) {
     const chosen = state.prefs?.backgroundModel
     if (typeof chosen !== 'string' || chosen === '') return undefined
-    return chosen === await rt.backgroundModel?.() ? splitRef(chosen) : undefined
+    return chosen === await rt.backgroundModel?.(sessionId) ? splitRef(chosen) : undefined
   }
 
   // Undefined: the guard passes (below the threshold, or a checkpoint on the explicit
@@ -659,8 +664,9 @@ export function install(rt) {
     const { threshold, header } = target
     const tokens = destinationTokens(agent, header, { prune: true })
     if (typeof tokens !== 'number' || tokens < threshold) return undefined
-    const background = await explicitBackground()
+    const background = await explicitBackground(agent.session.id)
     if (background !== undefined && await asideReady(agent.session, 'switch checkpoint')) {
+      rt.assertBotRunnerProvider?.(background.provider, agent.session.id, agent)
       const info = await ctx.llm.resolveModelInfo(background.provider, background.model, payload.signal).catch(() => undefined)
       const window = info?.context?.contextWindow
       const own = tokensOf(agent.session)
@@ -741,7 +747,7 @@ export function install(rt) {
     const session = agent.session
     if (!await asideReady(session, 'handoff note')) throw noAside()
     const header = session.requestHeader()
-    const route = await asideRoute(header?.config)
+    const route = await asideRoute(header?.config, session.id)
     if (!route?.provider || !route?.model) throw new Error('the Session has not called a model yet')
     const messages = session.deriveMessages()
     const base = folder ? FOLDER_PROMPT : HANDOFF_PROMPT
@@ -781,7 +787,7 @@ export function install(rt) {
     if (job !== undefined) assertCheckpoint(job)
     signal?.throwIfAborted()
     if (!await asideReady(session, 'checkpoint')) throw noAside()
-    const route = await asideRoute(session.requestHeader()?.config)
+    const route = await asideRoute(session.requestHeader()?.config, session.id)
     if (!route?.provider || !route?.model) throw new Error('the Session has not called a model yet')
     // The results list grows with the work, so the checkpoint may write as much as one
     // of the Bot's own replies.
@@ -833,7 +839,7 @@ export function install(rt) {
     const routes = [{ provider: route.provider, model: route.model, ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {}) }]
     if (forSwitch) {
       const bot = rt.selfOf(session.id) === undefined ? undefined : rt.botOf(rt.selfOf(session.id))
-      const ref = bot === undefined ? undefined : await Promise.resolve(rt.desiredModel?.(bot)).catch(() => undefined)
+      const ref = bot === undefined ? undefined : await Promise.resolve(rt.desiredModel?.(bot, { noCommands: rt.botRunnerRequired?.(session.id) })).catch(() => undefined)
       const wanted = splitRef(ref)
       if (wanted !== undefined && routes.every(one => one.provider !== wanted.provider || one.model !== wanted.model)) routes.push(wanted)
     }
@@ -877,7 +883,7 @@ export function install(rt) {
   async function askSteward(agent, { midTurn }) {
     const session = agent.session
     if (!await asideReady(session, 'context steward')) return undefined
-    const route = await asideRoute(session.requestHeader()?.config)
+    const route = await asideRoute(session.requestHeader()?.config, session.id)
     if (!route?.provider || !route?.model) return undefined
     const group = placeOf(agent.id)?.roomId !== undefined
     const lines = []
@@ -914,6 +920,7 @@ export function install(rt) {
       if (action !== undefined) return action
       rt.warn('omni-ui: the context steward gave no usable answer for %s; moving on to a fresh part', agent.id)
     } catch (error) {
+      if (error?.code === NO_BOT_RUNNER) throw error
       rt.warn('omni-ui: the context steward failed for %s; moving on to a fresh part: %s', agent.id, error)
     }
     return 'switch'
@@ -937,6 +944,7 @@ export function install(rt) {
         : engine.compactNow(agent, AbortSignal.timeout(NOTE_TIMEOUT_MS)))
       if (result === null) return false
     } catch (error) {
+      if (error?.code === NO_BOT_RUNNER) throw error
       if (!inTurn && (error?.code === 'busy' || error?.code === 'cancelled')) return undefined
       rt.warn('omni-ui: condensing %s failed: %s', agent.id, error)
       return false
@@ -1106,6 +1114,7 @@ export function install(rt) {
     if (target === undefined || messages.length === 0) return
     await rt.ensureCapabilities(target)
     const agent = await rt.resolveAgent(target)
+    rt.assertBotRunnerProvider?.(currentProvider(agent), target, agent)
     // A retry after a forward that stopped halfway must not deliver the same input twice.
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
     for (const message of messages) {
@@ -1133,6 +1142,7 @@ export function install(rt) {
   // would fail the same way, so an unloaded failure is noted once at info instead.
   const unloaded = error => ctx.fiber?.uid === null || /in inactive context/.test(String(error?.message ?? error))
   const noteInfo = (template, ...args) => { try { ctx.logger.info(template, ...args) } catch {} }
+  const currentProvider = agent => agent.model?.current?.()?.provider ?? agent.session.requestHeader?.()?.config?.provider
 
   // A message's inbox boundary, the same one forward() delivers it to.
   const inboxTargetOf = message => (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND || message.source?.kind === REPLY_KIND ? 'next-turn' : 'next-step')
@@ -1295,6 +1305,7 @@ export function install(rt) {
       const place = placeOf(agentId)
       if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
       const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
+      job.noCommands = rt.botRunnerRequired?.(agentId, agent) === true
       switches.set(agentId, job)
       const running = runSwitch(agent, job)
       // Settles once the move is over, either way: a fresh part's first answer or failure
@@ -1302,6 +1313,7 @@ export function install(rt) {
       job.done = running.then(() => {}, () => {})
       void running
         .catch(error => {
+          job.runnerRefused = error?.code === NO_BOT_RUNNER
           const name = rt.botOf(job.botId)?.name ?? rt.roomOf(job.roomId)?.name ?? agent.id
           if (unloaded(error)) return noteInfo('omni-ui: plugin unloaded while %s switched parts; input kept in part %s', name, agent.id)
           rt.warn('omni-ui: %s did not move on to a fresh part: %s', name, error)
@@ -1323,9 +1335,17 @@ export function install(rt) {
             }
             if (folder) folderRetry.set(agent.id, Date.now() + FOLDER_RETRY_MS)
             if (!job.noteFailed) partBase.set(agent.id, tokensOf(agent.session) ?? 0)
+            const back = job.carry.splice(0)
+            if (job.runnerRefused) {
+              restore(agent, back)
+              if (job.marked) {
+                delete state.switching[agent.id]
+                await rt.save()
+              }
+              return
+            }
             // The stopped turn goes on where it was. A retry finds the note among the
             // input this part kept, so it is added once.
-            const back = job.carry.splice(0)
             const noted = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => textOf(message.content) === PAUSE_NOTE)
             if (resume && !back.some(message => textOf(message.content) === PAUSE_NOTE) && !noted) {
               const carried = job.joined?.length ? { joined: job.joined } : {}
@@ -1376,9 +1396,11 @@ export function install(rt) {
   }
 
   async function runSwitch(agent, job) {
+    if (job.noCommands) job.admittedRoute = await freshRoute(rt.botOf(job.botId), agent.session, job.target, true)
     // Marks the part while the switch runs; it stays marked whenever input was put
     // back, so a restart knows where to look without resolving every earlier part.
     state.switching[agent.id] = job.roomId === undefined ? { botId: job.botId } : { botId: job.botId, roomId: job.roomId }
+    job.marked = true
     await rt.save()
     try {
       for (let attempt = 1; ; attempt += 1) {
@@ -1579,7 +1601,9 @@ export function install(rt) {
       // the durable archivePending marker covers a host restart.
       else if (rt.cutByRestart?.(event.data?.reason)) return
       else if (event.data?.reason?.kind === 'error') {
-        if (entry.fellBack !== true && !switchFailure(turnFailure(event.data.reason.error)) && rt.fallbackArmed?.(session.id) === true) {
+        const failure = turnFailure(event.data.reason.error)
+        if (failure.code === NO_BOT_RUNNER) return
+        if (entry.fellBack !== true && !switchFailure(failure) && rt.fallbackArmed?.(session.id) === true) {
           entry.fellBack = true
           return
         }
@@ -1593,11 +1617,21 @@ export function install(rt) {
   // misses a model the user picked since, so it counts only for a conversation
   // without a model of its own.
   // `target`: the model a switch moves to, ahead of the earlier part's route.
-  async function freshRoute(bot, session, target) {
-    const ref = bot === undefined ? undefined : await rt.desiredModel(bot, { sessionId: session?.id, session })
+  async function freshRoute(bot, session, target, noCommands = false) {
+    if (noCommands && [target, bot?.model].some(commandCapableAgent)) throw noBotRunner()
+    const ref = bot === undefined ? undefined : await rt.desiredModel(bot, { sessionId: session?.id, session, noCommands })
+    if (noCommands && commandCapableAgent(ref)) throw noBotRunner()
     if (ref !== undefined) return { ref, effort: await rt.desiredEffort(bot, ref) }
     if (target !== undefined) return { ref: target, effort: undefined }
     const route = session?.requestHeader()?.config
+    if (noCommands) {
+      if (commandCapableAgent(route?.provider)) throw noBotRunner()
+      if (!route?.provider || !route.model) {
+        const fallback = await rt.defaultModel({ noCommands })
+        if (fallback === undefined || commandCapableAgent(fallback)) throw noBotRunner()
+        return { ref: fallback, effort: undefined }
+      }
+    }
     return route?.provider && route?.model ? { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort } : undefined
   }
 
@@ -1649,7 +1683,7 @@ export function install(rt) {
       try {
         written = await writeNote(agent, AbortSignal.any([signal, AbortSignal.timeout(NOTE_TIMEOUT_MS)]), { folder: job.folder })
       } catch (error) {
-        if (signal.aborted) throw error
+        if (signal.aborted || error?.code === NO_BOT_RUNNER) throw error
         failure = error
       }
     }
@@ -1675,12 +1709,17 @@ export function install(rt) {
     if (signal.aborted) throw signal.reason
     const dir = rt.workDirOf(job)
     const intended = dir !== undefined && await rt.isFolder(dir) ? dir : rt.teamFolder()
+    const noCommands = job.noCommands || rt.botRunnerRequired?.(session.id, agent) === true
+    // Restricted work needs an admitted route before creating a Session, and
+    // must select that route successfully before forwarding anything to it.
+    let picked = job.admittedRoute
+    if (picked === undefined && noCommands) picked = await freshRoute(bot, session, job.target, noCommands)
     const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, {
       dir, group: room !== undefined, botId: job.botId, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
       ...(job.fresh ? {} : { readScopeSource: session.id, continueReadScope: true }),
     })
     // The catalog can change while the Session is being made.
-    const picked = await freshRoute(bot, session, job.target)
+    if (!noCommands) picked = await freshRoute(bot, session, job.target)
     const selected = picked === undefined || await selectRoute(bot, freshId, picked, name)
     if (bot !== undefined) await rt.applyPermission(bot, freshId, room)
       .catch(error => rt.warn('ds-bot: permission for the fresh part of %s not applied: %s', name, error))
@@ -1690,11 +1729,13 @@ export function install(rt) {
     // from the Bot or the group it is for, the one just applied to it. The threshold move
     // has an already selected destination (`target`).
     try {
+      if (noCommands && !selected) throw noBotRunner()
       if (bot !== undefined) await rt.assertNotOffCli?.(bot, freshId, undefined, { owner: { bot, room }, unselected: !selected && job.target === undefined })
     } catch (error) {
       rt.warn('ds-bot: no fresh part for %s: %s', name, error?.message ?? error)
       await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
         .catch(failure => rt.warn('ds-bot: unused fresh part of %s not archived: %s', name, failure))
+      if (error?.code === NO_BOT_RUNNER) throw error
       return
     }
     // The fresh part took several awaits: a Bot or group deleted meanwhile, a member that
@@ -1739,7 +1780,7 @@ export function install(rt) {
     await rt.save()
     // A model the user picked until now went to the earlier part, which was still the
     // Bot's; from here on a change goes to the fresh one.
-    const now = await freshRoute(bot, session, job.target)
+    const now = noCommands ? picked : await freshRoute(bot, session, job.target)
     if (now !== undefined && (now.ref !== picked?.ref || now.effort !== picked?.effort)) await selectRoute(bot, freshId, now, name)
     if (job.failed !== undefined) rescued.set(freshId, job.bare ? 'bare' : 'carried')
     job.freshId = freshId
@@ -1756,6 +1797,7 @@ export function install(rt) {
     try {
       await rt.ensureCapabilities(freshId)
       const fresh = await rt.resolveAgent(freshId)
+      if (noCommands && commandCapableAgent(currentProvider(fresh))) throw noBotRunner()
       const cwd = fresh.session.header?.cwd
       folder = cwd !== undefined && cwd !== session.header?.cwd ? cwd : undefined
       // A fresh part that is not where it was made for would move on at every step.
@@ -2322,7 +2364,7 @@ export function install(rt) {
     const sessionId = rt.chatOf(botId)
     const session = loadedSession(sessionId)
     const agent = session === undefined ? undefined : loadedAgent(sessionId)
-    const lines = session === undefined ? undefined : await contextLines(session).catch(() => undefined)
+    const lines = session === undefined ? undefined : await contextLines(session, { inspect: true }).catch(() => undefined)
     if (rt.botOf(botId) === undefined) throw refused('not-found', 'Unknown Bot')
     if (rt.chatOf(botId) !== sessionId) throw refused('stale', 'This conversation has moved to another part. Refresh its status.')
     let messages

@@ -15,6 +15,7 @@ import { checkShownView, showViewDescription, showViewParameters } from 'deep-vi
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
+import { registerTrustedTool } from './tool-registrations.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 // A message_bot call that sent nothing answers with this object rather than a string, so
@@ -1149,7 +1150,7 @@ export function install(rt) {
         if (relayOnly && def.name !== 'group_relay') continue
         if (held.added?.has(def.name) === true) continue
         try {
-          const dispose = agent.ctx.tools.register(def)
+          const dispose = registerTrustedTool(agent.ctx.tools, def)
           if (typeof dispose === 'function') {
             ;(held.toolLifts ??= new Map()).set(def.name, dispose)
             held.disposers.push(dispose)
@@ -1183,7 +1184,7 @@ export function install(rt) {
     for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
       if (relayOnly && def.name !== 'group_relay') continue
       try {
-        const dispose = agent.ctx.tools.register(def)
+        const dispose = registerTrustedTool(agent.ctx.tools, def)
         if (typeof dispose === 'function') {
           disposers.push(dispose)
           ;(held ??= { relay: relayOnly, tools: false, restricted: false, filtered: false, disposers: [], unlisted: new Set() }).toolLifts ??= new Map()

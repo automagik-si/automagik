@@ -5,6 +5,7 @@ import { multiuserMode } from './multiuser.js'
 
 // Only a current team and a known end to the lineage can rule out a Bot.
 export function classifySession(rt, sessionId, agent, recordedBotOf) {
+  const checkExternal = rt.botRunnerRequired !== undefined
   const seen = new Set()
   try {
     for (let depth = 0; depth <= 32 && typeof sessionId === 'string'; depth += 1) {
@@ -12,11 +13,24 @@ export function classifySession(rt, sessionId, agent, recordedBotOf) {
       seen.add(sessionId)
       if (rt.teamLoaded?.() !== true || rt.teamCurrent?.() !== true) return undefined
       const recorded = recordedBotOf?.(sessionId)
-      if (recorded !== undefined) return recorded
+      // The rollback hold trusts its durable record before looking up live ownership.
+      if (!checkExternal && recorded !== undefined) return recorded
+      const external = checkExternal && rt.extended !== undefined ? rt.extended.sessionBotOwner(sessionId) : null
+      if (external === undefined) return undefined
       const live = (agent?.id ?? agent?.session?.id) === sessionId ? agent : undefined
       // This walk owns the depth limit and must see each header itself.
-      const bot = rt.botOfSession(sessionId, live, { followParents: false })
-      if (bot != null) return typeof bot.id === 'string' ? bot.id : undefined
+      const direct = rt.botOfSession(sessionId, live, { followParents: false })
+      if (checkExternal) {
+        if (direct != null && typeof direct.id !== 'string') return undefined
+        const botId = recorded ?? external ?? direct?.id
+        if (botId !== undefined) {
+          if (typeof botId !== 'string' || (external !== null && external !== botId)
+            || (direct != null && direct.id !== botId)) return undefined
+          return botId
+        }
+      } else if (direct != null) {
+        return typeof direct.id === 'string' ? direct.id : undefined
+      }
       const header = live === undefined ? rt.ctx.sessions?.get(sessionId)?.header : live.session?.header
       if (header === null || typeof header !== 'object') return undefined
       if (header.origin !== 'subagent') return null
@@ -28,10 +42,14 @@ export function classifySession(rt, sessionId, agent, recordedBotOf) {
   return undefined
 }
 
+export function resolveBotSession(rt, sessionId, agent) {
+  return classifySession(rt, sessionId, agent, id => rt.recordedBotOf?.(id, { strict: true }))
+}
+
 export function provideBotSessions(ctx, rt) {
   return ctx.provide('automagikBotSessions', Object.freeze({
     version: 1,
-    botOf: (sessionId, agent) => classifySession(rt, sessionId, agent),
+    botOf: (sessionId, agent) => resolveBotSession(rt, sessionId, agent),
     protectedRoots: () => [rt.home, rt.dshHome],
   }))
 }
@@ -129,8 +147,12 @@ export function installAhead(rt) {
   if (reason === undefined) {
     const written = new Set()
     let recorded
-    try { recorded = readRecordedSessions(file) } catch {}
-    rt.recordedBotOf = sessionId => recorded?.get(sessionId)
+    let recordError
+    try { recorded = readRecordedSessions(file) } catch (error) { recordError = error }
+    rt.recordedBotOf = (sessionId, { strict = false } = {}) => {
+      if (recorded === undefined && strict) throw recordError
+      return recorded?.get(sessionId)
+    }
     // Records a Session as one Bot's before it runs anything; a failure stops that work.
     const recordSession = (sessionId, botId) => {
       if (written.has(sessionId)) return
@@ -156,7 +178,9 @@ export function installAhead(rt) {
     const recordBot = ({ agent }, next) => {
       const sessionId = agent?.id ?? agent?.session?.id
       if (written.has(sessionId)) return next()
-      const botId = classifySession(rt, sessionId, agent)
+      // Known live Bots still attempt a write when the cached record could
+      // not be read. A repaired record can then be synced and used again.
+      const botId = classifySession(rt, sessionId, agent, rt.recordedBotOf)
       if (typeof botId === 'string') recordSession(sessionId, botId)
       return next()
     }
@@ -173,11 +197,12 @@ export function installAhead(rt) {
     recorded = readRecordedSessions(file, gate)
     rt.recordedBotOf = sessionId => recorded.get(sessionId)
   } catch (error) {
+    rt.recordedBotOf = (_sessionId, { strict = false } = {}) => { if (strict) throw error }
     reason += ` Could not read the Bot session record ${file} (${error.message}). Repair or remove the record and restart.`
   }
   const hold = ({ agent }, next) => {
     if (recorded === undefined
-        || classifySession(rt, agent?.id ?? agent?.session?.id, agent, rt.recordedBotOf) !== null) throw new Error(reason)
+        || resolveBotSession(rt, agent?.id ?? agent?.session?.id, agent) !== null) throw new Error(reason)
     return next()
   }
   const preStep = ctx.on('agent/pre-step', hold, { prepend: true })
