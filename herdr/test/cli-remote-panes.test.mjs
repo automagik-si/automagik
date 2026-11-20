@@ -2268,7 +2268,7 @@ test("restart --machine --expect-pane: an old pane that can't be looked at or en
 // ---- #1208: a worker on a chosen agent home on the linked machine is read by its launch argv ----
 
 const CHOSEN_LAUNCH = "0f0e0d0c-0b0a-4908-8706-050403020100";
-const chosenArgv = (agent = "claude", home = "/home/vm/homes/b") => ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords(agent, home, CHOSEN_LAUNCH)), agent];
+const chosenArgv = (agent = "claude", home = "/srv/am-scene/homes/b") => ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords(agent, home, CHOSEN_LAUNCH)), agent];
 
 test("#1208 linked attach refuses a chosen-home worker by its launch argv, before any row or label", (t) => {
   const s = scene(t, { terminals: [atlasPane({ address: "vm/t9", name: "w9", argv: chosenArgv(),
