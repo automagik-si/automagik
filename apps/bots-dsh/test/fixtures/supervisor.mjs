@@ -28,9 +28,14 @@ export function fixture(t, { plugins = [BOTS], mode } = {}) {
   const dshPackage = join(root, 'runtime/node_modules/@deepseek-ai/dsh')
   const dshBin = join(dshPackage, 'lib/bin.js')
   const events = join(root, 'events.jsonl')
+  const bin = join(root, 'bin')
+  fs.mkdirSync(bin)
+  const fakePnpm = fileURLToPath(new URL('./supervisor-pnpm.mjs', import.meta.url))
+  fs.writeFileSync(join(bin, 'pnpm'), '#!/bin/sh\nexec "' + process.execPath + '" "' + fakePnpm + '" "$@"\n', { mode: 0o700 })
   fs.mkdirSync(dirname(dshBin), { recursive: true })
   write(join(dshPackage, 'package.json'), { type: 'module', version: '0.2.2-rc.2' })
   fs.copyFileSync(fileURLToPath(new URL('./supervisor-dsh.mjs', import.meta.url)), dshBin)
+  fs.copyFileSync(fileURLToPath(new URL('./supervisor-lock.mjs', import.meta.url)), join(dirname(dshBin), 'supervisor-lock.mjs'))
   fs.mkdirSync(botsHome)
   write(join(botsHome, 'state.json'), { version: 2, note: 'preserve me' })
   fs.mkdirSync(join(profileDir, VENDOR), { recursive: true })
@@ -69,8 +74,9 @@ export function fixture(t, { plugins = [BOTS], mode } = {}) {
     delete testEnv[key]
   }
   const env = {
-    ...testEnv, AUTOMAGIK_BOTS_HOME: botsHome, SUPERVISOR_FIXTURE: root, SUPERVISOR_MODE: mode ?? '',
+    ...testEnv, PATH: bin + ':' + testEnv.PATH, AUTOMAGIK_BOTS_HOME: botsHome, SUPERVISOR_FIXTURE: root, SUPERVISOR_MODE: mode ?? '',
     SUPERVISOR_HOST_SOURCE: HOST,
+    XDG_CONFIG_HOME: join(root, 'config'), NPM_CONFIG_USERCONFIG: join(root, 'user.npmrc'),
     SUPERVISOR_PACKAGES: JSON.stringify(Object.fromEntries(release.map(plugin => [plugin.sha256, { name: plugin.name, version: plugin.version }]))),
   }
   const command = [process.execPath, dshBin, 'web', '--no-open', '--host', '127.0.0.1', '--port', '0', 'verbatim value']

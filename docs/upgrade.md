@@ -229,19 +229,26 @@ working directory and stop timeout. Apply the unit edit and restart it with your
 ExecStart=/home/automagik/.automagik/web/dsh/update/web/supervisor/launcher.sh --dsh-home /home/automagik/.automagik/web/dsh --profile web -- /usr/bin/node /home/automagik/prod/automagik/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open --host 127.0.0.1 --port 8080
 ```
 
-The launcher loads and self-checks `current` and then tries `kept` if the check fails. If both
-copies fail, it runs the original DSH command directly and the update capability is unavailable.
+The launcher runs the original DSH command under the first copy that passes its self-check,
+trying `current` before `kept`. If both checks fail, it can start DSH directly when the store has
+no `state.json` or the state records a completed verdict with no pending journal step.
+An unreadable state, unfinished update or `manualRecovery` verdict stops startup and points to
+`state.json`. Direct startup runs without the update capability.
 
 ### Store and state
 
 The store is `$DSH_HOME/update/web/`, beside the live profile at `$DSH_HOME/profiles/web/`.
 Both directories need to be on the same filesystem. A profile `.npmrc` can name the package
 registry with `registry=`. Additional settings in that file make the update check refuse the
-profile.
+profile. On a supervised profile, the check and install use the registry resolved by pnpm.
+The check refuses a different registry configured in the DSH plugin manager. The staging
+install checks pnpm's effective write paths. The lockfile, modules and virtual store must stay
+inside staging, and a shared store must be outside the live profile. Staging and offline
+relinking skip pnpm hooks and lifecycle scripts.
 
 | Path in the store | Contents |
 |---|---|
-| `supervisor/launcher.sh`, `supervisor/current/`, `supervisor/kept/` | The fixed launcher and the two self-checked code copies |
+| `supervisor/launcher.sh`, `supervisor/current/`, `supervisor/kept/` | The fixed launcher and the two self-checked code copies. If a rotation displaces the executing copy, it stays in `supervisor/running/` until that supervisor exits. |
 | `update.lock`, `supervisor.json` | Supervisor ownership, the current boot ID and the current or most recent run ID |
 | `request.json`, `check.json` | A pending one-use request and the most recent Settings check |
 | `state.json`, `current.json` | Update progress and verdict, and the live version, kept version and last accepted lane sequence |
@@ -252,14 +259,28 @@ Read `state.json` with `jq . "$DSH_HOME/update/web/state.json"` or a text viewer
 `requestId` identifies the request, and `runId` and `bootId` link the verdict to
 `supervisor.json`. During a switch, `journal.keep` identifies the recovery directory,
 `journal.done` lists completed steps and `journal.pending` names the step that may have been
-interrupted. `healthy` means the new child's HTTP port responded and the installed versions
-matched. `notUpdated` means the previous installation is serving or was left running.
+interrupted. `journal.commitCurrent` records that the candidate passed health and recovery can
+finish committing `current.json`. `healthy` means the new child's local HTTP listener responded
+and the installed versions matched. The probe uses the host and port from the DSH command,
+with defaults of `127.0.0.1` and `3080`. When using `--public-url`, use a fixed local port so the
+probe can still find the listener. `notUpdated` means the previous installation answered its
+own local health check.
+
+### Recover an unchanged or restored profile after `manualRecovery`
+
+Stop the unit with your usual host tools and confirm the supervisor and DSH have exited.
+If `reason` is `health-failed` and there is no journal, the failure occurred before any
+installer-owned files moved. If the journal has `undo: true`, an empty `done` list and
+`pending: null`, the original files are already back in place. Confirm the previous
+plugin versions on disk and inspect the child logs for the listener or startup failure.
+After correcting the cause, set `state.json` aside, start the unit with your usual host
+tools and verify the previous profile answers locally.
 
 ### Rename back after `manualRecovery`
 
-Delivery 6 will automate rollback. Until then, stop the unit with your usual host tools and
-confirm the supervisor and DSH have exited. Read `state.json` and use the directory named by
-`journal.keep`. If the journal is incomplete, use `done`, `pending` and the files on disk to
+Delivery 6 will automate rollback. If a candidate is installed or the switch or undo
+is incomplete, stop the unit with your usual host tools and confirm the supervisor and
+DSH have exited. Read `state.json` and use the directory named by `journal.keep`. If the journal is incomplete, use `done`, `pending` and the files on disk to
 locate each original before moving anything. Use the previous host backup if the kept originals
 are missing.
 

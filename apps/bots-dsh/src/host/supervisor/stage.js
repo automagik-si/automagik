@@ -4,8 +4,9 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { runCommand } from './child.js'
-import { installedPlugins, profileRegistry } from './release.js'
-import { directory, identity, regularBytes, sameEntry, writeBytesAtomic } from './store.js'
+import { checkWriteDestinations } from './pnpm.js'
+import { installedPlugins, registryOnlyNpmrc } from './release.js'
+import { directory, identity, regularBytes, sameEntry, syncDirectory, writeBytesAtomic } from './store.js'
 
 export const VENDOR = 'vendor/automagik-update'
 export const ARCHIVE = /^[0-9a-f]{64}\.tgz$/
@@ -16,32 +17,38 @@ const install = ['install', '--frozen-lockfile', '--offline', '--ignore-scripts'
 const ARCHIVE_RECORD = 'created-archives.json'
 const archiveName = plugin => `${plugin.sha256.toLowerCase()}.tgz`
 
-function pidIsDead(record) {
-  if (!/^\d+\n$/.test(record ?? '')) return false
+function abandonedLock(record, entry) {
+  // Older DSH writers create the file before writing the PID. Give an empty
+  // record time to settle, then reclaim it only if its identity and bytes agree.
+  if (record === undefined || !/^\d*\n?$/.test(record)) return false
+  if (!record.endsWith('\n') && Date.now() - Number(entry.mtimeNs / 1_000_000n) < 2000) return false
+  if (record === '') return true
   const pid = Number(record)
   if (pid <= 0 || pid > 0x7fffffff || pid === process.pid) return false
   try { process.kill(pid, 0) } catch (error) { return error.code === 'ESRCH' }
   return false
 }
 
+const sameLock = (entry, current) => sameEntry(entry, current) && entry.ctimeNs === current.ctimeNs
+
 function reapProfileLock(path, entry) {
   if (!entry?.isFile() || entry.size > 32n) return
   const record = regularBytes(path, { optional: true })?.toString()
-  if (!pidIsDead(record)) return
+  if (!abandonedLock(record, entry)) return
   // Use DSH's claim name so our takeover also serializes with DSH's contenders.
   const suffix = createHash('sha256').update(record).digest('hex').slice(0, 16)
   const claim = `${path}.takeover-${suffix}`
-  try { fs.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx', mode: 0o600 }) } catch (error) {
+  try { writeBytesAtomic(claim, `${process.pid}\n`, { exclusive: true }) } catch (error) {
     if (error.code !== 'EEXIST') throw error
     const existing = identity(claim)
     if (existing?.isFile() && existing.size <= 32n
-      && pidIsDead(regularBytes(claim, { optional: true })?.toString())
-      && sameEntry(existing, identity(claim))) fs.rmSync(claim, { force: true })
+      && abandonedLock(regularBytes(claim, { optional: true })?.toString(), existing)
+      && sameLock(existing, identity(claim))) fs.rmSync(claim, { force: true })
     return
   }
   try {
-    if (sameEntry(entry, identity(path)) && regularBytes(path, { optional: true })?.toString() === record
-      && pidIsDead(record)) fs.rmSync(path, { force: true })
+    if (regularBytes(path, { optional: true })?.toString() === record
+      && sameLock(entry, identity(path)) && abandonedLock(record, entry)) fs.rmSync(path, { force: true })
   } finally {
     fs.rmSync(claim, { force: true })
   }
@@ -52,25 +59,17 @@ export async function takeProfileLock(profileDir, signal) {
   const deadline = Date.now() + LOCK_WAIT_MS
   for (;;) {
     signal?.throwIfAborted()
-    let fd
-    try { fd = fs.openSync(path, 'wx', 0o600) } catch (error) {
+    try { writeBytesAtomic(path, `${process.pid}\n`, { exclusive: true }) } catch (error) {
       if (error.code !== 'EEXIST') throw error
       reapProfileLock(path, identity(path))
       if (Date.now() >= deadline) throw new Error('Timed out waiting for the DSH profile lock')
       if (identity(path)) await wait(100, undefined, { signal })
       continue
     }
-    const entry = fs.fstatSync(fd, { bigint: true })
-    const release = () => {
+    const entry = identity(path)
+    return () => {
       if (sameEntry(entry, identity(path))) fs.rmSync(path, { force: true })
     }
-    try { fs.writeFileSync(fd, `${process.pid}\n`) } catch (error) {
-      release()
-      throw error
-    } finally {
-      fs.closeSync(fd)
-    }
-    return release
   }
 }
 
@@ -126,7 +125,7 @@ export function runDsh(config, home, cwd, args, signal) {
 
 export function relink(config, signal) {
   return runDsh(config, config.home, config.profileDir, [
-    'install', '--offline', '--frozen-lockfile', '--prod', '--ignore-scripts',
+    'install', '--offline', '--frozen-lockfile', '--prod', '--ignore-scripts', '--ignore-pnpmfile',
   ], signal)
 }
 
@@ -137,9 +136,10 @@ function copyInputs(profileDir, staging) {
   for (const file of PROFILE_INPUTS) {
     const bytes = regularBytes(join(profileDir, file), { optional: OPTIONAL_INPUTS.has(file) })
     if (bytes === undefined) continue
-    fs.writeFileSync(join(staging.source, file), bytes, { mode: 0o600 })
+    writeBytesAtomic(join(staging.source, file), bytes, { durable: true })
     fs.writeFileSync(join(staging.profileDir, file), bytes, { mode: file === 'compatibility.json' ? 0o400 : 0o600 })
   }
+  syncDirectory(staging.root)
 }
 
 function equalFile(a, b, file) {
@@ -162,7 +162,7 @@ function pinArchives(profileDir, staging, plugins) {
       const from = join(live, name)
       if (!identity(from)) {
         writeBytesAtomic(join(staging.root, ARCHIVE_RECORD), JSON.stringify([...created, name]), { durable: true })
-        writeBytesAtomic(from, regularBytes(downloadPath(staging, plugin)), { exclusive: true })
+        writeBytesAtomic(from, regularBytes(downloadPath(staging, plugin)), { exclusive: true, durable: true })
         created.push(name)
       } else {
         const entry = identity(from)
@@ -171,7 +171,9 @@ function pinArchives(profileDir, staging, plugins) {
           throw new Error('An existing archive does not match its content address')
         }
       }
-      fs.linkSync(from, join(target, name))
+      const staged = join(target, name)
+      if (identity(staged)?.isSymbolicLink() && fs.realpathSync(staged) === fs.realpathSync(from)) fs.unlinkSync(staged)
+      fs.linkSync(from, staged)
     }
   } catch (error) {
     discardArchives(profileDir, staging)
@@ -198,6 +200,38 @@ export function lockPins(lockfile) {
   return new Set(Array.from(lockfile.matchAll(/(?:file|link):([^\s'"(){}[\],]+?)(?=:\s|[\s'"(){}[\],]|$)/g), match => match[1]))
 }
 
+function mirrorLocalInputs(profileDir, staging) {
+  const lock = regularBytes(join(staging.source, 'pnpm-lock.yaml')).toString()
+  const manifest = JSON.parse(regularBytes(join(staging.source, 'package.json')))
+  const local = lockPins(lock)
+  for (const group of ['dependencies', 'optionalDependencies', 'devDependencies']) {
+    for (const spec of Object.values(manifest[group] ?? {})) {
+      if (/^(file|link):/.test(spec)) local.add(spec.slice(spec.indexOf(':') + 1))
+    }
+  }
+  for (const pin of local) {
+    const path = decodeURIComponent(pin)
+    if (isAbsolute(path)) continue
+    let source
+    try { source = fs.realpathSync(resolve(profileDir, path)) } catch (error) {
+      if (error.code === 'ENOENT') continue
+      throw error
+    }
+    const destination = resolve(staging.profileDir, path)
+    if (identity(destination)) {
+      if (fs.realpathSync(destination) === source) continue
+      throw new Error('A local package overlaps a staging input')
+    }
+    const rel = relative(staging.root, destination)
+    // Old lockfiles can contain relative resolutions for absolute specs being
+    // replaced. Never create a path outside staging to satisfy an old pin.
+    if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) continue
+    let parent = staging.root
+    for (const part of rel.split(sep).slice(0, -1)) parent = directory(join(parent, part))
+    fs.symlinkSync(source, destination)
+  }
+}
+
 function verifyCandidate(profileDir, staging, plugins, expectedEntries) {
   const after = JSON.parse(regularBytes(join(staging.profileDir, 'package.json')))
   const before = JSON.parse(regularBytes(join(staging.source, 'package.json')))
@@ -211,12 +245,14 @@ function verifyCandidate(profileDir, staging, plugins, expectedEntries) {
   const beforePins = lockPins(regularBytes(join(staging.source, 'pnpm-lock.yaml')).toString())
   const afterLock = regularBytes(join(staging.profileDir, 'pnpm-lock.yaml')).toString()
   const afterPins = lockPins(afterLock)
+  const liveDir = fs.realpathSync(profileDir)
   if (afterLock.includes(staging.root) || afterLock.includes(encodeURI(staging.root))) throw new Error('Nonportable staged lockfile')
   for (const pin of afterPins) {
-    if (beforePins.has(pin)) continue
     const path = decodeURIComponent(pin)
     const absolute = resolve(profileDir, path)
-    const rel = relative(profileDir, fs.realpathSync(absolute))
+    const real = fs.realpathSync(absolute)
+    if (beforePins.has(pin)) continue
+    const rel = relative(liveDir, real)
     if (isAbsolute(path) || !rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new Error('A new file pin does not resolve within the live profile')
     }
@@ -227,15 +263,17 @@ function verifyCandidate(profileDir, staging, plugins, expectedEntries) {
 }
 
 export async function stageInstall(config, staging, { plugins, registry }, versions, signal) {
-  const { profileDir, profile, env } = config
-  profileRegistry(profileDir, env)
+  const { profileDir, profile } = config
+  registryOnlyNpmrc(profileDir)
   assertVersions(profileDir, versions)
   checkDisk(profileDir, staging, plugins)
   copyInputs(profileDir, staging)
   const expectedEntries = Object.fromEntries(plugins.map(plugin => [plugin.name, `file:${VENDOR}/${archiveName(plugin)}`]))
+  mirrorLocalInputs(profileDir, staging)
+  await checkWriteDestinations(config, staging, signal)
   pinArchives(profileDir, staging, plugins)
   try {
-    const options = [`--registry=${registry}`]
+    const options = [`--registry=${registry}`, '--ignore-pnpmfile']
     await runDsh(config, staging.root, staging.profileDir, [
       'add', '--prefer-offline', '--ignore-scripts', ...options, ...Object.values(expectedEntries),
     ], signal)

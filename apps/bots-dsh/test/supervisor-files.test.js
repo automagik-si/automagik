@@ -14,7 +14,8 @@ test('the supervisor copy contains exactly the main import closure and its keys'
     if (seen.has(name)) continue
     seen.add(name)
     if (name.endsWith('.json')) {
-      assert.ok(Array.isArray(JSON.parse(fs.readFileSync(file)).keys))
+      const content = JSON.parse(fs.readFileSync(file))
+      assert.ok(Array.isArray(name === 'supervisor/files.json' ? content : content.keys))
       continue
     }
     const content = fs.readFileSync(file, 'utf8')
@@ -28,6 +29,6 @@ test('the supervisor copy contains exactly the main import closure and its keys'
     }
   }
   assert.deepEqual([...seen].sort(), [...SUPERVISOR_FILES].sort())
-  assert.deepEqual(SUPERVISOR_FILES.filter(file => file.startsWith('supervisor/')).sort(),
+  assert.deepEqual(SUPERVISOR_FILES.filter(file => file.startsWith('supervisor/') && file.endsWith('.js')).sort(),
     fs.readdirSync(join(HOST, 'supervisor')).filter(file => file.endsWith('.js')).map(file => `supervisor/${file}`).sort())
 })

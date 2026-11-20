@@ -2,11 +2,13 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import { hostname } from 'node:os'
+import { createServer } from 'node:net'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
+import { selfUpdateCheck } from '../src/host/self-update-check.js'
+import { refreshCopy, runningCopy, SELF_CHECK_OK, SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
 import { stageInstall, takeProfileLock, VENDOR } from '../src/host/supervisor/stage.js'
 import { completeSwitch, planSwitch } from '../src/host/supervisor/switch.js'
 import { writeJsonAtomic } from '../src/host/supervisor/store.js'
@@ -63,7 +65,9 @@ async function setup(t, f) {
   assert.equal(read(join(current, 'version.json')).version, FROM)
   for (const file of SUPERVISOR_FILES) assert.ok(fs.existsSync(join(current, file)), file)
   const check = launch(t, process.execPath, [join(current, 'supervisor/main.js'), '--self-check'], f.env)
-  assert.equal((await check.exit).code, 0)
+  const checkResult = await check.exit
+  assert.equal(checkResult.code, 0)
+  assert.equal(checkResult.stdout.trim(), SELF_CHECK_OK)
   return launcher
 }
 
@@ -86,6 +90,15 @@ function driver(t, f) {
 }
 
 const boots = f => eventsOf(f).filter(item => item.event === 'boot')
+const announced = running => running.stdout().includes('token=<redacted>')
+
+async function unusedLoopbackPort() {
+  const server = createServer()
+  await new Promise((resolve, reject) => server.listen(0, '127.0.0.1', resolve).once('error', reject))
+  const { port } = server.address()
+  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  return port
+}
 
 test('the fixed launcher checks each copy, falls back to bare DSH, and preserves the original argv', async t => {
   const f = fixture(t, { mode: 'exit' })
@@ -96,7 +109,7 @@ test('the fixed launcher checks each copy, falls back to bare DSH, and preserves
   const current = join(f.store, 'supervisor/current')
   const kept = join(f.store, 'supervisor/kept')
   fs.cpSync(current, kept, { recursive: true })
-  fs.writeFileSync(join(current, 'supervisor/main.js'), 'broken {')
+  fs.writeFileSync(join(current, 'supervisor/main.js'), '')
   const wrapped = launch(t, 'sh', [launcher, ...opts(f), '--', ...f.command], f.env)
   const wrappedResult = await wrapped.exit
   assert.equal(wrappedResult.code, 23, wrappedResult.stderr)
@@ -118,7 +131,7 @@ test('a boot-bound request updates once, keeps the old version and rotates the s
   const f = fixture(t)
   const launcher = await setup(t, f)
   const running = driver(t, f)
-  await until(() => running.stdout().includes('token=x'), 'fake child did not announce its launch URL')
+  await until(() => announced(running), 'fake child did not announce its launch URL')
   assert.deepEqual(supervisorOf(f), { version: 1, bootId: boots(f)[0].boot, runId: null })
   const competing = await driver(t, f).exit
   assert.equal(competing.code, 1)
@@ -167,13 +180,21 @@ test('a boot-bound request updates once, keeps the old version and rotates the s
   await until(() => !fs.existsSync(join(f.store, 'request.json')), 'duplicate request was not cleared')
   assert.equal(stateOf(f).runId, state.runId)
   running.child.kill('SIGHUP')
-  assert.equal((await running.exit).code, 0)
+  const stopped = await running.exit
+  assert.equal(stopped.code, 0)
+  assert.match(stopped.stdout, /token=<redacted>&access_token=<redacted>/)
+  assert.match(stopped.stderr, /token=<redacted> https:\/\/example.invalid\/\?api_key=<redacted>/)
+  for (const secret of ['stdout-secret', 'stderr-secret', 'query-secret', 'access-secret']) {
+    assert.ok(!stopped.stdout.includes(secret))
+    assert.ok(!stopped.stderr.includes(secret))
+  }
   assert.equal(eventsOf(f).at(-1).signal, 'SIGHUP')
 })
 
 for (const [mode, phase, reason] of [
   ['lock-edit-while-staging', 'notUpdated', 'switch-refused'],
   ['relink-fails', 'notUpdated', 'stage-failed'],
+  ['relink-staged-symlink', 'notUpdated', 'stage-failed'],
   ['trial-exit', 'manualRecovery', 'health-failed'],
 ]) {
   test(`records ${phase} after ${mode}`, async t => {
@@ -184,7 +205,7 @@ for (const [mode, phase, reason] of [
     const originalManifest = fs.readFileSync(manifest)
     const originalArchive = fs.readFileSync(f.archive)
     const running = driver(t, f)
-    await until(() => running.stdout().includes('token=x'), 'fake child did not start')
+    await until(() => announced(running), 'fake child did not start')
     request(f)
     await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === phase, 'missing verdict')
     assert.equal(stateOf(f).reason, reason)
@@ -199,7 +220,7 @@ for (const [mode, phase, reason] of [
     } else {
       assert.equal(fs.existsSync(join(f.store, `stage-${stateOf(f).runId}`)), false, 'staging still exists after notUpdated')
       if (mode === 'lock-edit-while-staging') assert.match(fs.readFileSync(lockfile, 'utf8'), /owner: edited/)
-      if (mode === 'relink-fails') {
+      if (mode.startsWith('relink-')) {
         assert.deepEqual(fs.readFileSync(lockfile), originalLockfile)
         assert.deepEqual(fs.readFileSync(manifest), originalManifest)
         assert.deepEqual(fs.readFileSync(f.archive), originalArchive)
@@ -207,6 +228,8 @@ for (const [mode, phase, reason] of [
         assert.equal(fs.readFileSync(join(f.profileDir, 'vendor/owner.tgz'), 'utf8'), 'owner archive')
         assert.equal(eventsOf(f).filter(event => event.event === 'install' && event.live).length, 1)
         assert.deepEqual(boots(f)[1], boots(f)[0])
+        assert.equal(fs.existsSync(join(f.profileDir, 'node_modules/invalid-link')), false)
+        assert.ok(eventsOf(f).some(event => event.event === 'probe'))
       }
       running.child.kill('SIGTERM')
       assert.equal((await running.exit).code, 0)
@@ -247,3 +270,235 @@ for (const move of ['keep-lockfile', 'install-modules']) {
     assert.equal((await child.exit).code, 0)
   })
 }
+
+
+test('bare launcher fallback refuses unsafe or unreadable state and permits completed terminal state', async t => {
+  const f = fixture(t, { mode: 'exit' })
+  const launcher = join(f.store, 'supervisor/launcher.sh')
+  const main = join(f.store, 'supervisor/current/supervisor/main.js')
+  fs.mkdirSync(join(main, '..'), { recursive: true })
+  fs.copyFileSync(join(HOST, 'supervisor/launcher.sh'), launcher)
+  fs.writeFileSync(main, '')
+  const state = join(f.store, 'state.json')
+  const bare = async () => {
+    const output = join(f.root, 'launcher.stderr')
+    const fd = fs.openSync(output, 'w')
+    let child
+    try {
+      child = spawn('sh', [launcher, ...opts(f), '--', ...f.command], { env: f.env, stdio: ['ignore', 'ignore', fd] })
+    } finally { fs.closeSync(fd) }
+    const code = await new Promise((resolve, reject) => {
+      child.once('close', resolve)
+      child.once('error', reject)
+    })
+    return { code, stderr: fs.readFileSync(output, 'utf8') }
+  }
+  const completed = { op: 'switch', pending: null, steps: ['keep-modules'], done: ['keep-modules'] }
+  for (const raw of [
+    '{malformed', JSON.stringify({ version: 1, phase: 'switching' }),
+    JSON.stringify({ version: 1, phase: 'manualRecovery' }),
+    JSON.stringify({ version: 1, phase: 'healthy', journal: { ...completed, pending: 'keep-modules' } }),
+    JSON.stringify({ version: 1, phase: 'notUpdated', journal: { ...completed, done: [] } }),
+  ]) {
+    fs.writeFileSync(state, raw)
+    const result = await bare()
+    assert.equal(result.code, 1, result.stderr)
+    assert.match(result.stderr, /^automagik supervisor: .*state\.json\n$/)
+    assert.equal(boots(f).length, 0)
+  }
+  fs.unlinkSync(state)
+  fs.symlinkSync(join(f.root, 'missing'), state)
+  assert.equal((await bare()).code, 1)
+  assert.equal(boots(f).length, 0)
+  fs.unlinkSync(state)
+  write(state, { version: 1, phase: 'healthy', journal: completed })
+  assert.equal((await bare()).code, 23)
+  assert.equal(boots(f).length, 1)
+})
+
+test('a public launch URL stays separate from the credential-free local HTTP probe', async t => {
+  const f = fixture(t)
+  const port = await unusedLoopbackPort()
+  const publicUrl = 'https://example.invalid/web/'
+  f.command.splice(f.command.indexOf('--host'), 4, '--port=' + port, '--public-url', publicUrl)
+  const running = driver(t, f)
+  await until(() => announced(running), 'DSH did not announce its public URL')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'local listener was not healthy')
+  assert.ok(running.stdout().includes(publicUrl + '?token=<redacted>'))
+  assert.deepEqual(eventsOf(f).filter(event => event.event === 'probe'), [
+    { event: 'probe', url: '/', host: '127.0.0.1:' + port },
+  ])
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
+})
+
+test('an unexpected signal exit is a supervisor failure', async t => {
+  const f = fixture(t, { mode: 'signal-death' })
+  const result = await driver(t, f).exit
+  assert.equal(result.code, 137, result.stderr)
+  assert.equal(result.signal, null)
+  assert.equal(boots(f).length, 1)
+})
+
+test('a forwarded service stop exits successfully even if DSH exits non-zero', async t => {
+  const f = fixture(t, { mode: 'signal-forward' })
+  const running = driver(t, f)
+  await until(() => eventsOf(f).some(event => event.event === 'waiting-for-signal'), 'DSH signal handlers were not ready')
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
+  assert.equal(eventsOf(f).at(-1).signal, 'SIGTERM')
+})
+
+for (const mode of ['pre-switch-unhealthy', 'restored-unhealthy']) {
+  test('requires serving HTTP before giving work back after ' + mode, async t => {
+    const f = fixture(t, { mode })
+    const running = driver(t, f)
+    await until(() => announced(running), 'DSH did not start')
+    if (mode === 'pre-switch-unhealthy') fs.appendFileSync(f.signed.path, '\n')
+    request(f)
+    assert.equal((await running.exit).code, 1)
+    const state = stateOf(f)
+    assert.equal(state.phase, 'manualRecovery')
+    assert.equal(state.reason, 'health-failed')
+    assert.equal(boots(f).length, mode === 'pre-switch-unhealthy' ? 1 : 2)
+    assert.ok(eventsOf(f).some(event => event.event === 'probe'))
+    assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, FROM)
+    if (mode === 'restored-unhealthy') {
+      assert.equal(state.journal.undo, true)
+      assert.deepEqual(state.journal.done, [])
+    } else {
+      assert.equal(state.journal, undefined)
+    }
+  })
+}
+
+async function interruptedCandidate(f, edit = () => {}) {
+  await stageInstall(f.config, f.staging, putDownloads(f), f.versions)
+  const run = {
+    version: 1, runId: RUN_ID, bootId: 'sup_previous', requestId: 'owner-request',
+    from: FROM, to: TO, names: [BOTS], sequence: 42, startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(), phase: 'switching', reason: null,
+  }
+  const save = () => writeJsonAtomic(join(f.store, 'state.json'), run, { profileDir: f.profileDir, durable: true })
+  run.journal = planSwitch(f.config, f.staging, run)
+  completeSwitch(f.config, f.staging, run, save)
+  edit(run)
+  save()
+}
+
+for (const cut of ['after intent', 'after current.json', 'legacy current.json']) {
+  test('finishes the version-record commit ' + cut + ' without relinking again', async t => {
+    const f = fixture(t, { mode: 'relink-fails' })
+    const previous = { version: 1, live: { version: FROM, sequence: 41 }, kept: null, lastSequence: 41 }
+    const next = { version: 1, live: { version: TO, sequence: 42 }, kept: { version: FROM }, lastSequence: 42 }
+    const current = join(f.store, 'current.json')
+    write(current, cut === 'after intent' ? previous : next)
+    await interruptedCandidate(f, run => {
+      run.phase = 'health'
+      run.journal.relinking = true
+      if (cut !== 'legacy current.json') run.journal.commitCurrent = true
+    })
+    const running = driver(t, f)
+    await until(() => stateOf(f).phase === 'healthy', 'version-record recovery did not finish')
+    assert.deepEqual(read(current), next)
+    assert.equal(stateOf(f).journal.commitCurrent, true)
+    assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, TO)
+    assert.equal(eventsOf(f).filter(event => event.event === 'install' && event.live).length, 0)
+    assert.equal(boots(f).length, 1)
+    running.child.kill('SIGTERM')
+    assert.equal((await running.exit).code, 0)
+  })
+}
+
+test('discards a distinct boot-bound request posted during recovery', async t => {
+  const f = fixture(t, { mode: 'relink-paused' })
+  await interruptedCandidate(f)
+  const running = driver(t, f)
+  await until(() => eventsOf(f).some(event => event.event === 'install' && event.live), 'recovery did not enter relink')
+  assert.notEqual(supervisorOf(f).bootId, 'sup_previous')
+  request(f, { requestId: 'during-recovery' })
+  assert.equal(read(join(f.store, 'request.json')).requestId, 'during-recovery')
+  fs.writeFileSync(join(f.root, 'resume-relink'), '')
+  await until(() => !fs.existsSync(join(f.store, 'request.json')), 'recovery request was not discarded')
+  assert.equal(stateOf(f).phase, 'healthy')
+  await wait(1200)
+  assert.equal(stateOf(f).runId, RUN_ID)
+  assert.equal(stateOf(f).requestId, 'owner-request')
+  request(f, { requestId: 'after-recovery' })
+  await until(() => stateOf(f).requestId === 'after-recovery' && stateOf(f).phase === 'notUpdated', 'idle request was not accepted')
+  assert.equal(stateOf(f).reason, 'not-newer')
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
+})
+
+test('a candidate publishes its own inventory while the executing generation survives two rotations', async t => {
+  const f = fixture(t)
+  await setup(t, f)
+  const root = join(f.store, 'supervisor')
+  const executing = runningCopy(f.store, join(root, 'current'))
+  const bot = join(f.profileDir, 'node_modules', BOTS)
+  const host = join(bot, 'src/host')
+  const main = join(host, 'supervisor/main.js')
+  const original = fs.readFileSync(main, 'utf8')
+  const extra = 'supervisor/new-module.js'
+  fs.writeFileSync(join(host, extra), 'export const newModule = true\n')
+  write(join(host, 'supervisor/files.json'), [...SUPERVISOR_FILES, extra])
+
+  // A zero exit without the self-check marker cannot publish a copy.
+  fs.writeFileSync(main, '')
+  write(join(bot, 'package.json'), { name: BOTS, type: 'module', version: TO })
+  await assert.rejects(refreshCopy(f.store, f.profileDir, TO, undefined, executing), /self-check result/)
+  assert.equal(read(join(root, 'current/version.json')).version, FROM)
+  assert.equal(fs.existsSync(join(root, 'next')), false)
+
+  fs.writeFileSync(main, "import './new-module.js'\n" + original)
+  await refreshCopy(f.store, f.profileDir, TO, undefined, executing)
+  assert.equal(fs.existsSync(join(root, 'current', extra)), true)
+  assert.equal(read(join(root, 'kept/version.json')).version, FROM)
+  assert.equal(executing.owns(join(root, 'kept')), true)
+  const next = '3.160.4'
+  write(join(bot, 'package.json'), { name: BOTS, type: 'module', version: next })
+  await refreshCopy(f.store, f.profileDir, next, undefined, executing)
+  assert.equal(read(join(root, 'current/version.json')).version, next)
+  assert.equal(read(join(root, 'kept/version.json')).version, TO)
+  assert.equal(read(join(root, 'running/version.json')).version, FROM)
+  executing.release()
+  assert.equal(fs.existsSync(join(root, 'running')), false)
+})
+
+test('the supervised dry check and installer use the same private pnpm registry without a request field', async t => {
+  const f = fixture(t)
+  const privateRegistry = 'https://private.example.invalid/npm/'
+  fs.unlinkSync(join(f.profileDir, '.npmrc'))
+  const userConfig = join(f.root, 'user.npmrc')
+  fs.writeFileSync(userConfig, 'registry=' + privateRegistry + '\n')
+  f.env.NPM_CONFIG_USERCONFIG = userConfig
+  f.env.SUPERVISOR_EXPECT_REGISTRY = privateRegistry
+  for (const key of ['PATH', 'NPM_CONFIG_USERCONFIG', 'SUPERVISOR_FIXTURE']) {
+    const before = process.env[key]
+    process.env[key] = f.env[key]
+    t.after(() => { if (before === undefined) delete process.env[key]; else process.env[key] = before })
+  }
+  const running = driver(t, f)
+  await until(() => announced(running), 'DSH did not start')
+  const pings = []
+  const check = await selfUpdateCheck({
+    profileDir: f.profileDir, ...f.signed, inDesktop: false, getDshVersion: () => '0.2.2-rc.2',
+    env: { AUTOMAGIK_SUPERVISOR_BOOT: supervisorOf(f).bootId, AUTOMAGIK_SUPERVISOR_VERSION: FROM },
+    ctx: { get: name => name === 'pluginManager' ? { registries: async () => ({ resolved: privateRegistry }) } : undefined },
+    fetch: async url => {
+      if (f.tarballs.has(url)) return new Response(f.tarballs.get(url))
+      pings.push(url)
+      assert.equal(url, privateRegistry + '-/ping')
+      return new Response('{}')
+    },
+  })
+  assert.equal(check.state, 'available')
+  assert.deepEqual(pings, [privateRegistry + '-/ping'])
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'update did not use the private registry')
+  assert.ok(eventsOf(f).find(event => event.event === 'add').args.includes('--registry=' + privateRegistry))
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
+})

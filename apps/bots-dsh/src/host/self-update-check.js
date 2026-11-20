@@ -7,7 +7,8 @@ import { currentDsh } from './dsh-update.js'
 import { refusal } from './refusal.js'
 import { prepareStore, readCheckRecord, REASON_CODES, selfUpdateDetails, supervisorOf, writeJsonAtomic } from './self-update.js'
 import { registryPlan } from './update.js'
-import { inspectRelease, isLaneVersion, PLUGINS, profileRegistry, releaseSource } from './supervisor/release.js'
+import { installRegistry } from './supervisor/pnpm.js'
+import { inspectRelease, isLaneVersion, PLUGINS, profileRegistry, registryOnlyNpmrc, releaseSource } from './supervisor/release.js'
 import { identity, ownerIsDead, readOwner, sameEntry, takeOwnerLock } from './supervisor/store.js'
 
 const REPLY_WAIT_MS = 5000
@@ -53,7 +54,17 @@ function checkResult(runId, env, state, reason) {
 async function runCheck({
   profileDir, env, inDesktop = inDesktopApp(), readMountInfo,
   ctx, getDshVersion = () => currentDsh(ctx), fetch = globalThis.fetch, source,
-  registry = async dir => (await registryPlan({}, ctx?.get?.('pluginManager'), () => profileRegistry(dir)))[0],
+  registry = async dir => {
+    const manager = ctx?.get?.('pluginManager')
+    if (!supervisorOf(env)) return (await registryPlan({}, manager, () => profileRegistry(dir)))[0]
+    const effective = await installRegistry(dir)
+    let configured
+    try { configured = (await manager?.registries?.())?.registry } catch {}
+    if (configured && configured.trim().replace(/\/+$/, '') + '/' !== effective) {
+      throw new Error('The plugin manager and the supervised install use different registries')
+    }
+    return effective
+  },
 }, run) {
   const { runId, ownsTeam } = run
   const requireTeam = () => { if (!ownsTeam()) throw readOnly() }
@@ -97,7 +108,7 @@ async function runCheck({
         const { state, reason } = await inspectRelease({
           profileDir, current, view, getDshVersion, fetch, source, registry: dir => {
             // A manager-provided registry still cannot make the staging profile reproduce other npmrc settings.
-            profileRegistry(dir)
+            registryOnlyNpmrc(dir)
             return registry(dir)
           },
           requireAccess,

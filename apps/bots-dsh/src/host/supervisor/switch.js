@@ -5,7 +5,7 @@ import { homedir } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
 import { isLaneVersion, PLUGINS } from './release.js'
 import { ARCHIVE, laneEntries, lockPins, sourceMatches, VENDOR, withLaneEntries } from './stage.js'
-import { directory, identity, regularBytes, syncDirectory, writeBytesAtomic } from './store.js'
+import { directory, identity, regularBytes, syncDirectory, syncFile, writeBytesAtomic } from './store.js'
 
 const MOVE_MODULES = 'install-modules'
 const STEPS = ['keep-lockfile', 'install-lockfile', 'install-entries', MOVE_MODULES]
@@ -69,20 +69,45 @@ export function planSwitch(config, staging, run) {
     .map(entry => entry.name).sort()
     .filter(name => oldPins.has(`${VENDOR}/${name}`) && !newPins.has(`${VENDOR}/${name}`))
 
-  const before = JSON.parse(regularBytes(join(staging.source, MANIFEST)))
+  const sourceManifest = regularBytes(join(staging.source, MANIFEST))
+  const before = JSON.parse(sourceManifest)
   const after = JSON.parse(regularBytes(join(staging.profileDir, MANIFEST)))
   const { names } = run
   const entries = laneEntries(before, names)
   writeBytesAtomic(join(kept, 'entries.json'), jsonBytes({ version: 1, dependencies: entries }), { durable: true })
-  writeBytesAtomic(join(staging.source, 'candidate.json'), jsonBytes(withLaneEntries(before, laneEntries(after, names))), { durable: true })
+  const candidateManifest = jsonBytes(withLaneEntries(before, laneEntries(after, names)))
+  writeBytesAtomic(join(staging.source, 'candidate.json'), candidateManifest, { durable: true })
   snapshot(kept, env)
-  syncDirectory(join(store, 'versions'))
-  syncDirectory(staging.root)
-  syncDirectory(store)
-  return {
+  for (const file of [MANIFEST, LOCKFILE]) {
+    syncFile(join(staging.source, file))
+    syncFile(join(profileDir, file))
+  }
+  syncFile(join(staging.profileDir, LOCKFILE))
+  for (const dir of [join(profileDir, VENDOR), profileDir, join(kept, 'vendor'), kept, join(store, 'versions'),
+    staging.source, staging.profileDir, dirname(staging.profileDir), staging.root, store]) syncDirectory(dir)
+
+  const journal = {
     op: 'switch', from: run.from, to: run.to, keep, lockHash: digest(candidateLock),
+    sourceHash: digest(sourceManifest), candidateHash: digest(candidateManifest),
     steps: ['keep-modules', ...vendor.map(name => `${VENDOR_STEP}${name}`), ...STEPS],
     done: [], pending: null,
+  }
+  verifyRecoveryInputs(staging, journal)
+  if (!sourceMatches(profileDir, staging.source)
+    || digest(regularBytes(join(staging.profileDir, LOCKFILE))) !== journal.lockHash) {
+    throw new Error('Switch inputs changed during preparation')
+  }
+  return journal
+}
+
+const isHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+
+function verifyRecoveryInputs(staging, journal) {
+  const source = regularBytes(join(staging.source, MANIFEST))
+  const candidate = regularBytes(join(staging.source, 'candidate.json'))
+  // Older journals carry no manifest digests.
+  if (journal.sourceHash !== undefined && (digest(source) !== journal.sourceHash || digest(candidate) !== journal.candidateHash)) {
+    throw new Error('Switch recovery inputs changed')
   }
 }
 
@@ -90,7 +115,8 @@ export function validJournal(run) {
   const { journal: j } = run
   if (j?.op !== 'switch' || !isLaneVersion(j.from) || !isLaneVersion(j.to) || j.from === j.to
     || j.from !== run.from || j.to !== run.to || j.keep !== `versions/${j.from}`
-    || typeof j.lockHash !== 'string' || !/^[0-9a-f]{64}$/.test(j.lockHash)
+    || !isHash(j.lockHash)
+    || ((j.sourceHash !== undefined || j.candidateHash !== undefined) && (!isHash(j.sourceHash) || !isHash(j.candidateHash)))
     || !Array.isArray(run.names) || run.names.length === 0 || new Set(run.names).size !== run.names.length
     || !run.names.every(name => PLUGINS.includes(name))
     || !Array.isArray(j.steps) || !Array.isArray(j.done)
@@ -102,6 +128,7 @@ export function validJournal(run) {
     || (j.pending !== null && (typeof j.pending !== 'string' || j.pending !== j.steps[j.done.length]))) return false
   return (j.undo === undefined || j.undo === true)
     && (j.relinking === undefined || j.relinking === true)
+    && (j.commitCurrent === undefined || (j.commitCurrent === true && !j.undo && j.pending === null && j.done.length === j.steps.length))
     && (j.undoReason === undefined || ['stage-failed', 'supervisor-restarted'].includes(j.undoReason))
 }
 
@@ -154,6 +181,7 @@ function apply(config, staging, journal, paths, step, undo) {
 export function completeSwitch(config, staging, run, save, afterRename = () => {}) {
   if (!validJournal(run) || run.journal.undo) throw new Error('Invalid forward journal')
   const j = run.journal
+  verifyRecoveryInputs(staging, j)
   const paths = pathsFor(config, staging, j)
   for (const step of j.steps.slice(j.done.length)) {
     j.pending = step
@@ -174,8 +202,9 @@ export function didSwitch(config, staging, run) {
 }
 
 export function undoSwitch(config, staging, run, save, reason) {
-  if (!validJournal(run)) throw new Error('Invalid undo journal')
+  if (!validJournal(run) || run.journal.commitCurrent) throw new Error('Invalid undo journal')
   const j = run.journal
+  if (j.pending !== null || j.done.length > 0) verifyRecoveryInputs(staging, j)
   j.undo = true
   j.undoReason ??= reason
   save()
@@ -189,6 +218,7 @@ export function undoSwitch(config, staging, run, save, reason) {
 }
 
 export function candidateMatches(config, staging, run) {
+  verifyRecoveryInputs(staging, run.journal)
   const manifest = regularBytes(join(config.profileDir, MANIFEST))
   const lock = regularBytes(join(config.profileDir, LOCKFILE))
   return manifest.equals(regularBytes(join(staging.source, 'candidate.json'))) && digest(lock) === run.journal.lockHash

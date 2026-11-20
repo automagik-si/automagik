@@ -24,7 +24,7 @@ export function takeRequest(store, read, bootId, active, seen) {
   const request = requestOf(read('request.json'), bootId)
   if (!sameEntry(entry, identity(path))) return null
   try { unlinkSync(path) } catch (error) { if (error.code !== 'ENOENT') throw error }
-  if (active || request === null || seen.has(request.requestId)) return null
+  if (request === null || seen.has(request.requestId)) return null
   seen.add(request.requestId)
-  return request
+  return active ? null : request
 }

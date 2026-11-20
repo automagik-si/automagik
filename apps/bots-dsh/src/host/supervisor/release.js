@@ -29,12 +29,17 @@ export function installedPlugins(profileDir) {
   return installed
 }
 
-export function profileRegistry(profileDir, env = process.env) {
+export function registryOnlyNpmrc(profileDir) {
   const npmrc = regularBytes(join(profileDir, '.npmrc'), { optional: true })?.toString() ?? ''
   const settings = npmrc.split(/\r?\n/).map(line => line.trim()).filter(line => line && !/^[#;]/.test(line))
   if (settings.some(line => !/^registry\s*=/.test(line))) {
     throw Object.assign(new Error('Only registry= is supported in the profile .npmrc'), { reason: 'profile-npmrc' })
   }
+  return settings
+}
+
+export function profileRegistry(profileDir, env = process.env) {
+  const settings = registryOnlyNpmrc(profileDir)
   const override = env.npm_config_registry || env.NPM_CONFIG_REGISTRY
   if (override) return override
   const setting = settings.at(-1)?.replace(/^registry\s*=\s*/, '').split(/[ \t]+[;#]/, 1)[0].trim().replace(/^(['"])(.*)\1$/, '$2')

@@ -98,3 +98,32 @@ test('an interrupted undo continues in reverse and keeps its original reason', t
   assert.equal(run.journal.undoReason, 'stage-failed')
   assertRestored(f)
 })
+
+
+test('prepares recovery inputs before intent and refuses to undo using changed source bytes', t => {
+  const f = prepared(t)
+  const { run, staging, config } = f
+  const synced = new Set()
+  const fsync = fs.fsyncSync
+  t.mock.method(fs, 'fsyncSync', fd => {
+    if (process.platform === 'linux') synced.add(fs.readlinkSync('/proc/self/fd/' + fd))
+    fsync(fd)
+  })
+  const journal = planSwitch(config, staging, run)
+  if (process.platform === 'linux') {
+    assert.ok(synced.has(join(staging.source, 'package.json')))
+    assert.ok(synced.has(join(staging.profileDir, 'pnpm-lock.yaml')))
+    assert.ok(synced.has(staging.source))
+    assert.ok(synced.has(staging.root))
+  }
+  assert.match(journal.sourceHash, /^[a-f0-9]{64}$/)
+  assert.match(journal.candidateHash, /^[a-f0-9]{64}$/)
+  run.journal = journal
+  completeSwitch(config, staging, run, () => {})
+  const live = join(f.profileDir, 'package.json')
+  const installed = fs.readFileSync(live)
+  fs.writeFileSync(join(staging.source, 'package.json'), '{}')
+  assert.throws(() => undoSwitch(config, staging, run, () => {}, 'stage-failed'), /recovery inputs changed/)
+  assert.deepEqual(fs.readFileSync(live), installed)
+  assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, TO)
+})

@@ -94,12 +94,12 @@ export function usableStore(profileDir, readMountInfo = readLinuxMountInfo) {
 }
 
 // Resolve existing ancestors when comparing paths to a store that has yet to be created.
-function projectedRealpath(path) {
+export function projectedRealpath(path) {
   try {
     return fs.realpathSync(path)
   } catch (error) {
     const parent = dirname(path)
-    if (error.code !== 'ENOENT' || parent === path) throw error
+    if (error.code !== 'ENOENT' || parent === path || fs.lstatSync(path, { throwIfNoEntry: false })) throw error
     return join(projectedRealpath(parent), basename(path))
   }
 }
@@ -315,6 +315,16 @@ export function takeOwnerLock(path, owner, ttl) {
     return { owns, release }
   }
   return null
+}
+
+export function syncFile(path) {
+  const fd = fs.openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error('Expected a regular file')
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
 }
 
 export function syncDirectory(path) {
