@@ -458,6 +458,45 @@ kept there as a `send` warning: the seat is restarted and the pass exits 0, and 
 person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
 nothing.
 
+**A seat on Claude Code's rate-limit dialog.** A running Claude Code seat blocked on Claude
+Code's rate-limit options dialog is reported as `rate-limited` by `am ls`, `am show` and the
+sidebar, with the reset time the dialog shows (the field is left out when it shows none). The
+detector matches the dialog's own shape, never a word: at least two numbered options must end the
+pane tail, start at 1 and be consecutive, one must carry the `❯` selection cursor, and the limit
+cue must be the dialog's own line: one of the three non-empty lines directly above the choices,
+with only the dialog's limit/reset words between it and them. A limit sentence in a report or in
+scrollback above the options is therefore not a cue, and a screen whose question the permission
+detector owns (a permission/selection dialog) is never a rate-limit match. The footer both
+dialogs may show (`Esc to cancel`, `Press enter to confirm`) is marked as a footer, so the
+options/limit shape decides the rate-limit rule while the send guard still treats the pane as
+held. A quoted, fenced or patched transcript is text, not the live dialog: a patch stays
+text however far above the dialog its hunk header sits within the visible tail (the rule never
+measures that distance).
+A raw, unmarked paste that ends the pane tail is the accepted limit of a text-only rule: it is
+byte-for-byte the live modal, so the rule cannot tell them apart, and every marked form (a
+quote, a fence, a patch) is refused. An ordinary report
+whose text says "rate limit" and lists findings is not the dialog, and an unreadable or empty tail
+is never a match. The detection reads the pane tail only: the dialog is never answered, and no key
+is sent. The reaction
+is the project file's top-level `onRateLimit` (`"park"` or `"switch"`, written in the project's
+`.herdr/bots.json` beside `version`): `park` (the default) records the reset and queues
+`am restart <bot>` for one minute after it, so `am restart --queued` lists the seat with its wake
+time; when the dialog names no reset, no wake time is invented and the watcher only cancels when
+the dialog clears. A past timestamp in the dialog is treated as unknown, and `tomorrow`/`today`
+choose the day a clock time lands on. `switch` restarts the seat now on another signed-in login
+whose account has a *fresh* meter reading (every window under 100%, at most 10 minutes old) and
+whose store already holds this session's transcript; when no login clears both, it parks and says
+which one it could not use. `am rate-limit [--all] [--dry-run]` runs one such sweep, and the
+scheduled `am restart --due` pass runs it first and then leaves a parked seat alone until its
+wake. Each episode (key `rate-limit:<project>:<bot id>`) writes one attention item
+(`"<bot> is rate-limited until <time>; parked"` or `"… switched to <login>"`) to
+`<app home>/automagik-herdr/attention.json`, shown once by `am ls` and `am show`; only a readable
+sweep that sees the seat healthy closes it (an unreadable sweep leaves the same item open), and a
+later dialog starts a new episode. The watcher drops a queued restart as soon as a readable pane
+no longer shows the dialog, whatever the pane's status. A setup with Herdr's automations scheduler
+should pause an automation that targets a parked bot until its wake: `am` cannot stop the
+scheduler's own sends.
+
 **Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
 `am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
 including for a linked project named with `--machine M --project DIR`. Its scheduler must

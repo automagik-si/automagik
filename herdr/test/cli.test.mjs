@@ -6,6 +6,7 @@ import { startFakeCore } from "./fake-core.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6649,6 +6650,347 @@ test("#1556 --due refuses to restart a pane other than the one it measured", asy
   assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
   assert.equal(s.hcState().terminals.find((x) => x.address === "t9").state, "live");
   assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "live");
+});
+
+// ---- #1557: a seat on the rate-limit dialog is parked or switched, and the person told once ----
+
+/** The dialog's screen text with a reset line (`reset` is the dialog's own sentence). */
+const rateDialog = (reset = "Your limit resets in 2 hours 30 minutes.") => [
+  "  ⎿  Rate limit reached", "", "  You have reached your Claude usage limit.", `  ${reset}`, "",
+  "  ❯ 1. Wait until it resets", "    2. Upgrade your plan", "    3. Switch accounts", "",
+].join("\n");
+const setScreen = (s, address, text) => {
+  const state = s.hcState();
+  const t = state.terminals.find((x) => x.address === address);
+  t.screen = text;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+};
+const queueFileOf = (s) => join(s.app, "automagik-herdr/queued-restarts.json");
+const attentionFileOf = (s) => join(s.app, "automagik-herdr/attention.json");
+const attentionItems = (s) => {
+  const text = (() => { try { return readFileSync(attentionFileOf(s), "utf8"); } catch { return null; } })();
+  return text === null ? [] : JSON.parse(text).items;
+};
+const openItems = (s) => attentionItems(s).filter((row) => row.open === true);
+/** A second signed-in login with a meter reading; `used` is its five-hour use (100: no headroom). */
+const secondLogin = (s, { used = 10, ts = new Date().toISOString() } = {}) => {
+  const dir = join(s.root, "login2");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "uuid-login-2" } }));
+  writeFileSync(join(s.app, "claude-logins.json"), JSON.stringify({ use: "default", logins: [{ id: "l2", dir }] }));
+  const account = createHash("sha256").update("uuid-login-2").digest("hex").slice(0, 16);
+  mkdirSync(join(s.home, ".automagik/meter"), { recursive: true });
+  writeFileSync(join(s.home, ".automagik/meter/claude-limits.jsonl"),
+    `${JSON.stringify({ ts, account, five_hour: { used_percentage: used }, seven_day: { used_percentage: 20 } })}\n`);
+  return dir;
+};
+/** The conversation file a switched login must already hold to resume `session` in `cwd`. */
+const seedTranscript = (dir, cwd, session) => {
+  const file = join(dir, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), `${session}.jsonl`);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ type: "assistant", message: { usage: { input_tokens: 1 } } })}\n`);
+};
+
+test("#1557 a seat showing the rate-limit dialog reports rate-limited in ls and show, with its reset time", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog());
+  const ls = s.cli(["ls", "--json"]);
+  assert.equal(ls.code, 0, ls.err);
+  const genie = ls.json().projects[0].bots.find((b) => b.id === ID.main);
+  assert.equal(genie.status, "rate-limited");
+  assert.equal(genie.core_status, "idle", "the core status stays beside the added word");
+  assert.equal(genie.terminal, "t5");
+  const delta = Date.parse(genie.rate_limited.resets_at) - Date.now();
+  assert.ok(delta > 2 * 3_600_000 && delta < 2.75 * 3_600_000, genie.rate_limited.resets_at);
+  assert.match(genie.rate_limited.question, /usage limit|rate limit/i);
+  assert.match(s.cli(["ls"]).out, /rate-limited \(resets 20\d\d-\d\d-\d\dT/);
+  const show = s.cli(["show", "Genie", "--json"]).json();
+  assert.equal(show.status, "rate-limited");
+  assert.ok(Math.abs(Date.parse(show.rate_limited.resets_at) - Date.parse(genie.rate_limited.resets_at)) < 5_000);
+  assert.match(s.cli(["show", "Genie"]).out, /rate limit {3}until .*Herdr never answers it/);
+  // The dialog names no time: the field is omitted, never guessed.
+  setScreen(s, "t5", rateDialog("Try again later."));
+  const noTime = s.cli(["ls", "--json"]).json().projects[0].bots.find((b) => b.id === ID.main);
+  assert.equal(noTime.status, "rate-limited");
+  assert.equal("resets_at" in noTime.rate_limited, false);
+  // Detection only reads: it never types into the dialog.
+  assert.equal(s.calls().some((c) => ["send", "keys"].includes(c[0])), false);
+});
+
+test("#1557 park queues the seat one minute after its reset, tells once, and the queued wake restarts it", async (t) => {
+  const s = restartScene(t);
+  s.seed(team({ onRateLimit: "park" }));
+  setScreen(s, "t5", rateDialog("Your limit resets in 1 second."));
+  const sweep = s.cli(["rate-limit", "--json"], { env: { AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0" } });
+  assert.equal(sweep.code, 0, sweep.err);
+  const parked = sweep.json().parked[0];
+  assert.equal(parked.id, ID.main);
+  assert.ok(Date.parse(parked.wake_at) - Date.now() < 5_000, parked.wake_at);
+  assert.equal(sweep.json().attention.length, 1);
+  assert.match(sweep.json().attention[0].text, /Genie is rate-limited until .*; parked/);
+  // `restart --queued` lists the seat with its wake time and the reset it recorded.
+  const queued = s.cli(["restart", "--queued", "--json"]).json().queued;
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].botId, ID.main);
+  assert.equal(queued[0].reason, "rate-limited");
+  assert.equal(queued[0].wake_at, parked.wake_at);
+  assert.equal(queued[0].resets_at, parked.resets_at);
+  assert.match(s.cli(["restart", "--queued"]).out, /rate-limited until .*wake at /);
+  // One attention item per episode: a second sweep, and a scheduled pass, add none.
+  const again = s.cli(["rate-limit", "--json"], { env: { AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0" } });
+  assert.equal(again.code, 0, again.err);
+  assert.deepEqual(again.json().attention, []);
+  const due = s.cli(["restart", "--due", "--json"], { env: { AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0" } });
+  assert.equal(due.code, 0, due.err);
+  assert.ok(due.json().notes.some((n) => /parked on the rate-limit dialog/.test(n)));
+  assert.equal(s.cli(["restart", "--queued", "--json"]).json().queued.length, 1, "no second entry");
+  assert.equal(openItems(s).length, 1);
+  assert.match(s.cli(["ls"]).out, /! Genie is rate-limited until .*; parked/);
+  // The wake replaces the dialog's pane, resuming the conversation; nothing was typed into it.
+  const entry = JSON.parse(readFileSync(queueFileOf(s), "utf8")).find((e) => e.options?.rateLimit === true);
+  const run = await s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"],
+    { env: { AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "100" } });
+  assert.equal(run.code, 0, run.err);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
+  const replacement = s.calls().find((c) => c[0] === "run" && !c.includes("--run-queued"));
+  assert.ok(agentWords(replacement).includes("--resume"), `the conversation resumes: ${JSON.stringify(agentWords(replacement))}`);
+  assert.equal(s.calls().some((c) => ["send", "keys"].includes(c[0])), false, "the dialog is never answered");
+  assert.deepEqual(JSON.parse(readFileSync(queueFileOf(s), "utf8")), [], "the entry fired");
+});
+
+test("#1557 switch restarts on the second login with headroom and resumes its conversation", (t) => {
+  const s = restartScene(t);
+  s.seed(team({ onRateLimit: "switch" }));
+  const dir = secondLogin(s);
+  seedTranscript(dir, s.project, SID);
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.equal(sweep.json().switched.length, 1);
+  assert.equal(sweep.json().switched[0].login, "l2");
+  const run = runCall(s.calls());
+  assert.ok(agentParts(run).env.includes(`CLAUDE_CONFIG_DIR=${dir}`), run.join(" "));
+  assert.ok(agentWords(run).includes("--resume"), "the conversation resumes on the other login");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live");
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
+  assert.equal(openItems(s).length, 1);
+  assert.match(openItems(s)[0].text, /Genie is rate-limited until .*; switched to login l2/);
+  assert.equal(sweep.json().attention.length, 1);
+});
+
+test("#1557 switch with no proven headroom parks instead, and says why; a recovered seat gets no item", (t) => {
+  const s = restartScene(t);
+  s.seed(team({ onRateLimit: "switch" }));
+  secondLogin(s, { used: 100 });
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"], { env: { AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0" } });
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.deepEqual(sweep.json().switched, []);
+  assert.equal(sweep.json().parked.length, 1);
+  assert.match(sweep.json().attention[0].text, /parked \(no second login with headroom\)/);
+  assert.match(sweep.json().notes.join("\n"), /no second signed-in login with headroom; parking/);
+  // A seat healthy at the sweep has no episode at all: none for a seat that recovers by itself.
+  assert.equal(openItems(s).length, 1);
+  setScreen(s, "t5", "❯ ");
+  const healthy = s.cli(["rate-limit", "--json"]);
+  assert.equal(healthy.code, 0, healthy.err);
+  assert.deepEqual(healthy.json().attention, []);
+  assert.equal(openItems(s).length, 0, "a recovered seat closes its episode");
+  // A fresh project seat never on the dialog creates nothing.
+  const clean = restartScene(t);
+  clean.seed(team());
+  setScreen(clean, "t5", "❯ ");
+  assert.equal(clean.cli(["rate-limit", "--json"]).code, 0);
+  assert.equal(openItems(clean).length, 0);
+});
+
+// The review's false positive: a healthy idle seat's last turn is a report that mentions the
+// limit and shows a markdown numbered list. It is not the dialog and must not restart anything.
+const rateReport = [
+  "I checked the rate limit path in the restart queue.",
+  "",
+  "Findings:",
+  "1. The retry loop waits, but no reset is recorded.",
+  "2. `am ls` reports a rate-limit status.",
+  "3. No test covers the parser.",
+].join("\n");
+
+test("#1557 a report mentioning the rate limit is not the dialog: no status, park, item or restart", (t) => {
+  const s = restartScene(t);
+  s.seed(team());
+  setScreen(s, "t5", rateReport);
+  const ls = s.cli(["ls", "--json"]);
+  assert.equal(ls.code, 0, ls.err);
+  const genie = ls.json().projects[0].bots.find((b) => b.id === ID.main);
+  assert.equal(genie.status, "idle", "the seat keeps its core status");
+  assert.equal("rate_limited" in genie, false);
+  assert.equal("core_status" in genie, false);
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().status, "idle");
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.deepEqual(sweep.json().rate_limited, []);
+  assert.deepEqual(sweep.json().parked, []);
+  assert.deepEqual(sweep.json().attention, []);
+  assert.deepEqual(s.cli(["restart", "--queued", "--json"]).json().queued, []);
+  assert.equal(existsSync(attentionFileOf(s)), false, "no attention item");
+  assert.equal(s.calls().some((c) => ["send", "keys"].includes(c[0])), false);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+});
+
+test("#1557 a permission dialog after a limit sentence parks nothing, reports nothing and sends no key", (t) => {
+  // The HIGH: the repo's own permission dialog, preceded by a sentence about the limit. The
+  // cue was read from the sentence, so this seat was reported rate-limited and parked at the
+  // sentence's time. It is the owner's permission question; nothing may be queued or said.
+  const s = restartScene(t);
+  s.seed(team());
+  setScreen(s, "t5", "I checked the rate limit path; the limit resets at 3:00 PM.\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n");
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.deepEqual(sweep.json().rate_limited, []);
+  assert.deepEqual(sweep.json().parked, []);
+  assert.deepEqual(sweep.json().attention, []);
+  assert.deepEqual(s.cli(["restart", "--queued", "--json"]).json().queued, [], "no queue entry for a dialog nobody detected");
+  assert.equal(existsSync(attentionFileOf(s)), false, "no attention item");
+  assert.equal(s.calls().some((c) => ["send", "keys"].includes(c[0])), false, "zero keys ever");
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+  const ls = s.cli(["ls", "--json"]);
+  assert.equal(ls.code, 0, ls.err);
+  const genie = ls.json().projects[0].bots.find((b) => b.id === ID.main);
+  assert.equal(genie.status, "idle", "the permission dialog is not a rate-limit status");
+  assert.equal("rate_limited" in genie, false);
+  assert.equal("core_status" in genie, false);
+});
+
+test("#1557 a past timestamp is unknown and a dialog with no reset parks with no invented wake", async (t) => {
+  // An ISO timestamp already gone proves nothing: no resets_at, no wake_at, no restart now.
+  const past = restartScene(t);
+  past.seed(team());
+  setScreen(past, "t5", rateDialog("Your limit reset at 2020-01-01T00:00:00Z."));
+  const pastSweep = past.cli(["rate-limit", "--json"]);
+  assert.equal(pastSweep.code, 0, pastSweep.err);
+  assert.equal("resets_at" in pastSweep.json().rate_limited[0], false);
+  assert.equal("wake_at" in pastSweep.json().parked[0], false);
+  const pastQueue = JSON.parse(readFileSync(queueFileOf(past), "utf8"));
+  assert.equal("wake_at" in pastQueue[0], false);
+  assert.equal("resets_at" in pastQueue[0], false);
+  // No reset sentence at all: the same, never the old guessed 15 minutes.
+  const none = restartScene(t);
+  none.seed(team());
+  setScreen(none, "t5", rateDialog("Try again later."));
+  const noneSweep = none.cli(["rate-limit", "--json"]);
+  assert.equal(noneSweep.code, 0, noneSweep.err);
+  assert.equal(noneSweep.json().parked.length, 1);
+  assert.equal("wake_at" in noneSweep.json().parked[0], false);
+  const entry = JSON.parse(readFileSync(queueFileOf(none), "utf8"))[0];
+  assert.equal("wake_at" in entry, false);
+  // The watcher polls and never fires at a guessed time; only its own expiry ends the wait.
+  const run = await none.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"],
+    { env: { AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "20", AUTOMAGIK_HERDR_QUEUE_MAX_MS: "300" } });
+  assert.equal(run.code, 0, run.err);
+  assert.equal(none.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing restarted on a guess");
+});
+
+test("#1557 a parked restart is dropped when the dialog is gone; a report mention does not keep it alive", async (t) => {
+  const s = restartScene(t);
+  s.seed(team());
+  setScreen(s, "t5", rateDialog("Your limit resets in 2 hours."));
+  assert.equal(s.cli(["rate-limit", "--json"]).json().parked.length, 1);
+  const entry = JSON.parse(readFileSync(queueFileOf(s), "utf8"))[0];
+  // The seat is healthy again: its last turn mentions the limit, but the dialog is not there.
+  setScreen(s, "t5", rateReport);
+  const run = await s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"],
+    { env: { AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "20", AUTOMAGIK_HERDR_QUEUE_MAX_MS: "500" } });
+  assert.equal(run.code, 0, run.err);
+  assert.deepEqual(JSON.parse(readFileSync(queueFileOf(s), "utf8")), [], "the queued restart was dropped");
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "the healthy seat was not restarted");
+  // The pane back at its prompt with no dialog drops it too.
+  const prompt = restartScene(t);
+  prompt.seed(team());
+  setScreen(prompt, "t5", rateDialog("Your limit resets in 2 hours."));
+  assert.equal(prompt.cli(["rate-limit", "--json"]).json().parked.length, 1);
+  const promptEntry = JSON.parse(readFileSync(queueFileOf(prompt), "utf8"))[0];
+  setScreen(prompt, "t5", "❯ ");
+  const gone = await prompt.cliAsync(["restart", ID.main, "--run-queued", promptEntry.id, "--json"],
+    { env: { AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "20", AUTOMAGIK_HERDR_QUEUE_MAX_MS: "500" } });
+  assert.equal(gone.code, 0, gone.err);
+  assert.deepEqual(JSON.parse(readFileSync(queueFileOf(prompt), "utf8")), []);
+  assert.equal(prompt.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false);
+});
+
+test("#1557 an unreadable sweep keeps its episode open and never writes a second item", (t) => {
+  const s = restartScene(t);
+  s.seed(team());
+  setScreen(s, "t5", rateDialog());
+  assert.equal(s.cli(["rate-limit", "--json"]).json().attention.length, 1);
+  const first = openItems(s)[0].id;
+  assert.equal(attentionItems(s).length, 1);
+  // hc can't answer read: the sweep knows nothing about the screen, so it must not heal.
+  const state = s.hcState();
+  state.fail = ["read"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const blind = s.cli(["rate-limit", "--json"]);
+  assert.equal(blind.code, 0, blind.err);
+  assert.match(blind.json().notes.join("\n"), /couldn't be read.*left open/);
+  // An unreadable tail is never a match in `am ls` either.
+  const blindLs = s.cli(["ls", "--json"]);
+  assert.equal(blindLs.code, 0, blindLs.err);
+  assert.notEqual(blindLs.json().projects[0].bots.find((b) => b.id === ID.main).status, "rate-limited");
+  assert.equal(openItems(s).length, 1, "the episode survives an unreadable sweep");
+  assert.equal(openItems(s)[0].id, first, "the same episode");
+  // Readable again: the same open episode, never a second item.
+  const again = s.hcState();
+  delete again.fail;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(again));
+  assert.equal(s.cli(["rate-limit", "--json"]).json().attention.length, 0);
+  assert.equal(attentionItems(s).length, 1);
+  assert.equal(openItems(s).length, 1);
+  assert.equal(openItems(s)[0].id, first);
+});
+
+test("#1557 switch without the conversation in the second login parks and says why", (t) => {
+  const s = restartScene(t);
+  s.seed(team({ onRateLimit: "switch" }));
+  secondLogin(s); // headroom, but no projects/<slug>/<session>.jsonl there
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"], { env: { AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0" } });
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.deepEqual(sweep.json().switched, []);
+  assert.equal(sweep.json().parked.length, 1);
+  assert.match(sweep.json().notes.join("\n"), /login l2 has headroom, but .*no conversation .*resume/);
+  assert.match(sweep.json().attention[0].text, /parked \(a login has headroom, but it cannot resume this conversation\)/);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing switched");
+});
+
+test("#1557 switch resumes the ledger's session when the pane label is gone", (t) => {
+  const s = restartScene(t, { session: null });
+  s.seed(team({ onRateLimit: "switch" }));
+  const dir = secondLogin(s);
+  seedTranscript(dir, s.project, SID);
+  // The pane lost its agent.session label; the hook's ledger row still names the conversation.
+  mkdirSync(dirname(ledgerPath(s.app)), { recursive: true });
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "session", terminal: "t5", agent: "claude", session: SID, at: new Date().toISOString() })}\n`);
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.equal(sweep.json().switched.length, 1);
+  assert.equal(sweep.json().switched[0].login, "l2");
+  const run = runCall(s.calls());
+  assert.ok(agentParts(run).env.includes(`CLAUDE_CONFIG_DIR=${dir}`), run.join(" "));
+  assert.ok(agentWords(run).includes("--resume"), "the ledger's conversation resumes on the other login");
+});
+
+test("#1557 a stale meter reading does not prove headroom for switch", (t) => {
+  const s = restartScene(t);
+  s.seed(team({ onRateLimit: "switch" }));
+  const dir = secondLogin(s, { ts: new Date(Date.now() - 2 * 60 * 60_000).toISOString() });
+  seedTranscript(dir, s.project, SID);
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"], { env: { AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0" } });
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.deepEqual(sweep.json().switched, []);
+  assert.equal(sweep.json().parked.length, 1);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "a two-hour-old reading proves nothing");
 });
 
 test("#1728 restart from a skewed member pane ends the member seat it replaces", (t) => {

@@ -29,7 +29,8 @@ import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
-import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION } from "./rows.js";
+import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED } from "./rows.js";
+import { rateLimitDialog } from "./restart.js";
 
 // The pack itself as a dialog: the bot form (create.js), or the attach picker, the Bots list
 // and a bot row's menu as a popup (a popup is as tall as its items; height is only the most).
@@ -277,6 +278,7 @@ export default class Spaces extends View {
     this.botsShown = 0; // the discovery drawn last: an older one answering after it is dropped
     this.botWatch = new Map(); // local project key -> the token of its one watcher
     this.refreshBots(cx);
+    cx.timer.every(15000, (cx) => this.scanRateLimits(cx));
     // The bot view (rows.js): the folds made this session (A7: fold id -> open), the row under
     // the pointer, the trees drawn last, the terminals drawn as bots (left out of the space's
     // own agent rows), the pictures known to be on disk, and when the next idle bot falls
@@ -302,6 +304,12 @@ export default class Spaces extends View {
     this.petsWanted = new Map(); // file -> { look, pose, dark }
     this.petsFailed = new Set();
     this.wakeAt = null;
+    // #1557: each live Claude seat's pane tail, read for Claude Code's rate-limit dialog on the
+    // 15-second sweep below (address -> { question, resets_at?, created_ms }), and the cursor
+    // that keeps one look at a handful of seats.
+    this.rateLimited = new Map();
+    this.rateLimitCursor = 0;
+    this.rateLimitBusy = false;
     // The model a bot row shows (A12, rows.js secondLine): the agents' own config files, read
     // now and on the 15-second timer, and each live bot pane's foreground command line by
     // address ({ argv, created }), read with hc get after each bot discovery when terminals()
@@ -316,6 +324,8 @@ export default class Spaces extends View {
     // Workers whose tab is on its way (openWorker): a second click waits for it.
     this.opening = new Set();
     this.loadModelTexts(cx);
+    // #1557: the first rate-limit look, after this.rateLimited exists (the timer above repeats it).
+    this.scanRateLimits(cx);
     // Hermes's own icon from the program table (its process shows as Python).
     this.hermes = { key: "hermes", name: "Hermes", icon: "icons/hermes.svg", tint: true };
     cx.spawn(async (cx) => {
@@ -433,8 +443,13 @@ export default class Spaces extends View {
   // terminal; a blocked mark names a permission when it says so. `owner` is the pane's
   // needs-owner question: a stopped agent waiting on the person draws its own Question chip,
   // apart from the blocked chip, its tooltip carrying what it asks.
-  status(t, a, report = null, owner = null) {
+  status(t, a, report = null, owner = null, rate = null) {
     const color = t[a.status] ?? t.dim;
+    // #1557: the rate-limit chip, beside (never instead of) the core status the row keeps.
+    if (a.status === "rate-limited") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold()
+      .text_color(t.blocked).flex().items_center()
+      .tooltip(rate?.resets_at ? `Rate-limited until ${rate.resets_at}; am parks or switches it` : "Rate-limited; am parks or switches it")
+      .child(RATE_LIMITED);
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child(needsYouText(report));
     if (owner) return div().flex_none().px(6).h(18).rounded(5).bg(t.ansi3 + "26").text_size(10.5).font_semibold().text_color(t.ansi3)
@@ -559,7 +574,7 @@ export default class Spaces extends View {
     this.paneSig = JSON.stringify(this.all.filter((k) => k.state === "live" && !String(k.address).includes("/") && known.has(k.labels?.[BOT_LABEL]))
       .map((k) => [k.address, k.created_ms ?? null, paneFolder(k)]));
     this.botOf = botTerminals(this.all, known, this.ledger);
-    this.trees = buildTree({ projects: this.bots, live, terminals: this.all, now });
+    this.trees = buildTree({ projects: this.bots, live, terminals: this.all, now, rateLimited: this.rateLimited });
     this.wakeAt = nextWake(live, now);
   }
 
@@ -806,7 +821,7 @@ export default class Spaces extends View {
     const live = n.live;
     if (live) this.order.push(live.terminal);
     const second = secondLine(r, tree, { texts: this.modelTexts, defaults: this.modelDefaults, argvOf: (a) => this.argvOf.get(a)?.argv ?? null });
-    const s = n.status === "error" ? "blocked" : n.status;
+    const s = n.rateLimited ? "rate-limited" : n.status === "error" ? "blocked" : n.status;
     const project = { key: n.project ?? tree.key, machine: tree.machine };
     // Not counted live but holding a live terminal (no agent seen in front yet): its pane, or
     // a peek, rather than nothing; read again at click time (panes() too), nothing if it is gone.
@@ -842,7 +857,7 @@ export default class Spaces extends View {
         .text_size(10).font_semibold().text_color(t.muted).child(`Wave ${b.planned.wave}`));
     } else {
       row = row.child(this.agentIcon(n, main ? 16 : 15, t))
-        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal), ownerQuestionOf(this.byAddress?.get(live.terminal), s, this.now)) : div().w(13).flex_none());
+        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal), ownerQuestionOf(this.byAddress?.get(live.terminal), s, this.now), n.rateLimited) : div().w(13).flex_none());
     }
     const box = this.rowEvents(row, r, t, onClick, onMenu).rounded(main ? 10 : 8);
     const styled = main
@@ -962,6 +977,48 @@ export default class Spaces extends View {
         this.screen = next;
         if (changed) cx.notify();
       } finally { this.scanning = false; }
+    });
+  }
+
+  // #1557: each live Claude seat's pane tail, read for Claude Code's rate-limit dialog (the
+  // same text rule the CLI uses, restart.js rateLimitDialog): a handful per 15-second sweep,
+  // never a loop. The address -> { question, resets_at?, created_ms } map is what rows.js marks
+  // a bot row with, so the sidebar draws "Rate limited" beside the core status. It never types.
+  scanRateLimits(cx) {
+    if (this.rateLimitBusy) return;
+    const bots = new Map((this.bots ?? []).flatMap((p) => (p.file?.bots ?? []).map((b) => [b.id, b])));
+    const seats = terminals().filter((t) => t.state === "live" && !String(t.address).includes("/")
+      && bots.get(t.labels?.[BOT_LABEL])?.agent === "claude" && t.status?.state !== "working");
+    if (!seats.length) {
+      if (this.rateLimited.size) { this.rateLimited.clear(); cx.notify(); }
+      return;
+    }
+    const start = this.rateLimitCursor % seats.length;
+    const ask = [...seats.slice(start), ...seats.slice(0, start)].slice(0, 8);
+    this.rateLimitCursor = (start + ask.length) % seats.length;
+    this.rateLimitBusy = true;
+    cx.spawn(async (cx) => {
+      let changed = false;
+      try {
+        await Promise.all(ask.map(async (t) => {
+          let found = null;
+          try { const r = await hc(["read", t.address]); if (r.code === 0) found = rateLimitDialog(r.stdout); } catch {}
+          const next = found ? { ...found, created_ms: t.created_ms ?? null } : null;
+          const prev = this.rateLimited.get(t.address) ?? null;
+          if (JSON.stringify(prev) !== JSON.stringify(next)) {
+            if (next) this.rateLimited.set(t.address, next); else this.rateLimited.delete(t.address);
+            changed = true;
+          }
+        }));
+        // A pane that ended or stopped being a live Claude seat keeps no record.
+        const live = new Set(seats.map((t) => t.address));
+        for (const address of [...this.rateLimited.keys()]) {
+          if (live.has(address)) continue;
+          this.rateLimited.delete(address);
+          changed = true;
+        }
+      } finally { this.rateLimitBusy = false; }
+      if (changed) cx.notify();
     });
   }
 
