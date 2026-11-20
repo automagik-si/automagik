@@ -27,6 +27,7 @@
 // list starts with a "default" row, as Claude Code's does; FAKE_ACP_NO_DEFAULT_EFFORT=1 leaves it
 // out, as Codex's does. FAKE_ACP_AUTH=session (or prompt) refuses `session/new` (or every
 // prompt) with ACP's auth_required, as an adapter whose CLI is signed out does.
+// FAKE_ACP_EXTRA_EFFORT adds an effort only to fake-small.
 //
 // As a native agent's CLI (a command started with `acp`, #959): FAKE_ACP_SESSION_MODELS=1 offers
 // its models only as the session's own list (`models` in the `session/new` answer, switched
@@ -50,9 +51,10 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
 
+const EXTRA_EFFORT = process.env.FAKE_ACP_EXTRA_EFFORT
 const MODELS = [
   { value: 'fake-large', name: 'Fake Large', efforts: ['low', 'medium', 'high'], effort: 'medium' },
-  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high'], effort: 'low' },
+  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high', ...(EXTRA_EFFORT ? [EXTRA_EFFORT] : [])], effort: 'low' },
   { value: 'fake-plain', name: 'Fake Plain', efforts: [], effort: undefined },
 ]
 const OFFERS = process.env.FAKE_ACP_NO_OPTIONS !== '1'

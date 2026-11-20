@@ -21,7 +21,8 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   Session's model, then its effort (the model first: the efforts are that model's). No effort
   leaves the agent's own. A model or effort the agent does not offer normally fails the turn,
   naming what it offers. For a missing stand-in, if the agent's own model is still available,
-  the reply uses that model without the requested effort and asks you to choose a model again.
+  DSH accepts an effort the known catalog offers for one of its models, and the reply uses the
+  agent's own model and effort and asks you to choose a model again.
 - **DSH tool cards and approvals.** With `dshTools` off (the kill switch), the agent runs its own
   tools. Each tool call it makes ends the model step with a call to `acp_tool`, a tool registered
   in that agent's scope only. DSH writes the `tool/call` and `tool/result` rows and draws the
@@ -923,7 +924,10 @@ check (about a day), whether or not it finds something newer; while it is still 
 for an unproven release it stays longer (below). Nothing is downloaded when a Session starts.
 
 npm is asked for a newer release once the last check is 20 hours old, by a timer that runs
-every 4 hours: at least once a day. A new release must start before it replaces the one in
+every 4 hours: at least once a day. Without the desktop app's pnpm, the check first asks the
+registry npm is configured with for the connector's scope; when npm names none, or that
+registry does not answer with an exact version (one that needs a sign-in to read, for example),
+it asks the public registry, as before. A new release must start before it replaces the one in
 use. In its fresh folder it is spawned the way a Session would spawn it and asked
 `initialize`, nothing more (`src/host/handshake.js`): it must answer within 20 seconds, on the
 protocol version the library speaks. One that fails is removed, the connector in use stays
