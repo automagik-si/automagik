@@ -28,6 +28,7 @@ import {
   launchPort, pageUrlOf, pinProfileStore, portFileOf, preloadOf, resourcesOf, serveDsh,
   storeLayoutOf, writeTools,
 } from './dsh.js'
+import { launchInstance } from './owner-record.js'
 import { BotCursor } from './bot-cursor.js'
 import { BotRelay } from './bot-relay.js'
 import { BotViews, isBotId, isTabId } from './bot-views.js'
@@ -294,7 +295,10 @@ async function launch() {
     // Then the plugins the lane staged go in, and this start is their trial (lane.js).
     lane: () => { if (app.isPackaged) laneTrial = beforeStart({ home, target: laneProfile, log: laneLog }) },
     // Electron's own binary runs dsh as Node, so the app ships one runtime.
-    tools: () => { dshTools = { resources, binDir: writeTools({ dir: join(home, 'bin'), node: process.execPath, pnpm: resources.pnpm }) } },
+    tools: () => {
+      dshTools = { resources, binDir: writeTools({ dir: join(home, 'bin'), node: process.execPath, pnpm: resources.pnpm }) }
+      instance ??= launchInstance({ home, log: reason => startLog(`${new Date().toISOString()} start: ${reason}\n`) })
+    },
     spawn: port => spawnDsh(port, started),
     // Earlier starts' dsh logins would pile up until dsh refuses the page (dsh.js forgetDshLogins).
     // dsh's page has the default session, and cookies ignore the port.
@@ -357,6 +361,7 @@ function publishAccount(status) {
 // What dsh is started with (the app's resources, and the tools on its PATH), for a start and for
 // each restart of DSH alone.
 let dshTools = null
+let instance
 let dshLog = null
 
 // A start that waited for dsh's last port (dsh.js launchPort) notes it in `steps` (start.log).
@@ -387,7 +392,7 @@ function spawnDsh(port, steps) {
   // Called for each child, including a retry if the first port was taken.
   const env = () => {
     marker = windowMarker.start()
-    return dshEnv({ home, electronAsNode: true, binDir, preload, privacy, windowDigest: marker.digest })
+    return dshEnv({ home, electronAsNode: true, binDir, preload, privacy, windowDigest: marker.digest, instanceId: instance?.instanceId })
   }
   // dsh's web app records its launch URL here (runtime patch web-launch-token-persistence); the
   // launcher reads it when dsh's output is unavailable.
