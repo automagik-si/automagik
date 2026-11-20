@@ -34,6 +34,7 @@
 // account is shown on these owner-only endpoints and nowhere else: not in team state, a
 // message, a tool, a model call or a log. `cli-login-accounts` and `cli-login-noticed` serve
 // the one-time notice for older ACP hosts. New isolated homes never carry terminal consent.
+// The owner-only `cli-login-start` and `cli-login-status` ready views can also name the account.
 //
 // Residual risk (RFC 0003's amendment, RFC 0023 section 3): a send from DSH's own composer is
 // admitted by DSH's session controller, which records it (`agent/inbox/spliced`) before any
@@ -522,9 +523,10 @@ export function install(rt) {
         return { id: body.provider, status: 'confirm', account, ...(choice ? { choice } : {}) }
       }
     }
+    let service
     let value
     try {
-      const service = acp()
+      service = acp()
       const method = METHODS[action]
       if (typeof service?.[method] !== 'function') throw Object.assign(new Error('Unavailable'), { code: 'acp-login/unavailable' })
       const args = action === 'start' ? [body.provider, { label: body.botId }]
@@ -552,7 +554,16 @@ export function install(rt) {
     // An attempt that ended ready on a CLI that was already signed in (it raced the check
     // above): the same confirm step, never "done".
     if (view.status === 'ready') {
-      const account = await pendingAccount(body.provider, { probe: false })
+      let account = await pendingAccount(body.provider, { probe: false })
+      if (account === undefined && (action === 'start' || action === 'status')) {
+        try {
+          const seen = await service.account?.(body.provider)
+          if (seen?.id === body.provider && seen.signedIn === true) {
+            if (seen.consent === 'needed') account = cliAccountView(seen)
+            else view.signedInAs = cliAccountView({ account: seen.account, ref: seen.ref })
+          }
+        } catch {}
+      }
       if (account !== undefined) {
         const waiting = { id: body.provider, status: 'confirm', account, ...(choice ? { choice } : {}) }
         return action === 'current' ? { id: body.provider, attempt: null, account, ...(choice ? { choice } : {}) } : waiting
