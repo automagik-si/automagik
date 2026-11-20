@@ -720,6 +720,15 @@ func fakeRefusingHC(t *testing.T, stderr, stdout string) string {
 			t.Fatal(err)
 		}
 	}
+	// This test exercises hc's refusal after the synthetic seat passed the pack's read-only check.
+	guard := filepath.Join(dir, "am")
+	if err := os.WriteFile(guard, []byte(`#!/bin/sh
+[ "$1 $2 $3" = "delivery-status t9 --json" ] || exit 64
+printf '%s' '{"terminal":"t9","held":false}'
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AM_BIN", guard)
 	bin := filepath.Join(dir, "hc")
 	script := `#!/bin/sh
 dir=$(dirname "$0")

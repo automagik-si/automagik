@@ -223,6 +223,9 @@ export function poseOf(live, now) {
   }
 }
 
+// The rate-limited chip's words (#1557), drawn by main.js status() beside the core status.
+export const RATE_LIMITED = "Rate limited";
+
 // The blocked chip's words, drawn by main.js status().
 export const NEEDS_YOU = "Needs you";
 export const NEEDS_YOU_PERMISSION = "Permission";
@@ -303,7 +306,7 @@ export function helpersOf(terminals, address, known = new Set(), depth = 0, seen
  * direct reports group by `category` in file order, then the uncategorised; a planned bot
  * is never live and has no members (a planned lead falls back to the main bot).
  */
-export function buildTree({ projects, live = {}, terminals = [], now = Date.now() }) {
+export function buildTree({ projects, live = {}, terminals = [], now = Date.now(), rateLimited = null }) {
   const known = knownBots(projects);
   const done = new Set();
   const unique = [];
@@ -355,10 +358,14 @@ export function buildTree({ projects, live = {}, terminals = [], now = Date.now(
         : file.bots
             .filter((b) => !placed.has(b.id) && b !== main && !leads.get(b.id)?.leadProject && leads.get(b.id)?.lead === bot.id)
             .map(node);
+      // #1557: the rate-limit dialog a live Claude seat is blocked on, read from its pane tail
+      // by the sidebar's own look (main.js) and keyed by the pane it was read on.
+      const rate = l ? rateLimited?.get(l.terminal) ?? null : null;
       const n = {
         bot, planned, pose: poseOf(l, now), members,
         live: l ? { terminal: l.terminal, duplicate: l.duplicate, parent: l.parent ?? null } : null,
         status: l?.status ?? null, program: l?.program ?? null, argv: l?.argv ?? null,
+        ...(rate ? { rateLimited: rate } : {}),
         helpers: l ? helpersOf(terminals, l.terminal, known) : [],
       };
       const crossWarn = (bot.crossMembers?.length || bot.members?.length)

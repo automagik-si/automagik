@@ -764,3 +764,26 @@ export function restartAnswer(r) {
   const raw = String(r?.err ?? "");
   return { refused: actionError(raw, "Restart"), forceable: /pass --force/.test(raw), freshable: /--fresh\b/.test(raw) };
 }
+
+export { durationMs, rateLimitDialog, resetTimeFrom } from "./dialog.js";
+
+/** An ISO instant in the person's own clock as "YYYY-MM-DD HH:MM", or an empty string when it is not one. */
+const localMinute = (iso) => {
+  const at = new Date(iso);
+  if (!Number.isFinite(at.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+};
+
+/** `<bot> is rate-limited until <time>; <outcome>`, or without the time when the dialog names none. */
+export function rateLimitLine(botName, { outcome = "parked", resetsAt = null } = {}) {
+  const at = resetsAt ? localMinute(resetsAt) : "";
+  return `${botName} is rate-limited${at ? ` until ${at}` : ""}; ${outcome}`;
+}
+
+/** How long a parked entry still has to wait (ms): 0 when `wakeAt` is due or absent, never negative. */
+export function wakeWait(wakeAt, now = Date.now()) {
+  if (typeof wakeAt !== "string" || !wakeAt) return 0;
+  const at = Date.parse(wakeAt);
+  return Number.isFinite(at) ? Math.max(0, at - now) : 0;
+}
