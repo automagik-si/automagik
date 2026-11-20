@@ -1092,3 +1092,34 @@ in the owner's activity list. No extra container port needs publishing.
 For direct private-network access, the plugin's `agentAccessHost` and `agentAccessPort` configure
 its separate listener; its defaults remain loopback and an OS-selected port. See the Bot
 plugin's [MCP setup and tool reference](../apps/bots-dsh/README.md#agent-access-mcp).
+
+### RFC 0038 caller assertions
+
+The gated Compose file passes `AUTOMAGIK_MULTIUSER` to DSH and maps it to
+`AUTOMAGIK_GATE_MULTIUSER` in the gate. The default is `0`. This image refuses DSH
+startup with `AUTOMAGIK_MULTIUSER=1` until the image follow-up installs the adapter
+and verifies the effective profile, including its matching DSH body limit.
+
+The gate stores the signing key in `gate-data` and publishes only the public keys
+to the named `caller-keys` volume. DSH has a read-only mount of that volume and never
+mounts `gate-data`. The gate publishes at startup when it knows the instance and
+on the next signature when the instance changes. First claim issues an owner
+session, which never signs an assertion.
+
+Caller assertions allow targets up to 4,096 bytes and assertion headers up to 8,192 bytes because DSH partitions startup combos at 3,072 bytes.
+
+Run these commands inside the gate container to rotate keys.
+
+```sh
+node /opt/automagik/gate-caller.mjs stage
+node /opt/automagik/gate-caller.mjs promote
+# Wait at least 120 seconds after promotion.
+node /opt/automagik/gate-caller.mjs retire
+```
+
+In an emergency, `retire --now` skips the wait. In-flight assertions signed by the
+retired key receive 401 once the adapter reloads the key set.
+
+To roll back, first stop member and guest admission, revoke their sessions and
+close their sockets. Then disable the reroute. See the adapter's README for the
+[remote stream WebSocket dependency](../apps/multiuser-dsh/README.md#remote-stream-websocket-upstream-dependency).

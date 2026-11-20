@@ -2,7 +2,8 @@ import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { Transform } from 'node:stream'
 import { COOKIE, cookieSecret, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
-import { agentMcpHeaders, DSH_HOST, responseHeaders, upstreamHeaders } from './gate-upstream.mjs'
+import { frontendPath } from './gate-frontend.mjs'
+import { agentMcpHeaders, callerHeaders, DSH_HOST, responseHeaders, upstreamHeaders, validBodyFraming } from './gate-upstream.mjs'
 import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
 
 export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
@@ -19,6 +20,14 @@ export function pinOrigin(value) {
   }
   return url
 }
+function hasSingleHost(req) {
+  let count = 0
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    if (req.rawHeaders[i].toLowerCase() === 'host') count++
+  }
+  return count === 1
+}
+
 function trustedRequest(req, origin, upgrade, allowNavigation = false) {
   if (req.headers.host !== origin.host) return false
   if (req.headers.origin !== undefined && req.headers.origin !== origin.origin) return false
@@ -30,11 +39,22 @@ function trustedRequest(req, origin, upgrade, allowNavigation = false) {
 function reservedPathAlias(rawUrl, origin) {
   const raw = rawUrl.split('?', 1)[0]
   const reserved = path => path === '/_gate' || path.startsWith('/_gate/')
+  return explorePath(raw, origin, reserved, raw.startsWith('/_gate/'))
+}
+
+function privatePath(rawUrl, origin) {
+  return explorePath(rawUrl.split('?', 1)[0], origin, path => {
+    const lower = path.toLowerCase()
+    return lower === '/_automagik' || lower.startsWith('/_automagik/')
+  })
+}
+
+function explorePath(raw, origin, reserved, exemptRaw = false) {
   const queue = [raw]
   const seen = new Set(queue)
   for (let i = 0; i < queue.length; i++) {
     const candidate = queue[i]
-    if (reserved(candidate) && (candidate !== raw || !raw.startsWith('/_gate/'))) return true
+    if (reserved(candidate) && (candidate !== raw || !exemptRaw)) return true
     let normalized
     try { normalized = new URL(candidate, origin).pathname }
     catch { return true }
@@ -88,8 +108,13 @@ function refuseSocket(socket, status = 401) {
   socket.end(`HTTP/1.1 ${status} Refused\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, destroy)
 }
 
-export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
+const ownerEquivalent = family => family.principal.roles.some(role => role === 'owner' || role === 'admin')
+const apiPath = path => path === '/api' || path.startsWith('/api/')
+
+export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, multiuser = false, caller, auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
+  if (multiuser && !caller) throw new Error('Multiuser requires a caller signer')
   const origin = pinOrigin(value)
+  const isMcpTarget = raw => new URL(raw, origin).pathname === '/api/omni-mcp'
   const sockets = new Map()
   // Cloud mode: the rail posts a single-use open code here, as a form (OIDC's form_post shape).
   // The gate trades it with the Cloud service itself and sets its own session; the browser
@@ -222,13 +247,18 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   // their own. A self-hosted instance has one human, so it keeps every session in scope.
   const mine = family => cloud ? other => samePerson(other.principal, family.principal) : undefined
   const server = http.createServer(async (req, res) => {
+    if (!hasSingleHost(req) || !validBodyFraming(req)) {
+      res.writeHead(400, { connection: 'close' }).end()
+      return
+    }
     if (reservedPathAlias(req.url, origin)) { answer(res, 400, { error: 'Non-canonical gate path' }); return }
+    if (privatePath(req.url, origin)) { answer(res, 400, { error: 'Private path' }); return }
     if (cloud && req.url === CLOUD_REVOCATION_PATH) { await cloudRevoke(req, res); return }
     if (cloud && req.url === CLOUD_RENEW_PATH) { await cloudRenew(req, res); return }
     if (cloud && req.url.split('?', 1)[0] === CLOUD_OPEN_PATH) { await cloudOpen(req, res); return }
-    // Literal target only: queries and aliases continue through the ordinary session gate.
-    // The upstream exact route admits only agent tokens, never a browser session alone.
-    if (req.url === '/api/omni-mcp') {
+    // The owner-only agent route uses a literal target. In multiuser mode also
+    // refuse URLs DSH would match to that exact route before obtaining a credential.
+    if (req.url === '/api/omni-mcp' || (multiuser && isMcpTarget(req.url))) {
       if (req.headers.host !== origin.host
         || (req.headers.origin !== undefined && req.headers.origin !== origin.origin)
         || req.headers['sec-fetch-site'] === 'cross-site') {
@@ -236,6 +266,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         answer(res, 403, { error: 'Invalid MCP origin' })
         return
       }
+      if (multiuser) { answer(res, 403, { error: 'Agent access is off in multiuser mode' }); return }
       try {
         const cookie = await credentials.cookie()
         const proxy = http.request({ hostname: DSH_HOST, port: credentials.port,
@@ -283,11 +314,29 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       // The gate-held browser credential also admits DSH's /api and WebSocket owner peer.
       // /connect is a DSH bearer exchange, never a second browser sign-in path.
       if (url.pathname === '/connect') { answer(res, 401, { error: 'Session exchanges belong to the gate' }); return }
-      const cookie = await credentials.cookie()
-      if (!sessions.active(family) || res.destroyed) { answer(res, 401, { error: 'Session required' }); return }
-      const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: req.method, path: req.url, headers: upstreamHeaders(req, credentials, cookie, family.principal), timeout: 30_000 }, upstream => {
-        // Refresh credentials for the next request on 401. Never replay a mutating body.
-        if (upstream.statusCode === 401) credentials.cookie(true).catch(() => {})
+      const owner = ownerEquivalent(family)
+      if (!owner && !multiuser) { answer(res, 403, { error: 'Owner access required' }); return }
+      if (!sessions.active(family)) { answer(res, 401, { error: 'Session required' }); return }
+      let path = req.url, headers
+      if (owner) {
+        const cookie = await credentials.cookie()
+        if (!sessions.active(family) || res.destroyed) { answer(res, 401, { error: 'Session required' }); return }
+        headers = upstreamHeaders(req, credentials, cookie, family.principal)
+      } else {
+        if (!apiPath(url.pathname)) {
+          if (!['GET', 'HEAD'].includes(req.method)) { answer(res, 405, { error: 'Method not allowed' }); return }
+          if (!frontendPath(url)) { answer(res, 404, { error: 'Unknown frontend path' }); return }
+        }
+        const target = url.pathname + url.search
+        let assertion
+        try { assertion = caller.sign({ principal: family.principal, familyId: family.id, method: req.method, path: target }) }
+        catch { answer(res, 403, { error: 'Caller refused' }); return }
+        path = '/_automagik/caller' + target
+        headers = callerHeaders(req, credentials, family.principal, assertion)
+      }
+      const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: req.method, path, headers, timeout: 30_000 }, upstream => {
+        // Refresh credentials for the next owner request on 401. Never replay a mutating body.
+        if (owner && upstream.statusCode === 401) credentials.cookie(true).catch(() => {})
         res.writeHead(upstream.statusCode, responseHeaders(upstream.headers))
         upstream.pipe(res)
         upstream.on('error', () => res.destroy())
@@ -298,15 +347,27 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       req.pipe(proxy)
     } catch { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() }
   })
-  server.on('connect', (req, socket) => refuseSocket(socket, reservedPathAlias(req.url, origin) ? 400 : 401))
+  // Inspect the complete header block, still bounded by Node's header byte limit.
+  server.maxHeadersCount = 0
+  server.on('connect', (req, socket) => refuseSocket(socket, !hasSingleHost(req) || !validBodyFraming(req) ||
+    reservedPathAlias(req.url, origin) || privatePath(req.url, origin) ? 400 : 401))
   server.on('upgrade', async (req, socket, head) => {
     socket.on('error', () => {})
-    if (reservedPathAlias(req.url, origin)) { refuseSocket(socket, 400); return }
+    // Node hands bytes after upgrade headers to the tunnel. Only a bodyless
+    // upgrade can use this path without treating HTTP body bytes as tunnel data.
+    if (!hasSingleHost(req) || req.headers['transfer-encoding'] !== undefined || Number(req.headers['content-length']) > 0) {
+      refuseSocket(socket, 400)
+      return
+    }
+    if (reservedPathAlias(req.url, origin) || privatePath(req.url, origin)) { refuseSocket(socket, 400); return }
     const authorization = await authorize(req, true)
     const family = authorization?.family
     if (!family) { refuseSocket(socket); return }
     try {
+      if (multiuser && isMcpTarget(req.url)) { refuseSocket(socket, 403); return }
       if (!req.url.startsWith('/') || req.url.startsWith('//') || new URL(req.url, origin).searchParams.has('token') || req.headers.upgrade?.toLowerCase() !== 'websocket') { refuseSocket(socket); return }
+      if (!ownerEquivalent(family)) { refuseSocket(socket, 403); return }
+      if (!sessions.active(family)) { refuseSocket(socket, 401); return }
       const cookie = await credentials.cookie()
       if (!sessions.active(family) || socket.destroyed) { refuseSocket(socket); return }
       const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: 'GET', path: req.url, headers: upstreamHeaders(req, credentials, cookie, family.principal, true), timeout: 5000 })

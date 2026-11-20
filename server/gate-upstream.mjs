@@ -46,10 +46,28 @@ export class DshCredentials {
 
 // Use an allowlist: hop-by-hop nominations cannot remove the credential or principal, and
 // browser cookies, bearer tokens and forwarding/identity assertions never cross this hop.
-const REQUEST_HEADERS = ['accept', 'accept-encoding', 'accept-language', 'content-type', 'content-length', 'if-none-match', 'if-modified-since', 'range', 'if-range', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions', 'sec-websocket-protocol']
-export function upstreamHeaders(req, credentials, cookie, principal, upgrade = false) {
+const REQUEST_HEADERS = ['accept', 'accept-encoding', 'accept-language', 'content-type', 'if-none-match', 'if-modified-since', 'range', 'if-range']
+const WEBSOCKET_HEADERS = ['sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions', 'sec-websocket-protocol']
+const MCP_HEADERS = ['authorization', 'accept', 'content-type', 'mcp-protocol-version', 'mcp-session-id', 'origin']
+
+export function validBodyFraming(req) {
+  const encoding = req.headers['transfer-encoding']
+  return encoding === undefined ||
+    (encoding.toLowerCase() === 'chunked' && req.headers['content-length'] === undefined)
+}
+
+function requestHeaders(req, allowed) {
   const headers = {}
-  for (const name of REQUEST_HEADERS) if (req.headers[name] !== undefined) headers[name] = req.headers[name]
+  for (const name of allowed) if (req.headers[name] !== undefined) headers[name] = req.headers[name]
+  // IncomingMessage decodes chunks. Explicitly ask Node to frame the outgoing
+  // body again, including methods for which ClientRequest defaults to no chunking.
+  if (req.headers['transfer-encoding'] !== undefined) headers['transfer-encoding'] = 'chunked'
+  else if (req.headers['content-length'] !== undefined) headers['content-length'] = req.headers['content-length']
+  return headers
+}
+
+export function upstreamHeaders(req, credentials, cookie, principal, upgrade = false) {
+  const headers = requestHeaders(req, [...REQUEST_HEADERS, ...WEBSOCKET_HEADERS])
   headers.host = credentials.authority
   headers.origin = `http://${credentials.authority}`
   headers.cookie = cookie
@@ -57,6 +75,15 @@ export function upstreamHeaders(req, credentials, cookie, principal, upgrade = f
   if (upgrade) { headers.connection = 'Upgrade'; headers.upgrade = 'websocket' }
   return headers
 }
+export function callerHeaders(req, credentials, principal, assertion) {
+  const headers = requestHeaders(req, REQUEST_HEADERS)
+  headers.host = credentials.authority
+  headers.origin = `http://${credentials.authority}`
+  headers['x-automagik-caller'] = assertion
+  headers['x-automagik-principal'] = Buffer.from(JSON.stringify(principal)).toString('base64url')
+  return headers
+}
+
 export function responseHeaders(headers) {
   const excluded = new Set(['set-cookie', 'connection', 'transfer-encoding', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'upgrade', ...(headers.connection ?? '').toLowerCase().split(',').map(v => v.trim())])
   return Object.fromEntries(Object.entries(headers).filter(([name]) => !excluded.has(name)))
@@ -65,10 +92,5 @@ export function responseHeaders(headers) {
 // The sole non-browser route. Its plugin authenticates the bearer on every call.
 // No browser cookie, principal, forwarding assertion or general /api path crosses here.
 export function agentMcpHeaders(req, credentials, cookie) {
-  const headers = { host: credentials.authority, cookie }
-  for (const name of ['authorization', 'accept', 'content-type', 'content-length',
-    'mcp-protocol-version', 'mcp-session-id', 'origin']) {
-    if (req.headers[name] !== undefined) headers[name] = req.headers[name]
-  }
-  return headers
+  return { ...requestHeaders(req, MCP_HEADERS), host: credentials.authority, cookie }
 }
