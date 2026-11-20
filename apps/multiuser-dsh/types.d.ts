@@ -39,6 +39,12 @@ export interface BotFact {
   }
 }
 
+export interface AutomagikCallerRoutes {
+  readonly version: 1
+  match(path: string, method: string):
+    ((request: Request, principal: AutomagikPrincipal, peer: unknown) => Promise<Response>) | undefined
+}
+
 export interface AutomagikCaller {
   readonly version: 2
   readonly multiuser: boolean

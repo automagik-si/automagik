@@ -5,6 +5,7 @@ import { frontendPath } from './frontend.js'
 import { createPeerRegistry } from './peers.js'
 
 export const DEFAULT_MAX_REQUEST_BODY_BYTES = 314572800
+export const CALLER_PAIRS = new Map([['POST /api/omni-ui', 16_384], ['GET /api/omni-ui/feed', 0]])
 const DRAIN_TIMEOUT_MS = 30_000
 const PREFIX = '/_automagik/caller'
 export const READY_PATH = PREFIX + '/_ready'
@@ -130,13 +131,14 @@ export function admitCaller(req, { keys, nonces, multiuser, keysConfigured, expe
 
 export function createCarrier({ connection, staticResource, clientModules, appResource, keys, nonces, scope, multiuser, keysConfigured,
   expectedAuthority, maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES, now = () => Date.now(), active = () => true,
-  ready = active, apiFor, seen, registry = createPeerRegistry(),
+  ready = active, apiFor, seen, registry = createPeerRegistry(), callerRoutes = () => undefined, callerSlots = 4,
 }) {
   if (!apiFor) {
     const api = connection.createSharedFetchHandler('/api')
     apiFor = () => api
   }
   const inFlight = new Set()
+  const posts = new Map()
   const pending = new Set()
   let onIdle
   const admission = { keys, nonces, multiuser, keysConfigured, expectedAuthority, now, seen }
@@ -165,21 +167,33 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
       abort.abort()
       res.destroy()
     }
-    let peer
+    let peer, slot
     try {
       const { method } = req
+      const raw = req.url.slice(PREFIX.length)
+      const pairLimit = CALLER_PAIRS.get(method + ' ' + raw)
+      const routes = pairLimit === undefined ? undefined : callerRoutes()
+      const callerHandler = routes?.version === 1 ? routes.match(url.pathname, method) : undefined
+      if (callerHandler && method === 'POST') {
+        const key = JSON.stringify([principal.person.issuer, principal.person.subject])
+        const count = posts.get(key) ?? 0
+        if (count >= callerSlots) return closeRequest(req, res, 429)
+        posts.set(key, count + 1)
+        slot = key
+      }
       const headers = new Headers({ host: authority })
       for (const name of REQUEST_HEADERS) {
         if (typeof req.headers[name] === 'string') headers.set(name, req.headers[name])
       }
       const apiRequest = within(url.pathname, '/api')
-      const streaming = apiRequest && api.requestBodyMode({ method, url }) === 'streaming'
+      const streaming = apiRequest && !callerHandler && api.requestBodyMode({ method, url }) === 'streaming'
       let body
       if (apiRequest && !streaming) {
         const stop = () => abort.abort()
         pending.add(stop)
         const untrack = registry.trackPending(stop)
-        try { body = await bufferedBody(req, maxRequestBodyBytes, abort.signal) }
+        const limit = callerHandler ? Math.min(pairLimit, maxRequestBodyBytes) : maxRequestBodyBytes
+        try { body = await bufferedBody(req, limit, abort.signal) }
         finally { pending.delete(stop); untrack() }
       }
       if (abort.signal.aborted || active() !== binding || registry.epoch !== epoch) return unavailable()
@@ -198,7 +212,8 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
       await scope.run(principal, async () => {
         if (!registry.live(peer) || active() !== binding) return unavailable()
         let response
-        if (apiRequest) response = await api.fetch(request, peer)
+        if (callerHandler) response = await callerHandler(request, principal, peer)
+        else if (apiRequest) response = await api.fetch(request, peer)
         else if (kind === 'bundle') response = await clientModules?.()?.fetchBundle(request)
         else if (kind === 'app') response = await appResource?.(request)
         else response = await staticResource?.(request, peer)
@@ -210,6 +225,11 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
       else if (abort.signal.aborted) unavailable()
       else refuse(500)
     } finally {
+      if (slot !== undefined) {
+        const count = posts.get(slot)
+        if (count === 1) posts.delete(slot)
+        else posts.set(slot, count - 1)
+      }
       if (inFlight.delete(cancel) && !inFlight.size) onIdle?.()
       res.off('close', onClose)
       if (peer) registry.remove(peer)

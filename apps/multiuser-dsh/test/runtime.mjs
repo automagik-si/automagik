@@ -81,7 +81,9 @@ export async function invoke(handler, { url, method, headers, body, chunks, rawH
   Object.assign(req, { url, method, headers: Object.fromEntries(flat), rawHeaders: rawHeaders ?? flat.flat() })
   const buffers = []
   const res = new Writable({ write(chunk, _encoding, done) { buffers.push(chunk); done() } })
-  res.writeHead = (status, headers) => Object.assign(res, { status, headers, headersSent: true })
+  const responseHeaders = {}
+  res.setHeader = (name, value) => { responseHeaders[name.toLowerCase()] = value }
+  res.writeHead = (status, headers) => Object.assign(res, { status, headers: Object.keys(responseHeaders).length ? { ...responseHeaders, ...headers } : headers, headersSent: true })
   onTransport?.(req, res)
   await handler(req, res)
   if (waitForEnd) await finished(res, { cleanup: true })
