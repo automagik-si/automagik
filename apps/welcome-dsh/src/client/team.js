@@ -971,22 +971,29 @@ export function TeamStep(props) {
   }, [phase, glitch])
   useEffect(() => { if (state) glitch() }, [state, glitch])
   useEffect(() => {
-    if (!state || !powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return
+    if (explicit || !state) return
+    if (!powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return
     autoPowered.current = true
     power.toggle()
-  }, [state])
+  }, [state, explicit])
   useEffect(() => {
-    if (!state || !powersOnByItself(state.preload, geniePower.phase, geniePower.detail, genieAutoPowered.current, 'genie')) return
+    if (explicit || !state) return
+    if (!powersOnByItself(
+      state.preload, geniePower.phase, geniePower.detail, genieAutoPowered.current, 'genie',
+    )) return
     genieAutoPowered.current = true
     setLastPressed('genie')
     geniePower.toggle()
-  }, [state])
+  }, [state, explicit])
   useEffect(() => {
-    if (!state || !powersOnByItself(state.preload, unfoldPower.phase, unfoldPower.detail, unfoldAutoPowered.current, 'unfold')) return
+    if (explicit || !state) return
+    if (!powersOnByItself(
+      state.preload, unfoldPower.phase, unfoldPower.detail, unfoldAutoPowered.current, 'unfold',
+    )) return
     unfoldAutoPowered.current = true
     setLastPressed('unfold')
     unfoldPower.toggle()
-  }, [state])
+  }, [state, explicit])
   if (!state) return null
 
   const name = state.companionName ?? t('Your companion')
