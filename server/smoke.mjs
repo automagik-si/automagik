@@ -180,7 +180,9 @@ async function main() {
   // The opt-in gate shares the namespace, never its writable state. No public port.
   await docker(['volume', 'create', gateVolume])
   await docker(['run', '--detach', '--name', gateName, '--network', `container:${name}`,
-    '--volume', `${gateVolume}:/data`, '--volume', `${volume}:/dsh:ro`,
+    '--volume', `${gateVolume}:/data`,
+    // DSH_HOME only, as compose.gate.yml mounts it (volume.subpath; Docker Engine 26+).
+    '--mount', `type=volume,source=${volume},target=/dsh/dsh,readonly,volume-subpath=dsh`,
     '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
     '--env', 'AUTOMAGIK_GATE_ENABLED=1', '--env', 'AUTOMAGIK_GATE_ORIGIN=http://localhost:3082',
     '--health-interval', '2s', '--health-start-period', '0s',
@@ -197,7 +199,12 @@ async function main() {
   const gateConfig = JSON.parse((await docker(['inspect', gateName])).stdout)[0]
   const dshConfig = JSON.parse((await docker(['inspect', name])).stdout)[0]
   check(gateConfig.HostConfig.NetworkMode === `container:${dshConfig.Id}`, 'gate does not share only the DSH network namespace')
-  check(gateConfig.Mounts.some(m => m.Name === volume && m.Destination === '/dsh' && !m.RW), 'gate DSH mount is not read-only')
+  check(gateConfig.Mounts.some(m => m.Name === volume && m.Destination === '/dsh/dsh' && !m.RW), 'gate DSH mount is not read-only')
+  check(!gateConfig.Mounts.some(m => m.Name === volume && m.Destination !== '/dsh/dsh'), 'gate mounts more of the DSH volume than DSH_HOME')
+  // The rest of the DSH volume stays out of the gate's reach: Pocket's chat socket exists in
+  // DSH, and the gate (the same uid 1000) can neither see nor connect to it, nor read the key.
+  await docker(['exec', name, '/bin/bash', '-c', 'test -S /data/bots/pocket/chat.sock'])
+  await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs"),net=require("net");for(const p of ["/dsh/bots","/dsh/secrets","/dsh/acp","/dsh/workspace"])if(fs.existsSync(p))process.exit(2);const c=net.connect("/dsh/bots/pocket/chat.sock");c.on("connect",()=>process.exit(3));c.on("error",e=>process.exit(e.code==="ENOENT"?0:4))'])
   check(gateConfig.Mounts.some(m => m.Name === gateVolume && m.Destination === '/data' && m.RW), 'gate has no separate writable store')
   check(!dshConfig.Mounts.some(m => m.Name === gateVolume), 'DSH mounts the gate store')
   await docker(['exec', gateName, '/nodejs/bin/node', '-e', 'const fs=require("fs");fs.accessSync("/dsh/dsh/launch-url");fs.writeFileSync("/data/gate-only", "private");try{fs.writeFileSync("/dsh/gate-write-probe", "bad");process.exit(1)}catch(e){if(e.code!=="EROFS")throw e}'])

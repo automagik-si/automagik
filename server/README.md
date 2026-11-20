@@ -281,8 +281,8 @@ described below; a profile whose `package.json` the owner changed stays owner-ma
 A DSH container mounts **one volume, at `/data`** (the `--volume` in Run). `/data/workspace` is a
 directory inside it, not a second mount, and the vendor homes and the meter's state default into
 it too: the image sets `HOME=/data`. The optional gate container has its own `/data`
-(`gate-data`) and reads the DSH volume at `/dsh:ro`; that read-only DSH view is the gate's, not
-the workspace's measurement view.
+(`gate-data`) and reads only the DSH volume's `dsh/` folder (`DSH_HOME`), read-only at `/dsh/dsh`;
+that view is the gate's, not the workspace's measurement view.
 
 The image bakes no host path. Resolve the workspace volume's host path per runtime:
 
@@ -747,8 +747,11 @@ legitimate traffic. Point the tunnel at the gate on port 3082 and keep DSH's pub
 untrusted.
 
 Only the network namespace is shared. The gate has its own `gate-data` volume at `/data`,
-never mounted into DSH; it reads `dsh-data` at `/dsh:ro` for the launch credential. It has no
-model key. With Access unset it connects only to the fixed loopback DSH listener and never
+never mounted into DSH; it reads only `dsh-data`'s `dsh/` folder, read-only at `/dsh/dsh`, for the
+launch credential and the profile (Compose `volume.subpath`: Docker Engine 26 and Compose 2.26 or
+later). The gate runs as the same uid 1000 as DSH, so the rest of the volume (the model key, the
+agents' logins, the team and Pocket's owner-only chat socket) stays out of its mount: a read-only
+mount would still let it read those files and connect to that socket. It has no model key. With Access unset it connects only to the fixed loopback DSH listener and never
 follows a launch file's destination or any upstream redirect. Tests use temporary stores and
 listeners; they do not touch a running installation.
 

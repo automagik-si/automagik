@@ -32,7 +32,17 @@ services:
       AUTOMAGIK_GATE_CLOUD_REVOCATION_URL: ${AUTOMAGIK_GATE_CLOUD_REVOCATION_URL:-}
     volumes:
       - gate-data:/data
-      - dsh-data:/dsh:ro
+      # Only DSH_HOME (the volume's dsh/ folder) for the launch credential and the profile the
+      # health report reads. The rest of the volume holds the model key, the agents' logins, the
+      # team and Pocket's owner-only chat socket; the gate runs as the same uid 1000, so a mount
+      # of the whole volume, even read-only, would let it read those files and connect to that
+      # socket. volume.subpath needs Docker Engine 26 and Compose 2.26 or later.
+      - type: volume
+        source: dsh-data
+        target: /dsh/dsh
+        read_only: true
+        volume:
+          subpath: dsh
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
