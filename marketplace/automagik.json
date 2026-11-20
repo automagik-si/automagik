@@ -67,6 +67,19 @@
       },
       "versions": [
         {
+          "version": "3.160.0",
+          "publishTimestamp": 1795159302,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/automagik-si/automagik",
+            "commit": "6794bafa1d75aab65d210040595bb4400d59313c",
+            "path": "apps/bots-dsh"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+          }
+        },
+        {
           "version": "3.159.1",
           "publishTimestamp": 1795140822,
           "source": {
@@ -5411,6 +5424,19 @@
         ]
       },
       "versions": [
+        {
+          "version": "3.160.0",
+          "publishTimestamp": 1795159302,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/automagik-si/automagik",
+            "commit": "6794bafa1d75aab65d210040595bb4400d59313c",
+            "path": "apps/welcome-dsh"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+          }
+        },
         {
           "version": "3.159.1",
           "publishTimestamp": 1795140822,
@@ -10866,6 +10892,19 @@
       },
       "versions": [
         {
+          "version": "3.160.0",
+          "publishTimestamp": 1795159302,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/automagik-dev/automagik",
+            "commit": "6794bafa1d75aab65d210040595bb4400d59313c",
+            "path": "apps/locale-pt-br-dsh"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+          }
+        },
+        {
           "version": "3.159.1",
           "publishTimestamp": 1795140822,
           "source": {
@@ -15613,6 +15652,19 @@
       },
       "versions": [
         {
+          "version": "3.160.0",
+          "publishTimestamp": 1795159302,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/automagik-dev/automagik",
+            "commit": "6794bafa1d75aab65d210040595bb4400d59313c",
+            "path": "apps/acp-dsh"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.2 <0.3.0-0"
+          }
+        },
+        {
           "version": "3.159.1",
           "publishTimestamp": 1795140822,
           "source": {
@@ -19822,6 +19874,46 @@
           },
           "engines": {
             "dsh": ">=0.2.1-rc.5 <0.2.2-0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@automagik/vault-dsh",
+      "title": {
+        "en": "Vault (Bitwarden)"
+      },
+      "description": {
+        "en": "Read Bitwarden vault fields for approved Bot commands in DeepSeek Harness."
+      },
+      "author": "Automagik",
+      "homepage": "https://github.com/automagik-si/automagik/tree/dev/apps/vault-dsh#readme",
+      "repository": {
+        "url": "https://github.com/automagik-si/automagik",
+        "directory": "apps/vault-dsh"
+      },
+      "metadata": {
+        "category": "automagik",
+        "keywords": [
+          "bitwarden",
+          "vault"
+        ],
+        "labels": [
+          "official"
+        ]
+      },
+      "versions": [
+        {
+          "version": "3.160.0",
+          "publishTimestamp": 1795159302,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/automagik-si/automagik",
+            "commit": "6794bafa1d75aab65d210040595bb4400d59313c",
+            "path": "apps/vault-dsh"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.2 <0.3.0-0"
           }
         }
       ]
