@@ -35,6 +35,12 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   the agent changes after review, and level changes can still raise a dialog. When the mirror
   body gets a question offering `allow_always` without `allow_once`, it replies with `reject_once`
   if offered or cancels the question, skips its dialog, and explains why in the result text.
+  Under an Automagik Codex permission profile, the mirror skips the dialog and refuses when Codex
+  asks to run a new command outside the sandbox because Codex keeps the profile's deny rule even
+  after approval, with the refusal reason shown as the turn's last line if Codex cancels the prompt.
+  Network, MCP and additional-permission questions still ask. An input question
+  for a running command has the same wire format as a new command escalation and is refused
+  the same way.
 - **DSH's own tools over the bridge (`dshTools`).** On, the agent gets the Session's preset tool
   set (standard, or cordis in creator mode) over one stdio MCP server per ACP session, named
   `dsh` and spawned by the adapter with that session's arguments. The bridge has no port; it
