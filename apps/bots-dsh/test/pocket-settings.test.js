@@ -1176,6 +1176,12 @@ test('a snapshot older than the desktop menu cache still lists models until it i
   assert.equal(settings.model.label, 'V4')
   assert.equal((await c.model(settings.rev, NEXT)).state, 'saved')
   assert.deepEqual(h.calls, [['select', 's-0', NEXT]])
+  // The phone never lists: a model added since shows only once the desktop lists again.
+  h.providers.deepseek.push({ id: 'v6' })
+  assert.ok(!(await c.read()).models.entries.some(entry => entry.id === 'deepseek/v6'))
+  assert.deepEqual(h.calls, [['select', 's-0', NEXT]])
+  await h.rt.catalog({ fresh: true })
+  assert.ok((await c.read()).models.entries.some(entry => entry.id === 'deepseek/v6'))
   h.calls.length = 0
   h.rt.dropCatalog()
   const cold = await c.read()

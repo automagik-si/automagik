@@ -524,11 +524,12 @@ only for an entry that would be listed:
   tools run commands).
 
 At most 200 entries, in catalog order. Every settings-bearing reply carries `models`; the phone
-replaces its list from each one. The list read is from the last snapshot the host holds,
-whatever its age, without saving anything; a write checks a fresh listing. A key, sign-in or
-route change on the computer drops the snapshot, and the list stays empty until the desktop
-lists models again. (Amended 2026-11-20: a 10 s limit left the phone with no list almost
-always, because the desktop lists models only when its menus need them.)
+replaces its list from each one. The list is read from the last snapshot the host holds,
+whatever its age, without saving anything; a write is checked against the same snapshot, and
+DSH checks the exact model when it is selected. A key, sign-in or route change on the computer
+drops the snapshot, and the list stays empty until the desktop lists models again. (Amended
+2026-11-20: a 10 s limit left the phone with no list almost always, because the desktop lists
+models only when it needs them.)
 
 ### Replies
 
@@ -560,8 +561,8 @@ negotiation the checks run in this order.
 | 13 | `not-applied` + `message` | The write was admitted and DSH turned the model selection down. The model stays as it was; a model write can clear Auto first (RFC 0031, D2), and `settings.level` shows the result. `message` is fixed: "The computer could not switch the Bot to that model, so it stays on its current one." | `message`, `settings`, `models` |
 | 14 | `too-large` | The reply would pass the line cap with no model entries. | nothing |
 
-Admission. The host checks 6 to 10 against the record; for a model write it then lists the
-catalog fresh, checks authority, the record and `rev` again, and checks 11 and 12. Then it calls
+Admission. The host checks 6 to 10 against the record; for a model write it then reads the
+held snapshot again, checks authority, the record and `rev` again, and checks 11 and 12. Then it calls
 the Bot update, which does its own waits (the update's checks, the agent's access check, and an
 Auto change already under way). Just before the first change to the Bot, in the same synchronous turn as
 that change, it checks again: the grant is open, the Bot is still eligible (5), the record is
