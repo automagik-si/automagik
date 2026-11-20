@@ -11,12 +11,14 @@
 //
 // Methods: chat.list; chat.subscribe {terminal, after?} -> {channel}; chat.backfill
 // {terminal, before, limit?}; chat.send {terminal, text, id}; chat.sendHeld / chat.cancelHeld
-// {terminal, id}; chat.answer {terminal, row, choice, text?}; chat.interrupt {terminal}. Every write
+// {terminal, id}; chat.answer {terminal, row, choice, text?}; chat.interrupt {terminal}. Every chat write
 // needs a subscription to that terminal on this connection (the engine refuses others). Rows are never
 // logged. A `dsh:<botId>` terminal is an Automagik Bot's chat (dsh-source.mjs): chat.send,
 // chat.interrupt and chat.answer on it reach the bots-dsh socket only when that socket answered
 // `write: 1`, and the hello answer then says `dshWrite: true`; otherwise they are refused
 // `read-only`, and a phone that sees no `dshWrite` keeps the DSH chat read-only.
+// RFC 0036 adds memory.read, memory.edit and memory.add on channel 0. They need a grant
+// opened at hello for this connection's opted-in methods. Their replies are live-only.
 
 /** Frame kinds, as herdr-core's. */
 export const DATA = 0
@@ -44,6 +46,19 @@ export const MAX_QUEUED = 2 * 1024 * 1024
 export const MAX_ENGINES = 8
 
 export const METHODS = ['chat.list', 'chat.subscribe', 'chat.backfill', 'chat.send', 'chat.sendHeld', 'chat.cancelHeld', 'chat.answer', 'chat.interrupt']
+export const MEMORY_METHODS = ['memory.read', 'memory.edit', 'memory.add']
+export const memoryRefused = (reason) => ({ ok: false, state: 'refused', reason })
+
+/** Queue writes in wire order, checking whether a chunk can still go when its turn comes. */
+export function chatWriter({ send, isClosed, isRevoked, onFail }) {
+  let writing = Promise.resolve()
+  const write = (bytes, { liveOnly = false } = {}) => (writing = writing.then(() => {
+    if (isRevoked() || (liveOnly && isClosed())) return
+    return send(bytes)
+  }).catch(onFail))
+  write.done = () => writing
+  return write
+}
 
 /** One frame's bytes. */
 export function frame(channel, kind, payload = Buffer.alloc(0)) {
@@ -80,7 +95,7 @@ const errorOf = (id, kind, message = kind) => ({ jsonrpc: '2.0', id, error: { co
 
 /**
  * One phone connection on the chat route.
- * @param {{ engine: any, write(bytes: Buffer): (Promise<void> | void), end(reason: string): void, log?: (l: string) => void,
+ * @param {{ engine: any, write(bytes: Buffer, opts?: {liveOnly?: boolean}): (Promise<void> | void), end(reason: string): void, log?: (l: string) => void,
  *   device?: string, window?: number, maxQueued?: number, maxUnsent?: number }} options
  *   device: the paired key guard.mjs admitted (stable across reconnects): message ids are kept under it
  *   write: bytes to the phone, in order; a promise that settles once they are taken counts them
@@ -95,22 +110,23 @@ export class ChatConnection {
     this.unsent = 0
     this.inFlight = 0
     this.framed = false
+    this.negotiating = false
     this.closed = false
     /** channel -> { terminal, handle, credit, queue: Buffer[], queued } */
     this.subs = new Map()
     /** terminal -> channel */
     this.byTerminal = new Map()
     this.nextChannel = 1
-    this.client = { connection: this, device }
+    this.client = { connection: this, device, closed: false }
   }
 
   /** Bytes to the phone, counted until taken: a phone that stops reading cannot grow memory. */
-  write(bytes) {
+  write(bytes, opts) {
     if (this.closed) return
     this.unsent += bytes.length
     if (this.unsent > this.maxUnsent) { this.close('slow'); return }
     const done = () => { this.unsent -= bytes.length }
-    const p = this.sendBytes(bytes)
+    const p = this.sendBytes(bytes, opts)
     if (p && typeof p.then === 'function') p.then(done, done)
     else done()
   }
@@ -142,7 +158,8 @@ export class ChatConnection {
     const b = Buffer.from(bytes)
     if (b.length) { this.chunks.push(b); this.length += b.length }
     try {
-      if (!this.framed) this.readHello()
+      if (!this.framed && !this.negotiating) this.readHello()
+      if (this.negotiating && this.length > MAX_REQUEST) return this.close('hello too long')
       while (this.framed && !this.closed && this.length >= 9) {
         const head = this.peek(9)
         const channel = head.readUInt32LE(0)
@@ -171,12 +188,32 @@ export class ChatConnection {
       this.write(Buffer.from(JSON.stringify(errorOf(m?.id ?? null, 'unsupported', 'chat/1 needs hello with generation 1, framed')) + '\n'))
       return this.close('unsupported')
     }
-    this.write(Buffer.from(JSON.stringify({
-      jsonrpc: '2.0', id: m.id,
-      result: { generation: 1, framed: true, chat: 1, credit: this.window, methods: METHODS, ...(this.engine.dshWrite?.() === true ? { dshWrite: true } : {}),
-        limits: { subscriptions: MAX_SUBSCRIPTIONS, rowText: ROW_TEXT_MAX, backfillRows: BACKFILL_ROWS, backfillBytes: BACKFILL_BYTES, sendText: SEND_TEXT_MAX } }
-    }) + '\n'))
-    this.framed = true
+    const result = {
+      generation: 1, framed: true, chat: 1, credit: this.window, methods: METHODS, ...(this.engine.dshWrite?.() === true ? { dshWrite: true } : {}),
+      limits: { subscriptions: MAX_SUBSCRIPTIONS, rowText: ROW_TEXT_MAX, backfillRows: BACKFILL_ROWS, backfillBytes: BACKFILL_BYTES, sendText: SEND_TEXT_MAX },
+    }
+    const answer = (manage) => {
+      if (this.closed) return
+      if (manage?.length) result.manage = manage
+      this.write(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n'))
+      this.framed = true
+    }
+    const requested = Array.isArray(m.params.manage) ? MEMORY_METHODS.filter((method) => m.params.manage.includes(method)) : []
+    if (!requested.length) return answer()
+    this.negotiating = true
+    let opening
+    try { opening = this.engine.openManage?.(this.client, requested) } catch {}
+    if (!opening) {
+      this.negotiating = false
+      return answer()
+    }
+    const finish = (manage) => {
+      if (this.closed) return
+      this.negotiating = false
+      answer(manage)
+      this.feed(Buffer.alloc(0))
+    }
+    Promise.resolve(opening).catch(() => {}).then(finish).catch(() => this.close('hello failed'))
   }
 
   onFrame(channel, kind, payload) {
@@ -184,10 +221,15 @@ export class ChatConnection {
       if (kind !== DATA) return
       let m
       try { m = JSON.parse(payload.toString('utf8')) } catch { return this.close('bad request') }
-      if (this.inFlight >= MAX_IN_FLIGHT) { this.reply(errorOf(m?.id ?? null, 'busy', `at most ${MAX_IN_FLIGHT} requests at once`)); return }
+      const liveOnly = typeof m?.method === 'string' && m.method.startsWith('memory.')
+      const opts = liveOnly ? { liveOnly: true } : undefined
+      if (this.inFlight >= MAX_IN_FLIGHT) { this.reply(errorOf(m?.id ?? null, 'busy', `at most ${MAX_IN_FLIGHT} requests at once`), opts); return }
       this.inFlight += 1
       this.request(m)
-        .then((answer) => this.reply(answer), (e) => { this.log(`chat: ${e.message}`); this.reply(errorOf(m?.id ?? null, 'failed')) })
+        .then((answer) => this.reply(answer, opts), (e) => {
+          this.log(liveOnly ? 'chat: memory request failed' : `chat: ${e.message}`)
+          this.reply(errorOf(m?.id ?? null, 'failed'), opts)
+        })
         .finally(() => { this.inFlight -= 1 })
       return
     }
@@ -198,7 +240,7 @@ export class ChatConnection {
     else if (kind === CLOSE) this.unsubscribe(channel, { answer: true })
   }
 
-  reply(m) { if (!this.closed) this.write(frame(0, DATA, Buffer.from(JSON.stringify(m)))) }
+  reply(m, opts) { if (!this.closed) this.write(frame(0, DATA, Buffer.from(JSON.stringify(m))), opts) }
 
   async request(m) {
     const id = m?.id ?? null
@@ -245,6 +287,10 @@ export class ChatConnection {
       case 'chat.interrupt':
         if (!terminal) return errorOf(id, 'invalid_params')
         return ok(await this.engine.interrupt(this.client, terminal))
+      case 'memory.read':
+      case 'memory.edit':
+      case 'memory.add':
+        return ok(this.engine.memory ? await this.engine.memory(this.client, m.method, p) : memoryRefused('read-only'))
       default:
         return errorOf(id, 'unknown_method', String(m?.method ?? ''))
     }
@@ -308,9 +354,17 @@ export class ChatConnection {
   /** End the connection: every subscription leaves its terminal (which the engine then holds). */
   close(reason = 'closed') {
     if (this.closed) return
-    for (const channel of [...this.subs.keys()]) this.unsubscribe(channel)
+    this.client.closed = true
     this.closed = true
-    this.endConn(reason)
+    this.chunks = []
+    this.length = 0
+    try {
+      for (const channel of this.subs.keys()) {
+        try { this.unsubscribe(channel) } catch {}
+      }
+    } finally {
+      try { this.engine.closeClient?.(this.client) } finally { this.endConn(reason) }
+    }
   }
 }
 

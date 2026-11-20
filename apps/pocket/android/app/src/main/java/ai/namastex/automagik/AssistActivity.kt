@@ -4,6 +4,7 @@ import android.app.KeyguardManager
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -40,13 +41,18 @@ object Assist {
  */
 class AssistActivity : ComponentActivity() {
     private val vm get() = (application as PocketApplication).vm
+    private val keyguard get() = getSystemService(KeyguardManager::class.java)
+    private lateinit var lockAuth: AppLockAuth
+    private var keyguardLocked by mutableStateOf(false)
+    private var dismissingKeyguard by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lockAuth = AppLockAuth(this, savedInstanceState)
         if (Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(true); setTurnScreenOn(true) }
-        val keyguard = getSystemService(KeyguardManager::class.java)
+        keyguardLocked = keyguard.isKeyguardLocked
         // Off in Settings: unlock first, as the notifications' Reply asks.
-        if (keyguard.isKeyguardLocked && !vm.state.value.lockAnswers) {
+        if (!AppLock.enabled && keyguardLocked && !vm.state.value.lockAnswers) {
             keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
                 override fun onDismissCancelled() = finish()
                 override fun onDismissError() = finish()
@@ -54,13 +60,47 @@ class AssistActivity : ComponentActivity() {
         }
         setContent {
             AutomagikTheme {
-                AssistPanel(vm, onClose = ::finish, onOpen = { ref ->
-                    startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        .apply { ref?.let { putExtra(Notify.EXTRA_HOST, it.hostId).putExtra(Notify.EXTRA_ADDRESS, it.address) } })
-                    finish()
+                val lock by AppLock.state.collectAsState()
+                val waitingForPhone = keyguardLocked || dismissingKeyguard
+                LockGate(lock.copy(locked = lock.enabled && (lock.locked || waitingForPhone)), cover = {
+                    lockAuth.AutoPrompt(lock, ready = !waitingForPhone)
+                    LockCover(lockAuth.canLock, ::unlock, { startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS)) }, vm::setForeground)
+                }, content = {
+                    AssistPanel(vm, onClose = ::finish, onOpen = { ref ->
+                        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            .apply { ref?.let { putExtra(Notify.EXTRA_HOST, it.hostId).putExtra(Notify.EXTRA_ADDRESS, it.address) } })
+                        finish()
+                    })
                 })
             }
         }
+    }
+
+    override fun onResume() { super.onResume(); keyguardLocked = keyguard.isKeyguardLocked }
+    override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); lockAuth.save(outState) }
+
+    private fun unlock() {
+        if (dismissingKeyguard) return
+        if (!keyguard.isKeyguardLocked) {
+            keyguardLocked = false
+            if (AppLock.locked()) lockAuth.request(AppLock.Purpose.UNLOCK)
+            return
+        }
+        keyguardLocked = true
+        dismissingKeyguard = true
+        keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+            override fun onDismissSucceeded() {
+                keyguardLocked = keyguard.isKeyguardLocked
+                dismissingKeyguard = false
+                if (AppLock.locked()) {
+                    AppLock.claimAutoPrompt(AppLock.state.value.episode)
+                    lockAuth.request(AppLock.Purpose.UNLOCK)
+                }
+            }
+
+            override fun onDismissCancelled() { keyguardLocked = true; dismissingKeyguard = false }
+            override fun onDismissError() { keyguardLocked = true; dismissingKeyguard = false }
+        })
     }
 }
 
@@ -117,6 +157,10 @@ class AssistActivity : ComponentActivity() {
                     IconButton(enabled = text.isNotBlank(), onClick = {
                         val send = text.trim(); val ref = chosen.ref
                         scope.launch {
+                            if (AppLock.locked()) {
+                                outcome = "Not sent: Automagik is locked. Open it to answer."
+                                return@launch
+                            }
                             val result = vm.reply(ref, send)
                             outcome = result
                             if (result.startsWith("You:")) { text = ""; delay(1_200); onClose() }

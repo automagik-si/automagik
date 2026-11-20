@@ -35,5 +35,9 @@ The app installs an update only when its SHA-256 matches `latest.json` (on the `
   storage if Keystore is unavailable or sealing fails before the encrypted file is put in place.
   It retries wrapping that key on each start.
 - **Typing into agents:** only what you send, from the app, a notification's Reply, or its Yes/No and option buttons. A button re-reads the agent's screen first and does nothing if the question changed.
-- **Lock screen:** answering from the lock screen is off by default (**Settings → Alerts**). When on, anyone holding your locked phone can read what an agent asks and answer it.
+- **Lock screen:** with the app lock off, answering from the lock screen is off by default (**Settings → Alerts**). If you allow it, anyone holding your locked phone can read what an agent asks and answer it.
+- **App lock:** turn on **Settings → Alerts → Lock Automagik** to require Android authentication
+  at startup and after 60 seconds off screen. Alerts are generic and answers happen in the app.
+  Recents hides app thumbnails. On API 26–32, the lock also blocks screenshots and screen sharing.
+  [RFC 0010](docs/rfcs/0010-app-lock.md)
 - **Microphone:** only while you dictate in the side-button panel.
