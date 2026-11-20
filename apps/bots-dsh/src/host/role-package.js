@@ -79,6 +79,8 @@ function validateManifest(files, entry) {
   }
 }
 
+export { validateManifest as validateRoleManifest }
+
 const ownRecord = (map, id) => map !== null && typeof map === 'object' && Object.hasOwn(map, id)
   && (!Array.isArray(map) || (id !== 'length' && map[id] !== null))
 const validRecord = (map, id, record) => plainObject(map) && ownRecord(map, id)
