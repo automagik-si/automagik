@@ -235,7 +235,7 @@ export function prepareWorkspace(dir, { uid = process.getuid?.() ?? 1000 } = {})
 
 const SECRET_FIELD = String.raw`(?:api[_-]?key|authorization|x-api-key|x-auth-token|x-amz-security-token|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret|token|_authToken|_auth|_password)`
 const SECRET_PREFIX = String.raw`(?:[a-z0-9]+[-_.])*`
-const SECRET_NAME = `${SECRET_PREFIX}${SECRET_FIELD}`
+export const SECRET_NAME = `${SECRET_PREFIX}${SECRET_FIELD}`
 const QUOTED_SECRET = new RegExp(
   String.raw`((?<![\w.\-])["']?${SECRET_NAME}["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`, 'gi',
 )

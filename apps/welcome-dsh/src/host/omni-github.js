@@ -6,7 +6,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:pa
 import { setTimeout as sleep } from 'node:timers/promises'
 import { stripVTControlCharacters } from 'node:util'
 import { Worker } from 'node:worker_threads'
-import { inflateRawSync } from 'node:zlib'
+import { inflateRawSync, inflateSync } from 'node:zlib'
 import { redactText } from './redact.js'
 
 const PIN = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).automagik.omni
@@ -14,6 +14,9 @@ const SHA = /^[a-f0-9]{40}$/
 const VERSION = /^\d+\.\d{6}\.\d+(?:-[0-9A-Za-z.]+)?$/
 const REPO = 'automagik-si/omni'
 const API = 'https://api.github.com/repos/' + REPO + '/git/'
+const GIT = 'https://github.com/' + REPO + '.git/git-upload-pack'
+const GIT_RESULT = 'application/x-git-upload-pack-result'
+const MAX_GIT = 64 * 1024
 const NPM_PACKAGE = '@automagik%2fomni'
 const BUN_VERSION = '1.4.4'
 const BUN = {
@@ -351,7 +354,7 @@ async function fetchBody(fetch, url, signal, options) {
   return response.body
 }
 
-async function readBody(body, max, signal) {
+async function readBody(body, max, signal, { prefix = false } = {}) {
   const reader = body.getReader()
   const parts = []
   let size = 0
@@ -359,6 +362,10 @@ async function readBody(body, max, signal) {
     for (;;) {
       const { done, value } = await abortable(reader.read(), signal)
       if (done) return Buffer.concat(parts, size)
+      if (prefix && size + value.byteLength >= max) {
+        parts.push(value.subarray(0, max - size))
+        return Buffer.concat(parts, max)
+      }
       size += value.byteLength
       if (size > max) throw quietError('The Omni download exceeded its size limit.')
       parts.push(value)
@@ -388,14 +395,105 @@ async function probeNpm(version, fetch, env) {
   return { npm: npmStatusOf(status), latest }
 }
 
-async function checkTag(fetch, pin, signal) {
-  const tag = 'v' + pin.version
-  const get = async path => {
+const sha1 = bytes => createHash('sha1').update(bytes).digest()
+const badGit = () => new Error('Invalid Git response.')
+
+function headerSeconds(value, max = Number.MAX_SAFE_INTEGER) {
+  const seconds = /^\d+$/.test(value ?? '') ? Number(value) : 0
+  return seconds >= 1 && seconds <= max ? seconds : null
+}
+
+const limitedStatus = response => response.status === 403 || response.status === 429
+
+function secondaryDelay(response) {
+  if (!limitedStatus(response) || response.headers.get('x-ratelimit-remaining') === '0') return null
+  const seconds = headerSeconds(response.headers.get('retry-after'), 10)
+  return seconds === null ? null : seconds * 1000
+}
+
+async function githubRequest(fetch, url, signal, wait, options, retryDelay = () => null) {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted()
+    const backoff = 1000 * 2 ** attempt
+    let response
     try {
-      const body = await fetchBody(fetch, API + path, signal, { redirect: 'error', headers: { accept: 'application/vnd.github+json' } })
-      return JSON.parse(await readBody(body, 1024 * 1024, signal))
+      response = await abortable(fetch(url, { signal, redirect: 'error', ...options }), signal)
     } catch {
       signal.throwIfAborted()
+      if (attempt === 2) throw new Error('GitHub request failed.')
+    }
+    const delay = !response || (response.status >= 500 && response.status <= 599) ? backoff : retryDelay(response)
+    if (response && (attempt === 2 || delay === null)) return response
+    void response?.body?.cancel().catch(() => {})
+    await abortable(wait(delay, undefined, { signal }), signal)
+  }
+}
+
+class GitHubRateLimit extends Error {
+  constructor(authenticated, headers, receivedAt) {
+    super("GitHub's API rate limit was reached.")
+    this.authenticated = authenticated
+    const retryAfter = headerSeconds(headers.get('retry-after'), 86_400)
+    this.retryAt = retryAfter === null ? null : receivedAt + retryAfter * 1000
+    this.reset = headerSeconds(headers.get('x-ratelimit-reset'))
+  }
+}
+
+async function rateLimited(response, signal) {
+  if (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after')) {
+    void response.body?.cancel().catch(() => {})
+    return true
+  }
+  if (!response.body) return false
+  let text
+  try { text = (await readBody(response.body, 4 * 1024, signal, { prefix: true })).toString('utf8').trim() } catch {
+    signal.throwIfAborted()
+    return false
+  }
+  const mediaType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? ''
+  const structured = mediaType === 'application/json' || mediaType.endsWith('+json')
+    || text.startsWith('{') || text.startsWith('[')
+  if (!structured) return /rate limit/i.test(text)
+  try {
+    const data = JSON.parse(text)
+    return data !== null && typeof data === 'object' && !Array.isArray(data)
+      && Object.hasOwn(data, 'message') && typeof data.message === 'string' && /rate limit/i.test(data.message)
+  } catch {
+    return false
+  }
+}
+
+async function githubApi(fetch, path, signal, { env, wait, now }) {
+  const headers = { accept: 'application/vnd.github+json' }
+  const token = env.GITHUB_TOKEN
+  const authenticated = typeof token === 'string' && /^[\x21-\x7e]{1,255}$/.test(token)
+  if (authenticated) headers.authorization = 'Bearer ' + token
+  const response = await githubRequest(fetch, API + path, signal, wait, { headers }, secondaryDelay)
+  if (!response.ok || !response.body) {
+    if (limitedStatus(response)) {
+      const receivedAt = now()
+      if (await rateLimited(response, signal)) throw new GitHubRateLimit(authenticated, response.headers, receivedAt)
+    } else {
+      void response.body?.cancel().catch(() => {})
+    }
+    throw new Error('Invalid GitHub API response.')
+  }
+  return JSON.parse(await readBody(response.body, 1024 * 1024, signal))
+}
+
+function checkCommit(commit, pin, tag) {
+  if (commit !== pin.commit) throw quietError("GitHub's " + tag + ' is not the commit this Automagik release pins.', 'update')
+}
+
+function checkTree(tree, pin) {
+  if (tree !== pin.tree) throw quietError("GitHub's commit does not have the Git tree this Automagik release pins.", 'update')
+}
+
+async function checkApiTag(fetch, pin, tag, signal, options) {
+  const get = async path => {
+    try { return await githubApi(fetch, path, signal, options) } catch (error) {
+      signal.throwIfAborted()
+      if (error instanceof GitHubRateLimit) throw error
       throw quietError("Could not check Omni's " + tag + ' pin on GitHub.')
     }
   }
@@ -403,18 +501,164 @@ async function checkTag(fetch, pin, signal) {
   if (object?.type === 'tag' && typeof object.sha === 'string' && SHA.test(object.sha)) {
     object = (await get('tags/' + object.sha))?.object
   }
-  if (object?.type !== 'commit' || object.sha !== pin.commit) {
-    throw quietError("GitHub's " + tag + ' is not the commit this Automagik release pins.', 'update')
+  checkCommit(object?.type === 'commit' ? object.sha : null, pin, tag)
+  checkTree((await get('commits/' + pin.commit))?.tree?.sha, pin)
+}
+
+const pkt = line => (Buffer.byteLength(line) + 4).toString(16).padStart(4, '0') + line
+
+async function gitRequest(fetch, command, args, signal, wait) {
+  const response = await githubRequest(fetch, GIT, signal, wait, {
+    method: 'POST',
+    headers: {
+      'git-protocol': 'version=2', 'content-type': 'application/x-git-upload-pack-request', accept: GIT_RESULT,
+    },
+    body: pkt('command=' + command + '\n') + '0001' + args.map(arg => pkt(arg + '\n')).join('') + '0000',
+  })
+  const mediaType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
+  if (response.status !== 200 || mediaType !== GIT_RESULT || !response.body) {
+    void response.body?.cancel().catch(() => {})
+    throw badGit()
   }
-  if ((await get('commits/' + pin.commit))?.tree?.sha !== pin.tree) {
-    throw quietError("GitHub's commit does not have the Git tree this Automagik release pins.", 'update')
+  return readBody(response.body, MAX_GIT, signal)
+}
+
+function* gitPackets(bytes) {
+  for (let at = 0; at + 4 <= bytes.length;) {
+    const hex = bytes.toString('latin1', at, at + 4)
+    if (!/^[0-9a-f]{4}$/i.test(hex)) throw badGit()
+    const length = Number.parseInt(hex, 16)
+    if (length === 0) {
+      const end = at + 4
+      if (end === bytes.length || (end + 4 === bytes.length && bytes.toString('latin1', end) === '0002')) return
+      throw badGit()
+    }
+    if (length === 1) {
+      at += 4
+      yield null
+    } else {
+      if (length < 4 || length > 0xfff0 || at + length > bytes.length) throw badGit()
+      yield bytes.subarray(at + 4, at + length)
+      at += length
+    }
+  }
+  throw badGit()
+}
+
+const gitText = packet => packet?.toString('latin1').replace(/\n$/, '')
+
+function validGitRef(name) {
+  if (name !== 'HEAD' && !name.startsWith('refs/')) return false
+  for (const char of name) {
+    if (char <= ' ' || char === '\x7f' || '~^:?*[\\'.includes(char)) return false
+  }
+  return !name.includes('..') && !name.includes('@{') && !name.endsWith('.')
+    && name.split('/').every(part => part && !part.startsWith('.') && !part.endsWith('.lock'))
+}
+
+function gitRef(bytes, ref) {
+  let commit = null
+  for (const packet of gitPackets(bytes)) {
+    const match = gitText(packet)?.match(/^([0-9a-fA-F]{40}) ([^ ]+)(?: peeled:([0-9a-fA-F]{40}))?$/)
+    if (!match || !validGitRef(match[2])) throw badGit()
+    if (match[2] === ref) {
+      if (commit !== null) throw badGit()
+      commit = (match[3] ?? match[1]).toLowerCase()
+    }
+  }
+  return commit
+}
+
+function gitPack(bytes) {
+  const packets = gitPackets(bytes)
+  let section = gitText(packets.next().value)
+  if (section === 'shallow-info') {
+    for (;;) {
+      const line = packets.next().value
+      if (line === null) break
+      if (!/^shallow [0-9a-fA-F]{40}$/.test(gitText(line) ?? '')) throw badGit()
+    }
+    section = gitText(packets.next().value)
+  }
+  if (section !== 'packfile') throw badGit()
+  const parts = []
+  for (const packet of packets) {
+    if (packet?.[0] === 1) parts.push(packet.subarray(1))
+    else if (packet?.[0] !== 2) throw badGit()
+  }
+  return Buffer.concat(parts)
+}
+
+function gitCommitTree(pack, commit) {
+  const trailer = pack.length - 20
+  if (trailer <= 12 || pack.toString('latin1', 0, 4) !== 'PACK'
+    || pack.readUInt32BE(4) !== 2 || pack.readUInt32BE(8) !== 1
+    || !sha1(pack.subarray(0, trailer)).equals(pack.subarray(trailer))) throw badGit()
+  let at = 12
+  let byte = pack[at++]
+  if (((byte >> 4) & 7) !== 1) throw badGit()
+  let size = byte & 15
+  for (let shift = 4; byte & 128; shift += 7) {
+    if (shift > 11 || at >= trailer) throw badGit()
+    byte = pack[at++]
+    size += (byte & 127) << shift
+  }
+  if (size > MAX_GIT) throw badGit()
+  const compressed = pack.subarray(at, trailer)
+  const { buffer: body, engine } = inflateSync(compressed, { maxOutputLength: MAX_GIT, info: true })
+  if (engine.bytesWritten !== compressed.length || body.length !== size
+    || sha1(Buffer.concat([Buffer.from('commit ' + size + '\0'), body])).toString('hex') !== commit) throw badGit()
+  const newline = body.indexOf(10)
+  if (newline < 0) throw badGit()
+  const tree = /^tree ([0-9a-fA-F]{40})$/.exec(body.toString('latin1', 0, newline))?.[1]
+  if (!tree) throw badGit()
+  return tree.toLowerCase()
+}
+
+async function checkGitTag(fetch, pin, tag, signal, wait) {
+  const ref = 'refs/tags/' + tag
+  const refs = await gitRequest(fetch, 'ls-refs', ['peel', 'ref-prefix ' + ref], signal, wait)
+  const commit = gitRef(refs, ref)
+  if (commit === null) throw quietError('GitHub has no ' + tag + ' tag for Omni.', 'update')
+  checkCommit(commit, pin, tag)
+  const bytes = await gitRequest(fetch, 'fetch', ['want ' + pin.commit, 'deepen 1', 'filter tree:0', 'no-progress', 'done'], signal, wait)
+  checkTree(gitCommitTree(gitPack(bytes), pin.commit), pin)
+}
+
+function rateLimitError(tag, { authenticated, retryAt, reset }, now) {
+  const at = now()
+  const deadline = retryAt !== null && retryAt > at ? retryAt : (reset ?? 0) * 1000
+  const minutes = Math.ceil((deadline - at) / 60_000)
+  const when = minutes <= 0 ? ' Try again later.' : minutes > 60 ? ' Try again in about an hour.'
+    : ' Try again in about ' + minutes + (minutes === 1 ? ' minute.' : ' minutes.')
+  const advice = authenticated ? " The GITHUB_TOKEN's own limit was reached."
+    : ' Everyone on the same network shares this limit. Set GITHUB_TOKEN in the environment Automagik starts with, or try from another network.'
+  return quietError("GitHub's API rate limit was reached, so Omni's " + tag + ' pin could not be checked.' + when + advice)
+}
+
+async function checkTag(fetch, pin, signal, { env, wait, now }) {
+  const tag = 'v' + pin.version
+  try {
+    await checkApiTag(fetch, pin, tag, signal, { env, wait, now })
+    return { via: 'api' }
+  } catch (limit) {
+    signal.throwIfAborted()
+    if (!(limit instanceof GitHubRateLimit)) throw limit
+    try {
+      await checkGitTag(fetch, pin, tag, signal, wait)
+      return { via: 'git' }
+    } catch (error) {
+      signal.throwIfAborted()
+      if (error?.next === 'update') throw error
+      throw rateLimitError(tag, limit, now)
+    }
   }
 }
 
 export async function verifyOmniArchive(stream, pin, signal, limits) {
   signal.throwIfAborted()
   const worker = new Worker(new URL('./omni-github-archive.js', import.meta.url), {
-    workerData: { stream, pin, limits }, transferList: [stream], execArgv: [],
+    workerData: { stream, pin, limits }, transferList: [stream], execArgv: [], env: {},
     resourceLimits: { maxOldGenerationSizeMb: 768 },
   })
   try {
@@ -498,7 +742,10 @@ async function ensureBun(layout, descriptor, fetch, signal) {
 }
 
 function appendLog(job, line) {
-  job.log = Buffer.concat([job.log, Buffer.from(line + '\n')]).subarray(-MAX_LOG)
+  const log = Buffer.concat([job.log, Buffer.from(line + '\n')])
+  let start = Math.max(0, log.length - MAX_LOG)
+  if (start > 0 && log[start - 1] !== 10) start = log.indexOf(10, start) + 1
+  job.log = log.subarray(start)
 }
 
 function logStream(job, stream, onLine = () => {}) {
@@ -782,7 +1029,8 @@ export function createOmniInstaller({
       if (job.source === 'github') {
         jobStep(job, 'download')
         const download = boundedSignal(signal, downloadMs)
-        await checkTag(fetch, pin, download)
+        const { via } = await checkTag(fetch, pin, download, { env, wait, now })
+        if (via === 'git') appendLog(job, "GitHub's API rate limit was reached; checked Omni's v" + pin.version + ' tag and commit over Git instead.')
         const url = 'https://codeload.github.com/' + REPO + '/tar.gz/' + pin.commit
         const entries = await verifyArchive(await fetchBody(fetch, url, download, { redirect: 'error' }), pin, download)
         runtime.bun ??= await ensureBun(layout, descriptor, fetch, download)
