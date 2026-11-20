@@ -4,6 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync as mkdir, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createRoleCatalog } from '../apps/bots-dsh/src/host/role-catalog.js';
+import { KEY_ID, rolesManifest, verifyRoles } from './lane';
 import { AM, METER, METER_CONTRACT, METER_KEYS, addonPinsOnly, contractHeld, keysHeld, meterHold, amPaths, globPattern, herdrShips, kindOf, LANE_ADDONS, manifest, meterHeld, meterPaths, meterShips, meterSince, nextPatch, pocketShips, pocketSince, sequenceOf, ships, signLane, unpackedIn, verifyLane, versionOnly } from './lane';
 
 describe('the plugin lane', () => {
@@ -700,5 +702,94 @@ describe('the plugin lane', () => {
     expect(() => verifyLane(Buffer.from(JSON.stringify({ ...lane, sequence: 999999 })), signature, keys)).toThrow(/signature/);
     const other = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
     expect(() => verifyLane(bytes, signature, [{ keyId: 'automagik-2026-10', publicKey: other }])).toThrow(/signature/);
+  });
+});
+
+describe('the versioned role catalog', () => {
+  const version: string = JSON.parse(readFileSync(join(import.meta.dir, '../apps/bots-dsh/package.json'), 'utf8')).version;
+  const issuedAt = '2026-11-20T03:00:00Z';
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const keys = [{ keyId: KEY_ID, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+  const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const sign = (bytes: Buffer) => signLane(bytes, privatePem);
+  const laneCli = join(import.meta.dir, 'lane.ts');
+  const env = { PATH: process.env.PATH ?? '' };
+
+  function manifestBytes(version: string) {
+    const run = spawnSync('bun', [laneCli, 'roles-manifest', version, issuedAt], { env });
+    expect(run.stderr.toString()).toBe('');
+    expect(run.status).toBe(0);
+    expect(run.stdout.toString()).toBe(`${JSON.stringify(rolesManifest({ version, issuedAt }), null, 2)}\n`);
+    return run.stdout;
+  }
+
+  test('emits the catalog envelope for a numeric release version', () => {
+    expect(rolesManifest({ version, issuedAt })).toEqual({
+      schemaVersion: 1, publisher: 'automagik', keyId: KEY_ID, issuedAt,
+      repository: 'https://github.com/automagik-si/automagik', version, roles: [],
+    });
+    for (const invalid of ['', 'v3.1.0', '3.1', '3.1.0-rc.1']) {
+      expect(() => rolesManifest({ version: invalid, issuedAt })).toThrow(/major\.minor\.patch/);
+    }
+  });
+
+  test('verifies the exact CLI output and rejects byte changes', () => {
+    const bytes = manifestBytes(version);
+    const signature = sign(bytes);
+    expect(verifyRoles(bytes, signature, keys, version)).toEqual(rolesManifest({ version, issuedAt }));
+    expect(() => verifyRoles(bytes.subarray(0, -1), signature, keys, version)).toThrow(/signature does not match/);
+    expect(() => verifyRoles(bytes, `!${signature}`, keys, version)).toThrow(/base64 signature/);
+  });
+
+  test('refuses signed catalogs with invalid encoding or envelope fields', () => {
+    const valid = rolesManifest({ version, issuedAt });
+    const invalidUtf8 = Buffer.from(JSON.stringify({ ...valid, issuedAt: '!' }));
+    invalidUtf8[invalidUtf8.indexOf('!')] = 0xff;
+    expect(() => verifyRoles(invalidUtf8, sign(invalidUtf8), keys, version)).toThrow(/UTF-8 JSON/);
+    for (const [override, error] of [
+      [{ keyId: 'other' }, /unknown signing key/],
+      [{ schemaVersion: 2 }, /schema version/],
+      [{ publisher: 'other' }, /publisher/],
+      [{ repository: 'https://example.invalid/other' }, /repository/],
+      [{ roles: {} }, /roles must be an array/],
+    ] as const) {
+      const bytes = Buffer.from(JSON.stringify({ ...valid, ...override }));
+      expect(() => verifyRoles(bytes, sign(bytes), keys, version)).toThrow(error);
+    }
+    const bytes = Buffer.from(JSON.stringify(valid));
+    expect(() => verifyRoles(bytes, sign(bytes), keys, `${version}.0`)).toThrow(/catalog version does not match/);
+  });
+
+  test('the Bot consumer fetches the versioned pair and refuses a signed catalog for another version', async () => {
+    const base = `https://github.com/automagik-si/automagik/releases/download/v${version}/`;
+    const urls = [`${base}roles.json`, `${base}roles.json.sig`];
+    async function load(catalogVersion: string, file: string) {
+      const bytes = manifestBytes(catalogVersion);
+      writeFileSync(file, bytes);
+      const signature = spawnSync('bun', [laneCli, 'sign', file], { env: { ...env, PLUGIN_LANE_KEY: privatePem } });
+      expect(signature.status).toBe(0);
+      const assets = new Map([[urls[0], bytes], [urls[1], signature.stdout]]);
+      const fetched: string[] = [];
+      const catalog = createRoleCatalog({
+        fetch: async (url: string) => {
+          fetched.push(url);
+          const asset = assets.get(url);
+          return asset ? new Response(asset) : new Response(null, { status: 404 });
+        },
+        keys, canFetch: () => true, warn() {},
+      });
+      const { view } = await catalog.snapshot();
+      expect(fetched).toEqual(urls);
+      return view;
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), 'lane-roles-'));
+    try {
+      const file = join(dir, 'roles.json');
+      expect(await load(version, file)).toEqual({ available: true, roles: [] });
+      expect(await load(version === '9.9.9' ? '9.9.8' : '9.9.9', file)).toEqual({ available: false, roles: [], reason: 'unverified' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -24,8 +24,10 @@
  *   bun scripts/lane.ts next-patch                               the next patch release: 3.N.(P+1) on the newest 3.N
  *   bun scripts/lane.ts pack-addons <dir>                          pack the add-ons the lane carries into dir, with addons.json
  *   bun scripts/lane.ts manifest <plugins.json> <base> <issuedAt> [addons.json]  print lane.json for a release's plugins.json
- *   bun scripts/lane.ts sign <lane.json>                         print its signature (the key in PLUGIN_LANE_KEY, PEM)
+ *   bun scripts/lane.ts roles-manifest <version> <issuedAt>      print roles.json for a versioned release
+ *   bun scripts/lane.ts sign <file>                             print its signature (the key in PLUGIN_LANE_KEY, PEM)
  *   bun scripts/lane.ts verify <lane.json> <lane.json.sig>       check it against plugin-lane/keys.json
+ *   bun scripts/lane.ts verify-roles <roles.json> <roles.json.sig> <version>  check the catalog against plugin-lane/keys.json and the release version
  *
  * The herdr pack (herdr/, docs/rfcs/0011-monorepo-parts-and-releases.md) is a part of its own: no
  * desktop build or plugin reads it, and Herdr installs it from its own tarball. A release whose
@@ -74,6 +76,7 @@ export const ROOT = join(import.meta.dir, '..');
 export const LANE_RELEASE = 'plugin-lane';
 export const SCHEMA_VERSION = 1;
 export const KEY_ID = 'automagik-2026-10';
+export const ROLES_REPOSITORY = 'https://github.com/automagik-si/automagik';
 const DOWNLOADS = 'https://github.com/automagik-si/automagik/releases/download/';
 // The plugins this release lane ships and updates. None of Unfold's is one: they left this
 // repository for Unfold's own, whose release ships them (RFC 0020); this repository's releases
@@ -538,6 +541,48 @@ export function manifest(plugins: ReleasePlugins, { base, issuedAt, dir, engines
 
 export const signLane = (bytes: Buffer, privatePem: string) => signBytes(null, bytes, createPrivateKey(privatePem)).toString('base64');
 
+/** roles.json on the versioned release (RFC 0037). */
+export function rolesManifest({ version, issuedAt }: { version: string; issuedAt: string }) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('roles.json: version must have the form major.minor.patch');
+  return {
+    schemaVersion: 1,
+    publisher: 'automagik',
+    keyId: KEY_ID,
+    issuedAt,
+    repository: ROLES_REPOSITORY,
+    version,
+    roles: [],
+  };
+}
+
+/** Verify the signed catalog against the version selected by the release cut. */
+export function verifyRoles(bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[], expectedVersion: string) {
+  let catalog: Record<string, unknown> | null;
+  try {
+    catalog = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error('roles.json: invalid UTF-8 JSON');
+  }
+  const key = keys.find(entry => entry.keyId === catalog?.keyId);
+  if (!key) throw new Error('roles.json: unknown signing key');
+  const encoded = signature.trim();
+  if (!/^[A-Za-z0-9+/]{86}==$/.test(encoded)) throw new Error('roles.json: invalid base64 signature');
+  let publicKey;
+  try {
+    publicKey = createPublicKey(key.publicKey);
+  } catch {
+    throw new Error('roles.json: invalid signing public key');
+  }
+  if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('roles.json: signing key must be Ed25519');
+  if (!verifyBytes(null, bytes, publicKey, Buffer.from(encoded, 'base64'))) throw new Error('roles.json: the signature does not match');
+  if (!catalog || catalog.schemaVersion !== 1) throw new Error('roles.json: unsupported schema version');
+  if (catalog.publisher !== 'automagik') throw new Error('roles.json: unexpected publisher');
+  if (catalog.repository !== ROLES_REPOSITORY) throw new Error('roles.json: unexpected repository');
+  if (catalog.version !== expectedVersion) throw new Error(`roles.json: catalog version does not match ${expectedVersion}`);
+  if (!Array.isArray(catalog.roles) || catalog.roles.length > 200) throw new Error('roles.json: roles must be an array of at most 200 entries');
+  return catalog;
+}
+
 /** The keys a consumer trusts: plugin-lane/keys.json, { keys: [{ keyId, publicKey (PEM) }] }. */
 export function verifyLane(bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[]): Lane {
   const lane = JSON.parse(bytes.toString('utf8')) as Lane;
@@ -619,6 +664,9 @@ if (import.meta.main) {
       return range;
     };
     console.log(JSON.stringify(manifest(plugins, { base, issuedAt, dir: join(file, '..'), engines, addons }), null, 2));
+  } else if (command === 'roles-manifest' && args.length === 2) {
+    const [version, issuedAt] = args;
+    console.log(JSON.stringify(rolesManifest({ version, issuedAt }), null, 2));
   } else if (command === 'sign' && args.length === 1) {
     const key = process.env.PLUGIN_LANE_KEY;
     if (!key) throw new Error('PLUGIN_LANE_KEY is not set');
@@ -627,8 +675,13 @@ if (import.meta.main) {
     const keys = JSON.parse(readFileSync(join(ROOT, 'plugin-lane', 'keys.json'), 'utf8')).keys;
     const lane = verifyLane(readFileSync(args[0]), readFileSync(args[1], 'utf8'), keys);
     console.log(`lane ${lane.version} (sequence ${lane.sequence}) is signed by ${lane.keyId}`);
+  } else if (command === 'verify-roles' && args.length === 3) {
+    const [file, signature, version] = args;
+    const keys = JSON.parse(readFileSync(join(ROOT, 'plugin-lane', 'keys.json'), 'utf8')).keys;
+    const catalog = verifyRoles(readFileSync(file), readFileSync(signature, 'utf8'), keys, version);
+    console.log(`roles.json for ${catalog.version} is signed by ${catalog.keyId}`);
   } else {
-    console.error('usage: bun scripts/lane.ts kind <last-full-tag> [<last-tag>] | ships <last-tag> | herdr <last-tag> | pocket <tag> | pocket-since <last-tag> [<lane-version>] | meter <tag> | meter-since <last-tag> [<lane-version> [<prerelease-tag>...]] | next-patch | pack-addons <dir> | manifest <plugins.json> <base> <issuedAt> [addons.json] | sign <lane.json> | verify <lane.json> <sig>');
+    console.error('usage: bun scripts/lane.ts kind <last-full-tag> [<last-tag>] | ships <last-tag> | herdr <last-tag> | pocket <tag> | pocket-since <last-tag> [<lane-version>] | meter <tag> | meter-since <last-tag> [<lane-version> [<prerelease-tag>...]] | next-patch | pack-addons <dir> | manifest <plugins.json> <base> <issuedAt> [addons.json] | roles-manifest <version> <issuedAt> | sign <file> | verify <lane.json> <lane.json.sig> | verify-roles <roles.json> <roles.json.sig> <version>');
     process.exit(2);
   }
 }
