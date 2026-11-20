@@ -1,4 +1,4 @@
-// The member runner's one request line: a JSON object naming the member, the command, the folder
+// The member runner's one request line: a JSON object naming the identity, the command, the folder
 // to run it in, a timeout and a short environment allowlist. Nothing else reaches the child.
 // Apache-2.0.
 //
@@ -28,11 +28,15 @@ export function plain(error) {
   return oneLine(code && !message.startsWith(code) ? `${code}: ${message}` : message);
 }
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSIONS = [1, 2];
 export const MAX_REQUEST_BYTES = 64 * 1024;
 export const MAX_REQUEST_WAIT_MS = 5000;
 export const MAX_ARGV = 1024;
 export const MEMBER_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+// RFC 0038 Contracts uses the Bot registry id (RFC 0014). The syntax excludes host-pinned
+// spellings outside that pattern (RFC 0014 Q18). The client checks sessionPinned in the registry.
+export const BOT_ID_RE = /^(b-[a-z2-7]{10}|session-[0-9a-f-]{36})$/;
 export const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
 /** The short environment allowlist: the request may carry only these names. */
@@ -57,13 +61,41 @@ export const RESERVED_ENV = new Set([
   "LD_AUDIT",
 ]);
 
-const REQUEST_KEYS = new Set(["v", "member", "argv", "cwd", "env", "timeoutMs"]);
+const V1_KEYS = new Set(["v", "member", "argv", "cwd", "env", "timeoutMs"]);
+const V2_KEYS = new Set(["v", "identity", "argv", "cwd", "env", "timeoutMs"]);
 
 const noNul = (value) => typeof value === "string" && !value.includes("\0");
 
+export function identityLabel(identity) {
+  return identity.kind === "bot" ? `bot ${identity.id}` : `member ${identity.name}`;
+}
+
+function memberIdentity(name) {
+  if (typeof name !== "string" || !MEMBER_RE.test(name)) {
+    throw new Refusal("BAD_REQUEST", "member must match [a-z0-9][a-z0-9_-]{0,63}");
+  }
+  return { kind: "member", name };
+}
+
+function parseIdentity(identity) {
+  if (
+    identity !== null && typeof identity === "object" && !Array.isArray(identity) &&
+    Object.keys(identity).length === 2 && Object.hasOwn(identity, "kind")
+  ) {
+    if (identity.kind === "member" && Object.hasOwn(identity, "name")) return memberIdentity(identity.name);
+    if (identity.kind === "bot" && Object.hasOwn(identity, "id")) {
+      if (typeof identity.id !== "string" || !BOT_ID_RE.test(identity.id)) {
+        throw new Refusal("BAD_REQUEST", "bot id must be a Bot registry id (b-<10 base32> or session-<uuid>)");
+      }
+      return { kind: "bot", id: identity.id };
+    }
+  }
+  throw new Refusal("BAD_REQUEST", 'identity must be {kind:"member",name} or {kind:"bot",id}');
+}
+
 /**
  * Parses and checks one request line. `config` carries `envAllow` (a Set or an array of names) and
- * `maxTimeoutMs`. Returns { member, argv, cwd, env, timeoutMs } with only allowed environment.
+ * `maxTimeoutMs`. Returns { identity, argv, cwd, env, timeoutMs } with only allowed environment.
  */
 export function parseRequest(line, config) {
   let req;
@@ -75,13 +107,12 @@ export function parseRequest(line, config) {
   if (req === null || typeof req !== "object" || Array.isArray(req)) {
     throw new Refusal("BAD_REQUEST", "the request is not an object");
   }
+  if (!PROTOCOL_VERSIONS.includes(req.v)) throw new Refusal("BAD_VERSION", "v must be 1 or 2");
+  const keys = req.v === 1 ? V1_KEYS : V2_KEYS;
   for (const key of Object.keys(req)) {
-    if (!REQUEST_KEYS.has(key)) throw new Refusal("BAD_REQUEST", `unknown field ${key}`);
+    if (!keys.has(key)) throw new Refusal("BAD_REQUEST", `unknown field ${key}`);
   }
-  if (req.v !== PROTOCOL_VERSION) throw new Refusal("BAD_VERSION", `v must be ${PROTOCOL_VERSION}`);
-  if (typeof req.member !== "string" || !MEMBER_RE.test(req.member)) {
-    throw new Refusal("BAD_REQUEST", "member must match [a-z0-9][a-z0-9_-]{0,63}");
-  }
+  const identity = req.v === 1 ? memberIdentity(req.member) : parseIdentity(req.identity);
   if (
     !Array.isArray(req.argv) ||
     req.argv.length < 1 ||
@@ -115,5 +146,5 @@ export function parseRequest(line, config) {
   if (!Number.isInteger(req.timeoutMs) || req.timeoutMs < 1 || req.timeoutMs > maxTimeout) {
     throw new Refusal("BAD_REQUEST", `timeoutMs must be a whole number from 1 to ${maxTimeout}`);
   }
-  return { member: req.member, argv: req.argv, cwd: req.cwd, env: allowed, timeoutMs: req.timeoutMs };
+  return { identity, argv: req.argv, cwd: req.cwd, env: allowed, timeoutMs: req.timeoutMs };
 }
