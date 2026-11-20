@@ -30,8 +30,8 @@
 //   (pocket-chat-adapter.js). On a runtime without the read methods the source is absent.
 // - Served to Pocket Link over a Unix socket in the team's home, owner-only (pocket-socket.js).
 // - With RFC 0036 management, a live phone grant can read, edit or add a shown project Bot's
-//   own memory without a chat subscription. Each check uses the current team lock and one
-//   fresh home registry snapshot. Private and global Bots have no management access.
+//   own memory and manage its own scheduled tasks without a chat subscription. Each check uses
+//   the current team lock and one fresh home registry snapshot.
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
@@ -254,13 +254,14 @@ const globalOnly = bot => bot?.project == null
  *   carriesSignInCode?: (text: string) => boolean }} options
  */
 export class DshChatSource {
-  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management }) {
+  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules }) {
     Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf })
     /** Whether a text carries a Claude sign-in code the computer showed (cli-login.js). Never throws. */
     this.carriesSignInCode = (text) => { try { return carriesSignInCode(text) === true } catch { return false } }
     /** Writes need the adapter's prompt and cancel, and the answerer listeners wired (install). */
     this.writable = writable === true && typeof adapter?.prompt === 'function' && typeof adapter?.cancel === 'function'
     this.management = management
+    this.schedules = schedules
     this.chatOwner = chatOwner ?? (sessionId => [...this.entries.values()].find(entry => entry.sessionId === sessionId)?.botId)
     /** botId -> entry */
     this.entries = new Map()
@@ -282,6 +283,22 @@ export class DshChatSource {
 
   manageMemory(method, args) {
     return this.management.run(method, args)
+  }
+
+  get listsSchedules() {
+    return this.writable && this.schedules?.available() === true
+  }
+
+  get writesSchedules() {
+    return this.listsSchedules && this.schedules.writable()
+  }
+
+  schedulesAllowed(botId, scheduleAvailable) {
+    return this.schedules.allowed(botId, scheduleAvailable)
+  }
+
+  manageSchedules(method, args) {
+    return this.schedules.run(method, args)
   }
 
   /**
@@ -858,6 +875,18 @@ export function ownBots(rt, reader) {
   }
 }
 
+function ownShownBot(rt, reader, botId) {
+  const bot = rt.state?.bots?.[botId]
+  if (bot?.id !== botId || rt.botOf(botId) !== bot) return 'not-found'
+  const session = rt.chatOf(botId)
+  if (typeof session !== 'string' || session === '') return 'not-found'
+  const binding = reader.bindingOf(botId)
+  if (binding === undefined) return 'not-shown'
+  const project = binding.listed ? binding.project : bot.project
+  if (typeof project !== 'string' || project === '') return 'global'
+  if (!binding.picked(project, binding.machine)) return 'not-shown'
+}
+
 function ownMemory(rt, reader) {
   return {
     enabled: () => rt.memoryEnabled === true
@@ -865,18 +894,23 @@ function ownMemory(rt, reader) {
       && ['read', 'edit', 'add'].every(method => typeof rt.pocketMemory?.[method] === 'function'),
     allowed(botId) {
       if (rt.holdsLock() !== true || rt.readOnly() !== undefined || rt.memoryEnabled !== true) return 'unavailable'
-      const bot = rt.state?.bots?.[botId]
-      if (bot?.id !== botId || rt.botOf(botId) !== bot) return 'not-found'
-      const session = rt.chatOf(botId)
-      if (typeof session !== 'string' || session === '') return 'not-found'
-      const binding = reader.bindingOf(botId)
-      if (binding === undefined) return 'not-shown'
-      const project = binding.listed ? binding.project : bot.project
-      if (typeof project !== 'string' || project === '') return 'global'
-      if (!binding.picked(project, binding.machine)) return 'not-shown'
+      const reason = ownShownBot(rt, reader, botId)
+      if (reason !== undefined) return reason
       return rt.isPrivate(botId) ? 'private' : undefined
     },
     run: (method, args) => rt.pocketMemory[method]({ ...args, refresh: () => rt.refreshShellChoice() }),
+  }
+}
+
+function ownSchedules(rt, reader) {
+  return {
+    available: () => rt.pocketSchedules?.available() === true,
+    writable: () => rt.pocketSchedules?.writable() === true,
+    allowed(botId, scheduleAvailable) {
+      if (rt.holdsLock() !== true || rt.readOnly() !== undefined || !scheduleAvailable || rt.pocketSchedules?.available() !== true) return 'unavailable'
+      return ownShownBot(rt, reader, botId)
+    },
+    run: (method, args) => rt.pocketSchedules[method]({ ...args, refresh: () => rt.refreshShellChoice() }),
   }
 }
 
@@ -912,6 +946,7 @@ export function install(rt) {
       source = new DshChatSource({
         adapter: createAdapter(controller), bots: ownBots(rt, reader), shown: reader.shown, registryIdOf: reader.registryIdOf,
         log: (...args) => rt.warn?.(...args), writable, chatOwner, management: ownMemory(rt, reader),
+        schedules: ownSchedules(rt, reader),
         stopOf: (id, turn) => rt.stopLineOfTurn?.(id, turn),
         carriesSignInCode: text => rt.loginTextMatches?.(text) === true,
       })

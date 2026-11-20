@@ -6,6 +6,10 @@
 // the group like a message from the user (see reminderText). DSH 0.2.0 mounts the service only with its Automation tasks bundle on, so
 // the service is optional and every endpoint reports whether it is there.
 
+import { createHash, randomUUID } from 'node:crypto'
+import { hasWriteApi } from './pocket-chat.js'
+import { MAX_SCHEDULE_LINE, SCHEDULE_ID, ScheduleAdmissionRefusal, refusedWrite, scheduleReplyCheck } from './pocket-socket.js'
+
 const MAX_TITLE = 120
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/
 // The targets whose delivery opens a Session of its own: no subagent lineage, no task
@@ -44,7 +48,7 @@ export function reminderText(text) {
 const targetSessionOf = entry => (entry.target?.kind === 'new' ? undefined : entry.target?.sessionId)
 // DSH 0.2.2 keeps tasks Host-wide, each with a delivery target, and changes them through
 // edit(); DSH 0.2.1 keeps them by Session. Both are served.
-const hostWide = service => typeof service.edit === 'function'
+const hostWide = service => typeof service?.edit === 'function'
 // The existing Session a task delivers to; a task that opens new Sessions has none.
 const sessionOf = entry => entry.target === undefined ? entry.sessionId : entry.target.kind === 'session' ? entry.target.sessionId : undefined
 const OWN_TASK_TOOLS = ['schedule_edit', 'schedule_view']
@@ -53,6 +57,169 @@ const LIST_PAGE = 100
 const LIST_READ_LIMIT = 500
 const OTHER_TASK_REFUSAL = 'This task belongs to another chat. A Bot reads and changes only the tasks of its own chat.'
 const sameOwner = (a, b) => a !== undefined && b !== undefined && a.botId === b.botId && a.roomId === b.roomId
+
+const stateOf = (entry, now) => entry.status === 'active' ? (now >= Date.parse(entry.scheduledAt) ? 'overdue' : 'scheduled')
+  : entry.status === 'paused' ? 'paused' : 'finished'
+const shortHash = text => createHash('sha256').update(text).digest('hex').slice(0, 16)
+const wireIdOf = id => SCHEDULE_ID.test(id) ? id : `x${shortHash(id)}`
+const timingFields = new Map([
+  ['after', ['afterSeconds']], ['every', ['everySeconds']], ['daily', ['time', 'timeZone']],
+  ['weekly', ['time', 'timeZone', 'weekdays']], ['cron', ['expression', 'timeZone']], ['rrule', ['rrule']],
+])
+const MAX_RULE_BYTES = 1024
+let pocketWritesWithdrawn = false
+
+async function probePocketWrites(attachment, warn) {
+  const probe = new Error('schedule write probe')
+  try {
+    await attachment.service.edit({ id: `schedule-probe-${randomUUID()}`, action: 'update', patch: { title: 'x' }, expectedUpdatedAt: null }, undefined, AbortSignal.abort(probe))
+  } catch (error) {
+    if (error === probe) { attachment.writable = true; return }
+  }
+  warn('pocket schedules: write checks unavailable')
+}
+
+function pocketTask(entry, now) {
+  const timing = { kind: entry.kind, at: entry.scheduledAt }
+  for (const field of timingFields.get(entry.kind) ?? []) {
+    const value = entry[field]
+    if ((field === 'rrule' || field === 'expression') && typeof value === 'string' && Buffer.byteLength(value) > MAX_RULE_BYTES) {
+      timing[field] = null
+      timing.ruleTooLong = true
+    } else if (value !== undefined) {
+      timing[field] = value
+    }
+  }
+  return {
+    id: wireIdOf(entry.id), rev: shortHash(JSON.stringify([entry.id, entry.updatedAt ?? null, entry.title, entry.status, timing])),
+    title: entry.title, state: stateOf(entry, now), timing,
+  }
+}
+
+function pocketScheduleList(botId, entries, selected, includeTask, overhead, owns, checkService) {
+  const now = Date.now()
+  const tasks = []
+  const targets = []
+  const result = { ok: true, state: 'read', schedules: { terminal: `dsh:${botId}`, tasks, truncated: false } }
+  if (includeTask) result.task = selected === undefined ? null : pocketTask(selected, now)
+  const selectedTarget = selected?.target.sessionId
+  // Reserve the selected task before filling the list.
+  let bytes = overhead + Buffer.byteLength(JSON.stringify(result))
+  for (const entry of entries) {
+    if (tasks.length === LIST_READ_LIMIT) break
+    const task = entry === selected ? result.task : pocketTask(entry, now)
+    bytes += Buffer.byteLength(JSON.stringify(task)) + (tasks.length === 0 ? 0 : 1)
+    if (bytes > MAX_SCHEDULE_LINE) break
+    tasks.push(task)
+    targets.push(entry.target.sessionId)
+  }
+  result.schedules.truncated = tasks.length < entries.length
+  result[scheduleReplyCheck] = (reply) => {
+    if (!checkService()) return refusedWrite('unavailable')
+    if (selectedTarget !== undefined && !owns(selectedTarget)) return refusedWrite('gone')
+    reply.schedules.tasks = tasks.filter((_, at) => owns(targets[at]))
+    return reply
+  }
+  return result
+}
+
+function pocketSchedulesOf(rt, ownerOf, attached) {
+  const available = () => hostWide(attached()?.service)
+  const writable = () => available() && attached().writable && !pocketWritesWithdrawn
+  const unknown = () => {
+    rt.warn('pocket schedules: unavailable')
+    return { ok: false, state: 'unknown', reason: 'pending' }
+  }
+
+  async function run(method, { botId, id, rev, title, allowed, controller, overhead, refresh }) {
+    const attachment = attached()
+    const checkService = () => attached() === attachment
+    const reading = method === 'list'
+    const check = () => allowed(checkService() && (reading ? available() : writable()))
+    await refresh()
+    const reason = check()
+    if (reason !== undefined) return refusedWrite(reason)
+    const service = attachment.service
+    const owns = (sessionId) => {
+      if (typeof sessionId !== 'string' || sessionId === '') return false
+      const owner = ownerOf(sessionId)
+      return owner?.botId === botId && owner.roomId === undefined
+    }
+    const read = async () => (await service.catalog()).filter(entry => entry.target?.kind === 'session' && owns(entry.target.sessionId))
+    const withTask = (result, entry) => {
+      const target = entry.target?.kind === 'session' ? entry.target.sessionId : undefined
+      const applied = result.state === 'saved' ? { applied: true } : undefined
+      return {
+        ...result, task: pocketTask(entry, Date.now()),
+        [scheduleReplyCheck]: reply => !checkService() ? refusedWrite('unavailable', applied)
+          : owns(target) ? reply : refusedWrite('gone', applied),
+      }
+    }
+    const entries = await read()
+    const afterRead = check()
+    if (afterRead !== undefined) return refusedWrite(afterRead)
+    const matchesId = entry => wireIdOf(entry.id) === id
+    const matches = id === undefined ? [] : entries.filter(matchesId)
+    if (matches.length > 1) return refusedWrite('ambiguous')
+    const [entry] = matches
+    if (reading) return pocketScheduleList(botId, entries, entry, id !== undefined, overhead, owns, checkService)
+    if (entry === undefined) return refusedWrite('gone')
+    const task = pocketTask(entry, Date.now())
+    if (task.rev !== rev) return withTask(refusedWrite('stale'), entry)
+    if (method !== 'rename' && task.state === 'finished') return withTask(refusedWrite('ended'), entry)
+    const name = method === 'rename' ? title.trim() : undefined
+    if ((method === 'pause' && entry.status === 'paused') || (method === 'resume' && entry.status === 'active')
+      || (method === 'rename' && name === entry.title)) return withTask({ ok: true, state: 'unchanged' }, entry)
+    if (method === 'rename') {
+      if (name === '') return refusedWrite('invalid', { message: 'Give the task a name' })
+      if (name.length > MAX_TITLE) return refusedWrite('invalid', { message: `Keep the name under ${MAX_TITLE} characters` })
+    }
+
+    const target = entry.target.sessionId
+    const admission = () => check() ?? (owns(target) ? undefined : 'gone')
+    let checked = false
+    const { signal } = controller
+    signal.throwIfAborted = () => {
+      if (!signal.aborted) {
+        const reason = admission()
+        if (reason !== undefined) controller.abort(new ScheduleAdmissionRefusal(reason))
+      }
+      AbortSignal.prototype.throwIfAborted.call(signal)
+      checked = true
+    }
+    const patch = method === 'rename' ? { title: name } : { active: method === 'resume' }
+    let updated
+    try {
+      updated = await service.edit({ id: entry.id, action: 'update', patch, expectedUpdatedAt: entry.updatedAt ?? null }, undefined, signal)
+    } catch (error) {
+      if (error instanceof ScheduleAdmissionRefusal || (signal.aborted && error === signal.reason)) return refusedWrite(error.reason)
+      if (error?.name === 'ScheduleInputError' && (!checked || admission() === undefined)) {
+        const extra = error.code === 'not_future' ? { message: 'This task has no future occurrence.' } : undefined
+        return refusedWrite('invalid', extra)
+      }
+      return unknown()
+    }
+    if (updated?.code === 'schedule_conflict' || updated?.code === 'schedule_not_found') {
+      if (!checkService()) return refusedWrite('unavailable')
+      const currentMatches = (await read()).filter(matchesId)
+      if (currentMatches.length > 1) return refusedWrite('ambiguous')
+      const [current] = currentMatches
+      return current?.id === entry.id ? withTask(refusedWrite('stale'), current) : refusedWrite('gone')
+    }
+    if (updated?.id !== entry.id || updated.target === undefined) return unknown()
+    if (!checked && !pocketWritesWithdrawn) {
+      pocketWritesWithdrawn = true
+      rt.warn('pocket schedules: write checks unavailable')
+    }
+    return withTask({ ok: true, state: 'saved' }, updated)
+  }
+
+  return {
+    available, writable,
+    list: args => run('list', args), pause: args => run('pause', args),
+    resume: args => run('resume', args), rename: args => run('rename', args),
+  }
+}
 
 // The settings form's timing as DSH 0.2.2's typed create selector.
 function selectorOf(when) {
@@ -86,6 +253,7 @@ function selectorOf(when) {
 export function install(rt) {
   const { ctx } = rt
   let service = null
+  let attachment
   // Tasks whose pause failed. While one is stuck, an unlineaged delivery is refused rather
   // than let it run with no Bot to bind it; the next successful sweep clears it. `swept`
   // holds deliveries closed through the boot window, before the first check has run.
@@ -97,8 +265,16 @@ export function install(rt) {
 
   const attach = (sub) => {
     const own = sub.schedule
+    const attached = { service: own, writable: false }
+    attachment = attached
     service = own
-    sub.effect(() => () => { if (service === own) service = null }, 'ds-bot: schedule service')
+    sub.effect(() => () => {
+      if (attachment === attached) { service = null; attachment = undefined }
+    }, 'ds-bot: schedule service')
+    // Only a host that serves writable Pocket chat can use this probe.
+    if (hostWide(own) && process.platform !== 'win32' && typeof rt.home === 'string' && hasWriteApi(ctx.get?.('sessionController') ?? ctx.sessionController)) {
+      void probePocketWrites(attached, (...args) => rt.warn(...args))
+    }
     void revokeNewSchedules()
       .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
   }
@@ -115,6 +291,7 @@ export function install(rt) {
     return rt.groupOwners.get(sessionId) ?? rt.pastOwners.get(sessionId)
   }
   const known = owner => owner !== undefined && (owner.botId === undefined ? rt.roomOf(owner.roomId) !== undefined : rt.botOf(owner.botId) !== undefined)
+  rt.pocketSchedules = pocketSchedulesOf(rt, ownerOf, () => attachment)
 
   // The durable header of a Session: the live registry first, then DSH's persisted copy.
   // The live registry only holds Sessions that are loaded, so a subagent child that ended,
@@ -477,9 +654,7 @@ export function install(rt) {
       // The state DSH derives for its own view: a task past its next firing reads
       // overdue; a paused one stays paused; any other is finished. catalog() carries
       // the status but not this state, so it is derived the same way here.
-      const state = entry.status === 'active' ? (now >= Date.parse(entry.scheduledAt) ? 'overdue' : 'scheduled')
-        : entry.status === 'paused' ? 'paused' : 'finished'
-      tasks.push({ ...entry, sessionId, ...owner, state })
+      tasks.push({ ...entry, sessionId, ...owner, state: stateOf(entry, now) })
     }
     return { available: true, tasks }
   }
