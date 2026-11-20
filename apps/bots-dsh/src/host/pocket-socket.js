@@ -17,6 +17,10 @@
 // To a `hello` without `write` the answer is today's (`readOnly: true`) and every write is refused
 // `read-only`, so an older bridge stays read only.
 //
+// RFC 0033 also negotiates attachments with `attachments: 1`: upload-begin, upload-chunk,
+// upload-finish, upload-cancel, attachment-read, and an optional uploads list on send.
+// Each subscription also needs `attachments: 1` for attachment rows, reads and sends.
+//
 // Management (RFC 0036) also needs `manage: 1` in hello. The bridge opens a grant for each
 // phone connection and closes it when access ends. Management calls name that grant and a Bot's
 // terminal, and need no subscription. Reads have their own limit and writes share the chat
@@ -25,6 +29,7 @@ import { lstatSync, unlinkSync } from 'node:fs'
 import { chmod, lstat, mkdir } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
 import { join } from 'node:path'
+import { ATTACH_METHODS, PocketUploads, READ_LINE_BYTES, sha256, validId } from './pocket-attach.js'
 
 export const SOCKET_DIR = 'pocket'
 export const SOCKET_NAME = 'chat.sock'
@@ -171,9 +176,10 @@ async function start({ home, source, log, lstatNow, now }) {
   }
   const connections = new Set()
   const limits = writeLimits(now)
+  const uploads = new PocketUploads({ home, log, now })
   const server = createServer(socket => {
     if (connections.size >= MAX_CONNECTIONS) { socket.destroy(); return }
-    const connection = serve(socket, source, log, limits)
+    const connection = servePocketConnection(socket, source, log, limits, uploads)
     connections.add(connection)
     socket.once('close', () => { connections.delete(connection); connection.close() })
   })
@@ -202,12 +208,14 @@ async function start({ home, source, log, lstatNow, now }) {
 }
 
 /** One reader of the socket (and writer, when its hello asked and the source takes writes). */
-function serve(socket, source, log, limits) {
+export function servePocketConnection(socket, source, log, limits, uploads) {
   let buffer = ''
   let closed = false
   let writes = false
   let manageMethods = []
   let ending = false
+  let attachmentGeneration = 0
+  let attachments = false
   let generation = 0
   const grants = new Map()
   const closeGrant = (id) => {
@@ -220,15 +228,20 @@ function serve(socket, source, log, limits) {
   const revoke = () => {
     for (const id of grants.keys()) closeGrant(id)
   }
+  // A pending watch and each reuse of the channel number have distinct tokens.
+  const subs = new Map()
+  const unsubscribe = (channel) => {
+    const sub = subs.get(channel)
+    subs.delete(channel)
+    sub?.handle?.close()
+  }
+  const clearSubs = () => { for (const channel of subs.keys()) unsubscribe(channel) }
   const finish = () => {
     ending = true
     manageMethods = []
     revoke()
+    if (attachments) clearSubs()
   }
-  /** channel -> handle (or a pending marker while its watch opens) */
-  const subs = new Map()
-  /** channel -> the terminal it watches */
-  const terminals = new Map()
   const write = (message) => {
     if (closed || socket.destroyed) return
     if (socket.writableLength > MAX_UNSENT) { end(); return }
@@ -238,9 +251,7 @@ function serve(socket, source, log, limits) {
     if (closed) return
     closed = true
     finish()
-    for (const handle of subs.values()) handle?.close?.()
-    subs.clear()
-    terminals.clear()
+    clearSubs()
   }
   const end = () => { close(); socket.destroy() }
 
@@ -327,14 +338,56 @@ function serve(socket, source, log, limits) {
     }
   }
 
+  const isAttachment = message => ATTACH_METHODS.includes(message?.method)
+    || (message?.method === 'send' && message.params && Object.hasOwn(message.params, 'uploads'))
+  const pairedPhone = phone => typeof phone === 'string' && PHONE_KEY.test(phone)
+  const scopeFor = (phone, sub) => ({
+    phone, phoneHash: sha256(phone), watch: sub, generation: attachmentGeneration,
+  })
+
+  async function attachmentRequest(id, method, params) {
+    if (!attachments || ending) return readOnly(id)
+    const reading = method === 'attachment-read'
+    const ref = !reading && typeof params.upload === 'string' ? { upload: params.upload } : {}
+    const refuse = reason => ({ id, result: refusedWrite(reason, ref) })
+    if (!pairedPhone(params.phone)) return refuse('read-only')
+    if (Object.hasOwn(params, 'name')) return refuse('invalid')
+    const sub = subs.get(params.channel)
+    const handle = sub?.handle
+    if (!sub?.attachments || typeof handle?.attach !== 'function') return refuse(reading || method === 'upload-begin' ? 'not-watching' : 'invalid')
+    if (!reading && !validId(params.upload)) return refuse('invalid')
+    if (reading && !limits.takeRead(params.phone)) return refuse('rate')
+    const staleRead = () => reading && (ending || subs.get(params.channel) !== sub)
+    const reply = (result) => {
+      if (staleRead()) return write(refuse('not-watching'))
+      const envelope = { id, result }
+      if (reading && result.ok && Buffer.byteLength(JSON.stringify(envelope)) + 1 > READ_LINE_BYTES) {
+        write(refuse('too-large'))
+      } else write(envelope)
+    }
+    try {
+      const result = await handle.attach(method, params, uploads, scopeFor(params.phone, sub), reply)
+      if (result !== undefined) reply(result)
+    } catch (error) {
+      if (!staleRead()) throw error
+      return refuse('not-watching')
+    }
+  }
+
   async function request(message) {
     const id = message?.id ?? null
     const params = message?.params && typeof message.params === 'object' ? message.params : {}
     switch (message?.method) {
-      case 'hello':
+      case 'hello': {
         // Writes only for a bridge that asks, and only when the source takes them: an older
         // bridge, which drops any socket that is not `readOnly: true`, gets today's answer.
         writes = params.write === 1 && source.writable === true
+        const offer = !ending && writes && params.attachments === 1 && source.attachments === true ? source.attachmentOffer?.() : undefined
+        if (Boolean(offer) !== attachments) {
+          attachments = Boolean(offer)
+          attachmentGeneration += 1
+          clearSubs()
+        }
         revoke()
         generation += 1
         manageMethods = []
@@ -345,8 +398,15 @@ function serve(socket, source, log, limits) {
           if (manageMethods.length > 0) manageMethods.unshift('manage-open', 'manage-close')
         }
         return writes
-          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS], dedupe: 'log', ...(manageMethods.length > 0 ? { manage: 1, manageMethods } : {}) } }
+          ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS, ...(offer ? ATTACH_METHODS : [])], dedupe: 'log', ...(manageMethods.length > 0 ? { manage: 1, manageMethods } : {}), ...(offer ? { attachments: offer } : {}) } }
           : { id, result: { protocol: PROTOCOL, readOnly: true, methods: METHODS } }
+      }
+      case 'upload-begin':
+      case 'upload-chunk':
+      case 'upload-finish':
+      case 'upload-cancel':
+      case 'attachment-read':
+        return attachmentRequest(id, message.method, params)
       case 'manage-close':
         closeGrant(params.grant)
         return { id, result: {} }
@@ -375,59 +435,82 @@ function serve(socket, source, log, limits) {
       case 'list':
         return { id, result: { terminals: await source.list() } }
       case 'subscribe': {
+        if (ending) return { id, error: { kind: 'closed', message: 'closed' } }
         const { terminal, channel, after } = params
         if (typeof terminal !== 'string' || !Number.isSafeInteger(channel) || channel <= 0) return { id, error: { kind: 'invalid_params', message: 'terminal, channel' } }
         if (subs.has(channel)) return { id, error: { kind: 'invalid_params', message: 'channel in use' } }
         if (subs.size >= MAX_SUBSCRIPTIONS) return { id, error: { kind: 'too_many', message: `at most ${MAX_SUBSCRIPTIONS} subscriptions` } }
-        subs.set(channel, null)
-        const handle = await source.watch(terminal, event => write({ channel, event }), { after: typeof after === 'string' ? after : undefined })
-        if (!handle.ok) { subs.delete(channel); return { id, error: { kind: handle.reason, message: handle.reason } } }
-        if (closed || !subs.has(channel)) { handle.close(); return { id, error: { kind: 'closed', message: 'closed' } } }
-        subs.set(channel, handle)
-        terminals.set(channel, terminal)
+        const sub = { terminal, attachments: params.attachments === 1 && attachments }
+        subs.set(channel, sub)
+        const current = () => !ending && subs.get(channel) === sub
+        let handle
+        try {
+          handle = await source.watch(terminal, event => { if (current()) write({ channel, event }) },
+            { after: typeof after === 'string' ? after : undefined, attachments: sub.attachments })
+        } catch (error) {
+          if (current()) unsubscribe(channel)
+          throw error
+        }
+        if (!current()) { handle.close?.(); return { id, error: { kind: 'closed', message: 'closed' } } }
+        if (!handle.ok) { unsubscribe(channel); return { id, error: { kind: handle.reason, message: handle.reason } } }
+        sub.handle = handle
         return { id, result: { channel } }
       }
-      case 'unsubscribe': {
-        const handle = subs.get(params.channel)
-        subs.delete(params.channel)
-        terminals.delete(params.channel)
+      case 'unsubscribe':
         // Ends the channel's writes too: one in flight is aborted, a later one is `not-watching`.
-        handle?.close()
+        unsubscribe(params.channel)
         return { id, result: {} }
-      }
       case 'send':
       case 'interrupt':
       case 'answer': {
-        if (!writes) return readOnly(id)
         const method = message.method
+        const withUploads = method === 'send' && Object.hasOwn(params, 'uploads')
         const ref = method === 'send' && typeof params.id === 'string' ? { id: params.id } : {}
+        const sub = subs.get(params.channel)
+        if (withUploads && (!attachments || (sub && !sub.attachments) || Object.hasOwn(params, 'name'))) {
+          return { id, result: refusedWrite('invalid', ref) }
+        }
+        if (!writes) return readOnly(id)
         // No paired phone's key, no write: never counted per connection, never by name.
-        if (typeof params.phone !== 'string' || !PHONE_KEY.test(params.phone)) return { id, result: refusedWrite('read-only', ref) }
+        if (!pairedPhone(params.phone)) return { id, result: refusedWrite('read-only', ref) }
         const phone = params.phone
-        const handle = subs.get(params.channel)
+        const handle = sub?.handle
         if (!handle || typeof handle[method] !== 'function') return { id, result: refusedWrite('not-watching', ref) }
         const by = typeof params.by === 'string' && params.by !== '' ? params.by : undefined
-        const chat = terminals.get(params.channel)
+        const chat = sub.terminal
         const key = `${phone}\0${chat}`
         if (limits.busy(key)) return { id, result: refusedWrite('busy', ref) }
         if (!limits.take(phone, chat, method === 'interrupt')) return { id, result: refusedWrite('rate', ref) }
         limits.begin(key)
         try {
           const args = method === 'send'
-            ? { text: params.text, id: params.id, ...(by ? { by } : {}) }
+            ? { text: params.text, id: params.id, ...(withUploads ? { uploads: params.uploads } : {}), ...(by ? { by } : {}) }
             : method === 'answer'
               ? { row: params.row, choice: params.choice, ...(params.text === undefined ? {} : { text: params.text }), ...(by ? { by } : {}) }
               : undefined
-          return { id, result: await handle[method](args) }
+          const result = withUploads
+            ? await handle.send(args, uploads, scopeFor(phone, sub))
+            : await handle[method](args)
+          return { id, result }
         } finally {
           limits.end(key)
         }
       }
       case 'backfill': {
-        const handle = subs.get(params.channel)
+        // A later hello can change the offer while the page is loading.
+        const negotiated = attachments
+        const sub = subs.get(params.channel)
+        const handle = sub?.handle
         if (!handle) return { id, error: { kind: 'not_watching', message: 'not_watching' } }
         if (typeof params.before !== 'string') return { id, error: { kind: 'invalid_params', message: 'before' } }
-        return { id, result: { rows: await handle.backfill(params.before, params.limit) } }
+        const stale = () => negotiated && (ending || subs.get(params.channel) !== sub)
+        let rows
+        try { rows = await handle.backfill(params.before, params.limit) } catch (error) {
+          if (!stale()) throw error
+        }
+        if (stale()) return { id, error: { kind: 'closed', message: 'closed' } }
+        write({ id, result: { rows } })
+        return
       }
       default:
         return readOnly(id)
@@ -446,8 +529,10 @@ function serve(socket, source, log, limits) {
       if (!line.trim()) continue
       let message
       try { message = JSON.parse(line) } catch { end(); return }
+      const hideError = isAttachment(message) || (attachments && ['subscribe', 'backfill'].includes(message?.method))
       request(message).then(reply => { if (reply !== undefined) write(reply) }, (error) => {
-        log('pocket chat: %s', error?.message ?? error)
+        if (hideError) log('pocket attachment: failed')
+        else log('pocket chat: %s', error?.message ?? error)
         write({ id: message?.id ?? null, error: { kind: 'failed', message: 'failed' } })
       })
     }
