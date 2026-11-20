@@ -25,6 +25,7 @@ import { findCommand, isExecutable } from './agents.js'
 import { batchSafe } from './batch-spawn.js'
 
 const REGISTRY = 'https://registry.npmjs.org'
+const EXACT_SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
 // npm is asked again once the last check is this old. The timer that asks runs every
 // CHECK_TICK_MS: a 24-hour timer beside a 24-hour window skipped every other day, because the
 // check a tick starts lands a moment after the tick, so the next tick still found it fresh.
@@ -121,13 +122,13 @@ function noteUnreachable(error, timeout) {
 }
 
 /** The newest version npm publishes for `pkg`. */
-export async function latestVersion(pkg, { fetch = globalThis.fetch, timeoutMs = 15_000, signal } = {}) {
+export async function latestVersion(pkg, { fetch = globalThis.fetch, timeoutMs = 15_000, signal, registry = REGISTRY } = {}) {
   const timeout = AbortSignal.timeout(timeoutMs)
   let res
   try {
-    res = await fetch(`${REGISTRY}/${pkg.replace('/', '%2F')}/latest`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headers: { accept: 'application/json' } })
+    res = await fetch(`${registry.replace(/\/+$/, '')}/${pkg.replace('/', '%2F')}/latest`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headers: { accept: 'application/json' } })
   } catch (error) {
-    noteUnreachable(error, timeout)
+    if (registry === REGISTRY) noteUnreachable(error, timeout)
     throw error
   }
   if (!res.ok) throw new Error(`npm answered ${res.status} for ${pkg}`)
@@ -136,11 +137,21 @@ export async function latestVersion(pkg, { fetch = globalThis.fetch, timeoutMs =
     body = await res.json()
   } catch (error) {
     // The connection can still drop, or the deadline pass, while the answer is read.
-    noteUnreachable(error, timeout)
+    if (registry === REGISTRY) noteUnreachable(error, timeout)
     throw error
   }
   const { version } = body
-  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+/.test(version)) throw new Error(`npm gave no version for ${pkg}`)
+  const pattern = registry === REGISTRY ? /^\d+\.\d+\.\d+/ : EXACT_SEMVER
+  if (typeof version !== 'string' || !pattern.test(version)) throw new Error(`npm gave no version for ${pkg}`)
+  return version
+}
+
+// The registry npm is configured with, tried first: any failure of its own is dropped and the
+// public registry is asked as before; only the caller's stop ends the lookup here.
+async function customLatest(pkg, base, { signal }) {
+  let version
+  try { version = await latestVersion(pkg, { signal, registry: base }) } catch {}
+  if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
   return version
 }
 
@@ -306,6 +317,27 @@ function pnpmLookupFailure(error, output, command, signal) {
   const failure = new Error(detail ? `Connector registry lookup failed (${detail}).` : 'Connector registry lookup failed.')
   if (reason !== undefined) unreachable.set(failure, reason)
   return failure
+}
+
+function registryBase(output, scoped) {
+  let value = output.trim()
+  if (scoped !== undefined) {
+    const values = new Map()
+    for (const line of output.split('\n')) {
+      const equals = line.indexOf('=')
+      if (equals !== -1) values.set(line.slice(0, equals).trim(), line.slice(equals + 1).trim())
+    }
+    value = values.get(scoped)
+    if (!value || value === 'undefined') value = values.get('registry')
+  }
+  try {
+    const { protocol, username, password, search, hash, origin, pathname } = new URL(value)
+    if ((protocol !== 'http:' && protocol !== 'https:') || username || password || search || hash) return null
+    const base = `${origin}${pathname}`.replace(/\/+$/, '')
+    return base === REGISTRY ? null : base
+  } catch {
+    return null
+  }
 }
 
 export class AdapterStore {
@@ -607,8 +639,46 @@ export class AdapterStore {
     } catch {}
   }
 
+  async npmRegistry(pkg, manager, { signal }) {
+    const scoped = pkg.startsWith('@') ? `${pkg.split('/')[0]}:registry` : undefined
+    const args = ['config', 'get', 'registry', ...(scoped ? [scoped] : [])]
+    const env = { ...this.env, npm_config_update_notifier: 'false', npm_config_fund: 'false', npm_config_audit: 'false' }
+    let cwd
+    let output = ''
+    try {
+      const folder = join(this.home, folderOf(pkg))
+      mkdirSync(folder, { recursive: true })
+      this.dropStale(folder)
+      cwd = mkdtempSync(join(folder, `.install-${process.pid}-${this.now()}-registry-`))
+      this.installing.add(cwd)
+      writeJson(join(cwd, 'package.json'), { name: LOOKUP_ROOT, private: true })
+      await runInstall(manager.command, args, {
+        cwd, env, signal, timeoutMs: 10_000,
+        onStdout: chunk => { if (output.length <= 65_536) output += chunk },
+      })
+    } catch {
+      output = ''
+    } finally {
+      if (cwd !== undefined) {
+        try { rmSync(cwd, { recursive: true, force: true }) } catch {}
+        this.installing.delete(cwd)
+      }
+    }
+    if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
+    return output.length > 65_536 ? null : registryBase(output, scoped)
+  }
+
   async lookupLatest(pkg, { signal }) {
     const manager = packageManagerOf(this.env)
+    if (manager?.kind === 'npm') {
+      const base = await this.npmRegistry(pkg, manager, { signal })
+      if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
+      if (base !== null) {
+        const version = await customLatest(pkg, base, { signal })
+        if (signal?.aborted) throw new Error('install stopped: DSH is quitting')
+        if (version !== undefined) return version
+      }
+    }
     if (manager?.kind !== 'pnpm') return latestVersion(pkg, { signal })
 
     const folder = join(this.home, folderOf(pkg))
@@ -635,7 +705,7 @@ export class AdapterStore {
       }
       if (signal.aborted) throw new Error('install stopped: DSH is quitting')
       const version = readJson(manifest)?.dependencies?.[pkg]
-      if (typeof version !== 'string' || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) {
+      if (typeof version !== 'string' || !EXACT_SEMVER.test(version)) {
         throw new Error('Connector registry lookup returned no exact version.')
       }
       return version
