@@ -1246,8 +1246,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         val prior = _chat.value?.takeIf { chatRef == ref }
         val unknown = prior?.let(Chat::unknown).orEmpty()
         val attempt = if (resuming) resumeAttempt else 0
-        closeChat(ref = null, keepMemory = chatRef == ref)
+        closeChat(ref = null, keepManagement = chatRef == ref)
         _botManage.update { it - ref.hostId }
+        _botSchedules.update { it - ref.hostId }
         resumeAttempt = attempt
         val gen = ++chatGen
         chatRef = ref
@@ -1337,11 +1338,11 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     /** Closes the chat for [ref] (any chat when null); its rows are dropped. */
-    fun closeChat(ref: TerminalRef? = null) = closeChat(ref, keepMemory = false)
+    fun closeChat(ref: TerminalRef? = null) = closeChat(ref, keepManagement = false)
 
-    private fun closeChat(ref: TerminalRef?, keepMemory: Boolean) {
+    private fun closeChat(ref: TerminalRef?, keepManagement: Boolean) {
         if (ref != null && ref != chatRef) return
-        if (!keepMemory) closeMemory()
+        if (!keepManagement) { closeMemory(); closeSchedules() }
         // bots-dsh stops following a Bot chat no phone watches: what it lists next is not a finish ([ChatWatch.left]).
         chatRef?.takeIf { Chat.isDsh(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
         ++chatGen
@@ -1360,6 +1361,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     fun streams(started: Boolean) {
         if (!started) {
             closeMemory()
+            closeSchedules()
             held.stop(activeChannel != null || attachJob?.isActive == true || nativeJob?.isActive == true, chatRef?.takeIf { chatJob?.isActive == true || resumeJob?.isActive == true })
             dropStream()
             chatJob?.cancel(); chatJob = null
@@ -1641,6 +1643,156 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     private fun applyMemory(s: ChatMemory.State) {
         if (s.phase == ChatMemory.Phase.CLOSED) endMemory(s) else _memory.value = s
+    }
+
+    private val _schedules = MutableStateFlow<ChatSchedules.State?>(null)
+    val schedules = _schedules.asStateFlow()
+    /** Discover the offer on demand, so chat and Memory never request schedule authority. */
+    private val _botSchedules = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val botSchedules = _botSchedules.asStateFlow()
+    private var scheduleToken = 0L
+    private var scheduleLink: ChatLink? = null
+    private var scheduleJob: Job? = null
+    /** A later connection can show that an earlier edit was pending with only the Bot's address. */
+    private val scheduleNotice = mutableSetOf<TerminalRef>()
+
+    /** The dialog owns its connection so its grant and task data end with it. */
+    fun openSchedules(ref: TerminalRef) {
+        if (state.value.demo || !Chat.isDsh(ref.address)) return
+        if (_schedules.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
+        closeSchedules()
+        val token = ++scheduleToken
+        val notice = ChatSchedules.EARLIER_CHANGE.takeIf { scheduleNotice.remove(ref) }
+        val connecting = ChatSchedules.State(ref.hostId, ref.address, token, op = ChatSchedules.Op.READ, notice = notice)
+        _schedules.value = connecting
+        scheduleJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+            var ownedLink: ChatLink? = null
+            try {
+                val link = try {
+                    withContext(linkDispatcher) {
+                        openChatLink(ref.hostId, scope, ChatClient.SCHEDULES) {
+                            viewModelScope.launch { schedulesLost(token) }
+                        }.also { ownedLink = it }
+                    }
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (e is ChatUnsupported) schedulesUnsupported(connecting)
+                    else endSchedules(connecting.closed("Couldn't connect to the computer."))
+                    return@launch
+                }
+                if (token != scheduleToken) return@launch
+                val grants = link.manage.intersect(ChatClient.SCHEDULES.toSet())
+                if ("schedule.list" !in grants) { schedulesUnsupported(connecting); return@launch }
+                _botSchedules.update { it + (ref.hostId to true) }
+                scheduleLink = link
+                _schedules.value = connecting.copy(phase = ChatSchedules.Phase.LOADING, status = ChatSchedules.CHECKING, grants = grants)
+                launch { readSchedules(token, link) }
+                awaitCancellation()
+            } finally {
+                scope.cancel()
+                ownedLink?.let { link ->
+                    withContext(NonCancellable + linkDispatcher) { runCatching { link.close() } }
+                }
+            }
+        }
+        scheduleJob?.start()
+    }
+
+    private fun schedulesUnsupported(s: ChatSchedules.State) {
+        _botSchedules.update { it + (s.hostId to false) }
+        endSchedules(s.closed("Schedules aren't offered on this connection. If this keeps happening, update Pocket Link and Automagik on this computer."))
+    }
+
+    private fun schedulesLost(token: Long) {
+        val s = _schedules.value ?: return
+        if (token != scheduleToken || s.phase == ChatSchedules.Phase.CLOSED) return
+        if (s.mayHaveSaved) {
+            endSchedules(s.copy(uncertain = s.uncertain ?: s.opTask, outcome = s.outcome ?: ChatSchedules.UNCONFIRMED)
+                .closed("The connection closed before the computer answered. The change may have been saved: check it on the computer."))
+        } else endSchedules(s.closed("The connection to the computer closed."))
+    }
+
+    private fun currentSchedules(token: Long, link: ChatLink) =
+        _schedules.value?.takeIf { token == scheduleToken && scheduleLink === link }
+
+    private fun endSchedules(closed: ChatSchedules.State) {
+        releaseSchedules()
+        _schedules.value = closed
+    }
+
+    private fun releaseSchedules() {
+        scheduleLink = null
+        scheduleJob?.cancel(); scheduleJob = null
+    }
+
+    fun closeSchedules() {
+        _schedules.value?.takeIf { it.mayHaveSaved }?.let { scheduleNotice += TerminalRef(it.hostId, it.terminal) }
+        ++scheduleToken
+        releaseSchedules()
+        _schedules.value = null
+    }
+
+    private suspend fun readSchedules(token: Long, link: ChatLink) {
+        val (terminal, id) = currentSchedules(token, link)?.let { it.terminal to it.uncertain } ?: return
+        val result = scheduleResult { link.scheduleList(terminal, id) }
+        val current = currentSchedules(token, link) ?: return
+        applySchedules(ChatSchedules.afterRead(current, id, result))
+    }
+
+    fun refreshSchedules() {
+        val s = _schedules.value?.takeIf { it.canRefresh } ?: return
+        val link = scheduleLink ?: return
+        val parent = scheduleJob ?: return
+        val phase = if (s.uncertain == null) ChatSchedules.Phase.LOADING else ChatSchedules.Phase.RECONCILING
+        val token = s.token
+        _schedules.value = s.copy(phase = phase, op = ChatSchedules.Op.READ, opTask = s.uncertain, status = ChatSchedules.CHECKING)
+        viewModelScope.launch(parent) { readSchedules(token, link) }
+    }
+
+    fun schedulePause(task: ChatSchedules.Task) = writeSchedule("schedule.pause", ChatSchedules.Op.PAUSE, task) { link, terminal, id, rev ->
+        link.schedulePause(terminal, id, rev)
+    }
+
+    fun scheduleResume(task: ChatSchedules.Task) = writeSchedule("schedule.resume", ChatSchedules.Op.RESUME, task) { link, terminal, id, rev ->
+        link.scheduleResume(terminal, id, rev)
+    }
+
+    fun scheduleRename(task: ChatSchedules.Task, title: String) {
+        val trimmed = ChatSchedules.trimTitle(title)
+        writeSchedule("schedule.rename", ChatSchedules.Op.RENAME, task, ChatSchedules.checkTitle(trimmed)) { link, terminal, id, rev ->
+            link.scheduleRename(terminal, id, rev, trimmed)
+        }
+    }
+
+    /** Claim the displayed revision on Main before another tap or refresh can send a call. */
+    private fun writeSchedule(method: String, op: ChatSchedules.Op, task: ChatSchedules.Task, issue: String? = null,
+                              call: suspend (ChatLink, String, String, String) -> JSONObject) {
+        val s = _schedules.value ?: return
+        val (id, rev) = task
+        val row = s.listing?.tasks?.find { it.id == id && it.rev == rev } ?: return
+        if (!s.canAct(method, row)) return
+        if (issue != null) { _schedules.value = s.copy(outcome = issue); return }
+        val link = scheduleLink ?: return
+        val parent = scheduleJob ?: return
+        val (_, terminal, token) = s
+        _schedules.value = s.copy(op = op, opTask = id, outcome = null, status = null)
+        viewModelScope.launch(parent) {
+            val result = scheduleResult { call(link, terminal, id, rev) }
+            val current = currentSchedules(token, link) ?: return@launch
+            val next = ChatSchedules.afterWrite(current, result)
+            applySchedules(next)
+            if (next.phase == ChatSchedules.Phase.RECONCILING) readSchedules(token, link)
+        }
+    }
+
+    /** Treat a request timeout as a lost reply while letting dialog cancellation end its work. */
+    private suspend fun scheduleResult(call: suspend () -> JSONObject): Any = withContext(linkDispatcher) {
+        try { call() } catch (e: Exception) { currentCoroutineContext().ensureActive(); e }
+    }
+
+    private fun applySchedules(s: ChatSchedules.State) {
+        if (s.phase == ChatSchedules.Phase.CLOSED) endSchedules(s) else _schedules.value = s
     }
 
     fun startTerminal(hostId: String, cwd: String, command: String) {
