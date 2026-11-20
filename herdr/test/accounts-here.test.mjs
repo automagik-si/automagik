@@ -10,6 +10,8 @@ import { accountFingerprint, fingerprint } from "../mods/am-sidebar/accountsRows
 import { readHere } from "../mods/am-sidebar/accountsFleet.js";
 import { AUTH_SCRIPT, FOLDER_SCRIPT, PRESENT_SCRIPT } from "../mods/am-sidebar/loginProbe.js";
 import { paneEnvOf } from "../mods/am-sidebar/agentPath.mjs";
+import { PANEL_MARKER, SIDEBAR_MARKERS, SIDEBAR_VERSION, WRITER_FILE, writerQualified } from "../mods/am-sidebar/accountsWrite.js";
+import { coreHere } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
 import { fingerprint as localFingerprint, tokenIdentity } from "../mods/am-quota/translate.js";
 import { AM, AM_READER, PACK, READER, auth, exe, fakeClaude, fpr, json, scene, snapshot } from "./accounts-fixture.mjs";
 
@@ -230,6 +232,7 @@ test("exceptions: bound projects first, then all three lists, capped at 200, wit
   assert.deepEqual(answer.bound, [{ project: "/z-bound", why: "own-app-home" }, { project: "/y-unread", why: "unread" }]);
   assert.equal(answer.list.length, 20);
   assert.equal(answer.more, 176);
+  assert.deepEqual(answer.defaults, { bound: [], list: ["/empty"], more: 0 });
   assert.equal(touched.filter((p) => p.endsWith("/pane-env")).length, 200);
   for (const p of ["/p-200", "/remote"]) assert.ok(!touched.includes(`${p}/.herdr/pane-env`));
   for (const p of ["/one", "/two", "/three", ...bound]) assert.ok(touched.includes(`${p}/.herdr/pane-env`));
@@ -403,8 +406,9 @@ test("three entry points give the same answer: the sidebar, am and both dedicate
   assert.equal(results[0].stdout.trim().split("\n").length, 1);
 });
 
-test("accounts takes here or fleet: another word, extra words to fleet, a relative project or --machine exit 2", (t) => {
+test("accounts usage: another word, extra words to fleet, a relative project or --machine exit 2", (t) => {
   const s = scene(t);
+  assert.equal(s.run(PACK, ["accounts", "other"]).stderr, "am: accounts takes here, fleet, plan, apply or set-login.\n");
   for (const args of [["other"], ["fleet", "/project"], ["here", "relative"], ["here", "--machine", "vm-other"]]) {
     assert.equal(s.run(PACK, ["accounts", ...args]).code, 2, args.join(" "));
   }
@@ -413,4 +417,92 @@ test("accounts takes here or fleet: another word, extra words to fleet, a relati
     assert.equal(s.run(READER, args).code, 2, args.join(" "));
   }
   assert.deepEqual(s.log(), []);
+});
+
+test("here reports the app home, writer evidence, unambiguous core and next slot", async () => {
+  const app = "/app", version = "3.160.3";
+  const path = (relative) => app + "/" + relative;
+  const files = new Map([
+    [path("claude-logins.json"), JSON.stringify({ use: "default", logins: [
+      { id: "2", dir: "/example-home/another-slot" }, { id: "other", dir: "/example-home/.claude-3" },
+    ] })],
+    [path(SIDEBAR_VERSION), version + "\n"],
+    [path(WRITER_FILE), JSON.stringify({ v: 1, setLogin: true, version })],
+  ]);
+  const yes = [PANEL_MARKER, ...SIDEBAR_MARKERS].map(path);
+  const rows = [
+    { readable: yes, on: "dir", ids: ["core-one", "core-one"], core: "core-one", panel: "on", flags: [true, true, true], qualified: true },
+    { readable: [yes[0]], on: "dir", ids: [], core: null, panel: "on", flags: [true, false, true], qualified: false },
+    { readable: yes.slice(1), on: "dir", ids: ["core-one", "core-two"], core: null, panel: "on", flags: [false, true, true], qualified: false },
+    { readable: yes, unreadable: yes[1], on: "dir", ids: [], core: null, panel: "on", flags: [true, false, true], qualified: false },
+    { readable: yes, on: "unknown", ids: [], core: null, panel: "unknown", flags: [true, true, true], qualified: false },
+    { readable: yes, on: "dir", unconfirmed: true, ids: [], core: null, panel: "on", flags: [true, true, false], qualified: false },
+    { readable: [], on: "none", off: "dir", ids: [], core: null, panel: "off", flags: [false, false, true], qualified: true },
+    { readable: [], on: "none", ids: [], core: null, panel: "absent", flags: [false, false, true], qualified: true },
+  ];
+  for (const row of rows) {
+    const io = fileIO(files, {
+      appHome: "/app///",
+      dir: (name) => name === path("mods/am-quota") ? row.on : row.off ?? "none",
+      readable: (name) => name === row.unreadable ? "unknown" : row.readable.includes(name) ? "yes" : "none",
+      coreHere: (deadline) => coreHere(row.ids.length ? { HC_SOCKET: "/fixture/core-0.sock" } : {}, {
+        deadline, sockets: () => row.ids.map((_, i) => `/fixture/core-${i}.sock`),
+        status: async (_env, { sockets: [path] }) => ({ status: { core: { id: row.ids[path.includes("-0") ? 0 : 1] } } }),
+      }),
+    });
+    // The same slots are returned by the reader regardless of whether a writer is qualified.
+    const readBytes = io.readBytes;
+    io.readBytes = (name) => row.unconfirmed && name === path(WRITER_FILE) ? Buffer.from("{}") :
+      readBytes(name.replace(/^\/app\/+/u, "/app/"));
+    const answer = await hereAnswer(io);
+    const [panelWrites, sidebarWrites, confirmed] = row.flags;
+    assert.equal(answer.appHome, app);
+    assert.equal(answer.core, row.core);
+    assert.equal(answer.claude.nextSlot, "/example-home/.claude-4");
+    assert.deepEqual(answer.writer, { setLogin: true, panel: row.panel, panelWrites, sidebarWrites, confirmed });
+    assert.equal(writerQualified(answer.writer, true), row.qualified);
+  }
+});
+
+test("here reads writer markers in the target app home and never runs hc", (t) => {
+  const s = scene(t, { scratchClaude: true });
+  exe(join(s.bin, "claude"), fakeClaude("ana@example.test"));
+  const link = s.staleLink();
+  mkdirSync(join(s.app, "mods/am-quota"), { recursive: true });
+  writeFileSync(join(s.app, PANEL_MARKER), "synthetic marker");
+  const version = readFileSync(join(s.app, SIDEBAR_VERSION), "utf8").trim();
+  json(join(s.app, WRITER_FILE), { v: 1, setLogin: true, version });
+  const result = s.run(READER, ["here"], { HERDR_APP_HOME: s.app + "///" });
+  assert.equal(result.code, 0, result.stderr);
+  const { appHome, writer, core, claude } = result.json();
+  assert.equal(appHome, s.app);
+  assert.deepEqual(writer, { setLogin: true, panel: "on", panelWrites: true, sidebarWrites: true, confirmed: true });
+  assert.equal(core, null);
+  assert.equal(claude.nextSlot, join(s.home, ".claude-2"));
+  assert.equal(claude.email, "ana@example.test");
+  assert.deepEqual(s.log(), []);
+  assert.ok(existsSync(link));
+});
+
+test("here refuses one answering core alongside a timeout or malformed reply", async () => {
+  const run = (other) => hereAnswer(fileIO(new Map(), {
+    coreHere: (deadline) => coreHere({ HC_SOCKET: "/fixture/one.sock" }, { deadline, sockets: () => ["/fixture/other.sock"],
+      status: (_env, { sockets: [path] }) => path === "/fixture/one.sock" ? { status: { core: { id: "core-one" } } } : other }),
+  }));
+  assert.equal((await run({ error: "timed out" })).core, null);
+  assert.equal((await run({ error: "reply is not JSON" })).core, null);
+  assert.equal((await run({ none: true })).core, "core-one");
+});
+
+test("the dispatch socket must itself answer even when another socket has the expected core", async () => {
+  const dispatch = "/fixture/dispatch.sock", other = "/fixture/other.sock";
+  const found = { status: { core: { id: "core-one" } } };
+  for (const key of ["HC_SOCKET", "HC_TERMINAL_SOCKET", "AUTOMAGIK_HERDR_CORE_SOCKET"]) {
+    for (const answer of [{ none: true }, { error: "timed out" }, found]) {
+      const id = await coreHere({ [key]: dispatch }, { sockets: () => [other],
+        status: (_env, { sockets: [path] }) => path === dispatch ? answer : found });
+      assert.equal(id, answer === found ? "core-one" : null, key);
+    }
+  }
+  assert.equal(await coreHere({}, { sockets: () => [other], status: () => found }), null);
 });

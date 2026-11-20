@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fleetRows, frozen, members, readFleetAnswer, restartArgs, restartWords, sameList } from "../mods/am-quota/fleet.js";
 import { FLEET_V, nextObs, parseFleet } from "../mods/am-quota/accountsRows.js";
+import { emptyPlan } from "../mods/am-quota/accountsPlanRecord.js";
 import { readHere } from "../mods/am-sidebar/accountsFleet.js";
 import { AT, BOT, fixtureHere, fpr } from "./accounts-fixture.mjs";
 
@@ -169,4 +170,75 @@ test("restartWords uses the code only and never displays stderr or error text", 
   }
   assert.equal(restartWords({ ...success, retired: "unconfirmed" }),
     "Bot A restarted in a new pane, but its old pane couldn't be confirmed ended: check it in Herdr before ending it.");
+});
+
+test("fleetRows uses fixed plan words and names the record route for a managed Restart", () => {
+  const ana = "ana@example.test", bo = "bo@example.test";
+  const appHome = "/example-home/app";
+  const wire = fixtureHere({ email: ana });
+  const claude = nextObs("claude", null, wire.claude, AT);
+  claude.routes.bare = { email: bo, state: "eligible" };
+  claude.routesDiffer = true;
+  const entry = { core, name, state: "read", at: AT, appHome, exceptions: wire.exceptions, claude,
+    codex: nextObs("codex", null, wire.codex, AT) };
+  const plan = emptyPlan(AT), section = plan.claude;
+  section.members[core] = { home: appHome, since: AT };
+  const read = (tool = "claude") => fleetRows({ plan, record: { machines: { [core]: entry } }, tool, ref: {}, now })[0];
+  for (const [state, why, wanted, attempt, words] of [
+    ["done", null, ana, null, `on ${ana}`],
+    ["pending", null, bo, null, `still on ${ana}`],
+    ["pending", null, bo, { at: new Date(now).toISOString(), outcome: null }, `switching to ${bo}…`],
+    ["pending", "no-login", bo, null, `no login of ${bo} here`],
+    ["pending", "not-eligible", bo, null, `still on ${ana}`],
+    ["pending", "update-first", bo, null, "update this machine first"],
+    ["suspended", "changed", bo, null, `changed on the machine: now ${ana}`],
+    ["suspended", "gone", bo, null, "gone: unlinked"],
+  ]) {
+    section.assign[core] = wanted;
+    section.progress[core] = { state, why, at: AT, attempt };
+    assert.equal(read().words, words);
+  }
+  section.progress[core] = { state: "done", why: null, at: AT };
+  for (const [state, reason, words] of [
+    ["away", null, "away (not connected)"], ["failed", "timeout", "failed: timeout"], ["unknown", "old-cli", "unknown: old-cli"],
+  ]) {
+    Object.assign(entry, { state, reason, at: new Date(now).toISOString() });
+    assert.equal(read().words, words);
+  }
+  Object.assign(entry, { state: "read", reason: null, at: AT });
+  const linked = read("codex");
+  assert.equal(linked.words, "Codex isn't moved on other machines yet.");
+  assert.match(linked.lines[0], /^signed in \(account /);
+  assert.deepEqual(linked.actions, []);
+  assert.equal(read().restart, `A start or restart from here starts ${ana}`);
+  assert.deepEqual(read().lines, [`A start or restart from here starts ${ana}.`]);
+  for (const why of ["own-path", "own-app-home", "unread"]) {
+    entry.exceptions.bound = [{ project: "/project", why }];
+    assert.equal(read().restart, null);
+    assert.ok(read().lines.includes(`A start or restart in a managed project starts ${ana}.`));
+  }
+  entry.exceptions.bound = [];
+  entry.appHome = "/example-home/other";
+  assert.equal(read().restart, `A restart from here starts ${bo}`);
+  entry.appHome = appHome;
+  entry.claude.routes.bare = { email: null, state: "unresolved" };
+  assert.equal(read().restart, "A restart from here starts this Mac starts Claude with its own command, which this read doesn't follow");
+});
+
+test("Restart describes each project's Claude route on the same managed core", () => {
+  const ana = "ana@example.test", bo = "bo@example.test", appHome = "/example-home/app";
+  const wire = fixtureHere({ email: ana });
+  const claude = nextObs("claude", null, wire.claude, AT);
+  claude.routes.bare = { email: bo, state: "eligible" };
+  const plan = emptyPlan(AT);
+  plan.claude.members[core] = { home: appHome, since: AT };
+  const exceptions = { bound: [{ project: "/own-path", why: "own-path" }], list: [], more: 0 };
+  const entry = { core, name, state: "read", at: AT, appHome, exceptions, claude };
+  const bots = [{ ...bot, project: "/managed" }, { ...bot, id: "b-bbbbbbbbbb", project: "/own-path" }];
+  const [shown] = fleetRows({ plan, record: { at: AT, machines: { [core]: entry } },
+    answer: { at: AT, bots: { [core]: { ...looked, claude: bots } } }, tool: "claude", ref: {}, now });
+  assert.equal(shown.restart, null);
+  assert.deepEqual(shown.bots.map(({ restart }) => restart), [
+    `Restart starts ${ana}`, "Restart starts a login this read couldn't confirm",
+  ]);
 });

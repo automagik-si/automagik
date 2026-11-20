@@ -159,6 +159,23 @@ never red. Red is kept for errors (a failed read or switch).
   a refusal is shown without the clause that offers one. Without the sidebar mod there is no CLI: the banner says to run
   `am restart <bot>` instead.
 
+### Linked machines: one plan
+
+Read the linked machines, then press **Manage across machines**. The first preview pins each
+proven Claude sign-in and moves nothing. To add Codex on this Mac, use **Place**. Choose
+**One account**, **Pinned** or **Spread**, review
+the proposed changes and press **Apply this plan**. Pins follow the linked core across a
+rename. **Spread again** previews a fresh distribution. Quota suggestions can open a preview
+when pressed.
+
+Each Claude machine uses the logins already signed in there. A machine with no matching login
+stays on its current one. The panel can show how to sign in a second login there. Away
+machines retry when back. A change made on a machine waits for **Adopt** or **Re-apply the
+plan**. If the machine changed app homes, use **Forget**, then enroll the new home. An
+unlinked core waits for **Rebind** or **Forget**. Restart the listed bots to move their
+running sessions. An ordinary Codex **Switch** still works on this Mac. When it changes the
+planned account, the next read offers **Adopt** or **Re-apply the plan**.
+
 ## Built from
 
 `main.js` (the panel, drawing what `view.js` says), `view.js` (each tool's card, the proxy's

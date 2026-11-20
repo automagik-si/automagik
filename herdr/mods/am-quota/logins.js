@@ -1,5 +1,7 @@
 // The Accounts panel's Claude login record and controls (#453). The probe lives in
 // loginProbe.js, a byte copy of the sidebar's, shared with `am accounts here`.
+// The panel uses `am accounts set-login` where present. Its older-sidebar fallback writes with
+// the snapshot it read. Apply uses the CLI writer for linked Claude assignments.
 
 import { LOGINS_FILE, DEFAULT_LOGIN, PROBE_MS, loginsPath, shapeProblem, askStatus, REAL_SCRIPT, bounded } from "./loginProbe.js";
 export { LOGINS_FILE, CONFIG_VAR, DEFAULT_LOGIN, DEFAULT_WORDS, CREDENTIAL_VARS, PROBE_MS, loginsPath, loginWords, parseLogins, shapeProblem, FOLDER_SCRIPT, AUTH_SCRIPT, PRESENT_SCRIPT, bounded, readStatus, authCommand, askStatus, accountEmail, readRecord, probeLogin, presentVars, REAL_SCRIPT, paneLogin } from "./loginProbe.js";

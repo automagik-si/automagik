@@ -28,7 +28,7 @@ import { Updater } from "./updater.js";
 import { METER_EVERY_MS, METER_FIRST_MS, meterBin, syncMeter, syncTargets, writeFleetRecord } from "./meter.js";
 import { parseMarker } from "./release.js";
 import { fleetPlan, meterScope } from "./meterFleet.js";
-import { MACHINES_FIRST_MS, MACHINES_SHOWN_KEY, MACHINES_TICK_MS, STATE_FILE as MACHINES_STATE, failureNotice, parseState as parseMachines, startCycle } from "./machineUpdates.js";
+import { MACHINES_FIRST_MS, MACHINES_SHOWN_KEY, MACHINES_TICK_MS, STATE_FILE as MACHINES_STATE, failureNotice, parseState as parseMachines, startAccountsRetry, startCycle } from "./machineUpdates.js";
 import { startBot, attachBot, botOfTerminal, ledgerBindings, modelTexts, sleepOf } from "./launch.js";
 import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
@@ -701,7 +701,9 @@ export default class Spaces extends View {
         const { sig, notice } = failureNotice(parseMachines(text ?? ""), shared(MACHINES_SHOWN_KEY) ?? null);
         if (sig !== (shared(MACHINES_SHOWN_KEY) ?? "")) setShared(MACHINES_SHOWN_KEY, sig);
         if (notice) notify({ ...notice, timeout: 15000 });
-        await startCycle({ exec, cli: `${appHome()}/mods/am-sidebar/bin/automagik-herdr`, get: shared, set: setShared });
+        const app = appHome();
+        const cycle = await startCycle({ exec, cli: `${app}/mods/am-sidebar/bin/automagik-herdr`, get: shared, set: setShared });
+        if (cycle.started) await startAccountsRetry({ exec, appHome: app, readText: readTextFile });
       } catch {}
       cx.timer.after(MACHINES_TICK_MS, (cx) => this.machinesTick(cx));
     });

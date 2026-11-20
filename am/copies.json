@@ -2,6 +2,10 @@
   "note": "Written by node scripts/am-copies.mjs --write; do not edit. Each is a byte-equal copy (RFC 0012).",
   "files": [
     {
+      "from": "herdr/mods/am-sidebar/accountsApply.js",
+      "to": "am/accountsApply.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/accountsFleet.js",
       "to": "am/accountsFleet.js"
     },
@@ -10,8 +14,28 @@
       "to": "am/accountsHere.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/accountsLaunch.js",
+      "to": "am/accountsLaunch.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsPlan.js",
+      "to": "am/accountsPlan.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsPlanRecord.js",
+      "to": "am/accountsPlanRecord.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsPlanRows.js",
+      "to": "am/accountsPlanRows.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/accountsRows.js",
       "to": "am/accountsRows.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsWrite.js",
+      "to": "am/accountsWrite.js"
     },
     {
       "from": "herdr/mods/am-sidebar/actionError.js",

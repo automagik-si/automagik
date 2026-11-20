@@ -1,13 +1,17 @@
 // Qualify the CLI on each linked machine and keep observations only for confirmed core ids.
-import { barName, bytesOf, checkHere, FLEET_V, HERE_MAX_BYTES, machineList, nextObs,
-  noExceptions, parseFleet, pathOkay, versionOkay } from "./accountsRows.js";
+import { barName, bytesOf, checkHere, FLEET_V, HERE_MAX_BYTES, ID, machineList, matches, nextObs,
+  noExceptions, object, parseFleet, pathOkay, versionOkay } from "./accountsRows.js";
 import { HERE_BUDGET_MS } from "./accountsHere.js";
+import { isHash } from "./accountsPlanRecord.js";
+import { CODES } from "./accountsWrite.js";
 import { paneLogin, REAL_SCRIPT } from "./loginProbe.js";
 import { hcExecArgs, MACHINE_NAME } from "./meterFleet.js";
 import { compareVersions } from "./release.js";
 
 export { hcExecArgs, REAL_SCRIPT };
 export const HERE_SINCE = "3.160.3";
+// The first patch that ships the writer, set against dev at the final rebase.
+export const WRITE_SINCE = "3.160.3";
 export const READ_SECONDS = 20;
 export const HERE_BUDGET_S = HERE_BUDGET_MS / 1000;
 // Leave time before hc's timeout for the target to end its probes and send the answer.
@@ -27,10 +31,11 @@ one() {
   d=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 0
   [ -f "$d/bin/automagik-herdr.mjs" ] && [ -f "$d/bin/run.sh" ] || return 0
   [ -f "$d/${MARKER}" ] && [ -f "$d/accountsHere.js" ] && m=yes || m=no
+  [ -f "$d/accountsWrite.js" ] && [ -f "$d/${MARKER}" ] && w=yes || w=no
   v=$(head -n 1 "$d/VERSION" 2>/dev/null | head -c 65)
   [ \${#v} -le 64 ] || v='?'
   case $v in ''|*[!0-9A-Za-z.+-]*) v='?' ;; esac
-  printf '%s %s %s %s\\n' "$2" "$v" "$m" "$d"
+  printf '%s %s %s %s %s\\n' "$2" "$v" "$m" "$w" "$d"
 }
 one "$app_home/mods/am-sidebar" pack
 one "$am_home/parts/automagik.am/current" am`;
@@ -38,18 +43,23 @@ one "$am_home/parts/automagik.am/current" am`;
 export function parseDiscover(stdout) {
   return String(stdout ?? "").split("\n").flatMap((line) => {
     if (bytesOf(line) > 600 || /\p{Cc}/u.test(line)) return [];
-    const m = /^(pack|am) ([^ ]+) (yes|no) (\/.*)$/.exec(line);
+    const m = /^(pack|am) ([^ ]+) (yes|no) (yes|no) (\/.*)$/.exec(line);
     if (!m) return [];
-    const [, kind, version, marker, dir] = m;
-    return [{ kind, version: versionOkay(version) && compareVersions(version, version) === 0 ? version : null, marker: marker === "yes", dir }];
+    const [, kind, version, marker, write, dir] = m;
+    return [{ kind, version: versionOkay(version) && compareVersions(version, version) === 0 ? version : null,
+      marker: marker === "yes", write: write === "yes", dir }];
   });
 }
 
-export function pickCli(found) {
-  const compatible = found.filter((c) => c.marker === true && versionOkay(c.version) && compareVersions(c.version, HERE_SINCE) >= 0)
+function pick(found, since, requireWriter) {
+  const compatible = found.filter((c) => c.marker === true && (!requireWriter || c.write === true)
+    && versionOkay(c.version) && compareVersions(c.version, since) >= 0)
     .sort((a, b) => compareVersions(b.version, a.version) || Number(b.kind === "pack") - Number(a.kind === "pack"));
   return compatible.length ? { cli: compatible[0] } : { reason: found.length ? "old-cli" : "no-cli" };
 }
+
+export const pickCli = (found) => pick(found, HERE_SINCE, false);
+export const pickWriter = (found) => pick(found, WRITE_SINCE, true);
 
 export const RUN_HERE = `set -u
 t0=$(date +%s 2>/dev/null) || exit 92
@@ -75,6 +85,35 @@ export function execOutcome(r) {
   return { kind: "ok", code: reply.code, stdout: typeof reply.stdout === "string" ? Buffer.from(reply.stdout, "base64").toString("utf8") : "" };
 }
 
+export const RUN_SET = `set -u
+d=$1 want=$2; shift 2
+[ -f "$d/${MARKER}" ] && [ -f "$d/accountsWrite.js" ] && [ -f "$d/bin/run.sh" ] || exit 90
+[ "$(head -n 1 "$d/VERSION" 2>/dev/null | head -c 65)" = "$want" ] || exit 91
+exec sh "$d/bin/run.sh" "$d/${MARKER}" set-login "$@" </dev/null 2>/dev/null`;
+
+export const setArgv = (cli, words) => ["sh", "-c", RUN_SET, "sh", cli.dir, cli.version, ...words];
+
+// A transport failure leaves the write's outcome unknown. A target refusal has a fixed code.
+export function setOutcome(result) {
+  const outcome = execOutcome(result);
+  if (outcome.kind !== "ok") return outcome;
+  if (outcome.code === 90 || outcome.code === 2) return { error: "old-cli" };
+  if (outcome.code === 91) return { error: "failed" };
+  let reply;
+  try { reply = JSON.parse(outcome.stdout); } catch { return { kind: "unreachable" }; }
+  if (outcome.code === 0 && reply?.ok === true && reply.cancelled === true && Object.keys(reply).length === 2) {
+    return { ok: true, cancelled: true };
+  }
+  if (outcome.code === 0 && reply?.ok === true && reply.cancelled === true && Object.keys(reply).length === 4
+    && (reply.outcome === "written" ? isHash(reply.snapshot)
+      : ["not-written", "indeterminate"].includes(reply.outcome) && reply.snapshot === null)) {
+    return { ok: true, cancelled: true, outcome: reply.outcome, snapshot: reply.snapshot };
+  }
+  if (object(reply) && outcome.code === 0 && reply.ok === true && !Object.hasOwn(reply, "error")
+    && isHash(reply.snapshot) && matches(ID, reply.use)) return { ok: true, snapshot: reply.snapshot, use: reply.use };
+  return outcome.code === 1 && CODES.includes(reply?.error) ? { error: reply.error } : { kind: "unreachable" };
+}
+
 export function readHere(text) {
   const bad = { reason: "bad-answer" };
   if (typeof text !== "string" || bytesOf(text) > HERE_MAX_BYTES) return bad;
@@ -84,7 +123,7 @@ export function readHere(text) {
 export const fleetMembers = (r) => machineList(r, MACHINE_NAME);
 
 const emptyEntry = () => ({ cli: null, versions: { pack: null, am: null }, panel: null,
-  codex: null, claude: null, exceptions: noExceptions() });
+  appHome: null, writer: null, write: null, core: null, codex: null, claude: null, exceptions: noExceptions() });
 
 export function fleetAfter(prev, reads, { first, final, at }) {
   const linked = !first?.complete || !final?.complete ? { at, reason: "failed" } : null;
@@ -103,8 +142,9 @@ export function fleetAfter(prev, reads, { first, final, at }) {
     if (!name && core !== "local") continue;
     let result;
     if (observed && read?.answer) {
-      const { versions, panel, codex, claude, exceptions } = read.answer;
-      result = { versions, panel, exceptions, cli: read.cli ?? null, state: now?.connected === false ? "away" : "read", reason: null,
+      const { versions, panel, appHome, writer, core: answeredCore, codex, claude, exceptions } = read.answer;
+      result = { versions, panel, appHome, writer, write: read.write === true, core: answeredCore,
+        exceptions, cli: read.cli ?? null, state: now?.connected === false ? "away" : "read", reason: null,
         codex: nextObs("codex", previous?.codex, codex, read.at ?? at),
         claude: nextObs("claude", previous?.claude, claude, read.at ?? at) };
     } else {
