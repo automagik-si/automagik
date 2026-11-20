@@ -3,13 +3,15 @@
 // carries a shown sign-in state is refused on every send endpoint. acp-dsh is a fake here.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import fs, { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { apply } from '../index.js'
+import { RESERVATION_FILE } from '../src/host/account-reservations.js'
 import { fakeContext } from './fake-ctx.js'
+import { CLAUDE, CODEX, reservationAcp } from './fixtures/account-reservations.js'
 
 const ENDPOINTS = [
   'cli-login-start', 'cli-login-current', 'cli-login-status', 'cli-login-answer',
@@ -18,9 +20,8 @@ const ENDPOINTS = [
 ]
 const STATE = 'expected_state_0123456789'
 
-async function fixture(t) {
-  const home = mkdtempSync(join(tmpdir(), 'automagik-cli-login-route-'))
-  writeFileSync(join(home, 'state.json'), JSON.stringify({ version: 1, bots: { first: { id: 'first', name: 'First Bot', createdAt: 1 } }, mainBotIds: ['first'], revision: 1 }))
+async function fixture(t, { home = mkdtempSync(join(tmpdir(), 'automagik-cli-login-route-')), seed = true } = {}) {
+  if (seed) writeFileSync(join(home, 'state.json'), JSON.stringify({ version: 1, bots: { first: { id: 'first', name: 'First Bot', createdAt: 1 } }, mainBotIds: ['first'], revision: 1 }))
   const calls = []
   const attemptId = randomUUID()
   const status = { id: 'acp-codex', attemptId, status: 'waiting', expiresAt: Date.now() + 60000, expiresBy: 'app', url: 'https://auth.openai.com/codex/device', userCode: 'ABCD-1234' }
@@ -52,7 +53,7 @@ async function fixture(t) {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   })
-  return { acp, rt, ctx, calls, call, route, prompts, logged, attemptId, payload: { botId: 'first', provider: 'acp-codex' } }
+  return { home, acp, rt, ctx, calls, call, route, prompts, logged, attemptId, payload: { botId: 'first', provider: 'acp-codex' } }
 }
 
 test('a first Bot can start a sign-in before it has a model, with no login tool and no state write', async (t) => {
@@ -379,4 +380,169 @@ test('the send guard finds a shown sign-in state at any depth, width or key of t
   assert.equal(h.prompts.length, 1)
   assert.deepEqual(h.prompts[0].content, [{ type: 'text', text: 'hello #not_a_shown_state_0123456789' }])
   assert.doesNotMatch(JSON.stringify(h.logged), /expected_state/)
+})
+
+function reservationFetch(route) {
+  const connection = { fetchRoutes: new Map(), interceptors: new Map() }
+  HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, route)
+  const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
+  const owner = { kind: 'owner' }
+  return (endpoint, payload, principal = owner) => handler.fetch(new Request('http://localhost/api/omni-ui', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint, payload }),
+  }), { principal })
+}
+
+function instanceFor(t, id) {
+  const previous = process.env.AUTOMAGIK_INSTANCE_ID
+  if (id === undefined) delete process.env.AUTOMAGIK_INSTANCE_ID
+  else process.env.AUTOMAGIK_INSTANCE_ID = id
+  t.after(() => {
+    if (previous === undefined) delete process.env.AUTOMAGIK_INSTANCE_ID
+    else process.env.AUTOMAGIK_INSTANCE_ID = previous
+  })
+}
+
+test('the owner Fetch route persists a private reservation, shows it after restart, and releases it signed out', async t => {
+  instanceFor(t, 'route-instance')
+  const h = await fixture(t, { seed: false })
+  const fake = reservationAcp()
+  Object.assign(h.acp, fake.service)
+  const path = join(h.home, RESERVATION_FILE)
+  const responses = []
+  const notes = []
+  h.rt.noteFailure = entry => notes.push(entry)
+  const before = JSON.stringify(h.rt.state)
+  function caller(route) {
+    const fetch = reservationFetch(route)
+    return async (endpoint, payload = {}) => {
+      const response = await fetch(endpoint, payload)
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('cache-control'), 'no-store')
+      const result = await response.json()
+      responses.push(result)
+      assert.equal(result.ok, true, JSON.stringify(result))
+      return result.value
+    }
+  }
+  const privacy = value => assert.doesNotMatch(JSON.stringify(value), /private-|@example\.test|"(email|org|plan|token|key|exact|loose|ref)"/)
+  const call = caller(h.route)
+  const initial = (await call('cli-login-accounts', { reservations: true })).accounts
+  assert.equal(fs.existsSync(path), false)
+  assert.equal(initial[CLAUDE].account.email, 'private-claude@example.test')
+  assert.deepEqual(initial[CLAUDE].reservation, { state: 'complete', claims: [],
+    offer: { offerId: initial[CLAUDE].reservation.offer.offerId } })
+  privacy(initial[CLAUDE].reservation)
+  privacy(initial[CODEX].reservation)
+  const saved = await call('cli-login-reserve', { ...initial[CLAUDE].reservation.offer, label: 'Release project' })
+  const claimView = saved.claims[0]
+  assert.deepEqual(saved, { state: 'complete',
+    claims: [{ claimId: claimView.claimId, rev: claimView.rev, current: true, mine: true, label: 'Release project' }],
+    offer: { offerId: saved.offer.offerId },
+  })
+  privacy(saved)
+  const bytes = fs.readFileSync(path, 'utf8')
+  assert.doesNotMatch(bytes, /private-|@example\.test|"(email|org|plan|token|ref)"/)
+  const record = JSON.parse(bytes)
+  assert.equal(Buffer.from(record.key, 'base64url').length, 32)
+  const [claim] = Object.values(record.claims)
+  assert.match(claim.exact, /^[\w-]{43}$/)
+  assert.match(claim.loose, /^[\w-]{43}$/)
+  assert.equal(claim.label, 'Release project')
+  assert.equal(claim.instance, 'route-instance')
+  assert.equal(claim.rev, claimView.rev)
+  assert.equal(JSON.stringify(h.rt.state), before)
+  assert.deepEqual(notes, [])
+  assert.deepEqual([...h.ctx.registeredTools.keys()].filter(name => /reservation/.test(name)), [])
+  await h.ctx.dispose()
+
+  const restarted = await fixture(t, { home: h.home, seed: false })
+  Object.assign(restarted.acp, fake.service)
+  const after = caller(restarted.route)
+  const claimAfter = (await after('cli-login-accounts', { reservations: true })).accounts[CLAUDE].reservation.claims[0]
+  assert.deepEqual(claimAfter, { ...claimView, claimId: claimAfter.claimId })
+  assert.notEqual(claimAfter.claimId, claimView.claimId)
+  fake.accounts[CLAUDE] = null
+  const reads = fake.calls.length
+  const released = await after('cli-login-release', { claimId: claimAfter.claimId, rev: claimAfter.rev })
+  assert.deepEqual(released, { state: 'unknown', claims: [] })
+  assert.equal(fake.calls.length, reads)
+  privacy(released)
+  assert.deepEqual(JSON.parse(fs.readFileSync(path, 'utf8')), { version: 1, key: record.key, claims: {} })
+  fake.accounts[CLAUDE] = { email: 'private-claude@example.test', org: 'private-organisation', ref: 'claude-ref' }
+  const shared = (await after('cli-login-accounts', { reservations: true })).accounts[CLAUDE].reservation
+  assert.deepEqual(shared.claims, [])
+  assert.ok(shared.offer)
+  const diagnostics = { responses, notes, logged: [...h.logged, ...restarted.logged], state: restarted.rt.state }
+  for (const secret of [record.key, claim.exact, claim.loose]) assert.equal(JSON.stringify(diagnostics).includes(secret), false)
+  assert.deepEqual(fake.calls.filter(([method]) => ['switch', 'signout', 'reset'].includes(method)), [])
+})
+
+test('reservation mutations are owner-only before any ACP or reservation file access and read-only hosts can list', async t => {
+  instanceFor(t, 'route-instance')
+  const h = await fixture(t)
+  const fake = reservationAcp()
+  Object.assign(h.acp, fake.service)
+  const fetch = reservationFetch(h.route)
+  const path = join(h.home, RESERVATION_FILE)
+  const lstat = fs.lstatSync
+  const disk = t.mock.method(fs, 'lstatSync', (file, ...args) => lstat(file, ...args))
+  const viewer = { kind: 'share-viewer', shareId: 'share', actor: { providerId: 'p', tenantId: 't', subjectId: 's' } }
+  const token = randomUUID().replaceAll('-', '').slice(0, 21) + 'A'
+  const mutations = [
+    ['cli-login-reserve', { offerId: token, label: 'A project' }],
+    ['cli-login-release', { claimId: token, rev: token }],
+  ]
+  for (const [endpoint, payload] of [['cli-login-accounts', { reservations: true }], ...mutations]) {
+    assert.equal((await fetch(endpoint, payload, viewer)).status, 403, endpoint)
+  }
+  assert.deepEqual(fake.calls, [])
+  assert.equal(disk.mock.calls.length, 0, 'no lstat or subsequent reservation file access')
+
+  const list = await fetch('cli-login-accounts', { reservations: true })
+  const { value } = await list.json()
+  assert.equal(list.status, 200)
+  assert.equal(list.headers.get('cache-control'), 'no-store')
+  assert.ok(value.accounts[CODEX].reservation.offer)
+  assert.ok(disk.mock.calls.some(call => call.arguments[0] === path))
+  fake.calls.splice(0)
+  disk.mock.resetCalls()
+  h.rt.readOnly = () => 'The team is open in another host.'
+  for (const [endpoint, payload] of mutations) {
+    const response = await fetch(endpoint, payload)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.equal((await response.json()).error.code, 'bot/read-only')
+  }
+  assert.deepEqual(fake.calls, [])
+  assert.equal(disk.mock.calls.some(call => call.arguments[0] === path), false)
+  const readOnly = await fetch('cli-login-accounts', { reservations: true })
+  assert.equal((await readOnly.json()).ok, true)
+  assert.ok(fake.calls.some(([method]) => method === 'evidence'))
+})
+
+test('reservation route payloads accept only the bounded action fields', async t => {
+  instanceFor(t, 'route-instance')
+  const h = await fixture(t)
+  const fake = reservationAcp()
+  Object.assign(h.acp, fake.service)
+  const { offer } = (await h.call('cli-login-accounts', { reservations: true })).result.value.accounts[CLAUDE].reservation
+  const token = offer.offerId
+  fake.calls.splice(0)
+  for (const [endpoint, payload] of [
+    ['cli-login-reserve', { offerId: token, label: 'Project', provider: CLAUDE }],
+    ['cli-login-reserve', { offerId: token, label: 'Project', rev: token }],
+    ['cli-login-reserve', { offerId: token, label: 'Project', claimId: token, rev: 1 }],
+    ['cli-login-reserve', { offerId: 'x'.repeat(100), label: 'Project' }],
+    ['cli-login-reserve', { offerId: token, label: 'x'.repeat(4097) }],
+    ['cli-login-release', { claimId: token, rev: token, label: 'Project' }],
+    ['cli-login-release', { claimId: token, rev: 1 }],
+    ['cli-login-release', [token, token]],
+  ]) {
+    const { response, result } = await h.call(endpoint, payload)
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.equal(result.ok, false)
+    assert.equal(result.error.code, 'bot/invalid')
+  }
+  assert.deepEqual(fake.calls, [])
+  assert.equal(fs.existsSync(join(h.home, RESERVATION_FILE)), false)
 })

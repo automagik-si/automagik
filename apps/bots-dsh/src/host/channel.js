@@ -316,6 +316,7 @@ export function install(rt) {
     'cli-login-start', 'cli-login-current', 'cli-login-status', 'cli-login-answer',
     'cli-login-cancel', 'cli-login-connections', 'cli-login-confirm', 'cli-login-accounts',
     'cli-login-noticed', 'cli-login-switch', 'cli-login-signout', 'cli-login-reset',
+    'cli-login-reserve', 'cli-login-release',
   ])
   const VAULT = new Set(['vault-status', 'vault-unlock', 'vault-lock', 'vault-items'])
   // The endpoints whose text reaches a Bot or a model: one that carries a Claude sign-in state

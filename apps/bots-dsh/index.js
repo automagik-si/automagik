@@ -4,9 +4,11 @@
 // types. That home is $AUTOMAGIK_BOTS_HOME, else $AUTOMAGIK_HOME/bots (~/.automagik/bots),
 // never under DSH_HOME: installed into someone's own DSH, the team keeps its files apart from
 // DSH's and from other plugins'.
-import { cpSync, existsSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import fs, { cpSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
+import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
 import * as diagnostics from './src/host/diagnostics.js'
 import * as extend from './src/host/extend.js'
 import * as store from './src/host/store.js'
@@ -15,6 +17,7 @@ import * as models from './src/host/models.js'
 import * as modelState from './src/host/model-state.js'
 import * as modelAccessHooks from './src/host/model-access-hooks.js'
 import * as cliLogin from './src/host/cli-login.js'
+import { RESERVATION_FILE } from './src/host/account-reservations.js'
 import * as acpAdoption from './src/host/acp-adoption.js'
 import * as subscriptionMove from './src/host/subscription-move.js'
 import * as providers from './src/host/providers.js'
@@ -94,7 +97,14 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
   turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
-  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
+  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks,
+  { install: rt => cliLogin.install(rt, {
+    path: join(rt.home, RESERVATION_FILE), fs, pid: process.pid,
+    random: (size, encoding) => randomBytes(size).toString(encoding),
+    decodeKey: key => Buffer.from(key, 'base64url'),
+    instanceId: () => process.env.AUTOMAGIK_INSTANCE_ID,
+  }) },
+  sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
   update, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
   officeSkills, goalSkills,
@@ -129,7 +139,7 @@ export function createRuntime(ctx, config = {}) {
   const rt = {
     ctx,
     config,
-    routePolicy: selectorRoutePolicy(config.routePolicy),
+    routePolicy: selectorRoutePolicy(config.routePolicy ?? DEFAULT_ROUTE_POLICY),
     dshHome,
     home,
     statePath: join(home, 'state.json'),
