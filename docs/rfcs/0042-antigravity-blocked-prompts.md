@@ -2,10 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q5 answered with this RFC's recommendations, see Decided; delivery 0, the capture, waits for a person with the laptop; none merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr (am's byte copies ride along, as every herdr patch carries am) |
 | Created | 2026-11-20 |
+
+> Approved by the owner's delegate on 2026-11-20 while the owner is away; the owner may amend on return.
 
 ## Summary
 
@@ -215,10 +217,16 @@ Every test and smoke runs with fake `hc`, `herdr-core` and `systemctl` first on 
    report, foreground) before, during and after each prompt, and two sanitized screens
    (`hc read --lines 40`) seconds apart while it waits. Include an ordinary pack launch as a
    control and one reproducing launch per prompt. If a prompt never appears in any pack launch,
-   the RFC returns to the owner before delivery 1. Blocks the rest.
-1. **Match and sidebar** (herdr patch): sections 1-4, their tests and the README's Antigravity
-   section.
-2. **Sends** (herdr patch, with Q3 a): section 5 and section 6's copies.
+   the RFC returns to the owner before delivery 3. Blocks delivery 3 only.
+1. **Identity and sidebar** (herdr patch, Refs #917): `agyCandidate`, the scan, its budget,
+   the held rule, the rows and Hermes's filter (sections 2-4), with `agyPromptOf(screenText,
+   shapes = AGY_SHAPES)` shipping an empty `AGY_SHAPES`, so nothing is drawn yet; the tests pass
+   synthetic shapes. Does not wait for delivery 0.
+2. **Sends** (herdr patch, Refs #917): section 5 and section 6's copies, over the same empty
+   table. Does not wait for delivery 0.
+3. **Captured shapes** (herdr patch, Closes #917): delivery 0's fixtures, the shapes in
+   `AGY_SHAPES`, the tests on the real captures and the README's Antigravity section. Waits for
+   delivery 0.
 
 ## Out of scope
 
@@ -268,3 +276,25 @@ block is refused, even while output above it changes.
   release the pack measures against (1.5.4), Linux and macOS.
 - (b) The owner, same scope.
 - (c) Linux first, macOS after its own capture.
+
+## Decided
+
+Approved by the owner's delegate on 2026-11-20 (the note under the table), with every
+recommendation above. The options not taken are listed with each question; taking one needs a
+later amendment.
+
+1. **Q1, surfaces:** the sidebar only, as Hermes's screen status. The tabs, the status bar,
+   `am show`/`am ls` and a lead's briefing keep herdr-core's word. Not taken: a pack-written
+   label for every surface (its own RFC), or nothing pack-side.
+2. **Q2, the residual false positive:** accepted for drawing and for refusing a send; a refused
+   sender keeps its message. Not taken: drawing only.
+3. **Q3, sends:** the hc wrapper's guard makes the one fresh check of section 5, with #1414's
+   refusal unchanged; best effort, and the pack's own senders unchanged. Not taken: sends left
+   as they are.
+4. **Q4, restart:** unchanged. Not taken: restart protection as a delivery of its own.
+5. **Q5, capture:** the owner's engineer, on the laptop, with a scratch folder, on agy 1.5.4,
+   Linux and macOS (delivery 0). Not taken: the owner; Linux first.
+
+Order: deliveries 1 and 2 do not depend on the captured text and land first, over a matcher
+that knows no shape yet and so never matches; delivery 3 adds the captured shapes after
+delivery 0 and closes #917.
