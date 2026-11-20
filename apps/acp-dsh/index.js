@@ -17,7 +17,7 @@ import { execFile, spawn } from 'node:child_process'
 import { dirname, join, posix, sep } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
-import { accountOf, accountView } from './src/host/account.js'
+import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
 import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
 import { AGENTS, findCommand, isNative, launchOf, signedInOf } from './src/host/agents.js'
 import { Backchannel } from './src/host/backchannel.js'
@@ -28,7 +28,9 @@ import { CliHomes, HOME_ENV, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, ensureChatProfiles } from './src/host/codex-chat-profiles.js'
 import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
 import { adaptersHome, AdapterStore, CHECK_TICK_MS, homeRelativeText, redactInstallerOutput } from './src/host/install.js'
+import { installationCliHome } from './src/host/installation.js'
 import { handshake } from './src/host/handshake.js'
+import { createIdentityReaders, IDENTITY_PROVIDERS } from './src/host/identity.js'
 import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNAVAILABLE, unsupported } from './src/host/image.js'
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
@@ -36,6 +38,9 @@ import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
+import {
+  reservationDigests, reservationOutcome, validReservationDigest, validReservationKey,
+} from './src/host/reservation-evidence.js'
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
 
 export const name = 'acp-dsh'
@@ -130,11 +135,20 @@ export function nodeCommand() {
   return { command: process.execPath, env: process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {} }
 }
 
+function defaultCliHome(ctx, storeHome, installation) {
+  const { root, owner } = installationCliHome(dirname(storeHome), installation, {
+    warn: message => warn(ctx, message),
+  })
+  info(ctx, owner ? 'Bot sign-ins: this installation keeps the existing Bot sign-in home'
+    : 'Bot sign-ins: this installation has its own Bot sign-in home')
+  return root
+}
+
 /**
  * @param {any} ctx
  * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any, nativeTools?: any }}
  *   [config]
- * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any> }} [deps]
+ * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string, evidenceOf?: typeof accountEvidenceOf }} [deps]
  *   catalogHome: where each agent's models and efforts are kept (beside the adapters by default).
  *   loginSpawn, loginTimers: tests only, a fake CLI process and clock for sign-in attempts.
  *   loginRecord: tests only, ownership records with a fake sign-in process.
@@ -142,7 +156,9 @@ export function nodeCommand() {
  *   imageSetup: tests only, the image run's lockdown check (image.js imageSetup).
  *   account: reads which account a signed-in CLI is on (account.js); consentFile: where the
  *   person's word for each account is kept (consent.js), in the isolated CLI root by default.
- *   cliHome/logoutRun: private home root and fake logout runner for tests. A synthetic store
+ *   evidenceOf: a direct account read for the owner's reservation check (account.js).
+ *   installation: the DSH home used for the default private CLI root. cliHome overrides that root.
+ *   logoutRun: fake logout runner for tests. A synthetic store
  *   without a home keeps the legacy in-memory test behavior; real stores always have a home.
  */
 export function apply(ctx, config = {}, {
@@ -150,8 +166,9 @@ export function apply(ctx, config = {}, {
   cliStore,
   find = name => findCommand(name), signedIn = signedInOf,
   catalogHome = store.home ? join(dirname(store.home), 'catalog') : undefined,
-  loginSpawn, loginTimers, loginRecord, imageSetup, account = accountOf,
-  cliHome = store.home ? join(dirname(store.home), 'cli-homes') : undefined,
+  loginSpawn, loginTimers, loginRecord, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
+  installation = process.env.DSH_HOME,
+  cliHome = store.home ? defaultCliHome(ctx, store.home, installation) : undefined,
   consentFile = cliHome ? join(cliHome, CONSENT_FILE)
     : typeof store.home === 'string' && store.home === adaptersHome()
       ? join(dirname(store.home), CONSENT_FILE) : undefined,
@@ -200,7 +217,7 @@ export function apply(ctx, config = {}, {
   // The chat's image keeper (`keepImages`): where an image an agent makes in a chat is kept so the
   // chat can show it. One at a time; the Bot team registers its images folder.
   let imageKeeper
-  const identityReaders = new Set()
+  const identityReaders = createIdentityReaders(message => warn(ctx, message))
   // The turn gates (`holdTurns`): each registrant's own entry, so one never replaces another's.
   const turnGates = new Set()
   let ownAnswerer
@@ -225,23 +242,7 @@ export function apply(ctx, config = {}, {
     holds: () => [...turnGates].map(entry => entry.gate),
     images: () => imageKeeper,
     hostStopping: () => hostStopping.now,
-    botIdentity: sessionId => {
-      let identity
-      for (const { reader } of identityReaders) {
-        let found
-        try { found = reader(sessionId) } catch {
-          warn(ctx, 'a Bot identity reader failed; no identity is sent')
-          return undefined
-        }
-        if (found === undefined) continue
-        if (identity !== undefined) {
-          warn(ctx, 'competing Bot identities for one Session; no identity is sent')
-          return undefined
-        }
-        identity = found
-      }
-      return identity
-    },
+    botIdentity: identityReaders.read,
     // The raw tri-state: an absent setting takes each agent's own switch in AcpAdapter.
     dshTools: () => flagOf(config.dshTools),
     // The raw native-tools setting: AcpAdapter.nativeOn reads it per Session.
@@ -1071,8 +1072,49 @@ export function apply(ctx, config = {}, {
     return { id, signedIn: true, consent: consentStates.get(id) }
   }
 
-  async function signOutAccount(id) {
+  async function expectAccount(id, expect) {
+    if (!validReservationKey(expect?.key) || !validReservationDigest(expect.loose)
+      || (expect.exact !== undefined && !validReservationDigest(expect.exact))
+      || (expect.recheck !== undefined && typeof expect.recheck !== 'function')) {
+      throw accountFailure('invalid', 'The sign-out request is not valid.')
+    }
+    if (!homes || !consentIds.includes(id) || disposed || !clis.has(id)) {
+      throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
+    }
+    const spec = AGENTS[id]
+    if (accountChanges.has(id) || loginLocks.has(id)
+      || homes.paused(spec.key) || homes.changing(spec.key)) {
+      throw accountFailure('busy', 'The Bot account is changing.')
+    }
+    const cli = clis.get(id)
+    const version = authVersions.get(id)
+    accountChanges.add(id)
+    try {
+      const env = { ...process.env, ...cliEnvironment(spec, cliDetails.get(id)) }
+      const { evidence } = await evidenceOf(spec, cli, { env })
+      const seen = reservationDigests(evidence, expect.key)
+      if (!disposed && (seen.loose !== expect.loose || seen.exact !== expect.exact)) {
+        throw accountFailure('changed', 'The Bot account changed. Look again.')
+      }
+      return { cli, version }
+    } finally {
+      accountChanges.delete(id)
+    }
+  }
+
+  function confirmMatch(id, spec, matched, expect) {
+    let current = false
+    try { current = expect.recheck === undefined || expect.recheck() === true } catch {}
+    if (!current || clis.get(id) !== matched.cli || authVersions.get(id) !== matched.version
+      || signIns.get(id) !== true || loginLocks.has(id)
+      || homes.paused(spec.key) || homes.changing(spec.key)) {
+      throw accountFailure('changed', 'The Bot account changed. Look again.')
+    }
+  }
+
+  async function signOutAccount(id, { expect } = {}) {
     restartGuard()
+    const matched = expect === undefined ? undefined : await expectAccount(id, expect)
     if (!homes || !consentIds.includes(id) || disposed) {
       throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
     }
@@ -1080,6 +1122,7 @@ export function apply(ctx, config = {}, {
     const spec = AGENTS[id]
     const cli = clis.get(id)
     if (!cli) throw accountFailure('unavailable', 'Install the CLI before changing accounts.')
+    if (matched !== undefined) confirmMatch(id, spec, matched, expect)
     if (loginLocks.delete(id)) homes.end(spec.key)
     homes.begin(spec.key)
     accountChanges.add(id)
@@ -1316,6 +1359,8 @@ export function apply(ctx, config = {}, {
 
   const service = {
     ...(homes ? { authScope: 'isolated' } : {}),
+    reservationEvidence: 2,
+    rolePromptProviders: IDENTITY_PROVIDERS,
     settingsEntry: name,
     status,
     // Sign-in, for the DSH owner's views only (the Bot team's owner-only route): never tools,
@@ -1325,7 +1370,7 @@ export function apply(ctx, config = {}, {
       restartGuard()
       return homes && consentIds.includes(id) ? startLogin(id, label) : logins.start(id, { label })
     },
-    accountSignOut: id => signOutAccount(id),
+    accountSignOut: (id, options) => signOutAccount(id, options),
     accountReset: id => resetAccount(id),
     accountRecovery: id => ({ required: !!(homes && consentIds.includes(id)
       && homes.recovery(AGENTS[id].key)) }),
@@ -1353,6 +1398,53 @@ export function apply(ctx, config = {}, {
      * to be shown. `fresh` asks the CLI again instead of taking the last answer.
      */
     account: (id, { fresh = false } = {}) => accountOfAgent(id, { fresh }),
+    /**
+     * Reservation evidence for the DSH owner's views only (RFC 0024): never tools, status,
+     * inspect, logs or events. The card compares `ref` with `account()` before offering Reserve.
+     * Reserve must match the shown `exact` on a new read; refusal and sign-out must still match
+     * under the same outcome on a new read. `changed` asks the caller to retry.
+     * With reservationEvidence >= 2, `keys` adds `digests` from the same observation.
+     * accountSignOut accepts `expect` with matching digests and an optional synchronous
+     * `recheck` that must return true before sign-out proceeds.
+     */
+    async accountEvidence(id, { key, keys } = {}) {
+      if (!validReservationKey(key)) {
+        throw accountFailure('invalid', 'A reservation key must be 32 bytes.')
+      }
+      if (keys !== undefined && (!Array.isArray(keys) || keys.length < 1 || keys.length > 4
+        || !Array.from(keys).every(validReservationKey))) {
+        throw accountFailure('invalid', 'Reservation keys must be 32 bytes each.')
+      }
+      if (!Object.hasOwn(AGENTS, id)) return undefined
+      const spec = AGENTS[id]
+      if (isNative(spec) || consents === undefined) return { id, supported: false }
+      inspections.delete(id)
+      await inspect(id)
+      await accountRead(id)
+      const authenticated = signIns.get(id)
+      if (authenticated !== true) return { id, ...(authenticated === false ? { signedIn: false } : {}) }
+
+      const cli = clis.get(id)
+      const version = authVersions.get(id)
+      const changed = () => disposed || clis.get(id) !== cli || authVersions.get(id) !== version
+        || signIns.get(id) !== true || accountChanges.has(id) || homes?.paused(spec.key)
+      if (changed()) return { id, signedIn: true, outcome: 'changed' }
+      const env = { ...process.env, ...cliEnvironment(spec, cliDetails.get(id)) }
+      const { account: who, evidence } = await evidenceOf(spec, cli, { env })
+      if (changed()) return { id, signedIn: true, outcome: 'changed' }
+
+      const scope = homes ? { authScope: 'isolated' } : {}
+      const result = evidence === undefined ? { outcome: 'unread', reservable: false, why: 'unknown' }
+        : reservationOutcome(evidence)
+      const digests = reservationDigests(evidence, key)
+      return {
+        id, ...scope, signedIn: true, vendor: spec.key, ref: refOf(who), ...result,
+        ...(spec.key === 'codex' && evidence?.class !== undefined ? { class: evidence.class } : {}),
+        ...digests,
+        ...(keys && digests.loose
+          ? { digests: keys.map(k => reservationDigests(evidence, k)) } : {}),
+      }
+    },
     // Read-only comparison for the owner's account controls. This never logs in, refreshes a
     // token or changes terminal auth; Bots' own account reads always use cliEnvironment.
     terminalAccount: async (id) => {
@@ -1393,13 +1485,25 @@ export function apply(ctx, config = {}, {
      * Refusals carry an `acp/image-*` code and a message to show as it is.
      */
     editImage,
-    /** Read only the Bot that owns this Session. Returns this registration's disposer. */
-    botIdentity(reader) {
-      if (typeof reader !== 'function') return () => {}
-      const entry = { reader }
-      identityReaders.add(entry)
-      return () => { identityReaders.delete(entry) }
+    /**
+     * Claude Code's native subagents in each running agent's current prompt, as workers
+     * (acp.js workersOf), by DSH Session id: { [sessionId]: [{ id, title, state: 'running' |
+     * 'done' | 'failed', result?, stopped?, at?, steps: [{ id, title, tool?, state }], more? }] }.
+     * `stopped`: DSH closed it when its turn ended (Stop, or the agent went away), so it is
+     * `failed` with the result `Stopped`. Only Sessions with a worker are listed. Read-only: it
+     * starts, stops and answers nothing.
+     */
+    nativeWorkers: () => {
+      const out = {}
+      for (const [sessionId, state] of adapter.live) {
+        let workers
+        try { workers = state?.run?.workers?.() } catch { workers = undefined }
+        if (Array.isArray(workers) && workers.length > 0) out[sessionId] = workers
+      }
+      return out
     },
+    /** Read only the Bot that owns this Session. Returns this registration's disposer. */
+    botIdentity: identityReaders.register,
     /**
      * Where an image an agent makes in a chat goes (agent-image.js): `keeper` is
      * { start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) ->

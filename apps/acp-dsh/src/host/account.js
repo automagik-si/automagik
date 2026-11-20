@@ -19,6 +19,7 @@
 import { execFile, spawn as spawnProcess } from 'node:child_process'
 import { delimiter, dirname } from 'node:path'
 import { batchSafe } from './batch-spawn.js'
+import { claudeReservation, codexReservation } from './reservation-evidence.js'
 
 export const ACCOUNT_TIMEOUT_MS = 8000
 const OUTPUT_LIMIT = 256 * 1024
@@ -77,7 +78,10 @@ function readClaude(cli, { env, run, timeoutMs }) {
         env: cliEnv(cli, env), cwd: env.AUTOMAGIK_BOT_CLI_HOME,
         timeout: timeoutMs, maxBuffer: 1 << 20, windowsHide: true,
       }), (error, stdout) => {
-        try { done(claudeAccount(String(stdout ?? ''))) } catch { done(undefined) }
+        try {
+          const output = String(stdout ?? '')
+          done({ account: claudeAccount(output), evidence: error?.killed ? undefined : claudeReservation(output) })
+        } catch { done(undefined) }
       })
     } catch {
       done(undefined)
@@ -131,9 +135,10 @@ function readCodex(cli, { env, spawn, timeoutMs }) {
           send({ method: 'initialized' })
           send({ id: 2, method: 'account/read', params: { refreshToken: false } })
         } else if (message.id === 2) {
-          let found
-          try { found = message.error ? undefined : codexAccount(message.result) } catch {}
-          return finish(found)
+          if (message.error) return finish(undefined)
+          const result = message.result
+          const answered = result && (Object.hasOwn(result, 'account') || typeof result.requiresOpenaiAuth === 'boolean')
+          return finish({ account: codexAccount(result), evidence: answered ? codexReservation(result) : undefined })
         }
       }
       return undefined
@@ -152,10 +157,18 @@ const READERS = { claude: readClaude, codex: readCodex }
  * @param {string | undefined} cli
  * @param {{ env?: NodeJS.ProcessEnv, run?: typeof execFile, spawn?: typeof spawnProcess, timeoutMs?: number }} [options]
  */
-export function accountOf(spec, cli, { env = process.env, run = execFile, spawn = spawnProcess, timeoutMs = ACCOUNT_TIMEOUT_MS } = {}) {
-  const read = READERS[spec?.key]
-  if (read === undefined || typeof cli !== 'string' || cli === '') return Promise.resolve(undefined)
-  return read(cli, { env, run, spawn, timeoutMs }).catch(() => undefined)
+export async function accountOf(spec, cli, options) {
+  return (await accountEvidenceOf(spec, cli, options)).account
+}
+
+/** The consent account and private reservation evidence from one vendor answer. */
+export async function accountEvidenceOf(spec, cli, { env = process.env, run = execFile, spawn = spawnProcess, timeoutMs = ACCOUNT_TIMEOUT_MS } = {}) {
+  const read = Object.hasOwn(READERS, spec?.key) ? READERS[spec.key] : undefined
+  if (read !== undefined && typeof cli === 'string' && cli !== '') {
+    const answer = await read(cli, { env, run, spawn, timeoutMs }).catch(() => undefined)
+    if (answer !== undefined) return answer
+  }
+  return { account: undefined, evidence: undefined }
 }
 
 /**

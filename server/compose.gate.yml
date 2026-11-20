@@ -3,13 +3,17 @@
 services:
   dsh:
     image: ${AUTOMAGIK_SERVER_IMAGE:?set a server image digest}
+    environment:
+      AUTOMAGIK_GATE_CLOUD_WORKSPACE: ${AUTOMAGIK_GATE_CLOUD_WORKSPACE:-}
     volumes:
       - dsh-data:/data
   gate:
     profiles: [gate]
     image: ${AUTOMAGIK_SERVER_IMAGE:?set a server image digest}
     entrypoint: [/nodejs/bin/node, /opt/automagik/gate-entrypoint.mjs]
-    depends_on: [dsh]
+    depends_on:
+      dsh:
+        condition: service_healthy
     network_mode: service:dsh
     environment:
       AUTOMAGIK_GATE_ENABLED: ${AUTOMAGIK_GATE_ENABLED:-0}
@@ -30,7 +34,15 @@ services:
       AUTOMAGIK_GATE_CLOUD_REVOCATION_URL: ${AUTOMAGIK_GATE_CLOUD_REVOCATION_URL:-}
     volumes:
       - gate-data:/data
-      - dsh-data:/dsh:ro
+      # DSH creates this view on old volumes before its first healthy check. It contains only
+      # the launch credential and the profile health report. DSH_HOME and the rest of the volume
+      # stay private. volume.subpath needs Docker Engine 26 and Compose 2.26 or later.
+      - type: volume
+        source: dsh-data
+        target: /dsh-view
+        read_only: true
+        volume:
+          subpath: gate-view
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

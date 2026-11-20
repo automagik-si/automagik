@@ -3,7 +3,7 @@
 // selection never reaches an attach.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { botRowOf, codeHasPane, paneFor, statusKey, stillThere } from '../src/client/code-side-model.js'
+import { botRowOf, codeHasPane, MAX_PANES, paneFor, prunePanes, statusKey, stillThere, togglePane, validGrid } from '../src/client/code-side-model.js'
 
 const TREE = {
   v: 1,
@@ -55,4 +55,37 @@ test('the words the host sends map to their keys; an unknown word reads idle, ne
   assert.equal(statusKey('not-running'), 'not-running')
   assert.equal(statusKey('done'), 'idle')
   assert.equal(statusKey(undefined), 'idle')
+})
+
+test('beside picks toggle rows and terminal aliases, and refuse a fifth live pane by name', () => {
+  const tree = structuredClone(TREE)
+  const [atlas, , workerOnly] = tree.projects[0].bots
+  atlas.workers.push({ terminal: 't7' }, { terminal: 't10', agent: 'builder' }, { terminal: 't11' })
+  const seat = { botId: atlas.id, worker: null }
+  const reviewer = { botId: atlas.id, worker: 't9' }
+  const alias = { botId: atlas.id, worker: 't7' }
+  const builder = { botId: atlas.id, worker: 't10' }
+  const worker = { botId: workerOnly.id, worker: 't8' }
+  const fifth = { botId: atlas.id, worker: 't11' }
+
+  const { list } = togglePane([seat], reviewer, tree)
+  assert.deepEqual(list, [seat, reviewer])
+  assert.deepEqual(togglePane(list, reviewer, tree), { list: [seat] })
+  assert.deepEqual(togglePane(list, alias, tree), { list: [reviewer] })
+  const full = [seat, reviewer, builder, worker]
+  assert.equal(full.length, MAX_PANES)
+  assert.deepEqual(togglePane(full, fifth, tree), { list: full, refused: ['Atlas', 'Atlas · reviewer', 'Atlas · builder', 'Only worker · dev'] })
+  assert.deepEqual(togglePane(full, { botId: 'b-bbbbbbbbbb', worker: null }, tree), { list: full })
+  assert.deepEqual(prunePanes([seat, alias, reviewer, null, fifth], TREE), [seat, reviewer])
+  assert.deepEqual(prunePanes([alias, seat, reviewer], tree), [alias, reviewer])
+})
+
+test('terminal grids have integer dimensions and bounded sides and cell count', () => {
+  for (const grid of [{ cols: 2, rows: 1 }, { cols: 1000, rows: 250 }, { cols: 250, rows: 1000 }]) {
+    assert.equal(validGrid(grid), true)
+  }
+  for (const grid of [null, {}, { cols: 1, rows: 1 }, { cols: 1001, rows: 1 }, { cols: 2, rows: 1001 },
+    { cols: 1000, rows: 251 }, { cols: '80', rows: 24 }, { cols: 80, rows: 24.5 }, { cols: 80, rows: 0 }]) {
+    assert.equal(validGrid(grid), false)
+  }
 })

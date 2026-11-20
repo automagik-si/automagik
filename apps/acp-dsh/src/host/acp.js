@@ -14,6 +14,7 @@ import { BRIDGE_NAME, isBridgeName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
+import { usageLimitOf } from './usage-limit.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -38,6 +39,68 @@ export function structuredNameOf(update) {
   const meta = update?._meta?.claudeCode
   if (typeof meta?.toolName === 'string' && meta.toolName !== '') return meta.toolName
   return undefined
+}
+
+/**
+ * The Agent/Task call a call ran inside, when the agent says so: Claude Code's adapter stamps
+ * every call a native subagent makes, and its result, with `_meta.claudeCode.parentToolUseId`,
+ * the subagent's own Agent/Task call id. Undefined for a call the main agent made.
+ */
+export function parentToolOf(update) {
+  const parent = update?._meta?.claudeCode?.parentToolUseId
+  return isToolId(parent) ? parent : undefined
+}
+
+// Claude Code's subagent tool: `Agent`, `Task` on older CLIs (the adapter's agent reporter).
+export const WORKER_TOOLS = new Set(['Agent', 'Task'])
+export const WORKERS_MAX = 12
+export const WORKER_STEPS_MAX = 40
+const WORKER_TEXT_MAX = 160
+// A call DSH closed itself (`ended`: endPrompt, when the turn was stopped or the agent went
+// away) did not finish, whatever status it was closed with: it failed, it was never done.
+const workerStatus = tool => (tool.ended === true ? 'failed' : tool.status === 'completed' ? 'done' : tool.status === 'failed' ? 'failed' : 'running')
+const shortLine = text => String(text ?? '').slice(0, 4096).split('\n').map(line => line.trim()).find(Boolean)?.slice(0, WORKER_TEXT_MAX) ?? ''
+// The ending a worker reports: its stripped report, else the raw result less the adapter's
+// `<usage>` block and `agentId:` line, which only the raw text still carries for this client.
+// One DSH stopped reports only that (`Stopped`, with `stopped`): what it had said is partial.
+const workerResult = (tool) => {
+  if (tool.ended === true) return 'Stopped'
+  if (workerStatus(tool) === 'running') return ''
+  const text = contentText(tool.content) || (typeof tool.rawOutput === 'string' ? tool.rawOutput : '')
+  return shortLine(text.replace(/<usage>[\s\S]*?<\/usage>/g, '').replace(/^agentId:.*$/gm, ''))
+}
+
+/**
+ * The native subagents of one prompt, as workers: each Agent/Task call in `ids` (the prompt's
+ * calls, in the order they came) with its title, its state, the line its result opens with and
+ * the calls stamped with its id as its steps. Newest workers last; bounded, never the payloads.
+ * One DSH closed when its turn ended (`ended`) is failed, `stopped`, and its result `Stopped`.
+ * @param {Map<string, any>} tools
+ * @param {Iterable<string>} ids
+ */
+export function workersOf(tools, ids) {
+  const calls = [...ids].map(id => tools.get(id)).filter(tool => tool !== undefined && tool.retired !== true)
+  const workers = calls.filter(tool => WORKER_TOOLS.has(tool.structuredName)).slice(-WORKERS_MAX)
+  return workers.map((worker) => {
+    const steps = calls.filter(tool => tool.parent === worker.id)
+    const shown = steps.slice(-WORKER_STEPS_MAX)
+    const result = workerResult(worker)
+    return {
+      id: worker.id,
+      title: shortLine(worker.title) || worker.structuredName,
+      state: workerStatus(worker),
+      ...(result ? { result } : {}),
+      ...(worker.ended === true ? { stopped: true } : {}),
+      ...(worker.seenAt === undefined ? {} : { at: worker.seenAt }),
+      steps: shown.map(step => ({
+        id: step.id,
+        title: shortLine(step.title) || step.structuredName || 'Tool',
+        ...(step.structuredName === undefined ? {} : { tool: String(step.structuredName).slice(0, 80) }),
+        state: workerStatus(step),
+      })),
+      ...(steps.length > shown.length ? { more: steps.length - shown.length } : {}),
+    }
+  })
 }
 
 // The text of ACP content: a content block, or a tool call's content items.
@@ -118,7 +181,7 @@ function stopped(what) {
 export class AgentRun {
   /**
    * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
-   *   name: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
+   *   name: string, provider?: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
    *   onWarn?: (message: string) => void, startMs?: number, requestMs?: number,
    *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
@@ -204,6 +267,7 @@ export class AgentRun {
         throw error
       }
       const identity = this.spec.botIdentity?.()
+      this.spec.botIdentity = undefined
       this.identityDelivery = identity
         ? this.init.agentCapabilities?.sessionCapabilities?.systemPrompt != null
           ? 'systemPrompt' : 'preamble'
@@ -396,14 +460,29 @@ export class AgentRun {
       this.tools.delete(id)
     }
     this.holdOn()
-    if (this.identityPreamble !== undefined) {
+    const carried = this.identityPreamble !== undefined
+    if (carried) {
       prompt = [{ type: 'text', text: this.identityPreamble }, ...prompt]
       this.identityPreamble = undefined
     }
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
-      result => this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' }),
-      error => this.endPrompt({ type: 'error', message: error?.message ?? String(error), ...(error?.code === undefined ? {} : { code: error.code }) }),
+      result => {
+        if (carried) {
+          this.preambleOutcome = result?.stopReason !== 'cancelled' && !this.cancelled
+            ? 'delivered' : 'unsure'
+        }
+        return this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' })
+      },
+      error => {
+        if (carried) this.preambleOutcome = 'unsure'
+        return this.endPrompt({
+          type: 'error', message: error?.message ?? String(error),
+          ...(error?.code === undefined ? {} : { code: error.code }),
+          ...(this.exited === undefined && usageLimitOf(this.spec.provider, error)
+            ? { usageLimit: true } : {}),
+        })
+      },
     )
     return this.prompting
   }
@@ -609,6 +688,15 @@ export class AgentRun {
 
   // --- the agent's side of the conversation ---------------------------------------------
 
+  /**
+   * The native subagents this prompt started, as workers (workersOf): what the Bot team draws
+   * under the Bot's row. The prompt's calls only, so a finished worker stays until the next
+   * prompt. Read-only.
+   */
+  workers() {
+    return workersOf(this.tools, this.turn)
+  }
+
   ignored(what, payload) {
     // Rejected traffic still needs safety checks, without retaining it or making a card.
     try {
@@ -687,7 +775,10 @@ export class AgentRun {
       return known
     }
     if (this.reviews?.last) this.reviews.after = true
-    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set() }
+    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now() }
+    // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) tool.parent = parent
     // First seen after its prompt ended: its event lands behind the prompt's end, where no step
     // reads it, and the next prompt drops it. No card will ever ask its question.
     if (this.promptEnded === true) tool.unanswerable = true
@@ -728,6 +819,12 @@ export class AgentRun {
     for (const key of ['title', 'kind', 'status', 'content', 'locations', 'rawInput', 'rawOutput', 'ended']) {
       if (update[key] !== undefined && update[key] !== null) tool[key] = update[key]
     }
+    // The link can come on a later update only (a streamed refinement or the result).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) {
+      if (typeof tool.parent === 'string' && tool.parent !== parent) tool.parentConflict = true
+      tool.parent = parent
+    }
     const status = tool.rawOutput?.review?.status
     if (this.reviews && tool.id.startsWith('guardian_assessment:') && typeof status === 'string' && !tool.reviewed) {
       tool.reviewed = true
@@ -756,14 +853,20 @@ export class AgentRun {
     permission?.answer(refusal(tool.refused, permission.options))
   }
 
-  /** A skipped fork MCP call has no mirror to answer its question. */
+  /**
+   * A skipped fork MCP call has no mirror to answer its question. An unanswerable question is
+   * cancelled first. The bridge server's call gets `allow_once` when offered and is cancelled
+   * otherwise. Answering `allow_always` would let the agent record a standing rule nobody
+   * approved (RFC 0039). The bridge's own `approval/request` is the person's dialog. Other
+   * servers get the agent's reject option, or are cancelled when none is offered.
+   */
   answerSkippedMcp(tool, options) {
     if (this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
     const answerFor = (choices) => {
       if (tool.unanswerable === true) return CANCELLED
       if (tool.mcpServer !== BRIDGE_NAME) return refusal('rejected', choices)
-      const allow = choices.find(option => option.kind === 'allow_once') ?? choices.find(option => option.kind === 'allow_always')
-      return allow === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: allow.optionId } }
+      const once = choices.find(option => option.kind === 'allow_once')
+      return once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } }
     }
     // A question already stored is answered from its own options, a new one (`options`) from its own.
     const stored = tool.permission
@@ -798,12 +901,13 @@ export class AgentRun {
       if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
     }
     // The bridge's call is not the mirror's: acp-dsh answers this ACP request itself with
-    // `allow-once` and raises no DSH dialog from it. The bridge's own `approval/request` is the
-    // one dialog the person sees (RFC 0003, amendment, "One dialog per call").
+    // `allow-once` or cancels a question that offers no `allow_once`: never `allow_always`,
+    // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
+    // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
+    // person sees (RFC 0003, amendment, "One dialog per call").
     if (this.spec.dshTools === true && tool.bridge === true) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
-        ?? (params.options ?? []).find(option => option.kind === 'allow_always')
-      return Promise.resolve(once === undefined ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: once.optionId } })
+      return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }
     const skipped = this.answerSkippedMcp(tool, params.options ?? [])
     if (skipped !== undefined) return Promise.resolve(skipped)
@@ -828,6 +932,8 @@ export class AgentRun {
         signal: lifetime.signal,
         invalidate: () => lifetime.abort(),
         options: params.options ?? [],
+        // codex-acp renders execute/pending on the question only before the command starts (dist/index.js:35333).
+        startsCommand: params.toolCall?.kind === 'execute' && params.toolCall?.status === 'pending',
         answer: (response) => {
           if (done) return
           done = true
@@ -841,8 +947,8 @@ export class AgentRun {
       // A later call update must not change what an answer to this question allows
       // (tool.js reviewHolds). A failed copy leaves this question to be asked as before.
       try {
-        const { id, title, kind, rawInput, content, locations, structuredName } = tool
-        permission.call = structuredClone({ id, title, kind, rawInput, content, locations, structuredName })
+        const { id, title, kind, rawInput, content, locations, structuredName, parent } = tool
+        permission.call = structuredClone({ id, title, kind, rawInput, content, locations, structuredName, parent })
       } catch {}
       tool.permission = permission
       // The agent took its question back (it cancelled the request, or the connection closed):

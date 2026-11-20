@@ -1,7 +1,9 @@
 package ai.namastex.automagik
 
+import android.app.Activity
 import android.app.Application
 import android.os.Build
+import android.os.Bundle
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -13,8 +15,22 @@ class PocketApplication : Application() {
     val vm by lazy { PocketViewModel(this) }
     override fun onCreate() {
         super.onCreate()
+        AppLock.init(this)
+        registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = AppLock.applyWindowPolicy(activity)
+            override fun onActivityStarted(activity: Activity) {
+                AppLock.onStarted(activity)
+                if (activity !is MainActivity && activity !is AssistActivity && AppLock.locked()) activity.finish()
+            }
+            override fun onActivityStopped(activity: Activity) = AppLock.onStopped(activity)
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        })
         CrashLog.install(this)
         AppUpdates.init(this)
+        kotlin.concurrent.thread(name = "pocket-key-wrap", isDaemon = true) { PhoneKey.migrate(noBackupFilesDir, Seal.sealer()) }
     }
 }
 

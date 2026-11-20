@@ -4,13 +4,17 @@ import { randomUUID } from 'node:crypto'
 import { createEditInput } from './image-input.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readAvatar } from './avatar.js'
-import { COLORS, EXTRA_COLORS, MESSAGE_INLINE_MAX, ROOM_MODES, SOURCE_KIND } from './constants.js'
+import { COLORS, EXTRA_COLORS, LONG_HEAD, MESSAGE_INLINE_MAX, ROOM_MODES, SOURCE_KIND } from './constants.js'
 import { within } from './folders.js'
 import { absoluteLinks } from './links.js'
 import { NAME_MAX } from './requests.js'
-import { unquote } from './text.js'
+import { headOf, unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
+import { BUILTIN_ROLES, genieDetached } from '../shared/roles.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
+import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
+import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
+import { ROLE_MAX } from '../shared/bot-profile.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 // A message_bot call that sent nothing answers with this object rather than a string, so
@@ -99,6 +103,10 @@ export function install(rt) {
   const { ctx, state } = rt
 
   const callerBot = (exec) => rt.botOf(rt.selfOf(exec.agent?.id))
+  // Only the Bot's own chat and its group Sessions take the role mask and guard.
+  // Genie itself refuses calls from task runs, subagents and fresh schedule Sessions.
+  const roleBotOf = id => (rt.chatOwners?.has(id) || rt.groupOwners?.has(id) ? rt.botOf(rt.selfOf(id)) : undefined)
+  const withheldRoleTools = bot => (genieDetached(bot, state.prefs) ? BUILTIN_ROLES.genie.tools : [])
   const callerRoom = (exec) => {
     const roomId = rt.groupOwners.get(exec.agent?.id)?.roomId
     return roomId ? { fromRoomId: roomId } : {}
@@ -595,6 +603,7 @@ export function install(rt) {
       const result = await next()
       if (result?.isError !== true) {
         ;(room.memberDirs ??= {})[bot.id] = workDir ?? null
+        room.scoped = true
         await rt.save()
       }
       return result
@@ -806,7 +815,7 @@ export function install(rt) {
       try {
         // A post that wants the replies names the conversation it was written
         // from, so the report comes back there instead of the own chat.
-        await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}) }, long.files)
+        await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}), ...(long.files.length > 0 ? { excerpt: headOf(text, LONG_HEAD) } : {}) }, long.files)
       } catch (failure) {
         if (sub !== undefined) rt.dropWork(sub)
         return `Could not post in "${room.name}": ${failure.message}`
@@ -913,6 +922,123 @@ export function install(rt) {
     },
   }))
 
+  // A page of the team's Settings as a card in the Bot's own chat (settings-card.js): the
+  // same page the Settings dialog draws, live, saving through the same actions. It changes
+  // nothing itself, and every change on it is the user's click: a Bot can show a setting
+  // only the user may change, such as the tools it is denied, but never change it.
+  rt.teamTools.push(defineTool({
+    name: 'show_settings',
+    description: 'Show the user a page of the team\'s Settings as a card in your own chat, so they can see and change it without leaving the chat. The card is the real Settings page, live: what they change there is saved as in Settings, and only their own clicks change it. Use it when the user wants to see or change something set up in Automagik, and for what only the user may change (the tools a Bot is denied, who may send, keys, permissions). Name a Bot to open its own settings (page bots), its scheduled tasks (schedules) or its usage (usage); name a group to open its settings (page groups). A page another plugin adds is plugin:<id>. It does not end your turn.',
+    parameters: {
+      page: { type: 'string', required: true, description: `Which page: ${SHOWABLE_PAGES.join(', ')}, or plugin:<id> for a page another plugin adds` },
+      bot: { type: 'string', description: 'Exact Bot name from list_bots, for page bots, schedules or usage' },
+      group: { type: 'string', description: 'Exact group chat name, for page groups' },
+      note: { type: 'string', description: 'One short line shown on the card: what to look at or change there' },
+    },
+    output,
+    async execute(args, exec) {
+      await rt.load()
+      const id = exec.agent?.id
+      if (rt.groupOwners.has(id)) return 'Settings cards only work in your own chat. In a group, say where the setting is instead.'
+      if (!rt.chatOwners.has(id)) return 'Only Bots on the team can use show_settings.'
+      const page = String(args.page ?? '').trim()
+      if (!isShowablePage(page)) return `No Settings page named ${JSON.stringify(page)}. Pick one of ${SHOWABLE_PAGES.join(', ')}, or plugin:<id>.`
+      const named = []
+      if (args.bot !== undefined && String(args.bot).trim() !== '') {
+        if (!['bots', 'schedules', 'usage'].includes(page)) return 'Name a Bot only with page bots, schedules or usage.'
+        const bot = rt.findBot(String(args.bot))
+        if (bot === undefined) return `No Bot named ${args.bot}.`
+        named.push(bot.name)
+      }
+      if (args.group !== undefined && String(args.group).trim() !== '') {
+        if (page !== 'groups') return 'Name a group only with page groups.'
+        const rooms = rt.findRooms(String(args.group))
+        if (rooms.length === 0) return `No group chat named ${args.group}.`
+        if (rooms.length > 1) return `More than one group chat is named ${args.group}; ask the user which one.`
+        named.push(rooms[0].name)
+      }
+      const note = String(args.note ?? '').trim()
+      if (note.length > 200) return 'Keep the note to one short line (200 characters at most).'
+      return `Showing Settings → ${page}${named.length ? ` (${named.join(', ')})` : ''} in the chat. The user changes it there; nothing has changed yet.`
+    },
+  }))
+
+  // A change to a Bot's setup, proposed as a card that shows each field as it is and as it
+  // would be (settings-card.js). Nothing changes until the user presses Apply there, which
+  // saves through the same path as the Bot's settings form, as the user. What only the user
+  // may set (the tools a Bot is denied, private, browser grants) is never in a proposal.
+  rt.teamTools.push(defineTool({
+    name: 'propose_bot_change',
+    description: 'Propose a change to a Bot\'s setup as a card in your own chat: each field as it is now and as it would be, with Apply and Dismiss. Nothing changes until the user presses Apply, so use it instead of update_bot when the user should see and approve the change first, or when several fields change together. Leave out bot to propose a change to yourself; only a Main Bot proposes changes to other Bots. It does not end your turn.',
+    parameters: {
+      bot: { type: 'string', description: 'Exact Bot name from list_bots; leave out for yourself' },
+      name: { type: 'string', description: 'New name' },
+      role: { type: 'string', description: `New role label, ${ROLE_MAX} characters at most` },
+      instructions: { type: 'string', description: 'Replacement instructions' },
+      work_dir: { type: 'string', description: 'Full path of the new working folder; an empty string returns it to the team workspace' },
+      model: { type: 'string', description: 'New model, as provider/model or a model id from list_bot_models' },
+      effort: { type: 'string', description: 'New thinking level, as list_bot_models shows; an empty string returns to the model\'s default' },
+      note: { type: 'string', description: 'One short line shown on the card: why this change' },
+    },
+    output,
+    async execute(args, exec) {
+      await rt.load()
+      const id = exec.agent?.id
+      if (rt.groupOwners.has(id)) return 'Proposal cards only work in your own chat. In a group, describe the change instead.'
+      if (!rt.chatOwners.has(id)) return 'Only Bots on the team can use propose_bot_change.'
+      const self = rt.selfOf(id)
+      const caller = rt.botOf(self)
+      if (caller === undefined) return 'Only Bots on the team can use propose_bot_change.'
+      const bot = args.bot ? rt.findBot(String(args.bot)) : caller
+      if (bot === undefined) return `No Bot named ${args.bot}.`
+      if (bot.id !== caller.id && !rt.isMain(self)) return 'Only a Main Bot can propose changes to another Bot. Leave out bot to propose a change to yourself.'
+      const note = String(args.note ?? '').trim()
+      if (note.length > 200) return 'Keep the note to one short line (200 characters at most).'
+      const asked = {}
+      for (const [key, arg] of PROPOSAL_FIELDS) {
+        if (args[arg] === undefined || args[arg] === null) continue
+        asked[key] = String(args[arg])
+      }
+      if (Object.keys(asked).length === 0) return 'Propose at least one change: name, role, instructions, work_dir, model or effort.'
+      const proposal = {}
+      try {
+        if (asked.name !== undefined) {
+          const name = asked.name.trim()
+          if (name === '' || name.length > 40) return 'A name has 1 to 40 characters.'
+          proposal.name = name
+        }
+        if (asked.role !== undefined) {
+          const role = asked.role.trim()
+          if (role.length > ROLE_MAX) return `A role label has ${ROLE_MAX} characters at most.`
+          proposal.role = role
+        }
+        if (asked.instructions !== undefined) proposal.instructions = asked.instructions.trim()
+        if (asked.workDir !== undefined) proposal.workDir = asked.workDir.trim() === '' ? '' : await rt.cleanWorkDir(asked.workDir.trim())
+        if (asked.model !== undefined) {
+          if (asked.model.trim() === '') return 'Name the model to move to; list_bot_models shows them.'
+          proposal.model = await rt.resolveModel(asked.model.trim(), { checkAccess: true, remember: false, keep: bot.model })
+        }
+        if (asked.effort !== undefined) {
+          const ref = proposal.model ?? bot.model ?? bot.appliedModel
+          if (asked.effort.trim() === '') proposal.effort = ''
+          else if (ref === undefined) return 'Propose a model first: this Bot has none to set a thinking level on.'
+          else {
+            const effort = await rt.resolveEffort(ref, asked.effort.trim())
+            if (effort === undefined) return `${asked.effort} is not a thinking level of ${ref}; list_bot_models shows them.`
+            proposal.effort = effort
+          }
+        }
+      } catch (error) {
+        return error?.message ?? String(error)
+      }
+      const current = { name: bot.name, role: bot.role ?? '', instructions: bot.instructions ?? '', workDir: bot.workDir ?? '', model: bot.model ?? bot.appliedModel ?? '', effort: bot.effort ?? '' }
+      for (const key of Object.keys(proposal)) if (proposal[key] === current[key]) delete proposal[key]
+      if (Object.keys(proposal).length === 0) return `Nothing to propose: ${bot.name} already has these settings.`
+      const fields = Object.keys(proposal).join(', ')
+      return `Proposed for ${bot.name}: ${fields}. The card is on screen; nothing changes until the user presses Apply.\n${proposalLine({ bot: bot.id, ...(note ? { note } : {}), change: proposal })}`
+    },
+  }))
+
   // The team tools live in each Session's own scope, never in the global layer:
   // a Bot's chat and a member's group Session get all of them, a group's own
   // Session gets only its relay, and a Session ds-bot does not own gets none —
@@ -932,7 +1058,7 @@ export function install(rt) {
     const held = scoped.get(id)
     if (held === undefined) return
     scoped.delete(id)
-    for (const dispose of held.disposers) {
+    for (const dispose of [...(held.packageLifts ?? []), ...held.disposers, ...(held.roleLifts ?? [])]) {
       try {
         dispose()
       } catch (error) {
@@ -956,6 +1082,40 @@ export function install(rt) {
   // A wanted Session whose Agent cannot take scoped tools yet is warned about
   // once; held.tools stays unset, so the next step's check tries again.
   const registerless = new WeakSet()
+  const packageToolCollision = name => [...scoped.values()].some(held => !held.relay
+    && !held.packageNames?.includes(name) && ctx.tools?.get?.(name, held.agent) !== undefined)
+  const syncPackageTools = (agent, held) => {
+    const role = rt.roleRuntime?.tools?.(agent, held.packageKey)
+    if (held.packageKey === role?.key) return
+    for (const dispose of held.packageLifts ?? []) dispose()
+    for (const name of held.packageNames ?? []) {
+      held.unlisted.delete(name)
+      ;(held.removedPackages ??= new Set()).add(name)
+    }
+    held.packageKey = undefined
+    held.packageLifts = []
+    held.packageNames = []
+    if (!role) return
+    const lifts = [role.dispose]
+    try {
+      for (const def of role.definitions) {
+        const dispose = agent.ctx?.tools?.register?.(def)
+        if (typeof dispose !== 'function') throw new Error('Role tools need a disposable Session registration.')
+        lifts.push(dispose)
+      }
+    } catch (error) {
+      for (const dispose of lifts) dispose()
+      rt.warn?.('omni-ui: role tools not served to %s: %s', agent.session?.id, error)
+      return
+    }
+    held.packageKey = role.key
+    held.packageLifts = lifts
+    held.packageNames = role.definitions.map(def => def.name)
+    for (const name of held.packageNames) {
+      held.removedPackages?.delete(name)
+      held.unlisted.add(name)
+    }
+  }
   const shareBotTools = (agent) => {
     if (agent === undefined) return
     const id = agent.session?.id
@@ -1119,10 +1279,33 @@ export function install(rt) {
       } catch { /* a scoped name cannot be restricted; connectors are global */ }
     }
   }
+  const maskRoleTools = (agent, held) => {
+    if (typeof agent.ctx?.tools?.restrict !== 'function' || typeof ctx.tools?.schemas !== 'function') return
+    const wanted = withheldRoleTools(roleBotOf(agent.session?.id))
+    const before = held.roleDenied ?? new Set()
+    if (wanted.length === 0 && before.size === 0) return
+    // Visible schemas omit the names we already masked. Prefer the registry's
+    // pre-restriction view so our mask stays in place when other masks lift.
+    const served = ctx.tools.view?.(agent)?.restrictableNames
+      ?? new Set([...before, ...ctx.tools.schemas(agent).map(schema => schema.name)])
+    const deny = wanted.filter(name => served.has(name))
+    if (deny.length === before.size && deny.every(name => before.has(name))) return
+    // Update the held names before restrict/lift, which can emit tools/change.
+    held.roleDenied = new Set(deny)
+    for (const lift of held.roleLifts ?? []) { try { lift() } catch { /* already lifted */ } }
+    held.roleLifts = []
+    for (const name of deny) {
+      try {
+        const lift = agent.ctx.tools.restrict({ deny: [name] })
+        if (typeof lift === 'function') held.roleLifts.push(lift)
+      } catch { /* the executor guard still refuses the call */ }
+    }
+  }
   const reapplyToolMasks = () => {
     for (const held of scoped.values()) {
       if (held.agent === undefined) continue
       try { maskConnectorTools(held.agent, held) } catch (error) { rt.warn('omni-ui: connector mask failed: %s', error) }
+      try { maskRoleTools(held.agent, held) } catch (error) { rt.warn('omni-ui: role mask failed: %s', error) }
     }
   }
 
@@ -1177,11 +1360,13 @@ export function install(rt) {
     const held = scoped.get(id) ?? { relay: false, tools: false, restricted: false, filtered: false, disposers: [], unlisted: new Set() }
     held.agent = agent
     scoped.set(id, held)
+    syncPackageTools(agent, held)
     if (!nativeDshSession(id)) filterBotAssembly(agent, held)
     if (!nativeDshSession(id) && held.restricted !== true && typeof agent.ctx?.tools?.restrict === 'function') {
       maskHiddenTools(agent, held, new Set(ctx.tools.schemas(agent).map(schema => schema.name)))
     }
     maskConnectorTools(agent, held)
+    maskRoleTools(agent, held)
   }
   ctx.on('tools/change', () => reapplyToolMasks())
   // A new Bot, part, or group Session gets its Agent before ds-bot records it, so the
@@ -1191,13 +1376,22 @@ export function install(rt) {
   ctx.tools.guard((exec) => {
     if (!rt.isBotSession(exec.agent?.id) || nativeDshSession(exec.agent?.id)) return undefined
     if (exec.name === BLOCKING_QUESTION_TOOL) return `Bots cannot use ${BLOCKING_QUESTION_TOOL}. Ask with ask_user in your own chat, or ask in your reply.`
+    const bot = roleBotOf(exec.agent?.id)
+    if (withheldRoleTools(bot).includes(exec.name)) return `${bot.name} does not have the ${exec.name} tool: its Genie role is off.`
     const target = exec.arguments?.target
     return SCHEDULE_TARGET_TOOLS.includes(exec.name) && target !== undefined && target !== 'this_session' ? SCHEDULE_TARGET_REFUSAL : undefined
   })
+  const pendingRole = agent => {
+    const owner = rt.selfOf?.(agent?.session?.id)
+    return owner === undefined ? undefined : rt.roleRuntime?.ready?.(owner)
+  }
   // Creation waits for this listener, so the Agent's first step already lacks the tool.
   ctx.on('agent/created', async ({ agent }) => {
     try {
       await rt.load()
+      // Keep the hidden-tools filter in registration order when no role is loading.
+      const ready = pendingRole(agent)
+      if (ready) await ready
       hideBotUnusedTools(agent)
       // Creation runs before the first step collects the tool list, so the
       // names just registered will already be in it; nothing stays pending.
@@ -1218,12 +1412,18 @@ export function install(rt) {
     if (agent === undefined) return next()
     try {
       await rt.load()
+      const ready = pendingRole(agent)
+      if (ready) await ready
       hideBotUnusedTools(agent)
     } catch (error) {
       rt.warn('omni-ui: scoping the tools of %s failed: %s', agent.session?.id ?? agent.id, error)
     }
-    const assembled = await next()
+    let assembled = await next()
     const held = scoped.get(agent.session?.id)
+    if (held?.removedPackages?.size && Array.isArray(assembled.tools)) {
+      assembled = { ...assembled, tools: assembled.tools.filter(tool => !held.removedPackages.has(tool.name)) }
+      held.removedPackages.clear()
+    }
     if (held?.unlisted === undefined || held.unlisted.size === 0) return assembled
     // DSH 0.2.2 collects the scoped tools itself after this waterfall (#814).
     if (!Array.isArray(assembled.tools)) {
@@ -1392,5 +1592,5 @@ export function install(rt) {
     }))
   }
 
-  Object.assign(rt, { pickRoom, hideBotUnusedTools, syncScopedTools, addTeamTool, removeTeamTool, reapplyToolMasks })
+  Object.assign(rt, { pickRoom, hideBotUnusedTools, syncScopedTools, addTeamTool, removeTeamTool, reapplyToolMasks, packageToolCollision })
 }

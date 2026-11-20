@@ -13,11 +13,17 @@ const OUTCOMES = { allow: 'allowed-once', reject: 'rejected' }
 // only when it is one of these; anything else is the ordinary web client.
 const CLIENT_KINDS = new Set(['web', 'desktop', 'im', 'pocket', 'relay', 'sdk', 'dsh', 'system'])
 
+// RFC 0039 delivery 3: the Live rail's "Just finished" window (task-card.js), and the bounds of what is kept.
+const ENDED_FOR_MS = 6 * 60 * 60 * 1000
+const ENDED_MAX = 50
+const UNANSWERED_MAX = 500
+const TOLD_MAX = 1000
+
 // The team's own lookups only read the team: who is on it, their models and capabilities, a
 // chat's or a group's transcript, a memory. A Claude Code session reaches them through its MCP
 // bridge (`mcp__dsh__<name>`), which asks for every call; those asks are answered here, so the
 // person is asked only about what changes something.
-export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall'])
+export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall', 'show_settings', 'propose_bot_change'])
 export const teamToolOf = name => String(name ?? '').replace(/^mcp__dsh__/, '')
 
 export function answerableOwner(rt, owner) {
@@ -27,8 +33,53 @@ export function answerableOwner(rt, owner) {
 
 export function install(rt) {
   const { ctx } = rt
-  /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string)=>void}>} */
+  /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
+  const folderIds = new Set()
+  // RFC 0039 delivery 3: withdrawals live in memory for the team they happened in. Owners bind each ask
+  // to its admission epoch and owner records by identity. A child inherits its parent's owner.
+  const withdrawn = []
+  const unanswered = new Map()
+  const told = new Set()
+  const runs = new WeakSet()
+  const owners = new WeakMap()
+  const teamEpoch = () => rt.teamGeneration?.().epoch
+  const ownerRecord = (kind, botId, { roomId, task } = {}) => ({
+    epoch: teamEpoch(), kind, bot: rt.botOf?.(botId),
+    ...(roomId !== undefined ? { room: rt.roomOf?.(roomId) } : {}),
+    ...(task !== undefined ? { task } : {}),
+  })
+  const current = entry => !runs.has(entry) && owners.has(entry) && owners.get(entry).epoch === teamEpoch()
+  const ownedBy = (owner, why, { task } = {}) => owner !== undefined && why === 'task'
+    && task !== undefined && owner.kind === 'task' && owner.task === task
+  const prune = (now = Date.now()) => {
+    const epoch = teamEpoch()
+    for (let at = withdrawn.length - 1; at >= 0; at -= 1) if (withdrawn[at].epoch !== epoch) withdrawn.splice(at, 1)
+    while (withdrawn.length > 0 && (now - withdrawn[0].at >= ENDED_FOR_MS || withdrawn.length > ENDED_MAX)) withdrawn.shift()
+  }
+  // Names are stored with the row. The request's reason, detail and arguments stay out of the view.
+  const record = (entry, why, botName) => {
+    const owner = owners.get(entry)
+    const epoch = teamEpoch()
+    if (owner === undefined || owner.epoch !== epoch || told.has(entry.id)) return false
+    told.add(entry.id)
+    while (told.size > TOLD_MAX) told.delete(told.values().next().value)
+    withdrawn.push({
+      id: entry.id, botId: entry.botId, botName: String(botName ?? owner.bot?.name ?? '').slice(0, 80), sessionId: entry.sessionId,
+      ...(entry.ownerSessionId !== undefined ? { ownerSessionId: entry.ownerSessionId } : {}),
+      ...(entry.roomId !== undefined ? { roomId: entry.roomId, roomName: String(owner.room?.name ?? '').slice(0, 80) } : {}),
+      ...(entry.taskId !== undefined ? { taskId: entry.taskId, label: entry.label ?? '' } : {}),
+      ...(entry.child ? { child: true } : {}),
+      tool: entry.tool, why, at: Date.now(), epoch,
+    })
+    prune()
+    if (why === 'task' && entry.taskId !== undefined) {
+      unanswered.delete(entry.taskId)
+      unanswered.set(entry.taskId, epoch)
+      while (unanswered.size > UNANSWERED_MAX) unanswered.delete(unanswered.keys().next().value)
+    }
+    return true
+  }
   // A task a Bot of the team started that still runs, by its Session.
   const runningTask = (sessionId) => {
     const task = rt.state?.tasks?.[sessionId]
@@ -58,6 +109,7 @@ export function install(rt) {
     const botId = owner?.botId ?? chat ?? task?.from ?? runOwner?.botId
     if (botId === undefined) return next()
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id,
       sessionId,
@@ -81,14 +133,20 @@ export function install(rt) {
       entry.capabilityKey = createHash('sha256').update(JSON.stringify(['v1', entry.botId, folder, entry.tool, entry.reason, target])).digest('hex')
     }
     pending.set(id, entry)
+    // Hook owners also arrive as run: true (stops.js).
+    if (runOwner !== undefined) runs.add(entry)
+    owners.set(entry, owner !== undefined ? ownerRecord('group', owner.botId, { roomId: owner.roomId })
+      : chat !== undefined ? ownerRecord('chat', chat)
+        : task !== undefined ? ownerRecord('task', task.from, { task }) : ownerRecord('run', runOwner?.botId))
     rt.noteApproval?.(sessionId, { tool: entry.tool, reason: entry.reason.slice(0, 200) })
     rt.approvalWaiting?.(entry)
     emit('open', { ...entry, answerable: true })
-    const settle = (outcome, decidedBy = 'dsh') => {
+    const settle = (outcome, decidedBy = 'dsh', why) => {
       if (!pending.has(id)) return false
       pending.delete(id)
+      folderIds.delete(id)
       rt.noteApproval?.(sessionId, undefined)
-      emit('settled', { id, outcome, decidedBy, at: Date.now() })
+      emit('settled', { id, outcome, decidedBy, at: Date.now(), ...(why !== undefined ? { why } : {}) })
       return true
     }
     if (owner === undefined) {
@@ -100,11 +158,12 @@ export function install(rt) {
       const linked = new AbortController()
       request.signal = linked.signal
       return new Promise((resolve, reject) => {
-        const complete = (outcome, decidedBy = 'dsh') => {
-          if (!settle(outcome, decidedBy)) return
+        const complete = (outcome, decidedBy = 'dsh', why) => {
+          if (!settle(outcome, decidedBy, why)) return false
           resolve(outcome)
           linked.abort()
           if (request.signal === linked.signal) request.signal = original
+          return true
         }
         entry.answer = complete
         if (original?.aborted) entry.answer('cancelled')
@@ -127,9 +186,10 @@ export function install(rt) {
     }
     rt.yieldRoomTurn?.(sessionId)
     return new Promise((resolve) => {
-      entry.answer = (outcome, decidedBy) => {
-        if (!settle(outcome, decidedBy)) return
+      entry.answer = (outcome, decidedBy, why) => {
+        if (!settle(outcome, decidedBy, why)) return false
         resolve(outcome)
+        return true
       }
       if (request.signal?.aborted) entry.answer('cancelled')
       request.signal?.addEventListener('abort', () => entry.answer('cancelled'), { once: true })
@@ -138,6 +198,9 @@ export function install(rt) {
 
   ctx.effect(() => () => {
     for (const entry of pending.values()) if (entry.child) entry.answer?.('cancelled', 'system')
+    withdrawn.length = 0
+    unanswered.clear()
+    told.clear()
   }, 'ds-bot: cancel held subagent asks')
 
   function childAsk(request, sessionId, owner) {
@@ -148,6 +211,7 @@ export function install(rt) {
       return 'cancelled'
     }
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id, sessionId, botId: owner.botId, child: true, ownerSessionId: owner.sessionId,
       ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
@@ -159,13 +223,19 @@ export function install(rt) {
       at: Date.now(),
     }
     pending.set(id, entry)
+    owners.set(entry, ownerRecord(owner.kind, owner.botId, {
+      ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
+      ...(owner.kind === 'task' ? { task: rt.state?.tasks?.[owner.taskId] } : {}),
+    }))
     if (owner.kind === 'group') rt.yieldRoomTurn?.(owner.sessionId)
     return new Promise(resolve => {
       const aborted = () => entry.answer('cancelled')
       entry.answer = outcome => {
-        if (!pending.delete(id)) return
+        if (!pending.delete(id)) return false
+        folderIds.delete(id)
         request.signal?.removeEventListener('abort', aborted)
         resolve(outcome)
+        return true
       }
       if (request.signal?.aborted) entry.answer('cancelled')
       else request.signal?.addEventListener('abort', aborted, { once: true })
@@ -173,6 +243,12 @@ export function install(rt) {
   }
 
   const approvalsView = () => [...pending.values()].map(({ answer, ...entry }) => ({ ...entry, answerable: answer !== undefined }))
+  function groupAskCurrent(id, room) {
+    const entry = pending.get(id)
+    if (entry === undefined) return false
+    const owner = owners.get(entry)
+    return owner?.kind === 'group' && owner.epoch === teamEpoch() && owner.room === room && owner.bot === rt.botOf(entry.botId)
+  }
   const waitsForApproval = sessionId => [...pending.values()].some(entry => entry.sessionId === sessionId || entry.ownerSessionId === sessionId)
 
   function answerApproval(id, choice, client = 'web') {
@@ -192,5 +268,26 @@ export function install(rt) {
     }
   }
 
-  Object.assign(rt, { approvalsView, waitsForApproval, answerApproval, cancelApprovals, onApproval })
+  // Check the ending operation before each cancellation and row. Only the call that settled the ask gets a row.
+  const endApprovals = async (sessionIds, why, by = {}, valid = () => false) => {
+    const ids = new Set([sessionIds].flat().filter(id => typeof id === 'string'))
+    let count = 0
+    for (const entry of pending.values()) {
+      if (!current(entry) || !ownedBy(owners.get(entry), why, by)) continue
+      if (!ids.has(entry.sessionId) && !ids.has(entry.ownerSessionId)) continue
+      // Yield so DSH answers already given are adopted before cancellation.
+      await new Promise(resolve => setImmediate(resolve))
+      if (pending.get(entry.id) !== entry) continue
+      if (valid() !== true) break
+      let won = false
+      try { won = entry.answer?.('cancelled', 'system', why) === true } catch (error) { rt.warn('ds-bot: withdrawing an ask failed: %s', error) }
+      if (valid() !== true) break
+      if (won && record(entry, why, by.botName)) count += 1
+    }
+    return count
+  }
+  const withdrawnView = () => { prune(); return withdrawn.map(({ epoch, ...row }) => row) }
+  const unansweredView = () => { const epoch = teamEpoch(); return [...unanswered].filter(([, at]) => at === epoch).map(([id]) => id) }
+
+  Object.assign(rt, { approvalsView, groupAskCurrent, isFolderApproval: id => folderIds.has(id), waitsForApproval, answerApproval, cancelApprovals, onApproval, endApprovals, withdrawnView, unansweredView })
 }

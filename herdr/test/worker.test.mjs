@@ -714,7 +714,8 @@ test("worker: hc run --bg as a child of the bot's pane, in the worktree, with th
     task: null, worktree: wt, agent: "codex", model: "gpt-5.5", effort: "medium", template: null, role: "dev",
     branch: "feat/login", project: s.project, lead: ID.dev, base: git(s.project, "rev-parse", "main").trim(), created: true,
     swap: false, override: false, override_requested: null,
-    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, generation: null, sequence: null, at: undefined });
+    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev,
+    env: { HOME: s.env.HOME }, session: null, generation: null, sequence: null, at: undefined });
   assert.ok(!Number.isNaN(Date.parse(row.at)));
 });
 
@@ -1174,12 +1175,11 @@ test("#1262: a template worker that reports no status is waited for past hc's 60
   // hc itself waits 60 s for a template's new terminal to report a status before it answers.
   const done = join(s.root, "run-answered");
   hcStateExtra(s, { runDelayMs: 61_000, runDelayDone: done });
-  const began = Date.now();
   const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
-  const took = Date.now() - began;
   assert.equal(r.code, 0, r.err);
+  // The fake writes `done` only when its own 61 s wait reaches the answer, never when the CLI
+  // killed the call: its presence is the proof that the wait outlasted the old 15 s timeout.
   assert.ok(existsSync(done), "hc's run was allowed to answer, not killed at 15 s");
-  assert.ok(took >= 60_000, `the start waited hc's first-status wait (${took} ms)`);
   const row = s.ledger().find((x) => x.kind === "worker");
   assert.equal(row.terminal, "t100");
   assert.equal(row.template, "mystery");
@@ -1927,7 +1927,8 @@ test("worker --task: the ledger row's task, project, lead, worktree, base, creat
   assert.deepEqual({ ...row, at: undefined, pid: undefined }, { event: "start", kind: "worker", terminal: "t100", pid: undefined,
     botId: ID.dev, task: "gl-231", worktree: realpathSync(wt), agent: "codex", model: "gpt-5.5", effort: "medium", template: null,
     role: "dev", branch: "fix/gl-231-login", project: s.project, lead: ID.cap, base, created: false, swap: false, override: false,
-    override_requested: null, core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, generation: null, sequence: null, at: undefined });
+    override_requested: null, core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev,
+    env: { HOME: s.env.HOME }, session: null, generation: null, sequence: null, at: undefined });
   assert.notEqual(row.base, git(wt, "rev-parse", "HEAD").trim(), "the base the worktree started from, not its head");
   // --branch making the worktree: created, and the base ref as a SHA; a per-task model is an override.
   git(s.project, "commit", "-q", "--allow-empty", "-m", "later");

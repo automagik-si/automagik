@@ -36,10 +36,19 @@ import androidx.compose.ui.unit.sp
 }
 
 /** A pairing link that came from outside the app: pair only if it's on the person's own screen. */
-@Composable fun ConfirmPairDialog(link: PairingLink, onPair: () -> Unit, onCancel: () -> Unit) {
-    AlertDialog(onDismissRequest = onCancel, title = { Text("Pair with ${link.name}?") }, text = {
-        Text("Only pair if this code is on your own computer’s screen, in Herdr’s Pocket Link. Whatever you type in its terminals goes to that computer.",
-            color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+@Composable fun ConfirmPairDialog(offer: PairingOffer, onPair: () -> Unit, onCancel: () -> Unit) {
+    val knownName = offer.known?.let { displayName(it.name) }
+    AlertDialog(onDismissRequest = onCancel, title = { Text(if (knownName == null) "Pair with a new computer?" else "Pair $knownName again?") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (knownName == null) {
+                Text("New computer: its key isn’t saved on this phone.", color = Blocked, fontSize = 13.sp, lineHeight = 19.sp)
+                Text("It calls itself “${offer.link.name}”.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            } else Text("This computer is already saved on this phone as “$knownName”.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Computer key fingerprint: ${offer.fingerprint}", color = Ink, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Only pair if this code is on your own computer’s screen, in Herdr’s Pocket Link. Whatever you type in its terminals goes to that computer.",
+                color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            if (knownName == null) Text("Tap Connect afterwards to open a session.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+        }
     }, confirmButton = { TextButton(onClick = onPair) { Text("Pair") } }, dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } })
 }
 

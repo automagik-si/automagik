@@ -6,7 +6,8 @@
 // Every request names an ordinary Session address (`kind: 'session'`), never a subagent address.
 // Reads: follow, events, state, observeState. Writes (RFC 0015's amendment), present only when the
 // controller has them: one queued prompt with the phone's request id, and a cancel of the active
-// turn. Nothing here calls updateQueue, steers a turn or raises a Remote event.
+// turn. RFC 0033 prompts can cite staged image receipts. Nothing here calls updateQueue,
+// steers a turn or raises a Remote event.
 
 /** @param {any} controller  `ctx.sessionController` */
 export function createAdapter(controller) {
@@ -23,8 +24,14 @@ export function createAdapter(controller) {
     observeState: (sessionId, signal) => controller.observeState({ sessionId }, signal),
     ...(typeof controller.prompt === 'function' && typeof controller.cancel === 'function'
       ? {
+          supportsReceipts: true,
           // `queue`, never `steer`: a phone message never redirects a running turn.
-          prompt: (sessionId, { requestId, text }, signal) => controller.prompt({ requestId, sessionId, mode: 'queue', content: [{ type: 'text', text }] }, signal),
+          prompt: (sessionId, { requestId, text, receipts }, signal) => {
+            const content = receipts
+              ? [...(text ? [{ type: 'text', text }] : []), ...receipts.map(receiptId => ({ type: 'file', receiptId }))]
+              : [{ type: 'text', text }]
+            return controller.prompt({ requestId, sessionId, mode: 'queue', content }, signal)
+          },
           cancel: sessionId => controller.cancel({ sessionId }),
         }
       : {}),

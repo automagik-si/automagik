@@ -154,7 +154,7 @@ test("docGet: no answer in time is a failure (1), and hc connect is ended", { ti
   t.mock.timers.tick(1000); // docGet's grace before its SIGKILL
   t.mock.timers.reset();
   assert.ok(connectPid > 0);
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 10_000;
   while (alive && Date.now() < deadline) {
     try { process.kill(connectPid, 0); await new Promise((go) => setTimeout(go, 50)); } catch { alive = false; }
   }

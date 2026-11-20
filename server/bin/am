@@ -1,0 +1,4 @@
+#!/bin/sh
+# am, for an operator in `docker exec`: the pinned release tarball's command, run on the image's
+# node. The tarball lives under /opt/automagik/am and is never installed into the data volume.
+exec /nodejs/bin/node /opt/automagik/am/bin/am.mjs "$@"

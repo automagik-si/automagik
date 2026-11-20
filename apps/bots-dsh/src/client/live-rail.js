@@ -1,9 +1,9 @@
-import { answerGroup, approvalDetail, approvalWhere, groupApprovals, nativeAsk } from './approvals.js'
+import { answerGroup, approvalDetail, approvalWhere, groupApprovals, nativeAsk, withdrawnText } from './approvals.js'
 import { openStops, stopLine } from './stops.js'
 import { createElement as h, useEffect, useState } from 'react'
 import { BotMark } from './mark.js'
 import { workPhrase } from './cells.js'
-import { endLabel, endOf, railEnded } from './task-card.js'
+import { ENDED_FOR_MS, ENDED_SHOWN, endLabel, endOf, railEnded } from './task-card.js'
 import { hostText, t } from './i18n.js'
 
 // -------------------------------------------------------------------------
@@ -77,6 +77,21 @@ export function liveSummary({ needs, working }) {
   return parts.join(' · ')
 }
 
+/** Notes for "Just finished" use the names stored with each withdrawal. */
+export function withdrawnOf(work, now = Date.now()) {
+  return (work?.withdrawn ?? []).filter(row => withdrawnText(row.why) !== '' && now - (row.at ?? 0) < ENDED_FOR_MS).map(row => ({
+    key: `gone:${row.id}`, name: String(row.botName ?? ''), at: row.at ?? 0,
+    place: String(row.roomName ?? row.label ?? ''),
+    line: `${withdrawnText(row.why)} · ${row.tool}`,
+  })).sort((a, b) => b.at - a.at).slice(0, ENDED_SHOWN)
+}
+
+function GoneCard({ item }) {
+  return h('div', { className: 'bt-live-card', role: 'note' }, h('span', { className: 'bt-live-text' },
+    h('span', { className: 'bt-live-name' }, item.name, item.place ? h('span', { className: 'bt-live-place' }, ` · ${item.place}`) : null),
+    h('span', { className: 'bt-live-line' }, item.line)))
+}
+
 const since = (at, now) => {
   const minutes = Math.max(0, Math.round((now - at) / 60000))
   return minutes < 1 ? t('just now') : minutes < 60 ? t('{count} min', { count: minutes }) : t('{count} h', { count: Math.round(minutes / 60) })
@@ -131,6 +146,11 @@ export function LiveRail({ roster, actions, useWork, useSessionStatus }) {
     return () => clearInterval(timer)
   }, [])
   const live = liveOf(work, roster, now)
+  // Keep each list's limit before merging so every task omitted from the Tasks row appears here.
+  const finished = [
+    ...live.ended.map(item => ({ at: item.at, node: h(Entry, { key: item.key, item, tone: item.status === 'failed' ? 'bad' : 'done', actions, line: `${item.title} · ${item.label}` }) })),
+    ...withdrawnOf(work, now).map(item => ({ at: item.at, node: h(GoneCard, { key: item.key, item }) })),
+  ].sort((a, b) => b.at - a.at).map(entry => entry.node)
   return h('aside', { className: 'bt-live', 'aria-label': t('Live') },
     h('div', { className: 'bt-live-top' },
       h('h2', { className: 'bt-live-title' }, t('Live')),
@@ -139,10 +159,7 @@ export function LiveRail({ roster, actions, useWork, useSessionStatus }) {
       live.needs.map(item => item.count > 1 ? h(GroupEntry, { key: item.key, item, actions, statusMap }) : h(Entry, { key: item.key, item, tone: 'need', actions, line: item.line ?? (item.tool ? t('Wants to use {tool}', { tool: item.tool }) : t('Waiting for your answer')) }))),
     h(Section, { label: t('Working'), dot: 'work', empty: t('Nothing running right now.') },
       live.working.map(item => h(Entry, { key: item.key, item, tone: 'work', actions, line: item.task && item.at ? `${item.phrase} · ${since(item.at, now)}` : item.phrase }))),
-    live.ended.length > 0
-      ? h(Section, { label: t('Just finished'), dot: 'done', empty: '' },
-          live.ended.map(item => h(Entry, { key: item.key, item, tone: item.status === 'failed' ? 'bad' : 'done', actions, line: `${item.title} · ${item.label}` })))
-      : null,
+    finished.length > 0 ? h(Section, { label: t('Just finished'), dot: 'done', empty: '' }, finished) : null,
     h('section', { className: 'bt-live-sec' },
       h('h3', { className: 'bt-live-label' }, t('Automations')),
       h('button', { type: 'button', className: 'bt-live-card', onClick: () => actions.openSettings('schedules') },

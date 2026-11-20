@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "ownerReview": {
+    "billing": [],
+    "reviewer": [
+      ".github/pr-reviewer.json",
+      "scripts/pr-reviewer/**",
+      ".github/workflows/pr-reviewer-watch.yml"
+    ],
+    "release": [".github/workflows/release.yml", ".github/workflows/follow-omni.yml"],
+    "keys": [
+      "plugin-lane/keys.json",
+      "meter/usagemeter/meter-keys.json",
+      "herdr/mods/am-sidebar/pack-keys.json",
+      "am/am-keys.json",
+      "am/meter-keys.json",
+      "am/pack-keys.json",
+      "am/plugin-lane-keys.json",
+      "herdr/mods/am-sidebar/meter-keys.json",
+      "herdr/install.sh",
+      "apps/welcome-dsh/src/host/lane-keys.json",
+      "apps/desktop/src/lane-keys.js",
+      "apps/bots-dsh/src/host/role-keys.json"
+    ]
+  },
+  "wordMatch": {
+    "notBilling": [
+      {
+        "path": "meter/usagemeter/src/ledger.rs",
+        "why": "the meter's token ledger, not a billing ledger (RFC 0029 (g))"
+      }
+    ]
+  },
+  "holdLabels": ["do not merge", "blocked"]
+}

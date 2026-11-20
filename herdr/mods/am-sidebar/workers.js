@@ -852,19 +852,25 @@ export function loginGeneration(record, vendor) {
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. `generation` and `sequence`: the Bot login
+ * --session-id, or the one it resumed), else null. `env`: #1490's launch home, the absolute
+ * HOME/DSH_HOME/CODEX_HOME/KIMI_CODE_HOME the seat was started with, so a search for the
+ * conversation it left on disk uses its own root and never the reviving process's; null when the
+ * launch named none (the search then fails closed). `generation` and `sequence`: the Bot login
  * generation and record sequence this launch used (loginGeneration), both null when it has no
  * Claude/Codex generation record (another agent or template, no pointer, or no record). A seat's
  * worker-only fields are null or false.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
-  template, role, swap, override, overrideRequested, core, createdMs, squad, session, generation, sequence, at }) {
+  template, role, swap, override, overrideRequested, core, createdMs, squad, session, env, generation, sequence, at }) {
   const requested = overrideRequested && Object.keys(overrideRequested).length ? { ...overrideRequested } : null;
+  const home = env && typeof env === "object" && !Array.isArray(env)
+    ? Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === "string" && v)) : null;
   return { event: "start", kind, terminal, pid: Number.isInteger(pid) ? pid : null, botId, task: orNull(task),
     worktree: orNull(worktree), agent: orNull(agent), model: orNull(model), effort: orNull(effort), template: orNull(template),
     role: orNull(role), branch: orNull(branch), project: orNull(project), lead: orNull(lead), base: orNull(base),
     created: created === true, swap: swap === true, override: override === true, override_requested: requested,
     core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session),
+    ...(home && Object.keys(home).length ? { env: home } : {}),
     generation: orNull(generation), sequence: msOrNull(sequence), at: stamp(at) };
 }
 

@@ -68,6 +68,25 @@ export function install(rt) {
       return undefined
     }
   }
+
+  // A group member's live level must stay within the Bot's own level.
+  function groupMemberHolds(sessionId, bot) {
+    try {
+      const service = presets()
+      if (service === undefined) return false
+      const session = (ctx.sessions?.list?.() ?? []).find(loaded => loaded?.id === sessionId)
+      if (session === undefined) return true
+      if (chains.has(sessionId) || unapplied.has(sessionId)) return false
+      const current = service.current(session)
+      if (typeof current !== 'string' || current === '') return false
+      const own = bot.permission ?? service.catalog().defaultPreset
+      const a = runRank(service, current)
+      const b = runRank(service, own)
+      return a !== undefined && b !== undefined ? a <= b : current === own
+    } catch {
+      return false
+    }
+  }
   // `{ permissionFallback }` for a Bot's or group's view when its Auto runs as workspace-write.
   // `{ permissionNotOffered }` when its saved level is one DSH no longer offers (#1001):
   // the level stays saved, and the view tells it, with the level the Bot's own chat reads
@@ -906,7 +925,10 @@ export function install(rt) {
     const wanted = cleanRoomPermission(name) ?? undefined
     if (wanted === room.permission) return false
     if (wanted === undefined) delete room.permission
-    else room.permission = wanted
+    else {
+      room.permission = wanted
+      room.scoped = true
+    }
     markFallback(`room:${room.id}`, false)
     const service = presets()
     if (service === undefined) return true
@@ -1008,5 +1030,5 @@ export function install(rt) {
   // The Sessions that carry the mark now, as a fresh list.
   const unappliedSessions = () => [...unapplied.keys()]
 
-  Object.assign(rt, { newBotPermission, sessionWide, permissionFactsOf, unappliedSessions, permissionCatalog, permissionFallbackOf, permissionKey, autoClosed, applyPermission, applyTaskPermission, levelHolds, reapplyTasks, capTasks, taskOfRoom, inToolCall, callerGroup, callerTask, callerLevel, capTaskByOpener, armedLevels, lowerScheduledSession, assertTaskDepth, taskForebears, taskLevelOf, forgetTaskPermission, checkPreset, startingSession, assertLevelOffered, setPermission, levelTo, inheritedPermission, cleanRoomPermission, setRoomPermission })
+  Object.assign(rt, { newBotPermission, sessionWide, groupMemberHolds, permissionFactsOf, unappliedSessions, permissionCatalog, permissionFallbackOf, permissionKey, autoClosed, applyPermission, applyTaskPermission, levelHolds, reapplyTasks, capTasks, taskOfRoom, inToolCall, callerGroup, callerTask, callerLevel, capTaskByOpener, armedLevels, lowerScheduledSession, assertTaskDepth, taskForebears, taskLevelOf, forgetTaskPermission, checkPreset, startingSession, assertLevelOffered, setPermission, levelTo, inheritedPermission, cleanRoomPermission, setRoomPermission })
 }

@@ -19,6 +19,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -136,7 +138,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
 
 /**
  * A chat (RFC 0015 delivery 5): a terminal's agent, or an Automagik Bot's chat (`dsh:`; it takes writes only when the
- * bridge's hello says `dshWrite`). Rows are plain text ([ChatText]); which buttons show is [ChatActions]'s alone, and
+ * bridge's hello says `dshWrite`). Rows can also carry attachments ([Attach]); which buttons show is [ChatActions]'s alone, and
  * without a message box the bottom line says why ([ChatActions.whyNoSend]). [onShowTerminal] is null where there is
  * no terminal.
  */
@@ -144,6 +146,16 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     DisposableEffect(ref) { vm.openChat(ref); onDispose { vm.closeChat(ref) } }
     val s = vm.chat.collectAsStateWithLifecycle().value?.takeIf { it.terminal == ref.address } ?: Chat.State(ref.address)
     val app by vm.state.collectAsStateWithLifecycle()
+    val memory = vm.memory.collectAsStateWithLifecycle().value
+    val botManage = vm.botManage.collectAsStateWithLifecycle().value[ref.hostId]
+    val schedules = vm.schedules.collectAsStateWithLifecycle().value
+    val botSchedules = vm.botSchedules.collectAsStateWithLifecycle().value[ref.hostId]
+    // The settings dialog drops its contents even when the app stops collecting the chat.
+    val settings = vm.settings.collectAsState().value
+    val botSettings = vm.botSettings.collectAsStateWithLifecycle().value[ref.hostId]
+    val att = vm.attachments.state.collectAsStateWithLifecycle().value
+    val picker = rememberAttachPicker(vm.attachments)
+    val botWrites = vm.botWrites.collectAsStateWithLifecycle().value[ref.hostId]
     val chat = vm.botChats.collectAsStateWithLifecycle().value[ref.hostId]?.getOrNull()?.find { it.terminal == ref.address }
     val terminal = app.machines[ref.hostId]?.terminals?.find { it.address == ref.address }
     val members = remember(app.machines[ref.hostId]?.members) {
@@ -166,7 +178,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     val pinned = chatPinned(s, pinnedId)
     // A card that closed falls back to the other one; the bar and the pinned area always describe the same card.
     LaunchedEffect(pending.map { it.id }) { if (pending.none { c -> c.id == pinnedId }) pinnedId = null }
-    val count = rows.size + s.screen.size + s.messages.size + s.receipts.size
+    val count = rows.size + s.screen.size + s.messages.size + s.receipts.size + att.messages.size
     LaunchedEffect(count) { val items = list.layoutInfo.totalItemsCount; if (count > 0 && items > 0) list.animateScrollToItem(items - 1) }
     // The keyboard shrinking the list keeps its top: bring the newest row back instead.
     LaunchedEffect(list) {
@@ -178,7 +190,13 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     BoxWithConstraints(modifier.fillMaxSize().background(Canvas)) {
         val cardMax = (maxHeight - 200.dp).coerceIn(240.dp, ChatStyle.PENDING_MAX_HEIGHT)
         Column(Modifier.fillMaxSize()) {
-            ChatBar(s, identity, pinned, onBack, onShowTerminal?.takeIf { ChatActions.canShowTerminal(s) }, vm::chatInterrupt, vm::reconnectChat)
+            val showMemory = s.dsh && !app.demo && botManage != false && (s.dshWrite || botWrites == true)
+            val showSchedules = s.dsh && !app.demo && botSchedules != false && (s.dshWrite || botWrites == true)
+            val showSettings = ChatSettings.isBot(s.terminal) && !app.demo && botSettings != false && (s.dshWrite || botWrites == true)
+            ChatBar(s, identity, pinned, onBack, onShowTerminal?.takeIf { ChatActions.canShowTerminal(s) }, vm::chatInterrupt, vm::reconnectChat,
+                onMemory = if (showMemory) ({ vm.openMemory(ref) }) else null,
+                onSchedules = if (showSchedules) ({ vm.openSchedules(ref) }) else null,
+                onSettings = if (showSettings) ({ vm.openSettings(ref) }) else null)
             Box(Modifier.fillMaxWidth().weight(1f)) {
                 LazyColumn(Modifier.fillMaxSize().alpha(if (s.offline || s.gone) .55f else 1f), state = list,
                     contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -186,17 +204,24 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                         TextButton(onClick = vm::chatEarlier, modifier = Modifier.fillMaxWidth()) { Text("Load earlier", fontSize = 12.sp) }
                     }
                     if (s.screenOnly) item("screen-only") { Hint("History appears when this pane’s transcript is found.") }
-                    items(rows, key = { "r:" + it.id }) { ChatRowView(it, s, vm, openLink, expanded) }
+                    items(rows, key = { "r:" + it.id }) { ChatRowView(it, s, vm, openLink, expanded, att) }
                     if (s.screen.isNotEmpty()) item("live") { Hint("Live from the screen") }
                     items(s.screen, key = { "s:" + it.id }) { ChatRowView(it, s, vm, openLink, expanded) }
                     items(s.receipts, key = { "x:" + it.id }) { ReceiptCard(it, identity.name, vm::dismissReceipt) }
                     items(s.messages, key = { "m:" + it.id }) { m -> MessageView(m, s, onSendNow = { confirmDraft = it }, onCancel = vm::chatCancelHeld, onRetry = vm::chatRetry) }
+                    items(att.messages, key = { "u:" + it.id }) { m ->
+                        UploadMessageView(m, s, att, vm.attachments, onCancel = {
+                            if (vm.attachments.cancel(m.id, restore = draft.isBlank())) draft = m.caption
+                        }, restoreCaption = { if (draft.isBlank()) draft = it })
+                    }
                     if (count == 0 && pending.isEmpty() && s.error == null) item("empty") { Hint(if (s.connected) "No messages yet." else "Connecting chat…") }
                 }
                 s.notice?.let { notice -> ChatNotice(notice, vm::dismissChatNotice, Modifier.align(Alignment.TopCenter).padding(8.dp)) }
             }
             SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp))
-            val why = ChatActions.whyNoSend(s)
+            val why = ChatActions.whyNoSend(s).let {
+                if (it == ChatActions.READ_ONLY && att.peer == Attach.Peer.App) Attach.READ_ONLY_APP else it
+            }
             Column(Modifier.fillMaxWidth().background(Chrome).navigationBarsPadding()) {
                 if (pinned != null) {
                     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp)) {
@@ -214,7 +239,15 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                 }
                 if (why != null) Text(why, fontSize = 12.sp, color = Muted,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp))
-                else if (ChatActions.canSend(s)) ChatComposer(draft, { draft = it }, { vm.chatSend(draft); draft = "" }, draft.isNotBlank(), identity.name, onSay = say)
+                else if (ChatActions.canSend(s)) ChatComposer(draft, { draft = it }, {
+                    when (vm.attachments.submit(draft)) {
+                        Submit.Accepted -> draft = ""
+                        is Submit.Refused -> Unit
+                        Submit.Text -> { vm.chatSend(draft); draft = "" }
+                    }
+                }, enabled = draft.isNotBlank() || att.draft.isNotEmpty() || att.preparing > 0, name = identity.name,
+                    onSay = say, leading = { AttachButton(s, att, picker, vm.attachments) },
+                    above = { AttachTray(att, vm.attachments) })
             }
         }
     }
@@ -224,15 +257,23 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
             confirmButton = { TextButton(onClick = { vm.chatSendHeld(m); confirmDraft = null }) { Text("Send now") } },
             dismissButton = { TextButton(onClick = { confirmDraft = null }) { Text("Cancel") } })
     }
+    if (memory != null && memory.hostId == ref.hostId && memory.terminal == ref.address) ChatMemoryDialog(vm, memory)
+    if (schedules != null && schedules.hostId == ref.hostId && schedules.terminal == ref.address) ChatSchedulesDialog(vm, schedules)
+    if (settings != null && settings.hostId == ref.hostId && settings.terminal == ref.address) ChatSettingsDialog(vm, settings)
 }
 
-@Composable private fun ChatBar(s: Chat.State, identity: ChatIdentity, card: Chat.Row?, onBack: () -> Unit, onShowTerminal: (() -> Unit)?, onInterrupt: () -> Unit, onReconnect: () -> Unit) {
+@Composable private fun ChatBar(s: Chat.State, identity: ChatIdentity, card: Chat.Row?, onBack: () -> Unit, onShowTerminal: (() -> Unit)?,
+                               onInterrupt: () -> Unit, onReconnect: () -> Unit, onMemory: (() -> Unit)?,
+                               onSchedules: (() -> Unit)?, onSettings: (() -> Unit)?) {
     Column(Modifier.fillMaxWidth().background(Chrome)) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to agents") }
             Surface(color = Surface, shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, Border),
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 6.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                val action = if (onSettings == null) Modifier
+                    else Modifier.clickable(onClickLabel = "Bot settings", role = Role.Button, onClick = onSettings)
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).then(action).padding(start = 6.dp, end = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(36.dp)) {
                         PetView(identity.pet, identity.pose, 36.dp)
                         Box(Modifier.align(Alignment.BottomEnd).size(12.dp).background(stateColor(s.status.state), CircleShape)
@@ -246,6 +287,8 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                     }
                 }
             }
+            if (onMemory != null) IconButton(onClick = onMemory) { Icon(Icons.Outlined.Psychology, "Bot memory", tint = Ink) }
+            if (onSchedules != null) IconButton(onClick = onSchedules) { Icon(Icons.Outlined.Schedule, "Bot schedules", tint = Ink) }
             if (ChatActions.canInterrupt(s)) IconButton(onClick = onInterrupt) { Icon(Icons.Outlined.StopCircle, "Interrupt", tint = Blocked) }
             if (onShowTerminal != null) IconButton(onClick = onShowTerminal) { Icon(Icons.Outlined.Terminal, "Show terminal", tint = Ink) }
         }
@@ -259,12 +302,15 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     }
 }
 
-/** The composer at the mock's size: a 56 dp pill with a 17 px field, the mic and Send (attach comes later). */
+/** The composer at the mock's size: a 56 dp pill with a 17 px field, the mic, Send and optional attachment controls. */
 @Composable internal fun ChatComposer(draft: String, onDraft: (String) -> Unit, onSend: () -> Unit, enabled: Boolean, name: String,
-                                      engine: DictateEngine? = rememberPhoneEngine(), onSay: ((String) -> Unit)? = null) {
+                                      engine: DictateEngine? = rememberPhoneEngine(), onSay: ((String) -> Unit)? = null,
+                                      leading: (@Composable () -> Unit)? = null, above: (@Composable () -> Unit)? = null) {
+    above?.invoke()
     Surface(color = Surface, shape = RoundedCornerShape(ChatStyle.COMPOSER_RADIUS), border = BorderStroke(1.dp, Border),
         modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp).heightIn(min = ChatStyle.COMPOSER_HEIGHT)) {
         Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            leading?.invoke()
             BasicTextField(draft, onDraft, maxLines = 5,
                 textStyle = TextStyle(color = Ink, fontSize = ChatStyle.COMPOSER_TEXT, lineHeight = 22.sp),
                 cursorBrush = SolidColor(Accent),
@@ -334,15 +380,17 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
 }
 
 @Composable internal fun ChatRowView(row: Chat.Row, s: Chat.State, vm: PocketViewModel, openLink: (String, Boolean) -> Unit,
-                                    expanded: MutableMap<String, Boolean>) {
+                                    expanded: MutableMap<String, Boolean>, att: AttachState = AttachState.EMPTY) {
     when (row.kind) {
         "text" -> {
+            if (row.blocks != null && Attach.renderable(row.blocks).isEmpty() && row.text.isBlank()) return
             val mine = row.role == "user"
             Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
                 Surface(color = if (mine) Accent.copy(alpha = .14f) else Surface, shape = RoundedCornerShape(12.dp), border = if (mine) null else BorderStroke(1.dp, Border),
-                    modifier = Modifier.widthIn(max = 560.dp)) {
+                    modifier = Modifier.widthIn(max = 560.dp).then(if (row.blocks == null) Modifier else Modifier.testTag("chat-attachment-row"))) {
                     Column(Modifier.padding(10.dp, 8.dp)) {
-                        ChatTextView(row.text, openLink)
+                        if (row.blocks != null) AttachBlocks(row, s, att, vm.attachments, openLink)
+                        else ChatTextView(row.text, openLink)
                         Chat.cutNote(row, s.dsh)?.let { Text(it, fontSize = 11.sp, color = Muted) }
                         if (row.interrupted) Text(Chat.STOPPED, fontSize = 11.sp, color = Muted)
                     }

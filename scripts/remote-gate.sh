@@ -580,6 +580,7 @@ gate_plugin() {
     say "layout check skipped (CHROME_BIN unset): no browser found, CI unset"
   fi
   step install bun install --frozen-lockfile
+  if [ "$app" = bots-dsh ]; then step acp-install bun install --cwd ../acp-dsh --frozen-lockfile; fi
   if grep -q '"harness"' package.json && [ ! -d dev/harness/node_modules ]; then
     step harness bun run harness
   fi

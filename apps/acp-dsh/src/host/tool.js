@@ -15,6 +15,7 @@ const DSH_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute'
 const kindOf = kind => (DSH_KINDS.has(kind) ? kind : 'other')
 const OUTPUT_LIMIT = 20_000
 const LASTING_ONLY = 'lasting-only'
+const CONFINED = 'confined'
 
 const diffsOf = content => (Array.isArray(content) ? content : [])
   .filter(item => item?.type === 'diff' && typeof item.path === 'string')
@@ -38,6 +39,9 @@ export function callArguments(tool) {
     ...(diffs.length ? { diffs } : {}),
     // An image being made: the chat draws its image card from the first sight of the call.
     ...(isImageCall(tool) ? { image: true } : {}),
+    // A native subagent's call: the agent's id of the Agent/Task call it ran inside, so the
+    // card's own row says which worker it belongs to.
+    ...(typeof tool.parent === 'string' ? { parent: tool.parent } : {}),
   }
 }
 
@@ -46,6 +50,7 @@ const judgedText = tool => `Auto's judge refused ${tool.title}: ${tool.judgeReas
 
 function resultText(tool) {
   if (tool.sessionFileResult !== undefined) return tool.sessionFileResult
+  if (tool.confinedReason !== undefined) return tool.confinedReason
   if (tool.lastingReason !== undefined) return tool.lastingReason
   if (typeof tool.judgeReason === 'string') return judgedText(tool)
   const text = contentText(tool.content) || tool.output || (tool.rawOutput === undefined ? '' : typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput))
@@ -83,7 +88,7 @@ async function resultOf(tool, attachments) {
   return {
     title: tool.title,
     kind: tool.kind,
-    status: tool.status,
+    status: tool.confinedReason !== undefined ? 'failed' : tool.status,
     text: resultText(tool),
     ...(diffs.length ? { diffs } : {}),
     ...(images.length ? { images } : {}),
@@ -96,7 +101,7 @@ export function optionFor(outcome, options) {
   let chosen
   if (outcome === 'allowed-once') chosen = pick(['allow_once'])
   if (outcome === 'rejected') chosen = pick(['reject_once', 'reject_always'])
-  if (outcome === LASTING_ONLY) chosen = pick(['reject_once'])
+  if (outcome === LASTING_ONLY || outcome === CONFINED) chosen = pick(['reject_once'])
   return chosen ? { outcome: { outcome: 'selected', optionId: chosen.optionId } } : { outcome: { outcome: 'cancelled' } }
 }
 
@@ -115,7 +120,7 @@ async function imageResult(host, live, tool, exec) {
   if (exec.signal?.aborted) return failed('The image was stopped before it was finished.')
   const base64 = agentImageOf(tool)
   if (base64 === undefined) {
-    return failed(tool.lastingReason ?? (typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
+    return failed(tool.confinedReason ?? tool.lastingReason ?? (typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
       ? `${live.name} could not make this image. Try again, or describe it differently.`
       : `${live.name} ended without an image. Try again.`))
   }
@@ -183,6 +188,7 @@ export function mirrorTool(host) {
       locations: { type: 'json' },
       diffs: { type: 'json' },
       image: { type: 'boolean' },
+      parent: { type: 'string', description: "The agent's id of the subagent call this call ran inside." },
     },
     output: {
       schema: {
@@ -373,15 +379,23 @@ function reviewedArguments(session, callId) {
 }
 
 function reviewHolds(host, live, tool, exec, permission, record) {
-  if (record === undefined) return false
+  if (record === undefined || tool.parentConflict === true) return false
   if (!permission.options.some(option => option.kind === 'allow_once')) return false
   if (live?.calls?.has(exec.callId) !== true || live.toolIds?.get(exec.callId) !== tool.id) return false
   const level = levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.())
   if (level.auto !== true || level.policy !== record.policy || level.sandbox !== record.sandbox) return false
   const args = reviewedArguments(exec.agent.session, exec.callId)
-  if (args === undefined || permission.call === undefined) return false
-  if (!isDeepStrictEqual(JSON.parse(JSON.stringify(callArguments(permission.call))), args)) return false
-  return isDeepStrictEqual(JSON.parse(JSON.stringify(callArguments(tool))), args)
+  if (args === null || typeof args !== 'object' || Object.getPrototypeOf(args) !== Object.prototype || permission.call === undefined) return false
+  const { parent: rowParent, ...reviewedCall } = args
+  if (Object.hasOwn(args, 'parent') && typeof rowParent !== 'string') return false
+  const { parent: questionParent, ...questionCall } = callArguments(permission.call)
+  const { parent: liveParent, ...liveCall } = callArguments(tool)
+  // Claude ACP can send the stamp later. It says which worker the call belongs to.
+  // Any conflicting stamp invalidates the review.
+  const parents = new Set([rowParent, questionParent, liveParent].filter(parent => typeof parent === 'string'))
+  if (parents.size > 1) return false
+  if (!isDeepStrictEqual(JSON.parse(JSON.stringify(questionCall)), reviewedCall)) return false
+  return isDeepStrictEqual(JSON.parse(JSON.stringify(liveCall)), reviewedCall)
 }
 
 // `review: false` (a nested call's question, asked from another call's card): the Auto review
@@ -389,8 +403,28 @@ function reviewHolds(host, live, tool, exec, permission, record) {
 async function ask(host, live, tool, exec, permission, { review = true } = {}) {
   const record = review ? reviewed.get(exec) : undefined
   if (review) reviewed.delete(exec)
+  tool.confinedReason = undefined
   tool.lastingReason = undefined
   const options = permission?.options ?? []
+  const mode = live.run?.modes?.currentModeId
+  const call = permission?.call
+  const rawInput = call?.rawInput ?? tool.rawInput
+  const network = typeof permission?.title === 'string'
+    && /^(?:https?|socks5(?:tcp|udp)) network access to \S/i.test(permission.title)
+  // Codex keeps the managed profile's deny rule even after approving a command escalation.
+  // codex-acp's standard renderer uses execute/pending for both new commands and write_stdin approvals.
+  if (typeof mode === 'string' && /^permission-profile:automagik-(?:read|workspace|image)-[0-9a-f]{32}$/.test(mode)
+    && permission?.startsCommand === true
+    && tool.mcp !== true && !network
+    && rawInput !== null && typeof rawInput === 'object'
+    && [Object.prototype, null].includes(Object.getPrototypeOf(rawInput))
+    && Object.hasOwn(rawInput, 'command') && typeof rawInput.command === 'string' && rawInput.command.trim() !== ''
+    && Reflect.ownKeys(rawInput).every(key => key === 'command' || key === 'cwd')
+    && options.some(option => option.kind === 'allow_once' || option.kind === 'allow_always')) {
+    tool.confinedReason = `${live.name} runs inside its own folder at this Bot's level, so an approval cannot run ${tool.title} outside it. Raise the Bot's level to Full access to run it.`.replace(/\s+/g, ' ').slice(0, 300)
+    live.confinedReason = tool.confinedReason
+    return CONFINED
+  }
   const lasting = options.find(option => option.kind === 'allow_always')
   if (lasting !== undefined && !options.some(option => option.kind === 'allow_once')) {
     // A one-time yes is never sent as the agent's lasting allow (#1718): refuse with no dialog

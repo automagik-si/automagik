@@ -13,6 +13,7 @@ import { LAMP_CSS } from './lamp.js'
 import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
+import { installSelfUpdateMock } from './self-update-mock.js'
 import { teamActions } from './team-actions.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
@@ -32,7 +33,7 @@ import { sameVersion } from './dsh-offer.js'
 import { QuestionCard, QuestionDock } from './questions.js'
 import { DesktopUpdate, DESKTOP_UPDATE_CSS } from './desktop-update.js'
 import { WORK_CODE_SWITCH_CSS } from './work-code-switch.js'
-import { installCodeSide } from './code-side.js'
+import { CODE_PANEL, CodeMainPanel, codePanelNavigation, installCodeSide } from './code-side.js'
 import { LEFT_BAR_CSS } from './left-bar-css.js'
 import { installBarWidth } from './left-bar-width.js'
 import { PRIVACY_CSS } from './privacy.js'
@@ -49,6 +50,8 @@ import { headerNavigation, installHeaderNavigation } from './header-navigation.j
 import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
+import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
+import { PAGE_ICONS, PageBoundary, SettingsPage } from './settings.js'
 import { BotBrowserBody, installBotBrowserTab } from './bot-browser-tab.js'
 import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
@@ -59,6 +62,7 @@ import { MODEL_SWITCH_CSS, ModelSwitchNotice } from './model-switch.js'
 import { announceCarried, CLI_LOGIN_CSS, CliLoginConversation, installCliLoginBridge, installKnownStateGuard } from './cli-login.js'
 import { createCliLogin } from './cli-login-state.js'
 import { cliLoginBotOf } from './cli-login-model.js'
+import { installLoginCommand } from './login-command.js'
 import { ConnectorDock, MailDock, CONNECTOR_CSS } from './connectors.js'
 import { CONNECTORS_PAGE_CSS } from './connectors-page.js'
 import { LearningDock, LearningTurnTail, LEARNING_CSS } from './learning-card.js'
@@ -282,6 +286,8 @@ export function apply(ctx) {
     // Omni listens to: an unchanged answer carries only those.
     const live = {}
     if (value.connectors !== undefined && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live.connectors = value.connectors
+    if (value.secretSources !== undefined && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live.secretSources = value.secretSources
+    if (value.secretSourcesPresent !== undefined && value.secretSourcesPresent !== current.secretSourcesPresent) live.secretSourcesPresent = value.secretSourcesPresent
     if (value.capabilityStatuses !== undefined && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live.capabilityStatuses = value.capabilityStatuses
     if (value.learning !== undefined && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live.learning = value.learning
     if (value.learningSettled !== undefined && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live.learningSettled = value.learningSettled
@@ -558,6 +564,7 @@ export function apply(ctx) {
     }
   }
   let cliLogin
+  const codePanel = codePanelNavigation(ctx.layout)
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
     learningAnswer: (id, approve) => after(call('learning-answer', { id, approve })),
@@ -667,6 +674,10 @@ export function apply(ctx) {
       seatChatView.set({ seat })
       try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
     },
+    openCodePane: (selected, options) => {
+      try { codePanel.open(selected, options) } catch (error) { noteClientError('code-side', error) }
+    },
+    closeCodePane: codePanel.close,
     seatList: () => call('seat-chat-list'),
     selectPanel: (id) => { ctx.layout.selectPanel(id) },
     toggleSidebar: () => { ctx.layout.toggleSidebar() },
@@ -1195,6 +1206,8 @@ export function apply(ctx) {
     () => installCompiledStyles(GOAL_CSS, 'goal'),
     () => installCompiledStyles(USER_MESSAGE_CSS, 'user-messages'),
     () => installCompiledStyles(TASK_CSS, 'tasks'),
+    () => installCompiledStyles(SETTINGS_CARD_CSS, 'settings-card'),
+    () => setSettingsPages({ PAGE_ICONS, PageBoundary, SettingsPage }),
     () => installCompiledStyles(DESKTOP_UPDATE_CSS, 'desktop-update'),
     () => installCompiledStyles(WORK_CODE_SWITCH_CSS, 'work-code-switch'),
     () => installCompiledStyles(PRIVACY_CSS, 'privacy'),
@@ -1240,6 +1253,10 @@ export function apply(ctx) {
       name: 'main', key: SEAT_CHAT_PANEL,
       inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
     }, SeatChatPanel)),
+    () => ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main', key: CODE_PANEL,
+      inject: () => ({ onBack: codePanel.close }),
+    }, CodeMainPanel)),
     () => shadow('sidebar.brand.mark', { priority: BOT_PRIORITY }, BrandMark),
     () => shadow('sidebar.brand.name', { priority: BOT_PRIORITY }, BrandName),
     // The desktop app's own update, above the account and Channels (desktop-update.js).
@@ -1322,6 +1339,7 @@ export function apply(ctx) {
     () => installCompiledStyles(QUEUE_CSS, 'queue'),
     () => installMentions(),
     () => installAtMenu(),
+    () => installLoginCommand(ctx, { roster, actions, t }),
     () => installAdvancedStyle(),
     installHeader,
     installNativeBotHeader,
@@ -1597,4 +1615,8 @@ export function apply(ctx) {
       groups.dispose()
     }
   }, 'ds-bot: surface')
+  // The web self-update preview (issue 1540, step 1): a clickable mock behind `?mock-1540`, so a normal
+  // start of the app is untouched and the owner can open it on a running instance without any
+  // updater code. It goes away with this plugin's context.
+  ctx.effect(() => installSelfUpdateMock(), 'ds-bot: self-update preview (issue 1540)')
 }

@@ -937,3 +937,11 @@ test('#1092 review: a heredoc hides nothing without its end line, and graphql fr
     assert.equal(hardToUndo({ tool: 'bash', args: { command } }, { root: '/w/repo' }), true, command)
   }
 })
+
+test('RFC 0034 password-manager reads on the mirror reach the person without a judge call', async t => {
+  const w = await world(t, 'acp-hermes/default')
+  const mirrorCall = { title: 'bash', input: { command: 'bw get password x' }, allowOnce: true }
+  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall }), 'person')
+  assert.equal(w.rt.autoAuditRows().at(-1).code, 'hard')
+  assert.equal(w.requests.length, 0)
+})

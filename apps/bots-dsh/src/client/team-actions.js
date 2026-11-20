@@ -121,8 +121,19 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     createRoom: (members, options = {}) => after(call('create-room', { members, ...options })),
     setBotAuto: (id, rev) => after(call('set-bot-auto', { id, rev })),
     updateBot: (id, patch) => after(call('update-bot', { id, ...patch })),
-    // A model on another route: the host starts a new conversation with a handoff note
-    // (parts.js). `patch` carries the thinking level picked with it.
+    attachRole: (id, role) => after(call('role-attach', { id, role })),
+    detachRole: id => after(call('role-detach', { id })),
+    roleCatalog: () => after(call('role-catalog')),
+    installRole: id => after(call('role-install', { id })),
+    uninstallRole: id => after(call('role-uninstall', { id })),
+    grantRole: (id, role, capability, on) => after(call('role-grant', { id, role, capability, on })),
+    roleSettings: (id, role) => call('role-settings', { id, role }),
+    setRoleSettings: (id, role, values) => call('role-settings-set', { id, role, values }),
+    voicePane: (sessionId, paneId, open, active) => call('voice-pane', { sessionId, paneId, open, active }),
+    voiceWait: (sessionId, paneId, callId, signal) => call('voice-wait', { sessionId, paneId, callId }, signal),
+    voiceSpoken: (sessionId, paneId, callId, outcome) => call('voice-spoken', { sessionId, paneId, callId, outcome }),
+    // A model on another route: the host changes it in place on a chat with nothing said.
+    // `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),
     switchRouteInChat: async (id, ref, patch = {}) => {
       try { return await after(call('switch-route', { id, ...patch, model: ref })) } catch (error) {
@@ -162,7 +173,13 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     cliLoginCancel: (botId, provider, attemptId) => call('cli-login-cancel', loginPayload(botId, provider, { attemptId })),
     cliLoginConnections: () => call('cli-login-connections', {}),
     cliLoginConfirm: (botId, provider, ref, model) => call('cli-login-confirm', loginPayload(botId, provider, { ...(ref === undefined ? {} : { ref }), ...(model === undefined ? {} : { model }) })),
-    cliLoginAccounts: () => call('cli-login-accounts', {}),
+    cliLoginAccounts: options => call('cli-login-accounts', options?.reservations === true ? { reservations: true } : {}),
+    cliLoginReserve: (offerId, label, claim) => call('cli-login-reserve', {
+      offerId, label, ...(claim?.machineId ? { machineId: claim.machineId }
+        : claim === undefined ? {} : { claimId: claim.claimId, rev: claim.rev }),
+    }),
+    cliLoginRelease: (claimId, rev) => call('cli-login-release', { claimId, rev }),
+    cliLoginReleaseMachine: machineId => call('cli-login-release', { machineId }),
     cliLoginSwitch: (botId, provider) => call('cli-login-switch', loginPayload(botId, provider)),
     cliLoginReset: (botId, provider) => call('cli-login-reset', loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call('cli-login-signout',
@@ -199,7 +216,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     setPrefs: prefs => after(call('set-prefs', prefs)),
     setMain: (id, main = true, options = {}) => after(call('set-main', { id, main, ...options })),
     updateRoom: (id, patch) => after(call('update-room', { id, ...patch })),
-    send: (sessionId, text) => after(call('send', { sessionId: partFor(sessionId), text })),
+    send: (sessionId, text, voicePane) => after(call('send', { sessionId: partFor(sessionId), text, ...(voicePane ? { voicePane } : {}) })),
     answerQuestion: (sessionId, questionId, answer) => after(call('answer-question', { sessionId: partFor(sessionId), questionId, answer })),
     dismissQuestion: sessionId => after(call('dismiss-question', { sessionId })),
     answerView: (sessionId, viewId, action, values) => after(call('view-reply', { sessionId: partFor(sessionId), viewId, action, values })),
@@ -232,10 +249,28 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     closeGoal: () => ui.set(state => (state.goalOpen ? { ...state, goalOpen: null } : state)),
     // Values go out in these requests and never come back in a response.
     secretSet: payload => after(call('secret-set', payload)),
-    secretAllow: requestId => after(call('secret-allow', { requestId })),
+    secretAllow: (requestId, approval) => after(call('secret-allow', { ...approval, requestId })),
+    secretSourceDetail: requestId => call('secret-source-detail', { requestId }),
+    vaultStatus: (signal, provider) => call('vault-status', provider === undefined ? undefined : { provider }, signal),
+    vaultUnlock: (password, connection) => call('vault-unlock', { provider: 'bitwarden', password, connection }),
+    vaultUnlockSecretService: () => call('vault-unlock', { provider: 'secret-service' }),
+    vaultUnlockSaved: (provider, connection, credentialRevision) => call('vault-unlock', { provider, connection,
+      ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
+    vaultLock: provider => provider === undefined ? call('vault-lock') : call('vault-lock', { provider }),
+    vaultItems: (search, provider, project) => call('vault-items', provider === 'hashicorp-vault'
+      ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }),
+        ...(project === undefined ? {} : { project }) }),
+    vaultFields: (provider, mount, path) => call('vault-fields', { provider, mount, path }),
+    vaultTokenSet: (provider, token, connection, server, credentialRevision) => call('vault-token-set', provider === 'hashicorp-vault'
+      ? { provider, token, ...connection } : { provider, token, connection, ...(server === undefined ? {} : { server }),
+        ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
+    vaultTokenClear: (provider, connection, credentialRevision) => call('vault-token-clear', { provider,
+      ...(connection === undefined ? {} : { connection }), ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
+    secretSourceSet: mapping => after(call('secret-source-set', mapping)),
     secretCancel: requestId => after(call('secret-cancel', { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call('secret-update', { name, scope, purpose })),
     secretDelete: name => after(call('secret-delete', { name })),
+    secretSourceClear: name => after(call('secret-source-clear', { name })),
     connectorConnect: (id, payload = {}) => after(call('connector-connect', { id, ...payload })),
     connectorDisconnect: id => after(call('connector-disconnect', { id })),
     connectorRetry: id => after(call('connector-retry', { id })),

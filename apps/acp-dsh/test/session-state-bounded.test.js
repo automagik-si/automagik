@@ -76,7 +76,7 @@ test('1250 prompts bound retired calls and retain paths and permission precedenc
   assert.deepEqual(await soon(p.ask('image-1200')), CANCELLED)
   assert.deepEqual(await soon(p.ask('refused-1200')), picked('no'))
   assert.deepEqual(await soon(p.ask('bridge-1200')), picked('yes'))
-  assert.deepEqual(await soon(p.ask('bridge-1200', { options: OPTIONS.filter(option => option.kind === 'allow_always') })), picked('always'))
+  assert.deepEqual(await soon(p.ask('bridge-1200', { options: OPTIONS.filter(option => option.kind === 'allow_always') })), CANCELLED)
   assert.deepEqual(await soon(p.ask('bridge-1200', { options: [] })), CANCELLED)
   assert.deepEqual([noted.length, asked.length], counts)
   assert.deepEqual(p.run.queue, [])

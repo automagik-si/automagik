@@ -13,6 +13,8 @@ import { agentRowSessions } from './task-card.js'
 import { ProjectRail } from './left-bar-rail.js'
 import { TeamRows, drawBot } from './left-bar-team.js'
 import { LEFT_BAR_SKIN } from './left-bar-css.js'
+import { mock1540On } from './self-update-flag.js'
+import { roleTagOf } from '../shared/roles.js'
 
 // A channel's glyph in its kind's shape, in one colour: colour in the bar only ever means a
 // status, so the glyph says what kind of channel a row is. Anything unknown wears a chat bubble.
@@ -50,7 +52,7 @@ export function channelGlyph(channel) {
 // Read, never run: every row comes from what the team already has (the roster, the Sessions'
 // status, the work the host reports), and a press only opens what today's rows open. The "+"
 // makes nothing yet: creating or joining a space comes with Automagik Cloud, and the "+" says
-// so in a note. The Code side, sign-in and Cloud's own tiles are not part of this bar yet.
+// so in a note. Sign-in and Cloud's own tiles are separate.
 
 /** The one tile the rail has today: this computer, the local team. */
 export const LOCAL_SPACE = 'local'
@@ -133,7 +135,7 @@ function currentKey(roster, shownId) {
  * the DSH bots in today's order, then the group chats. `order` is the sidebar's own order of
  * everything but the Main Bot ({ kind: 'bot' | 'room' | 'agent', item }).
  */
-export function teamOf({ roster, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
+export function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
   const main = roster.byId?.[roster.mainBotId]
   const shown = key => key === current
   const unread = (id, key, own) => !shown(key) && (own || marked[id] === true)
@@ -144,7 +146,8 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
     // A Bot's channels come from the one plugin that serves it (extend.js's botChannels): with
     // a source the bar draws them under its row, and while there is none the team's own
     // botChildren rows stay exactly as today. Never both.
-    return { ...item, channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
+    const roleTag = roleTagOf(roster.byId?.[item.id] ?? item, roster.prefs, roster, t)
+    return { ...item, ...(roleTag ? { roleTag } : {}), channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
   }
   const agent = (item) => {
     const tasks = item.kind === 'tasks'
@@ -223,12 +226,18 @@ function SpaceNote({ anchor, onClose }) {
 /**
  * The bar. `order` and the stores are the sidebar's (sidebar.js TeamSidebar); `tools` are the
  * head's other buttons (the update button, other plugins' tools); `notice` is a line above
- * the list (a read-only team, the Main Bot being set up); `foot` sits under the list (the Work
- * and Code switch, where the app has Herdr). `open(row)` opens a row as today's rows do,
+ * the list (a read-only team, the Main Bot being set up); `foot` sits under the list (the Herdr
+ * action, where the app has it). `open(row)` opens a row as today's rows do,
  * `menu(row, event)` its context menu, `renderAfter(row)` draws what hangs under a row and
  * `renderEnd(row)` what other plugins add at the end of a Bot's row.
+ *
+ * The owner's new top row (Search and New, every other tool at the foot) is the approved
+ * self-update mock's layout, so it sits behind the mock's own flag (`?mock-1540`, #1546): without
+ * it the bar draws exactly what dev draws, with the wordmark and the tools up top.
  */
-export function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
+export function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown, sideSwitch, codeList }) {
+  // Read at render time, so the flag turns the new layout on and off in a running page.
+  const mock = mock1540On()
   const shownId = useSessions(list => list.ids.find(id => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? '')
   const current = currentKey(roster, shownId)
   const status = useTeamStatus({ roster, useSessionStatus, useWork })
@@ -272,13 +281,18 @@ export function LeftBar({ roster, order, marked, seats = [], useSessions, useSes
         collapse ?? null),
       h('div', { className: 'lb-list' },
         h('div', { className: 'lb-head' },
-          h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
-          tools,
+          // Without the flag: the wordmark and the tools, exactly where dev draws them. With it:
+          // Search and New only, and the tools move to the foot below.
+          mock ? null : h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
+          mock ? null : tools,
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
+        sideSwitch ?? null,
         notice,
-        team.bots.length === 0 && empty ? empty
-          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : undefined, label: t('Bot list') }),
-        foot ? h('div', { className: 'lb-foot' }, foot) : null)),
+        codeList ?? (team.bots.length === 0 && empty ? empty
+          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : undefined, label: t('Bot list') })),
+        mock
+          ? h('div', { className: 'lb-foot' }, tools, foot ?? null)
+          : foot ? h('div', { className: 'lb-foot' }, foot) : null)),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }

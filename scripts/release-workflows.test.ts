@@ -6,12 +6,13 @@
 // packs am and checks am's key before it tags.
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import * as amLane from './am-lane';
 import * as meterLane from './meter-lane';
+import { KEY_ID } from './lane';
 import { pluginNames } from './release-plugins';
 
 const workflow = (name: string) => readFileSync(join(import.meta.dir, '..', '.github', 'workflows', name), 'utf8').split('\n');
@@ -1348,6 +1349,183 @@ describe('an empty selected signing slot never falls back to the other one (#170
           }
         }
       }
+    }
+  });
+});
+
+describe('the cut publishing a signed role catalog', () => {
+  const lines = workflow('release.yml');
+  const { jobs: { cut: { steps } } } = Bun.YAML.parse(lines.join('\n')) as {
+    jobs: { cut: { steps: { name?: string; if?: string; env?: Record<string, string>; run?: string }[] } };
+  };
+  const write = 'Write the role catalog';
+  const sign = 'Sign the role catalog';
+  const check = 'Check the role catalog';
+  const publish = 'Publish the release';
+  const notes = '`roles.json` (signed, `roles.json.sig`) lists the official role packages.';
+
+  test('derives stable issuedAt bytes from the selected cut commit in UTC', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-roles-time-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'release'));
+      writeFileSync(join(dir, 'bin/git'), [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        '[[ "$TZ" == UTC ]]',
+        '[[ "$1 $2 $3 $4" == "show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd" ]]',
+        'case "$5" in',
+        '  cut-one) printf "%s\\n" 2026-11-20T03:00:00Z ;;',
+        '  cut-two) printf "%s\\n" 2026-11-21T04:05:06Z ;;',
+        '  *) exit 64 ;;',
+        'esac',
+      ].join('\n'), { mode: 0o755 });
+      writeFileSync(join(dir, 'bin/bun'), [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        '[[ "$1 $2" == "scripts/lane.ts roles-manifest" ]]',
+        'exec "$BUN_BIN" "$LANE_CLI" "$2" "$3" "$4"',
+      ].join('\n'), { mode: 0o755 });
+      const env = {
+        PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`,
+        BUN_BIN: process.execPath,
+        LANE_CLI: join(import.meta.dir, 'lane.ts'),
+        VERSION: '9.9.9',
+      };
+      const run = (sha: string, tz: string) => {
+        const result = bash(runOf(lines, write), [], { ...env, SHA: sha, TZ: tz }, dir);
+        expect(result.status).toBe(0);
+        return readFileSync(join(dir, 'release/roles.json'), 'utf8');
+      };
+      const first = run('cut-one', 'Pacific/Honolulu');
+      expect(run('cut-one', 'Asia/Tokyo')).toBe(first);
+      expect(JSON.parse(first).issuedAt).toBe('2026-11-20T03:00:00Z');
+      expect(JSON.parse(run('cut-two', 'Pacific/Honolulu')).issuedAt).toBe('2026-11-21T04:05:06Z');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('writes, signs and checks the catalog in order with the same guard as packing', () => {
+    const names = ['Pack the plugins', write, sign, check, publish];
+    expect(steps.map(step => step.name).filter(name => name && names.includes(name))).toEqual(names);
+    const step = (name: string) => steps.find(step => step.name === name)!;
+    for (const name of [write, sign, check]) expect(step(name).if).toBe(step('Pack the plugins').if);
+    expect(step(write).env).toEqual({ VERSION: '${{ steps.cut.outputs.version }}', SHA: '${{ steps.cut.outputs.sha }}' });
+    expect(step(sign).env).toEqual({ PLUGIN_LANE_KEY: '${{ secrets.PLUGIN_LANE_KEY }}' });
+    expect(step(sign).run?.trim()).toBe('bun scripts/lane.ts sign release/roles.json > release/roles.json.sig');
+    expect(step(check).env).toEqual({ VERSION: '${{ steps.cut.outputs.version }}' });
+    expect(step(publish).env).not.toHaveProperty('PLUGIN_LANE_KEY');
+  });
+
+  test('keeps plugin checksums and the rolling lane separate from the catalog pair', () => {
+    const pack = steps.find(step => step.name === 'Pack the plugins')!;
+    const lane = steps.find(step => step.name === 'Sign and post the plugin lane')!;
+    expect(pack.run).toContain('(cd release && sha256sum -- * > PLUGINS.SHA256SUMS)');
+    expect(pack.run).not.toContain('roles.json');
+    expect(steps.indexOf(pack)).toBeLessThan(steps.findIndex(step => step.name === write));
+    expect(lane.if).toBe(pack.if);
+    expect(lane.run).toContain('gh release upload plugin-lane lane/lane.json lane/lane.json.sig --clobber');
+    expect(lane.run).not.toContain('roles.json');
+  });
+
+  test('creates the release with both assets only after verification', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-roles-'));
+    try {
+      for (const folder of ['bin', 'plugin-lane', 'release']) mkdirSync(join(dir, folder));
+      for (const file of ['scripts/lane.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json']) {
+        const dest = join(dir, file);
+        mkdirSync(dirname(dest), { recursive: true });
+        copyFileSync(join(import.meta.dir, '..', file), dest);
+      }
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+      const key = { keyId: KEY_ID, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() };
+      writeFileSync(join(dir, 'plugin-lane/keys.json'), JSON.stringify({ keys: [key] }));
+      writeFileSync(join(dir, 'release/plugins.json'), '{}');
+      const sha = '0123456789012345678901234567890123456789';
+      const issuedAt = '2026-11-20T03:00:00Z';
+      const fake = (command: string, body: string) => writeFileSync(join(dir, 'bin', command), `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`, { mode: 0o755 });
+      fake('git', [
+        '[[ ! -v PLUGIN_LANE_KEY && "$TZ" == UTC ]]',
+        `[[ "$*" == 'show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd ${sha}' ]]`,
+        `printf '%s\\n' '${issuedAt}'`,
+      ].join('\n'));
+      fake('bun', 'if [[ "$2" != sign ]]; then [[ ! -v PLUGIN_LANE_KEY ]]; fi\nexec "$BUN_BIN" "$@"');
+      fake('gh', `[[ ! -v PLUGIN_LANE_KEY && "$1 $2" == "release create" ]]
+printf '%s\\n' "$@" > gh.log`);
+      const env = {
+        PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`, BUN_BIN: process.execPath,
+        VERSION: '9.9.9', SHA: sha, KIND: 'plugins', PRERELEASE: 'true', HERDR: 'no', POCKET: 'no', METER: 'no',
+        GITHUB_REPOSITORY: 'owner/repo', GITHUB_OUTPUT: join(dir, 'output'),
+      };
+      const run = (step: string, overrides: Record<string, string> = {}) => bash(step, [], { ...env, ...overrides }, dir);
+      const written = run(runOf(lines, write));
+      expect(written.err).toBe('');
+      expect(written.status).toBe(0);
+      expect(JSON.parse(readFileSync(join(dir, 'release/roles.json'), 'utf8')).issuedAt).toBe(issuedAt);
+      expect(run(runOf(lines, sign), { PLUGIN_LANE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }).status).toBe(0);
+      const checkThenPublish = `${runOf(lines, check)}\n${runOf(lines, publish)}`;
+      const refused = run(checkThenPublish, { VERSION: '9.9.8' });
+      expect(refused.status).toBe(1);
+      expect(refused.err).toContain('catalog version does not match 9.9.8');
+      expect(existsSync(join(dir, 'gh.log'))).toBe(false);
+
+      const published = run(checkThenPublish);
+      expect(published.status).toBe(0);
+      expect(published.out).toContain(`roles.json for 9.9.9 is signed by ${KEY_ID}`);
+      const args = readFileSync(join(dir, 'gh.log'), 'utf8').trimEnd().split('\n');
+      expect(args.slice(0, 8)).toEqual([
+        'release', 'create', 'v9.9.9', 'release/plugins.json', 'release/roles.json', 'release/roles.json.sig', '--prerelease', '--latest=false',
+      ]);
+      expect(args[args.indexOf('--notes') + 1]).toContain(notes);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a patch without plugins has no role catalog in its release notes', () => {
+    const gh = fakeGh();
+    try {
+      const run = gh.run(runOf(lines, publish), { KIND: 'am', HERDR: 'no', POCKET: 'no', METER: 'no' });
+      expect(run.status).toBe(0);
+      expect(gh.calls()).toHaveLength(1);
+      expect(gh.calls()[0]).not.toContain(notes);
+    } finally {
+      gh.cleanup();
+    }
+  });
+});
+
+describe('the versioned role catalog release contract', () => {
+  test('documents both assets on plugin releases and keeps the rolling lane limited to its own pair', () => {
+    const releaseHeader = workflow('release.yml').slice(0, 120).join('\n');
+    const parts = readFileSync(join(import.meta.dir, '../docs/rfcs/0011-monorepo-parts-and-releases.md'), 'utf8');
+    const laneReadme = readFileSync(join(import.meta.dir, '../plugin-lane/README.md'), 'utf8');
+    expect(releaseHeader).toContain('Every versioned release that packs bots-dsh, including prereleases, also carries roles.json and roles.json.sig.');
+    expect(parts).toMatch(/\| Plugins \|[^\n]*Every versioned release that packs `bots-dsh`, including prereleases, also carries `roles\.json` and `roles\.json\.sig`\./);
+    expect(laneReadme).toContain('Every versioned release that packs `bots-dsh`, including prereleases, also carries the official\nrole catalog `roles.json` and its detached signature `roles.json.sig`, signed with the same key.');
+    expect(laneReadme).toContain('The rolling `plugin-lane` release holds only `lane.json` and `lane.json.sig`.');
+  });
+});
+
+describe('the desktop asset sweep preserving a release\'s role catalog', () => {
+  test('adds the catalog exception immediately after the original cut asset exception', () => {
+    const lines = workflow('desktop-build.yml');
+    const original = 'case "${name}" in automagik-*.tgz|plugins.json|PLUGINS.SHA256SUMS|lane.json|lane.json.sig|automagik-pocket-*.apk|latest.json|usagemeter-*|usagemeter.SHA256SUMS|meter.json|meter.json.sig|server-image.json) continue ;; esac';
+    const at = lines.findIndex(line => line.trim() === original);
+    expect(at).toBeGreaterThan(-1);
+    expect(lines[at + 1].trim()).toBe('case "${name}" in roles.json|roles.json.sig) continue ;; esac');
+  });
+
+  test('keeps the catalog and its signature and deletes a stale catalog backup', () => {
+    const gh = fakeGh({ assets: ['lane.json', 'roles.json', 'roles.json.sig', 'roles.json.old'] });
+    try {
+      expect(gh.run(runOf(workflow('desktop-build.yml'), 'Add the builds to the release'), { REPLACE: 'true' }).status).toBe(0);
+      expect(gh.calls().filter(call => call.startsWith('release delete-asset'))).toEqual([
+        'release delete-asset v9.9.9 roles.json.old --yes --repo owner/repo',
+      ]);
+    } finally {
+      gh.cleanup();
     }
   });
 });

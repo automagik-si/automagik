@@ -186,9 +186,7 @@ export function WorkCodeSwitch({ roster, useSessions }) {
   const answer = (update) => { void control.open({ botId, update }) }
   const notices = state.result ? codeNotices(state.result) : []
   return h('div', { className: 'bt-code-switch-wrap' },
-    h('div', { className: 'bt-code-switch', role: 'group', 'aria-label': t('Work or code'), onPointerEnter: () => { void control.refresh() } },
-      // Work is this window: a mark of where the person is, not a control.
-      h('span', { className: 'bt-code-seg', 'aria-current': state.front ? 'true' : undefined, title: t('Work, in this window') }, t('Work')),
+    h('div', { className: 'bt-code-switch', role: 'group', 'aria-label': t('Open Herdr'), onPointerEnter: () => { void control.refresh() } },
       h('button', {
         type: 'button',
         className: 'bt-code-seg',

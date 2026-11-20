@@ -125,7 +125,8 @@ ids are never reused, so a rename between the check and the call cannot redirect
 | `terminal.list` | the caller's own pane and every terminal it may type into (the `terminal.send` rule): its team graph, its own workers and the shared review roles. Other teams' panes and every linked-machine row are left out, and the `machines` inventory is empty: a sandboxed bot can reach no machine target, so no machine is named |
 | `terminal.get`, `terminal.read`, `terminal.wait` | the caller itself, hcGuard's `teamOf` graph, and its own workers |
 | `terminal.send` | the same, plus hcGuard's shared send rules: pm/integrator/fixer callers may send to any listed bot; captain callers may send to other captains; tester/reviewer/fixer targets serve every squad. Ranks come from the approved roster. Workers inherit no caller-rank widening |
-| `terminal.kill`, `terminal.rm`, `terminal.label` | the caller's **own workers only**: the target's `parent` is the caller's pane, or its `worker.of` is the caller's bot. A team member, another bot's worker and a worker caller are refused |
+| `terminal.kill`, `terminal.rm` | a bot caller's **own workers only**: the target's `parent` is the caller's pane, or its `worker.of` is the caller's bot |
+| `terminal.label` | the same own-worker rule, plus a caller (bot or worker) may set or clear `automagik-herdr.needs-owner` on its own pane |
 | `terminal.run` | the helper shape, or the exact approved template/agent shape below; bound bot panes only |
 | `templates.list` | only the approved worker template, with its metadata unchanged |
 | `proxy.workerTransport` | local transport identification for the wrapper's verified bot pane; never forwarded |
@@ -167,13 +168,16 @@ target is still team-scoped.
 
 Everything else is refused with a JSON-RPC error whose message starts `hc-proxy: `, including
 `terminal.put`, `terminal.keys`, `terminal.attach`, `terminal.interrupt`, `terminal.keep`,
-`terminal.label` (on a non-own target), `file.*`, `doc.*`, `machine.*`, `server.*`,
+`terminal.label` calls outside the table's allowance, `file.*`, `doc.*`, `machine.*`, `server.*`,
 `events.subscribe`, `rpc.discover` and `templates.list`. `hello` is refused before it can switch
 the connection to framed mode.
 
 `terminal.label` forwards only `terminal` and `labels`; the 0.1.14 schema lists no caller for
-label. It is allowed on an own worker because the pack's worker start does **not** set the
-worker's tab label: `workerArgs` sets `worker.of`, `branch`, `worker.role`, `task*` and
+label. On the caller's own pane, `labels` must be an object with exactly one key,
+`automagik-herdr.needs-owner`, whose value is a string (including an empty string) or null.
+The per-pane socket fixes the caller's identity. Labelling an own worker is allowed because
+the pack's worker start leaves the tab label for a later call. `workerArgs` sets `worker.of`,
+`branch`, `worker.role`, `task*` and
 `herdr.space`, and the sidebar's `keptSteps` sets `herdr.space`/`herdr.tab` with a later
 `hc label` once the pane is in the window. Without that call the worker's tab marker could not be
 written from the pane.

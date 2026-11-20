@@ -101,9 +101,9 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
       problem ? h('span', { className: 'bt-note bt-danger' }, hostText(problem))
         : clash ? h('span', { className: 'bt-note bt-danger' }, t('A Bot named {name} already exists', { name: finalName })) : null),
     h('label', { className: 'bt-field' },
-      h('span', { className: 'bt-field-label' }, t('Role')),
+      h('span', { className: 'bt-field-label' }, t('Description')),
       h('input', {
-        className: 'bt-input', value: role, maxLength: ROLE_MAX, 'aria-label': t('Role'),
+        className: 'bt-input', value: role, maxLength: ROLE_MAX, 'aria-label': t('Description'),
         onChange: event => setRole(event.target.value),
       })),
     h('div', { className: 'bt-field' },

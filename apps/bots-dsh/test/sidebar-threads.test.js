@@ -330,3 +330,35 @@ test('a group with approvals is marked as needing the person; the narrow rail sa
   const node = find(draw(false), named('RoomRow'))[0]
   assert.match(node.type(node.props).props['aria-label'], /2 approvals waiting/)
 })
+
+test('the native Claude Code subagents of a Bot hang under its row next to its tasks (issue 1564)', () => {
+  const { tree, threadsOf } = sidebar({ tasks: {} })
+  // The wide sidebar is the left bar: what hangs under a row comes from its renderAfter.
+  assert.equal(tree?.type?.name, 'LeftBar')
+  const under = tree.props.renderAfter({ kind: 'bot', id: 'pip', bot: {} })
+  const workers = find(under, named('BotWorkers'))
+  assert.equal(workers.length, 1, 'one workers list under the row')
+  assert.equal(workers[0].props.bot.id, 'pip')
+  assert.equal(typeof workers[0].props.useWork, 'function', 'it reads the live answer the threads read')
+  // It sits after the tasks the Bot started, before what other plugins hang there.
+  assert.deepEqual(under.props.children.map(node => node?.type?.name), ['BotThreads', 'BotWorkers', 'BotChildren'])
+  assert.ok(threadsOf('pip'))
+})
+
+test('rfc0039 [P] T1 ended task in unanswered shows the line', () => {
+  const card = TaskCard({
+    sessionId: 'session-a', title: 'Check API', task: task('pip', 'Check API', 2, 'done'),
+    useWork: pick => pick({ unanswered: ['session-a'] }),
+  })
+  assert.match(textOf(card), /The task ended with an approval unanswered/)
+})
+
+test('rfc0039 [C] T2 working or unlisted task shows no line', () => {
+  for (const [status, unanswered] of [['working', ['session-a']], ['done', ['session-b']], ['done', undefined]]) {
+    const card = TaskCard({
+      sessionId: 'session-a', title: 'Check API', task: task('pip', 'Check API', 2, status),
+      useWork: pick => pick({ unanswered }),
+    })
+    assert.doesNotMatch(textOf(card), /The task ended with an approval unanswered/)
+  }
+})

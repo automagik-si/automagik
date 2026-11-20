@@ -14,10 +14,12 @@ import {
   isAgentLoopRequest, offloadedImageText,
 } from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
+import { ACP_USAGE_LIMIT_CODES } from './usage-limit.js'
 import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
+import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import { agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
@@ -84,6 +86,7 @@ const STOP_LINE = Object.freeze({
   refusal: name => `[${name} declined to go on with this request. Ask again in a new message.]`,
   max_turn_requests: name => `[${name} stopped at its limit of requests for one turn. Reply to let it go on.]`,
 })
+export const STAND_IN_LINE = (name, model) => `[${name} does not offer ${model} now, so this reply used its own model. Choose a model again for this Bot.]`
 // An agent whose CLI is not signed in says so with ACP's `auth_required`, at the start of its
 // session or of a prompt. The turn fails with its own code, never ACP_AGENT: a sign-in answers
 // it, another model does not (the Bot team never falls back on it).
@@ -532,30 +535,54 @@ export function aside(providers, ctx, sideModel = () => SIDE_MODEL, redact = tex
  * Put the agent on DSH's model and effort, the model first: the efforts it offers are that
  * model's. DSH's `default` model is the one the agent started on. With no effort, the model's
  * own comes back, so an earlier turn's choice does not stay: the agent's "default" row when it
- * has one (Claude Code's, which hands effort back to its settings), else `ownEffort()`, the one
+ * has one (Claude Code's, which hands effort back to its settings), else `ownEffort(id)`, the one
  * the agent showed for that model when it was read, asked only then; when it is not known, no
  * effort is set.
  * @param {AgentRun} run
  * @param {string} model
  * @param {string | undefined} effort
- * @param {() => string | undefined} [ownEffort]
- * @param {{ signal?: AbortSignal }} [options] the turn's Stop, for each request
+ * @param {(id: string) => string | undefined} [ownEffort]
+ * @param {{ signal?: AbortSignal, standIns?: string[] }} [options] the turn's Stop and the agent's stand-in ids
  */
-export async function choose(run, model, effort, ownEffort, { signal } = {}) {
+export async function choose(run, model, effort, ownEffort, { signal, standIns = [] } = {}) {
   const option = run.option('model')
+  const offered = valuesOf(option).map(choice => choice.value)
+  const ownModel = offered.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : run.startModel
+  // A stand-in that has disappeared can use the agent's own model if it is still offered.
+  const substituted = model !== DEFAULT_MODEL && standIns.includes(model) && !offered.includes(model)
+    && (option === undefined || offered.includes(ownModel))
+  const target = substituted || model === DEFAULT_MODEL ? ownModel : model
   if (option === undefined) {
-    if (model !== DEFAULT_MODEL) throw new Error(`it offers no choice of model, so not ${model}`)
-  } else {
-    const target = model === DEFAULT_MODEL && !valuesOf(option).some(choice => choice.value === DEFAULT_MODEL) ? run.startModel : model
-    if (target !== undefined) await run.setOption('model', target, { signal })
+    if (!substituted && model !== DEFAULT_MODEL) throw new Error(`it offers no choice of model, so not ${model}`)
+  } else if (target !== undefined) {
+    await run.setOption('model', target, { signal })
   }
-  if (effort !== undefined) return run.setOption('thought_level', effort, { signal })
-  const levels = run.option('thought_level')
-  if (levels === undefined) return
-  const offered = valuesOf(levels).map(choice => choice.value)
-  if (offered.includes(DEFAULT_MODEL)) return run.setOption('thought_level', DEFAULT_MODEL, { signal })
-  const own = ownEffort?.()
-  if (own !== undefined && offered.includes(own)) await run.setOption('thought_level', own, { signal })
+  if (!substituted && effort !== undefined) {
+    await run.setOption('thought_level', effort, { signal })
+  } else {
+    const levelOption = run.option('thought_level')
+    const levels = valuesOf(levelOption).map(choice => choice.value)
+    if (levels.includes(DEFAULT_MODEL)) await run.setOption('thought_level', DEFAULT_MODEL, { signal })
+    else if (levelOption !== undefined) {
+      const own = ownEffort?.(substituted ? target ?? DEFAULT_MODEL : model)
+      if (levels.includes(own)) await run.setOption('thought_level', own, { signal })
+    }
+  }
+  if (substituted) return { model }
+}
+
+const EFFORT_LADDER = new Map(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((id, rank) => [id, rank]))
+const effortRank = id => EFFORT_LADDER.get(id) ?? EFFORT_LADDER.size
+
+function withOfferedEfforts(entry, models) {
+  const efforts = new Map()
+  for (const model of [entry, ...models]) {
+    for (const effort of model.reasoning?.efforts ?? []) {
+      if (!efforts.has(effort.id)) efforts.set(effort.id, effort)
+    }
+  }
+  if (efforts.size === 0 && !entry.reasoning) return entry
+  return { ...entry, reasoning: { efforts: [...efforts.values()].sort((a, b) => effortRank(a.id) - effortRank(b.id)) } }
 }
 
 export class AcpAdapter extends LlmAdapter {
@@ -603,6 +630,7 @@ export class AcpAdapter extends LlmAdapter {
     this.backchannel = backchannel
     this.redact = redactor ?? (text => text)
     this.live = new Map()
+    this.roleTurns = new Map()
     this.sessionFiles = new SessionFiles({
       agent: id => this.ctx.agents?.get?.(id), live: id => this.live.get(id),
       level: session => levelOf(ctx.get?.('approval'), session, ctx.get?.('sandboxPolicy'), ctx.get?.('permissionPresets')),
@@ -884,6 +912,7 @@ export class AcpAdapter extends LlmAdapter {
     live.reaper = undefined
     live.reaping = undefined
     live.open = false
+    live.substitution = undefined
     live.run?.dispose()
     if (live.bridge !== undefined) this.backchannel?.revoke(live.bridge)
     if (this.live.get(sessionId) === live) this.live.delete(sessionId)
@@ -896,6 +925,7 @@ export class AcpAdapter extends LlmAdapter {
    * process would go on with whatever it was doing, and every later message would fail.
    */
   reap(sessionId, live) {
+    if (live !== undefined) live.substitution = undefined
     if (live?.fileOwner) { this.end(sessionId, live); return }
     const prompt = live?.run?.prompting
     if (prompt === undefined || live.reaping === prompt) return
@@ -1025,6 +1055,7 @@ export class AcpAdapter extends LlmAdapter {
     if (live === undefined) return starting !== undefined
     live.held = text
     live.open = false
+    live.substitution = undefined
     // A cancel's own wait on this session (reap) has nothing left to end.
     this.timers.clearTimeout(live.reaper)
     live.reaper = undefined
@@ -1155,6 +1186,9 @@ export class AcpAdapter extends LlmAdapter {
    * shows; the model selection itself is DSH's.
    */
   noteEvent(session, event) {
+    if (event?.type === 'turn/start' && typeof session?.id === 'string') {
+      this.roleTurns.set(session.id, (this.roleTurns.get(session.id) ?? 0) + 1)
+    }
     // Every observed crossing invalidates this owner's epoch, including away and back and
     // sessions kept by the ordinary bridge-off path. No transcript can recreate authority.
     const owner = this.sessionFiles.owners.get(session?.id)
@@ -1191,10 +1225,16 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the
-  // agent sees it. An id the agent does not list resolves bare, as DSH's routing allows.
+  // agent sees it. A missing stand-in other than default takes its own efforts and every one the
+  // known catalog offers, so the prompt reaches this adapter, which runs it on the agent's own model.
   async resolveModel(provider, model) {
     const agent = this.agents.get(provider)
-    const found = await agent?.catalog.model(model)
+    const models = agent?.catalog ? await agent.catalog.models() : []
+    let found = models.find(entry => entry.id === model)
+    if (found === undefined) {
+      found = agent?.catalog?.spec?.fallback?.find(entry => entry.id === model)
+      if (found && model !== DEFAULT_MODEL) found = withOfferedEfforts(found, models)
+    }
     const imageInput = agent?.imageInput === true ? { inputModalities: ['text', 'image'] } : {}
     if (found === undefined) return { provider, id: model, name: model, ...imageInput }
     return {
@@ -1306,6 +1346,7 @@ export class AcpAdapter extends LlmAdapter {
     const continuing = mirrorAnswered && live?.provider === options.provider && live.open
     if (continuing) started()
     if (!continuing) {
+      if (live !== undefined) live.substitution = undefined
       if (options.messages.findLast(message => !bridgeRow(message))?.role === 'tool') {
         // The agent may still be on the prompt this step belonged to. Nobody is reading it any
         // more, so it is asked to stop now, and its session is ended if it has not stopped in
@@ -1372,10 +1413,22 @@ export class AcpAdapter extends LlmAdapter {
       const asks = typeof agent.hardAsk === 'function' && !(this.bridgeOn(agent, sessionId) && agent.disableBuiltInTools === true && !native) && !full
       const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
-      // A flip of the mode is a new tool set: the next turn starts a new agent session on it.
+      const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
+      const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
+      const role = takesIdentity ? rolePromptOf(identityRead) : { digest: '' }
+      const turn = this.roleTurns.get(sessionId)
+      const sameTurn = live !== undefined && turn !== undefined && live.roleTurn === turn
+      const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
+      // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
-        || bridgeGone || live.asks !== asks || (live.native === true) !== native)
+        || bridgeGone || live.asks !== asks || (live.native === true) !== native || roleChanged)
       if (remade) {
+        if (roleChanged) {
+          try {
+            this.ctx.logger?.info?.(
+              `acp-dsh: ${agent.name} role prompt changed: a new agent session starts`)
+          } catch {}
+        }
         this.end(sessionId, live, { preserveFiles: keepsFiles() })
         live = undefined
       }
@@ -1413,6 +1466,16 @@ export class AcpAdapter extends LlmAdapter {
           live = undefined
         }
       }
+      if (live !== undefined && live.run.preambleOutcome === 'unsure'
+        && (live.roleDigest ?? '') !== '') {
+        try {
+          this.ctx.logger?.info?.(
+            `acp-dsh: ${agent.name} role prompt not confirmed: a new agent session starts`)
+        } catch {}
+        this.end(sessionId, live, { preserveFiles: keepsFiles() })
+        live = undefined
+      }
+      if (live !== undefined) live.roleTurn = turn
       let fresh = false
       let crossing = false
       const prior = lastProviderOf(options.messages)
@@ -1422,7 +1485,20 @@ export class AcpAdapter extends LlmAdapter {
       const replaying = this.replayOn()
       if (live === undefined) {
         crossing = replaying && prior !== undefined && prior !== options.provider
-        const state = { fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox, provider: options.provider, name: agent.name, asks, native, twinsOff: false, run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, bridge: undefined, replay: undefined, owed: undefined, drifted: false }
+        const state = {
+          fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox,
+          provider: options.provider, name: agent.name, asks, native, twinsOff: false,
+          run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent,
+          bridge: undefined, replay: undefined, owed: undefined, drifted: false,
+          roleDigest: role.digest, roleTurn: turn,
+        }
+        if (role.refused) {
+          try {
+            this.ctx.logger?.info?.(
+              `acp-dsh: ${agent.name} Bot role prompt refused (${role.refused})`)
+          } catch {}
+        }
+        const text = takesIdentity ? identityText(identityRead, role.part) : undefined
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
         // session start is tried once more on that one: the turn is not lost to a bad release.
@@ -1454,29 +1530,13 @@ export class AcpAdapter extends LlmAdapter {
               state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true, native: twinsOff })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
-            const takesIdentity = ['acp-claude', 'acp-codex'].includes(options.provider)
             const run = new AgentRun({
               ...spec,
+              provider: options.provider,
               cwd: dshAgent?.session?.header?.cwd
                 ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME ?? homedir(),
               name: agent.name,
-              botIdentity: () => {
-                if (!takesIdentity) return undefined
-                const identity = this.botIdentity(sessionId)
-                if (typeof identity?.name !== 'string' || !identity.name.trim()) return undefined
-                const { name, role, instructions } = identity
-                return '# Your identity\n'
-                  + `You are ${name}, a Bot on the user's team.`
-                  + (role ? ` Your role: ${role}.` : '')
-                  + (instructions ? `\n\n${instructions}` : '')
-                  + '\n\nFor a Bot Browser request, use the browser tools this conversation offers. '
-                  + 'Never launch Chrome or another browser from a command. '
-                  + 'When sign-in, payment or verification needs the person, use the offered browser handoff '
-                  + '(`browser_handoff` when available) and stop until they answer. '
-                  + 'If you cannot open the page here, ask the Bot named `browse` only when `message_bot` is offered '
-                  + 'and that Bot is on the team. Say when the request was sent, then report the browser outcome '
-                  + 'when its reply arrives. If the route is unavailable or a call fails, say why.'
-              },
+              botIdentity: () => text,
               // Which way the Bot's identity went (never its text), for the log.
               onIdentity: takesIdentity ? delivery => {
                 try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} Bot identity: ${delivery}`) } catch {}
@@ -1605,11 +1665,13 @@ export class AcpAdapter extends LlmAdapter {
         }
       }
       // The Session's model and effort, then its level as the agent's own permission mode, before every prompt.
+      let substitution
+      const standIns = (agent.catalog?.spec?.fallback ?? []).map(entry => entry.id).filter(id => id !== DEFAULT_MODEL)
       try {
-        await choose(
+        substitution = await choose(
           live.run, options.model, options.reasoningEffort,
-          () => agent.catalog?.ownEffort(options.model),
-          { signal: options.signal },
+          id => agent.catalog?.ownEffort(id),
+          { signal: options.signal, standIns },
         )
       } catch (error) {
         if (live.held !== undefined) return yield* stopped(live.held)
@@ -1778,8 +1840,11 @@ export class AcpAdapter extends LlmAdapter {
       if (live.bridge !== undefined) live.bridge.agentAsked = false
       // The previous turn's mirrors are finished for DSH; continuation steps keep these above.
       live.calls.clear()
+      live.confinedReason = undefined
       live.toolIds?.clear()
       live.run.prompt(prompt).catch(() => {})
+      // The notice belongs to this prompt, including any step after a mirror result.
+      if (substitution !== undefined) live.substitution = { ...substitution, signal: options.signal }
     }
     // The turn stays open until its end is drained here: the agent may finish it before DSH
     // asks for the step after a tool result.
@@ -1790,10 +1855,15 @@ export class AcpAdapter extends LlmAdapter {
         yield* shown()
         return yield* stopped(live.held)
       }
-      if (event.type === 'end' || event.type === 'error') live.open = false
       // The prompt is over (finished, failed or stopped): nobody waits for a DSH tool call the
       // bridge still has in flight, so each is stopped; the bridge itself stays for the next turn.
-      if (event.type === 'end' || event.type === 'error' || event.type === 'aborted') this.backchannel?.cancel?.(live.bridge, event.type === 'aborted' ? 'the turn was stopped' : 'the turn ended')
+      let substitution
+      if (event.type === 'end' || event.type === 'error' || event.type === 'aborted') {
+        live.open = false
+        substitution = live.substitution
+        live.substitution = undefined
+        this.backchannel?.cancel?.(live.bridge, event.type === 'aborted' ? 'the turn was stopped' : 'the turn ended')
+      }
       // Inbound text is logged as the agent said it: DSH does not redact at ingest, and neither
       // does this plugin. The redactor runs at each provider crossing instead — the replay out
       // (`replayBlocks`) and the transcript handed back to a native provider (`crossed`).
@@ -1855,6 +1925,14 @@ export class AcpAdapter extends LlmAdapter {
           yield* blocks.add('text', shownText(STOP_LINE[event.stopReason](agent.name)))
           yield* blocks.close()
         }
+        // A queued end can reach a continuation after its Stop.
+        if (substitution !== undefined && this.live.get(sessionId) === live && Object.hasOwn(FINISH, event.stopReason)
+            && !options.signal?.aborted && !substitution.signal?.aborted && !live.run.cancelled && !this.hostStopping()) {
+          const { model } = substitution
+          try { this.ctx.logger?.info?.(`acp-dsh: ${options.provider}: ${model} is not offered; ran on the agent's own model`) } catch {}
+          yield* blocks.add('text', shownText(STAND_IN_LINE(agent.name, model)))
+          yield* blocks.close()
+        }
         if (reviewerStopped) return yield finish('stop')
         // A cancel the app did not ask for (the turn's Stop would have aborted the signal) while
         // the host itself is stopping came from outside: its SIGTERM reached the agent, which
@@ -1863,6 +1941,14 @@ export class AcpAdapter extends LlmAdapter {
         if (event.stopReason === 'cancelled' && options.signal?.aborted !== true
             && live.run.cancelled !== true && this.hostStopping()) {
           return yield finish('error', `${agent.name} was interrupted before it finished.`, AGENT_INTERRUPTED)
+        }
+        if (event.stopReason === 'cancelled' && typeof live.confinedReason === 'string'
+            && options.signal?.aborted !== true && live.run.cancelled !== true) {
+          const reason = live.confinedReason
+          live.confinedReason = undefined
+          yield* blocks.add('text', shownText(`[${reason}]`))
+          yield* blocks.close()
+          return yield finish('stop')
         }
         if (event.stopReason === 'cancelled') return yield finish('aborted', 'Stopped', 'ABORTED')
         return yield finish(FINISH[event.stopReason] ?? 'stop')
@@ -1880,9 +1966,11 @@ export class AcpAdapter extends LlmAdapter {
             && (this.hostStopping() || live.run.exited?.signal === 'SIGTERM' || live.run.exited?.signal === 'SIGINT')) {
           return yield finish('error', `${agent.name}: ${event.message}`, AGENT_INTERRUPTED)
         }
+        if (event.usageLimit === true && Object.hasOwn(ACP_USAGE_LIMIT_CODES, options.provider)) {
+          return yield finish('error', `${agent.name}: ${event.message}`, ACP_USAGE_LIMIT_CODES[options.provider])
+        }
         return yield finish('error', `${agent.name}: ${event.message}`)
       } else if (event.type === 'aborted') {
-        live.open = false
         // The turn ends here for the person; the agent's side of it has `cancelWaitMs` to end,
         // counted from now, whether or not the agent still reads what it is sent.
         if (live.own) {
@@ -1919,6 +2007,7 @@ export class AcpAdapter extends LlmAdapter {
     try { this.offReviewed?.() } catch {}
     for (const entry of this.starting.values()) entry.upload?.controller.abort()
     this.starting.clear()
+    this.roleTurns.clear()
     for (const id of this.sessionFiles.owners.keys()) this.sessionFiles.clear(id)
     for (const agent of this.agents.values()) agent.catalog?.dispose()
     for (const [sessionId, live] of this.live) this.end(sessionId, live)

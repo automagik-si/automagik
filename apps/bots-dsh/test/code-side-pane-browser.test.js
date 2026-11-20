@@ -4,8 +4,10 @@
 // key reaches the input route. Every name and terminal here is made up.
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 import { browserGuard } from './browser-guard.js'
@@ -106,4 +108,564 @@ test('a waking key or paste only retakes; nothing typed before confirmation is s
   assert.match(await note(page), /Typing is back: type again/)
 
   assert.deepEqual(errors, [], 'the pane throws nothing')
+})
+
+function codeDocument(t) {
+  const { JSDOM } = createRequire(join(process.env.DSH_HARNESS, 'package.json'))('jsdom')
+  const { window } = new JSDOM('<!doctype html><div id="root"></div>', {
+    url: 'https://automagik.test/', runScripts: 'outside-only', pretendToBeVisual: true,
+  })
+  t.after(() => window.close())
+  window.Response = Response
+  window.TextEncoder = TextEncoder
+  // xterm can mount for the stream lifecycle test without measuring a real display.
+  window.ResizeObserver = class { observe() {} disconnect() {} }
+  window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
+  window.HTMLCanvasElement.prototype.getContext = () => ({ measureText: () => ({ width: 8 }) })
+  window.eval(seeds.outputFiles[0].text)
+  window.require = name => window.nativeSeeds[name]
+  window.eval(app.outputFiles[0].text)
+  return window
+}
+
+async function waitFor(check, message) {
+  const until = Date.now() + 2000
+  while (!check() && Date.now() < until) await delay(10)
+  assert.ok(check(), message)
+}
+
+const DESKTOP_ONLY = { v: 1, machine: null, projects: [], reason: 'desktop-only' }
+const LIVE_TREE = {
+  v: 1,
+  machine: { name: 'This computer', core: 'fake-core' },
+  projects: [{ folder: '/atlas', name: 'Atlas', bots: [
+    { id: 'b-aaaaaaaaaa', name: 'Atlas', status: 'idle', terminal: { id: 't1', cols: 80, rows: 24 }, workers: [] },
+  ] }],
+}
+const portuguese = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+
+for (const [language, message] of [
+  ['en', 'Terminals show in the Automagik desktop app.'],
+  ['zh', '终端会显示在 Automagik 桌面应用中。'],
+  ['pt', 'Os terminais aparecem no app Automagik para desktop.'],
+]) {
+  test(`a denial arriving after mount shows one desktop message in ${language} without loading the pane`, async (t) => {
+    const window = codeDocument(t)
+    const { promise, resolve } = Promise.withResolvers()
+    window.__readCodeTree = () => promise
+    const pressed = window.pressTerminal()
+    window.mountCodeBody(language, portuguese)
+    await waitFor(() => window.document.querySelector('#code-fixture'), 'the body mounted before the tree answered')
+    resolve(Response.json({ ok: true, value: DESKTOP_ONLY }))
+    await pressed
+
+    const body = () => window.document.querySelector('.cs-host')
+    await waitFor(body, 'the mounted body reacted to the denial')
+    assert.deepEqual(Array.from(body().children, child => [child.tagName, child.className, child.textContent]), [['P', 'cs-empty', message]])
+    assert.equal(window.__chunkRequests.length, 0)
+    assert.equal(window.__streams.length, 0)
+    assert.equal(window.__calls.some(call => call.url.includes('/code/')), false)
+  })
+}
+
+test('a denied refresh unmounts the live pane, closes its stream and releases typing', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  window.__readCodeTree = () => Response.json({ ok: true, value: LIVE_TREE })
+  await window.pressTerminal()
+  window.mountCodeBody('en')
+  await waitFor(() => window.__streams.length === 1, 'the pane opened a stream')
+  document.querySelector('.cs-screen').click()
+  await waitFor(() => document.querySelector('.cs-screen')?.dataset.codeMode === 'typing', 'typing started')
+
+  window.__calls.length = 0
+  window.__readCodeTree = () => Response.json({ ok: true, value: DESKTOP_ONLY })
+  await window.refreshCodeTree()
+  await waitFor(() => window.__closed && window.__calls.some(call => call.url.endsWith('/release')), 'the stream closed and typing was released')
+  assert.equal(document.querySelector('.cs-host').textContent, 'Terminals show in the Automagik desktop app.')
+  assert.equal(document.querySelector('.cs-pane'), null)
+  assert.equal(window.__streams.length, 1)
+  assert.deepEqual(Array.from(window.__calls, call => call.url).filter(url => url.includes('/code/')), ['api/omni-ui/code/release'])
+})
+
+test('a tree read error stays visible and only the next Terminal press retries the read', async (t) => {
+  const window = codeDocument(t)
+  window.__readCodeTree = () => new Response(null, { status: 503 })
+  await window.pressTerminal()
+  window.mountCodeBody('en')
+  const message = () => window.document.querySelector('.cs-empty')?.textContent
+  await waitFor(() => message() === 'The Code side could not read this computer’s team.', 'the read error stayed visible')
+  const reads = () => window.__calls.filter(call => call.body?.endpoint === 'code-tree').length
+  assert.equal(reads(), 1)
+
+  window.__readCodeTree = () => Response.json({ ok: true, value: DESKTOP_ONLY })
+  await window.pressTerminal()
+  await waitFor(() => message() === 'Terminals show in the Automagik desktop app.', 'the next Terminal press showed the new response')
+  assert.equal(reads(), 2)
+  assert.equal(window.__streams.length, 0)
+})
+
+async function paneBrowser(t) {
+  const guard = await browserGuard()
+  if (guard.skip) { t.skip(guard.skip); return null }
+  const browser = await guard.chromium.launch({ executablePath: guard.executablePath, headless: true })
+  t.after(() => browser.close())
+  const page = await browser.newPage({ viewport: { width: 1800, height: 1100 } })
+  page.setDefaultTimeout(6000)
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.route('**/*', route => (route.request().url() === 'https://automagik.test/'
+    ? route.fulfill({ contentType: 'text/html', body: '<!doctype html><div id="root" style="display:flex;width:520px;height:240px"></div>' })
+    : route.abort()))
+  await page.goto('https://automagik.test/')
+  await page.addScriptTag({ content: seeds.outputFiles[0].text })
+  await page.addScriptTag({ content: 'window.require=name=>window.nativeSeeds[name];' })
+  await page.addScriptTag({ content: app.outputFiles[0].text })
+  t.after(() => assert.deepEqual(errors, [], 'the panes throw nothing'))
+  return page
+}
+
+test('a 120×40 grid shrinks, scrolls to the last cell if needed, grows back and resets in write order', async (t) => {
+  const page = await paneBrowser(t)
+  if (!page) return
+  await page.evaluate(async () => {
+    await window.inspectTerms()
+    window.__initialGrid = { cols: 120, rows: 40 }
+    window.mountPane()
+  })
+  await page.waitForFunction(() => window.__terms[0]?.options.fontSize < 12)
+  assert.deepEqual(await page.evaluate(() => [window.__terms[0].cols, window.__terms[0].rows]), [120, 40])
+  const reachable = await page.locator('.cs-screen').evaluate((box) => {
+    const screen = box.querySelector('.xterm-screen')
+    box.scrollLeft = box.scrollWidth
+    box.scrollTop = box.scrollHeight
+    const area = box.getBoundingClientRect()
+    const grid = screen.getBoundingClientRect()
+    return grid.right <= area.left + box.clientWidth + 1 && grid.bottom <= area.top + box.clientHeight + 1
+  })
+  assert.equal(reachable, true)
+
+  await page.locator('#root').evaluate((root) => { root.style.width = '1500px'; root.style.height = '1000px' })
+  await page.waitForFunction(() => window.__terms[0].options.fontSize === 12)
+  await page.evaluate(() => {
+    const stream = window.__streams[0]
+    stream.emit('data', 'discard this old paint')
+    stream.emit('reset', { cols: 95, rows: 30 })
+    stream.emit('data', '\x1b[3;5Hnew paint')
+  })
+  await page.waitForFunction(() => window.__terms[0].buffer.active.getLine(2)?.translateToString(true) === '    new paint')
+  assert.deepEqual(await page.evaluate(() => [window.__terms[0].cols, window.__terms[0].rows]), [95, 30])
+  assert.equal(await page.evaluate(() => window.__terms[0].buffer.active.getLine(0).translateToString(true)), '')
+})
+
+test('reverse take replies send the next key to the latest pane and release the stale session', async (t) => {
+  const page = await paneBrowser(t)
+  if (!page) return
+  await page.evaluate(() => {
+    window.__pending = {}
+    window.__takeAnswer = ({ bot }) => new Promise(resolve => {
+      window.__pending[bot] = session => resolve(Response.json({ session }))
+    })
+    window.mountTwoPanes()
+  })
+  const screens = page.locator('.cs-screen')
+  await page.waitForFunction(() => document.querySelectorAll('.cs-screen[aria-label="View only · click to type"]').length === 2)
+  await screens.first().click()
+  await screens.last().evaluate(node => node.click())
+  await page.evaluate(() => window.__pending['b-bbbbbbbbbb']('latest'))
+  await page.locator('.cs-screen[data-code-mode=typing]').waitFor()
+  await page.evaluate(() => window.__pending['b-aaaaaaaaaa']('stale'))
+  await page.waitForFunction(() => window.__calls.some(call => call.url.endsWith('/release') && call.body.session === 'stale'))
+  await page.keyboard.press('x')
+  await page.waitForFunction(() => window.__calls.some(call => call.url.endsWith('/input')))
+  const recorded = await calls(page)
+  const attempts = recorded.filter(call => call.url.endsWith('/take'))
+  assert.notEqual(attempts[0].body.viewer, attempts[1].body.viewer)
+  const viewers = await page.evaluate(() => window.__streams.map(stream => new URLSearchParams(stream.url.split('?')[1]).get('viewer')))
+  assert.deepEqual(attempts.map(call => call.body.viewer), viewers)
+  assert.deepEqual(recorded.filter(call => call.url.endsWith('/input')).map(call => [call.body.session, Buffer.from(call.body.data, 'base64').toString()]), [['latest', 'x']])
+})
+
+test('a stream error cancels a pending take and reopening requires the pane handshake', async (t) => {
+  const page = await paneBrowser(t)
+  if (!page) return
+  await page.evaluate(async () => {
+    await window.inspectTerms()
+    window.__takeAnswer = () => new Promise(resolve => { window.__finishTake = () => resolve(Response.json({ session: 'lost' })) })
+    window.mountPane()
+  })
+  const screen = page.locator('.cs-screen')
+  await page.getByLabel('View only · click to type', { exact: true }).click()
+  await page.evaluate(() => {
+    window.__streams[0].onerror()
+    window.__finishTake()
+  })
+  await page.waitForFunction(() => window.__calls.some(call => call.url.endsWith('/release') && call.body.session === 'lost'))
+  assert.equal(await screen.getAttribute('aria-label'), 'The terminal could not be reached')
+  // The click itself focuses xterm's own textarea; what matters is that the late take left
+  // input off, so a key typed now reaches no session.
+  assert.equal(await page.evaluate(() => window.__terms[0].options.disableStdin), true)
+  await page.keyboard.type('x')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal((await calls(page)).filter(call => call.url.endsWith('/input')).length, 0)
+  await screen.click()
+  assert.equal((await calls(page)).filter(call => call.url.endsWith('/take')).length, 1)
+
+  await page.evaluate(() => { window.__manualPane = true })
+  await page.getByRole('button', { name: 'Reconnect' }).click()
+  await page.waitForFunction(() => window.__streams.length === 2)
+  await screen.click()
+  assert.equal((await calls(page)).filter(call => call.url.endsWith('/take')).length, 1)
+  await page.evaluate(() => window.__streams[1].emit('pane', {}))
+  await page.getByLabel('View only · click to type', { exact: true }).waitFor()
+})
+
+test('an initial typing refusal stays view-only without key or paste retakes', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  let error = 'typing-elsewhere'
+  window.__takeAnswer = () => Response.json({ error }, { status: 409 })
+  window.mountPane()
+  const screen = () => document.querySelector('.cs-screen')
+  await waitFor(() => screen()?.getAttribute('aria-label') === 'View only · click to type', 'the watch opened')
+  screen().click()
+  await waitFor(() => screen().dataset.codeMode === 'elsewhere', 'the take was refused as typing elsewhere')
+  assert.equal(screen().getAttribute('aria-label'), 'Typing elsewhere · view only')
+  assert.equal(document.querySelector('.cs-paste-note'), null)
+  window.__calls.length = 0
+  const paste = new window.Event('paste', { bubbles: true, cancelable: true })
+  screen().dispatchEvent(paste)
+  document.querySelector('.xterm-helper-textarea').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  assert.deepEqual(Array.from(window.__calls), [])
+
+  error = 'attach-refused'
+  screen().click()
+  await waitFor(() => screen().dataset.codeMode === 'view', 'an attach refusal stayed in view mode')
+  assert.equal(screen().getAttribute('aria-label'), 'View only · click to type')
+  assert.equal(document.querySelector('.cs-paste-note'), null)
+  assert.equal(window.__calls.filter(call => call.url.endsWith('/take')).length, 1)
+})
+
+test('the seat face toggles beside panes, prunes a gone worker and clears the selection on Back', async (t) => {
+  const page = await paneBrowser(t)
+  if (!page) return
+  const tree = structuredClone(LIVE_TREE)
+  const [bot] = tree.projects[0].bots
+  bot.workers = ['Reviewer', 'Builder', 'Tester', 'Runner'].map((role, index) => ({
+    terminal: `t${index + 2}`, role, status: 'idle', branch: 'refs/heads/feature',
+  }))
+  await page.locator('#root').evaluate((root) => { root.style.width = '1400px'; root.style.height = '900px' })
+  await page.evaluate(value => window.mountSeatFixture(value), tree)
+  await page.locator('[data-face=terminal]').click()
+  const terminal = page.locator('[data-seat-face=terminal]')
+  const pane = terminal.locator('.cs-pane')
+  const row = name => terminal.locator('.cs-row', { hasText: name })
+  const beside = name => row(name).click({ modifiers: ['Control'] })
+  await page.waitForFunction(() => window.__streams.length === 1)
+  for (const name of ['Reviewer', 'Builder', 'Tester']) await beside(name)
+  await page.waitForFunction(() => window.__streams.length === 4)
+  assert.equal(await terminal.locator('.cs-row[aria-current=true]').count(), 4)
+  assert.equal(await pane.count(), 4)
+  assert.equal(await pane.nth(0).evaluate(el => el.offsetTop), await pane.nth(1).evaluate(el => el.offsetTop))
+  assert.ok(await pane.nth(2).evaluate(el => el.offsetTop) > await pane.nth(0).evaluate(el => el.offsetTop))
+  await beside('Runner')
+  const refusal = terminal.locator('.cs-pane-head .cs-paste-note[data-wrap]')
+  assert.match(await refusal.textContent(), /Atlas, Atlas · Reviewer, Atlas · Builder, Atlas · Tester/)
+  assert.equal(await refusal.evaluate(el => getComputedStyle(el).whiteSpace), 'normal')
+  assert.equal(await page.evaluate(() => window.__streams.length), 4)
+  await beside('Atlas')
+  await terminal.locator('.cs-panes[data-count="3"]').waitFor()
+  assert.equal(await refusal.count(), 0)
+  assert.equal(await row('Atlas').getAttribute('aria-current'), null)
+
+  await row('Reviewer').click()
+  await terminal.locator('.cs-panes[data-count="1"]').waitFor()
+  await row('Runner').focus()
+  await page.keyboard.press('Control+Enter')
+  await terminal.locator('.cs-panes[data-count="2"]').waitFor()
+  assert.equal(await row('Runner').getAttribute('aria-current'), 'true')
+  await page.evaluate(async () => {
+    const workers = window.__tree.projects[0].bots[0].workers
+    window.__tree.projects[0].bots[0].workers = workers.filter(worker => worker.role !== 'Runner')
+    await window.refreshCodeTree()
+  })
+  await terminal.locator('.cs-panes[data-count="1"]').waitFor()
+  assert.equal(await row('Runner').count(), 0)
+  await beside('Atlas')
+  await terminal.locator('.cs-panes[data-count="2"]').waitFor()
+  await terminal.getByRole('button', { name: 'Back to chat' }).click()
+  await page.locator('[data-seat-face=chat]').waitFor()
+  assert.deepEqual(await page.evaluate(() => {
+    const state = window.codeSnapshot()
+    return [state.selected, state.beside, state.refused]
+  }), [null, [], null])
+})
+
+test('the newest pending take wins even without pointer events; a later stream error cancels its own pending take', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  await window.inspectTerms()
+  const pending = new Map()
+  window.__takeAnswer = ({ bot }) => {
+    const { promise, resolve } = Promise.withResolvers()
+    pending.set(bot, resolve)
+    return promise
+  }
+  window.mountTwoPanes()
+  const screen = index => document.querySelectorAll('.cs-screen')[index]
+  await waitFor(() => screen(1)?.getAttribute('aria-label') === 'View only · click to type', 'both watches opened')
+  screen(0).click()
+  screen(1).click()
+  pending.get('b-bbbbbbbbbb')(Response.json({ session: 'latest' }))
+  await waitFor(() => screen(1).dataset.codeMode === 'typing', 'the latest pane took typing')
+  pending.get('b-aaaaaaaaaa')(Response.json({ session: 'stale' }))
+  const released = id => window.__calls.some(call => call.url.endsWith('/release') && call.body.session === id)
+  await waitFor(() => released('stale'), 'the stale reply was released')
+
+  window.__terms[0].input('a', true)
+  window.__terms[1].input('b', true)
+  await waitFor(() => window.__calls.some(call => call.url.endsWith('/input')), 'the latest pane sent input')
+  assert.deepEqual(Array.from(window.__calls.filter(call => call.url.endsWith('/input')),
+    call => [call.body.session, Buffer.from(call.body.data, 'base64').toString()]), [['latest', 'b']])
+  assert.equal(document.activeElement, window.__terms[1].textarea)
+
+  screen(0).click()
+  window.__streams[0].onerror()
+  pending.get('b-aaaaaaaaaa')(Response.json({ session: 'disconnected' }))
+  await waitFor(() => released('disconnected'), 'the disconnected pane released its late reply')
+  assert.equal(screen(0).getAttribute('aria-label'), 'The terminal could not be reached')
+  assert.equal(window.__terms[0].options.disableStdin, true)
+  assert.notEqual(document.activeElement, window.__terms[0].textarea)
+})
+
+test('a seat rebinding remounts its watcher, and resets apply before the new paint', async (t) => {
+  const window = codeDocument(t)
+  await window.inspectTerms()
+  let tree = structuredClone(LIVE_TREE)
+  window.__readCodeTree = () => Response.json({ ok: true, value: tree })
+  await window.pressTerminal()
+  window.mountCodeBody('en')
+  await waitFor(() => window.__streams.length === 1, 'the seat opened its first watch')
+  const term = window.__terms[0]
+  assert.deepEqual([term.cols, term.rows], [80, 24])
+  window.__streams[0].emit('data', 'old paint')
+  window.__streams[0].emit('reset', { cols: 95, rows: 30 })
+  window.__streams[0].emit('data', '\x1b[3;5Hnew paint')
+  await waitFor(() => term.buffer.active.getLine(2)?.translateToString(true) === '    new paint', 'the second paint followed its reset')
+  assert.deepEqual([term.cols, term.rows], [95, 30])
+  assert.equal(term.buffer.active.getLine(0).translateToString(true), '')
+
+  tree = structuredClone(tree)
+  tree.projects[0].bots[0].terminal.id = 't2'
+  await window.refreshCodeTree()
+  await waitFor(() => window.__streams.length === 2 && window.__closed, 'the seat closed its first watch and mounted another')
+  assert.notEqual(window.__streams[0].url, window.__streams[1].url, 'the new watcher has a distinct viewer')
+})
+
+test('the seat row keyboard shortcut adds once and a fifth pick leaves the streams intact', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  const tree = structuredClone(LIVE_TREE)
+  tree.projects[0].bots[0].workers = ['Reviewer', 'Builder', 'Tester', 'Runner'].map((role, index) => ({
+    terminal: `t${index + 2}`, role, status: 'idle',
+  }))
+  window.mountSeatFixture(tree)
+  await waitFor(() => document.querySelector('[data-face=terminal]'), 'the seat switch appeared')
+  document.querySelector('[data-face=terminal]').click()
+  const row = label => Array.from(document.querySelectorAll('.cs-row')).find(button => button.querySelector('.cs-row-label').textContent === label)
+  const beside = label => row(label).dispatchEvent(new window.MouseEvent('click', { ctrlKey: true, bubbles: true, detail: 1 }))
+  await waitFor(() => window.__streams.length === 1 && row('Reviewer'), 'the first seat watch opened')
+
+  const shortcut = new window.KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true, cancelable: true })
+  await window.flushCodePick(() => {
+    row('Reviewer').dispatchEvent(shortcut)
+  })
+  assert.equal(shortcut.defaultPrevented, true)
+  row('Reviewer').click() // A keyboard-generated click has detail 0.
+  await window.flushCodePick(() => beside('Builder'))
+  await window.flushCodePick(() => beside('Tester'))
+  await waitFor(() => window.__streams.length === 4, 'four distinct panes opened')
+  assert.equal(document.querySelectorAll('.cs-row[aria-current=true]').length, 4)
+  beside('Runner')
+  const refusal = () => document.querySelector('.cs-pane-head .cs-paste-note[data-wrap]')
+  await waitFor(refusal, 'the first pane showed the refusal')
+  assert.match(refusal().textContent, /Atlas, Atlas · Reviewer, Atlas · Builder, Atlas · Tester/)
+  assert.equal(window.__streams.length, 4)
+  beside('Atlas')
+  await waitFor(() => document.querySelector('.cs-panes')?.dataset.count === '3', 'the first pane was removed')
+  assert.equal(refusal(), null)
+  document.querySelector('[aria-label="Back to chat"]').click()
+  await waitFor(() => document.querySelector('[data-seat-face=chat]'), 'Back returned to the seat chat')
+  assert.equal(window.codeSnapshot().beside.length, 0)
+})
+
+test('outside pointerdown and Escape discard pending takes before their replies arrive', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  await window.inspectTerms()
+  const pending = []
+  window.__takeAnswer = () => {
+    const answer = Promise.withResolvers()
+    pending.push(answer.resolve)
+    return answer.promise
+  }
+  window.mountPane()
+  const screen = () => document.querySelector('.cs-screen')
+  await waitFor(() => screen()?.getAttribute('aria-label') === 'View only · click to type', 'the watch opened')
+
+  for (const [cancel, session] of [
+    [() => document.body.dispatchEvent(new window.Event('pointerdown', { bubbles: true })), 'outside'],
+    [() => document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })), 'escape'],
+  ]) {
+    screen().click()
+    await waitFor(() => pending.length > 0, 'the take started')
+    const answer = pending.shift()
+    cancel()
+    answer(Response.json({ session }))
+    await waitFor(() => window.__calls.some(call => call.url.endsWith('/release') && call.body.session === session), 'the stale session was released')
+    assert.equal(screen().dataset.codeMode, 'view')
+    assert.equal(window.__terms[0].options.disableStdin, true)
+    assert.notEqual(document.activeElement, window.__terms[0].textarea)
+  }
+})
+
+test('a late refusal for an old input session cannot end a newer typing session', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  await window.inspectTerms()
+  let rejectOldInput
+  let inputs = 0
+  window.__inputAnswer = () => {
+    if (++inputs === 1) return new Promise(resolve => { rejectOldInput = resolve })
+    return new Response(null, { status: 204 })
+  }
+  window.mountPane()
+  const screen = () => document.querySelector('.cs-screen')
+  await waitFor(() => screen()?.getAttribute('aria-label') === 'View only · click to type', 'the watch opened')
+  screen().click()
+  await waitFor(() => screen().dataset.codeMode === 'typing', 'the first take completed')
+  window.__terms[0].input('a', true)
+  await waitFor(() => rejectOldInput, 'the first input request is pending')
+  const first = window.__calls.find(call => call.url.endsWith('/input')).body.session
+
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  screen().click()
+  await waitFor(() => screen().dataset.codeMode === 'typing', 'the second take completed')
+  rejectOldInput(Response.json({ error: 'not-typing' }, { status: 409 }))
+  await delay(30)
+  assert.equal(screen().dataset.codeMode, 'typing')
+  assert.equal(window.__terms[0].options.disableStdin, false)
+  window.__terms[0].input('b', true)
+  await waitFor(() => window.__calls.filter(call => call.url.endsWith('/input')).length === 2, 'the second session sent input')
+  const second = window.__calls.filter(call => call.url.endsWith('/input'))[1]
+  assert.notEqual(second.body.session, first)
+  assert.equal(Buffer.from(second.body.data, 'base64').toString(), 'b')
+})
+
+test('a network failure on the first take leaves view-only without an idle-resume note', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  const failure = Promise.withResolvers()
+  window.__takeAnswer = () => failure.promise
+  window.mountPane()
+  const screen = () => document.querySelector('.cs-screen')
+  await waitFor(() => screen()?.getAttribute('aria-label') === 'View only · click to type', 'the watch opened')
+  screen().click()
+  await waitFor(() => window.__calls.some(call => call.url.endsWith('/take')), 'the first take started')
+  failure.reject(new Error('offline'))
+  await waitFor(() => screen().dataset.codeMode === 'view', 'the first take failed')
+  assert.equal(document.querySelector('.cs-paste-note'), null)
+  window.__calls.length = 0
+  screen().dispatchEvent(new window.Event('paste', { bubbles: true, cancelable: true }))
+  assert.deepEqual(Array.from(window.__calls), [])
+  delete window.__takeAnswer
+  screen().click()
+  await waitFor(() => screen().dataset.codeMode === 'typing', 'a later click retried successfully')
+  assert.equal(window.__calls.filter(call => call.url.endsWith('/take')).length, 1)
+})
+
+test('a Code view multiplexes four panes, routes their paints and reopens them together', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  const tree = structuredClone(LIVE_TREE)
+  const bot = tree.projects[0].bots[0]
+  bot.workers = ['Reviewer', 'Builder', 'Tester'].map((role, index) => ({ terminal: `t${index + 2}`, role, status: 'idle' }))
+  await window.inspectTerms()
+  window.mountSeatFixture(tree)
+  const screens = () => [...document.querySelectorAll('.cs-screen')]
+  const openCount = () => screens().filter(screen => screen.getAttribute('aria-label') === 'View only · click to type').length
+  const params = stream => new URLSearchParams(stream.url.split('?')[1])
+  const live = () => window.__streams.filter(stream => !stream.closed)
+  const text = index => window.__terms[index].buffer.active.getLine(0).translateToString(true)
+  await waitFor(() => document.querySelector('[data-face=terminal]'), 'the seat switch appeared')
+  document.querySelector('[data-face=terminal]').click()
+  await waitFor(() => openCount() === 1, 'the single pane opened')
+  const [single] = live()
+  assert.deepEqual([...params(single).keys()], ['bot', 'viewer'])
+  assert.equal(params(single).get('bot'), bot.id)
+  single.emit('data', 'single history')
+  await waitFor(() => text(0) === 'single history', 'the single stream used raw base64')
+
+  let finishTake
+  window.__takeAnswer = () => new Promise(resolve => { finishTake = resolve })
+  screens()[0].click()
+  await waitFor(() => finishTake, 'a take is pending during a pane-set change')
+  for (const { role } of bot.workers) {
+    const row = [...document.querySelectorAll('.cs-row')].find(button => button.querySelector('.cs-row-label').textContent === role)
+    await window.flushCodePick(() => row.dispatchEvent(new window.MouseEvent('click', { ctrlKey: true, bubbles: true, detail: 1 })))
+  }
+  await waitFor(() => openCount() === 4, 'all four panes received their handshake')
+  assert.equal(window.__streams.length, 4)
+  assert.equal(live().length, 1)
+  const [multi] = live()
+  assert.ok(window.__streams.every(stream => stream.previousOpen === 0), 'each source was closed before the next was constructed')
+  assert.deepEqual(params(multi).getAll('bot'), [bot.id, bot.id, bot.id, bot.id])
+  assert.deepEqual(params(multi).getAll('worker'), ['', 't2', 't3', 't4'])
+  const viewers = params(multi).getAll('viewer')
+  assert.equal(viewers[0], params(single).get('viewer'))
+  assert.equal(new Set(viewers).size, 4)
+  assert.equal(new Set(viewers.map(viewer => viewer.slice(0, viewer.lastIndexOf('.')))).size, 1)
+  finishTake(Response.json({ session: 'old-take' }))
+  await waitFor(() => window.__calls.some(call => call.url.endsWith('/release') && call.body.session === 'old-take'), 'the old take was released')
+  assert.ok(window.__terms.every(term => term.options.disableStdin))
+  assert.equal(text(0), '', 'stream replacement cleared the original paint')
+  finishTake = undefined
+  screens()[1].click()
+  await waitFor(() => finishTake, 'a take is pending in the pane that will close')
+  multi.emit('data', 'first paint', 0)
+  multi.emit('data', 'discard this', 2)
+  multi.emit('reset', { cols: 85, rows: 25 }, 2)
+  multi.emit('data', 'third paint', 2)
+  multi.emit('close', { reason: 'ended' }, 1)
+  finishTake(Response.json({ session: 'closed-pane-take' }))
+  await waitFor(() => window.__calls.some(call => call.url.endsWith('/release') && call.body.session === 'closed-pane-take'), 'the closed pane released its late take')
+  await waitFor(() => text(0) === 'first paint' && text(2) === 'third paint' && openCount() === 3, 'paint, reset and close reached their tagged panes')
+  assert.deepEqual([window.__terms[2].cols, window.__terms[2].rows], [85, 25])
+  assert.equal(screens()[1].getAttribute('aria-label'), 'This terminal ended')
+  assert.equal(text(1), '')
+  assert.equal(live().length, 1)
+
+  window.__manualPane = true
+  document.querySelector('.cs-pane .cs-btn').click()
+  await waitFor(() => window.__streams.length === 5 && screens().every(screen => screen.getAttribute('aria-label') === 'Opening the terminal…'), 'Reconnect reset every pane')
+  assert.equal(live().length, 1)
+  const [reopened] = live()
+  assert.equal(reopened.url, multi.url)
+  assert.equal(reopened.previousOpen, 0)
+  multi.emit('data', 'stale', 0)
+  for (let p = 0; p < 4; p += 1) reopened.emit('pane', {}, p)
+  await waitFor(() => openCount() === 4, 'the reopened view received all handshakes')
+  assert.equal(text(0), '')
+  assert.equal(text(2), '')
+
+  window.__takeAnswer = () => Response.json({ session: 'signed-out' })
+  window.__inputStatus = 401
+  screens()[2].click()
+  await waitFor(() => screens()[2].dataset.codeMode === 'typing', 'the third pane took typing')
+  const paste = new window.Event('paste', { bubbles: true, cancelable: true })
+  Object.defineProperty(paste, 'clipboardData', { value: { getData: () => 'test byte' } })
+  screens()[2].dispatchEvent(paste)
+  await waitFor(() => screens().every(screen => screen.getAttribute('aria-label') === 'The terminal could not be reached'), 'input 401 failed the entire view')
+  assert.equal(live().length, 0)
+  assert.ok(window.__terms.every(term => term.options.disableStdin))
 })

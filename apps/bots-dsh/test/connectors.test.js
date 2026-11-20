@@ -18,6 +18,7 @@ test('signIn asks GitHub who owns the token', async () => {
   assert.deepEqual(user, { login: 'octo' })
   assert.equal(seen.url, 'https://gh.test/user')
   assert.equal(seen.init.headers.Authorization, `Bearer ${token}`)
+  assert.equal(seen.init.headers['User-Agent'], 'automagik-bots')
   await assert.rejects(signIn(token, { fetch: async () => answer(401, {}) }), /did not accept/)
   await assert.rejects(signIn(token, { fetch: async () => answer(500, {}) }), /GitHub answered 500/)
   await assert.rejects(signIn(token, { fetch: async () => { throw new Error(`boom ${token}`) } }), /^Error: Could not reach GitHub$/)

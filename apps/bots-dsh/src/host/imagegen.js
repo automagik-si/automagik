@@ -111,7 +111,10 @@ export async function* sseEvents(body) {
 
 // `credentials` answers DSH's credential service (the plugin does not require one: ctx.get),
 // `codex` acp-dsh's acpAgents service (or undefined), and `folder` the team workspace.
-export function createImageGen({ credentials: credentialsOf, codex: codexOf = () => undefined, folder, fetch = globalThis.fetch, now = () => Date.now(), warn = () => {} }) {
+export function createImageGen({
+  credentials: credentialsOf, codex: codexOf = () => undefined, folder,
+  reservation = () => undefined, fetch = globalThis.fetch, now = () => Date.now(), warn = () => {},
+}) {
   const progress = new Map()
   // Whether the ChatGPT backend took a streamed request; it is asked once per run.
   let chatgptStreams = true
@@ -159,6 +162,8 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key !== '') return { kind: 'openai', token: record.key }
     const env = await credentials?.resolve?.(OPENAI_ENV).catch(() => undefined)
     if (typeof env?.value === 'string' && env.value !== '') return { kind: 'openai', token: env.value }
+    const check = reservation()
+    if (check && await check.imageGate?.('acp-codex')) return undefined
     const service = codexService()
     const access = await service?.imageAccess().catch(() => undefined)
     if (access?.ready === true) return {
@@ -251,11 +256,25 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
    * Draws one image and keeps it. Returns { id, file, via, bytes }. `callId` names the card
    * that follows its progress.
    */
-  async function generate({ prompt, size = 'auto', quality = 'auto', background = 'auto', callId, signal, input }) {
+  async function generate(options) {
+    const done = reservation()?.workStarted?.('acp-codex')
+    try { return await generateHeld(options) } finally { done?.() }
+  }
+
+  const reservationRefusal = (input, held) => refused(
+    `Codex cannot ${input ? 'edit the picture' : 'draw'} here: ${held}`,
+  )
+
+  async function generateHeld({
+    prompt, size = 'auto', quality = 'auto', background = 'auto', callId, signal, input,
+  }) {
     const text = String(prompt ?? '').trim().slice(0, PROMPT_MAX)
     if (text === '') throw Object.assign(new Error('Say what to draw.'), { code: 'bot/invalid' })
     const found = await source(input ? { refresh: false } : undefined)
     if (!found) {
+      const check = reservation()
+      const held = check && await check.imageGate?.('acp-codex')
+      if (held) throw reservationRefusal(input, held)
       // A signed-in Codex that acp-dsh does not let draw (a safety check of its image run did
       // not hold) is not a missing sign-in: say what helps.
       const codex = await codexService()?.imageAccess().catch(() => undefined)
@@ -280,8 +299,9 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
       note(callId, { phase: 'failed', error: error.message })
       throw error
     }
-    if (found.kind === 'codex') return drawWithCodex(found.service, {
-      text, size, quality, background, callId, signal, input, accountGeneration: found.accountGeneration,
+    if (found.kind === 'codex') return await drawWithCodex(found.service, {
+      text, size, quality, background, callId, signal, input,
+      accountGeneration: found.accountGeneration,
     })
     const base = {
       model: chatgpt ? CODEX_IMAGE_MODEL : OPENAI_IMAGE_MODEL,
@@ -300,6 +320,8 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
       note(callId, { partials })
     }
     try {
+      const late = chatgpt && reservation()?.held?.('acp-codex')
+      if (late) throw reservationRefusal(input, late)
       let response = input ? await requestEdit(found, streamed, input, signal)
         : await request(found, chatgpt && !chatgptStreams ? base : streamed, signal)
       // A backend that does not take a streamed request answers 400 naming it: asked again whole.
@@ -341,6 +363,8 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     text, size, quality, background, callId, signal, input, accountGeneration,
   }) {
     try {
+      const late = reservation()?.held?.('acp-codex')
+      if (late) throw reservationRefusal(input, late)
       if (input && typeof service.editImage !== 'function') {
         throw editWithoutLockedRun('this Automagik\'s Codex service cannot edit pictures', 'Editing a picture with Codex needs a newer Automagik. Ask the user to update.')
       }
@@ -405,6 +429,7 @@ export function install(rt) {
     credentials: () => { try { return ctx.get?.('credentials') } catch { return undefined } },
     codex: () => { try { return ctx.get?.('acpAgents') } catch { return undefined } },
     folder: () => rt.teamFolder?.(),
+    reservation: () => rt.machineReservations,
     warn: (...args) => rt.warn?.(...args),
   })
   const editInput = createEditInput({ rt, ctx })

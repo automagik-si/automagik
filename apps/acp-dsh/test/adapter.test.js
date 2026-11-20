@@ -1155,6 +1155,17 @@ test('an allow-once rule answers the agent\'s own permission request and still c
   }
 })
 
+test('a bridged question offering only allow_always is cancelled and the turn stops before DSH is asked', async () => {
+  const h = dshHost({ env: { FAKE_ACP_ALWAYS_ONLY: '1' } })
+  try {
+    const chunks = await step(h.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'bridge-permit bash' }] }])
+    assert.equal(chunks.at(-1).reason.kind, 'aborted', JSON.stringify(chunks.at(-1).reason))
+    assert.doesNotMatch(textIn(chunks), /permit yes/)
+    assert.equal(h.asked.length, 0)
+    assert.equal(h.executed.length, 0)
+  } finally { h.close() }
+})
+
 test('a bridge the adapter never starts fails the turn with acp_bridge_missing', async () => {
   const h = dshHost({ env: { FAKE_ACP_SKIP_MCP: '1' }, spec: { bridgeReadyMs: 250 } })
   try {
@@ -1317,6 +1328,62 @@ test('probe (delivery 6): a fork continues the same conversation, closes the sou
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+for (const systemPrompt of [true, false]) {
+  test(`a Codex tool-refresh fork keeps the replaced role (systemPrompt=${systemPrompt})`,
+    async t => {
+      const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-role-fork-'))
+      const trace = join(dir, 'trace.ndjson')
+      const oldPart = '<role-prompt id="voice-mouth">\nOld role.\n</role-prompt>'
+      const newPart = '<role-prompt id="voice-mouth">\nNew role.\n</role-prompt>'
+      let rolePrompt = oldPart
+      const h = dshHost({
+        provider: 'acp-codex', base: AGENTS['acp-codex'], trace, spec: { refresh: 'fork' },
+        botIdentity: () => ({ name: 'Ada', rolePrompt }),
+        env: {
+          HOME: dir, USERPROFILE: dir, FAKE_ACP_MODES: 'workspace-write',
+          ...(systemPrompt ? { FAKE_ACP_SYSTEM_PROMPT: '1' } : {}),
+        },
+      })
+      t.after(() => { h.close(); rmSync(dir, { recursive: true, force: true }) })
+      // 'plain' ends the fake agent's turn without a tool call or a permission ask.
+      const messages = [{
+        role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }],
+      }]
+      const next = async () => {
+        const chunks = await step(h.adapter, messages, { provider: 'acp-codex' })
+        assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1).reason))
+      }
+      await next()
+      rolePrompt = newPart
+      await next()
+      h.definitions.push({
+        name: 'extra', description: 'Extra', parameters: { type: 'object', properties: {} },
+      })
+      await next()
+      const events = traceEvents(trace)
+      const starts = events.filter(event => event.event === 'new-session')
+      const forks = events.filter(event => event.event === 'fork')
+      const prompts = events.filter(event => event.event === 'prompt')
+      assert.equal(starts.length, 2)
+      assert.equal(forks.length, 1)
+      const [fork] = forks
+      assert.equal(fork.from, starts[1].sessionId)
+      assert.equal(prompts[2].sessionId, fork.sessionId)
+      assert.equal(h.backchannel.records.size, 1)
+      assert.equal(h.adapter.live.get('s1').bridge, [...h.backchannel.records.values()][0])
+      if (systemPrompt) {
+        assert.ok(starts[0].systemPrompt.includes(oldPart))
+        assert.ok(starts[1].systemPrompt.includes(newPart))
+        assert.equal(fork.systemPrompt, starts[1].systemPrompt)
+      } else {
+        assert.ok(prompts[0].text.includes(oldPart))
+        assert.ok(prompts[1].text.includes(newPart))
+        assert.equal(Object.hasOwn(fork, 'systemPrompt'), false)
+      }
+      assert.doesNotMatch(prompts[2].text, /<role-prompt /)
+    })
+}
 
 test('probe (delivery 6): a fork lists its bridge before the session answer, and a preset change before that answer is held', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-fork-order-'))

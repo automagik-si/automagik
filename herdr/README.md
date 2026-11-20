@@ -458,14 +458,32 @@ kept there as a `send` warning: the seat is restarted and the pass exits 0, and 
 person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
 nothing.
 
+**Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
+`am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
+including for a linked project named with `--machine M --project DIR`. Its scheduler must
+be running, with backend `hc` and bot targets (`herdr-automations` 0.12.1-am.2 or later, the
+pinned release). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
+just before the send, hc refuses to type into it and the failed run shows the reason.
+A new wake starts at its next occurrence. An already registered wake missed while the
+scheduler was stopped can catch up once on startup within 1380 elapsed minutes (23 hours).
+Daylight saving time follows the scheduler's cron library.
+
+`am ls` and `am show` report the schedule and the last run. Rerun the same `am edit` with
+`--wake` or `--no-wake` to repair a failed sync. A worktree edit saves to that worktree's
+roster. Run the same edit against the main checkout to change the live schedule.
+
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
-A bot started by the pack as Claude Code, Codex, omp, pi or grok is told to set and clear it in its launch briefing.
+A bot started by the pack as Claude Code, Codex, omp, pi, grok or guarded dsh-tui is told to
+set and clear it in its launch briefing. Attached Claude Code seats get the guidance when the
+briefing hook prints. `am brief` and Hermes omit it. The dsh-tui guard and per-pane proxy
+allow exactly this key on the caller's own pane.
 The sidebar draws a **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
-the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when
+the one terminal snapshot it already takes. The label is the signal for the question, without a
+screen scan or a herdr-core status word for it. The chip also clears when
 the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
 the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
@@ -772,21 +790,37 @@ Session ids. Claude gets its id from Herdr at launch. dsh-TUI, Antigravity, Code
 launch, so the pack reads the id from what each leaves on disk (DSH's session folders for the
 pane's folder, Antigravity's prompt history, Codex's rollout session_meta, Kimi's session index:
 only ids, folders and times) and records it as it does Claude's: a session row in the workers ledger and the pane's
-`agent.session` label. Anyone can leave a session in that folder with no pane the pack knows (a
-terminal of your own, DSH Desktop), so the pack takes only a pane's first conversation: the one
-session born within two minutes after the pane started. It records none, and the bot comes back
-on a new conversation, which the report says, when two sessions were born then, when none was,
-or when another pane of that agent in that folder (any hc pane, whoever started it, and every
-launch the workers ledger names) started within two minutes before the pane or before that
-session. A session born later is never taken, and a recorded id is never replaced. What stays
-unknowable: a session someone started outside hc in that folder inside those two minutes, when
-the pane's own agent left none. A conversation started later inside the pane is not followed:
+`agent.session` label. The search root is the seat's own, never the reviving process's: its
+launch records the person's `HOME` and the agent's own home (`$DSH_HOME`, `$CODEX_HOME` or
+`$KIMI_CODE_HOME`, only absolute ones) in the seat row, and a hand launch's own `env` words on
+the pane count too; a search reads those. When the seat's launch names no home, the search
+fails closed and the bot starts new; the reviving process's `HOME` or `$CODEX_HOME` is not used.
+The recorded home is the launching command's environment: a herdr-core started with another
+home isn't followed. A seat started before this release names none, so it comes back on a new
+conversation once, and the report says why. Anyone can leave a session in that folder
+with no pane the pack knows (a terminal of your own, DSH Desktop), so the pack takes only a
+pane's first conversation: the one session born within two minutes after the pane started. It
+records none, and the bot comes back on a new conversation, which the report says, when two
+sessions were born then, when none was, or when another pane of that agent in that folder (any
+hc pane, whoever started it, and every launch the workers ledger names) started within two
+minutes before the pane or before that session. An id another live pane's label or the workers
+ledger ties to another launch is never taken, whatever folder or agent that pane shows, and
+when hc can't read one of its panes nothing is taken. A session born later is never taken,
+and a recorded id is never replaced. A rollout's file name must name the id inside it, and a
+session file that is a symlink, or is replaced under the read, is refused. What stays
+unknowable: a session someone started outside hc in that folder inside those two minutes, or one
+an older pane of that agent there (started more than two minutes before this pane) started inside
+them, when the pane's own agent left none; that one is taken, since ids, folders and times can't
+tell it from the pane's own. A conversation started later inside the pane is not followed:
 the bot resumes its first one. Codex's UUIDv7 dates its thread's creation at launch, even if its
 first turn writes the rollout days later; the pack looks in every dated folder from the launch's
 local day minus one onward. DSH's home is `$DSH_HOME`, else `~/.dsh`; Codex's is `$CODEX_HOME`, else
 `~/.codex`; Kimi's is `$KIMI_CODE_HOME`, else `~/.kimi-code` (only absolute overrides count).
-Revive never guesses Codex's or Kimi's latest conversation: with no id of its own, it starts a
-new conversation and the report says why. Manual `am restart` keeps its existing fallback.
+Revive never guesses Codex's or Kimi's latest conversation, for a bot or its helper: with no
+conversation of its own (recorded, or found by the rule above) it starts a new one, and the report
+says why. A helper whose own shell or template command names that agent's latest-conversation
+flag (`--last`, `--continue`, `-c`) is not started; the report gives the command to run it by hand.
+A manual `am restart` keeps its latest-conversation fallback.
 Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
@@ -1114,9 +1148,10 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 A pack-started dsh-tui bot pane, and every worker it starts, gets
 `mods/am-sidebar/guard/` first on its PATH (`startArgs` and `workerArgs` add it for the
 `dsh-tui` agent only). Its `hc` is a deny-by-default wrapper around the real `hc` (#624; the
-full send/keys/attach scope is #628): it scans PATH past every guard folder and passes an
-allowed call through unchanged — same stdio, same exit code, same stdout and stderr. It allows
-`send`, `read`, `ls`, `get`, `wait`, `label` (the caller's own workers only), `kill`,
+full send/keys/attach scope is #628): it scans PATH past every guard folder and forwards
+allowed calls with the same stdio and exit code. It allows
+`send`, `read`, `ls`, `get`, `wait`, `label` (the caller's own workers and
+`automagik-herdr.needs-owner` on the caller's own pane), `kill`,
 `rm` (the caller's own workers only), `events`, `schema`, `templates`, the doc-only
 `--help`/`-h`/`--version`/`--skill` forms,
 and one `run` shape: the dsh-tui worker start that `am worker` emits (`--bg`, the
@@ -1125,10 +1160,10 @@ caller as `--parent`, `worker.of=<the caller's bot>`, a `--cwd` under the projec
 refused with one stderr line naming #624, #628 and #631, and the real `hc` is never called:
 `exec`, any other `run` (including a template or another agent), file writes, edits and reads,
 `machine`, `server`, `update`, `connect`, `put`, `keys`, `attach`, a `machine/t7` target on
-every verb but `send` — typed as an address or reached by a name that `hc ls` resolves to one
-(`read`, `get`, `wait`, `label`, `kill`, `rm` and both `hc events` target options resolve the
-target and refuse a machine address before the real `hc` runs) — and any `--on` outside
-an allowed `send`.
+every verb but `send` (whether typed or returned by `hc get`), and any `--on` outside an allowed
+`send`. Herdr-core types keys after about 3 seconds of quiet with no condition, so a guard
+check can go stale before delivery. Attach opens a persistent keyboard. Both wait on
+herdr-core for delivery checks or caller binding.
 
 `send` is scoped to the caller's team: its lead chain (`effectiveLead` up), its declared lead
 chain (`bot.lead`, then that bot's lead, while each id is listed in the project's bots.json,
@@ -1152,8 +1187,10 @@ authority; a worker pane has no ledger row, so its `worker.of` label names its b
 cwd's project. The target is resolved with the real `hc` (`ls` for a name, `get` for the
 labels). Any target outside that team is refused. `read`, `get` and `wait` are scoped to the
 same graph — the caller's own pane, its own workers and its team — and the shared send roles do
-not widen them: the verified address is the one forwarded, so a rename between the check and the
-call cannot redirect it. `rm` ends the caller's own workers only (`parent` is the caller's pane,
+not widen them. For `send`, `read`, `get`, `wait`, `label`, `kill`, `rm` and both `hc events`
+target options, the guard forwards the checked address from `hc get`. A rename between the check
+and the call cannot redirect it. With `--on`, the guard verifies that address is on the named
+machine and forwards its bare terminal ID. `rm` ends the caller's own workers only (`parent` is the caller's pane,
 or `worker.of` is the caller's bot); a team member's seat, another bot's worker and every
 stranger are refused, and a worker pane ends nothing. The launch briefing carries the guard
 paragraph only for a dsh-tui bot; a claude, omp or hermes briefing is unchanged. On a linked
@@ -1166,15 +1203,18 @@ reads the target's herdr-core status and, when it is neither working nor blocked
 sign-in dialog gets one JSON error line on stderr, kind `blocked`, naming the pane, and exit 9
 (hc's own `blocked` code), so a relay can tell it from a transport error and route the message
 elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
-it. A free pane's send is unchanged; a screen that cannot be read is left to hc's own send, so
-nothing is queued or dropped. This is the pack's wrapper: a sender that bypasses it with an
+it. A free pane's message is forwarded as given. When the screen cannot be read, hc handles
+delivery. This is the pack's wrapper: a sender that bypasses it with an
 absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
 hold belongs.
 
 **This is a guardrail, not a boundary.** A bot can bypass it with an absolute path to the real
 `hc`, a raw socket client, or `hc connect`. The team data is still writable: a bot that edits
 its project's `.herdr/bots.json` can widen its own `send` scope (for example by giving itself
-the pm, integrator or fixer rank), and a bot can label its own workers. `ls` and `events` stay
+the pm, integrator or fixer rank), and a bot can label its own workers. For the own-pane label
+exception, the guard trusts `HC_TERMINAL_ID`. Forging it can use that exception to set or clear
+only `automagik-herdr.needs-owner` on another local pane. With the proxy on, the per-pane socket
+fixes the caller's identity independently of that environment variable. `ls` and `events` stay
 cross-pane (a wrapper cannot filter a table's text or a stream without changing what the real
 `hc` printed), and `kill` is the project's main bot's; the per-pane proxy is where a sandboxed
 pane's list is filtered and its events are refused. The real
@@ -1321,20 +1361,27 @@ Herdr starts `am machines update`: on each connected machine it runs that machin
 own `am update` (am, then the pack where one is installed), so every check is made there, by the
 copy installed there, against the keys it pins: the signed pointer, the tarball's sha256, never a
 release older than one it took, and the replaced copy kept (`am rollback automagik.am`,
-`am update --rollback`). Then usagemeter, as `meter install` does (the signed
-meter-lane pointer checked here, the build's sha256 on the machine, never a downgrade, the old
-binary kept as `usagemeter.prev`): on a machine that has one, or on all of them once you agreed to
-that, and never after `install.sh --no-usagemeter`. This computer's am and usagemeter follow in the
-same run; its pack is the sidebar's own update above.
+`am update --rollback`). The pack there takes the machine's **automatic** path (#1505): its own
+setting (`am update --auto off` on that machine) and a release it rolled back hold the pack,
+exactly as they hold the machine's own auto-update; a person's explicit `am update` there
+(`--retry-skipped` also clears the record) is still the only way to install a skipped release.
+Then usagemeter, as `meter
+install` does (the signed meter-lane pointer checked here, the build's sha256 on the machine, never
+a downgrade, the old binary kept as `usagemeter.prev`): on a machine that has one, or on all of
+them once you agreed to that, and never after `install.sh --no-usagemeter`. This computer's am and
+usagemeter follow in the same run; its pack is the sidebar's own update above.
 
 `am machines` shows the last answer of each machine: its am, pack and usagemeter
-versions, and what the last run did or why it did not (a pointer it could not verify, a download
-that failed, a machine that was not connected). A machine that was not updated is also said once in
-a notice. The record is `<app home>/automagik-herdr/linked-updates.json`.
+versions, both switches (its own pack auto setting and the linked updater's) and what the last run
+did or why it did not (a pointer it could not verify, a download that failed, a machine that was
+not connected). A machine that was not updated is also said once in a notice. The record is
+`<app home>/automagik-herdr/linked-updates.json`.
 
-It is on by default. A machine opts out with its own switch, the file `~/.automagik/linked-update`
-holding `off` (`am machines --auto off` there, or `--machine M` from here): the run
-reads it first and starts nothing on that machine. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
+The linked updater is on by default. A machine opts out with its own switch, the file
+`~/.automagik/linked-update` holding `off` (`am machines --auto off` there, or `--machine M` from
+here): the run reads it first and starts nothing on that machine. This is not the machine's pack
+setting (`am update --auto off`, shown as `pack auto`): that one holds the pack alone, while this
+one stops the whole linked run. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
 that runs Herdr turns the whole run off.
 
 Updates come from the Automagik monorepo's GitHub releases, through one signed pointer: the

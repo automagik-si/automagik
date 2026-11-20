@@ -62,6 +62,7 @@ export default class PocketLink extends View {
     this.busy = null; // what a button is doing
     this.error = null;
     this.pairing = null; // { link, rows, expires, copied }
+    this.confirmReset = false;
     this.closed = false;
     this.cancelling = null;
     this.handle = cx.focus_handle();
@@ -280,7 +281,12 @@ export default class PocketLink extends View {
           .flex_1()
           .min_w(0)
           .child(div().text_size(13).font_semibold().child(on ? `On · ${s.name ?? "this computer"}` : "Off"))
-          .child(div().text_size(12).text_color(t.dim).truncate().child(on ? (s.login ? "Starts with your login." : "Running until you log out.") : "Phones can't reach this computer.")),
+          .child(div().text_size(12).text_color(t.dim).truncate().child(on ? (s.login ? "Starts with your login." : "Running until you log out.") : "Phones can't reach this computer."))
+          .when(on && Boolean(s.fingerprint), (el) => el.child(
+            h_flex().gap(4).min_w(0).text_size(12).text_color(t.dim)
+              .child(div().truncate().child("Computer key fingerprint"))
+              .child(div().flex_none().child(s.fingerprint)),
+          )),
       )
       .child(
         on
@@ -383,6 +389,31 @@ export default class PocketLink extends View {
       .child(this.button(t, `pl-forget-${d.id}`, "Remove", (cx) => this.act("forget", ["forget", d.id], cx), { disabled: Boolean(this.busy) }));
   }
 
+  resetRow(t, count) {
+    const disabled = Boolean(this.busy);
+    if (!this.confirmReset) {
+      return h_flex().pt(8).child(this.button(t, "pl-reset", "Reset key…", (cx) => {
+        this.confirmReset = true;
+        cx.notify();
+      }, { disabled }));
+    }
+    const phones = count === 0 ? "no phones are paired" : `every phone (${count}) is unpaired and pairs again with a new code`;
+    return v_flex().pt(8).gap(6)
+      .child(this.note(t, `A new key for this computer: ${phones}. Codes shown before stop working.`))
+      .child(h_flex().gap(6)
+        .child(this.button(t, "pl-reset-confirm", "Reset key", (cx) => {
+          this.confirmReset = false;
+          this.act("reset", ["reset"], cx, () => {
+            this.pairing = null;
+            notify({ title: "Key reset", body: "Every phone was unpaired. Pair them again with a new code.", level: "success", timeout: 8000 });
+          });
+        }, { disabled }))
+        .child(this.button(t, "pl-reset-cancel", "Cancel", (cx) => {
+          this.confirmReset = false;
+          cx.notify();
+        }, { disabled })));
+  }
+
   render() {
     const t = theme();
     const s = this.status;
@@ -395,6 +426,7 @@ export default class PocketLink extends View {
             ...(s.running ? [this.section(t, "Pair a phone"), this.pairCard(t)] : []),
             this.section(t, s.devices.length ? "Paired phones" : "No phones paired yet"),
             v_flex().children(s.devices.map((d) => this.phone(t, d))),
+            this.resetRow(t, s.devices.length),
           ];
     return v_flex()
       .id("pocket-link")
