@@ -7,21 +7,23 @@ import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { selfUpdateStatus } from '../src/host/self-update.js'
+import { createUpdateHold, install as installUpdateHold } from '../src/host/self-update-hold.js'
+import { install as installSelfUpdate, selfUpdateStatus } from '../src/host/self-update.js'
 import { LISTENER_UNKNOWN } from '../src/host/supervisor/child.js'
 import { selfUpdateCheck } from '../src/host/self-update-check.js'
 import { refreshCopy, runningCopy, SELF_CHECK_OK, SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
 import { stageInstall, takeProfileLock, VENDOR } from '../src/host/supervisor/stage.js'
 import { completeSwitch, planSwitch } from '../src/host/supervisor/switch.js'
 import { writeJsonAtomic } from '../src/host/supervisor/store.js'
-import { BOTS, eventsOf, fixture, FROM, HOST, lane, putDownloads, read, RUN_ID, TO, write } from './fixtures/supervisor.mjs'
+import { batch, bootstrap, shell } from './fixtures/supervisor-health-wire.mjs'
+import { BOTS, eventsOf, fixture, FROM, HOST, lane, putDownloads, read, RUN_ID, TO, WELCOME, write } from './fixtures/supervisor.mjs'
 
 const DRIVER = fileURLToPath(new URL('./fixtures/supervisor-driver.mjs', import.meta.url))
 const stateOf = f => read(join(f.store, 'state.json'))
 const supervisorOf = f => read(join(f.store, 'supervisor.json'))
 const opts = f => ['--dsh-home', f.home, '--profile', f.profile]
 
-function launch(t, bin, args, env) {
+function launch(t, bin, args, env, detached = false) {
   const logs = fs.mkdtempSync(join(tmpdir(), 'supervisor-logs-'))
   const stdout = join(logs, 'stdout')
   const stderr = join(logs, 'stderr')
@@ -29,7 +31,7 @@ function launch(t, bin, args, env) {
   const err = fs.openSync(stderr, 'w')
   let child
   try {
-    child = spawn(bin, args, { env, stdio: ['ignore', out, err] })
+    child = spawn(bin, args, { env, detached, stdio: ['ignore', out, err] })
   } finally {
     fs.closeSync(out)
     fs.closeSync(err)
@@ -96,7 +98,8 @@ function driver(t, f) {
     home: f.home, profile: f.profile, command: f.command, version: FROM, laneUrl: signed.laneUrl, keys: signed.keys,
     tarballs: [...f.tarballs].map(([url, bytes]) => [url, bytes.toString('base64')]),
   }
-  return launch(t, process.execPath, [DRIVER], { ...f.env, SUPERVISOR_DRIVER: JSON.stringify(options) })
+  return launch(t, process.execPath, [DRIVER], { ...f.env, SUPERVISOR_DRIVER: JSON.stringify(options) },
+    f.env.SUPERVISOR_CUT_AFTER !== undefined)
 }
 
 const boots = f => eventsOf(f).filter(item => item.event === 'boot')
@@ -209,10 +212,11 @@ for (const [mode, phase, reason] of [
   ['relink-fails', 'notUpdated', 'stage-failed'],
   ['compatibility-repair', 'notUpdated', 'stage-failed'],
   ['relink-staged-symlink', 'notUpdated', 'stage-failed'],
-  ['trial-exit', 'manualRecovery', 'health-failed'],
+  ['trial-exit', 'rolledBack', 'health-failed'],
 ]) {
   test(`records ${phase} after ${mode}`, async t => {
     const f = fixture(t, { mode })
+    if (mode === 'trial-exit') fakeTransport(f)
     const lockfile = join(f.profileDir, 'pnpm-lock.yaml')
     const manifest = join(f.profileDir, 'package.json')
     const originalLockfile = fs.readFileSync(lockfile)
@@ -223,14 +227,13 @@ for (const [mode, phase, reason] of [
     request(f)
     await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === phase, 'missing verdict')
     assert.equal(stateOf(f).reason, reason)
-    assert.equal(boots(f).length, 2)
-    assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, phase === 'manualRecovery' ? TO : FROM)
-    if (phase === 'manualRecovery') {
-      assert.equal((await running.exit).code, 19)
-      const next = driver(t, f)
-      assert.equal((await next.exit).code, 1)
-      assert.equal(boots(f).length, 2)
-      assert.equal(stateOf(f).bootId, supervisorOf(f).bootId)
+    assert.equal(boots(f).length, phase === 'rolledBack' ? 3 : 2)
+    assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, FROM)
+    if (phase === 'rolledBack') {
+      assert.equal(stateOf(f).rollback.failed, 'exited')
+      assert.equal(fs.existsSync(join(f.store, 'current.json')), false)
+      running.child.kill('SIGTERM')
+      assert.equal((await running.exit).code, 0)
     } else {
       assert.equal(fs.existsSync(join(f.store, `stage-${stateOf(f).runId}`)), false, 'staging still exists after notUpdated')
       if (mode === 'lock-edit-while-staging') assert.match(fs.readFileSync(lockfile, 'utf8'), /owner: edited/)
@@ -253,6 +256,32 @@ for (const [mode, phase, reason] of [
     }
   })
 }
+
+test('manual recovery keeps the snapshot when the renamed-back child also fails', async t => {
+  const f = fixture(t, { mode: 'rollback-unhealthy' })
+  fakeTransport(f)
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  request(f)
+  const stopped = await running.exit
+  assert.equal(stopped.code, 1)
+  const state = stateOf(f)
+  assert.equal(state.phase, 'manualRecovery')
+  assert.equal(state.reason, 'health-failed')
+  assert.equal(state.rollback.failed, 'exited')
+  assert.equal(state.rollback.previousFailed, 'port')
+  assert.deepEqual(state.rollback.tried, ['rename-back', 'restart', 'health'])
+  assert.deepEqual(state.rollback.location.modules, { previous: 'live', candidate: 'staging' })
+  assert.match(stopped.stderr, /node_modules previous=live, candidate=staging/)
+  assert.equal(boots(f).length, 3)
+  assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, FROM)
+  assert.ok(fs.existsSync(join(f.store, 'versions', FROM, 'data', 'bots-state.json')))
+  assert.ok(fs.existsSync(join(f.store, 'stage-' + state.runId)))
+  const next = driver(t, f)
+  assert.equal((await next.exit).code, 1)
+  assert.equal(boots(f).length, 3)
+  assert.equal(stateOf(f).bootId, supervisorOf(f).bootId)
+})
 
 for (const move of ['keep-lockfile', 'install-modules']) {
   test(`a new supervisor recovers an interrupted ${move} before the first child boot`, async t => {
@@ -343,7 +372,7 @@ test('bare launcher fallback refuses unsafe or unreadable state and permits comp
   assert.equal(boots(f).length, 2)
 })
 
-test('a public launch URL stays separate from the credential-free local HTTP probe', async t => {
+test('a public launch URL stays separate from authenticated local health probes', async t => {
   const f = fixture(t)
   const port = await unusedLoopbackPort()
   const publicUrl = 'https://example.invalid/web/'
@@ -354,7 +383,11 @@ test('a public launch URL stays separate from the credential-free local HTTP pro
   await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'local listener was not healthy')
   assert.ok(running.stdout().includes(publicUrl + '?token=<redacted>'))
   assert.deepEqual(eventsOf(f).filter(event => event.event === 'probe'), [
-    { event: 'probe', url: '/', host: '127.0.0.1:' + port },
+    ...['/', '/', '/?token=<redacted>'].map(url => ({ event: 'probe', url, host: '127.0.0.1:' + port })),
+    ...['self-update-status', 'state'].map(endpoint => ({
+      event: 'probe', url: '/api/omni-ui', host: '127.0.0.1:' + port, endpoint, health: true,
+    })),
+    ...['/', batch, bootstrap, shell].map(url => ({ event: 'probe', url, host: '127.0.0.1:' + port })),
   ])
   running.child.kill('SIGTERM')
   assert.equal((await running.exit).code, 0)
@@ -646,3 +679,619 @@ for (const [verdict, lastPhase, mode] of [['healthy', 'health', ''], ['notUpdate
     }
   })
 }
+
+function fakeTransport(f) {
+  f.command[f.command.indexOf('--port') + 1] = '3080'
+  f.env.SUPERVISOR_ANNOUNCE_ONLY = '1'
+  f.env.SUPERVISOR_FAKE_TRANSPORT = '1'
+}
+
+const previousVersion = f => read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version
+
+for (const fault of ['port', 'sign-in', 'plugins', 'roster', 'page']) {
+  test('a failed trial ' + fault + ' rolls back to a healthy previous child', async t => {
+    const f = fixture(t, { mode: 'trial-' + fault })
+    fakeTransport(f)
+    const prior = { version: 1, live: { version: FROM, sequence: 41 }, kept: null, lastSequence: 41 }
+    const current = join(f.store, 'current.json')
+    writeJsonAtomic(current, prior, { profileDir: f.profileDir, durable: true })
+    const before = fs.readFileSync(current)
+    const running = driver(t, f)
+    await until(() => announced(running), 'fake child did not start')
+    request(f)
+    await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'rolledBack', 'missing rollback')
+    assert.equal(stateOf(f).rollback.failed, fault)
+    const output = running.stdout() + running.stderr() + JSON.stringify(stateOf(f))
+    for (const secret of ['stdout-secret', 'fixture-token', 'fixture-cookie']) assert.ok(!output.includes(secret))
+    assert.equal(previousVersion(f), FROM)
+    assert.deepEqual(fs.readFileSync(current), before)
+    assert.equal(boots(f).length, 3)
+    assert.ok(boots(f).every(boot => boot.boot === supervisorOf(f).bootId))
+    running.child.kill('SIGTERM')
+    assert.equal((await running.exit).code, 0)
+  })
+}
+
+test('the second boot after a missing roster reads the saved team and its replacement is retained', async t => {
+  const f = fixture(t, { mode: 'trial-team-missing' })
+  fakeTransport(f)
+  write(join(f.botsHome, 'state.json'), { version: 2, revision: 7, note: 'preserve me' })
+  const path = join(f.botsHome, 'state.json')
+  const original = fs.readFileSync(path)
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'rolledBack', 'missing rollback')
+  const state = stateOf(f)
+  const saved = join(f.store, 'rollback-data', state.runId)
+  assert.equal(state.rollback.failed, 'roster')
+  assert.equal(state.rollback.teamMissing, true)
+  assert.deepEqual(state.rollback.data, { restored: true, why: 'team-lost', trialKept: true })
+  assert.deepEqual(fs.readFileSync(path), original)
+  assert.deepEqual(fs.readFileSync(join(saved, 'bots-state.json')), original)
+  assert.deepEqual(read(join(saved, 'trial-bots-state.json')), { version: 2, revision: 1, bots: {} })
+  assert.equal(previousVersion(f), FROM)
+  assert.equal(boots(f).length, 3)
+})
+
+test('recovery refuses to start a trial with an unrelated dependency edit', async t => {
+  const f = fixture(t, { mode: 'trial-dependency-edit' })
+  fakeTransport(f)
+  f.env.SUPERVISOR_PAUSE_TRIAL_HEALTH = '1'
+  const manifest = join(f.profileDir, 'package.json')
+  const first = driver(t, f)
+  await until(() => announced(first), 'initial child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'health'
+    && read(manifest).dependencies['custom-plugin'] === '^2.0.0', 'trial did not change the manifest during health')
+  first.child.kill('SIGTERM')
+  assert.equal((await first.exit).code, 0)
+  const cut = stateOf(f)
+  assert.equal(cut.phase, 'health')
+  assert.ok(cut.trialStartedAt)
+  assert.equal(previousVersion(f), TO)
+
+  delete f.env.SUPERVISOR_PAUSE_TRIAL_HEALTH
+  const recovered = driver(t, f)
+  assert.equal((await recovered.exit).code, 1)
+  const result = stateOf(f)
+  assert.equal(result.phase, 'manualRecovery')
+  assert.equal(result.reason, 'rollback-failed')
+  assert.equal(result.rollback.step, 'manifest')
+  assert.deepEqual(result.rollback.tried, [])
+  assert.deepEqual(result.rollback.location.modules, { previous: 'kept', candidate: 'live' })
+  assert.deepEqual(result.rollback.location.lockfile, { previous: 'kept', candidate: 'live' })
+  assert.equal(previousVersion(f), TO)
+  assert.equal(read(manifest).dependencies['custom-plugin'], '^2.0.0')
+  assert.equal(eventsOf(f).filter(event => event.event === 'install' && event.live).length, 1)
+  assert.equal(result.rollback.failed, 'plugins')
+  assert.equal(boots(f).length, 2)
+})
+
+test('recovery rejects a trial that lost the team and saved an empty replacement before the roster RPC', async t => {
+  const f = fixture(t, { mode: 'trial-team-missing-recover' })
+  fakeTransport(f)
+  f.env.SUPERVISOR_PAUSE_TRIAL_HEALTH = '1'
+  f.env.SUPERVISOR_RECORD_HEALTH = '1'
+  const path = join(f.botsHome, 'state.json')
+  const original = { version: 2, revision: 7, bots: { ada: {}, bea: {} } }
+  write(path, original)
+  const first = driver(t, f)
+  await until(() => announced(first), 'initial child did not start')
+  request(f)
+  const replacement = { version: 2, revision: 1, bots: {} }
+  await until(() => eventsOf(f).some(event => event.event === 'team-replaced'), 'candidate did not replace the team')
+  assert.deepEqual(read(path), replacement)
+  first.child.kill('SIGTERM')
+  assert.equal((await first.exit).code, 0)
+  assert.equal(stateOf(f).phase, 'health')
+  assert.ok(!eventsOf(f).some(event => event.candidate && event.endpoint === 'state'))
+
+  delete f.env.SUPERVISOR_PAUSE_TRIAL_HEALTH
+  const recovered = driver(t, f)
+  await until(() => stateOf(f).phase === 'rolledBack', 'recovery did not restore the previous team')
+  const state = stateOf(f)
+  assert.equal(state.rollback.failed, 'roster')
+  assert.deepEqual(state.rollback.data, { restored: true, why: 'team-lost', trialKept: true })
+  assert.equal(boots(f).length, 3)
+  assert.equal(previousVersion(f), FROM)
+  assert.equal(fs.existsSync(join(f.store, 'current.json')), false)
+  assert.deepEqual(read(path), original)
+  assert.deepEqual(read(join(f.store, 'rollback-data', state.runId, 'trial-bots-state.json')), replacement)
+  assert.deepEqual(eventsOf(f).filter(event => event.event === 'roster-at-boot').at(-1),
+    { event: 'roster-at-boot', installed: FROM, bots: ['ada', 'bea'] })
+  recovered.child.kill('SIGTERM')
+  assert.equal((await recovered.exit).code, 0)
+})
+
+test('recovery restores a revision-1 team lost before the trial roster RPC', async t => {
+  const f = fixture(t, { mode: 'trial-team-enoent-recover' })
+  fakeTransport(f)
+  f.env.SUPERVISOR_PAUSE_TRIAL_HEALTH = '1'
+  f.env.SUPERVISOR_RECORD_HEALTH = '1'
+  const path = join(f.botsHome, 'state.json')
+  const original = { version: 2, revision: 1, bots: { ada: {}, bea: {} } }
+  write(path, original)
+  const first = driver(t, f)
+  await until(() => announced(first), 'initial child did not start')
+  request(f)
+  await until(() => eventsOf(f).some(event => event.event === 'team-read' && event.present === false),
+    'candidate did not read the missing team')
+  assert.equal(fs.existsSync(path), false)
+  first.child.kill('SIGTERM')
+  assert.equal((await first.exit).code, 0)
+  assert.equal(stateOf(f).phase, 'health')
+  assert.ok(!eventsOf(f).some(event => event.candidate && event.endpoint === 'state'))
+
+  delete f.env.SUPERVISOR_PAUSE_TRIAL_HEALTH
+  const recovered = driver(t, f)
+  await until(() => stateOf(f).phase === 'rolledBack', 'recovery did not restore the previous team')
+  const state = stateOf(f)
+  assert.equal(state.rollback.failed, 'roster')
+  assert.deepEqual(state.rollback.data, { restored: true, why: 'team-lost', trialKept: false })
+  assert.equal(boots(f).length, 3)
+  assert.equal(fs.existsSync(join(f.store, 'current.json')), false)
+  assert.deepEqual(read(path), original)
+  assert.deepEqual(eventsOf(f).filter(event => event.event === 'roster-at-boot').at(-1),
+    { event: 'roster-at-boot', installed: FROM, bots: ['ada', 'bea'] })
+  recovered.child.kill('SIGTERM')
+  assert.equal((await recovered.exit).code, 0)
+})
+
+test('a trial whose lane dependency changes rolls back even when its page answers', async t => {
+  const f = fixture(t, { mode: 'trial-lane-dependency-edit' })
+  fakeTransport(f)
+  f.env.SUPERVISOR_RECORD_HEALTH = '1'
+  f.env.SUPERVISOR_EXPECT_ROLLBACK = '1'
+  const running = driver(t, f)
+  await until(() => announced(running), 'initial child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'rolledBack', 'trial did not roll back')
+  assert.equal(stateOf(f).rollback.failed, 'plugins')
+  assert.ok(eventsOf(f).some(event => event.candidate && event.page && event.status === 200))
+  assert.equal(previousVersion(f), FROM)
+  assert.equal(boots(f).length, 3)
+  assert.deepEqual(read(join(f.profileDir, 'package.json')), f.manifest)
+  assert.equal(fs.existsSync(join(f.store, 'current.json')), false)
+})
+
+test('a trial that exits after saving an empty team gives the original Bots back at the next boot', async t => {
+  const f = fixture(t, { mode: 'trial-empty-team-exit' })
+  fakeTransport(f)
+  const path = join(f.botsHome, 'state.json')
+  const original = { version: 2, revision: 7, bots: { ada: {}, bea: {} } }
+  write(path, original)
+  const running = driver(t, f)
+  await until(() => announced(running), 'initial child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'rolledBack', 'missing rollback')
+  const state = stateOf(f)
+  assert.equal(state.rollback.failed, 'exited')
+  assert.equal(state.rollback.teamMissing, undefined)
+  assert.deepEqual(state.rollback.data, { restored: true, trialKept: true, why: 'team-lost' })
+  assert.deepEqual(read(path), original)
+  assert.deepEqual(read(join(f.store, 'rollback-data', state.runId, 'trial-bots-state.json')), { version: 2, revision: 1, bots: {} })
+  assert.deepEqual(eventsOf(f).filter(event => event.event === 'roster-at-boot').at(-1),
+    { event: 'roster-at-boot', installed: FROM, bots: ['ada', 'bea'] })
+})
+
+for (const field of ['dependency', 'compatibility', 'dsh']) {
+  test('rollback compares the trial profile after a change to ' + field, async t => {
+    const f = fixture(t, { mode: 'trial-' + field + '-edit' })
+    fakeTransport(f)
+    const running = driver(t, f)
+    await until(() => announced(running), 'fake child did not start')
+    request(f)
+    const expected = field === 'dsh' ? 'rolledBack' : 'manualRecovery'
+    await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === expected, 'missing decision')
+    const state = stateOf(f)
+    const manifest = read(join(f.profileDir, 'package.json'))
+    if (field === 'dsh') {
+      assert.equal(previousVersion(f), FROM)
+      assert.ok(manifest.dsh.profile.bundles.includes('reconciled'))
+    } else {
+      assert.equal((await running.exit).code, 1)
+      assert.equal(state.rollback.step, 'manifest')
+      assert.deepEqual(state.rollback.tried, [])
+      assert.equal(previousVersion(f), TO)
+      assert.deepEqual(state.rollback.location.modules, { previous: 'kept', candidate: 'live' })
+      assert.deepEqual(state.rollback.location.lockfile, { previous: 'kept', candidate: 'live' })
+    }
+  })
+}
+
+test('listener eligibility stays unknown until the child announces and a stale file is ignored', async t => {
+  const f = fixture(t, { mode: 'signal-forward' })
+  const running = driver(t, f)
+  await until(() => fs.existsSync(join(f.store, 'supervisor.json')), 'supervisor did not announce')
+  const env = { AUTOMAGIK_SUPERVISOR_BOOT: supervisorOf(f).bootId, AUTOMAGIK_SUPERVISOR_VERSION: FROM }
+  assert.deepEqual(read(join(f.store, 'listener.json')), { version: 1, bootId: env.AUTOMAGIK_SUPERVISOR_BOOT, listener: 'unknown' })
+  assert.equal(selfUpdateStatus({ profileDir: f.profileDir, env }).reason, 'listener-unknown')
+  const check = await selfUpdateCheck({ ...f.signed, profileDir: f.profileDir, env, inDesktop: false,
+    fetch: () => assert.fail('unknown listener must be refused before checking release'),
+  })
+  assert.equal(check.reason, 'listener-unknown')
+  assert.equal(announced(running), false)
+})
+
+test('the launch line is forwarded after the listener is available to the plugin', async t => {
+  const f = fixture(t)
+  fakeTransport(f)
+  const running = driver(t, f)
+  await until(() => announced(running), 'DSH did not announce')
+  const env = { AUTOMAGIK_SUPERVISOR_BOOT: supervisorOf(f).bootId, AUTOMAGIK_SUPERVISOR_VERSION: FROM,
+    [LISTENER_UNKNOWN]: '1' }
+  assert.deepEqual(read(join(f.store, 'listener.json')), {
+    version: 1, bootId: env.AUTOMAGIK_SUPERVISOR_BOOT, listener: 'verified',
+  })
+  assert.equal(selfUpdateStatus({ profileDir: f.profileDir, env }).available, true)
+})
+
+test('an old child receives a full give-back window and releases a failed signature hold once', async t => {
+  const f = fixture(t)
+  fakeTransport(f)
+  f.env.SUPERVISOR_FAKE_AGE_MS = '61000'
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  fs.appendFileSync(f.signed.path, '\n')
+  const responses = []
+  const hold = createUpdateHold({
+    readStatus: () => ({ supervised: true, profileKnown: true, run: fs.existsSync(join(f.store, 'state.json')) ? stateOf(f) : null }),
+    schedule: () => ({}), onResume: reason => { responses.push(reason) },
+  })
+  hold.close('owner-request')
+  request(f)
+  hold.wrote()
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'notUpdated', 'old child did not pass give-back health')
+  assert.equal(stateOf(f).reason, 'signature-invalid')
+  hold.tick()
+  hold.tick()
+  assert.deepEqual(responses, ['notUpdated'])
+  assert.equal(boots(f).length, 1)
+})
+
+test('a 5b live package receives a 5b-readable refusal and opens its hold without a download', async t => {
+  const f = fixture(t)
+  fakeTransport(f)
+  fs.unlinkSync(join(f.profileDir, 'node_modules', BOTS, 'src/host/update-contract.json'))
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  fs.unlinkSync(f.signed.path)
+  const { runOf } = await import('./fixtures/supervisor-5b/supervisor/records.js')
+  const resumes = []
+  const hold = createUpdateHold({
+    readStatus: () => ({ supervised: true, profileKnown: true, run: fs.existsSync(join(f.store, 'state.json')) ? runOf(stateOf(f), []) : null }),
+    schedule: () => ({}), onResume: reason => { resumes.push(reason) },
+  })
+  hold.close('owner-request')
+  request(f)
+  hold.wrote()
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'notUpdated', 'old generation refusal missing')
+  assert.equal(stateOf(f).reason, 'profile-invalid')
+  assert.equal(stateOf(f).detail, 'previous-unsupported')
+  assert.equal(previousVersion(f), FROM)
+  assert.ok(eventsOf(f).every(event => event.event === 'boot'))
+  hold.tick()
+  hold.tick()
+  assert.deepEqual(resumes, ['notUpdated'])
+})
+
+for (const contract of ['missing', 'invalid']) {
+  test('an uninterrupted 5b refusal keeps work held when the legacy page fails (' + contract + ' contract)', async t => {
+    const f = fixture(t, { mode: 'unchanged-page-fails' })
+    fakeTransport(f)
+    const path = join(f.profileDir, 'node_modules', BOTS, 'src/host/update-contract.json')
+    if (contract === 'missing') fs.unlinkSync(path)
+    else write(path, { version: 1, holdRun: false })
+    f.env.SUPERVISOR_FAKE_AGE_MS = '61000'
+    f.env.SUPERVISOR_RECORD_HEALTH = '1'
+    const running = driver(t, f)
+    await until(() => announced(running), 'fake child did not start')
+    fs.unlinkSync(f.signed.path)
+    const { runOf } = await import('./fixtures/supervisor-5b/supervisor/records.js')
+    const resumes = []
+    const hold = createUpdateHold({
+      readStatus: () => ({ supervised: true, profileKnown: true, run: fs.existsSync(join(f.store, 'state.json')) ? runOf(stateOf(f), []) : null }),
+      schedule: () => ({}), onResume: reason => { resumes.push(reason) },
+    })
+    hold.close('owner-request')
+    request(f)
+    hold.wrote()
+    assert.equal((await running.exit).code, 1)
+    assert.equal(stateOf(f).phase, 'manualRecovery')
+    assert.equal(stateOf(f).reason, 'health-failed')
+    assert.equal(stateOf(f).journal, undefined)
+    assert.equal(previousVersion(f), FROM)
+    assert.equal(boots(f).length, 1)
+    assert.ok(eventsOf(f).some(event => event.endpoint === 'list-bots' && event.status === 200))
+    assert.ok(eventsOf(f).some(event => event.page && event.status === 200))
+    assert.ok(eventsOf(f).some(event => event.event === 'health-probe' && event.status === 500))
+    hold.tick()
+    assert.equal(hold.closed, true)
+    assert.deepEqual(resumes, [])
+  })
+}
+
+test('a crash after checking gives back a serving 5b profile with a 5b-readable verdict', async t => {
+  const f = fixture(t)
+  fakeTransport(f)
+  fs.unlinkSync(join(f.profileDir, 'node_modules', BOTS, 'src/host/update-contract.json'))
+  f.env.SUPERVISOR_CUT_AFTER = 'checking'
+  f.env.SUPERVISOR_RECORD_HEALTH = '1'
+  const first = driver(t, f)
+  await until(() => announced(first), 'initial 5b child did not start')
+  request(f)
+  assert.equal((await first.exit).signal, 'SIGKILL')
+  assert.equal(stateOf(f).phase, 'checking')
+  assert.equal(Object.hasOwn(stateOf(f), 'journal'), false)
+  fs.unlinkSync(f.signed.path)
+
+  delete f.env.SUPERVISOR_CUT_AFTER
+  const recovered = driver(t, f)
+  await until(() => stateOf(f).phase === 'notUpdated', '5b give-back verdict missing')
+  const { runOf } = await import('./fixtures/supervisor-5b/supervisor/records.js')
+  const verdict = stateOf(f)
+  assert.equal(runOf(verdict, [verdict.bootId]).reason, 'profile-invalid')
+  assert.equal(verdict.detail, 'previous-unsupported')
+  assert.deepEqual(verdict.fromVersions, { [BOTS]: FROM })
+  assert.equal(previousVersion(f), FROM)
+  const probes = eventsOf(f).filter(event => event.event === 'health-probe')
+  assert.ok(probes.some(event => event.endpoint === 'list-bots' && event.health === undefined && event.status === 200))
+  assert.ok(probes.some(event => event.page && event.status === 200))
+  assert.ok(!probes.some(event => event.endpoint === 'self-update-status'))
+  assert.equal(boots(f).length, 2)
+  recovered.child.kill('SIGTERM')
+  assert.equal((await recovered.exit).code, 0)
+})
+
+test('the frozen 5b supervisor accepts a request with d6\'s unchanged four keys', async t => {
+  const f = fixture(t)
+  fakeTransport(f)
+  const frozen = join(f.root, 'frozen-supervisor')
+  fs.cpSync(fileURLToPath(new URL('./fixtures/supervisor-5b/', import.meta.url)), frozen, { recursive: true })
+  write(join(frozen, 'package.json'), { type: 'module' })
+  write(join(frozen, 'version.json'), { version: FROM })
+  f.env.SUPERVISOR_FROZEN_MAIN = join(frozen, 'supervisor/main.js')
+  const running = driver(t, f)
+  await until(() => announced(running), '5b did not start')
+  write(join(f.store, 'check.json'), {
+    version: 1, runId: 'generation-pairing-check', checkedAt: new Date().toISOString(), state: 'available',
+    reason: null, laneVersion: TO, sequence: 42, supervisor: true, plugins: [{ name: BOTS, from: FROM, to: TO }],
+  })
+  const env = {
+    AUTOMAGIK_BOTS_HOME: f.botsHome, AUTOMAGIK_SUPERVISOR_BOOT: supervisorOf(f).bootId,
+    AUTOMAGIK_SUPERVISOR_VERSION: FROM, [LISTENER_UNKNOWN]: '0',
+  }
+  for (const [key, value] of Object.entries(env)) {
+    const previous = process.env[key]
+    process.env[key] = value
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous })
+  }
+  const rt = {
+    ctx: { get: name => name === 'profileContext' ? { dir: f.profileDir } : undefined },
+    config: { selfUpdate: true }, statePath: join(f.botsHome, 'state.json'), holdsLock: () => true,
+    markUpdateStop: () => true, flushUpdateNotes: publish => publish(),
+  }
+  installSelfUpdate(rt)
+  const dispose = installUpdateHold(rt)
+  t.after(dispose)
+  let published
+  const rename = fs.renameSync
+  t.mock.method(fs, 'renameSync', (source, target) => {
+    if (target === join(f.store, 'request.json')) published = read(source)
+    return rename(source, target)
+  })
+  const click = await rt.selfUpdateStart()
+  assert.equal(click.started, true)
+  assert.deepEqual(Object.keys(published).sort(), ['bootId', 'requestId', 'requestedAt', 'version'])
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', '5b did not accept the request')
+  assert.equal(stateOf(f).requestId, click.requestId)
+  assert.equal(previousVersion(f), TO)
+})
+
+test('a service group cut just after rollback intent recovers the prior current record and profile', async t => {
+  const f = fixture(t, { mode: 'trial-exit' })
+  fakeTransport(f)
+  write(join(f.botsHome, 'state.json'), { version: 2, revision: 7, note: 'preserve me' })
+  const prior = { version: 1, live: { version: FROM, sequence: 41 }, kept: null, lastSequence: 41 }
+  const candidate = { version: 1, live: { version: TO, sequence: 42 }, kept: { version: FROM }, lastSequence: 42 }
+  write(join(f.store, 'current.json'), candidate)
+  await interruptedCandidate(f, run => {
+    run.phase = 'health'
+    run.journal.relinking = true
+    run.journal.commitCurrent = true
+    run.priorCurrent = prior
+    run.fromVersions = { [BOTS]: FROM }
+  })
+  f.env.SUPERVISOR_CUT_AFTER = 'stop'
+  const interrupted = driver(t, f)
+  assert.equal((await interrupted.exit).signal, 'SIGKILL')
+  assert.equal(stateOf(f).rollback.restoreCurrent, true)
+  assert.deepEqual(read(join(f.store, 'current.json')), candidate)
+  assert.equal(previousVersion(f), TO)
+  delete f.env.SUPERVISOR_CUT_AFTER
+  const recovered = driver(t, f)
+  await until(() => stateOf(f).phase === 'rolledBack', 'next supervisor did not finish rollback')
+  assert.deepEqual(read(join(f.store, 'current.json')), prior)
+  assert.equal(previousVersion(f), FROM)
+  assert.deepEqual(read(join(f.profileDir, 'package.json')), f.manifest)
+  assert.deepEqual(read(join(f.botsHome, 'state.json')), { version: 2, revision: 7, note: 'preserve me' })
+  assert.ok(fs.existsSync(f.archive))
+  recovered.child.kill('SIGTERM')
+  assert.equal((await recovered.exit).code, 0)
+})
+
+for (const repeat of [false, true]) {
+  test('reverse rename fsync failure ' + (repeat ? 'uses a bounded retry budget' : 'replays on the next start'), async t => {
+    const f = fixture(t, { mode: 'trial-page' })
+    fakeTransport(f)
+    f.env.SUPERVISOR_UNDO_FSYNC_FAILURE = '1'
+    const first = driver(t, f)
+    await until(() => announced(first), 'initial child did not start')
+    request(f)
+    assert.equal((await first.exit).code, 1)
+    const cut = stateOf(f)
+    assert.equal(cut.phase, 'rollingBack')
+    assert.equal(cut.rollback.ioFailures, 1)
+    assert.equal(cut.journal.done.at(-1), 'install-modules')
+    assert.equal(fs.existsSync(join(f.profileDir, 'node_modules')), false)
+    assert.ok(fs.existsSync(join(f.store, cut.journal.keep, 'node_modules')))
+
+    if (!repeat) delete f.env.SUPERVISOR_UNDO_FSYNC_FAILURE
+    const recovered = driver(t, f)
+    if (repeat) {
+      assert.equal((await recovered.exit).code, 1)
+      const failed = stateOf(f)
+      assert.equal(failed.phase, 'manualRecovery')
+      assert.equal(failed.reason, 'rollback-failed')
+      assert.equal(failed.rollback.ioFailures, 2)
+      assert.deepEqual(failed.rollback.location.modules, { previous: 'kept', candidate: 'staging' })
+    } else {
+      await until(() => stateOf(f).phase === 'rolledBack', 'rollback did not replay the completed rename')
+      assert.equal(stateOf(f).rollback.ioFailures, 1)
+      assert.equal(previousVersion(f), FROM)
+      recovered.child.kill('SIGTERM')
+      assert.equal((await recovered.exit).code, 0)
+    }
+  })
+}
+
+test('a team lost before trial causes rollback without booting the candidate', async t => {
+  const f = fixture(t, { mode: 'pretrial-team-missing' })
+  fakeTransport(f)
+  write(join(f.botsHome, 'state.json'), { version: 2, revision: 7, note: 'preserve me' })
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'rolledBack', 'missing rollback')
+  const state = stateOf(f)
+  assert.equal(boots(f).length, 2)
+  assert.equal(state.rollback.failed, 'roster')
+  assert.deepEqual(state.rollback.data, { restored: true, why: 'team-lost', trialKept: false })
+  assert.deepEqual(read(join(f.botsHome, 'state.json')), { version: 2, revision: 7, note: 'preserve me' })
+  assert.equal(previousVersion(f), FROM)
+})
+
+test('a genuinely new team can pass health with no team file at the switch', async t => {
+  const f = fixture(t)
+  fakeTransport(f)
+  fs.unlinkSync(join(f.botsHome, 'state.json'))
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'missing health verdict')
+  assert.equal(previousVersion(f), TO)
+  assert.deepEqual(read(join(f.store, 'versions', FROM, 'data.json')).files, [])
+})
+
+test('a retry at the same sequence retains both trial copies and pins the mixed previous set', async t => {
+  const f = fixture(t, { mode: 'trial-new-format', plugins: [BOTS, WELCOME] })
+  fakeTransport(f)
+  write(join(f.botsHome, 'state.json'), { version: 2, revision: 7, note: 'preserve me' })
+  f.env.SUPERVISOR_ROLLBACK_VERDICT_PAUSE = '250'
+  const older = '3.160.1'
+  const welcome = join(f.profileDir, 'node_modules', WELCOME, 'package.json')
+  write(welcome, { ...read(welcome), version: older })
+  const previousKept = join(f.store, 'versions', '3.160.0')
+  fs.mkdirSync(previousKept, { recursive: true })
+  const current = join(f.store, 'current.json')
+  write(current, { version: 1, live: { version: FROM, sequence: 42 }, kept: { version: '3.160.0' }, lastSequence: 42 })
+  const before = fs.readFileSync(current)
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  const savedRuns = []
+  for (const requestId of ['first-owner-request', 'retry-owner-request']) {
+    request(f, { requestId })
+    const state = await until(() => {
+      if (!fs.existsSync(join(f.store, 'state.json'))) return
+      const state = stateOf(f)
+      if (state.phase === 'rolledBack' && state.requestId === requestId) return state
+    }, 'missing rollback for ' + requestId)
+    assert.deepEqual(state.fromVersions, { [BOTS]: FROM, [WELCOME]: older })
+    assert.deepEqual(fs.readFileSync(current), before)
+    assert.equal(read(welcome).version, older)
+    assert.equal(previousVersion(f), FROM)
+    assert.ok(fs.existsSync(previousKept))
+    savedRuns.push(state.runId)
+  }
+  assert.equal(new Set(savedRuns).size, 2)
+  for (const runId of savedRuns) {
+    const saved = join(f.store, 'rollback-data', runId)
+    assert.deepEqual(read(join(saved, 'trial-bots-state.json')), { version: 3, revision: 8, note: 'edited during trial' })
+    assert.deepEqual(read(join(saved, 'bots-state.json')), { version: 2, revision: 7, note: 'preserve me' })
+  }
+})
+
+test('a failed rolledBack verdict write leaves the previous child held until a supervised recovery', async t => {
+  const f = fixture(t, { mode: 'trial-exit' })
+  fakeTransport(f)
+  f.env.SUPERVISOR_VERDICT_FAILURE = 'rolledBack'
+  const pidPath = join(f.root, 'dsh-child-pid')
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  request(f)
+  try {
+    const result = await running.exit
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /could not record the update verdict/)
+    const cut = stateOf(f)
+    assert.equal(cut.phase, 'rollingBack')
+    assert.equal(cut.rollback.starts, 1)
+    assert.equal(cut.journal.undoReason, 'health-failed')
+    assert.equal(previousVersion(f), FROM)
+    assert.doesNotThrow(() => process.kill(Number(fs.readFileSync(pidPath, 'utf8')), 0))
+  } finally {
+    if (fs.existsSync(pidPath) && stateOf(f).rollback?.starts) {
+      const stops = eventsOf(f).filter(event => event.event === 'stop').length
+      process.kill(Number(fs.readFileSync(pidPath, 'utf8')), 'SIGTERM')
+      await until(() => eventsOf(f).filter(event => event.event === 'stop').length > stops, 'held fixture child did not stop')
+    }
+  }
+  delete f.env.SUPERVISOR_VERDICT_FAILURE
+  const recovered = driver(t, f)
+  await until(() => stateOf(f).phase === 'rolledBack', 'verdict did not recover')
+  assert.equal(stateOf(f).rollback.starts, 2)
+  assert.equal(stateOf(f).journal.undoReason, undefined)
+  recovered.child.kill('SIGTERM')
+  assert.equal((await recovered.exit).code, 0)
+})
+
+test('give-back health checks the page and keeps work held when the unchanged page fails', async t => {
+  const f = fixture(t, { mode: 'unchanged-page-fails' })
+  fakeTransport(f)
+  const running = driver(t, f)
+  await until(() => announced(running), 'fake child did not start')
+  fs.appendFileSync(f.signed.path, '\n')
+  request(f)
+  assert.equal((await running.exit).code, 1)
+  const state = stateOf(f)
+  assert.equal(state.phase, 'manualRecovery')
+  assert.equal(state.reason, 'health-failed')
+  assert.equal(state.journal, undefined)
+  assert.equal(previousVersion(f), FROM)
+  assert.equal(boots(f).length, 1)
+})
+
+test('a service cut between the previous child spawn and its health save consumes one restart', async t => {
+  const f = fixture(t, { mode: 'trial-exit' })
+  fakeTransport(f)
+  f.env.SUPERVISOR_CUT_AFTER = 'spawn'
+  const interrupted = driver(t, f)
+  await until(() => announced(interrupted), 'fake child did not start')
+  request(f)
+  assert.equal((await interrupted.exit).signal, 'SIGKILL')
+  const cut = stateOf(f)
+  assert.equal(cut.phase, 'rollingBack')
+  assert.equal(cut.rollback.step, 'restart')
+  assert.equal(cut.rollback.starts, 1)
+  assert.equal(cut.rollback.failures, undefined)
+  assert.equal(previousVersion(f), FROM)
+  delete f.env.SUPERVISOR_CUT_AFTER
+  const recovered = driver(t, f)
+  await until(() => stateOf(f).phase === 'rolledBack', 'rollback did not recover')
+  assert.equal(stateOf(f).rollback.starts, 2)
+  assert.equal(stateOf(f).rollback.failures, undefined)
+  assert.equal(previousVersion(f), FROM)
+  recovered.child.kill('SIGTERM')
+  assert.equal((await recovered.exit).code, 0)
+})

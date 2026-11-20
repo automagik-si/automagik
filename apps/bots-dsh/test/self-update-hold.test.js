@@ -503,3 +503,78 @@ test('the start route passes the force option only for a boolean true', async t 
     { force: true }, { force: false }, { force: false }, { force: false },
   ])
 })
+
+test('an expected run holds real admission past the boot ceiling and is consumed by its own verdict', async () => {
+  const plans = []
+  const c = clockHold({ expectedRun: 'live-run', run: new Error('profile and state unavailable'),
+    bootPlan: () => { plans.push('plan') } })
+  let stepped = false
+  const gate = c.hold.wait().then(() => { stepped = true })
+  c.advance(PROFILE_WAIT_MS + 1)
+  c.status({ ...verdict('rolledBack'), runId: 'other-run' })
+  await tickPromises()
+  assert.equal(stepped, false)
+  assert.deepEqual(c.hold.proof(), { state: 'closed', run: null })
+  c.status(verdict('rollingBack'))
+  assert.deepEqual(c.hold.proof(), { state: 'closed', run: 'live-run' })
+  c.status(verdict('manualRecovery'))
+  assert.equal(c.hold.closed, true)
+  assert.deepEqual(plans, [])
+  c.status(verdict('rolledBack'))
+  await gate
+  c.status(verdict('rolledBack'))
+  assert.deepEqual(plans, ['plan'])
+  c.hold.close('second-request')
+  c.hold.wrote()
+  c.status({ ...verdict('checking', 'second-request'), runId: 'second-run' })
+  assert.deepEqual(c.hold.proof(), { state: 'closed', run: 'second-run' })
+  c.status({ ...verdict('notUpdated', 'second-request'), runId: 'second-run' })
+  assert.deepEqual(c.resumes, ['notUpdated'])
+})
+
+test('disposing a held trial releases no work when the previous child later receives rolledBack', async () => {
+  const plans = []
+  const trial = clockHold({ expectedRun: 'live-run', run: verdict('health'), bootPlan: () => { plans.push('trial') } })
+  assert.equal(trial.hold.closed, true)
+  trial.status(verdict('rollingBack'))
+  trial.hold.dispose()
+  const previous = clockHold({ expectedRun: 'live-run', run: verdict('rollingBack'), bootPlan: () => { plans.push('previous') } })
+  const gate = previous.hold.gate()
+  assert.deepEqual(plans, [])
+  previous.status(verdict('rolledBack'))
+  await gate
+  trial.status(verdict('rolledBack'))
+  assert.deepEqual(plans, ['previous'])
+})
+
+
+test('hold proof follows the latest owner request in a child started for an earlier run', () => {
+  let run
+  let profileKnown = true
+  let readable = true
+  const hold = createUpdateHold({
+    expectedRun: 'boot-run',
+    readStatus: () => ({ supervised: true, profileKnown, readable, run }),
+    schedule: () => ({}),
+  })
+  assert.deepEqual(hold.proof(), { state: 'closed', run: null })
+  run = { ...verdict('health'), runId: 'wrong-run' }
+  assert.deepEqual(hold.proof(), { state: 'closed', run: null })
+  run.runId = 'boot-run'
+  profileKnown = false
+  assert.deepEqual(hold.proof(), { state: 'closed', run: null })
+  profileKnown = true
+  assert.deepEqual(hold.proof(), { state: 'closed', run: 'boot-run' })
+  readable = false
+  assert.deepEqual(hold.proof(), { state: 'closed', run: null })
+  readable = true
+  run = { ...verdict('healthy'), runId: 'boot-run' }
+  assert.deepEqual(hold.proof(), { state: 'open', run: null })
+  hold.close('second-click')
+  hold.wrote()
+  assert.deepEqual(hold.proof(), { state: 'closed', run: null })
+  run = { ...verdict('checking', 'second-click'), runId: 'second-run' }
+  assert.deepEqual(hold.proof(), { state: 'closed', run: 'second-run' })
+  run.phase = 'notUpdated'
+  assert.deepEqual(hold.proof(), { state: 'open', run: null })
+})

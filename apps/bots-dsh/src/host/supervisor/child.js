@@ -11,7 +11,7 @@ const HEALTH_MS = 60_000
 export const LISTENER_UNKNOWN = 'AUTOMAGIK_SUPERVISOR_LISTENER_UNKNOWN'
 const MAX_LINE = 64 * 1024
 
-function webOption(args, option) {
+export function webOption(args, option) {
   let value
   for (let index = 0; index < args.length && args[index] !== '--'; index++) {
     if (args[index] === option) value = args[++index]
@@ -56,9 +56,9 @@ function redactCredentials(line) {
 }
 
 export async function forwardChildOutput(input, output, onLaunchUrl) {
-  const forward = line => {
+  const forward = async line => {
     const match = LAUNCH_URL.exec(line)
-    if (match) onLaunchUrl(match[1])
+    if (match) await onLaunchUrl(match[1])
     return output.write(redactCredentials(line) + '\n')
   }
   input.setEncoding('utf8')
@@ -75,13 +75,13 @@ export async function forwardChildOutput(input, output, onLaunchUrl) {
       }
       if (!discard) line += chunk.slice(start, end)
       if (newline === -1) break
-      if (!discard && !forward(line.replace(/\r$/, ''))) await once(output, 'drain')
+      if (!discard && !await forward(line.replace(/\r$/, ''))) await once(output, 'drain')
       line = ''
       discard = false
       start = end + 1
     }
   }
-  if (line && !forward(line)) await once(output, 'drain')
+  if (line && !await forward(line)) await once(output, 'drain')
 }
 
 export function startChild([node, ...args], env, onExit) {
@@ -90,7 +90,11 @@ export function startChild([node, ...args], env, onExit) {
   let stopping
   for (const [stream, output] of [[processChild.stdout, process.stdout], [processChild.stderr, process.stderr]]) {
     // A closed log sink must not leave an unhandled rejection or stall DSH.
-    void forwardChildOutput(stream, output, url => { child.launchUrl ??= url }).catch(() => stream.resume())
+    void forwardChildOutput(stream, output, url => {
+      if (child.launchUrl !== null) return
+      child.launchUrl = url
+      return child.onLaunchUrl?.()
+    }).catch(() => stream.resume())
   }
   child.exited = new Promise(resolve => {
     const finish = (code, signal) => {

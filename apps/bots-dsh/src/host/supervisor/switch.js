@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
 import { isLaneVersion, PLUGINS } from './release.js'
-import { ARCHIVE, laneEntries, lockPins, sourceMatches, VENDOR, withLaneEntries } from './stage.js'
+import { ARCHIVE, equalFile, laneEntries, lockPins, PROFILE_INPUTS, sourceMatches, VENDOR, withLaneEntries } from './stage.js'
 import { directory, identity, regularBytes, syncDirectory, syncFile, writeBytesAtomic } from './store.js'
 
 const MOVE_MODULES = 'install-modules'
@@ -13,8 +13,9 @@ const MANIFEST = 'package.json'
 const LOCKFILE = 'pnpm-lock.yaml'
 const MODULES = 'node_modules'
 const VENDOR_STEP = 'keep-archive:'
+const HARMLESS_KEYS = ['dsh']
 const jsonBytes = value => Buffer.from(JSON.stringify(value, null, 2) + '\n')
-const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+export const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 
 function homePath(value, fallback) {
   const path = value?.trim() || fallback
@@ -26,7 +27,7 @@ export const DATA_FILES = Object.freeze([Object.freeze({
   snapshot: 'bots-state.json',
 })])
 
-function snapshot(kept, env) {
+function snapshot(kept, env, reads) {
   const data = directory(join(kept, 'data'))
   const files = []
   for (const { path, snapshot } of DATA_FILES) {
@@ -38,7 +39,7 @@ function snapshot(kept, env) {
     if (!document || typeof document !== 'object' || Array.isArray(document)
       || !Number.isSafeInteger(format) || format < 0) throw new Error('Invalid Bots state format')
     writeBytesAtomic(join(data, snapshot), bytes, { durable: true })
-    files.push({ path: source, snapshot, format })
+    files.push({ path: source, snapshot, format, ...(reads ? { reads } : {}) })
   }
   writeBytesAtomic(join(kept, 'data.json'), jsonBytes({ version: 1, files }), { durable: true })
 }
@@ -77,7 +78,7 @@ export function planSwitch(config, staging, run) {
   writeBytesAtomic(join(kept, 'entries.json'), jsonBytes({ version: 1, dependencies: entries }), { durable: true })
   const candidateManifest = jsonBytes(withLaneEntries(before, laneEntries(after, names)))
   writeBytesAtomic(join(staging.source, 'candidate.json'), candidateManifest, { durable: true })
-  snapshot(kept, env)
+  snapshot(kept, env, config.stateFormats)
   for (const file of [MANIFEST, LOCKFILE]) {
     syncFile(join(staging.source, file))
     syncFile(join(profileDir, file))
@@ -115,7 +116,7 @@ export function validJournal(run) {
   const { journal: j } = run
   if (j?.op !== 'switch' || !isLaneVersion(j.from) || !isLaneVersion(j.to) || j.from === j.to
     || j.from !== run.from || j.to !== run.to || j.keep !== `versions/${j.from}`
-    || !isHash(j.lockHash)
+    || !isHash(j.lockHash) || (j.rollbackManifestHash !== undefined && !isHash(j.rollbackManifestHash))
     || ((j.sourceHash !== undefined || j.candidateHash !== undefined) && (!isHash(j.sourceHash) || !isHash(j.candidateHash)))
     || !Array.isArray(run.names) || run.names.length === 0 || new Set(run.names).size !== run.names.length
     || !run.names.every(name => PLUGINS.includes(name))
@@ -129,7 +130,7 @@ export function validJournal(run) {
   return (j.undo === undefined || j.undo === true)
     && (j.relinking === undefined || j.relinking === true)
     && (j.commitCurrent === undefined || (j.commitCurrent === true && !j.undo && j.pending === null && j.done.length === j.steps.length))
-    && (j.undoReason === undefined || ['stage-failed', 'supervisor-restarted'].includes(j.undoReason))
+    && (j.undoReason === undefined || ['stage-failed', 'supervisor-restarted', 'health-failed'].includes(j.undoReason))
 }
 
 export function validTerminalJournal(run) {
@@ -154,34 +155,84 @@ function pathsFor(config, staging, journal) {
   }
 }
 
+function needsRename(source, target, allowMissing) {
+  if (source && !target) return true
+  if (source || (!target && !allowMissing)) throw new Error('Inconsistent switch rename')
+  return false
+}
+
 function rename(from, to, allowMissing) {
-  const source = identity(from)
-  const target = identity(to)
-  if (source && !target) fs.renameSync(from, to)
-  else if (source || (!target && !allowMissing)) throw new Error('Inconsistent switch rename')
+  if (needsRename(identity(from), identity(to), allowMissing)) fs.renameSync(from, to)
   for (const parent of new Set([dirname(from), dirname(to)])) syncDirectory(parent)
 }
 
-function apply(config, staging, journal, paths, step, undo) {
-  if (step === 'install-entries') {
-    const old = regularBytes(join(staging.source, MANIFEST))
-    const candidate = regularBytes(join(staging.source, 'candidate.json'))
-    const live = join(config.profileDir, MANIFEST)
-    const bytes = regularBytes(live, { optional: true })
-    if (bytes?.equals(undo ? old : candidate)) return
-    if (!bytes?.equals(undo ? candidate : old)) {
-      // A failed DSH relink may have reconciled the manifest before reporting failure.
-      if (!undo || !journal.relinking || !bytes) throw new Error('Profile entries changed during the switch')
-      const { dependencies } = JSON.parse(regularBytes(join(config.store, journal.keep, 'entries.json')))
-      const restored = withLaneEntries(JSON.parse(bytes), dependencies)
-      if (!isDeepStrictEqual(restored, JSON.parse(old))) throw new Error('Unrelated profile entries changed during relink')
+function manifestWrite(config, staging, journal, undo) {
+  const old = regularBytes(join(staging.source, MANIFEST))
+  const candidate = regularBytes(join(staging.source, 'candidate.json'))
+  const live = join(config.profileDir, MANIFEST)
+  const bytes = regularBytes(live, { optional: true })
+  const previousEntries = () => JSON.parse(regularBytes(join(config.store, journal.keep, 'entries.json'))).dependencies
+  if (undo && journal.undoReason === 'health-failed') {
+    const restored = regularBytes(join(staging.source, 'rollback.json'))
+    if (digest(restored) !== journal.rollbackManifestHash) throw new Error('Rollback manifest changed')
+    if (bytes?.equals(restored)) return
+    if (!bytes || !isDeepStrictEqual(withLaneEntries(JSON.parse(bytes), previousEntries()), JSON.parse(restored))) {
+      throw new Error('Profile entries changed after rollback was prepared')
     }
-    writeBytesAtomic(live, undo ? old : candidate, { durable: true })
+    return restored
+  }
+  if (bytes?.equals(undo ? old : candidate)) return
+  if (!bytes?.equals(undo ? candidate : old)) {
+    // A failed DSH relink may have reconciled the manifest before reporting failure.
+    if (!undo || !journal.relinking || !bytes) throw new Error('Profile entries changed during the switch')
+    const restored = withLaneEntries(JSON.parse(bytes), previousEntries())
+    if (!isDeepStrictEqual(restored, JSON.parse(old))) throw new Error('Unrelated profile entries changed during relink')
+  }
+  return undo ? old : candidate
+}
+
+const allowAbsent = (journal, step) => journal.relinking && [MOVE_MODULES, 'install-lockfile'].includes(step)
+
+function apply(config, staging, journal, paths, step) {
+  if (step === 'install-entries') {
+    const bytes = manifestWrite(config, staging, journal, false)
+    if (bytes) writeBytesAtomic(join(config.profileDir, MANIFEST), bytes, { durable: true })
     return
   }
   const [from, to] = paths[step]
-  if (!undo) rename(from, to, false)
-  else rename(to, from, journal.relinking && [MOVE_MODULES, 'install-lockfile'].includes(step))
+  rename(from, to, false)
+}
+
+export class UndoIOError extends Error {}
+
+export class UndoPreflightError extends Error {
+  constructor(cause) {
+    super(cause.message, { cause })
+  }
+}
+
+function prepareUndo(config, staging, journal, paths, steps) {
+  let manifest
+  // Simulate the reverse order. A later move can use a path vacated by an earlier one.
+  const planned = new Map()
+  const at = path => planned.has(path) ? planned.get(path) : identity(path)
+  for (const step of steps) {
+    if (step === 'install-entries') {
+      manifest = manifestWrite(config, staging, journal, true)
+      continue
+    }
+    const [to, from] = paths[step]
+    const source = at(from)
+    const fromDir = identity(dirname(from))
+    const toDir = identity(dirname(to))
+    if (!fromDir?.isDirectory() || !toDir?.isDirectory()) throw new Error('Missing switch rename directory')
+    if (needsRename(source, at(to), allowAbsent(journal, step))) {
+      if (source.dev !== toDir.dev) throw new Error('Switch rename crosses filesystems')
+      planned.set(from, undefined)
+      planned.set(to, source)
+    }
+  }
+  return manifest
 }
 
 export function completeSwitch(config, staging, run, save, afterRename = () => {}) {
@@ -192,7 +243,7 @@ export function completeSwitch(config, staging, run, save, afterRename = () => {
   for (const step of j.steps.slice(j.done.length)) {
     j.pending = step
     save()
-    apply(config, staging, j, paths, step, false)
+    apply(config, staging, j, paths, step)
     afterRename(step)
     j.done.push(step)
     j.pending = null
@@ -207,29 +258,58 @@ export function didSwitch(config, staging, run) {
     && !identity(join(staging.profileDir, MODULES)) && !!identity(join(config.profileDir, MODULES))))
 }
 
-export function undoSwitch(config, staging, run, save, reason) {
+export function undoSwitch(config, staging, run, save, reason, afterRename = () => {}, beforeUndo = () => {}) {
   if (!validJournal(run) || run.journal.commitCurrent) throw new Error('Invalid undo journal')
   const j = run.journal
-  if (j.pending !== null || j.done.length > 0) verifyRecoveryInputs(staging, j)
-  j.undo = true
-  j.undoReason ??= reason
-  save()
+  const steps = [j.pending, ...j.done.toReversed()].filter(Boolean)
   const paths = pathsFor(config, staging, j)
-  for (const step of [j.pending, ...j.done.toReversed()].filter(Boolean)) {
-    apply(config, staging, j, paths, step, true)
-    if (j.pending === step) j.pending = null
-    else j.done.pop()
+  const undoReason = j.undoReason ?? reason
+  let manifest
+  try {
+    if (steps.length > 0) verifyRecoveryInputs(staging, j)
+    manifest = prepareUndo(config, staging, { ...j, undoReason }, paths, steps)
+  } catch (error) {
+    throw new UndoPreflightError(error)
+  }
+  beforeUndo()
+  if (!j.undo || j.undoReason === undefined) {
+    j.undo = true
+    j.undoReason = undoReason
     save()
+  }
+  for (const step of steps) {
+    try {
+      if (step === 'install-entries') {
+        if (manifest) writeBytesAtomic(join(config.profileDir, MANIFEST), manifest, { durable: true })
+        else syncDirectory(config.profileDir)
+      } else {
+        const [to, from] = paths[step]
+        rename(from, to, allowAbsent(j, step))
+      }
+      afterRename(step)
+      if (j.pending === step) j.pending = null
+      else j.done.pop()
+      save()
+    } catch (cause) {
+      throw new UndoIOError(cause.message, { cause })
+    }
   }
 }
 
+export function sameInstallerManifest(a, b) {
+  const installerEntries = manifest => Object.entries(manifest).filter(([key]) => !HARMLESS_KEYS.includes(key))
+  return isDeepStrictEqual(Object.fromEntries(installerEntries(a)), Object.fromEntries(installerEntries(b)))
+}
+
 export function candidateMatches(config, staging, run) {
-  verifyRecoveryInputs(staging, run.journal)
-  const manifest = regularBytes(join(config.profileDir, MANIFEST))
-  const lock = regularBytes(join(config.profileDir, LOCKFILE))
-  const workspace = regularBytes(join(config.profileDir, 'pnpm-workspace.yaml'), { optional: true })
-  const originalWorkspace = regularBytes(join(staging.source, 'pnpm-workspace.yaml'), { optional: true })
-  const workspaceMatches = workspace === undefined ? originalWorkspace === undefined
-    : originalWorkspace !== undefined && workspace.equals(originalWorkspace)
-  return workspaceMatches && manifest.equals(regularBytes(join(staging.source, 'candidate.json'))) && digest(lock) === run.journal.lockHash
+  try {
+    verifyRecoveryInputs(staging, run.journal)
+    const manifest = JSON.parse(regularBytes(join(config.profileDir, MANIFEST)))
+    const candidate = JSON.parse(regularBytes(join(staging.source, 'candidate.json')))
+    const lock = regularBytes(join(config.profileDir, LOCKFILE))
+    return sameInstallerManifest(manifest, candidate) && digest(lock) === run.journal.lockHash
+      && PROFILE_INPUTS.slice(2).every(file => equalFile(config.profileDir, staging.source, file))
+  } catch {
+    return false
+  }
 }

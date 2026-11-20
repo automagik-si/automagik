@@ -1,7 +1,9 @@
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import { LISTENER_UNKNOWN } from './supervisor/child.js'
 import { inDesktopApp } from './constants.js'
 import { currentOf, hasBootId, isId, publicVersion, runOf, supervisorStateOf } from './supervisor/records.js'
+import { PLUGINS } from './supervisor/release.js'
 import { readJson, usableStore } from './supervisor/store.js'
 
 export { REASON_CODES } from './supervisor/records.js'
@@ -80,12 +82,52 @@ export function selfUpdateDetails(profileDir, env, readMountInfo) {
   }
 }
 
+export function listenerUnknown(profileDir, env = process.env, readMountInfo) {
+  const store = () => usableStore(profileDir, readMountInfo)
+  const record = readJson(store, store(), 'listener.json')
+  if (record?.version === 1 && isId(record.bootId) && record.bootId === env?.AUTOMAGIK_SUPERVISOR_BOOT) {
+    if (record.listener === 'unknown') return true
+    if (record.listener === 'verified' || record.listener === 'verified-argv') return false
+  }
+  return env?.[LISTENER_UNKNOWN] === '1'
+}
+
+export function pluginHealth(ctx, versions = new WeakMap()) {
+  const active = new Map()
+  for (const entry of ctx.get?.('loader')?.entries?.() ?? []) {
+    const name = entry.options?.name
+    if (!PLUGINS.includes(name) || entry.fiber?.state !== 2) continue
+    if (active.has(name)) active.set(name, null)
+    else active.set(name, entry)
+  }
+  return PLUGINS.map(name => {
+    const entry = active.get(name)
+    if (!entry) return { name, version: null, loaded: false }
+    if (!versions.has(entry)) {
+      let version = null
+      try {
+        const manifest = createRequire(entry.parent.tree.ctx.baseUrl).resolve(name + '/package.json')
+        const { version: found } = JSON.parse(fs.readFileSync(manifest))
+        if (typeof found === 'string') version = found
+      } catch {}
+      versions.set(entry, version)
+    }
+    return { name, version: versions.get(entry), loaded: true }
+  })
+}
+
+// A supervisor that runs health and rollback names its own boot here. A pre-d6 supervisor copies the service's
+// environment to DSH, so an inherited value is trusted only when it names this boot, which is new on every start.
+const rollbackCapable = env => typeof env?.AUTOMAGIK_SUPERVISOR_ROLLBACK === 'string' && env.AUTOMAGIK_SUPERVISOR_ROLLBACK !== ''
+  && env.AUTOMAGIK_SUPERVISOR_ROLLBACK === env.AUTOMAGIK_SUPERVISOR_BOOT
+
 function statusOf(profileDir, env, inDesktop, readMountInfo) {
   const { storeDir, currentInvalid, ...status } = selfUpdateDetails(profileDir, env, readMountInfo)
   const reason = inDesktop ? 'desktop-app' : status.supervisor === null ? 'no-supervisor'
-    : env?.[LISTENER_UNKNOWN] === '1' ? 'listener-unknown'
+    : listenerUnknown(profileDir, env, readMountInfo) ? 'listener-unknown'
     : storeDir === undefined ? 'no-store' : currentInvalid ? 'store-invalid' : null
-  return { available: reason === null, reason, ...status }
+  return { available: reason === null, reason, ...status,
+    ...(rollbackCapable(env) ? { rollback: true } : {}) }
 }
 
 export function selfUpdateStatus({ profileDir, env = process.env, inDesktop = inDesktopApp(), readMountInfo }) {
@@ -97,7 +139,10 @@ export function install(rt) {
     [LISTENER_UNKNOWN]: process.env[LISTENER_UNKNOWN],
     AUTOMAGIK_SUPERVISOR_BOOT: process.env.AUTOMAGIK_SUPERVISOR_BOOT,
     AUTOMAGIK_SUPERVISOR_VERSION: process.env.AUTOMAGIK_SUPERVISOR_VERSION,
+    AUTOMAGIK_SUPERVISOR_ROLLBACK: process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK,
   }
   const inDesktop = inDesktopApp()
   rt.selfUpdateStatus = () => statusOf(rt.ctx.get?.('profileContext')?.dir, env, inDesktop)
+  const versions = new WeakMap()
+  rt.selfUpdateHealth = () => ({ plugins: pluginHealth(rt.ctx, versions), hold: rt.updateHold?.proof() ?? { state: 'unknown', run: null } })
 }

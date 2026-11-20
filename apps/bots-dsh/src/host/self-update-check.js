@@ -5,8 +5,7 @@ import { join } from 'node:path'
 import { inDesktopApp } from './constants.js'
 import { currentDsh } from './dsh-update.js'
 import { refusal } from './refusal.js'
-import { prepareStore, readCheckRecord, REASON_CODES, selfUpdateDetails, supervisorOf, writeJsonAtomic } from './self-update.js'
-import { LISTENER_UNKNOWN } from './supervisor/child.js'
+import { listenerUnknown, prepareStore, readCheckRecord, REASON_CODES, selfUpdateDetails, supervisorOf, writeJsonAtomic } from './self-update.js'
 import { installRegistry } from './supervisor/pnpm.js'
 import { inspectRelease, isLaneVersion, PLUGINS, registryOnlyNpmrc, releaseSource } from './supervisor/release.js'
 import { identity, ownerIsDead, readOwner, sameEntry, takeOwnerLock } from './supervisor/store.js'
@@ -93,7 +92,7 @@ async function runCheck({
     try {
       requireAccess()
       reclaimChecks(store, owner.host, requireAccess)
-      if (supervisor && (env ?? process.env)[LISTENER_UNKNOWN] === '1') {
+      if (supervisor && listenerUnknown(profileDir, env, readMountInfo)) {
         record = result('refused', 'listener-unknown')
       } else if (!currentInvalid) {
         const path = join(store, `check-${runId}`)

@@ -4,6 +4,8 @@ import fs from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
+import { pathToFileURL } from 'node:url'
+import { healthReply } from './supervisor-health-wire.mjs'
 import { pnpmLock, verifyOfflineLock } from './supervisor-lock.mjs'
 
 const [action, ...args] = process.argv.slice(2)
@@ -70,6 +72,7 @@ if (action === 'plugin') {
         process.exitCode = 1
       }
       if (mode === 'relink-fails' || mode === 'restored-unhealthy') process.exitCode = 3
+      if (mode === 'pretrial-team-missing') fs.unlinkSync(join(process.env.AUTOMAGIK_BOTS_HOME, 'state.json'))
       if (mode === 'relink-staged-symlink') {
         const [stage] = fs.readdirSync(join(home, 'update/web')).filter(name => name.startsWith('stage-'))
         fs.symlinkSync(join(home, 'update/web', stage, 'target'), join(profile, 'node_modules/invalid-link'))
@@ -89,8 +92,56 @@ if (action === 'plugin') {
     ? fs.readFileSync(join(root, 'events.jsonl'), 'utf8').split('\n').filter(line => line.includes('"event":"boot"')).length : 0
   record({ event: 'boot', args, home, boot: process.env.AUTOMAGIK_SUPERVISOR_BOOT, version: process.env.AUTOMAGIK_SUPERVISOR_VERSION,
     listenerUnknown: process.env.AUTOMAGIK_SUPERVISOR_LISTENER_UNKNOWN === '1' ? '1' : undefined })
+  if (process.env.AUTOMAGIK_SUPERVISOR_BOOT && process.env.SUPERVISOR_EXPECT_ROLLBACK) {
+    assert.equal(process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK, process.env.AUTOMAGIK_SUPERVISOR_BOOT)
+  }
   const installed = read(join(profile, 'node_modules/@automagik/bots-dsh/package.json')).version
-  if (mode === 'trial-exit' && installed === '3.160.3') {
+  const candidate = installed === '3.160.3'
+  const statePath = join(process.env.AUTOMAGIK_BOTS_HOME, 'state.json')
+  const losesTeam = candidate && ['trial-team-missing', 'trial-team-missing-recover'].includes(mode)
+  const rosterPresent = fs.existsSync(statePath) && !losesTeam
+  if (losesTeam) {
+    fs.unlinkSync(statePath)
+    write(statePath, { version: 2, revision: 1, bots: {} })
+    if (mode === 'trial-team-missing-recover') record({ event: 'team-replaced' })
+  }
+  if (candidate && mode === 'trial-team-enoent-recover') {
+    fs.unlinkSync(statePath)
+    const { install } = await import(pathToFileURL(join(process.env.SUPERVISOR_HOST_SOURCE, 'store.js')))
+    const rt = { ctx: { effect() {} }, home: process.env.AUTOMAGIK_BOTS_HOME, statePath, warn() {},
+      updateHold: { awaitingBootVerdict: true } }
+    install(rt)
+    await rt.load()
+    record({ event: 'team-read', present: rt.teamHealth().present })
+  }
+  if (['trial-empty-team-exit', 'trial-team-missing-recover', 'trial-team-enoent-recover'].includes(mode)) {
+    if (candidate && mode === 'trial-empty-team-exit') write(statePath, { version: 2, revision: 1, bots: {} })
+    else if (!candidate) {
+      const roster = fs.existsSync(statePath) ? read(statePath) : null
+      record({ event: 'roster-at-boot', installed, bots: Object.keys(roster?.bots ?? {}) })
+    }
+  }
+  if (candidate && mode === 'trial-new-format') write(statePath, { version: 3, revision: 8, note: 'edited during trial' })
+  if (candidate && mode === 'trial-dsh-edit') {
+    const path = join(profile, 'package.json')
+    const manifest = read(path)
+    manifest.dsh.profile.bundles.push('reconciled')
+    write(path, manifest)
+  }
+  if (candidate && mode === 'trial-dependency-edit') {
+    const path = join(profile, 'package.json')
+    const manifest = read(path)
+    manifest.dependencies['custom-plugin'] = '^2.0.0'
+    write(path, manifest)
+  }
+  if (candidate && mode === 'trial-lane-dependency-edit') {
+    const path = join(profile, 'package.json')
+    const manifest = read(path)
+    manifest.dependencies['@automagik/bots-dsh'] = '^3.160.3'
+    write(path, manifest)
+  }
+  if (candidate && mode === 'trial-compatibility-edit') write(join(profile, 'compatibility.json'), { version: 1, changed: true })
+  if ((mode === 'trial-exit' || mode === 'rollback-unhealthy' || mode === 'trial-empty-team-exit') && candidate) {
     process.exitCode = 19
   } else if (mode === 'bare-announces') {
     fs.writeSync(1, 'dsh web: https://example.invalid/?to')
@@ -122,14 +173,39 @@ if (action === 'plugin') {
     const url = arg('--public-url') ?? 'http://127.0.0.1:' + arg('--port') + '/'
     fs.writeSync(1, 'dsh web: ' + url + '?token=fixture-token\n')
   } else {
+    const fault = candidate && mode.startsWith('trial-') ? mode.slice('trial-'.length) : null
     const unhealthy = mode === 'pre-switch-unhealthy' || (mode === 'restored-unhealthy' && bootsAlready > 0)
-    const server = createServer((req, res) => {
-      record({ event: 'probe', url: req.url, host: req.headers.host, authorization: req.headers.authorization })
-      if (unhealthy) req.socket.destroy()
-      else res.end('ready')
+      || (mode === 'rollback-unhealthy' && bootsAlready > 1) || fault === 'port'
+    let expectedRun = process.env.AUTOMAGIK_SUPERVISOR_RUN
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url, 'http://127.0.0.1')
+      const chunks = []
+      for await (const part of req) chunks.push(part)
+      const payload = chunks.length ? JSON.parse(Buffer.concat(chunks)) : undefined
+      record({ event: 'probe', url: url.searchParams.has('token') ? '/?token=<redacted>' : req.url,
+        host: req.headers.host, authorization: req.headers.authorization, endpoint: payload?.endpoint,
+        health: payload?.payload?.health })
+      if (unhealthy) return req.socket.destroy()
+      const manifest = read(join(profile, 'package.json'))
+      const plugins = Object.keys(manifest.dependencies).filter(name => name.startsWith('@automagik/'))
+        .map(name => ({ name, loaded: true, version: read(join(profile, 'node_modules', name, 'package.json')).version }))
+      const statePathOfRun = join(home, 'update/web/state.json')
+      const update = fs.existsSync(statePathOfRun) ? read(statePathOfRun) : null
+      const live = update?.bootId === process.env.AUTOMAGIK_SUPERVISOR_BOOT ? update : null
+      const terminal = ['healthy', 'rolledBack', 'notUpdated'].includes(live?.phase)
+      if (terminal && live.runId === expectedRun) expectedRun = undefined
+      const run = live && !terminal ? live.runId : expectedRun ?? null
+      const result = healthReply({
+        url, headers: req.headers, payload, plugins, run, present: rosterPresent,
+        legacy: !fs.existsSync(join(profile, 'node_modules/@automagik/bots-dsh/src/host/update-contract.json')),
+        bots: fs.existsSync(statePath) && read(statePath).note ? 1 : 0,
+        fault: candidate && ['trial-new-format', 'trial-dsh-edit', 'trial-dependency-edit', 'trial-compatibility-edit'].includes(mode) ? 'page' : fault,
+      })
+      res.writeHead(result.status, result.headers)
+      res.end(result.body)
     })
     const announce = bound => {
-      const advertised = arg('--public-url') ?? bound
+      const advertised = process.env.SUPERVISOR_ANNOUNCED_URL ?? arg('--public-url') ?? bound
       // Split keys and values across writes on both streams.
       fs.writeSync(1, 'dsh web: ' + advertised + '?to')
       fs.writeSync(2, 'diagnostic token=stderr-')
@@ -144,7 +220,11 @@ if (action === 'plugin') {
     }
     const host = arg('--host') ?? '127.0.0.1'
     server.listen(Number(arg('--port') ?? 3080), host, () => {
-      announce('http://' + host + ':' + server.address().port + '/')
+      fs.writeFileSync(join(root, 'dsh-child-pid'), String(process.pid))
+      const url = 'http://' + host + ':' + server.address().port + '/'
+      const delay = Number(process.env.SUPERVISOR_ANNOUNCE_DELAY ?? 0)
+      if (delay) setTimeout(() => announce(url), delay).unref()
+      else announce(url)
     })
     for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
       process.on(sig, () => {

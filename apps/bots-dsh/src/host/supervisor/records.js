@@ -8,6 +8,10 @@ export const cleanVersion = value => VERSION.exec(String(value ?? '').trim())?.[
 export const RUNNING = new Set(['checking', 'downloading', 'verifying', 'staging', 'switching', 'restarting', 'health', 'rollingBack'])
 export const TERMINAL = new Set(['healthy', 'rolledBack', 'notUpdated', 'manualRecovery'])
 const ID = /^[A-Za-z0-9_-]{8,64}$/
+export const HEALTH_FAILURES = Object.freeze(['exited', 'port', 'sign-in', 'plugins', 'roster', 'page'])
+const ROLLBACK_STEPS = ['stop', 'manifest', 'rename', 'current', 'data', 'verify', 'restart', 'health']
+const ROLLBACK_TRIED = ['rename-back', 'data-restore', 'restart', 'health']
+const DATA_REASONS = ['same-format', 'unknown', 'team-in-use', 'superseded', 'snapshot-changed']
 export const REASON_CODES = Object.freeze([
   'download-failed', 'signature-invalid', 'hash-mismatch', 'not-newer', 'sequence-lower',
   'engines-dsh', 'registry-unreachable', 'listener-unknown', 'stage-failed', 'switch-refused', 'health-failed',
@@ -54,11 +58,47 @@ export function supervisorStateOf(value, bootIds) {
   return { bootId, runId }
 }
 
+function rollbackOf(value, bootIds, failedBeforeTrial) {
+  const { failed, trialFrom, trialTo, data, step, tried, previousFailed, location, starts, failures, ioFailures,
+    restoreCurrent, manifestHash, teamMissing, unpinned, why } = value ?? {}
+  const time = field => isTimestamp(field) && !hasBootId(field, bootIds)
+  const place = part => ['live', 'kept', 'missing'].includes(part?.previous)
+    && ['live', 'staging', 'missing'].includes(part?.candidate)
+  const validFailure = HEALTH_FAILURES.includes(failed) || (failed === undefined && failedBeforeTrial && step === 'manifest')
+  if (!validFailure || !time(trialFrom) || (trialTo !== undefined && !time(trialTo))
+    || (step !== undefined && !ROLLBACK_STEPS.includes(step))
+    || (tried !== undefined && (!Array.isArray(tried) || !tried.every(action => ROLLBACK_TRIED.includes(action))))
+    || (previousFailed !== undefined && !HEALTH_FAILURES.includes(previousFailed))
+    || (location !== undefined && (!place(location?.modules) || !place(location?.lockfile)))
+    || ![starts, failures, ioFailures].every(count => count === undefined || isSequence(count))
+    || ![restoreCurrent, teamMissing, unpinned].every(flag => flag === undefined || typeof flag === 'boolean')
+    || (manifestHash !== undefined && (typeof manifestHash !== 'string' || !/^[0-9a-f]{64}$/.test(manifestHash)))
+    || (why !== undefined && why !== 'restart-budget')) return null
+  if (data !== undefined && data !== null && !(data?.restored === true && (data.why === undefined || data.why === 'team-lost'))
+    && !(data?.restored === false && DATA_REASONS.includes(data.why))) return null
+  if (data?.trialKept !== undefined && (typeof data.trialKept !== 'boolean' || (data.trialKept && !data.restored))) return null
+  return {
+    trialFrom, ...(failed === undefined ? {} : { failed }),
+    ...Object.fromEntries(Object.entries({ trialTo, step, tried, previousFailed, starts, failures, ioFailures, teamMissing, unpinned, why })
+      .filter(([, field]) => field !== undefined)),
+    ...(data === undefined ? {} : { data: data === null ? null : {
+      restored: data.restored, ...(data.why === undefined ? {} : { why: data.why }),
+      ...(data.trialKept === undefined ? {} : { trialKept: data.trialKept }),
+    } }),
+    ...(location === undefined ? {} : { location: Object.fromEntries(['modules', 'lockfile'].map(file => [
+      file, { previous: location[file].previous, candidate: location[file].candidate },
+    ])) }),
+  }
+}
+
 export function runOf(value, bootIds) {
   if (value?.version !== 1) return null
-  const { runId, bootId, phase, from, to, reason, startedAt, updatedAt, requestId } = value
+  const { runId, bootId, phase, from, to, reason, startedAt, updatedAt, requestId, detail } = value
+  const rollback = value.rollback === undefined ? undefined
+    : rollbackOf(value.rollback, bootIds, phase === 'manualRecovery' && reason === 'rollback-failed')
   if (!isId(bootId) || !isId(runId) || hasBootId(runId, bootIds)
     || (requestId !== undefined && (!isId(requestId) || hasBootId(requestId, bootIds)))
+    || rollback === null || (detail !== undefined && (detail !== 'previous-unsupported' || reason !== 'profile-invalid'))
     || (!RUNNING.has(phase) && !TERMINAL.has(phase))
     || (from !== null && !publicVersion(from, bootIds)) || (to !== null && !publicVersion(to, bootIds))
     || (reason !== null && (!REASON_CODES.includes(reason) || hasBootId(reason, bootIds)))
@@ -66,5 +106,7 @@ export function runOf(value, bootIds) {
     || !isTimestamp(updatedAt) || hasBootId(updatedAt, bootIds)) return null
   return { version: 1, runId, bootId, phase, from, to, reason, startedAt, updatedAt,
     ...(requestId === undefined ? {} : { requestId }),
+    ...(detail === undefined ? {} : { detail }),
+    ...(rollback === undefined ? {} : { rollback }),
   }
 }

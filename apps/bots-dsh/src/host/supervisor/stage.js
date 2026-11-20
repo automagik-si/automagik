@@ -146,7 +146,7 @@ function copyInputs(profileDir, staging) {
   syncDirectory(staging.root)
 }
 
-function equalFile(a, b, file) {
+export function equalFile(a, b, file) {
   const from = regularBytes(join(a, file), { optional: OPTIONAL_INPUTS.has(file) })
   const to = regularBytes(join(b, file), { optional: OPTIONAL_INPUTS.has(file) })
   return from === undefined ? to === undefined : to !== undefined && from.equals(to)

@@ -293,9 +293,11 @@ If the DSH profile lock times out, confirm its writer has exited before removing
 |---|---|
 | `supervisor/launcher.sh`, `supervisor/current/`, `supervisor/kept/` | The fixed launcher and the two self-checked code copies. If a rotation displaces the executing copy, it stays in `supervisor/running/` until that supervisor exits. |
 | `update.lock`, `supervisor.json` | Supervisor ownership, the current boot ID and the current or most recent run ID |
+| `listener.json` | The current boot's listener eligibility, unknown until DSH announces and the supervisor verifies it |
 | `request.json`, `check.json` | A pending one-use request and the most recent Settings check |
 | `state.json`, `current.json` | Update progress and verdict, and the live version, kept version and last accepted lane sequence |
 | `stage-<runId>/`, `versions/<version>/` | Temporary install and source files, and the previous installer files and data snapshot |
+| `rollback-data/<runId>/` | The kept team snapshot and any trial team replaced by rollback |
 
 Read `state.json` with `jq . "$DSH_HOME/update/web/state.json"` or a text viewer. Its
 `phase`, `reason`, `from`, `to` and `updatedAt` show the last step and verdict.
@@ -303,53 +305,114 @@ Read `state.json` with `jq . "$DSH_HOME/update/web/state.json"` or a text viewer
 `supervisor.json`. During a switch, `journal.keep` identifies the recovery directory,
 `journal.done` lists completed steps and `journal.pending` names the step that may have been
 interrupted. `journal.commitCurrent` records that the candidate passed health and recovery can
-finish committing `current.json`. `healthy` means the new child's local HTTP listener responded
-and the installed versions matched. The probe uses the host and port from the DSH command,
-with defaults of `127.0.0.1` and `3080`. Using `--public-url` requires a fixed local port.
-With `--port 0 --public-url` the check refuses the update with `listener-unknown` before stopping
-work. If a request reaches the supervisor with those flags, it records `notUpdated` with
-`listener-unknown` before changing the installation. For other `notUpdated` verdicts, the
-previous installation answered its own local health check. If a verdict cannot be written
-durably, the supervisor exits with an error without stopping DSH itself; the service manager
-then stops and restarts the unit, and the next supervised start recovers from the last durable
-state.
+finish committing `current.json`. `healthy` means the child passed these checks while work was held.
+
+1. The child announces its listener and local sign-in returns a browser session cookie. The
+   supervisor exchanges the in-memory launch token over direct HTTP and uses the cookie for the
+   remaining checks. It uses the local listener's host and port, never follows redirects, and
+   records only failure codes. With no public URL, the announcement must match the command. With
+   `--public-url`, the supervisor needs a fixed port and the local listener must return DSH's
+   unauthenticated response before it receives credentials. The response identifies DSH, while the
+   port still comes from the command. `--tls-cert` and `--port 0 --public-url` give
+   `listener-unknown` before the click.
+2. The owner's status route confirms the expected plugin versions are active and admission is
+   closed for this run. The version comes from the manifest resolved by the loader entry when it
+   first reports active. Avoid changing plugins through DSH's own plugin manager during the trial.
+3. The roster's health form checks the saved team without bootstrapping a new Bot, opening a
+   Session or making a model call. If a team was snapshotted, the file on disk must have an integer
+   revision at least as high as the snapshot's. The normal startup migration may update the team
+   format and retitle existing Sessions.
+4. The authenticated page contains the frontend mount element and inline module loader. Health
+   checks the frontend module, the blocking bootstrap scripts listed in the DSH boot graph, and
+   the application batch containing Bots. The JavaScript responses must complete and contain data.
+
+The supervisor allows up to 60 seconds for sign-in and plugin status, then a further 60 seconds
+for the roster and page. The previous version also passes health before it releases stopped work
+after a failed relink or a refused switch. An older live Bots release without the update contract
+gives work back with `notUpdated` and `profile-invalid` before any download. Upgrade that release
+once by hand. A verdict that cannot be written durably makes the supervisor exit with an error.
+The service manager stops and restarts the unit, and the next supervised start uses the last
+durable state. If the directory fsync fails immediately after the verdict file is renamed, a
+power loss can erase a verdict that the child already saw. The next start resumes from the journal.
+
+### Automatic rollback
+
+If the candidate fails health, the supervisor records `rollingBack` and stops the trial. It checks
+every reverse move before touching the profile. If a candidate commit was interrupted, it restores
+the previous `current.json`, then reverses the journaled renames and verifies the restored profile.
+It uses the kept module tree, lockfile and archives. This needs no external connection, registry or
+dependency store. If the service stops during trial health, the next start checks the candidate
+again using the already linked profile if its saved team and installer inputs match. The supervisor
+checks installer inputs again before committing. With a legacy journal missing the original plugin
+versions, the supervisor verifies the manifest and lockfile by content and checks the active
+plugins without version pins. A previous version without the update contract cannot be started
+for rollback health.
+
+Rollback restores a missing team file or a replacement that fails the snapshot revision check.
+Malformed data without evidence of loss is left in place. For a team that passes the revision
+check, a format newer than the previous version can read can require restoration.
+The supervisor takes the team's writer lock and checks recorded hashes before writing. The original snapshot and any
+replaced trial team are retained in `rollback-data/<runId>/`, even after a later update. If a team
+change was saved during the trial window and the snapshot replaced the team, the trial copy
+contains that change. Keep the directory as long as you need those files. Sessions, memory,
+settings and keys remain available.
+
+The previous child boots with work held and must pass the same health checks. A successful
+`rolledBack` verdict records the failed trial check, trial times and team restore outcome. The
+previous version and release sequence remain current. Interrupted launches of the previous child
+have a budget of three attempts. An I/O error during a reverse move leaves rollback in progress
+for the next supervised start to replay. A second such error or an observed previous-child failure
+ends in `manualRecovery`,
+with held work still on disk. The supervisor records the last step and the locations of
+`node_modules/` and `pnpm-lock.yaml` and stops.
 
 ### Recover an unchanged or restored profile after `manualRecovery`
 
 Stop the unit with your usual host tools and confirm the supervisor and DSH have exited.
-If `reason` is `health-failed` and there is no journal, the failure occurred before any
-installer-owned files moved. If the journal has `undo: true`, an empty `done` list and
-`pending: null`, the original files are already back in place. Confirm the previous
-plugin versions on disk and inspect the child logs for the listener or startup failure.
-After correcting the cause, set `state.json` aside, start the unit with your usual host
-tools and verify the previous profile answers locally.
+If there is no journal, no installer-owned files moved. If the journal has `undo: true`, an empty
+`done` list and `pending: null`, the original files are already in the live profile. Inspect the
+logs and `rollback.previousFailed` in `state.json`. Check the team snapshot and any pending restore
+as described below. After correcting the failure, set `state.json` aside, start the unit and verify
+the previous profile answers locally.
 
 ### Rename back after `manualRecovery`
 
-Delivery 6 will automate rollback. If a candidate is installed or the switch or undo
-is incomplete, stop the unit with your usual host tools and confirm the supervisor and
-DSH have exited. Read `state.json` and use the directory named by `journal.keep`. If the journal is incomplete, use `done`, `pending` and the files on disk to
-locate each original before moving anything. Use the previous host backup if the kept originals
-are missing.
+Stop the unit and confirm DSH and the supervisor have exited before moving files. Read
+`state.json` for `rollback.step`, `rollback.location`, and the folders named by `journal.keep` and
+`stage-<runId>`. Use `done`, `pending` and the actual files to identify each original if the
+journal was interrupted. If the kept originals are missing, use the previous host backup.
 
-1. Set aside the trial's `node_modules/` and `pnpm-lock.yaml` in a new directory beside the
-   profile. Rename the kept `node_modules/` and `pnpm-lock.yaml` back into the profile.
-2. Rename the kept `vendor/*.tgz` back into the live profile's `vendor/automagik-update/`.
-   The old lockfile may also refer to archives that are already in place. Leave those in place.
-3. In the live `package.json`, replace only the dependency keys listed in the kept
-   `entries.json` under `dependencies`. Write the merged file through a temporary sibling,
-   then rename it over the live file.
-4. Read the kept `data.json`. If the trial wrote a higher format number at the Bots state
-   path recorded there, set that trial file aside and restore a copy of `data/bots-state.json`
-   at that path. This can undo a team change made during the trial. A file without a format
-   field is format 0.
-5. Set `state.json` aside with the trial files so the supervisor can boot again. If
-   `current.json` lists the trial as live, set its `live` and `kept` fields to `null` while
-   retaining `lastSequence`. Start the unit with your usual host tools and verify that the web
-   profile and the previous plugin versions are serving.
+```sh
+jq '{phase, reason, rollback, keep: .journal.keep, done: .journal.done, pending: .journal.pending}' "$DSH_HOME/update/web/state.json"
+```
 
-A rename-back uses the saved module tree and tarballs, so it needs no dependency install. The
-runtime, profile settings, sessions and model credentials stay in their existing locations.
+If rollback stopped at `manifest` with no reverse renames, the candidate tree is still live.
+Reconcile the trial-time plugin or installer-input change before restoring the old lockfile and
+modules. Use DSH's plugin manager for the plugin change. Compare against `stage-<runId>/source`
+for the source manifest and installer inputs before following the steps below.
+
+1. For each of `node_modules/` and `pnpm-lock.yaml`, leave an already restored original in place.
+   If the candidate occupies its live path, set that candidate file or tree aside. Rename the kept
+   original back into the profile.
+2. Rename the kept `vendor/*.tgz` into the live profile's `vendor/automagik-update/`. Leave the
+   archives referenced by the original lockfile that are already in place.
+3. Use the journaled `stage-<runId>/source/rollback.json` if available and its digest matches the
+   rollback record. Otherwise merge only the lane dependency keys in kept `entries.json` and
+   verify the result against `stage-<runId>/source/package.json`. Preserve DSH's profile metadata.
+   Write the verified manifest through a temporary sibling and rename it into place.
+4. If `journal.restore` exists and `journal.restored` is absent, verify that the live team's SHA-256
+   equals `trialHash` and the snapshot's SHA-256 equals `snapshotHash`. A null `trialHash` means the
+   recorded trial file was absent. Preserve any trial bytes before copying the matching snapshot
+   to the recorded team path. If the hashes differ or a restore already completed, leave the
+   current team in place and retain the saved copies.
+5. If `current.json` names the trial, restore the recorded `priorCurrent` or remove the file if
+   the record says it was originally absent. Use the previous backup if the journal lacks this
+   information. Set `state.json` aside with the trial files, start the unit and verify the
+   previous version locally.
+
+A 5b supervisor copy refuses an in-progress delivery 6 rollback. The fixed launcher allows its
+bare fallback after a durable `rolledBack` verdict when both copies are broken. For an unfinished
+rollback, restore a working delivery 6 supervisor copy or follow the manual steps above.
 
 ## Rollback
 

@@ -5,12 +5,6 @@ import { createHash } from 'node:crypto'
 import { constants, copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
 
-// The saved team's format. A file may carry an older version this build still reads and
-// migrates (the formats before the stamp count as LEGACY_VERSION); any other value means a
-// newer Omni wrote it, and this one must not touch it.
-const STATE_VERSION = 2
-const LEGACY_VERSION = 0
-const COMPATIBLE_VERSIONS = [LEGACY_VERSION, 1, STATE_VERSION]
 import { join } from 'node:path'
 import { piAiClaudeOf } from './claude-models.js'
 import { LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
@@ -19,6 +13,14 @@ import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
+import updateContract from './update-contract.json' with { type: 'json' }
+
+// The saved team's format. A file may carry an older version this build still reads and
+// migrates (the formats before the stamp count as LEGACY_VERSION); any other value means a
+// newer Omni wrote it, and this one must not touch it.
+const COMPATIBLE_VERSIONS = updateContract.stateFormats
+const STATE_VERSION = 2
+const LEGACY_VERSION = 0
 
 // A table read that sees only the keys the table holds itself. Ids that come from
 // outside (a request body, a tool argument, a name a model gives) go through this, so
@@ -34,6 +36,10 @@ export function install(rt) {
   let loaded = null
   // Whether `state` is the team as its file has it (teamLoaded).
   let teamRead = false
+  let teamPresentAtLoad = null
+  // Preserve ENOENT as evidence until the supervisor decides the trial.
+  const missingTeamHeld = () => teamPresentAtLoad === false && !!process.env.AUTOMAGIK_SUPERVISOR_RUN
+    && rt.updateHold?.awaitingBootVerdict !== false
   let writing = Promise.resolve()
   const { warn } = rt
 
@@ -111,7 +117,8 @@ export function install(rt) {
   }
   const readOnly = () => {
     if (stuck !== undefined) return `The Bot team file ${statePath} could not be read (${stuck}). Omni does not change it; fix or move the file and reload.`
-    if (holder === undefined) return undefined
+    if (holder === undefined) return missingTeamHeld()
+      ? 'The Bot team is read-only while the update is being checked.' : undefined
     const where = holder.pid ? `pid ${holder.pid}${holder.host ? ` on ${holder.host}` : ''}` : 'unknown process'
     return `The Bot team in ${home} is open in another dsh (Web or Desktop, ${where}). This window shows the team but cannot change it; close the other one and reload.`
   }
@@ -448,7 +455,9 @@ export function install(rt) {
   const load = () => loaded ??= (async () => {
     claimLock()
     if (holder !== undefined) warn('ds-bot: %s', readOnly())
-    const { migrated, stale } = adopt(readFileState())
+    const parsed = readFileState()
+    teamPresentAtLoad = parsed !== undefined ? true : stuck === undefined && !aside ? false : null
+    const { migrated, stale } = adopt(parsed)
     if (holder !== undefined) return
     // A file set aside just now stays where it is: the person's bytes were copied, and the
     // fresh team reaches the disk on the next real save rather than within this read.
@@ -581,6 +590,7 @@ export function install(rt) {
     return dropped
   }
   rt.saveCopy = (change, { beforeCommit, afterWrite } = {}) => {
+    if (missingTeamHeld()) return Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`))
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
     refreshShellHolds(state.bots)
     indexSessions()
@@ -627,7 +637,7 @@ export function install(rt) {
     refreshShellHolds(state.bots)
     indexSessions()
     // A reading host keeps the file's revision, so its window does not skip the next change.
-    if (!writable()) return required ? Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`)) : writing
+    if (missingTeamHeld() || !writable()) return required ? Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`)) : writing
     return writeSnapshot(() => {
       refreshShellHolds(state.bots)
       rt.sweepAuto?.()
@@ -642,6 +652,10 @@ export function install(rt) {
   const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, beforeCommit, afterWrite } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
+      if (missingTeamHeld()) {
+        if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
+        return
+      }
       if (stuck !== undefined || holder !== undefined) {
         if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
         warnReadOnly()
@@ -924,7 +938,11 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, teamLoaded, teamCurrent, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
+    state, load, save, refresh, readOnly, teamLoaded,
+    // The first read distinguishes an absent roster from a saved empty team.
+    teamHealth: () => teamPresentAtLoad !== null && teamRead && stuck === undefined && !aside
+      ? { present: teamPresentAtLoad, revision: state.revision, bots: Object.keys(state.bots).length } : null,
+    teamCurrent, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,
