@@ -252,3 +252,156 @@ test('the host maps each Session\'s workers onto its Bot and keeps only what the
   assert.deepEqual(nativeWorkersView(rt, undefined), {})
   assert.deepEqual(nativeWorkersView(rt, { nativeWorkers: () => { throw new Error('gone') } }), {})
 })
+
+test('opening a worker focuses its dialog and Escape inside returns focus to the opener', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document, window } = env
+  const opener = row(document, RUNNING.id)
+  await act(() => opener.click())
+  const dialog = pop(document)
+  assert.equal(dialog.tabIndex, -1)
+  assert.equal(document.activeElement, dialog)
+  const close = dialog.querySelector('button')
+  close.focus()
+  await act(() => close.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, opener)
+})
+
+test('Close returns focus to the worker opener', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document } = env
+  const opener = row(document, DONE.id)
+  await act(() => opener.click())
+  await act(() => pop(document).querySelector('button').click())
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, opener)
+})
+
+test('Escape from an outside input closes the worker dialog and preserves input focus', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document, window } = env
+  const input = document.createElement('input')
+  document.body.append(input)
+  await act(() => row(document, RUNNING.id).click())
+  input.focus()
+  await act(() => input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, input)
+})
+
+test('an outside press closes the worker dialog and preserves focus taken by an input', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document, window } = env
+  const input = document.createElement('input')
+  document.body.append(input)
+  await act(() => row(document, RUNNING.id).click())
+  await act(() => {
+    input.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true }))
+    input.focus() // jsdom does not perform the browser's default focus action.
+  })
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, input)
+})
+
+test('pressing a non-focusable div returns focus to the worker opener', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document, window } = env
+  const opener = row(document, RUNNING.id)
+  await act(() => opener.click())
+  await act(() => document.querySelector('#elsewhere').dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true })))
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, opener)
+})
+
+test('activating another focused worker button focuses its new dialog', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document } = env
+  await act(() => row(document, RUNNING.id).click())
+  const firstDialog = pop(document)
+  const second = row(document, DONE.id)
+  second.focus()
+  await act(() => second.click()) // Keyboard activation produces a click without a pointerdown.
+  assert.notEqual(pop(document), firstDialog)
+  assert.equal(pop(document).querySelector('.bt-worker-title').textContent, DONE.title)
+  assert.equal(document.activeElement, pop(document))
+})
+
+test('a live step update keeps focus on the open worker dialog’s Close button', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document } = env
+  await act(() => row(document, RUNNING.id).click())
+  const close = pop(document).querySelector('button')
+  close.focus()
+  const updated = { ...RUNNING, steps: [...RUNNING.steps, { id: 'a3', title: 'Check the log', state: 'running' }] }
+  await render(env, { workers: [FAILED, DONE, updated] })
+  assert.equal(pop(document).querySelectorAll('[role="listitem"]').length, 3)
+  assert.equal(document.activeElement, close)
+})
+
+test('removing a focused worker dialog sends focus to the first remaining worker button', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document } = env
+  await act(() => row(document, RUNNING.id).click())
+  pop(document).querySelector('button').focus()
+  await render(env, { workers: [FAILED, DONE] })
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, row(document, DONE.id))
+})
+
+test('removing an open worker preserves focus on an outside control', async (t) => {
+  const env = mount(t)
+  await render(env)
+  const { document } = env
+  const input = document.createElement('input')
+  document.body.append(input)
+  await act(() => row(document, RUNNING.id).click())
+  input.focus()
+  await render(env, { workers: [FAILED, DONE] })
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, input)
+})
+
+test('removing the last worker closes its focused dialog with no worker to receive focus', async (t) => {
+  const env = mount(t)
+  await render(env, { workers: [RUNNING] })
+  const { document } = env
+  await act(() => row(document, RUNNING.id).click())
+  assert.equal(document.activeElement, pop(document))
+  await render(env, { workers: [] })
+  assert.equal(pop(document), null)
+  assert.equal(document.activeElement, document.body)
+})
+
+const pipWorkerIds = (chat, room) => nativeWorkersView({
+  chatOwners: new Map([['chat', bot.id]]),
+  groupOwners: new Map([['room', { botId: bot.id }]]),
+}, { nativeWorkers: () => ({ chat, room }) }).pip.map(worker => worker.id)
+
+test('the host interleaves workers from two Sessions by time, keeping their order at equal times', () => {
+  const chat = [{ id: 'c1', at: 1 }, { id: 'c2', at: 3 }, { id: 'c3' }]
+  const room = [{ id: 'r1', at: 2 }, { id: 'r2', at: 3 }, { id: 'r3', at: 4 }]
+  assert.deepEqual(pipWorkerIds(chat, room), ['c1', 'r1', 'c2', 'c3', 'r2', 'r3'])
+})
+
+test('the host keeps the twelve newest workers across Sessions', () => {
+  const chat = Array.from({ length: 7 }, (_, i) => ({ id: `c${i}`, at: 2 * i }))
+  const room = Array.from({ length: 7 }, (_, i) => ({ id: `r${i}`, at: 2 * i + 1 }))
+  assert.deepEqual(pipWorkerIds(chat, room), ['c1', 'r1', 'c2', 'r2', 'c3', 'r3', 'c4', 'r4', 'c5', 'r5', 'c6', 'r6'])
+})
+
+test('a leading undated worker in the second Session sorts first and drops out at the cap', () => {
+  const chat = Array.from({ length: 6 }, (_, i) => ({ id: `c${i}`, at: 2 * i + 1 }))
+  const room = [{ id: 'undated' }, ...Array.from({ length: 5 }, (_, i) => ({ id: `r${i}`, at: 2 * i + 2 }))]
+  const order = ['c0', 'r0', 'c1', 'r1', 'c2', 'r2', 'c3', 'r3', 'c4', 'r4', 'c5']
+  assert.deepEqual(pipWorkerIds(chat, room), ['undated', ...order])
+  assert.deepEqual(pipWorkerIds(chat, [...room, { id: 'r5', at: 12 }]), [...order, 'r5'])
+})

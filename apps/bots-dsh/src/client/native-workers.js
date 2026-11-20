@@ -5,7 +5,7 @@
 // BotThreads): a spinner while one runs, a green or red mark once it ended, its title and age,
 // and the line its result opens with. A worker opens a popover with its status, result and steps.
 // Nothing here starts, stops or answers a worker.
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createElement as h, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { t } from './i18n.js'
 
@@ -63,20 +63,37 @@ const ordered = workers => workers.map((worker, index) => ({ worker, index }))
   .sort((a, b) => Number(b.worker.state === 'running') - Number(a.worker.state === 'running') || b.index - a.index)
   .map(entry => entry.worker)
 
-function WorkerPopover({ worker, anchor, age, onClose }) {
+function WorkerPopover({ worker, anchor, age, onClose, focusedOnUnmount }) {
   const pop = useRef(null)
   const [place, setPlace] = useState(() => ({ left: 340, top: 96 }))
+  const closeAndFocus = useCallback(() => {
+    onClose()
+    if (anchor?.isConnected) anchor.focus()
+  }, [anchor, onClose])
   useLayoutEffect(() => {
     const rect = anchor?.getBoundingClientRect?.()
     const height = pop.current?.getBoundingClientRect?.().height ?? 0
     const viewport = globalThis.innerHeight ?? 800
     if (rect && rect.width > 0) setPlace({ left: Math.round(rect.right + 12), top: Math.max(16, Math.min(Math.round(rect.top), viewport - Math.max(height, 120) - 16)) })
   }, [anchor, worker.steps?.length])
+  useLayoutEffect(() => {
+    const dialog = pop.current
+    dialog.focus()
+    // Read focus before React removes the dialog so a live removal can restore it.
+    return () => { focusedOnUnmount.current = dialog.contains(document.activeElement) }
+  }, [focusedOnUnmount])
   useEffect(() => {
-    const onKey = (event) => { if (event.key === 'Escape') onClose() }
+    const onKey = (event) => {
+      if (event.key !== 'Escape') return
+      if (pop.current?.contains(event.target) || pop.current?.contains(document.activeElement)) closeAndFocus()
+      else onClose()
+    }
     const onDown = (event) => {
       if (pop.current?.contains(event.target) || anchor?.contains?.(event.target)) return
       onClose()
+      setTimeout(() => {
+        if (anchor?.isConnected && (document.activeElement === document.body || document.activeElement === null)) anchor.focus()
+      }, 0)
     }
     document.addEventListener('keydown', onKey)
     document.addEventListener('pointerdown', onDown, true)
@@ -84,9 +101,9 @@ function WorkerPopover({ worker, anchor, age, onClose }) {
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('pointerdown', onDown, true)
     }
-  }, [anchor, onClose])
+  }, [anchor, onClose, closeAndFocus])
   const steps = worker.steps ?? []
-  return createPortal(h('div', { ref: pop, className: 'bt-menu bt-worker-pop', role: 'dialog', 'aria-label': t('Worker details'), style: { left: place.left, top: place.top } },
+  return createPortal(h('div', { ref: pop, className: 'bt-menu bt-worker-pop', role: 'dialog', tabIndex: -1, 'aria-label': t('Worker details'), style: { left: place.left, top: place.top } },
     h('div', { className: 'bt-worker-head' },
       h('span', { className: 'bt-worker-title', title: worker.title }, worker.title),
       h('span', { className: 'bt-worker-badge', 'data-state': worker.state }, stateLabel(worker.state)),
@@ -103,7 +120,7 @@ function WorkerPopover({ worker, anchor, age, onClose }) {
           h('span', { className: 'bt-menu-label' }, step.title),
           h('span', { className: 'bt-menu-hint' }, [step.tool, stateLabel(step.state)].filter(Boolean).join(' · '))))),
     h('div', { className: 'bt-menu-sep' }),
-    h('button', { type: 'button', onClick: onClose }, t('Close'))), document.body)
+    h('button', { type: 'button', onClick: closeAndFocus }, t('Close'))), document.body)
 }
 
 /**
@@ -115,15 +132,23 @@ export function NativeWorkers({ bot, useWork, wide, age }) {
   const [openId, setOpenId] = useState(null)
   const [all, setAll] = useState(false)
   const anchors = useRef(new Map())
+  const group = useRef(null)
+  const focusedOnUnmount = useRef(false)
   const workers = JSON.parse(key)
   const open = openId === null ? undefined : workers.find(worker => worker.id === openId)
-  useEffect(() => { if (openId !== null && open === undefined) setOpenId(null) }, [openId, open])
+  useLayoutEffect(() => {
+    if (openId !== null && open === undefined) {
+      if (focusedOnUnmount.current) group.current?.querySelector('button[data-worker]')?.focus()
+      setOpenId(null)
+    }
+    focusedOnUnmount.current = false
+  })
+  const close = useCallback(() => setOpenId(null), [])
   if (!wide || workers.length === 0) return null
   const sorted = ordered(workers)
   const shown = all || sorted.length <= WORKERS_SHOWN + 1 ? sorted : sorted.slice(0, WORKERS_SHOWN)
   const more = sorted.length - shown.length
-  const close = () => setOpenId(null)
-  return h('div', { className: 'bt-threads bt-workers', role: 'group', 'aria-label': t('Subagents {name} started', { name: bot.name }) },
+  return h('div', { ref: group, className: 'bt-threads bt-workers', role: 'group', 'aria-label': t('Subagents {name} started', { name: bot.name }) },
     shown.map((worker) => {
       const line = workerLine(worker)
       const when = worker.at === undefined ? '' : age(worker.at)
@@ -141,5 +166,5 @@ export function NativeWorkers({ bot, useWork, wide, age }) {
         h('span', { className: 'bt-worker-line' }, line))
     }),
     more > 0 ? h('button', { type: 'button', className: 'bt-thread bt-thread-more', onClick: () => setAll(true) }, t('+{n} more', { n: more })) : null,
-    open ? h(WorkerPopover, { worker: open, anchor: anchors.current.get(open.id), age: open.at === undefined ? '' : age(open.at), onClose: close }) : null)
+    open ? h(WorkerPopover, { key: openId, worker: open, anchor: anchors.current.get(open.id), age: open.at === undefined ? '' : age(open.at), onClose: close, focusedOnUnmount }) : null)
 }
