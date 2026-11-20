@@ -13,6 +13,7 @@ class ChatUnsupported : IllegalStateException(Chat.UPDATE_LINK)
  */
 internal interface ChatLink : Closeable {
     val dshWrite: Boolean
+    val isClosed: Boolean get() = false
     val manage: Set<String> get() = emptySet()
     suspend fun list(): List<Chat.Terminal>
     suspend fun subscribe(terminal: String, after: String?, event: (JSONObject) -> Unit, closed: (String) -> Unit): Int
@@ -29,11 +30,15 @@ internal interface ChatLink : Closeable {
     suspend fun schedulePause(terminal: String, id: String, rev: String) = ChatClient.refusedSchedules()
     suspend fun scheduleResume(terminal: String, id: String, rev: String) = ChatClient.refusedSchedules()
     suspend fun scheduleRename(terminal: String, id: String, rev: String, title: String) = ChatClient.refusedSchedules()
+    suspend fun settingsRead(terminal: String) = ChatClient.refusedSettings()
+    suspend fun settingsName(terminal: String, rev: String, name: String) = ChatClient.refusedSettings()
+    suspend fun settingsModel(terminal: String, rev: String, model: String) = ChatClient.refusedSettings()
 }
 
 /** The production [ChatLink]: [ChatClient] over Pocket Link's chat route, straight through. */
 internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
     override val dshWrite get() = client.dshWrite
+    override val isClosed get() = client.isClosed
     override val manage get() = client.manage
     override suspend fun list() = client.list()
     override suspend fun subscribe(terminal: String, after: String?, event: (JSONObject) -> Unit, closed: (String) -> Unit) =
@@ -52,6 +57,9 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
     override suspend fun scheduleResume(terminal: String, id: String, rev: String) = client.scheduleResume(terminal, id, rev)
     override suspend fun scheduleRename(terminal: String, id: String, rev: String, title: String) =
         client.scheduleRename(terminal, id, rev, title)
+    override suspend fun settingsRead(terminal: String) = client.settingsRead(terminal)
+    override suspend fun settingsName(terminal: String, rev: String, name: String) = client.settingsName(terminal, rev, name)
+    override suspend fun settingsModel(terminal: String, rev: String, model: String) = client.settingsModel(terminal, rev, model)
     override fun close() = client.close()
 }
 
@@ -63,9 +71,12 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
  * which the phone never sets. Held messages never exist on a DSH chat, so sendHeld and cancelHeld stay refused.
  */
 class ChatClient(private val core: CoreClient, val dshWrite: Boolean = false, val manage: Set<String> = emptySet()) : Closeable {
+    internal val isClosed get() = core.isClosed
+
     companion object {
         val MEMORY = listOf("memory.read", "memory.edit", "memory.add")
         val SCHEDULES = listOf("schedule.list", "schedule.pause", "schedule.resume", "schedule.rename")
+        val SETTINGS = listOf("settings.read", "settings.name", "settings.model")
 
         /** The bridge's answer to a write the phone never sends: the same shape dsh-source.mjs `refusedDsh` gives. */
         fun refusedReadOnly(id: String? = null): JSONObject = JSONObject().put("state", "refused").put("ok", false)
@@ -73,16 +84,21 @@ class ChatClient(private val core: CoreClient, val dshWrite: Boolean = false, va
 
         internal fun refusedMemory() = JSONObject().put("ok", false).put("state", "refused").put("reason", "read-only")
         internal fun refusedSchedules() = refusedMemory()
+        internal fun refusedSettings() = refusedMemory()
 
         /** Pocket requires each opted-in family to grant its read method so it can check an unconfirmed write. */
         suspend fun start(core: CoreClient, manage: List<String> = emptyList()): ChatClient {
-            val requested = (MEMORY + SCHEDULES).filter { it in manage }
+            val requested = (MEMORY + SCHEDULES + SETTINGS).filter { it in manage }
             val hello = core.start(requested.takeIf { it.isNotEmpty() }?.let { JSONArray(it) })
             if (hello.optInt("chat") != 1) { core.close(); throw ChatUnsupported() }
             val answered = hello.optJSONArray("manage")?.let { a -> (0 until a.length()).map { a.opt(it) } }.orEmpty()
             val granted = if (answered.all { it is String }) requested.filter { it in answered }.toSet() else emptySet()
             val usable = granted.filter { method ->
-                if (method in MEMORY) "memory.read" in granted else "schedule.list" in granted
+                when (method) {
+                    in MEMORY -> "memory.read" in granted
+                    in SCHEDULES -> "schedule.list" in granted
+                    else -> "settings.read" in granted
+                }
             }.toSet()
             return ChatClient(core, dshWrite = hello.opt("dshWrite") == true, manage = usable)
         }
@@ -166,6 +182,16 @@ class ChatClient(private val core: CoreClient, val dshWrite: Boolean = false, va
         schedule("schedule.resume", terminal) { put("id", id).put("rev", rev) }
     suspend fun scheduleRename(terminal: String, id: String, rev: String, title: String) =
         schedule("schedule.rename", terminal) { put("id", id).put("rev", rev).put("title", title) }
+
+    private suspend fun settings(method: String, terminal: String, fields: JSONObject.() -> Unit): JSONObject =
+        if ("settings.read" !in manage || method !in manage || !ChatSettings.isBot(terminal)) refusedSettings()
+        else core.call(method, params(terminal).apply(fields))
+
+    suspend fun settingsRead(terminal: String) = settings("settings.read", terminal) { }
+    suspend fun settingsName(terminal: String, rev: String, name: String) =
+        settings("settings.name", terminal) { put("rev", rev).put("name", name) }
+    suspend fun settingsModel(terminal: String, rev: String, model: String) =
+        settings("settings.model", terminal) { put("rev", rev).put("model", model) }
 
     override fun close() = core.close()
 }
