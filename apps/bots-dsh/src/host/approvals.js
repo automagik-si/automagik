@@ -17,7 +17,7 @@ const CLIENT_KINDS = new Set(['web', 'desktop', 'im', 'pocket', 'relay', 'sdk', 
 // chat's or a group's transcript, a memory. A Claude Code session reaches them through its MCP
 // bridge (`mcp__dsh__<name>`), which asks for every call; those asks are answered here, so the
 // person is asked only about what changes something.
-export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall'])
+export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall', 'show_settings', 'propose_bot_change'])
 export const teamToolOf = name => String(name ?? '').replace(/^mcp__dsh__/, '')
 
 export function answerableOwner(rt, owner) {
