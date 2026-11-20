@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 import * as yaml from 'yaml'
 import { hasReadScopeAdapters, mergePatch, replaceProfilePatch } from '../apps/desktop/src/profile-patch.mjs'
-import { pinStore, profileDirOf, PROFILE, seedProfile } from './lib.mjs'
+import { pinStore, profileDirOf, PROFILE, seedProfile, workspaceFileStat } from './lib.mjs'
 import { ADAPTER, basePlugins, FOLLOW_STATUS, installedPlugins, LEGACY_PLUGINS, markSeed, ownership, packageHash, profileState, compareRelease, validBuild, vendorRelease, writeJson, readJson } from './profile-state.mjs'
 import { materializePlugins, PLUGINS, pruneImageArchives } from './plugin-payload.mjs'
 import { mergeImageProfile, readLock } from './profile-lock.mjs'
@@ -119,7 +119,7 @@ function record(dshHome, target, build, result) {
   try {
     writeJson(join(dshHome, FOLLOW_STATUS), { version: 1, imageVersion: build.automagik,
       packageSha256: packageHash(target), result })
-  } catch { /* Live version/ownership checks still make a mismatch unhealthy. */ }
+  } catch { /* The follower still reports its rollback to the entrypoint. */ }
 }
 
 /** Recover the directory-swap window before first-start seeding can mistake it for no profile. */
@@ -164,7 +164,8 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
   let own = ownership(target, source)
   const done = result => {
     record(dshHome, target, build, result)
-    return { target, seeded: false, result, ...profileState({ profile: target, source, build, dshHome }) }
+    return { target, seeded: false, result, ...profileState({ profile: target, source, build, dshHome,
+      rolledBack: result === 'update-rolled-back' }) }
   }
   if (own.reason === 'legacy-image-seed') {
     try { markSeed(target, own.release, own.packageSha256); own = ownership(target, source) }
@@ -186,10 +187,12 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     // Rebuild the lock too: a stopped seed may have written the archives but not
     // yet their new integrity. The workspace's own lock keeps what the welcome added; one
     // that cannot be read falls back to the image's, so a broken lock never stops the server.
-    let lock
-    try { lock = readLock(target) } catch { /* Use the image lock when the workspace lock is unreadable. */ }
-    try { materializePlugins({ source, target, lock, previousFiles }) }
-    catch { return done('update-rolled-back') }
+    try {
+      workspaceFileStat(join(target, 'pnpm-workspace.yaml'))
+      let lock
+      try { lock = readLock(target) } catch { /* Use the image lock when the workspace lock is unreadable. */ }
+      materializePlugins({ source, target, lock, previousFiles })
+    } catch { return done('update-rolled-back') }
     try { pinStore(target, dshHome) }
     catch (error) {
       if (error.code === 'UNSUPPORTED_PROFILE_WORKSPACE') return done('update-rolled-back')

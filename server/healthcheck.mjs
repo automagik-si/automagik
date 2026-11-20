@@ -65,6 +65,10 @@ export async function healthReport({
         reason: 'invalid-profile-state' }
     }
     if (viewDir) {
+      // Startup publishes the refusal even when the follower cannot write its status file.
+      if (state.followsImage && readProfileState(viewDir, build, { keepRollback: true }).reason === 'update-rolled-back') {
+        state = { ...state, followsImage: false, reason: 'update-rolled-back' }
+      }
       // A failed publication leaves DSH's own health report intact.
       try { writeProfileState(viewDir, state) } catch {}
     }

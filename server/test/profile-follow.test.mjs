@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import fs, { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -12,6 +12,7 @@ import { compareRelease, FOLLOW_STATUS, installedPlugins, markSeed, ownership, p
 import { materializePlugins, packPlugin, PLUGINS } from '../plugin-payload.mjs'
 import { buildOfflineStore } from '../offline-store.mjs'
 import { healthReport } from '../healthcheck.mjs'
+import { readProfileState, writeProfileState } from '../gate-view.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { VOLUME_LOCK, withVolumeLock } from '../volume-lock.mjs'
@@ -379,10 +380,90 @@ test('matching-image repair refuses a symlinked workspace YAML and preserves its
   write(external, before)
   rmSync(workspace)
   symlinkSync(external, workspace)
+  const lock = join(f.target, 'pnpm-lock.yaml')
+  const beforeLock = Buffer.concat([Buffer.from('# Owner lock comment\n'), readFileSync(lock)])
+  write(lock, beforeLock)
 
   assert.equal((await prepare(f)).result, 'update-rolled-back')
   assert.equal(readlinkSync(workspace), external)
   assert.deepEqual(readFileSync(external), before)
+  assert.deepEqual(readFileSync(lock), beforeLock)
+})
+
+test('matching-image repair pins a single-link workspace YAML in place', async t => {
+  const f = fixture(t); await prepare(f)
+  const workspace = join(f.target, 'pnpm-workspace.yaml')
+  write(workspace, `packages:\n  - .\nstoreDir: "/previous/${'long-path/'.repeat(32)}store"\n`)
+  chmodSync(workspace, 0o600)
+  const before = statSync(workspace)
+  assert.equal(before.nlink, 1)
+
+  assert.equal((await prepare(f)).result, 'matching-image')
+  const after = statSync(workspace)
+  assert.equal(after.ino, before.ino)
+  assert.equal(after.mode, before.mode)
+  assert.equal(readFileSync(workspace, 'utf8'), `packages:\n  - .\nstoreDir: ${JSON.stringify(join(f.dshHome, 'pnpm-store'))}\n`)
+})
+
+test('matching-image repair pins a hard-linked workspace YAML without changing its other name', async t => {
+  const f = fixture(t); await prepare(f)
+  const workspace = join(f.target, 'pnpm-workspace.yaml'), external = join(f.dir, 'shared-workspace.yaml')
+  const before = Buffer.from('packages:\n  - .\nstoreDir: "/previous/store"\n')
+  write(external, before)
+  chmodSync(external, 0o600)
+  rmSync(workspace)
+  linkSync(external, workspace)
+
+  assert.equal((await prepare(f)).result, 'matching-image')
+  assert.deepEqual(readFileSync(external), before)
+  assert.equal(readFileSync(workspace, 'utf8'), `packages:\n  - .\nstoreDir: ${JSON.stringify(join(f.dshHome, 'pnpm-store'))}\n`)
+  assert.equal(statSync(workspace).mode & 0o777, 0o600)
+})
+
+test('a refused matching-image repair publishes rollback even when the status path is a directory', async t => {
+  const f = fixture(t); await prepare(f)
+  const workspace = join(f.target, 'pnpm-workspace.yaml'), external = join(f.dir, 'shared-workspace.yaml')
+  renameSync(workspace, external)
+  symlinkSync(external, workspace)
+  const status = join(f.dshHome, FOLLOW_STATUS)
+  rmSync(status)
+  mkdirSync(status)
+
+  const result = await prepare(f)
+  assert.equal(result.result, 'update-rolled-back')
+  assert.equal(result.reason, 'update-rolled-back')
+  assert.equal(result.followsImage, false)
+  assert.equal(statSync(status).isDirectory(), true)
+  assert.equal(profileState({ profile: f.target, ...f.old, dshHome: f.dshHome }).followsImage, false)
+
+  const viewDir = join(f.dir, 'data', 'gate-view')
+  mkdirSync(viewDir, { mode: 0o700 })
+  writeProfileState(viewDir, result)
+  const published = readProfileState(viewDir, f.old.build)
+  assert.equal(published.reason, 'update-rolled-back')
+  assert.equal(published.followsImage, false)
+
+  const report = env => healthReport({ root: dirname(f.old.source), dshHome: f.dshHome, viewDir, env, probe: async () => 401 })
+  for (const env of [{}, { AUTOMAGIK_GATE_ENABLED: '1' }]) {
+    const health = await report(env)
+    assert.equal(health.reason, 'update-rolled-back')
+    assert.equal(health.followsImage, false)
+    assert.equal(health.fence.healthy, true)
+    assert.equal(health.healthy, false)
+  }
+  // Owner-only health retains this start's refusal even after the view's normal freshness window.
+  rmSync(status, { recursive: true })
+  write(join(viewDir, 'profile-state.json'), JSON.stringify({ ...published, at: new Date(0).toISOString() }))
+  const health = await report({})
+  assert.equal(health.reason, 'update-rolled-back')
+  assert.equal(health.followsImage, false)
+  assert.equal(health.healthy, false)
+
+  rmSync(workspace)
+  const repaired = await prepare(f)
+  assert.equal(repaired.reason, 'matching-image')
+  writeProfileState(viewDir, repaired)
+  assert.equal((await report({})).healthy, true)
 })
 
 test('matching-image repair preserves an augmented lock after a partial write and succeeds on retry', async t => {

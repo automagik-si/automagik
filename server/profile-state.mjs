@@ -143,7 +143,7 @@ export function ownership(profile, source) {
   return ownerManaged()
 }
 
-export function profileState({ profile, source, build, dshHome }) {
+export function profileState({ profile, source, build, dshHome, rolledBack = false }) {
   const own = ownership(profile, source), plugins = installedPlugins(profile)
   const base = basePlugins(own)
   const validImage = validBuild(build)
@@ -152,12 +152,16 @@ export function profileState({ profile, source, build, dshHome }) {
     PLUGINS.every(name => plugins[name] === build.plugins[name])
   let reason = own.reason
   if (!validImage) reason = 'invalid-image-metadata'
+  else if (own.managed && rolledBack) reason = 'update-rolled-back'
   else if (own.managed) {
-    const status = readJson(join(dshHome, FOLLOW_STATUS))
-    if (status?.version === 1 && status.imageVersion === build.automagik && status.packageSha256 === packageHash(profile) && status.result === 'update-rolled-back') reason = 'update-rolled-back'
+    const path = join(dshHome, FOLLOW_STATUS)
+    const stat = lstatSync(path, { throwIfNoEntry: false })
+    const status = stat?.isFile() ? readJson(path) : undefined
+    if (status?.version === 1 && status.imageVersion === build.automagik &&
+        status.packageSha256 === packageHash(profile) && status.result === 'update-rolled-back') reason = 'update-rolled-back'
     else if (base.some(name => plugins[name] === null)) reason = 'missing-plugins'
     else if (newerMarker || Object.values(plugins).some(v => v !== null && compareRelease(v, build.automagik) > 0)) reason = 'newer-than-image'
-    else if (matchesImage) reason = 'matching-image'
+    else if (matchesImage) reason = stat && status === undefined ? 'update-rolled-back' : 'matching-image'
     else reason = 'update-required'
   }
   return { plugins, followsImage: reason === 'matching-image', ownerManaged: own.ownerManaged, matchesImage, reason }
