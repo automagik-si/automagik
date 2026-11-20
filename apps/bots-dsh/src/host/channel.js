@@ -514,9 +514,12 @@ export function install(rt) {
       await rt.refresh()
       if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result') {
         if (rt.holdsLock() !== true) return fail(CHECK_READ_ONLY, 'bot/read-only')
+        if (endpoint === 'self-update-check-result' && (typeof body.runId !== 'string' || body.runId === '')) {
+          return fail('An update check run ID is required.', 'bot/invalid')
+        }
         const generation = rt.teamGeneration()
         const result = endpoint === 'self-update-status' ? rt.selfUpdateStatus()
-          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult() : await rt.selfUpdateCheck()
+          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId) : await rt.selfUpdateCheck()
         return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
       }
       const readOnly = rt.readOnly()

@@ -1455,6 +1455,8 @@ const pack = createPack({
     "the package registry could not be reached.": "não foi possível acessar o registro de pacotes.",
     "this window does not hold the team lock.": "esta janela não tem o controle da equipe.",
     "the update check is taking too long. Try again.": "a verificação de atualizações está demorando demais. Tente novamente.",
+    "The check was interrupted. Check again.": "A verificação foi interrompida. Verifique novamente.",
+    "A check is already running. Try again shortly.": "Já há uma verificação em andamento. Tente novamente em instantes.",
     "the update check could not be completed.": "não foi possível concluir a verificação de atualizações.",
     "Checked {time}": "Verificado em {time}",
     "Could not check for updates.": "Não foi possível verificar atualizações.",

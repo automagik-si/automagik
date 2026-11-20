@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { AGENT_TOOLS } from '../src/host/agent-access.js'
 import { ROUTE } from '../src/host/constants.js'
+import { install as installLocalAgents } from '../src/host/local-agents/index.js'
 import {
   REASON_CODES, install, readSelfUpdate, selfUpdateStatus, storeDirOf, supervisorOf, usableStore, writeJsonAtomic,
 } from '../src/host/self-update.js'
@@ -708,12 +709,19 @@ const resultEndpoint = 'self-update-check-result'
 const laneUrl = 'https://github.com/automagik-si/automagik/releases/download/plugin-lane/lane.json'
 
 function pausedLane(t) {
-  const started = Promise.withResolvers()
-  const resume = Promise.withResolvers()
   const urls = []
+  let pending
+  const pause = () => {
+    const started = Promise.withResolvers()
+    const resume = Promise.withResolvers()
+    pending = { started, resume }
+    return { started: started.promise, resume: resume.resolve }
+  }
+  const first = pause()
   t.mock.method(globalThis, 'fetch', async url => {
     urls.push(url)
     if (url === laneUrl) {
+      const { started, resume } = pending
       started.resolve()
       await resume.promise
       return new Response('{"keyId":"unknown","schemaVersion":1}')
@@ -721,14 +729,20 @@ function pausedLane(t) {
     if (url === laneUrl + '.sig') return new Response('fixture signature')
     assert.fail(`Unexpected URL: ${url}`)
   })
-  return { started: started.promise, resume: resume.resolve, urls }
+  return { ...first, pause, urls }
 }
 
-test('a long check returns its run ID, joins in-flight work, and is read without another download', requiresStore, async t => {
+test('deferred checks join in flight and the result route stays bound to the requested run', requiresStore, async t => {
   const { home, profileDir, storeDir } = fixture(t)
   announceSupervisor(t, { DSH_HOME: home })
+  const prior = {
+    version: 1, runId: 'completed-before-restart', checkedAt: run.startedAt, state: 'current', reason: 'not-newer',
+    laneVersion: '1.2.3', sequence: 4, plugins: [], supervisor: true,
+  }
+  writeJsonAtomic(join(storeDir, 'check.json'), prior, { profileDir })
   const { rt, post, dispose } = statusChannel(profileDir, join(home, 'team'), checkEndpoint)
   const lane = pausedLane(t)
+  let nextLane
   const replies = []
   const wait = Promise.withResolvers()
   const set = globalThis.setTimeout
@@ -746,12 +760,27 @@ test('a long check returns its run ID, joins in-flight work, and is read without
     await wait.promise
     for (const reply of replies) reply()
 
-    const marker = JSON.parse(readFileSync(join(storeDir, 'check.running.json'), 'utf8'))
+    const first = await initial
+    const { runId } = first.value
+    const marker = JSON.parse(readFileSync(join(storeDir, `check-${runId}`, 'check.running.json'), 'utf8'))
     assert.match(marker.runId, /^[a-f0-9-]{36}$/)
-    const checking = { ok: true, value: { state: 'checking', runId: marker.runId } }
-    assert.deepEqual(await initial, checking)
+    assert.equal(marker.runId, runId)
+    const checking = { ok: true, value: { state: 'checking', runId } }
+    const interrupted = { ok: true, value: { state: 'interrupted', runId } }
+    assert.deepEqual(first, checking)
     assert.deepEqual(await joined, checking)
-    assert.deepEqual(await post({}, resultEndpoint), { ok: true, value: { state: 'checking' } })
+    assert.deepEqual(await post({ runId }, resultEndpoint), checking)
+    assert.equal((await post({}, resultEndpoint)).error.code, 'bot/invalid')
+
+    // A fresh module has the same disk records and none of the interrupted process's memory.
+    const checkBeforeRestart = rt.selfUpdateCheck
+    const resultBeforeRestart = rt.selfUpdateCheckResult
+    const restarted = await import('../src/host/self-update-check.js?restart-fixture')
+    restarted.install(rt)
+    assert.deepEqual(await post({ runId }, resultEndpoint), interrupted)
+    assert.deepEqual(await post({ runId: prior.runId }, resultEndpoint), { ok: true, value: prior })
+    rt.selfUpdateCheck = checkBeforeRestart
+    rt.selfUpdateCheckResult = resultBeforeRestart
     assert.deepEqual(lane.urls, [laneUrl])
 
     // A caller arriving just before completion gets the result in its check response.
@@ -770,9 +799,24 @@ test('a long check returns its run ID, joins in-flight work, and is read without
     assert.equal(answer.value.state, 'refused')
     assert.equal(answer.value.reason, 'signature-invalid')
     assert.deepEqual(answer.value, JSON.parse(readFileSync(join(storeDir, 'check.json'), 'utf8')))
-    assert.deepEqual(await post({}, resultEndpoint), answer)
+    assert.equal(answer.value.runId, runId)
+    assert.deepEqual(await post({ runId }, resultEndpoint), answer)
     assert.deepEqual(lane.urls, [laneUrl, laneUrl + '.sig'])
+
+    // A second window starts a new check before the first window polls again.
+    nextLane = lane.pause()
+    const next = post()
+    await nextLane.started
+    assert.deepEqual(await post({ runId }, resultEndpoint), interrupted)
+    nextLane.resume()
+    const newer = await next
+    assert.equal(newer.ok, true)
+    assert.notEqual(newer.value.runId, runId)
+    assert.deepEqual(await post({ runId }, resultEndpoint), interrupted)
+    assert.deepEqual(await post({ runId: newer.value.runId }, resultEndpoint), newer)
+    assert.deepEqual(lane.urls, [laneUrl, laneUrl + '.sig', laneUrl, laneUrl + '.sig'])
   } finally {
+    nextLane?.resume()
     lane.resume()
     await dispose()
   }
@@ -784,7 +828,7 @@ test('losing the team during a check leaves the previous record intact and refus
   const teamHome = join(home, 'team')
   const checkPath = join(storeDir, 'check.json')
   const prior = {
-    version: 1, checkedAt: run.startedAt, state: 'current', reason: 'not-newer',
+    version: 1, runId: 'prior-run', checkedAt: run.startedAt, state: 'current', reason: 'not-newer',
     laneVersion: '1.2.3', sequence: 4, plugins: [], supervisor: true,
   }
   writeJsonAtomic(checkPath, prior, { profileDir })
@@ -794,7 +838,7 @@ test('losing the team during a check leaves the previous record intact and refus
   const extension = t.mock.fn(() => ({ extension: true }))
   rt.hooks.endpoint(resultEndpoint, extension, { read: true })
   try {
-    assert.deepEqual(await post({ url: 'https://fixture.invalid/update' }, resultEndpoint), { ok: true, value: prior })
+    assert.deepEqual(await post({ runId: prior.runId, url: 'https://fixture.invalid/update' }, resultEndpoint), { ok: true, value: prior })
     assert.deepEqual(lane.urls, [])
     const request = post()
     await lane.started
@@ -804,7 +848,7 @@ test('losing the team during a check leaves the previous record intact and refus
     assert.equal(rt.sameTeam(generation), false)
     lane.resume()
     assert.deepEqual(await request, refused)
-    assert.deepEqual(await post({}, resultEndpoint), refused)
+    assert.deepEqual(await post({ runId: prior.runId }, resultEndpoint), refused)
     assert.deepEqual(readFileSync(checkPath), previousBytes)
     assert.equal(extension.mock.callCount(), 0)
   } finally {
@@ -820,8 +864,9 @@ test('the two check routes are absent from the MCP, Bot and local-agent tool lis
   try {
     assert.ok(AGENT_TOOLS.length > 0)
     assert.ok(rt.teamTools.length > 0)
-    // Local-agent tools exist only where local agents are installed; when present they are checked too.
-    for (const tools of [AGENT_TOOLS, rt.teamTools, rt.localAgentTools ?? []]) {
+    installLocalAgents(rt)
+    assert.ok(rt.localAgentTools.some(tool => tool.name === 'approve_agent_action'))
+    for (const tools of [AGENT_TOOLS, rt.teamTools, rt.localAgentTools]) {
       for (const endpoint of [checkEndpoint, resultEndpoint]) {
         assert.equal(tools.some(tool => tool.endpoint === endpoint || tool.name?.replaceAll('_', '-') === endpoint), false)
       }

@@ -362,6 +362,7 @@ export function apply(ctx) {
   // Plugin updates: every window that opens asks the host once (the host keeps its
   // answer for a while), again each hour, and every two seconds while installing.
   const update = createSource({ available: false, phase: 'idle' })
+  const takeUpdateReply = value => update.set(previous => ({ ...value, app: previous.app, hostAnswered: true }))
   let wakeUpdate = () => {}
   ctx.effect(() => {
     let stopped = false
@@ -371,7 +372,7 @@ export function apply(ctx) {
       if (stopped) return
       const value = await call('update-check', { fresh: false }).catch(() => null)
       if (stopped) return
-      if (value) update.set(previous => ({ ...value, app: previous.app }))
+      if (value) takeUpdateReply(value)
       timer = setTimeout(loop, value?.phase === 'installing' || value?.dsh?.phase === 'installing' ? 2000 : 60 * 60_000)
     }
     wakeUpdate = loop
@@ -879,7 +880,7 @@ export function apply(ctx) {
   }
   actions.checkUpdate = async () => {
     const value = await call('update-check', { fresh: true })
-    update.set(previous => ({ ...value, app: previous.app }))
+    takeUpdateReply(value)
     wakeUpdate()
   }
   actions.freshConversation = botId => after(call('bot-fresh', { id: botId }))

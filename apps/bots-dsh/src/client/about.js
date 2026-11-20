@@ -179,7 +179,8 @@ const failedCheck = error => ({ reason: error?.code === 'bot/read-only' ? error.
 function SelfUpdateRow({ Row, check, readResult }) {
   const [starting, setStarting] = useState(false)
   const [result, setResult] = useState(null)
-  const waiting = result?.state === 'checking'
+  const runId = result?.state === 'checking' ? result.runId : undefined
+  const waiting = runId !== undefined
   const checking = starting || waiting
   useEffect(() => {
     if (!waiting) return
@@ -188,7 +189,7 @@ function SelfUpdateRow({ Row, check, readResult }) {
     let polls = 0
     const poll = async () => {
       try {
-        const value = await readResult()
+        const value = await readResult(runId)
         if (stopped) return
         if (value.state !== 'checking') setResult(value)
         else if (++polls >= MAX_CHECK_POLLS) setResult({ reason: 'check-timeout' })
@@ -199,7 +200,7 @@ function SelfUpdateRow({ Row, check, readResult }) {
     }
     timer = setTimeout(poll, CHECK_POLL_MS)
     return () => { stopped = true; clearTimeout(timer) }
-  }, [waiting, readResult])
+  }, [runId, readResult])
   const onCheck = async () => {
     setStarting(true)
     setResult(null)
@@ -212,6 +213,8 @@ function SelfUpdateRow({ Row, check, readResult }) {
   const message = result === null || waiting ? null
     : result.state === 'available' ? t('Automagik {version} is available, signed and checked.', { version: result.laneVersion })
     : result.state === 'current' ? t('Up to date.')
+    : result.state === 'interrupted' ? t('The check was interrupted. Check again.')
+    : result.state === 'checking' ? t('A check is already running. Try again shortly.')
     : t('Cannot update: {reason}', { reason: selfUpdateReason(result.reason) })
   return h(Row, { label: 'Automagik', hint: h('span', { role: 'status' }, message) },
     h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: checking, onClick: onCheck },
@@ -318,7 +321,7 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
       stars === null ? null : h('span', { className: 'bt-star-count' }, starCount(stars))) : null),
     repo ? h('p', { key: 'ask', className: 'bt-about-ask' }, t('If Omni helps you, a star on GitHub helps more people find it.')) : null,
     h(Section, { key: 'updates', title: t('Updates') },
-      !ours && update.source && update.source !== 'unknown'
+      !ours && update.hostAnswered
         ? h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
       h(Row, { label: ours ? 'Automagik' : 'Omni', hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)

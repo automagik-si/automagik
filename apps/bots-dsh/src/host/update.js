@@ -72,13 +72,14 @@ export const fetchJson = async (url, headers = {}) => {
 
 // The registries the plugin manager installs from, in its order: its configured
 // first one (else pnpm's own), then the fallbacks, unless that first one is private.
-export async function registryPlan(config, manager) {
+export async function registryPlan(config, manager, fallback = () => OFFICIAL_REGISTRY) {
   if (typeof config.updateRegistry === 'string' && config.updateRegistry !== '') return [normalizeRegistry(config.updateRegistry)]
-  const configured = await Promise.resolve(manager?.registries?.()).catch(() => null)
-  if (!configured) return [OFFICIAL_REGISTRY, MIRROR_REGISTRY]
+  let configured
+  try { configured = await manager?.registries?.() } catch { /* Older managers may not report a registry. */ }
+  if (!configured) return [fallback(), MIRROR_REGISTRY]
   const fallbacks = (configured.fallbackRegistries ?? []).map(normalizeRegistry)
   const own = configured.resolved ? normalizeRegistry(configured.resolved) : null
-  const first = configured.registry ? normalizeRegistry(configured.registry) : own ?? OFFICIAL_REGISTRY
+  const first = configured.registry ? normalizeRegistry(configured.registry) : own ?? fallback()
   const isPublic = first === OFFICIAL_REGISTRY || fallbacks.includes(first)
   return isPublic ? [...new Set([first, ...fallbacks])] : [first]
 }

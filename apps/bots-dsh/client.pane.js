@@ -11419,6 +11419,8 @@ var ZH = {
   "the package registry could not be reached.": "无法连接软件包仓库。",
   "this window does not hold the team lock.": "此窗口未持有团队锁。",
   "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
+  "The check was interrupted. Check again.": "更新检查已中断。请重新检查。",
+  "A check is already running. Try again shortly.": "正在进行更新检查。请稍后重试。",
   "the update check could not be completed.": "无法完成更新检查。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",

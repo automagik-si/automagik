@@ -2514,6 +2514,8 @@ var ZH = {
   "the package registry could not be reached.": "无法连接软件包仓库。",
   "this window does not hold the team lock.": "此窗口未持有团队锁。",
   "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
+  "The check was interrupted. Check again.": "更新检查已中断。请重新检查。",
+  "A check is already running. Try again shortly.": "正在进行更新检查。请稍后重试。",
   "the update check could not be completed.": "无法完成更新检查。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
@@ -22207,7 +22209,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     diagnosticsPermissions: () => call2("diagnostics-permissions"),
     repoStars: () => call2("repo-stars"),
     checkSelfUpdate: () => call2("self-update-check"),
-    selfUpdateResult: () => call2("self-update-check-result"),
+    selfUpdateResult: (runId) => call2("self-update-check-result", { runId }),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = "action") => {
       noteClientError(where, error);
@@ -35113,7 +35115,8 @@ var failedCheck = (error) => ({ reason: error?.code === "bot/read-only" ? error.
 function SelfUpdateRow({ Row: Row3, check, readResult }) {
   const [starting, setStarting] = (0, import_react89.useState)(false);
   const [result, setResult] = (0, import_react89.useState)(null);
-  const waiting = result?.state === "checking";
+  const runId = result?.state === "checking" ? result.runId : void 0;
+  const waiting = runId !== void 0;
   const checking = starting || waiting;
   (0, import_react89.useEffect)(() => {
     if (!waiting) return;
@@ -35122,7 +35125,7 @@ function SelfUpdateRow({ Row: Row3, check, readResult }) {
     let polls = 0;
     const poll = async () => {
       try {
-        const value = await readResult();
+        const value = await readResult(runId);
         if (stopped) return;
         if (value.state !== "checking") setResult(value);
         else if (++polls >= MAX_CHECK_POLLS) setResult({ reason: "check-timeout" });
@@ -35136,7 +35139,7 @@ function SelfUpdateRow({ Row: Row3, check, readResult }) {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [waiting, readResult]);
+  }, [runId, readResult]);
   const onCheck = async () => {
     setStarting(true);
     setResult(null);
@@ -35148,7 +35151,7 @@ function SelfUpdateRow({ Row: Row3, check, readResult }) {
       setStarting(false);
     }
   };
-  const message = result === null || waiting ? null : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
+  const message = result === null || waiting ? null : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : result.state === "interrupted" ? t("The check was interrupted. Check again.") : result.state === "checking" ? t("A check is already running. Try again shortly.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
   return (0, import_react89.createElement)(
     Row3,
     { label: "Automagik", hint: (0, import_react89.createElement)("span", { role: "status" }, message) },
@@ -35273,7 +35276,7 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
     (0, import_react89.createElement)(
       Section3,
       { key: "updates", title: t("Updates") },
-      !ours && update.source && update.source !== "unknown" ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
+      !ours && update.hostAnswered ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
       (0, import_react89.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react89.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),
@@ -43085,6 +43088,7 @@ function apply(ctx) {
     };
   }, "ds-bot: roster poll");
   const update = createSource({ available: false, phase: "idle" });
+  const takeUpdateReply = (value) => update.set((previous) => ({ ...value, app: previous.app, hostAnswered: true }));
   let wakeUpdate = () => {
   };
   ctx.effect(() => {
@@ -43095,7 +43099,7 @@ function apply(ctx) {
       if (stopped) return;
       const value = await call("update-check", { fresh: false }).catch(() => null);
       if (stopped) return;
-      if (value) update.set((previous) => ({ ...value, app: previous.app }));
+      if (value) takeUpdateReply(value);
       timer = setTimeout(loop, value?.phase === "installing" || value?.dsh?.phase === "installing" ? 2e3 : 60 * 6e4);
     };
     wakeUpdate = loop;
@@ -43592,7 +43596,7 @@ function apply(ctx) {
   };
   actions.checkUpdate = async () => {
     const value = await call("update-check", { fresh: true });
-    update.set((previous) => ({ ...value, app: previous.app }));
+    takeUpdateReply(value);
     wakeUpdate();
   };
   actions.freshConversation = (botId) => after(call("bot-fresh", { id: botId }));
