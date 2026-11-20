@@ -25,7 +25,7 @@ export const TARGET = "am";
 export const RECORD = "am/copies.json";
 export const WRITE = "node scripts/am-copies.mjs --write";
 /** The entry points whose import closure am copies, inside SOURCE. */
-export const ROOTS = ["bin/automagik-herdr.mjs", "briefing.mjs", "briefingEntry.mjs"];
+export const ROOTS = ["bin/automagik-herdr.mjs", "bin/accounts.mjs", "briefing.mjs", "briefingEntry.mjs"];
 /** Copied too, though nothing imports them: [from (repository path), to (repository path)]. */
 export const EXTRA = [
   [`${SOURCE}/bin/automagik-herdr`, `${TARGET}/bin/automagik-herdr`],

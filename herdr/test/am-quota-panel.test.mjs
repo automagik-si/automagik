@@ -14,9 +14,10 @@ import { bounded } from "./bounded.mjs";
 const here = (f) => new URL(f, import.meta.url).href;
 const FAKE_SWITCH = "data:text/javascript," + encodeURIComponent(`
   export const installs = [];
+  export const switchFixture = {};
   export async function install({ provider, account }) {
     installs.push({ provider, id: account.id });
-    return { label: provider === "claude" ? "Claude Code" : "Codex", fingerprint: "fp-new" };
+    return { label: provider === "claude" ? "Claude Code" : "Codex", fingerprint: switchFixture.write?.(provider, account) ?? "fp-new" };
   }`);
 const stubs = { herdr: here("./am-quota-herdr.mjs"), "gpui-kit": here("./gpui-stub.mjs"), "gpui-base": here("./gpui-stub.mjs") };
 const fromMod = (context) => context.parentURL?.includes("/mods/am-quota/");
@@ -29,11 +30,14 @@ registerHooks({
 });
 
 const { state, finishRun } = await import(stubs.herdr);
-const { installs } = await import(FAKE_SWITCH);
+const { installs, switchFixture } = await import(FAKE_SWITCH);
 const { default: Panel, plain, records } = await import("../mods/am-quota/main.js");
 const { all, index, nodes, textOf } = await import(stubs["gpui-kit"]);
 const { AUTH_SCRIPT, FOLDER_SCRIPT, PRESENT_SCRIPT } = await import("../mods/am-quota/logins.js");
 const { layoutPopup } = await import("./popup-layout.mjs");
+
+const { FLEET_FILE, nextObs } = await import("../mods/am-quota/accountsRows.js");
+const { auth, fixtureHere, fpr, BOT } = await import("./accounts-fixture.mjs");
 
 const NOW = Date.now();
 const H = 3600000;
@@ -1341,4 +1345,319 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
     { where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row' });
   assert.equal(asks(), 4, "one queued round after it, not two");
   assert.match(text(draw()), /dee@example\.com · login 2 Use/);
+});
+
+const FLEET = `${state.appHome}/${FLEET_FILE}`;
+const READER = `${state.appHome}/mods/am-sidebar/bin/accounts.mjs`;
+const FLEET_CORE = "core-vm-other";
+const FLEET_NAME = "vm-other";
+const fixed = (stdout, code = 0, stderr = "") => ({ code, stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout), stderr });
+const noFleet = () => fixed({});
+const linkedMachine = () => fixed({ machines: [{ id: FLEET_CORE, name: FLEET_NAME, state: "connected" }] });
+const linkedBot = (id = BOT, terminal = "t8", name = "Bot A") => ({
+  id, name, project: "/project", expect: { core: FLEET_CORE, terminal, created_ms: 8 }, on: "login unknown",
+});
+const fleetRuns = () => state.runs.filter((run) => run.args.includes("am-quota.accounts=fleet"));
+const fleetReads = () => state.hcCalls.filter((args) => args[0] === "machine");
+
+function fleetRecord({ linked = null, effective = "ana@example.com", selected = "default" } = {}) {
+  const at = iso(NOW);
+  const entry = (name, identity) => ({
+    name, at, state: "read", reason: null, cli: "pack", versions: identity.versions, panel: identity.panel,
+    codex: nextObs("codex", null, identity.codex, at), claude: nextObs("claude", null, identity.claude, at), exceptions: identity.exceptions,
+  });
+  const local = entry(null, fixtureHere({ email: effective }));
+  local.claude.selected = selected;
+  return { v: 1, at, linked, machines: { local, [FLEET_CORE]: entry(FLEET_NAME, fixtureHere()) } };
+}
+
+function fleetReply({ bots = [], linked = null } = {}) {
+  return fixed({ v: 1, at: iso(NOW), linked, machines: [{ core: FLEET_CORE, bots: {
+    codex: [], claude: bots, ownHome: 0, unbound: 0, more: 0, codexReliable: false,
+  } }] });
+}
+
+async function linkedPanel(t, { bots = [], seed = false, reader = true, sidebar = true, config, answer, listed, settle = true, record } = {}) {
+  const oldHc = state.hc, oldExec = state.exec;
+  t.after(() => { state.hc = oldHc; state.exec = oldExec; });
+  state.hc = noFleet;
+  const p = await panel({ config, sidebar, claude: TWO_IN, record });
+  state.hcCalls = [];
+  const hc = (args) => {
+    if (args[0] === "machine") return listed ? listed() : linkedMachine();
+    if (args[0] === "ls") return fixed({ terminals: [] });
+    if (args[0] === "get") return fixed({ address: args[1], state: "live" });
+    return fixed({});
+  };
+  state.hc = hc;
+  if (reader) state.files.set(READER, "example program");
+  if (seed) state.files.set(FLEET, JSON.stringify(fleetRecord()));
+  const fallback = claudeExec(TWO_IN);
+  state.exec = (program, args) => {
+    if (program === "rm") {
+      for (const file of args.slice(2)) state.files.delete(file);
+      return fixed("");
+    }
+    if (program === "env" && args.at(-1) === "fleet") {
+      if (answer) return answer();
+      state.files.set(FLEET, JSON.stringify(fleetRecord()));
+      return fleetReply({ bots });
+    }
+    return fallback(program, args);
+  };
+  state.calls = [];
+  p.view.readFleet(p.cx, { force: true });
+  if (settle) await p.cx.settle();
+  return p;
+}
+
+test("no linked machine: one hc machine ls, no section or fleet run, and the same shell calls", async (t) => {
+  const old = state.hc;
+  t.after(() => { state.hc = old; });
+  state.hcCalls = [];
+  state.hc = noFleet;
+  const p = await panel({ claude: TWO_IN });
+  assert.deepEqual(fleetReads(), [["machine", "ls", "--json"]]);
+  assert.equal(fleetRuns().length, 0);
+  assert.doesNotMatch(text(p.draw()), /On linked machines/);
+  assert.ok(state.calls.every((a) => a[0] !== "rm" && !a.includes("fleet")));
+});
+
+test("linked machines use a private fleet terminal and clean its files after success and failure", async (t) => {
+  const p = await linkedPanel(t);
+  assert.equal(fleetRuns().length, 1);
+  const run = fleetRuns()[0];
+  const tail = run.args.slice(run.args.indexOf("--") + 1);
+  assert.deepEqual(tail.slice(-6), ["env", `HERDR_APP_HOME=${state.appHome}`, "sh", RUNNER, READER, "fleet"]);
+  assert.match(tail[2], /^umask 077/);
+  assert.ok(tail[2].includes('find "${out%/*}"') && tail[2].includes('-name "fleet-*"'));
+  assert.match(tail[2], /"\$@" >"\$out" 2>\/dev\/null/);
+  assert.doesNotMatch(tail.join(" "), /cat "\$err"|CODEX_HOME|automagik-herdr\.mjs/);
+  assert.equal(run.files.err, null);
+  assert.ok(state.calls.some((a) => a[0] === "rm" && a.includes(run.files.out) && a.includes(run.files.code)));
+  assert.ok(!state.files.has(run.files.out) && !state.files.has(run.files.code));
+  assert.match(text(p.draw()), /On linked machines.*vm-other/s);
+  const leftover = `${state.appHome}/data/am-quota/runs/fleet-leftover.out`;
+  state.files.set(leftover, "example");
+  state.fileMtimes = new Map([[leftover, Date.now() - 11 * 60_000]]);
+  state.runFail = "CANARY-STDERR-0043";
+  t.after(() => { state.runFail = undefined; delete state.fileMtimes; });
+  p.view.readFleet(p.cx, { force: true });
+  await p.cx.settle();
+  assert.ok(state.calls.filter((a) => a[0] === "rm").length >= 2);
+  assert.ok(state.files.has(leftover));
+  assert.match(text(p.draw()), /The linked machines weren't read \(failed\)/);
+  assert.doesNotMatch(text(p.draw()), /CANARY-STDERR-0043/);
+  state.runFail = undefined;
+  p.view.readFleet(p.cx, { force: true });
+  await p.cx.settle();
+  assert.equal(state.files.has(leftover), false);
+});
+
+test("a fleet run removes only abandoned private files", async (t) => {
+  await linkedPanel(t);
+  const args = fleetRuns()[0].args;
+  const script = args[args.indexOf("-c") + 1];
+  const runs = mkdtempSync(join(tmpdir(), "am-quota-fleet-runs-"));
+  t.after(() => rmSync(runs, { recursive: true, force: true }));
+  const fresh = join(runs, "fleet-new"), old = join(runs, "fleet-old");
+  writeFileSync(fresh, "example");
+  writeFileSync(old, "example");
+  const abandoned = new Date(Date.now() - 11 * 60_000);
+  utimesSync(old, abandoned, abandoned);
+  const r = spawnSync("sh", ["-c", script, "sh", join(runs, "fleet-done.out"), join(runs, "fleet-done.code"), "true"], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(old), false);
+  assert.equal(readFileSync(fresh, "utf8"), "example");
+});
+
+test("a sidebar without its dedicated reader gives the update line without running it", async (t) => {
+  const p = await linkedPanel(t, { reader: false });
+  assert.match(text(p.draw()), /Reading linked machines needs the sidebar mod switched on and up to date\./);
+  assert.equal(fleetRuns().length, 0);
+});
+
+test("a failed list or run keeps cached rows and shows the failed attempt beside them", async (t) => {
+  const p = await linkedPanel(t, { seed: true, listed: () => fixed("CANARY-STDERR-0043", 1),
+    answer: () => fixed({ error: "busy" }, 1, "CANARY-STDERR-0043") });
+  const drawn = text(p.draw());
+  assert.match(drawn, /vm-other/);
+  assert.match(drawn, /The linked machines weren't read \(busy\)/);
+  assert.match(drawn, /The list of linked machines couldn't be read .+: rows show the last read\./);
+  assert.match(drawn, /Last fleet read /);
+  assert.doesNotMatch(drawn, /CANARY-STDERR-0043/);
+});
+
+test("fleet.json is drawn before the run answers, and a running read keeps a second from starting", async (t) => {
+  let release, asked;
+  const reply = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { asked = resolve; });
+  const p = await linkedPanel(t, { seed: true, settle: false, answer: () => { asked(); return reply; } });
+  await started;
+  assert.match(text(p.draw()), /ana@example\.com, the same account as this Mac/);
+  p.view.readFleet(p.cx, { force: true });
+  release(fleetReply());
+  await p.cx.settle();
+  assert.equal(fleetRuns().length, 1);
+  assert.equal(fleetReads().length, 1);
+});
+
+test("refresh forces a read and a tick reads at most every five minutes", async (t) => {
+  const p = await linkedPanel(t);
+  assert.equal(fleetRuns().length, 1);
+  p.view.tick(p.cx);
+  await p.cx.settle();
+  assert.equal(fleetRuns().length, 1);
+  p.draw();
+  nodes.get("am-refresh").click(null, p.cx);
+  await p.cx.settle();
+  assert.equal(fleetRuns().length, 2);
+  p.view.fleet.at -= 300_001;
+  p.view.tick(p.cx);
+  await p.cx.settle();
+  assert.equal(fleetRuns().length, 3);
+});
+
+test("a Codex switch or ↻ reads this Mac's Codex reference again", async (t) => {
+  const p = await linkedPanel(t);
+  const file = `${state.home}/.codex/auth.json`;
+  let reads = 0;
+  state.onRead = (path) => { if (path === file) reads += 1; };
+  switchFixture.write = (_provider, _account) => {
+    state.files.set(file, auth("account-b"));
+    return fpr("account-b");
+  };
+  t.after(() => { delete state.onRead; delete switchFixture.write; });
+  state.files.set(file, auth("account-a"));
+  p.view.tool = "codex";
+  p.view.readFleet(p.cx, { force: true });
+  await p.cx.settle();
+  assert.match(text(p.draw()), /the same account as this Mac/i);
+  const beforeSwitch = reads;
+  nodes.get("primary-codex").click(null, p.cx);
+  await p.cx.settle();
+  assert.ok(reads > beforeSwitch);
+  assert.match(text(p.draw()), /another account than this Mac's/i);
+  const beforeRefresh = reads;
+  state.files.set(file, auth("account-a"));
+  nodes.get("am-refresh").click(null, p.cx);
+  await p.cx.settle();
+  assert.ok(reads > beforeRefresh);
+  assert.match(text(p.draw()), /the same account as this Mac/i);
+});
+
+test("Codex linked rows show with no proxy and with a failed proxy read", async (t) => {
+  const p = await linkedPanel(t, { config: null });
+  p.view.tool = "codex";
+  assert.match(text(p.draw()), /your own CLIProxyAPI/);
+  assert.match(text(p.draw()), /signed in \(account [a-f0-9]{8}\); this Mac has no Codex login/);
+  p.view.setup = null;
+  p.view.error = "Proxy unavailable";
+  assert.match(text(p.draw()), /Proxy unavailable.*On linked machines/s);
+  assert.match(text(p.draw()), /vm-other/);
+});
+
+test("linked Restart checks the frozen bot and pane list, runs one at a time and rereads", async (t) => {
+  const first = linkedBot(), second = linkedBot("b-bbbbbbbbbb", "t9", "Bot B");
+  const p = await linkedPanel(t, { bots: [first, second] });
+  const press = () => { p.draw(); nodes.get(`restart-claude-${FLEET_CORE}`).click(null, p.cx); };
+  press();
+  assert.match(text(p.draw()), /Restart 2 bots on vm-other\? Press again to confirm/);
+  assert.match(text(p.draw()), /A restart from here starts ana@example\.com/);
+  const old = p.view.fleet.answer.bots[FLEET_CORE].claude;
+  p.view.fleet.answer.bots[FLEET_CORE].claude = [{ ...first, id: "b-cccccccccc" }, second];
+  press();
+  assert.match(text(p.draw()), /The list changed: press Restart again\./);
+  assert.equal(state.runs.length, 1);
+  p.view.fleet.answer.bots[FLEET_CORE].claude = old;
+  const exec = state.exec;
+  const issued = [];
+  let finish, began;
+  const started = new Promise((resolve) => { began = resolve; });
+  state.exec = (program, args) => {
+    if (!args.includes("--expect-pane")) return exec(program, args);
+    issued.push(args.slice(args.indexOf("restart"), -1));
+    if (issued.length === 1) return new Promise((resolve) => { finish = resolve; began(); });
+    return fixed({});
+  };
+  press();
+  press();
+  await started;
+  assert.equal(issued.length, 1);
+  finish(fixed({ refused: "binding", error: "CANARY-STDERR-0043" }, 1, "CANARY-STDERR-0043"));
+  await p.cx.settle();
+  assert.deepEqual(issued, [first, second].map((bot) => ["restart", bot.id, "--project", bot.project,
+    "--machine", FLEET_NAME, "--expect-pane", `${FLEET_CORE}/${bot.expect.terminal}/8`]));
+  assert.match(text(p.draw()), /Bot A's pane is no longer the one shown: nothing was restarted\./);
+  assert.doesNotMatch(text(p.draw()), /CANARY-STDERR-0043/);
+  assert.equal(fleetRuns().length, 2);
+});
+
+test("linked Restart says when the old pane couldn't be confirmed ended", async (t) => {
+  const p = await linkedPanel(t, { bots: [linkedBot()] });
+  const exec = state.exec;
+  state.exec = (program, args) => args.includes("--expect-pane") ? fixed({ retired: "unconfirmed" }, 0) : exec(program, args);
+  const press = () => { p.draw(); nodes.get(`restart-claude-${FLEET_CORE}`).click(null, p.cx); };
+  press();
+  press();
+  await p.cx.settle();
+  assert.ok(text(p.draw()).includes("Bot A restarted in a new pane, but its old pane couldn't be confirmed ended: check it in Herdr before ending it."));
+});
+
+test("linked Restart with a readable exit code but unreadable output never says restarted", async (t) => {
+  for (const [name, stdout] of [["truncated", '{"retired":"end'], ["empty", ""]]) {
+    await t.test(name, async (t) => {
+      const p = await linkedPanel(t, { bots: [linkedBot()] });
+      const exec = state.exec;
+      state.exec = (program, args) => args.includes("--expect-pane") ? fixed(stdout, 0) : exec(program, args);
+      const press = () => { p.draw(); nodes.get(`restart-claude-${FLEET_CORE}`).click(null, p.cx); };
+      press();
+      press();
+      await p.cx.settle();
+      const drawn = text(p.draw());
+      assert.match(drawn, /whether its old pane ended couldn't be verified/);
+      assert.doesNotMatch(drawn, /Bot A restarted\./);
+    });
+  }
+});
+
+test("failed reads show only the fixed code, clear stdout files and never create stderr files", async (t) => {
+  const p = await linkedPanel(t, { seed: true, answer: () => fixed({ error: "CANARY-STDERR-0043" }, 1, "CANARY-STDERR-0043") });
+  assert.match(text(p.draw()), /The linked machines weren't read \(failed\)/);
+  assert.doesNotMatch(text(p.draw()), /CANARY-STDERR-0043/);
+  assert.ok(![...state.files.keys()].some((file) => file.includes("/runs/fleet-")));
+  assert.doesNotMatch(JSON.stringify(fleetRuns().map((r) => r.args)), /CANARY-STDERR-0043/);
+});
+
+test("Claude compares against fleet.json's local effective email when the selected slot has a bad folder", async (t) => {
+  const p = await linkedPanel(t, { record: { use: "2", logins: [{ id: "2", dir: "relative" }] }, answer: () => {
+    state.files.set(FLEET, JSON.stringify(fleetRecord({ effective: "ana@example.com", selected: "2" })));
+    return fleetReply();
+  } });
+  assert.match(text(p.draw()), /ana@example\.com, the same account as this Mac/);
+});
+
+test("without the sidebar runner a linked machine gives the update line without a terminal", async (t) => {
+  const p = await linkedPanel(t, { sidebar: false });
+  assert.match(text(p.draw()), /Reading linked machines needs the sidebar mod switched on and up to date\./);
+  assert.equal(fleetRuns().length, 0);
+});
+
+test("the local Claude and Codex cards, banners and Restart draw as before", async (t) => {
+  const p = await linkedPanel(t, { settle: false });
+  p.view.switched.codex = { at: NOW, from: "ana@example.com", to: "bo@example.com",
+    look: { bots: [{ id: BOT, name: "Bot A", project: "/project" }], reliable: true } };
+  const marks = new Map();
+  for (const tool of ["claude", "codex"]) {
+    p.view.tool = tool;
+    p.draw();
+    marks.set(tool, ["card-" + tool, "switched-" + tool, "restart-" + tool].map((id) => nodes.has(id) ? text(nodes.get(id)) : null));
+  }
+  await p.cx.settle();
+  for (const tool of ["claude", "codex"]) {
+    p.view.tool = tool;
+    p.draw();
+    assert.deepEqual(["card-" + tool, "switched-" + tool, "restart-" + tool].map((id) => nodes.has(id) ? text(nodes.get(id)) : null), marks.get(tool));
+  }
+  assert.match(text(p.draw()), /On linked machines/);
 });
