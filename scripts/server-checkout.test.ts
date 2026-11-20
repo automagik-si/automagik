@@ -35,7 +35,7 @@ test('real normal Bun pack needs no plugin dependencies, skips hooks, binds chil
   const f = fixture(); const p = pack(f);
   const result = verifyCheckoutDirectory(p.dir, { kind: 'checkout', event: f.event, revision: p.revision,
     version: p.version, manifest: p.manifest, repository: CHECKOUT_REPOSITORY });
-  expect(Object.keys(result.plugins).sort()).toEqual(['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/welcome-dsh']);
+  expect(Object.keys(result.plugins).sort()).toEqual(['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/multiuser-dsh', '@automagik/welcome-dsh']);
   const manifest = JSON.parse(readFileSync(join(p.dir, 'plugins.json'), 'utf8'));
   expect(Object.keys(manifest.packages)).toEqual(Object.keys(CHECKOUT_PACKAGES));
   expect(manifest.commit).toBe(f.revision);

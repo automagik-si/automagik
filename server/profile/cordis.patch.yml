@@ -52,3 +52,9 @@
 - id: ui-settings-models
   config:
     credentialOnboarding: false
+# RFC 0038 delivery 1: the multiuser adapter answers 401 on its private route in mode off.
+# Mode on requires startup readiness. To disable the adapter, add a later override row
+# with id: multiuser-dsh and disabled: true.
+- insert:
+    - id: multiuser-dsh
+      name: '@automagik/multiuser-dsh'

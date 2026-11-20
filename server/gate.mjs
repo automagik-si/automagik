@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { Transform } from 'node:stream'
 import { COOKIE, cookieSecret, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
 import { frontendPath } from './gate-frontend.mjs'
-import { agentMcpHeaders, callerHeaders, DSH_HOST, responseHeaders, upstreamHeaders, validBodyFraming } from './gate-upstream.mjs'
+import { agentMcpHeaders, callerHeaders, callerUpgradeHeaders, DSH_HOST, responseHeaders, upstreamHeaders, validBodyFraming } from './gate-upstream.mjs'
+import { MEMBER_UPGRADE_PATH, memberRole, memberStatus, probeDsh } from './gate-mux.mjs'
 import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
 
 export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
@@ -12,6 +13,10 @@ export const CLOUD_REVOCATION_PATH = '/_gate/cloud/revocation'
 const MAX_OPEN_BODY = 4096
 const MAX_RENEW_BODY = 4096
 const MAX_REVOCATION_BODY = 4096
+const MAX_EARLY_UPGRADE_BYTES = 1_048_576 + 1024 * 14 // One max-size mux message, with frame headers.
+// Match the adapter's socket limits while the gate is still holding the handshake.
+const MAX_PENDING_UPGRADES_PER_PERSON = 4
+const MAX_PENDING_UPGRADES = 64
 
 export function pinOrigin(value) {
   const url = new URL(value)
@@ -111,12 +116,68 @@ function refuseSocket(socket, status = 401) {
 const ownerEquivalent = family => family.principal.roles.some(role => role === 'owner' || role === 'admin')
 const apiPath = path => path === '/api' || path.startsWith('/api/')
 const exchangePath = url => url.pathname === '/connect'
+const CALLER_PREFIX = '/_automagik/caller'
 
-export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, multiuser = false, caller, auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
+// ClientRequest cannot observe a close that occurred before the socket was handed to it.
+function reuseProbe(probe) {
+  return (_options, connected) => {
+    if (!probe.destroyed && !probe.readableEnded && !probe.writableEnded) return probe
+    probe.destroy()
+    connected(new Error('DSH readiness connection closed'))
+  }
+}
+
+// `connectDsh({ port, host, signal })` resolves a loopback socket on which the adapter answered
+// its readiness probe; a member's request is sent on that socket and nowhere else.
+export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, multiuser = false, caller,
+  connectDsh = options => probeDsh({ ...options, authority: credentials.authority }),
+  auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
   if (multiuser && !caller) throw new Error('Multiuser requires a caller signer')
   const origin = pinOrigin(value)
   const isMcpTarget = raw => new URL(raw, origin).pathname === '/api/omni-mcp'
   const sockets = new Map()
+  const pendingUpgrades = new Map()
+  let pendingUpgradeCount = 0
+  // A member's HTTP responses are piped apart from the socket table; each request has its own
+  // record, so revocation, expiry, renewal and rebind end it too. A request still waiting for its
+  // probe is answered 401 by its handler; a forwarded one is cut at both ends.
+  const callerRequests = new Set()
+  const transports = new WeakMap()
+  const endRequest = (record, hard = false) => {
+    if (!callerRequests.delete(record)) return
+    record.detach()
+    record.abort.abort()
+    record.probe?.destroy()
+    record.proxy?.destroy()
+    if ((record.proxy || hard) && !record.res.writableFinished) record.res.destroy()
+  }
+  function trackRequest(req, res, family) {
+    const socket = req.socket
+    let transport = transports.get(socket)
+    if (socket && !transport) {
+      const records = new Set()
+      const close = () => { for (const record of records) endRequest(record, true) }
+      transport = { records, close }
+      transports.set(socket, transport)
+      socket.once('close', close)
+    }
+    const record = { family, res, abort: new AbortController(), probe: undefined, proxy: undefined, detach() {
+      res.off('close', closed)
+      res.off('finish', finished)
+      if (transport && transport.records.delete(record) && !transport.records.size) {
+        socket.off('close', transport.close)
+        transports.delete(socket)
+      }
+    } }
+    const closed = () => endRequest(record, true)
+    const finished = () => endRequest(record)
+    callerRequests.add(record)
+    transport?.records.add(record)
+    res.once('close', closed)
+    res.once('finish', finished)
+    if (socket?.destroyed || res.destroyed) closed()
+    return record
+  }
   // Cloud mode: the rail posts a single-use open code here, as a form (OIDC's form_post shape).
   // The gate trades it with the Cloud service itself and sets its own session; the browser
   // never sees a workspace token, and a code or token in a URL is refused.
@@ -318,24 +379,43 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       const owner = ownerEquivalent(family)
       if (!owner && !multiuser) { answer(res, 403, { error: 'Owner access required' }); return }
       if (!sessions.active(family)) { answer(res, 401, { error: 'Session required' }); return }
-      let path = req.url, headers, cookie
+      let path = req.url, headers, cookie, probe, record
       if (owner) {
         cookie = await credentials.cookie()
         if (!sessions.active(family) || res.destroyed) { answer(res, 401, { error: 'Session required' }); return }
         headers = upstreamHeaders(req, credentials, cookie, family.principal)
       } else {
+        if (rebinding) { res.writeHead(503, { connection: 'close' }).end(); return }
         if (!apiPath(url.pathname)) {
           if (!['GET', 'HEAD'].includes(req.method)) { answer(res, 405, { error: 'Method not allowed' }); return }
           if (!frontendPath(url)) { answer(res, 404, { error: 'Unknown frontend path' }); return }
         }
         const target = url.pathname + url.search
+        record = trackRequest(req, res, family)
+        if (!callerRequests.has(record)) return
+        try { probe = await connectDsh({ port: credentials.port, host: DSH_HOST, signal: record.abort.signal }) }
+        catch {
+          // Nothing is signed: no adapter answered on this connection, or the session ended.
+          if (!res.destroyed) answer(res, callerRequests.has(record) ? 503 : 401, { error: callerRequests.has(record) ? 'DSH unavailable' : 'Session required' })
+          return
+        }
+        record.probe = probe
+        if (!sessions.active(family) || res.destroyed || !callerRequests.has(record)) {
+          probe.destroy()
+          if (!res.destroyed) answer(res, 401, { error: 'Session required' })
+          return
+        }
         let assertion
         try { assertion = caller.sign({ principal: family.principal, familyId: family.id, method: req.method, path: target }) }
-        catch { answer(res, 403, { error: 'Caller refused' }); return }
-        path = '/_automagik/caller' + target
+        catch { probe.destroy(); answer(res, 403, { error: 'Caller refused' }); return }
+        path = CALLER_PREFIX + target
         headers = callerHeaders(req, credentials, family.principal, assertion)
       }
-      const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: req.method, path, headers, timeout: 30_000 }, upstream => {
+      // A member's request goes on the probed connection: with `agent` undefined, Node uses
+      // createConnection; `agent: false` would open a new connection.
+      const options = { hostname: DSH_HOST, port: credentials.port, method: req.method, path, headers, timeout: 30_000 }
+      if (probe) options.createConnection = reuseProbe(probe)
+      const proxy = http.request(options, upstream => {
         // A 401 drops the refused cookie. The next owner request checks its family before minting.
         // Never replay a body.
         if (owner && upstream.statusCode === 401) credentials.invalidate(cookie)
@@ -343,9 +423,11 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         upstream.pipe(res)
         upstream.on('error', () => res.destroy())
       })
+      if (record) record.proxy = proxy
       proxy.on('timeout', () => proxy.destroy(new Error('DSH timeout')))
-      proxy.on('error', () => { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() })
-      res.on('close', () => proxy.destroy())
+      // A member's probed connection that breaks before an answer (a DSH restart) is a 503.
+      proxy.on('error', () => { if (!res.headersSent) answer(res, owner ? 502 : 503, { error: 'DSH unavailable' }); else res.destroy() })
+      if (!record) res.on('close', () => proxy.destroy())
       req.pipe(proxy)
     } catch { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() }
   })
@@ -368,9 +450,17 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     try {
       if (multiuser && isMcpTarget(req.url)) { refuseSocket(socket, 403); return }
       if (!req.url.startsWith('/') || req.url.startsWith('//') || new URL(req.url, origin).searchParams.has('token') || req.headers.upgrade?.toLowerCase() !== 'websocket') { refuseSocket(socket); return }
-      if (!ownerEquivalent(family)) { refuseSocket(socket, 403); return }
+      const owner = ownerEquivalent(family)
+      if (!owner && !(multiuser && memberRole(family.principal.roles) && req.method === 'GET' && req.url === MEMBER_UPGRADE_PATH)) { refuseSocket(socket, 403); return }
+      if (!sessions.active(family)) { refuseSocket(socket, 401); return }
       if (exchangePath(new URL(req.url, origin))) { refuseSocket(socket, 401); return }
       if (!sessions.active(family)) { refuseSocket(socket, 401); return }
+      if (!owner) {
+        if (req.headers['sec-websocket-version'] !== '13') refuseSocket(socket, 400)
+        else if (rebinding) refuseSocket(socket, 503)
+        else await carryMember(req, socket, head, family)
+        return
+      }
       const cookie = await credentials.cookie()
       if (!sessions.active(family) || socket.destroyed) { refuseSocket(socket); return }
       const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: 'GET', path: req.url, headers: upstreamHeaders(req, credentials, cookie, family.principal, true), timeout: 5000 })
@@ -386,32 +476,124 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         if (response.statusCode === 401) credentials.invalidate(cookie)
         refuseSocket(socket, response.statusCode === 401 ? 401 : 502)
       })
-      proxy.on('upgrade', (response, upstream, upstreamHead) => {
-        record.upstream = upstream
-        if (!sessions.active(family) || socket.destroyed) { upstream.destroy(); socket.destroy(); return }
-        proxy.setTimeout(0)
-        const headers = { ...responseHeaders(response.headers), connection: 'Upgrade', upgrade: 'websocket' }
-        socket.write(`HTTP/1.1 101 Switching Protocols\r\n${Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('')}\r\n`)
-        if (head.length) upstream.write(head)
-        if (upstreamHead.length) socket.write(upstreamHead)
-        upstream.on('error', () => socket.destroy())
-        upstream.on('close', () => socket.destroy())
-        const admitted = new Transform({
-          transform(chunk, encoding, callback) {
-            if (!sessions.touch(family)) { callback(new Error('Session expired')); return }
-            callback(null, chunk)
-          },
-        })
-        admitted.on('error', () => { socket.destroy(); upstream.destroy() })
-        socket.on('close', () => admitted.destroy())
-        socket.pipe(admitted).pipe(upstream).pipe(socket)
-      })
+      relay(record, socket, head, proxy)
       proxy.end()
     } catch { refuseSocket(socket, 502) }
   })
-  const revoke = id => { for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy() }
+  // The upstream handshake's answer, relayed and metered by session activity for owners and
+  // members alike.
+  function relay(record, socket, head, proxy) {
+    const { family } = record
+    proxy.on('upgrade', (response, upstream, upstreamHead) => {
+      record.upstream = upstream
+      if (!sessions.active(family) || socket.destroyed) { upstream.destroy(); socket.destroy(); return }
+      proxy.setTimeout(0)
+      const headers = { ...responseHeaders(response.headers), connection: 'Upgrade', upgrade: 'websocket' }
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\n${Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('')}\r\n`)
+      if (head.length) upstream.write(head)
+      if (upstreamHead.length) socket.write(upstreamHead)
+      upstream.on('error', () => socket.destroy())
+      upstream.on('close', () => socket.destroy())
+      const admitted = new Transform({
+        transform(chunk, encoding, callback) {
+          if (!sessions.touch(family)) { callback(new Error('Session expired')); return }
+          callback(null, chunk)
+        },
+      })
+      admitted.on('error', () => { socket.destroy(); upstream.destroy() })
+      socket.on('close', () => admitted.destroy())
+      socket.pipe(admitted).pipe(upstream).pipe(socket)
+    })
+  }
+  // A member's or guest's /api/remote.mux: signed as GET for the exact path and sent, with the
+  // handshake fields and the assertion only, on the connection the adapter answered its probe on.
+  async function carryMember(req, socket, head, family) {
+    if (socket.destroyed) return
+    const person = JSON.stringify([family.principal.issuer, family.principal.subject])
+    const held = pendingUpgrades.get(person) ?? 0
+    if (held >= MAX_PENDING_UPGRADES_PER_PERSON) return refuseSocket(socket, 429)
+    if (pendingUpgradeCount >= MAX_PENDING_UPGRADES) return refuseSocket(socket, 503)
+    pendingUpgrades.set(person, held + 1)
+    pendingUpgradeCount++
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      socket.off('close', release)
+      pendingUpgradeCount--
+      const left = pendingUpgrades.get(person) - 1
+      if (left === 0) pendingUpgrades.delete(person)
+      else pendingUpgrades.set(person, left)
+    }
+    // A refusal keeps its slot until close frees the buffered browser bytes.
+    socket.once('close', release)
+    const abort = new AbortController()
+    const record = { socket, family, member: true, proxy: undefined, probe: undefined }
+    sockets.set(socket, record)
+    socket.on('close', () => { sockets.delete(socket); abort.abort(); record.probe?.destroy(); record.proxy?.destroy(); record.upstream?.destroy() })
+    socket.on('error', () => record.proxy?.destroy())
+    // Read until the probe settles so a browser FIN is visible even on an
+    // upgrade's half-open socket. Keep any early tunnel bytes for relay.
+    const early = []
+    let earlyBytes = head.length
+    const departed = () => { abort.abort(); socket.destroy() }
+    const buffer = chunk => {
+      earlyBytes += chunk.length
+      if (earlyBytes > MAX_EARLY_UPGRADE_BYTES) departed()
+      else early.push(chunk)
+    }
+    if (socket.readableEnded || earlyBytes > MAX_EARLY_UPGRADE_BYTES) { departed(); return }
+    socket.once('end', departed)
+    socket.on('data', buffer)
+    socket.resume()
+    let probe
+    try { probe = await connectDsh({ port: credentials.port, host: DSH_HOST, signal: abort.signal }) }
+    catch {
+      if (!socket.destroyed) refuseSocket(socket, 503)
+      return
+    } finally {
+      socket.pause()
+      socket.off('data', buffer)
+      socket.off('end', departed)
+    }
+    if (socket.readableEnded || socket.destroyed) { probe.destroy(); departed(); return }
+    record.probe = probe
+    for (let i = early.length - 1; i >= 0; i--) socket.unshift(early[i])
+    if (!sessions.active(family) || socket.destroyed) {
+      probe.destroy()
+      refuseSocket(socket, 401)
+      return
+    }
+    let assertion
+    try { assertion = caller.sign({ principal: family.principal, familyId: family.id, method: 'GET', path: MEMBER_UPGRADE_PATH }) }
+    catch {
+      probe.destroy()
+      refuseSocket(socket, 403)
+      return
+    }
+    const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: 'GET', path: CALLER_PREFIX + MEMBER_UPGRADE_PATH,
+      headers: callerUpgradeHeaders(req, credentials, family.principal, assertion), createConnection: reuseProbe(probe), timeout: 5000 })
+    record.proxy = proxy
+    proxy.on('error', () => { if (record.upstream) socket.destroy(); else refuseSocket(socket, 503) })
+    proxy.on('timeout', () => proxy.destroy())
+    // The carrier's refusal passes through; the owner credential is never touched here.
+    proxy.on('response', response => {
+      response.resume()
+      refuseSocket(socket, memberStatus(response.statusCode))
+    })
+    proxy.once('upgrade', release)
+    relay(record, socket, head, proxy)
+    proxy.end()
+  }
+  const revoke = id => {
+    for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy()
+    for (const record of [...callerRequests]) if (record.family.id === id) endRequest(record)
+  }
   sessions.on('revoke', revoke)
-  const timer = setInterval(() => { for (const record of sockets.values()) if (!sessions.active(record.family)) record.socket.destroy() }, 1000).unref()
+  const timer = setInterval(() => {
+    for (const record of sockets.values()) if (!sessions.active(record.family)) record.socket.destroy()
+    for (const record of [...callerRequests]) if (!sessions.active(record.family)) endRequest(record)
+  }, 1000).unref()
   // Section 6's poll fallback: at least every 5 minutes while the gate holds sessions, and
   // while a removal is still pending (it may have ended the last session, and only a later
   // list can lift it). A failed poll changes nothing, and the next tick tries again.
@@ -431,26 +613,42 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   })
   let binding = Promise.resolve()
   server.rebind = (port, target, drop = false) => {
-    if (drop) { for (const record of sockets.values()) record.socket.destroy(); server.closeAllConnections() }
+    if (drop) {
+      for (const record of sockets.values()) record.socket.destroy()
+      for (const record of [...callerRequests]) endRequest(record, true)
+      server.closeAllConnections()
+    }
     const task = binding.then(async () => {
       const host = typeof target === 'function' ? target() : target
-      if (server.address()?.address === host) return
+      const address = server.address()
+      if (address?.address === host && (port === 0 || address.port === port)) return
       rebinding = true
-      await new Promise((resolve, reject) => {
-        server.close(error => error ? reject(error) : resolve())
-        // Stop accepting first, then drop connections accepted while this rebind was queued.
-        if (drop) server.closeAllConnections()
-      })
-      await new Promise((resolve, reject) => {
-        const failed = error => reject(error)
-        server.once('error', failed)
-        server.listen(port, host, () => { server.off('error', failed); resolve() })
-      })
-      rebinding = false
+      try {
+        await new Promise((resolve, reject) => {
+          server.close(error => error ? reject(error) : resolve())
+          // Stop accepting first, then drop member connections and any other connections
+          // covered by drop that were accepted while this rebind was queued.
+          for (const record of sockets.values()) if (drop || record.member) record.socket.destroy()
+          for (const record of [...callerRequests]) endRequest(record, true)
+          if (drop) server.closeAllConnections()
+        })
+        await new Promise((resolve, reject) => {
+          const failed = error => reject(error)
+          server.once('error', failed)
+          server.listen(port, host, () => { server.off('error', failed); resolve() })
+        })
+      } finally {
+        rebinding = false
+      }
     })
     binding = task.catch(() => {})
     return task
   }
-  server.closeGate = () => { for (const record of sockets.values()) record.socket.destroy(); server.closeAllConnections(); return new Promise(resolve => server.close(resolve)) }
+  server.closeGate = () => {
+    for (const record of sockets.values()) record.socket.destroy()
+    for (const record of [...callerRequests]) endRequest(record, true)
+    server.closeAllConnections()
+    return new Promise(resolve => server.close(resolve))
+  }
   return server
 }

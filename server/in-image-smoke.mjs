@@ -279,6 +279,9 @@ async function main() {
   check(dry.pnpm === PNPM_PATH, `the CLI store used ${dry.pnpm}, not ${PNPM_PATH}`)
   check(dry.registry === 'https://registry.npmjs.org', `the CLI store used ${dry.registry}`)
 
+  const caller = await fetch('http://127.0.0.1:3081/_automagik/caller/api/x', { signal: AbortSignal.timeout(5000) })
+  check(caller.status === 401 && (await caller.arrayBuffer()).byteLength === 0,
+    'mode-off caller route did not return an empty 401 on DSH')
   console.log(`IN-IMAGE SMOKE OK am=${am} hc=${hc} pnpm=${pnpm} node=${node} cli-store=dry-run`)
 }
 

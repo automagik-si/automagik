@@ -327,3 +327,44 @@ test('shell metacharacters remain one URL argument and execute no commands', (t)
   assert.deepEqual(JSON.parse(echo.stdout), call.args.slice(1))
   assert.equal(existsSync(marker), false)
 })
+
+import { closeSync, openSync } from 'node:fs'
+
+test('real entrypoint refuses invalid mode or missing caller keys and fixes the off-mode DSH environment', t => {
+  for (const [mode, code] of [['invalid', 'invalid AUTOMAGIK_MULTIUSER'], ['1', 'caller-keys-config'], [undefined, undefined]]) {
+    const dir = mkdtempSync(join(tmpdir(), 'automagik-multiuser-main-'))
+    t.after(() => rmSync(dir, { recursive: true, force: true }))
+    const program = harness.replace('modelKey: env.DEEPSEEK_API_KEY,', 'multiuser: env.AUTOMAGIK_MULTIUSER,')
+    const env = {
+      PATH: process.env.PATH, HOME: dir, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir,
+      XDG_RUNTIME_DIR: join(dir, 'run'), HC_SESSION: 'test-multiuser-entrypoint',
+      AUTOMAGIK_CLI_INSTALL: 'off', DEEPSEEK_API_KEY: 'test-only',
+    }
+    if (mode !== undefined) env.AUTOMAGIK_MULTIUSER = mode
+    writeFileSync(join(dir, '.env'), 'AUTOMAGIK_MULTIUSER=1\nAUTOMAGIK_CALLER_KEYS=/env/caller-keys.json\n')
+    const stdout = join(dir, 'stdout'), stderr = join(dir, 'stderr')
+    const out = openSync(stdout, 'w'), err = openSync(stderr, 'w')
+    let result
+    try {
+      result = spawnSync(process.execPath, ['--input-type=module', '--eval', program], {
+        env, stdio: ['ignore', out, err], timeout: 30_000,
+      })
+    } finally {
+      closeSync(out)
+      closeSync(err)
+    }
+    assert.ifError(result.error)
+    result.stdout = readFileSync(stdout, 'utf8')
+    result.stderr = readFileSync(stderr, 'utf8')
+    if (code) {
+      assert.equal(result.status, 1)
+      assert.ok(result.stderr.includes(code))
+      assert.doesNotMatch(result.stdout, /CORE |SPAWN /)
+      assert.doesNotMatch(result.stderr, /test-only|\/env\//)
+    } else {
+      assert.equal(result.status, 0, result.stderr)
+      assert.match(result.stdout, /CORE /)
+      assert.equal(spawnRecord(result, 'SPAWN ').multiuser, '0')
+    }
+  }
+})

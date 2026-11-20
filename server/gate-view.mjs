@@ -132,11 +132,11 @@ function unavailableProfileState(reason) {
   }
 }
 
-export function readProfileState(view, build) {
+export function readProfileState(view, build, { keepRollback = false } = {}) {
   const state = readJson(join(view, PROFILE_STATE_FILE))
   if (!isProfileState(state, build)) return unavailableProfileState('no-profile-state')
   const age = Date.now() - Date.parse(state.at)
-  if (age > MAX_AGE || age < -MAX_CLOCK_SKEW) {
+  if ((age > MAX_AGE && !(keepRollback && state.reason === 'update-rolled-back')) || age < -MAX_CLOCK_SKEW) {
     return unavailableProfileState('stale-profile-state')
   }
   return state

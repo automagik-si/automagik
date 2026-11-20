@@ -1,4 +1,5 @@
 [install]
-# The same install settings as the sibling plugins: Bun installs no peers. The pack has no
-# dependencies of its own, so it has no lockfile either.
+# The same install settings as the sibling plugins: Bun installs no peers. The @deepseek-ai
+# peers come from the dsh profile that loads the plugin (dev/harness in tests). Bun
+# installs the pinned `ws` dependency locally. The lockfile also records peer resolution.
 peer = false

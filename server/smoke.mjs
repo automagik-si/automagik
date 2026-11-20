@@ -17,6 +17,10 @@ const name = `automagik-server-smoke-${process.pid}`
 const volume = `${name}-data`
 const gateName = `${name}-gate`
 const gateVolume = `${name}-gate-data`
+const memberName = `${name}-member`
+const memberData = `${name}-member-data`
+const publicKeys = `${name}-caller-keys`
+const signerData = `${name}-signer-data`
 const START_TIMEOUT_MS = 240_000
 
 const docker = async (args, options = {}) => {
@@ -67,6 +71,62 @@ async function waitForHealthy() {
     await sleep(1000)
   }
   throw new Error(`Docker's health check did not turn healthy\n${await logsOf()}`)
+}
+
+async function smokeMultiuser() {
+  const flags = ['--env', 'AUTOMAGIK_MULTIUSER=1', '--env', 'AUTOMAGIK_CLI_INSTALL=off',
+    '--env', 'AUTOMAGIK_CALLER_KEYS=/caller-keys/caller-keys.json',
+    '--env', 'AUTOMAGIK_INSTANCE_ID=member-smoke']
+  await docker(['volume', 'create', memberData])
+  await docker(['run', '--detach', '--name', memberName, '--network', 'none',
+    '--volume', `${memberData}:/data`, ...flags, image])
+  const refused = await docker(['wait', memberName], { timeout: 30_000 })
+  check(refused.stdout.trim() === '1', 'multiuser without the caller keys mount did not exit 1')
+  const logs = await docker(['logs', memberName])
+  check(logs.stderr.includes('caller-keys-mount') && !/herdr-core/.test(logs.stdout + logs.stderr),
+    'multiuser without the caller keys mount did not refuse before the core')
+  await docker(['rm', memberName])
+
+  await docker(['volume', 'create', publicKeys])
+  await docker(['volume', 'create', signerData])
+  const signer = `
+    import { createSigner } from '/opt/automagik/gate-caller.mjs'
+    const workspace = 'member-smoke'
+    const signer = createSigner({ dir: '/data', publicDir: '/caller-keys', instance: () => workspace })
+  `
+  const helper = (network, code) => docker(['run', '--rm', '--network', network, '--user', '1000:1000',
+    '--volume', `${signerData}:/data`, '--volume', `${publicKeys}:/caller-keys`,
+    '--entrypoint', '/nodejs/bin/node', image, '--input-type=module', '-e', signer + code], { timeout: 30_000 })
+  await helper('none', 'signer.publish()')
+  await docker(['run', '--detach', '--name', memberName, '--network', 'none',
+    '--volume', `${memberData}:/data`, '--volume', `${publicKeys}:/caller-keys:ro`, ...flags,
+    '--health-interval', '2s', image])
+  const started = Date.now()
+  while (true) {
+    const status = (await docker(['inspect', memberName, '--format', '{{.State.Status}} {{.State.Health.Status}}'])).stdout.trim()
+    if (status === 'running healthy') break
+    check(status.startsWith('running ') && Date.now() - started < START_TIMEOUT_MS, 'multiuser carrier did not become healthy')
+    await sleep(500)
+  }
+  const report = JSON.parse((await docker(['exec', memberName, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs', '--json'])).stdout)
+  check(report.healthy && report.multiuser?.healthy, 'multiuser report lacks the live carrier')
+  await helper(`container:${memberName}`, `
+    // The adapter rejects assertions from its first five seconds.
+    await new Promise(resolve => setTimeout(resolve, 6000))
+    const principal = { issuer: 'https://member.invalid', subject: 'member', roles: ['member'], workspace }
+    const assertion = signer.sign({ principal, familyId: 'smoke', method: 'GET', path: '/' })
+    const get = () => fetch('http://127.0.0.1:3081/_automagik/caller/', {
+      headers: { 'x-automagik-caller': assertion }, redirect: 'manual', signal: AbortSignal.timeout(5000),
+    })
+    const index = await get()
+    if (index.status !== 200 || index.headers.get('cache-control') !== 'no-cache' ||
+        !index.headers.get('etag')) throw new Error('member-index')
+    await index.body.cancel()
+    const replay = await get()
+    if (replay.status !== 401) throw new Error('member-replay')
+    await replay.body.cancel()
+  `)
+  say('multiuser: mount refusal, healthy carrier, member index cache policy, replay refused')
 }
 
 async function main() {
@@ -120,6 +180,7 @@ async function main() {
   await docker(['exec', name, '/bin/bash', '-c', 'test -f /data/dsh/profiles/automagik-web/node_modules/@automagik/bots-dsh/package.json'])
   await docker(['exec', name, '/bin/bash', '-c', 'test -f /data/dsh/profiles/automagik-web/node_modules/@automagik/welcome-dsh/package.json'])
   await docker(['exec', name, '/bin/bash', '-c', 'test -f /data/dsh/profiles/automagik-web/node_modules/@automagik/acp-dsh/package.json'])
+  await docker(['exec', name, '/bin/bash', '-c', 'test -f /data/dsh/profiles/automagik-web/node_modules/@automagik/multiuser-dsh/package.json'])
   await docker(['exec', name, '/bin/bash', '-c', 'test -f /data/dsh/launch-url'])
   const mode = (await docker(['exec', name, '/nodejs/bin/node', '-e', 'process.stdout.write((require("fs").statSync("/data/dsh/launch-url").mode & 0o777).toString(8))'])).stdout.trim()
   check(mode === '600', `launch-url is ${mode}, not 600`)
@@ -132,11 +193,11 @@ async function main() {
   const entries = (config.match(/^- id:/gm) ?? []).length
   check(entries >= 190, `composed only ${entries} entries`)
   // dsh-base is a bundle patch, not an entry: it shows only through the entries it adds.
-  for (const plugin of ['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh',
+  for (const plugin of ['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh', '@automagik/multiuser-dsh',
     '@deepseek-ai/dsh-web-app', '@deepseek-ai/dsh-office-kit']) {
     check(config.includes(`name: '${plugin}'`) || config.includes(`name: "${plugin}"`), `${plugin} is not composed`)
   }
-  say(`seeded profile, three plugins, 600 launch URL, uid 1000, ${entries} composed entries`)
+  say(`seeded profile, four plugins, 600 launch URL, uid 1000, ${entries} composed entries`)
   for (const line of logs.split('\n').filter((line) => /first boot:|am self install:/.test(line))) {
     say(line.replace(/^automagik-web: /, ''))
   }
@@ -314,6 +375,7 @@ async function main() {
   check(/the key file must be 0400 or 0600/.test(await logsOf()), 'no explanation for the refused key file')
   say('key file: 0400 used, 0644 refused')
 
+  await smokeMultiuser()
   console.log(`SMOKE OK image=${image} health=401 start_to_401_ms=${startTo401} uid=1000`)
 }
 
@@ -326,6 +388,8 @@ try {
   } catch {}
   process.exitCode = 1
 } finally {
+  await docker(['rm', '--force', memberName]).catch(() => {})
+  for (const temp of [memberData, publicKeys, signerData]) await docker(['volume', 'rm', '--force', temp]).catch(() => {})
   await docker(['rm', '--force', gateName]).catch(() => {})
   await docker(['volume', 'rm', '--force', gateVolume]).catch(() => {})
   await docker(['rm', '--force', name]).catch(() => {})

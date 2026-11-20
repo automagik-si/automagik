@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { EventEmitter, once } from 'node:events'
 import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import files from 'node:fs/promises'
 import http from 'node:http'
@@ -10,6 +11,8 @@ import { pathToFileURL } from 'node:url'
 import { PassThrough, Readable } from 'node:stream'
 import { setImmediate } from 'node:timers/promises'
 import test from 'node:test'
+import WebSocket from 'ws'
+import { Service } from '@deepseek-ai/cordis'
 import { TypertGatewayService } from '@deepseek-ai/dsh-api-gateway'
 import { ClientModuleRegistry } from '@deepseek-ai/dsh-client-modules'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
@@ -22,6 +25,8 @@ import { COOKIE, SessionStore } from '../../../server/gate-store.mjs'
 import { appOf, install as installAppManifest, manifestOf } from '../../bots-dsh/src/host/app-manifest.js'
 import { callerOf } from '../../bots-dsh/src/host/multiuser.js'
 import * as adapter from '../index.js'
+import { READY_PATH } from '../src/carrier.js'
+import { MUX_PATH } from '../src/mux-carrier.js'
 import { invoke, localHTTP, prefix, provideConnection, rpc, runtime, send, webRuntime, wire } from './runtime.mjs'
 
 const origin = 'https://workspace.invalid'
@@ -48,7 +53,39 @@ function clientRegistry(ctx, dir, names, configurePackage) {
   return new ClientModuleRegistry(ctx)
 }
 
-function callerRuntime(t, { services = runtime(t), now } = {}) {
+const fixtureDispatch = new WeakMap()
+
+function fixtureGateway(ctx, { publicMux = false } = {}) {
+  if (!ctx.get('typert')) new TypertRegistry(ctx)
+  // Keep the in-process fixture's public upgrade table empty. Its RPC connection and
+  // remoteAccess service are shared with the adapter.
+  const gateway = new TypertGatewayService(publicMux ? ctx : ctx.isolate('webServer'), TypertGatewayService.Config({}))
+  const claims = gateway.claimsEndpoint.bind(gateway)
+  const dispatch = gateway.dispatchRpc.bind(gateway)
+  gateway.claimsEndpoint = endpoint => endpoint === 'fixture' || claims(endpoint)
+  gateway.dispatchRpc = (endpoint, payload, signal, peer) => {
+    const observe = fixtureDispatch.get(gateway)
+    if (endpoint !== 'fixture' || !observe) return dispatch(endpoint, payload, signal, peer)
+    // This test-only RPC observes the caller, like the access snapshot. Business RPCs
+    // still use the gateway's normal authorization and dispatch.
+    const decision = gateway.ctx.remoteAccess.decide({ principal: peer.principal, action: 'remoteAccess/follow', resources: [] })
+    assert.equal(decision.kind, 'allow')
+    return observe(endpoint, payload, signal, peer)
+  }
+  return gateway
+}
+
+function observeRpc(ctx, handler) {
+  const service = ctx.get('typertGateway')
+  const gateway = service[Symbol.for('cordis.original')]
+  fixtureDispatch.set(gateway, handler)
+  return () => fixtureDispatch.delete(gateway)
+}
+
+function callerRuntime(t, { services = runtime(t), now, publicMux = false } = {}) {
+  // The adapter registers its automagik policy before it admits any caller.
+  new RemoteAccessService(services.ctx)
+  const gateway = fixtureGateway(services.ctx, { publicMux })
   const dir = mkdtempSync(join(tmpdir(), 'caller-interop-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const signer = createSigner({ dir, publicDir: dir, instance: () => instance, now })
@@ -61,7 +98,7 @@ function callerRuntime(t, { services = runtime(t), now } = {}) {
   })
   syncBuiltinESMExports()
   t.after(() => { mount.mock.restore(); syncBuiltinESMExports() })
-  return { ...services, dir, signer, async activate(ctx = services.ctx) {
+  return { ...services, dir, signer, gateway, async activate(ctx = services.ctx) {
     const env = { AUTOMAGIK_MULTIUSER: '1', AUTOMAGIK_CALLER_KEYS: join(dir, 'caller-keys.json'), AUTOMAGIK_INSTANCE_ID: instance, DSH_HOME: dir }
     const old = Object.fromEntries(Object.keys(env).map(name => [name, process.env[name]]))
     Object.assign(process.env, env)
@@ -84,9 +121,9 @@ function callerRuntime(t, { services = runtime(t), now } = {}) {
 async function setup(t, { names = ['fixture-a', 'fixture-b'], fixtureDist = true, configurePackage } = {}) {
   const { ctx, webServer, connection, dir, signer, activate } = callerRuntime(t)
   const dispatched = []
-  const createFetchHandler = connection.createSharedFetchHandler.bind(connection)
-  t.mock.method(connection, 'createSharedFetchHandler', channel => {
-    const handler = createFetchHandler(channel)
+  const createFetchHandler = connection.createSharedFetchHandler
+  t.mock.method(connection, 'createSharedFetchHandler', function (channel) {
+    const handler = createFetchHandler.call(this, channel)
     return { ...handler, fetch(request, peer) {
       dispatched.push(request.url)
       return handler.fetch(request, peer)
@@ -94,11 +131,16 @@ async function setup(t, { names = ['fixture-a', 'fixture-b'], fixtureDist = true
   })
   await activate()
   assert.equal(ctx.get('automagikCaller').version, 1)
-  new RemoteAccessService(ctx)
   const route = webServer.match(prefix + '/api/fixture')
   assert.equal(route?.path, prefix)
   assert.equal(typeof route.handler, 'function')
   assert.equal(webServer.upgrades.size, 0)
+  // The private mux path dispatches to the adapter's mux carrier, which reads the raw target.
+  const muxRoute = webServer.upgrades.get(MUX_PATH)
+  const refused = []
+  const socket = Object.assign(new EventEmitter(), { destroy() { this.emit('close') }, end(bytes, flushed) { refused.push(bytes); flushed() } })
+  muxRoute.handler({ url: MUX_PATH + '?', method: 'GET', headers: {}, rawHeaders: [] }, socket, Buffer.alloc(0))
+  assert.match(refused[0], /^HTTP\/1\.1 400 Bad Request\r\n/)
 
   const dist = join(dir, 'dist')
   const index = join(dist, 'index.html')
@@ -142,7 +184,7 @@ function person(subject, role = 'member') {
 function observe(f) {
   const both = Promise.withResolvers()
   let overlapped = 0
-  return f.connection.rpc.intercept('/api', method => method === 'fixture', async (_method, _body, _signal, peer) => {
+  return observeRpc(f.ctx, async (_method, _body, _signal, peer) => {
     if (++overlapped === 2) both.resolve()
     await both.promise
     await setImmediate()
@@ -153,7 +195,7 @@ function observe(f) {
 }
 
 function businessGateway({ ctx, connection }) {
-  const typert = new TypertRegistry(ctx)
+  const typert = ctx.get('typert')
   let calls = 0
   class Session extends TypertRemoteService {
     prompt() { calls++; return 'prompted' }
@@ -163,7 +205,7 @@ function businessGateway({ ctx, connection }) {
     id: 'fixture-session/prompt', service: 'session', namespace: 'session', method: 'prompt',
     invocation: { kind: 'direct' }, parameters: [], result: { mode: 'src-json' },
   }] })
-  const gateway = new TypertGatewayService(ctx, TypertGatewayService.Config({}))
+  const gateway = ctx.get('typertGateway')[Symbol.for('cordis.original')]
   assert.equal(gateway.claimsEndpoint('session/prompt'), true)
   return {
     calls: () => calls,
@@ -248,7 +290,21 @@ function inProcessGate(t, f, cookie = () => assert.fail('owner credential reques
   const sessions = new SessionStore(f.dir, { memory: true, accepts: () => true })
   const port = 54321
   f.webServer.listenedPort = port
-  const gate = createGate({ origin, sessions, multiuser: true, caller: f.signer, credentials: {
+  // The gate's probe is answered in-process by the same web server, before signing.
+  // A refused probe prevents any forwarded request, as on loopback.
+  const probes = []
+  const connectDsh = async () => {
+    const responder = f.webServer.responderFor(READY_PATH)
+    const reply = await invoke((req, res) => {
+      if (!responder) { res.writeHead(404); return res.end() }
+      return responder.handler(req, res)
+    }, { url: READY_PATH, method: 'GET', headers: { host: `127.0.0.1:${port}` }, waitForEnd: true })
+    const ready = reply.headers?.['x-automagik-ready']
+    probes.push({ status: reply.status, ready })
+    if (reply.status !== 204 || ready !== '1' || reply.bytes.length) throw new Error('unready')
+    return new PassThrough()
+  }
+  const gate = createGate({ origin, sessions, multiuser: true, caller: f.signer, connectDsh, credentials: {
     port, authority: `127.0.0.1:${port}`, cookie,
   } })
   t.after(() => gate.closeGate())
@@ -282,17 +338,17 @@ function inProcessGate(t, f, cookie = () => assert.fail('owner credential reques
       'content-length': body ? String(Buffer.byteLength(body)) : undefined, ...headers,
     } })
   }
-  return { request, upstream }
+  return { request, upstream, probes }
 }
 
-for (const kind of ['exact', 'prefix', 'upgrade']) {
+for (const kind of ['exact', 'prefix', 'upgrade', 'mux upgrade']) {
   test(`a preexisting ${kind} route in /_automagik blocks adapter startup and receives no member requests`, async t => {
     const f = callerRuntime(t)
     const { webServer } = f
     const responderFor = webServer.responderFor
-    const path = prefix + (kind === 'prefix' ? '/api' : '/api/fixture')
+    const path = kind === 'mux upgrade' ? MUX_PATH : prefix + (kind === 'prefix' ? '/api' : '/api/fixture')
     const handler = t.mock.fn((_req, res) => { res.writeHead(200); res.end('intruder') })
-    if (kind === 'upgrade') webServer.registerUpgrade({ path, handler })
+    if (kind.endsWith('upgrade')) webServer.registerUpgrade({ path, handler })
     else webServer.register({ kind, path, handler })
     const log = t.mock.method(console, 'error', () => {})
     const dispose = await f.activate()
@@ -300,10 +356,23 @@ for (const kind of ['exact', 'prefix', 'upgrade']) {
     assert.equal(webServer.prefixes.has(prefix), false)
     assert.equal(log.mock.callCount(), 1)
     assert.match(log.mock.calls[0].arguments[0], /startup refused.*\/_automagik/)
+    const sign = t.mock.method(f.signer, 'sign')
     const { request, upstream } = inProcessGate(t, f)
-    assert.equal((await request('/api/fixture', 'POST', person('first'), rpc())).status, 404)
-    assert.equal(upstream.mock.callCount(), 1)
-    assert.equal(upstream.mock.calls[0].arguments[0].path, prefix + '/api/fixture')
+    assert.equal((await request('/api/fixture', 'POST', person('first'), rpc())).status, 503)
+    assert.equal(sign.mock.callCount(), 0)
+    assert.equal(upstream.mock.callCount(), 0)
+    const target = prefix + '/api/fixture'
+    const reply = await invoke(webServer.responderFor(target).handler, {
+      url: target, method: 'POST', body: rpc(), headers: { host: '127.0.0.1:54321' },
+    })
+    assert.equal(reply.status, 404)
+    if (kind.endsWith('upgrade')) {
+      // The handshake on the held path is refused by the reservation, never handed over.
+      const refused = []
+      const socket = Object.assign(new EventEmitter(), { destroy() { this.emit('close') }, end(bytes, flushed) { refused.push(bytes); flushed() } })
+      webServer.upgrades.get(path).handler({ url: path, method: 'GET', headers: {} }, socket, Buffer.alloc(0))
+      assert.match(refused[0], /^HTTP\/1\.1 503 /)
+    }
     assert.equal(handler.mock.callCount(), 0)
     await dispose()
     assert.equal(webServer.responderFor, responderFor)
@@ -312,7 +381,7 @@ for (const kind of ['exact', 'prefix', 'upgrade']) {
 
 test('the adapter reserves /_automagik for its lifetime and later intruders receive no member requests', async t => {
   const f = callerRuntime(t)
-  const { webServer, connection } = f
+  const { webServer } = f
   const { register, registerUpgrade } = webServer
   const dispose = await f.activate()
   const handler = t.mock.fn()
@@ -326,8 +395,7 @@ test('the adapter reserves /_automagik for its lifetime and later intruders rece
   const removeSibling = webServer.register(sibling)
   assert.equal(webServer.match(sibling.path), sibling)
   removeSibling()
-  connection.rpc.intercept('/api', method => method === 'fixture', (_method, _body, _signal, peer) =>
-    ({ ok: true, value: peer.principal.person.subject }))
+  observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
   assert.equal(result(await request('/api/fixture', 'POST', person('first'), rpc())).value, 'first')
   assert.equal(handler.mock.callCount(), 0)
@@ -499,8 +567,14 @@ test('gate interop through the installed private route preserves attribution, po
   const stopObserving = observe(f)
   const captured = []
   const upstream = await localHTTP(t, (req, res) => {
-    captured.push({ path: req.url, method: req.method, headers: req.headers })
+    // The gate's readiness probe is answered here too; captured hops exclude it.
+    if (req.url !== READY_PATH) captured.push({ path: req.url, method: req.method, headers: req.headers })
     f.webServer.match(new URL(req.url, 'http://x').pathname)?.handler(req, res)
+  })
+  const carried = []
+  upstream.server.on('upgrade', (req, socket, head) => {
+    carried.push({ path: req.url, headers: req.headers })
+    f.webServer.upgrades.get(new URL(req.url, 'http://x').pathname)?.handler(req, socket, head)
   })
   f.webServer.listenedPort = upstream.port
   const sessions = new SessionStore(f.dir, { memory: true, accepts: () => true })
@@ -529,10 +603,16 @@ test('gate interop through the installed private route preserves attribution, po
     assert.equal(result(await call('session/prompt', headers, { args: {} })).error.code, 'remote-access/denied')
     assert.equal(business.calls(), 0)
     assert.equal((await business.follow(principal)).owner, false)
+    // Delivery 5b carries a member's /api/remote.mux to the adapter; this handshake has no
+    // WebSocket key, so the adapter's WebSocket server refuses it and the gate passes the 400.
     const upgrade = await send(port, '/api/remote.mux', {
-      upgrade: true, headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket' },
+      upgrade: true, headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13' },
     })
-    assert.equal(upgrade.status, 403)
+    assert.equal(upgrade.status, 400)
+    const hop = carried.at(-1)
+    assert.equal(hop.path, prefix + '/api/remote.mux')
+    assert.ok(hop.headers['x-automagik-caller'])
+    assert.equal(hop.headers.cookie, undefined)
   }
   const firstHop = captured[0]
   assert.ok(firstHop.headers['x-automagik-caller'])
@@ -545,9 +625,8 @@ test('gate interop through the installed private route preserves attribution, po
 
 const fixturePath = '/api/fixture'
 
-function observeFixture(connection) {
-  assert.ok(connection.rpc.intercept('/api', method => method === 'fixture', (_method, _body, _signal, peer) =>
-    ({ ok: true, value: peer.principal.person.subject })))
+function observeFixture(ctx) {
+  assert.ok(observeRpc(ctx, (_method, _body, _signal, peer) => ({ ok: true, value: peer.principal.person.subject })))
 }
 
 function countFallback(t, webServer) {
@@ -571,7 +650,7 @@ test('the reserved carrier refuses before the connection arrives and after it le
 
   const connection = provideConnection(f.ctx)
   await connection
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
   const member = () => request(fixturePath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
@@ -590,7 +669,7 @@ test('a replacement connection inherits an unpersisted rollback cutoff', async t
   await f.activate()
   const first = provideConnection(f.ctx)
   await first
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
   const principal = person('first')
   const member = () => request(fixturePath, 'POST', principal, rpc())
@@ -620,7 +699,7 @@ test('a replacement connection inherits an unpersisted rollback cutoff', async t
   wall = start * 1000
   await provideConnection(f.ctx)
   assert.equal(f.ctx.get('automagikCaller').version, 1)
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   const atWatermark = (await member()).status
   wall += 6000
   mono += 6000
@@ -647,7 +726,7 @@ test('a delayed claim projects from its claim time before the first request', as
   const claimedAt = Math.floor(wall / 1000)
   await provideConnection(f.ctx)
   assert.equal(f.ctx.get('automagikCaller').version, 1)
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   inProcessGate(t, f)
   const principal = person('first')
   const assertion = f.signer.sign({ principal, familyId: 'fixture', method: 'POST', path: fixturePath })
@@ -672,7 +751,7 @@ test('a replacement connection refuses an unused assertion on its first request 
   await f.activate()
   const first = provideConnection(f.ctx)
   await first
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   f.webServer.listenedPort = 54321
   const method = 'POST'
   const path = prefix + fixturePath
@@ -692,7 +771,7 @@ test('a replacement connection refuses an unused assertion on its first request 
   mono += 40_000
   await first.dispose()
   await provideConnection(f.ctx)
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   assert.equal((await send(unused)).status, 401)
   assert.equal(Number(readFileSync(file, 'utf8')), 150)
 })
@@ -706,7 +785,7 @@ test('a replacement connection anchors at a forward correction before the first 
   await f.activate()
   const first = provideConnection(f.ctx)
   await first
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   f.webServer.listenedPort = 54321
   const method = 'POST'
   const path = prefix + fixturePath
@@ -723,7 +802,7 @@ test('a replacement connection anchors at a forward correction before the first 
   mono += 1000
   await first.dispose()
   await provideConnection(f.ctx)
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   const unused = sign()
   wall += 40_000
   mono += 40_000
@@ -737,7 +816,7 @@ test('new and retained carrier handlers refuse while a caller dependent holds te
   await f.activate()
   const connection = provideConnection(f.ctx)
   await connection
-  observeFixture(f.ctx.get('connection'))
+  observeFixture(f.ctx)
   const entered = Promise.withResolvers()
   const hold = Promise.withResolvers()
   await f.ctx.inject(['automagikCaller'], c => c.effect(() => () => {
@@ -771,7 +850,7 @@ test('adapter disposal leaves the permanent guard ahead of the fallback and late
   const fallback = countFallback(t, f.webServer)
   const dispose = await f.activate()
   const { match } = f.webServer
-  observeFixture(f.connection)
+  observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
   const member = () => request(fixturePath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
@@ -799,7 +878,7 @@ test('adapter disposal while a member POST body is held refuses before RPC dispa
   const dispose = await f.activate()
   f.webServer.listenedPort = 54321
   const interceptor = t.mock.fn(() => ({ ok: true }))
-  assert.ok(f.connection.rpc.intercept('/api', method => method === 'fixture', interceptor))
+  assert.ok(observeRpc(f.ctx, interceptor))
 
   const method = 'POST'
   const path = prefix + fixturePath
@@ -829,6 +908,52 @@ test('adapter disposal while a member POST body is held refuses before RPC dispa
   assert.deepEqual({ status, calls: interceptor.mock.callCount() }, { status: 503, calls: 0 })
 })
 
+test('a held POST is cancelled before its body arrives across connection reactivation', async t => {
+  let wall = Date.now()
+  t.mock.method(Date, 'now', () => wall)
+  const f = callerRuntime(t, { services: webRuntime(t), now: () => wall })
+  await f.activate()
+  const first = provideConnection(f.ctx)
+  await first
+  f.webServer.listenedPort = 54321
+  const calls = t.mock.fn((_method, _body, _signal, peer) => ({ ok: true, value: peer.principal.person.subject }))
+  observeRpc(f.ctx, calls)
+  const method = 'POST'
+  const path = prefix + fixturePath
+  const assertFor = subject => f.signer.sign({ principal: person(subject), familyId: 'fixture', method, path: fixturePath })
+  const headers = assertion => ({ host: '127.0.0.1:54321', 'content-type': 'application/json', 'x-automagik-caller': assertion })
+  const entered = Promise.withResolvers()
+  const hold = Promise.withResolvers()
+  let completed
+  const old = invoke(f.webServer.match(path).handler, {
+    url: path, method, body: rpc(), headers: headers(assertFor('old')),
+    onTransport(req) {
+      const iterator = req.iterator.bind(req)
+      req.iterator = async function* (options) {
+        entered.resolve()
+        await hold.promise
+        yield* iterator(options)
+      }
+    },
+  }).then(reply => (completed = reply))
+  try {
+    await Promise.race([entered.promise, old.then(() => assert.fail('body read never started'))])
+    await first.dispose()
+    await provideConnection(f.ctx)
+    wall += 6000
+    const fresh = await invoke(f.webServer.match(path).handler, {
+      url: path, method, body: rpc(), headers: headers(assertFor('new')),
+    })
+    assert.equal(result(fresh).value, 'new')
+    assert.equal(completed?.status, 503, 'the old body is still held')
+  } finally {
+    hold.resolve()
+    await old
+  }
+  assert.equal(calls.mock.callCount(), 1)
+  assert.equal(calls.mock.calls[0].arguments[3].principal.person.subject, 'new')
+})
+
 for (const event of ['adapter disposal', 'connection loss']) {
   test(`a dispatched RPC keeps its caller through ${event} while new requests receive 503`, async t => {
     let wall = Date.now()
@@ -843,7 +968,7 @@ for (const event of ['adapter disposal', 'connection loss']) {
     if (ctx !== f.ctx) assert.equal(f.ctx.get('automagikCaller'), undefined)
     const entered = Promise.withResolvers()
     const hold = Promise.withResolvers()
-    assert.ok(f.ctx.get('connection').rpc.intercept('/api', method => method === 'fixture', async (_method, _body, _signal, peer) => {
+    assert.ok(observeRpc(f.ctx, async (_method, _body, _signal, peer) => {
       entered.resolve()
       await hold.promise
       const principal = callerOf(ctx)
@@ -871,7 +996,7 @@ for (const event of ['adapter disposal', 'connection loss']) {
     wall += 6000
     if (event === 'connection loss') {
       await provideConnection(f.ctx)
-      observeFixture(f.ctx.get('connection'))
+      observeFixture(f.ctx)
     } else {
       await f.activate(ctx)
     }
@@ -888,7 +1013,7 @@ test('adapter disposal aborts a dispatched RPC at the drain deadline and complet
   t.mock.method(globalThis, 'setTimeout', (fn, delay, ...args) => schedule(fn, delay === 30_000 ? 10 : delay, ...args))
   const entered = Promise.withResolvers()
   const hold = Promise.withResolvers()
-  assert.ok(f.connection.rpc.intercept('/api', method => method === 'fixture', async (_method, _body, signal) => {
+  assert.ok(observeRpc(f.ctx, async (_method, _body, signal) => {
     entered.resolve(signal)
     await hold.promise
     return { ok: true }
@@ -927,7 +1052,7 @@ test('an overlapping activation leaves the first owner serving through its dispo
     ['multiuser-dsh: startup refused because /_automagik is already reserved'],
   ])
   assert.equal(f.ctx.get('automagikCaller'), original)
-  observeFixture(f.connection)
+  observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
   const member = () => request(fixturePath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
@@ -952,7 +1077,7 @@ test('a duplicate caller provider fails the injected child and releases its rese
   assert.equal(f.ctx.get('automagikCaller'), value)
   assert.equal(f.webServer.register, register)
   assert.equal(f.webServer.registerUpgrade, registerUpgrade)
-  observeFixture(f.connection)
+  observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
   const member = () => request(fixturePath, 'POST', person('first'), rpc())
   assert.equal((await member()).status, 503)
@@ -969,13 +1094,14 @@ test('a waiting owner reloads the watermark and refuses the previous owner’s s
   const f = callerRuntime(t, { now: () => wall })
   const disposeFirst = await f.activate()
   const first = f.ctx.get('automagikCaller')
-  const waiting = f.ctx.isolate('connection')
+  const waiting = f.ctx.isolate('connection').isolate('typertGateway')
+  fixtureGateway(waiting)
   await f.activate(waiting)
   assert.equal(waiting.get('connection'), undefined)
   assert.equal(f.ctx.get('automagikCaller'), first)
 
   t.mock.method(Date, 'now', () => wall)
-  observeFixture(f.connection)
+  observeFixture(f.ctx)
   const { request, upstream } = inProcessGate(t, f)
   const member = () => request(fixturePath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
@@ -985,7 +1111,7 @@ test('a waiting owner reloads the watermark and refuses the previous owner’s s
   assert.equal(waiting.get('automagikCaller'), undefined)
 
   await provideConnection(waiting)
-  observeFixture(waiting.get('connection'))
+  observeFixture(waiting)
   assert.equal(waiting.get('automagikCaller').version, 1)
   const route = f.webServer.match(prefix + fixturePath)
   assert.equal(route.path, prefix)
@@ -1108,4 +1234,160 @@ test('the revisioned Bot team client.pane.js chunk form passes through the gate'
   const reply = await request(`/plugins/${id}/client.pane.js?rev=${rev}`, 'GET', person('first'))
   assert.equal(reply.status, 200)
   assert.equal(reply.bytes.toString(), `${source};\n//# sourceMappingURL=client.pane.js.map?rev=${rev}\n`)
+})
+
+// --- RFC 0038 delivery 5b: the member stream carrier through the real gate ------------------
+
+// The real gate on loopback, probing and forwarding to `target` (a listening DSH web server).
+async function loopbackGate(t, f, target, { now } = {}) {
+  const sessions = new SessionStore(f.dir, { memory: true, accepts: () => true, now })
+  const credentials = { port: target.port, authority: `127.0.0.1:${target.port}`, cookie: () => assert.fail('owner credential requested') }
+  const gate = createGate({ origin, sessions, multiuser: true, caller: f.signer, credentials })
+  gate.listen(0, '127.0.0.1')
+  await once(gate, 'listening')
+  t.after(() => gate.closeGate())
+  const { port } = gate.address()
+  const issue = (principal, options) => {
+    const issued = sessions.issue(origin, principal, options)
+    return { ...issued, headers: { host: new URL(origin).host, origin, cookie: `${COOKIE}=${issued.secret}` } }
+  }
+  const socket = headers => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/remote.mux`, { headers, perMessageDeflate: true })
+    const frames = []
+    ws.on('message', data => frames.push(JSON.parse(data.toString())))
+    ws.on('error', () => {})
+    const opened = new Promise((resolve, reject) => {
+      ws.once('open', resolve)
+      ws.once('unexpected-response', (_req, res) => reject(Object.assign(new Error('refused'), { status: res.statusCode })))
+    })
+    opened.catch(() => {})
+    return { ws, frames, opened, closed: once(ws, 'close') }
+  }
+  return { sessions, credentials, port, issue, socket,
+    http: (path, headers, body) => send(port, path, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body }) }
+}
+
+// Every request DSH's web server receives, as raw headers, before any route sees it.
+function recordHops(webServer) {
+  const hops = []
+  const record = req => { hops.push({ url: req.url, rawHeaders: req.rawHeaders }) }
+  webServer.server.prependListener('request', record)
+  webServer.server.prependListener('upgrade', record)
+  return hops
+}
+
+async function streamRuntime(t) {
+  const f = callerRuntime(t, { publicMux: true })
+  await f.webServer[Service.init]()
+  await f.activate()
+  return f
+}
+
+test('member and guest upgrades are carried through the real gate with the caller header list', async t => {
+  const f = await streamRuntime(t)
+  const hops = recordHops(f.webServer)
+  const g = await loopbackGate(t, f, f.webServer)
+  for (const role of ['member', 'guest']) {
+    const { headers } = g.issue(person(role, role))
+    const s = g.socket(headers)
+    await s.opened
+    s.ws.send(JSON.stringify({ type: 'open', streamId: 'follow', endpoint: 'remoteAccess/follow', payload: { args: {} } }))
+    while (!s.frames.length) await setImmediate()
+    assert.deepEqual(s.frames[0], { type: 'item', streamId: 'follow', value: { type: 'baseline', owner: false, grants: [] } })
+    const hop = hops.findLast(entry => entry.url === MUX_PATH)
+    const names = hop.rawHeaders.filter((_, i) => i % 2 === 0).map(name => name.toLowerCase()).sort()
+    assert.deepEqual(names, ['connection', 'host', 'origin', 'sec-websocket-extensions', 'sec-websocket-key',
+      'sec-websocket-version', 'upgrade', 'x-automagik-caller'])
+    s.ws.close()
+    await s.closed
+  }
+  // Each carried hop followed one probe on its own connection; no hop carried a DSH credential.
+  assert.ok(hops.every(hop => !hop.rawHeaders.some((value, i) => i % 2 === 0 && value.toLowerCase() === 'cookie')))
+})
+
+test('revoking a member session closes the carried socket and releases its Peer and streams', async t => {
+  const f = await streamRuntime(t)
+  const created = t.mock.method(f.connection, 'createPeer')
+  const g = await loopbackGate(t, f, f.webServer)
+  const issued = g.issue(person('first'))
+  const s = g.socket(issued.headers)
+  await s.opened
+  s.ws.send(JSON.stringify({ type: 'open', streamId: 'follow', endpoint: 'remoteAccess/follow', payload: { args: {} } }))
+  while (!s.frames.length) await setImmediate()
+  const peer = created.mock.calls.map(call => call.result).find(candidate => candidate.interactions === 'answer')
+  const access = f.ctx.get('remoteAccess')
+  assert.equal(access.followers.size, 1)
+  g.sessions.revoke(issued.family)
+  await s.closed
+  while (!peer.signal.aborted || access.followers.size) await setImmediate()
+})
+
+test('hard family expiry at the real gate closes the member socket and both stream pumps', { timeout: 5000 }, async t => {
+  const f = await streamRuntime(t)
+  const created = t.mock.method(f.connection, 'createPeer')
+  let now = Date.now()
+  const g = await loopbackGate(t, f, f.webServer, { now: () => now })
+  const issued = g.issue(person('first'), { expires: now + 5000 })
+  const s = g.socket(issued.headers)
+  await s.opened
+  for (const streamId of ['one', 'two']) {
+    s.ws.send(JSON.stringify({ type: 'open', streamId, endpoint: 'remoteAccess/follow', payload: { args: {} } }))
+  }
+  while (s.frames.length < 2) await setImmediate()
+  const peer = created.mock.calls.map(call => call.result).find(candidate => candidate.interactions === 'answer')
+  const access = f.ctx.get('remoteAccess')
+  assert.equal(access.followers.size, 2)
+  assert.ok(g.sessions.active(issued.family))
+  now += 5000
+  assert.equal(g.sessions.active(issued.family), false)
+  await s.closed
+  while (!peer.signal.aborted || access.followers.size) await setImmediate()
+  assert.deepEqual(s.frames.map(frame => frame.streamId).sort(), ['one', 'two'])
+})
+
+test('a DSH restart interval never hands a signed member request to an early private route', async t => {
+  const f = callerRuntime(t)
+  await f.webServer[Service.init]()
+  const early = []
+  const record = req => early.push({ url: req.url, caller: req.headers['x-automagik-caller'] })
+  f.webServer.register({ kind: 'prefix', path: prefix, handler(req, res) { record(req); res.writeHead(200).end('early') } })
+  f.webServer.registerUpgrade({ path: MUX_PATH, handler(req, socket) {
+    record(req)
+    socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+  } })
+  const g = await loopbackGate(t, f, f.webServer)
+  const member = () => g.issue(person('first')).headers
+  const attempt = async () => {
+    const http = await g.http('/api/fixture', member(), rpc())
+    const s = g.socket(member())
+    const upgrade = await s.opened.then(() => 101, error => error.status)
+    return [http.status, upgrade]
+  }
+  assert.deepEqual(await attempt(), [503, 503])
+  assert.ok(early.length > 0, 'the early route saw the probes')
+  assert.ok(early.every(entry => entry.caller === undefined))
+  // The adapter activates late: startup is refused (A's 404 for HTTP, 503 for upgrades).
+  const log = t.mock.method(console, 'error', () => {})
+  await f.activate()
+  assert.match(log.mock.calls[0].arguments[0], /startup refused/)
+  log.mock.restore()
+  assert.deepEqual(await attempt(), [503, 503])
+  assert.ok(early.every(entry => entry.caller === undefined))
+
+  // A clean restart: a fresh DSH whose adapter activates normally carries members again.
+  const next = runtime(t)
+  new RemoteAccessService(next.ctx)
+  await next.webServer[Service.init]()
+  fixtureGateway(next.ctx, { publicMux: true })
+  observeFixture(next.ctx)
+  await f.activate(next.ctx)
+  g.credentials.port = next.webServer.port
+  g.credentials.authority = `127.0.0.1:${next.webServer.port}`
+  const reply = await g.http('/api/fixture', member(), rpc())
+  assert.equal(result(reply).value, 'first')
+  const s = g.socket(member())
+  await s.opened
+  s.ws.close()
+  await s.closed
+  assert.ok(early.every(entry => entry.caller === undefined))
 })

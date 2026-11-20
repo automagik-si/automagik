@@ -3,10 +3,15 @@
 // rule, and the pnpm store pinning that keeps a profile built under /build usable under /data.
 import {
   accessSync,
+  closeSync,
   constants,
   existsSync,
+  fchmodSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -14,6 +19,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { cp } from 'node:fs/promises'
 import { markSeed } from './profile-state.mjs'
@@ -166,6 +172,14 @@ function readVersion(source) {
   }
 }
 
+export function workspaceFileStat(workspace) {
+  const stat = lstatSync(workspace, { throwIfNoEntry: false })
+  if (stat && !stat.isFile()) {
+    throw Object.assign(new Error('Image profile pnpm-workspace.yaml must be a regular file'), { code: 'UNSUPPORTED_PROFILE_WORKSPACE' })
+  }
+  return stat
+}
+
 /**
  * pnpm refuses to touch a profile whose node_modules were linked from another store
  * (`ERR_PNPM_UNEXPECTED_STORE`). The image builds the profile under /build with the builder's
@@ -176,10 +190,31 @@ function readVersion(source) {
 export function pinStore(profileDir, dshHome) {
   const store = join(dshHome, 'pnpm-store')
   const workspace = join(profileDir, 'pnpm-workspace.yaml')
-  const text = existsSync(workspace) ? readFileSync(workspace, 'utf8') : ''
+  const stat = workspaceFileStat(workspace)
+  const text = stat ? readFileSync(workspace, 'utf8') : ''
   const line = `storeDir: ${JSON.stringify(store)}`
   const next = /^storeDir:.*$/m.test(text) ? text.replace(/^storeDir:.*$/m, line) : `${text.replace(/\s*$/, '')}${text.trim() ? '\n' : ''}${line}\n`
-  if (next !== text) writeFileSync(workspace, next)
+  if (next !== text) {
+    if (stat?.nlink === 1) {
+      // A single-file bind mount can be written in place.
+      const fd = openSync(workspace, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW)
+      try {
+        writeFileSync(fd, next)
+        fsyncSync(fd)
+      } finally { closeSync(fd) }
+    } else {
+      const fresh = `${workspace}.${randomUUID()}.tmp`
+      const fd = openSync(fresh, 'wx', stat ? stat.mode & 0o777 : 0o666)
+      try {
+        try {
+          writeFileSync(fd, next)
+          if (stat) fchmodSync(fd, stat.mode & 0o777)
+          fsyncSync(fd)
+        } finally { closeSync(fd) }
+        renameSync(fresh, workspace)
+      } finally { rmSync(fresh, { force: true }) }
+    }
+  }
   const modules = join(profileDir, 'node_modules', '.modules.yaml')
   if (existsSync(modules)) {
     const raw = readFileSync(modules, 'utf8')

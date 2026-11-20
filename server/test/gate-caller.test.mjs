@@ -308,3 +308,54 @@ test('failed promote and emergency retire publications resume the original rotat
   assert.equal(await run('promote'), 1)
   assert.equal(loadCallerKeys(f.dir).signer, pending)
 })
+
+import { linkSync } from 'node:fs'
+
+test('caller rotation creates a missing home and private directory with restricted modes', t => {
+  const f = setup(t)
+  const dir = join(f.dir, 'new', 'home')
+  rotateCallerKeys({ dir, action: 'stage' })
+  assert.equal(statSync(dir).mode & 0o777, 0o700)
+  assert.equal(statSync(join(dir, 'caller')).mode & 0o777, 0o700)
+  assert.equal(loadCallerKeys(dir).keys.length, 2)
+})
+
+test('a direct signer can publish in its home while keeping the private store in caller/', t => {
+  const f = setup(t)
+  const signer = createSigner({ dir: f.dir, publicDir: f.dir, instance: () => principal.workspace, now: () => iat * 1000 })
+  assert.ok(signer.sign(inputs))
+  const published = JSON.parse(readFileSync(join(f.dir, 'caller-keys.json'), 'utf8'))
+  assert.equal(published.keys[0].kid, loadCallerKeys(f.dir).signer)
+  assert.equal(Object.hasOwn(published.keys[0], 'd'), false)
+})
+
+test('caller private directory symlink into the published directory is refused before touching it', t => {
+  const f = setup(t)
+  chmodSync(f.publicDir, 0o755)
+  symlinkSync(f.publicDir, join(f.dir, 'caller'))
+  assert.throws(() => loadCallerKeys(f.dir))
+  assert.throws(() => f.signer.publish())
+  assert.throws(() => f.rotate('stage'))
+  assert.equal(statSync(f.publicDir).mode & 0o777, 0o755)
+  assert.throws(() => readFileSync(join(f.publicDir, 'keys.json')), { code: 'ENOENT' })
+})
+
+test('private key symlinks, hard links and open permissions are refused on fast, rotation and signer reload paths', t => {
+  for (const how of ['symlink', 'hard link', 'mode']) {
+    const f = setup(t)
+    assert.ok(f.signer.sign(inputs))
+    const backing = join(f.dir, 'backing')
+    if (how === 'mode') chmodSync(f.privateFile, 0o644)
+    else {
+      renameSync(f.privateFile, backing)
+      if (how === 'symlink') symlinkSync(backing, f.privateFile)
+      else linkSync(backing, f.privateFile)
+    }
+    const bytes = readFileSync(f.privateFile)
+    f.advance(1000)
+    assert.throws(() => f.signer.sign(inputs))
+    assert.throws(() => loadCallerKeys(f.dir))
+    assert.throws(() => f.rotate('stage'))
+    assert.deepEqual(readFileSync(f.privateFile), bytes)
+  }
+})
