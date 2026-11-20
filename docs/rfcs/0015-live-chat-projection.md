@@ -1514,7 +1514,9 @@ The separate file keeps the old ledger readable on rollback. A missing file is a
 file that cannot be read or does not validate is moved to `document-manifests.json.bad`, as the
 ledger is: for 24 h from that moment every upload begin and every send with `uploads` (images
 included, since both stores must be consulted) is refused `quota` and prompts nothing; text sends
-keep working.
+keep working. A `.bad` file without a readable replacement (an interrupted move) counts as broken,
+as for the ledger. In 4b a broken ledger (`uploads.json`) also refuses every send with `uploads`
+`quota` before either store is consulted, for the same 24 h.
 
 **Manifest exception.** The caption hash and the `pocket-a/` DSH request id use the images
 rule. A Retry sends the same id, caption and ordered uploads. On a saved document manifest,
