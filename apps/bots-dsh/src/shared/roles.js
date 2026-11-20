@@ -11,10 +11,48 @@ export const isWindowsReservedName = name => /^(?:con|prn|aux|nul|com[1-9]|lpt[1
 export const isRoleId = id => typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,40}$/.test(id)
   && !RESERVED_ROLE_IDS.includes(id) && !isWindowsReservedName(id)
 export const isRoleVersion = version => typeof version === 'string' && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version)
+export const isPackageRoleId = id => isRoleId(id) && !Object.hasOwn(BUILTIN_ROLES, id)
+export const ROLE_SOURCE_UNCONFIRMED = "This role's source cannot be confirmed right now."
+export const CHOOSE_NONE_FIRST = 'Choose None first.'
+export const detachRoleFirst = name => `Detach ${name} first.`
 
 export function attachedRoleIds(bot) {
   if (!Object.hasOwn(bot ?? {}, 'roles') || !Array.isArray(bot.roles)) return []
   return bot.roles.flatMap(entry => typeof entry?.id === 'string' && Object.hasOwn(entry, 'id') ? [entry.id] : [])
+}
+
+const ownPackageId = entry => Object.hasOwn(entry ?? {}, 'id') && isPackageRoleId(entry.id)
+
+export function packageAttachment(bot) {
+  if (!Object.hasOwn(bot ?? {}, 'roles') || !Array.isArray(bot.roles)) return undefined
+  const entry = bot.roles.find(entry => ownPackageId(entry)
+    && ['version', 'attachedAt', 'grants'].every(key => Object.hasOwn(entry, key))
+    && isRoleVersion(entry.version) && typeof entry.attachedAt === 'string' && Array.isArray(entry.grants))
+  if (entry) return { id: entry.id, version: entry.version, attachedAt: entry.attachedAt }
+}
+
+export function packageRecoveryId(bot) {
+  if (!Object.hasOwn(bot ?? {}, 'roles') || !Array.isArray(bot.roles) || bot.roles.length !== 1) return undefined
+  const [entry] = bot.roles
+  if (ownPackageId(entry)) return entry.id
+}
+
+export function attachmentStatus(attachment, records) {
+  if (!Object.hasOwn(records ?? {}, attachment.id)) return 'missing'
+  const record = records[attachment.id]
+  if (record.version !== undefined && record.version !== attachment.version) return 'version-mismatch'
+  return record.status
+}
+
+// A pin can use catalog declarations only when the installed archive digest matches.
+export function packageDeclarations({ id, version }, roster) {
+  const details = Object.hasOwn(roster?.roleDetails ?? {}, id) ? roster.roleDetails[id] : undefined
+  const { installed, catalog } = details ?? {}
+  if (installed?.version !== version || !installed.sha256) return undefined
+  if (installed.verified) return installed
+  if (catalog?.version !== version || catalog.sha256 !== installed.sha256) return undefined
+  const row = roster.roleCatalog?.roles?.find(role => role.id === id && role.version === version)
+  if (row) return { ...catalog, name: row.name, capabilities: row.capabilities, fromCatalog: true }
 }
 
 const isAttachment = entry => typeof entry?.id === 'string' && Object.hasOwn(BUILTIN_ROLES, entry.id)
@@ -36,7 +74,13 @@ export function effectiveRoleIds(bot, prefs) {
 export const genieDetached = (bot, prefs) => bot?.kind === 'genie' && rolesOn(prefs)
   && !effectiveRoleIds(bot, prefs).includes('genie')
 
-export const roleTagOf = (bot, prefs) => rolesOn(prefs) ? BUILTIN_ROLES[effectiveRoleIds(bot, prefs)[0]]?.name : undefined
+export function roleTagOf(bot, prefs, roster, localize = name => name) {
+  if (!rolesOn(prefs)) return undefined
+  const builtIn = BUILTIN_ROLES[effectiveRoleIds(bot, prefs)[0]]
+  if (builtIn) return localize(builtIn.name)
+  const pin = packageAttachment(bot)
+  if (pin) return packageDeclarations(pin, roster)?.name ?? pin.id
+}
 
 export function roleOutletVisible(outlet, id, bot, roster) {
   if (!roster || !rolesOn(roster.prefs)) return true

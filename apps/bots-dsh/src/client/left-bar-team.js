@@ -275,7 +275,7 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
       return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), null,
         h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
         h('span', { className: 'lb-name' }, row.name),
-        row.bot.roleTag ? h('span', { className: 'bt-tag' }, t(row.bot.roleTag)) : null,
+        row.bot.roleTag ? h('span', { className: 'bt-tag' }, row.bot.roleTag) : null,
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
         renderEnd ? renderEnd(row) : null,
         status(row))

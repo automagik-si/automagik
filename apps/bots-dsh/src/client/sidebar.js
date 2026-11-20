@@ -109,8 +109,8 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   }
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
-  const tag = roleTagOf(bot, roster.prefs)
-  const label = [bot.name, tag ? t(tag) : '', role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
+  const tag = roleTagOf(bot, roster.prefs, roster, t)
+  const label = [bot.name, tag, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-bot-id': id, title: wide ? undefined : bot.name,
@@ -119,7 +119,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, t(tag)) : null, bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, tag) : null, bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
     blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
