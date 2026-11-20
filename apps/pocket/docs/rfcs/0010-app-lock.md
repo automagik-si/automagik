@@ -53,13 +53,15 @@ terminal and chat content and let that person send input to the machines.
   `android/app/src/main/java/ai/namastex/automagik/MainActivity.kt:105`
   `android/app/src/main/java/ai/namastex/automagik/MainActivity.kt:133`
   `android/app/src/main/java/ai/namastex/automagik/MainActivity.kt:177`
-  `android/app/src/main/java/ai/namastex/automagik/PocketViewModel.kt:360`
+  `android/app/src/main/java/ai/namastex/automagik/PocketViewModel.kt:475`
 - **Cover Assist.** While the app lock is enabled, show the cover if either the app or the
   phone is locked. On the Unlock tap, dismiss Android's lock screen first, then check whether
-  the app still needs authentication. On API 26, open Assist after unlocking the phone. Check
-  the app lock again before sending from Assist.
-  `android/app/src/main/java/ai/namastex/automagik/AssistActivity.kt:49`
-  `android/app/src/main/java/ai/namastex/automagik/AssistActivity.kt:82`
+  the app still needs authentication. With the app lock and **Answer from the lock screen**
+  both off, hide the panel until Android dismisses the keyguard. Check on every resume.
+  On API 26, open Assist after unlocking the phone. Recheck both locks before sending.
+  `android/app/src/main/java/ai/namastex/automagik/AssistActivity.kt:59`
+  `android/app/src/main/java/ai/namastex/automagik/AssistActivity.kt:78`
+  `android/app/src/main/java/ai/namastex/automagik/AssistActivity.kt:169`
 - **Protect Recents.** With the lock enabled, Android omits Recents screenshots on API 33 and
   later. On API 26–32, secure windows also block screenshots and screen sharing. This applies
   to every window in the app, including the scanner. A scanner that starts while locked closes.
@@ -68,23 +70,18 @@ terminal and chat content and let that person send input to the machines.
 - **Keep alerts generic.** Enablement clears posted Needs you and Done alerts. It leaves the
   Watch notification available. While enabled, alerts have no actions, and both receivers
   refuse stale actions. An answer already admitted before enablement can finish, with a
-  generic outcome if the lock is enabled by then. With the lock off, the existing action
-  authentication and visibility follow **Answer from the lock screen**.
-  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:68`
-  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:75`
-  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:84`
-  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:94`
-  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:122`
+  generic outcome if the lock is enabled by then. With **Answer from the lock screen** off,
+  both receivers refuse actions while the phone is locked on every supported API level.
+  Android enforces the action authentication flag from API 31.
+  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:69`
+  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:127`
+  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:170`
+  `android/app/src/main/java/ai/namastex/automagik/Notify.kt:198`
 - **Keep Watch working.** A visible cover counts as foreground for Watch and updates, without
   starting terminal or chat streams. The previously selected agent still counts as on screen
   for alerts, so its Needs you plays the in-app sound in place of a notification.
   `android/app/src/main/java/ai/namastex/automagik/AppLock.kt:278`
-  `android/app/src/main/java/ai/namastex/automagik/PocketViewModel.kt:542`
-
-With the app lock off, Assist can compose its panel while Android's lock-screen dismissal is
-pending. API 26–30 also lack Android's per-action authentication check for notification buttons.
-`android/app/src/main/java/ai/namastex/automagik/AssistActivity.kt:54`
-`android/app/src/main/java/ai/namastex/automagik/Notify.kt:68`
+  `android/app/src/main/java/ai/namastex/automagik/PocketViewModel.kt:723`
 
 ## Alternatives considered
 
