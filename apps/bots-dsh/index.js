@@ -69,6 +69,7 @@ import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
 import * as channel from './src/host/channel.js'
 import * as codeSide from './src/host/code-side.js'
+import * as automations from './src/host/automations.js'
 import * as agentSpace from './src/host/agent-space.js'
 import * as feed from './src/host/feed.js'
 import * as genui from './src/host/genui.js'
@@ -95,7 +96,7 @@ const MODULES = [
   turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, dshUpdate, thinking, agentSpace, feed, codeSide, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
+  update, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
   officeSkills, goalSkills,
 ]
 

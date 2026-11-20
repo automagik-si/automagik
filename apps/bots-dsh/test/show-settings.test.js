@@ -95,6 +95,13 @@ test('an unknown page, a long note, a group Session and a stranger are refused',
   assert.equal((await show({ page: 'general' }, 'stranger')).text, 'Only Bots on the team can use show_settings.')
 })
 
+test('show_settings refuses the dialog-only Automations page', async t => {
+  const show = start(t)
+  const answer = await show({ page: 'automations' }, 'm1')
+  assert.match(answer.text, /^No Settings page named "automations"\./)
+  assert.equal(answer.concluded, false)
+})
+
 // propose_bot_change: a card with each field as it is and as it would be; nothing changes until
 // the user presses Apply, so the tool only checks and resolves what the card will save.
 test('a proposal is checked, carries only what changes, and changes nothing', async (t) => {

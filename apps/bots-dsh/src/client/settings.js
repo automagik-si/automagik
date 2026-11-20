@@ -17,6 +17,7 @@ import { CapabilitiesPage } from './capability-settings.js'
 import { BrowserPage } from './browser-settings.js'
 import { ComputerPage } from './computer.js'
 import { SchedulesPage } from './schedules.js'
+import { AutomationsPage } from './automations-page.js'
 import { FeedbackIcon, FeedbackPage } from './feedback.js'
 import { AgentAccessPage } from './agent-access.js'
 import { PrivacyPage } from './privacy.js'
@@ -346,6 +347,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
   const extra = actions.pluginSettings?.() ?? []
   // Before About: what the plugins add sits with the team's pages, not after the app's.
   const own = SETTINGS_PAGES.filter(([key]) => key !== 'models' || actions.providers !== undefined)
+  own.splice(own.findIndex(([key]) => key === 'schedules') + 1, 0, ['automations', 'Automations'])
   const pluginPages = extra.map(section => [`plugin:${section.id}`, section.label])
   // Keep remote agents together, independent of the current display language.
   const agents = pluginPages.findIndex(([key]) => key === 'plugin:acp-agents')
@@ -379,7 +381,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
         h('span', { ref: nav.thumb, className: 'bt-thumb', 'aria-hidden': true }),
         pages.map(([key, text]) => h('button', {
           key, type: 'button', className: 'bt-settings-item', 'aria-current': shown === key ? 'page' : undefined, onClick: () => actions.openSettings(key),
-        }, h(PAGE_ICONS[key] ?? PlugIcon), key.startsWith('plugin:') ? text : t(text))),
+        }, h(key === 'automations' ? ClockIcon : PAGE_ICONS[key] ?? PlugIcon), key.startsWith('plugin:') ? text : t(text))),
         actions.openHarnessSettings ? h('button', {
           type: 'button', className: 'bt-settings-item bt-settings-shell', title: t('Models, providers, and the rest of DeepSeek Harness'),
           onClick: () => { close(); actions.openHarnessSettings() },
@@ -392,7 +394,8 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
         shown === 'usage' ? null : h('div', { key: pageKey, className: 'bt-settings-scroll bt-settings-page', 'data-move': last.current.move },
           errorLine,
           // Called, not mounted: it holds no state, and the dialog's tree stays as it was.
-          h(PageBoundary, null, SettingsPage({ shown, id, bot, room, pluginPage, roster, actions, run, useUpdate, close }))),
+          h(PageBoundary, null, shown === 'automations' ? h(AutomationsPage, { Section: SetSection })
+            : SettingsPage({ shown, id, bot, room, pluginPage, roster, actions, run, useUpdate, close }))),
         usageOpened ? h('div', { key: 'usage', className: 'bt-settings-scroll bt-settings-usage', 'data-off': shown === 'usage' ? undefined : '', 'aria-hidden': shown === 'usage' ? undefined : true },
           shown === 'usage' ? errorLine : null,
           h(PageBoundary, { reset: shown }, h(UsagePage, { roster, actions, focusId: usageFocus }))) : null),
