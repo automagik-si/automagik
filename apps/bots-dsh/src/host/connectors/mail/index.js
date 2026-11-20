@@ -29,15 +29,24 @@ const MAIL_ADD_REFUSALS = new Set([
 const MAILBOX = /^[^\s@<>()[\],;:"\\]+@[^\s@<>()[\],;:"\\]+\.[^\s@<>()[\],;:"\\]+$/
 function readAddresses(raw) {
   const list = []
+  const seen = new Set()
   let ok = true
   for (const entry of addressparser(Array.isArray(raw) ? raw.join(', ') : String(raw ?? ''), { flatten: true })) {
+    // Lower case is the spelling the allow rule stores and checks, so a cleared send goes to the
+    // address the person allowed; the display name rides along as written.
     const address = String(entry.address ?? '').trim().toLowerCase()
     if (!MAILBOX.test(address)) ok = false
-    else if (!list.includes(address)) list.push(address)
+    else if (!seen.has(address)) {
+      seen.add(address)
+      list.push({ name: entry.name, address })
+    }
   }
   return { list, ok }
 }
-const parseAddresses = raw => readAddresses(raw).list
+const parseAddresses = raw => readAddresses(raw).list.map(({ address }) => address)
+// A list from readAddresses written back as a recipient field: what a cleared send's record keeps.
+const writeAddresses = list => list.map(({ name, address }) => (!name ? address
+  : `${/^[\w ]+$/.test(name) ? name : `"${name.replace(/["\\]/g, '\\$&')}"`} <${address}>`)).join(', ')
 
 // The recipients of a send that needs no card: every field reads whole and every address is
 // allowed. Undefined otherwise.
@@ -46,7 +55,7 @@ function allowedRecipients(to, cc, bcc, allowed) {
   if (set.size === 0) return undefined
   const fields = [to, cc, bcc].map(readAddresses)
   const all = fields.flatMap(field => field.list)
-  if (fields.some(field => !field.ok) || all.length === 0 || all.some(address => !set.has(address))) return undefined
+  if (fields.some(field => !field.ok) || all.length === 0 || all.some(({ address }) => !set.has(address))) return undefined
   return { to: fields[0].list, cc: fields[1].list, bcc: fields[2].list }
 }
 
@@ -291,13 +300,19 @@ export function install(rt, host) {
           const rcpt = cleared === undefined
             ? { to: request.to, cc: request.cc || undefined, bcc: request.bcc || undefined }
             : { to: some(cleared.to), cc: some(cleared.cc), bcc: some(cleared.bcc) }
+          if (cleared !== undefined) {
+            request.to = writeAddresses(cleared.to)
+            request.cc = writeAddresses(cleared.cc)
+            request.bcc = writeAddresses(cleared.bcc)
+          }
           await session.send({ ...rcpt, subject: request.subject, text: request.body, attachments, ...(request.replyTo ? { inReplyTo: request.replyTo } : {}) })
           request.status = 'sent'
           request.settledAt = Date.now()
           list.push(request)
           while (list.length > MAX_REQUESTS) { const at = list.findIndex(entry => entry.status !== 'pending'); list.splice(at === -1 ? 0 : at, 1) }
           await rt.save()
-          return `Sent "${request.subject}" to ${cleared === undefined ? request.to : [...cleared.to, ...cleared.cc, ...cleared.bcc].join(', ')} from ${account.address}.`
+          const recipients = cleared === undefined ? request.to : [request.to, request.cc, request.bcc].filter(Boolean).join(', ')
+          return `Sent "${request.subject}" to ${recipients} from ${account.address}.`
         }
         for (const old of list) if (old.status === 'pending') { old.status = 'canceled'; old.settledAt = Date.now() }
         list.push(request)
