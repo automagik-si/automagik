@@ -91,6 +91,21 @@ test("node already on the worker's PATH: PATH unchanged, nothing said", (t) => {
   assert.equal(pathOf(got.path), path);
 });
 
+test("a FIFO named like the agent is never opened for its first line", (t) => {
+  const s = scratch(t);
+  const fifo = join(s.empty, "claude");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  chmodSync(fifo, 0o755);
+  const module = new URL("../mods/am-sidebar/agentPath.mjs", import.meta.url).href;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import { interpreterPath } from ${JSON.stringify(module)};
+    console.log(JSON.stringify(interpreterPath("claude", process.argv[1])));
+  `, s.empty], { timeout: 5000, encoding: "utf8", env: { ...process.env, ...s.env } });
+  assert.ifError(r.error);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { path: s.empty, note: null });
+});
+
 test("node missing, codex reached through a link to nvm's bin: nvm's bin goes first, nothing removed", (t) => {
   const s = scratch(t);
   const prefix = npmPrefix(s.root);

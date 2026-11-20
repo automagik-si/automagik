@@ -19,6 +19,7 @@ export const window = () => ({ platform: state.platform });
 // Each theme token reads as its own name, so a test can say which colour a line was drawn in.
 export const theme = () => new Proxy({}, { get: (_t, k) => (typeof k === "string" ? `t.${k}` : undefined) });
 export async function readTextFile(path) {
+  state.onRead?.(path);
   return state.files.has(path) ? state.files.get(path) : null;
 }
 export async function writeTextFile(path, text, expected) {
@@ -34,14 +35,22 @@ export async function writeTextFile(path, text, expected) {
 // state.runs; hc ls and hc get of a run's terminal still go to state.hc.
 export function finishRun(run, answer = run.answer) {
   state.files.set(run.files.out, answer?.stdout ?? "");
-  state.files.set(run.files.err, answer?.stderr ?? "");
+  if (run.files.err) state.files.set(run.files.err, answer?.stderr ?? "");
   state.files.set(run.files.code, `${answer?.code ?? 0}\n`);
 }
 // state.runFail: hc run refuses (nothing starts); state.runNoAddress: it starts, its answer names no terminal.
 async function runRestart(args) {
   if (state.runFail) return { code: 1, stdout: "", stderr: state.runFail };
   const at = args.indexOf("--");
-  const [out, err, code, ...argv] = args.slice(at + 5);
+  const privateRun = args[at + 3].startsWith("umask 077");
+  const [out, ...words] = args.slice(at + 5);
+  const [err, code, ...argv] = privateRun ? [null, ...words] : words;
+  if (privateRun) {
+    const folder = out.slice(0, out.lastIndexOf("/"));
+    for (const path of state.files.keys()) {
+      if (path.startsWith(`${folder}/fleet-`) && Date.now() - state.fileMtimes?.get(path) >= 11 * 60_000) state.files.delete(path);
+    }
+  }
   const address = `t${900 + (state.runs ??= []).length}`;
   state.calls.push(argv);
   (state.execOptions ??= []).push(null);

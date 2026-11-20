@@ -13,7 +13,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
+import { attachPath, closingRow, foldAttach, heldIn, readAttach } from "../mods/am-sidebar/attach.js";
 import { GUARD_DIR, KILL_GUARD_DIR } from "../mods/am-sidebar/workers.js";
 import { AGY_FIXED_DENY, CLAUDE_PERSON_SETTINGS } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE } from "../mods/am-sidebar/briefingText.mjs";
@@ -1967,4 +1967,106 @@ test("#206 history --machine refuses a machine that isn't linked, and a name the
   const name = s.cli(["history", "Nobody", ...s.on]);
   assert.notEqual(name.code, 0);
   assert.equal(name.out.trim(), "");
+});
+
+test("restart --machine --expect-pane: the shown binding restarts", (t) => {
+  const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
+  const s = scene(t, { terminals: [pane] });
+  assert.equal(s.cli(["attach", ATLAS, "vm/t8", ...s.on]).code, 0);
+  const shown = `${CORE}/t8/${pane.created_ms}`;
+  const r = s.cli(["restart", ATLAS, ...s.on, "--expect-pane", shown, "--fresh", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual([r.json().terminal, r.json().machine, r.json().replaced], ["t100", "vm", "t8"]);
+  assert.equal(r.json().retired, "ended");
+  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "finished");
+});
+
+for (const pinned of [true, false]) {
+  test(pinned
+    ? "restart --machine --expect-pane: the old pane is looked at and ended while the ledger lock is held"
+    : "restart --machine without --expect-pane ends the old pane after the ledger is let go, as before", (t) => {
+    const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
+    const s = scene(t, { terminals: [pane] });
+    assert.equal(s.cli(["attach", ATLAS, "vm/t8", ...s.on]).code, 0);
+    s.setState((state) => { state.lockProbe = { path: `${attachPath(s.app)}.lock`, terminal: "vm/t8" }; });
+    const expect = pinned ? ["--expect-pane", `${CORE}/t8/${pane.created_ms}`] : [];
+    const r = s.cli(["restart", ATLAS, ...s.on, ...expect, "--fresh", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    if (!pinned) assert.equal(Object.hasOwn(r.json(), "retired"), false);
+    const { terminals, lockProbe: { seen } } = s.hcState();
+    assert.equal(terminals.find((p) => p.address === "vm/t8").state, "finished");
+    const kill = seen.findIndex(({ call }) => call === "kill");
+    assert.deepEqual(seen[kill], { call: "kill", held: pinned });
+    assert.deepEqual(seen.slice(0, kill).findLast(({ call }) => call === "get"), { call: "get", held: pinned });
+  });
+}
+
+test("restart --machine --expect-pane: a pane given to another bot while the replacement starts is refused and that pane is never ended", (t) => {
+  const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
+  const s = scene(t, { terminals: [pane] });
+  assert.equal(s.cli(["attach", ATLAS, "vm/t8", ...s.on]).code, 0);
+  const rows = s.rows();
+  const held = heldIn(foldAttach(rows), ATLAS, CORE);
+  const other = "b-bbbbbbbbbb";
+  s.setState((state) => {
+    state.onRunWrite = { path: attachPath(s.app), text: [
+      ...rows, closingRow(held, "detach", "detach"), { ...held, bot: other },
+    ].map((row) => `${JSON.stringify(row)}\n`).join("") };
+  });
+  const shown = `${CORE}/t8/${pane.created_ms}`;
+  const r = s.cli(["restart", ATLAS, ...s.on, "--expect-pane", shown, "--fresh", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.equal(r.json().refused, "binding");
+  assert.equal(r.json().error, "Atlas's pane couldn't be confirmed as the one shown (vm/t8); nothing was restarted.");
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "vm/t100"]]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
+  assert.equal(heldIn(foldAttach(s.rows()), other, CORE).terminal, "t8");
+  assert.ok(s.rows().every((row) => row.terminal !== "t100"));
+});
+
+test("restart --machine --expect-pane: the shown pane attached to the same bot id in another project is refused and never ended", (t) => {
+  const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
+  const s = scene(t, { terminals: [pane] });
+  assert.equal(s.cli(["attach", ATLAS, "vm/t8", ...s.on]).code, 0);
+  const other = scratchProject(join(s.project, ".."), "other", {
+    isGit: false, bots: JSON.parse(readFileSync(join(s.project, ".herdr/bots.json"), "utf8")),
+  });
+  const rows = s.rows();
+  const held = heldIn(foldAttach(rows), ATLAS, CORE);
+  s.setState((state) => {
+    state.onRunWrite = { path: attachPath(s.app), text: [
+      ...rows, closingRow(held, "detach", "detach"), { ...held, project: other },
+    ].map((row) => `${JSON.stringify(row)}\n`).join("") };
+  });
+  const shown = `${CORE}/t8/${pane.created_ms}`;
+  const r = s.cli(["restart", ATLAS, ...s.on, "--expect-pane", shown, "--fresh", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.equal(r.json().refused, "binding");
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "vm/t100"]]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
+  const now = heldIn(foldAttach(s.rows()), ATLAS, CORE);
+  assert.deepEqual([now.project, now.terminal], [other, "t8"]);
+  assert.ok(s.rows().every((row) => row.terminal !== "t100"));
+});
+
+test("restart --machine --expect-pane: an old pane that can't be looked at or ended is reported unconfirmed, never as ended", async (t) => {
+  for (const [step, failure] of [["lookup", { failGetOnRun: ["vm/t8"] }], ["kill", { failKill: "vm/t8" }],
+    ["lookup-internal-exit-3", { failGetOnRun: ["vm/t8"], failGetExit: 3 }]]) {
+    await t.test(step, (t) => {
+      const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
+      const s = scene(t, { terminals: [pane] });
+      assert.equal(s.cli(["attach", ATLAS, "vm/t8", ...s.on]).code, 0);
+      s.setState((state) => { Object.assign(state, failure); });
+      const shown = `${CORE}/t8/${pane.created_ms}`;
+      const r = s.cli(["restart", ATLAS, ...s.on, "--expect-pane", shown, "--fresh", "--json"]);
+      assert.equal(r.code, 0, r.err);
+      assert.equal(r.json().retired, "unconfirmed");
+      assert.equal(heldIn(foldAttach(s.rows()), ATLAS, CORE).terminal, "t100");
+      assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
+      if (step !== "kill") {
+        assert.ok(!s.calls().some(([op, address]) => op === "kill" && address === "vm/t8"));
+        assert.ok(r.json().warnings.some((w) => w.includes("check in Herdr that it is still")));
+      }
+    });
+  }
 });
