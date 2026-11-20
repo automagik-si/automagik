@@ -17,7 +17,7 @@ import { execFile, spawn } from 'node:child_process'
 import { dirname, join, posix, sep } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
-import { accountOf, accountView } from './src/host/account.js'
+import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
 import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
 import { AGENTS, findCommand, isNative, launchOf, signedInOf } from './src/host/agents.js'
 import { Backchannel } from './src/host/backchannel.js'
@@ -37,6 +37,7 @@ import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
+import { reservationDigests, reservationOutcome, validReservationKey } from './src/host/reservation-evidence.js'
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
 
 export const name = 'acp-dsh'
@@ -144,7 +145,7 @@ function defaultCliHome(ctx, storeHome, installation) {
  * @param {any} ctx
  * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any, nativeTools?: any }}
  *   [config]
- * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string }} [deps]
+ * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string, evidenceOf?: typeof accountEvidenceOf }} [deps]
  *   catalogHome: where each agent's models and efforts are kept (beside the adapters by default).
  *   loginSpawn, loginTimers: tests only, a fake CLI process and clock for sign-in attempts.
  *   loginRecord: tests only, ownership records with a fake sign-in process.
@@ -152,6 +153,7 @@ function defaultCliHome(ctx, storeHome, installation) {
  *   imageSetup: tests only, the image run's lockdown check (image.js imageSetup).
  *   account: reads which account a signed-in CLI is on (account.js); consentFile: where the
  *   person's word for each account is kept (consent.js), in the isolated CLI root by default.
+ *   evidenceOf: a direct account read for the owner's reservation check (account.js).
  *   installation: the DSH home used for the default private CLI root. cliHome overrides that root.
  *   logoutRun: fake logout runner for tests. A synthetic store
  *   without a home keeps the legacy in-memory test behavior; real stores always have a home.
@@ -161,7 +163,7 @@ export function apply(ctx, config = {}, {
   cliStore,
   find = name => findCommand(name), signedIn = signedInOf,
   catalogHome = store.home ? join(dirname(store.home), 'catalog') : undefined,
-  loginSpawn, loginTimers, loginRecord, imageSetup, account = accountOf,
+  loginSpawn, loginTimers, loginRecord, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
   installation = process.env.DSH_HOME,
   cliHome = store.home ? defaultCliHome(ctx, store.home, installation) : undefined,
   consentFile = cliHome ? join(cliHome, CONSENT_FILE)
@@ -1365,6 +1367,41 @@ export function apply(ctx, config = {}, {
      * to be shown. `fresh` asks the CLI again instead of taking the last answer.
      */
     account: (id, { fresh = false } = {}) => accountOfAgent(id, { fresh }),
+    /**
+     * Reservation evidence for the DSH owner's views only (RFC 0024): never tools, status,
+     * inspect, logs or events. The card compares `ref` with `account()` before offering Reserve.
+     * Reserve must match the shown `exact` on a new read; refusal and sign-out must still match
+     * under the same outcome on a new read. `changed` asks the caller to retry.
+     */
+    async accountEvidence(id, { key } = {}) {
+      if (!validReservationKey(key)) throw accountFailure('invalid', 'A reservation key must be 32 bytes.')
+      if (!Object.hasOwn(AGENTS, id)) return undefined
+      const spec = AGENTS[id]
+      if (isNative(spec) || consents === undefined) return { id, supported: false }
+      inspections.delete(id)
+      await inspect(id)
+      await accountRead(id)
+      const authenticated = signIns.get(id)
+      if (authenticated !== true) return { id, ...(authenticated === false ? { signedIn: false } : {}) }
+
+      const cli = clis.get(id)
+      const version = authVersions.get(id)
+      const changed = () => disposed || clis.get(id) !== cli || authVersions.get(id) !== version
+        || signIns.get(id) !== true || accountChanges.has(id) || homes?.paused(spec.key)
+      if (changed()) return { id, signedIn: true, outcome: 'changed' }
+      const env = { ...process.env, ...cliEnvironment(spec, cliDetails.get(id)) }
+      const { account: who, evidence } = await evidenceOf(spec, cli, { env })
+      if (changed()) return { id, signedIn: true, outcome: 'changed' }
+
+      const scope = homes ? { authScope: 'isolated' } : {}
+      const result = evidence === undefined ? { outcome: 'unread', reservable: false, why: 'unknown' }
+        : reservationOutcome(evidence)
+      return {
+        id, ...scope, signedIn: true, vendor: spec.key, ref: refOf(who), ...result,
+        ...(spec.key === 'codex' && evidence?.class !== undefined ? { class: evidence.class } : {}),
+        ...reservationDigests(evidence, key),
+      }
+    },
     // Read-only comparison for the owner's account controls. This never logs in, refreshes a
     // token or changes terminal auth; Bots' own account reads always use cliEnvironment.
     terminalAccount: async (id) => {

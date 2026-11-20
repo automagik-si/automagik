@@ -2,12 +2,16 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { apply, SERVICE } from '../index.js'
+import { accountEvidenceOf } from '../src/host/account.js'
 import { GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
 import { CliHomes, HOME_ENV, trackRun } from '../src/host/cli-homes.js'
 import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
@@ -639,4 +643,191 @@ test('profiles "orchard" and "meadow" of one DSH home still refuse account chang
     assert.equal(cliRoot(orchard, id), cliRoot(meadow, id))
     await assert.rejects(meadow.service.loginStart(id), otherSession)
   }
+})
+
+test('accountEvidence binds a private fresh read to the Bot sign-in without opening credentials', async t => {
+  const claudeId = 'acp-claude'
+  const codexId = 'acp-codex'
+  const email = 'email-SENTINEL@example.test'
+  const key = Buffer.from('key-SENTINEL'.padEnd(32, '.'))
+  const claudeStatus = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty',
+    email, orgId: 'org-SENTINEL', orgName: 'display-org-SENTINEL', subscriptionType: 'plan-SENTINEL' }
+  const codexResult = { account: { type: 'chatgpt', email, planType: 'plus', workspaceName: 'ws-SENTINEL' },
+    requiresOpenaiAuth: true, userId: 'user-SENTINEL' }
+  let deferClaude, overrideClaude, codexSilent
+  const fakeRun = (file, args, options, done, overrides) => {
+    assert.equal(file, '/fake/claude')
+    assert.deepEqual(args, ['auth', 'status', '--json'])
+    done(null, JSON.stringify({ ...claudeStatus, ...overrides }))
+  }
+  const fakeSpawn = (file, args, options, silent = false) => {
+    assert.equal(file, '/fake/codex')
+    assert.deepEqual(args, ['app-server', '--listen', 'stdio://'])
+    const child = new EventEmitter()
+    child.stdin = new PassThrough()
+    child.stdout = new PassThrough()
+    child.kill = () => true
+    child.stdin.on('data', line => {
+      const request = JSON.parse(String(line))
+      if (request.method === 'initialize') child.stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`)
+      if (request.method === 'account/read') {
+        assert.deepEqual(request.params, { refreshToken: false })
+        if (!silent) child.stdout.write(`${JSON.stringify({ id: request.id, result: codexResult })}\n`)
+      }
+    })
+    return child
+  }
+  const directReads = []
+  const consentReads = []
+  const h = fixture(t, { deps: {
+    async account(spec, cli, options) {
+      consentReads.push({ vendor: spec.key, env: options.env })
+      return (await accountEvidenceOf(spec, cli, { ...options, run: fakeRun, spawn: fakeSpawn })).account
+    },
+    evidenceOf(spec, cli, options) {
+      directReads.push({ vendor: spec.key, env: options.env })
+      const run = (file, args, opts, done) => {
+        const reply = () => fakeRun(file, args, opts, done, overrideClaude)
+        if (deferClaude) deferClaude(reply)
+        else reply()
+      }
+      if (!codexSilent) return accountEvidenceOf(spec, cli, { ...options, run, spawn: fakeSpawn })
+      // Keep the fake timeout's event loop alive alongside the reader's unref'ed deadline.
+      const keepAlive = setTimeout(() => {}, 1000)
+      return accountEvidenceOf(spec, cli, { ...options, run, timeoutMs: 5,
+        spawn: (file, args, opts) => fakeSpawn(file, args, opts, true) })
+        .finally(() => clearTimeout(keepAlive))
+    },
+  } })
+  const emitted = []
+  const warnings = []
+  const ctx = h.adapter.ctx
+  const emit = ctx.emit
+  t.mock.method(ctx, 'emit', (name, ...args) => { emitted.push([name, ...args]); emit(name, ...args) })
+  t.mock.method(ctx.logger, 'warn', line => warnings.push(line))
+  h.next(email)
+  for (const id of botIds) await h.login(id)
+  const launches = Object.fromEntries(botIds.map(id => [id, h.adapter.agents.get(id).catalog.spec.spawn().env]))
+  const dirs = [launches[claudeId].CLAUDE_CONFIG_DIR, launches[codexId].CODEX_HOME]
+  const consentFile = join(dirname(dirname(launches[claudeId][POINTER_ENV])), CONSENT_FILE)
+  const savedConsent = readFileSync(consentFile, 'utf8')
+  const accesses = []
+  const answers = []
+  const read = async (id, keys) => {
+    const mocks = [
+      [fs, 'openSync'], [fs, 'readFileSync'], [fs.promises, 'open'], [fs, 'createReadStream'],
+    ].map(([owner, method]) => {
+      const original = owner[method]
+      return t.mock.method(owner, method, function (file, ...args) {
+        const path = file instanceof URL ? fileURLToPath(file) : Buffer.isBuffer(file) ? file.toString() : file
+        if (typeof path === 'string' && dirs.some(dir => resolve(path) === dir || resolve(path).startsWith(`${dir}${sep}`))) {
+          accesses.push({ method, path })
+        }
+        return original.call(this, file, ...args)
+      })
+    })
+    syncBuiltinESMExports()
+    try {
+      const answer = await h.service.accountEvidence(id, { key })
+      assert.deepEqual(Object.keys(answer), keys)
+      answers.push(answer)
+      return answer
+    } finally {
+      for (const mock of mocks) mock.mock.restore()
+      syncBuiltinESMExports()
+    }
+  }
+  const base = ['id', 'authScope', 'signedIn', 'vendor', 'ref', 'outcome', 'reservable']
+  const claude = await read(claudeId, [...base, 'exact', 'loose'])
+  const codex = await read(codexId, [...base, 'class', 'exact', 'loose'])
+  for (const [id, vendor, answer] of [[claudeId, 'claude', claude], [codexId, 'codex', codex]]) {
+    assert.equal(answer.vendor, vendor)
+    assert.equal(answer.authScope, 'isolated')
+    assert.equal(answer.signedIn, true)
+    assert.equal(answer.outcome, 'complete')
+    assert.equal(answer.reservable, true)
+    assert.match(answer.exact, /^[A-Za-z0-9_-]{43}$/)
+    assert.match(answer.loose, /^[A-Za-z0-9_-]{43}$/)
+    assert.equal(answer.ref, (await h.service.account(id)).ref)
+  }
+  assert.equal(codex.class, 'personal')
+  codexResult.account.planType = 'team'
+  const workspace = await read(codexId, [...base, 'class', 'exact', 'loose'])
+  assert.equal(workspace.class, 'workspace')
+  assert.equal(workspace.ref, codex.ref)
+  assert.equal((await h.service.account(codexId)).consent, 'given')
+  assert.equal(workspace.loose, codex.loose)
+  assert.notEqual(workspace.exact, codex.exact)
+
+  overrideClaude = { orgId: null }
+  const ambiguousClaude = await read(claudeId, [...base, 'why', 'loose'])
+  overrideClaude = undefined
+  assert.equal(ambiguousClaude.why, 'no-organisation')
+  assert.equal(ambiguousClaude.loose, claude.loose)
+  assert.notEqual(ambiguousClaude.ref, claude.ref)
+  assert.equal((await h.service.account(claudeId)).ref, claude.ref)
+  codexResult.account.planType = 'unknown-plan-SENTINEL'
+  const ambiguousCodex = await read(codexId, [...base, 'why', 'class', 'loose'])
+  assert.deepEqual([ambiguousCodex.outcome, ambiguousCodex.reservable, ambiguousCodex.why, ambiguousCodex.class, ambiguousCodex.loose],
+    ['ambiguous', false, 'unknown-plan', 'unknown', codex.loose])
+  codexResult.account = { type: 'chatgpt', email: null, planType: 'plus' }
+  const noEmail = await read(codexId, [...base, 'why', 'class'])
+  assert.deepEqual([noEmail.outcome, noEmail.reservable, noEmail.why, noEmail.class, noEmail.ref],
+    ['none', false, 'no-email', 'personal', 'unknown'])
+  codexResult.account = { type: 'amazonBedrock' }
+  const bedrock = await read(codexId, [...base, 'why'])
+  assert.deepEqual([bedrock.outcome, bedrock.reservable, bedrock.why], ['none', false, 'not-a-subscription'])
+
+  const started = Promise.withResolvers()
+  deferClaude = started.resolve
+  const pending = read(claudeId, ['id', 'signedIn', 'outcome'])
+  const release = await started.promise
+  const pause = join(launches[claudeId][HOME_ENV], 'paused')
+  writeFileSync(pause, '')
+  release()
+  assert.deepEqual(await pending, { id: claudeId, signedIn: true, outcome: 'changed' })
+  deferClaude = undefined
+  rmSync(pause)
+
+  codexSilent = true
+  // Leave only the direct read silent. The existing consent probe still gets an answer.
+  const unread = await read(codexId, [...base, 'why'])
+  assert.deepEqual([unread.outcome, unread.reservable, unread.why, unread.ref], ['unread', false, 'unknown', 'unknown'])
+  assert.equal(readFileSync(consentFile, 'utf8'), savedConsent)
+  assert.equal(directReads.length, 9)
+  for (const { vendor, env } of [...directReads, ...consentReads]) {
+    const field = vendor === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'
+    assert.equal(env[field], launches[`acp-${vendor}`][field])
+  }
+  await h.service.accountSignOut(claudeId)
+  assert.deepEqual(await read(claudeId, ['id', 'signedIn']), { id: claudeId, signedIn: false })
+  assert.deepEqual(accesses, [])
+  assert.equal(directReads.length, 9)
+  assert.equal(await h.service.accountEvidence('unknown-id', { key }), undefined)
+  assert.deepEqual(await h.service.accountEvidence('acp-hermes', { key }), { id: 'acp-hermes', supported: false })
+  const errors = []
+  await assert.rejects(h.service.accountEvidence('unknown-id', { key: key.toString() }), error => {
+    errors.push(error.stack)
+    return error.code === 'acp-account/invalid' && error.message === 'A reservation key must be 32 bytes.'
+  })
+  const status = await h.service.status()
+  const inspections = await Promise.all(botIds.map(id => h.service.inspect(id)))
+  assert.ok(emitted.some(([name, payload]) => name === 'acp-dsh/login-ready' && payload.id === claudeId))
+  const publicText = JSON.stringify({ answers, status, inspections, emitted, logs: h.logs, warnings, errors,
+    consent: readFileSync(consentFile, 'utf8') }).toLowerCase()
+  for (const privateValue of [email, 'org-SENTINEL', 'display-org-SENTINEL', 'plan-SENTINEL', 'ws-SENTINEL',
+    'user-SENTINEL', 'unknown-plan-SENTINEL', ...['utf8', 'hex', 'base64', 'base64url'].map(encoding => key.toString(encoding)),
+    JSON.stringify([...key])]) assert.equal(publicText.includes(privateValue.toLowerCase()), false)
+})
+
+test('accountEvidence omits an unknown sign-in and skips reads without a consent store', async t => {
+  const evidenceOf = () => assert.fail('unexpected direct account read')
+  const key = Buffer.alloc(32)
+  const unknown = fixture(t, { deps: { signedIn: async () => undefined, evidenceOf } })
+  assert.deepEqual(await unknown.service.accountEvidence('acp-codex', { key }), { id: 'acp-codex' })
+  await unknown.stop()
+
+  const noConsent = fixture(t, { deps: { store: { binOf: () => undefined }, evidenceOf } })
+  assert.deepEqual(await noConsent.service.accountEvidence('acp-codex', { key }), { id: 'acp-codex', supported: false })
+  assert.deepEqual(noConsent.calls, [])
 })
