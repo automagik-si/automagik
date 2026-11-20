@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate } from './constants.js'
 import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
 import { textOf } from './text.js'
+import { startUpdateRecovery } from './self-update-recovery.js'
 
 // Long enough for DSH to finish opening its workspaces after a start.
 export const RESUME_DELAY_MS = 3000
@@ -149,13 +150,12 @@ export const readNotes = (file, { strict = false } = {}) => {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'))
     const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-    if (strict && (!object(parsed?.turns) || !object(parsed?.queued)
-      || !Object.values(parsed.queued).every(Array.isArray)
-      || (parsed.held !== undefined && (!object(parsed.held) || !Object.values(parsed.held).every(Array.isArray)))
-      || (parsed.cut !== undefined && !Array.isArray(parsed.cut)))) {
-      throw new Error('Invalid inflight notes')
-    }
+    const readable = object(parsed?.turns) && object(parsed?.queued) && Object.values(parsed.queued).every(Array.isArray)
+      && (parsed.held === undefined || (object(parsed.held) && Object.values(parsed.held).every(Array.isArray)))
+      && (parsed.cut === undefined || Array.isArray(parsed.cut))
+    if (strict && !readable) throw new Error('Invalid inflight notes')
     return {
+      readable,
       turns: object(parsed?.turns) ? parsed.turns : {},
       queued: object(parsed?.queued) ? parsed.queued : {},
       held: object(parsed?.held) ? Object.fromEntries(Object.entries(parsed.held)
@@ -164,7 +164,7 @@ export const readNotes = (file, { strict = false } = {}) => {
     }
   } catch (error) {
     if (strict && error?.code !== 'ENOENT') throw error
-    return { turns: {}, queued: {}, held: {}, cut: [] }
+    return { readable: false, turns: {}, queued: {}, held: {}, cut: [] }
   }
 }
 
@@ -193,6 +193,7 @@ export async function* historyBack(controller, sessionId, signal) {
 export function install(rt) {
   const { ctx, home } = rt
   const file = join(home, 'inflight.json')
+  const expectedUpdateRun = process.env.AUTOMAGIK_SUPERVISOR_RUN
 
   // What the last run left; read before this run notes anything.
   let interrupted = readNotes(file)
@@ -288,6 +289,7 @@ export function install(rt) {
   const handingBack = new Map()
   const cutClaims = new Map()
   const cutClaimEnds = new Map()
+  const recoveryReports = new Set()
   // The Sessions that are not a Bot's chat or group (tasks, DSH bots, automation runs, registered Sessions) the
   // update cut at the click: healed by id, past the newest-Sessions window and the daily limit.
   /** @type {string[]} */
@@ -363,11 +365,16 @@ export function install(rt) {
     })
     return writing
   }
+  let publishedRequest
   rt.flushUpdateNotes = async (publish) => {
     let pending = persist(true)
     while (await pending) {
       // Input can reach the inbox during a write. Publish in the same tick that the latest write is confirmed.
-      if (pending === writing) return publish === undefined ? true : publish()
+      if (pending === writing) {
+        const result = publish === undefined ? true : publish()
+        if (result?.started === true) publishedRequest = result.requestId
+        return result
+      }
       pending = writing
     }
     return false
@@ -560,11 +567,13 @@ export function install(rt) {
     }
     if (event.type === 'user/message' && event.data?.source?.kind === SOURCE_KIND && event.data.source.exchangeId) {
       taken?.add(event.data.source.exchangeId)
+      for (const report of recoveryReports) report.resumed('delivery', event.data.source.exchangeId)
       forgetQueued(event.data.source.exchangeId)
     }
     if (event.type === 'user/message' && typeof event.data?.id === 'string') {
       const messageId = event.data.id
       claims.get(id)?.delete(messageId)
+      for (const report of recoveryReports) report.resumed('input', messageId)
       if (notesFenced() || Object.values(held).some(list => list.some(item => item?.message?.id === messageId))) {
         heldReceipts.add(messageId)
         void acknowledgeHeld(session, messageId)
@@ -801,14 +810,27 @@ export function install(rt) {
 
   // Build each message through ordinary delivery (including its ledger and capabilities)
   // before waking the destination. A distinct user/message still acknowledges each item.
-  async function resendTo(target, items, ownsTeam) {
+  async function resendTo(target, items, ownsTeam, recovery) {
     const warn = error => rt.warn('omni-ui: sending again what %s was sent failed: %s', target, error)
     const started = (item, destination) => startedTurns?.has(item.recordId ?? item.oldId) || startedTurns?.has(destination)
-    const sendable = (agent, item, destination) => ownsTeam() && (item.recordId !== undefined || sessionFor(item.oldId, item.args) === destination)
-      && (item.args.resumedByUpdate === true || !item.args.resumed || !started(item, destination))
-      && (!item.liveClaim || rt.deliveryNote(item.args.exchangeId) !== undefined)
-      && taken?.has(item.args.exchangeId) !== true && !waitingFor(agent).has(item.args.exchangeId)
-      && ![...(claims.get(destination)?.values() ?? [])].some(message => message.source?.exchangeId === item.args.exchangeId)
+    const received = item => recovery?.resumed(item.recordId === undefined ? 'delivery' : 'turn',
+      item.recordId ?? item.args.exchangeId)
+    const sendable = (agent, item, destination) => {
+      if (!ownsTeam() || (item.recordId === undefined && sessionFor(item.oldId, item.args) !== destination)
+        || (item.args.resumedByUpdate !== true && item.args.resumed && started(item, destination))) return false
+      const id = item.args.exchangeId
+      if (taken?.has(id) === true) {
+        received(item)
+        return false
+      }
+      if ((item.liveClaim && rt.deliveryNote(id) === undefined)
+        || [...(claims.get(destination)?.values() ?? [])].some(message => message.source?.exchangeId === id)) return false
+      if (waitingFor(agent).has(id)) {
+        received(item)
+        return false
+      }
+      return true
+    }
 
     // Ordinary delivery joins #1569's reply queue when installed. Submit all replies
     // before waiting, and let the other roles use their own single wake.
@@ -820,7 +842,10 @@ export function install(rt) {
           return sendable(agent, item, destination)
         },
       })
-      if (sent !== undefined) resent.add(deliveredTo)
+      if (sent !== undefined) {
+        resent.add(deliveredTo)
+        received(item)
+      }
     }).map(reply => reply.catch(warn))
 
     const staged = items.filter(item => item.args.role !== 'reply').map(item => {
@@ -832,6 +857,7 @@ export function install(rt) {
           return sent.promise
         },
       }).then(sent => {
+        if (sent !== undefined) received(item)
         if (sent !== undefined || (item.record?.stoppedBy !== 'update' && started(item, target))) item.done?.()
         const current = updateTurns.get(item.recordId)
         if (sent === undefined || item.record?.stoppedBy !== 'update' || current?.since !== item.record.since || !ownsTeam()) return
@@ -903,7 +929,7 @@ export function install(rt) {
   // `updateCut`: the Sessions the web self-update cut at its click (rt.markUpdateStop), healed by id past the
   // newest-Sessions window and the daily limit; `onlyUpdate`: the pass after an update that did not happen, which
   // picks up only those and marks no task stopped.
-  async function healCutSessions(skip, { updateCut = [], onlyUpdate = false, ownsTeam = () => true } = {}) {
+  async function healCutSessions(skip, { updateCut = [], onlyUpdate = false, ownsTeam = () => true, recovery } = {}) {
     const { state } = rt
     const candidates = new Map()
     const byUpdate = new Set(updateCut)
@@ -979,6 +1005,7 @@ export function install(rt) {
         continue
       }
       if (updated) {
+        recovery?.resumed('turn', id)
         cut = cut.filter(value => value !== id)
         persist(true)
       }
@@ -1124,6 +1151,53 @@ export function install(rt) {
     if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam)
   }
 
+  // Report the same durable notes the resume pass works from, without exposing their payloads.
+  function reportRecovery(run, noted, updateCut, dropped, heldBefore, ownsTeam, { liveClaims, inventoryReadable } = {}) {
+    if (!run || !rt.holdsLock()) return null
+    const items = []
+    const add = (kind, id, sessionId, botId, roomId, title) => {
+      const name = title || [botId === undefined ? null : rt.botOf(botId)?.name, roomId === undefined ? null : rt.roomOf(roomId)?.name]
+        .filter(Boolean).join(' · ') || rt.state.tasks?.[sessionId]?.title
+        || ctx.sessions.get?.(sessionId)?.header?.title || sessionId
+      items.push({ kind, id, sessionId, name })
+    }
+    for (const [id, record] of Object.entries(noted)) {
+      if (record.stoppedBy !== 'update') continue
+      add('turn', id, id, record.botId, record.roomId)
+      for (const item of [...(record.later ?? []), ...(record.trigger?.joined ?? [])]) {
+        add('delivery', item?.info?.exchangeId, id, record.botId, record.roomId)
+      }
+    }
+    for (const id of updateCut) add('turn', id, id, rt.selfOf?.(id))
+    for (const [id, list] of Object.entries(dropped)) {
+      for (const item of Array.isArray(list) ? list : []) {
+        const args = item?.args
+        if (args && (!liveClaims || liveClaims.has(args.exchangeId))) {
+          const title = args.wake === true ? rt.state.tasks?.[args.taskSessionId]?.title : undefined
+          add('delivery', args.exchangeId, id, args.toId, args.roomId, title)
+        }
+      }
+    }
+    for (const [id, list] of Object.entries(heldBefore)) {
+      for (const item of Array.isArray(list) ? list : []) {
+        const message = item?.message
+        add('input', message?.id, id, rt.selfOf?.(id), rt.groupOwners.get(id)?.roomId)
+      }
+    }
+    const recovery = startUpdateRecovery({
+      profileDir: ctx.get?.('profileContext')?.dir, run, items, inventoryReadable,
+      ownsTeam: () => rt.holdsLock() && ownsTeam(),
+      currentRun: () => rt.selfUpdateStatus?.()?.run,
+      warn: (...args) => rt.warn(...args),
+    })
+    if (recovery) recoveryReports.add(recovery)
+    return recovery
+  }
+
+  function finishRecovery(recovery) {
+    if (recoveryReports.delete(recovery)) recovery.finish()
+  }
+
   async function resumeAll(signal, takeover = false) {
     const defer = outcome => {
       bootDeferred = true
@@ -1146,7 +1220,7 @@ export function install(rt) {
     const ownsTeam = () => !signal.aborted && !stopped && !notesFenced() && rt.lockTerm() === term
       && (locked ? (rt.sameTeam?.(generation) ?? rt.holdsLock()) : (rt.canWriteTeam?.() ?? term === 0))
     if (!ownsTeam()) return defer({ failed: 'The team changed before the restart pass could take its notes' })
-    const { turns: previous, queued: dropped, cut: cutBefore } = interrupted
+    const { turns: previous, queued: dropped, cut: cutBefore, readable } = interrupted
     const heldBefore = held
     const noted = { ...previous }
     for (const [id, record] of Object.entries(noted)) {
@@ -1188,24 +1262,41 @@ export function install(rt) {
         return persist()
       }
     }
-    const works = pass(noted, takeover ? {} : dropped, destinationWork, ownsTeam, { settleTurn })
+    const deliveries = takeover ? {} : dropped
+    const run = expectedUpdateRun === undefined ? null : rt.selfUpdateStatus?.()?.run
+    const recovery = run && run.runId === expectedUpdateRun
+      ? reportRecovery(run, noted, cutBefore, deliveries, heldBefore, ownsTeam, { inventoryReadable: readable }) : null
+    const works = pass(noted, deliveries, destinationWork, ownsTeam, { settleTurn, recovery })
     destinationPlan.resolve()
-    const resending = Promise.all(works.values()).then(async () => {
+    const resending = Promise.allSettled(works.values()).then(async results => {
       firstTurn = undefined
       startedTurns = undefined
       taken = undefined
       await rt.settleRoomBatches?.()
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
     })
-    // Healing task Sessions is independent of a reply waiting for a busy Bot.
-    await Promise.all([resending, healCutSessions(new Set(Object.keys(noted)), { updateCut: cutBefore, onlyUpdate: takeover, ownsTeam })])
-    // Input a held step had taken goes after the cut work is picked up, so it never stands for a turn that started.
-    await resendHeld(heldBefore, ownsTeam)
+    try {
+      // Healing task Sessions is independent of a reply waiting for a busy Bot.
+      const results = await Promise.allSettled([resending, healCutSessions(new Set(Object.keys(noted)), {
+        updateCut: cutBefore, onlyUpdate: takeover, ownsTeam, recovery,
+      })])
+      // Input a held step had taken goes after the cut work is picked up.
+      await resendHeld(heldBefore, ownsTeam, recovery)
+      if (recovery && !takeover) {
+        for (const id of await rt.wakeLog?.bootReplayed ?? []) recovery.resumed('delivery', id)
+      }
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
+    } finally {
+      finishRecovery(recovery)
+    }
     persist()
     finish({})
   }
 
   // The resume pass over a set of notes: each noted turn and each dropped delivery, by destination.
-  function pass(noted, dropped, works, ownsTeam, { liveClaims, settleTurn } = {}) {
+  function pass(noted, dropped, works, ownsTeam, { liveClaims, settleTurn, recovery } = {}) {
     // Read once, before any resume, so every post can tell its owners.
     owners = ownersOf()
     // Resolve each durable item on its own; an old Session can now lead to several
@@ -1237,6 +1328,7 @@ export function install(rt) {
     for (const item of notes) {
       const { args, oldId } = item
       if (pendingBack.has(args.exchangeId) || (liveClaims && !liveClaims.has(args.exchangeId))) continue
+      if (taken?.has(args.exchangeId)) recovery?.resumed('delivery', args.exchangeId)
       if (args.wake === true && rt.wakeLog?.accountsFor(args.exchangeId)) continue
       if (rt.botOf(args.toId) === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
       const target = sessionFor(oldId, args)
@@ -1287,17 +1379,21 @@ export function install(rt) {
           rt.warn('omni-ui: picking up an interrupted turn for %s failed: %s', target, error)
         })))
         const sendable = ready.filter(Boolean)
-        await resendTo(target, sendable.filter(item => item.args !== undefined), ownsTeam)
+        await resendTo(target, sendable.filter(item => item.args !== undefined), ownsTeam, recovery)
         for (const { record, recordId } of sendable) {
           if (!ownsTeam() || record?.stoppedBy !== 'update') continue
           const current = updateTurns.get(recordId)
           if (current?.since !== record.since || !current.continuationQueued) continue
+          recovery?.resumed('turn', recordId)
           const joined = (current.trigger?.joined ?? []).filter(item => !current.handedBack?.includes(item.info.exchangeId))
           const send = delivery => ownsTeam() && handBack(recordId, current, delivery, ownsTeam)
           const [laterSent, joinedSent] = await Promise.all([
             handBackResults(recordId, current, ownsTeam),
             handBackRequests(rt, target, record.botId, joined, send),
           ])
+          if (recovery) {
+            for (const id of updateTurns.get(recordId)?.handedBack ?? []) recovery.resumed('delivery', id)
+          }
           if (laterSent && joinedSent && ownsTeam() && updateTurns.get(recordId)?.since === record.since) {
             updateTurns.delete(recordId)
             persist(true)
@@ -1310,7 +1406,7 @@ export function install(rt) {
   }
 
   // The input held steps had taken when the last run stopped (rt.noteHeldInput), sent again once.
-  async function resendHeld(notes, ownsTeam) {
+  async function resendHeld(notes, ownsTeam, recovery) {
     for (const [sessionId, list] of Object.entries(notes ?? {})) {
       if (!ownsTeam()) return
       if (!Array.isArray(list) || list.length === 0) continue
@@ -1338,19 +1434,29 @@ export function install(rt) {
           const message = item?.message
           if (typeof message?.id !== 'string' || !held[sessionId]?.some(item => item?.message?.id === message.id)) continue
           if (written.has(message.id) || writtenAfterMove.has(message.id)) {
+            recovery?.resumed('input', message.id)
             const receiptSession = writtenAfterMove.has(message.id) || sessionId === target
               ? agent.session : ctx.sessions.get?.(sessionId)
             if (receiptSession === undefined) rt.forgetHeldInput(sessionId, message.id)
             else await acknowledgeHeld(receiptSession, message.id)
             continue
           }
-          if (heldReceipts.has(message.id) || waiting.has(message.id) || claims.get(target)?.has(message.id)) continue
+          if (heldReceipts.has(message.id)) {
+            recovery?.resumed('input', message.id)
+            continue
+          }
+          if (claims.get(target)?.has(message.id)) continue
+          if (waiting.has(message.id)) {
+            recovery?.resumed('input', message.id)
+            continue
+          }
           // A restart can target the current part instead of the one that took
           // this input. Close that destination to callers before sending it.
           rt.closePart?.(target, 'held input')
           agent.followup(message)
           // A flush can include a claim before its user/message. Keep the note until that event.
           if (await ctx.sessions.flush(agent.session) !== true) break
+          recovery?.resumed('input', message.id)
         }
       } catch (error) {
         rt.warn('omni-ui: sending again what %s was holding failed: %s', sessionId, error)
@@ -1370,25 +1476,38 @@ export function install(rt) {
     cutClaims.clear()
     const liveClaims = new Set([...stoppedClaims.values()].flatMap(ids => [...ids]))
     const pendingEnds = [...cutClaimEnds]
-    const works = pass(noted, queued, new Map(), ownsTeam, { liveClaims })
-    const healing = healCutSessions(new Set(Object.keys(noted)), { updateCut, onlyUpdate: true, ownsTeam })
+    const run = rt.selfUpdateStatus?.()?.run
+    const recovery = run?.requestId && run.requestId === publishedRequest
+      ? reportRecovery(run, noted, updateCut, queued, heldBefore, ownsTeam, { liveClaims })
+      : null
+    publishedRequest = undefined
+    const works = pass(noted, queued, new Map(), ownsTeam, { liveClaims, recovery })
+    const healing = healCutSessions(new Set(Object.keys(noted)), { updateCut, onlyUpdate: true, ownsTeam, recovery })
     const warn = error => rt.warn('ds-bot: picking up the work an update stopped failed: %s', error)
-    const recovered = Promise.all([...works.values(), healing]).then(() => resendHeld(heldBefore, ownsTeam))
-    const replayReports = ids => {
-      if (ownsTeam()) rt.wakeLog?.replayCutReports(ids, ownsTeam)
+    const recovered = Promise.allSettled([...works.values(), healing]).then(async results => {
+      for (const result of results) if (result.status === 'rejected') warn(result.reason)
+      await resendHeld(heldBefore, ownsTeam, recovery)
+    })
+    const replayReports = async ids => {
+      if (!ownsTeam()) return
+      for (const id of await rt.wakeLog?.replayCutReports(ids, ownsTeam) ?? []) recovery?.resumed('delivery', id)
     }
     const endedClaims = new Set([...stoppedClaims].filter(([id]) => !cutClaimEnds.has(id)).flatMap(([, ids]) => [...ids]))
-    void recovered.then(() => replayReports(endedClaims)).catch(warn)
+    const replayed = recovered.then(() => replayReports(endedClaims))
     // A slow cancellation can still own a claim when a verdict comes back. Try that input again after turn end.
-    for (const [id, end] of pendingEnds) {
-      void Promise.all([recovered, end.promise]).then(async () => {
-        if (!ownsTeam()) return
-        const work = pass({}, { [id]: queued[id] }, new Map(), ownsTeam, { liveClaims })
-        await Promise.all(work.values())
-        await resendHeld({ [id]: held[id] }, ownsTeam)
-        replayReports(stoppedClaims.get(id))
-      }).catch(warn)
-    }
+    const late = pendingEnds.map(async ([id, end]) => {
+      await Promise.all([recovered, end.promise])
+      if (!ownsTeam()) return
+      const work = pass({}, { [id]: queued[id] }, new Map(), ownsTeam, { liveClaims, recovery })
+      const results = await Promise.allSettled(work.values())
+      for (const result of results) if (result.status === 'rejected') warn(result.reason)
+      await resendHeld({ [id]: held[id] }, ownsTeam, recovery)
+      await replayReports(stoppedClaims.get(id))
+    })
+    void Promise.allSettled([replayed, ...late]).then(results => {
+      for (const result of results) if (result.status === 'rejected') warn(result.reason)
+      finishRecovery(recovery)
+    })
   }
 
   const bootFailed = error => {

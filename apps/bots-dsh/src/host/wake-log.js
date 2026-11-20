@@ -450,16 +450,17 @@ export function install(rt) {
   })
 
   async function nudge(agent, id, still) {
-    if (!still() || unmarked(id) || isClaimed(id) || agent.status === 'running') return
+    if (!still() || unmarked(id) || isClaimed(id)) return false
     const step = agent.inbox.nextStep.find(message => idOf(message) === id)
     const message = step ?? agent.inbox.nextTurn.find(message => idOf(message) === id)
-    if (message === undefined) return
+    if (message === undefined) return false
+    if (agent.status === 'running') return true
     quiet(() => agent.inbox.remove(message.id))
     agent.send(message, step === undefined ? 'next-turn' : 'next-step', true)
-    await flush(agent.session)
+    return await flush(agent.session) === true
   }
 
-  async function reconcile(report, target, botsAtStart, kind, still, original = target) {
+  async function reconcile(report, target, botsAtStart, kind, still, handedBack, original = target) {
     const { id, botId } = report
     if (!still() || !open(report) || unmarked(id) || pending(id)) return
     if (repair(report)) {
@@ -489,13 +490,14 @@ export function install(rt) {
     if (!still() || !open(report) || unmarked(id) || pending(id)) return
     const results = [...observations.values()]
     if (results.some(({ result }) => result === 'found')) {
+      handedBack.add(id)
       if (await saveProducer(report, still)) finish(report, 'done', { how: 'taken' }, still)
       return
     }
     if (isClaimed(id)) return
     const held = results.find(({ agent, held }) => held && heldBy(agent, id))
     if (held !== undefined) {
-      await nudge(held.agent, id, still)
+      if (await nudge(held.agent, id, still) && still()) handedBack.add(id)
       return
     }
     if (results.some(({ result }) => result === 'unreadable')) return
@@ -516,7 +518,7 @@ export function install(rt) {
     const chat = rt.chatOf(botId)
     if (chat === undefined || chat === target) return
     // The fallback must pass the very same receipt, inbox and resume checks.
-    return await reconcile(report, chat, botsAtStart, kind, still, target)
+    return await reconcile(report, chat, botsAtStart, kind, still, handedBack, target)
   }
 
   const sendable = ({ report, target, original }, still) => still() && open(report)
@@ -544,7 +546,7 @@ export function install(rt) {
     return { ready: ready.promise, sent }
   }
 
-  async function resend(items, still, waitForIdle) {
+  async function resend(items, still, waitForIdle, handedBack) {
     const stages = []
     try {
       const ready = await bounded(async (signal) => {
@@ -567,8 +569,13 @@ export function install(rt) {
         if (still() && open(item.report)) writeRecord(item.report, 'sent', { messageId: message.id })
       }
       if (reserved.length === 0) return
-      await flush(agent.session)
-      if (still()) for (const { sent } of reserved) sent.resolve(true)
+      const flushed = await flush(agent.session)
+      if (still()) {
+        for (const { item, sent } of reserved) {
+          if (flushed === true) handedBack.add(item.report.id)
+          sent.resolve(true)
+        }
+      }
     } catch (error) {
       if (still() && error?.code !== 'wake/timeout') warn(`wake replay could not send a batch (${errorCode(error)})`)
     } finally {
@@ -598,6 +605,7 @@ export function install(rt) {
     const still = () => owns() && (cut?.ownsTeam() ?? true)
     if (!still()) return
     const botsAtStart = new Set(Object.keys(state.bots))
+    const handedBack = new Set()
     const byDestination = new Map()
     for (const report of reports.values()) {
       if (!open(report) || (kind === 'hourly' && !old(report)) || (cut && !cut.ids.has(report.id))) continue
@@ -609,7 +617,7 @@ export function install(rt) {
       const batches = new Map()
       for (const report of group) {
         if (!still()) return
-        const candidate = await reconcile(report, target, botsAtStart, kind, still)
+        const candidate = await reconcile(report, target, botsAtStart, kind, still, handedBack)
         if (!still()) return
         if (candidate === undefined) continue
         const key = JSON.stringify([candidate.target, report.intent.report.work ?? ''])
@@ -618,14 +626,14 @@ export function install(rt) {
       }
       for (const items of batches.values()) {
         if (!still()) return
-        await resend(items, still, kind !== 'update')
+        await resend(items, still, kind !== 'update', handedBack)
       }
     }))
     if (!still()) return
     for (const result of results) {
       if (result.status === 'rejected') warn(`wake replay for a destination failed (${errorCode(result.reason)})`)
     }
-    if (kind === 'hourly' || cut) return
+    if (kind === 'hourly' || cut) return handedBack
     for (const report of reports.values()) {
       if (!known(report) || report.open || unmarked(report.id)) continue
       const { work, replyTo } = report.intent?.report ?? report.terminal
@@ -634,6 +642,7 @@ export function install(rt) {
       }
     }
     rewrite()
+    return handedBack
   }
 
   read()
@@ -649,7 +658,7 @@ export function install(rt) {
     const mine = epoch
     chain = chain.then(async () => {
       passing = true
-      try { await pass(kind, mine, adoption, cut) } finally { passing = false }
+      try { return await pass(kind, mine, adoption, cut) } finally { passing = false }
     }).catch(error => warn(`wake replay failed (${errorCode(error)})`))
     return chain
   }
@@ -721,7 +730,7 @@ export function install(rt) {
       if (claims?.size === 0) claimed.delete(id)
     },
     replayCutReports(ids, ownsTeam) {
-      if (ids?.size > 0) void queue('update', undefined, { ids, ownsTeam })
+      if (ids?.size > 0) return queue('update', undefined, { ids, ownsTeam })
     },
     firstOptions(id) {
       const term = firstSends.get(id)
@@ -744,6 +753,7 @@ export function install(rt) {
         })
       }
     },
+    get bootReplayed() { return startDone },
     get replayed() { return startDone.then(() => chain) },
   }
 

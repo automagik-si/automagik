@@ -12479,6 +12479,69 @@ Object.assign(ZH, {
   "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
 });
 Object.assign(ZH, HOST_ZH);
+Object.assign(ZH, {
+  "Checking the signed release": "正在检查已签名的版本",
+  "Verifying the downloaded packages": "正在验证已下载的软件包",
+  "Restarting and checking health": "正在重启并检查是否正常",
+  "Automagik {version} is ready to install.": "Automagik {version} 已可安装。",
+  "{plugin} is already on {version}.": "{plugin} 已是 {version} 版。",
+  "Work in progress stops when you click Update now. Automagik will pick it up again once a healthy version is ready.": "点击立即更新后，正在进行的工作会暂停。版本确认可用后，Automagik 会接着处理这些工作。",
+  "Waiting for the update supervisor to confirm the request.": "正在等待更新监督程序确认请求。",
+  "Switching versions…": "正在切换版本…",
+  "The update status is unconfirmed.": "更新状态尚未确认。",
+  "In-app update recovery guide": "应用内更新恢复指南",
+  "The team data kept the same format.": "团队数据仍采用原来的格式。",
+  "The team data format could not be determined.": "无法确定团队数据的格式。",
+  "The team data was in use.": "团队数据当时正在使用。",
+  "The team data changed after the restore was planned.": "制定恢复计划后，团队数据发生了变化。",
+  "The saved team snapshot had changed.": "已保存的团队快照发生了变化。",
+  "Stop DSH": "停止 DSH",
+  "Restore the plugin entries": "恢复插件条目",
+  "Put back the kept files": "放回保留的文件",
+  "Restore the version record": "恢复版本记录",
+  "Restore team data": "恢复团队数据",
+  "Verify the profile": "验证配置",
+  "Check health": "检查运行状态",
+  "Live profile": "当前配置",
+  "Kept version": "保留的版本",
+  "Staging folder": "暂存文件夹",
+  "The saved team snapshot was restored. Sessions, memory, settings and keys are kept separately.": "已恢复保存的团队快照。会话、记忆、设置和密钥单独保存。",
+  "If you saved a team change between {start} and {end}, it may have been replaced. A copy of the trial team was kept if there was team data to copy.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。若试用期间有可复制的团队数据，已保留副本。",
+  "The team snapshot was skipped. {reason}": "未恢复团队快照。{reason}",
+  "The supervisor recorded no team snapshot outcome.": "监督程序未记录团队快照的恢复结果。",
+  "Work recovery results are not available yet.": "暂时没有工作恢复结果。",
+  "There was no stopped work to recover.": "没有需要恢复的中断工作。",
+  "Pending": "等待处理",
+  "Resumed": "已恢复",
+  "Could not resume": "无法恢复",
+  "Turn": "对话轮次",
+  "Queued input": "队列中的输入",
+  "Queued delivery": "队列中的投递",
+  "{name} ({kind}) · {state}": "{name}（{kind}）· {state}",
+  "Work recovery": "工作恢复",
+  "The previous plugin set passed its checks.": "上一组插件已通过检查。",
+  "Update target {version}.": "更新目标版本为 {version}。",
+  "Oldest plugin version before the update: {version}.": "更新前最旧的插件版本为 {version}。",
+  "Automagik was not updated": "Automagik 未更新",
+  "Manual recovery required": "需要手动恢复",
+  "See the recovery guide and the supervisor’s state.json before moving any files.": "移动文件前，请查看恢复指南和监督程序的 state.json。",
+  "Previous plugin version recorded for the update: {version}.": "更新记录中的旧插件版本为 {version}。",
+  "Previous version check: {reason}": "旧版本检查结果：{reason}",
+  "Last rollback step: {step}.": "最后的回退步骤：{step}。",
+  "Rollback actions tried: {actions}.": "已尝试的回退操作：{actions}。",
+  "{file}: previous — {previous}; candidate — {candidate}.": "{file}：旧版本在 {previous}，候选版本在 {candidate}。",
+  "The supervisor has not confirmed the update request.": "监督程序尚未确认更新请求。",
+  "Your previous version stays kept.": "上一个版本会保留。",
+  "The previous version can read the team data format.": "上一个版本可以读取这种格式的团队数据。",
+  "If you saved a team change between {start} and {end}, it may have been replaced.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。",
+  "A copy of the trial team data was kept.": "已保留试用期间的团队数据副本。",
+  "No copy of the trial team data was kept.": "未保留试用期间的团队数据副本。",
+  "The supervisor did not record whether a copy of the trial team data was kept.": "监督程序未记录是否保留了试用期间的团队数据副本。",
+  "More work items than can be shown here ({pending} pending, {resumed} resumed, {failed} could not resume, {unconfirmed} unconfirmed).": "部分工作未逐项列出（{pending} 项待恢复，{resumed} 项已恢复，{failed} 项无法恢复，{unconfirmed} 项未确认）。",
+  "The signed release did not offer a newer compatible plugin set.": "签名版本没有提供更新且兼容的插件组合。",
+  "Work recovery is unconfirmed because the saved notes could not be read.": "无法读取保存的记录，工作恢复情况尚未确认。",
+  "The supervisor could not confirm a healthy running instance.": "监督程序未能确认实例正常运行。"
+});
 var fill2 = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
 var service = null;
 var bound = null;
@@ -13391,14 +13454,21 @@ function stepMenuFocus(menu, event, trigger) {
 }
 
 // src/client/styles.js
+var SHELL_LIGHT_PALETTE = `--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)`;
+var SHELL_DARK_PALETTE = `--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff`;
+var roundButtonCss = (selector) => `
+${selector}{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
+${selector}:hover{background:var(--bt-hover)}
+${selector}:active{transform:scale(.94)}
+`;
 var SHELL_CSS = `
-body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
+body{${SHELL_LIGHT_PALETTE}}
 /* The --bt-glass-* tokens keep upstream's names, which its cards, menus and docks read, and
    hold solid surfaces here: this look is clay depth on a plain ground, not frosted glass. */
 /* iOS waits out a double-tap zoom on buttons; the plugin's own controls never zoom. */
 :is(.bt-tool,.bt-uaction,.bt-menu button,.bt-menu-item,.bt-icon-btn,.bt-round,.bt-pill,.bt-account,.bt-set-row,.bt-settings-item,.bt-react-strip button,.bt-palette-row,.bt-palette-clear,.bt-tab,.bt-ptab,.bt-ptab-x,.bt-bcard-x,.bt-plus,.bt-q-btn,.bt-q-x,.bt-x,.bt-nc-send,.bt-send,.bt-soft,.bt-mini,.bt-side-send,.bt-shape,.bt-swatch,.bt-color,.bt-newchat,.bt-task-day,.bt-task-remove,.bt-fb-btn){touch-action:manipulation}
 :is(.bt-round,.bt-you,.bt-account,.bt-color,.bt-color span,.bt-swatch,.bt-icon-btn,.bt-avatar-trigger,.bt-avatar-pencil,.bt-plus,.bt-mic,.bt-voice){corner-shape:round}
-body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff}
+body[data-ds-dark-theme]{${SHELL_DARK_PALETTE}}
 body{--bt-gold:#f2b84b;--bt-gold-edge:#c98a1a;--bt-gold-band:#e9a636;--bt-gold-shine:#fff3d4;--bt-gem:#8fdcec;--bt-gem-2:#f0bddf;--bt-role-bg:#fbe7bf;--bt-role-ink:#8a5a12;--bt-role-edge:#e7c88a;--bt-role-shine:#fff6e2;--bt-magic-cyan:#3ccbf4;--bt-magic-violet:#9a6cf6;--bt-magic-pink:#ff4fa0;--bt-arena:#120f24;--bt-arena-2:#231a44;--bt-arena-ink:#f4f1ff}
 body[data-ds-dark-theme]{--bt-role-bg:#4a3a1c;--bt-role-ink:#f6d48f;--bt-role-edge:#2a1f0c;--bt-role-shine:rgba(255,240,200,.12)}
 ${Object.entries(INKS).map(([name, [light]]) => `body{--bt-ink-${name}:${light}}`).join("")}
@@ -13516,9 +13586,7 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .omni-logo{flex:none;overflow:visible}
 .omni-mark{object-fit:contain;-webkit-user-drag:none;user-select:none}
 .bt-you .omni-logo{color:var(--bt-ink)}
-.bt-round{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
-.bt-round:hover{background:var(--bt-hover)}
-.bt-round:active{transform:scale(.94)}
+${roundButtonCss(".bt-round")}
 .bt-list{display:flex;flex-direction:column;gap:3px;overflow-y:auto;min-height:0;flex:1 1 auto}
 /* Chromium ignores ::-webkit-scrollbar when scrollbar-width or scrollbar-color (inherited) is non-auto. */
 .bt-side:not(.bt-rail)>.bt-list{margin-right:-12px;scrollbar-gutter:stable;scrollbar-width:auto;scrollbar-color:auto}

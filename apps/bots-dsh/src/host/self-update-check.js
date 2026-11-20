@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { CHECK_FRESH_MS } from '../shared/self-update.js'
+import { compareVersions } from './lane-verify.js'
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
@@ -194,6 +196,23 @@ export function savedResult(profileDir) {
     version: 1, runId, checkedAt, state, reason, laneVersion, sequence, supervisor,
     plugins: plugins.map(({ name, from, to }) => ({ name, from, to })),
   }
+}
+
+export function savedCheckSummary(profileDir, now = Date.now()) {
+  const saved = savedResult(profileDir)
+  if (!saved) return null
+  const { checkedAt, laneVersion, sequence, plugins, state } = saved
+  const age = now - Date.parse(checkedAt)
+  return { checkedAt, laneVersion, sequence, plugins, state, fresh: age >= 0 && age < CHECK_FRESH_MS }
+}
+
+export function newerCheckedCandidate(check, current) {
+  if (check?.state !== 'available' || check.laneVersion === null || check.sequence === null
+    || check.sequence < (current?.lastSequence ?? 0) || check.plugins.length === 0
+    || check.plugins.some(plugin => plugin.to !== check.laneVersion || compareVersions(plugin.to, plugin.from) < 0)
+    || !check.plugins.some(plugin => compareVersions(plugin.to, plugin.from) > 0)) return false
+  const live = current?.live?.version
+  return live == null || compareVersions(check.laneVersion, live.replace(/^v/, '')) > 0
 }
 
 export function install(rt) {

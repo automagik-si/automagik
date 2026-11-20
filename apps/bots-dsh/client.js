@@ -3574,6 +3574,69 @@ Object.assign(ZH, {
   "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
 });
 Object.assign(ZH, HOST_ZH);
+Object.assign(ZH, {
+  "Checking the signed release": "正在检查已签名的版本",
+  "Verifying the downloaded packages": "正在验证已下载的软件包",
+  "Restarting and checking health": "正在重启并检查是否正常",
+  "Automagik {version} is ready to install.": "Automagik {version} 已可安装。",
+  "{plugin} is already on {version}.": "{plugin} 已是 {version} 版。",
+  "Work in progress stops when you click Update now. Automagik will pick it up again once a healthy version is ready.": "点击立即更新后，正在进行的工作会暂停。版本确认可用后，Automagik 会接着处理这些工作。",
+  "Waiting for the update supervisor to confirm the request.": "正在等待更新监督程序确认请求。",
+  "Switching versions…": "正在切换版本…",
+  "The update status is unconfirmed.": "更新状态尚未确认。",
+  "In-app update recovery guide": "应用内更新恢复指南",
+  "The team data kept the same format.": "团队数据仍采用原来的格式。",
+  "The team data format could not be determined.": "无法确定团队数据的格式。",
+  "The team data was in use.": "团队数据当时正在使用。",
+  "The team data changed after the restore was planned.": "制定恢复计划后，团队数据发生了变化。",
+  "The saved team snapshot had changed.": "已保存的团队快照发生了变化。",
+  "Stop DSH": "停止 DSH",
+  "Restore the plugin entries": "恢复插件条目",
+  "Put back the kept files": "放回保留的文件",
+  "Restore the version record": "恢复版本记录",
+  "Restore team data": "恢复团队数据",
+  "Verify the profile": "验证配置",
+  "Check health": "检查运行状态",
+  "Live profile": "当前配置",
+  "Kept version": "保留的版本",
+  "Staging folder": "暂存文件夹",
+  "The saved team snapshot was restored. Sessions, memory, settings and keys are kept separately.": "已恢复保存的团队快照。会话、记忆、设置和密钥单独保存。",
+  "If you saved a team change between {start} and {end}, it may have been replaced. A copy of the trial team was kept if there was team data to copy.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。若试用期间有可复制的团队数据，已保留副本。",
+  "The team snapshot was skipped. {reason}": "未恢复团队快照。{reason}",
+  "The supervisor recorded no team snapshot outcome.": "监督程序未记录团队快照的恢复结果。",
+  "Work recovery results are not available yet.": "暂时没有工作恢复结果。",
+  "There was no stopped work to recover.": "没有需要恢复的中断工作。",
+  "Pending": "等待处理",
+  "Resumed": "已恢复",
+  "Could not resume": "无法恢复",
+  "Turn": "对话轮次",
+  "Queued input": "队列中的输入",
+  "Queued delivery": "队列中的投递",
+  "{name} ({kind}) · {state}": "{name}（{kind}）· {state}",
+  "Work recovery": "工作恢复",
+  "The previous plugin set passed its checks.": "上一组插件已通过检查。",
+  "Update target {version}.": "更新目标版本为 {version}。",
+  "Oldest plugin version before the update: {version}.": "更新前最旧的插件版本为 {version}。",
+  "Automagik was not updated": "Automagik 未更新",
+  "Manual recovery required": "需要手动恢复",
+  "See the recovery guide and the supervisor’s state.json before moving any files.": "移动文件前，请查看恢复指南和监督程序的 state.json。",
+  "Previous plugin version recorded for the update: {version}.": "更新记录中的旧插件版本为 {version}。",
+  "Previous version check: {reason}": "旧版本检查结果：{reason}",
+  "Last rollback step: {step}.": "最后的回退步骤：{step}。",
+  "Rollback actions tried: {actions}.": "已尝试的回退操作：{actions}。",
+  "{file}: previous — {previous}; candidate — {candidate}.": "{file}：旧版本在 {previous}，候选版本在 {candidate}。",
+  "The supervisor has not confirmed the update request.": "监督程序尚未确认更新请求。",
+  "Your previous version stays kept.": "上一个版本会保留。",
+  "The previous version can read the team data format.": "上一个版本可以读取这种格式的团队数据。",
+  "If you saved a team change between {start} and {end}, it may have been replaced.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。",
+  "A copy of the trial team data was kept.": "已保留试用期间的团队数据副本。",
+  "No copy of the trial team data was kept.": "未保留试用期间的团队数据副本。",
+  "The supervisor did not record whether a copy of the trial team data was kept.": "监督程序未记录是否保留了试用期间的团队数据副本。",
+  "More work items than can be shown here ({pending} pending, {resumed} resumed, {failed} could not resume, {unconfirmed} unconfirmed).": "部分工作未逐项列出（{pending} 项待恢复，{resumed} 项已恢复，{failed} 项无法恢复，{unconfirmed} 项未确认）。",
+  "The signed release did not offer a newer compatible plugin set.": "签名版本没有提供更新且兼容的插件组合。",
+  "Work recovery is unconfirmed because the saved notes could not be read.": "无法读取保存的记录，工作恢复情况尚未确认。",
+  "The supervisor could not confirm a healthy running instance.": "监督程序未能确认实例正常运行。"
+});
 var fill2 = (text2, params) => params ? text2.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text2;
 var service = null;
 var bound = null;
@@ -3682,8 +3745,8 @@ function hostText(message) {
   return message;
 }
 function language() {
-  const active = service?.getLocale?.().active;
-  return typeof active === "string" ? active : "en";
+  const active2 = service?.getLocale?.().active;
+  return typeof active2 === "string" ? active2 : "en";
 }
 var dateLocale = () => language().startsWith("zh") ? "zh-CN" : "en-US";
 var DICTIONARY = { zh: ZH };
@@ -5319,23 +5382,23 @@ function listenForInput() {
     if (Date.now() - lastInput > DROWSY_MS) for (const set2 of sleepers) set2(true);
   }, 3e4).unref?.();
 }
-function useDrowsy(enabled = true) {
+function useDrowsy(enabled2 = true) {
   const [drowsy, setDrowsy] = (0, import_react6.useState)(false);
   (0, import_react6.useEffect)(() => {
-    if (!enabled) return void 0;
+    if (!enabled2) return void 0;
     listenForInput();
     sleepers.add(setDrowsy);
     return () => {
       sleepers.delete(setDrowsy);
     };
-  }, [enabled]);
-  return enabled && drowsy;
+  }, [enabled2]);
+  return enabled2 && drowsy;
 }
 var quiet = () => typeof document !== "undefined" && (document.body?.dataset.btMotion === "quiet" || globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true);
-function useLook(ref, enabled) {
+function useLook(ref, enabled2) {
   const [direction, setDirection] = (0, import_react6.useState)(void 0);
   (0, import_react6.useEffect)(() => {
-    if (!enabled) return void 0;
+    if (!enabled2) return void 0;
     let frame = 0;
     let rest2;
     let point = null;
@@ -5360,7 +5423,7 @@ function useLook(ref, enabled) {
       clearTimeout(rest2);
       window.removeEventListener("pointermove", onMove);
     };
-  }, [enabled]);
+  }, [enabled2]);
   return direction;
 }
 function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = false, onOnce }) {
@@ -5523,9 +5586,9 @@ var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "w
 var WORK = ["thinking", "searching", "working", "sending", "orbit"];
 var botState = (running2, activity, alert, { failed = false, unread = false } = {}) => alert ? "alert" : running2 ? WORK.includes(activity) ? activity : "working" : failed ? "failed" : activity === "waiting" ? "waiting" : unread ? "review" : "idle";
 var toolState = (name) => /^(message_bot|stop_bot|create_bot|update_bot|delete_bot|create_group|update_group|delete_group|post_to_group)$/.test(name) ? "sending" : /search|fetch|browse|read|grep|glob|list|recall/i.test(name) ? "searching" : "working";
-function useGaze(ref, enabled) {
+function useGaze(ref, enabled2) {
   (0, import_react7.useEffect)(() => {
-    if (!enabled || reducedMotion()) return void 0;
+    if (!enabled2 || reducedMotion()) return void 0;
     let frame = 0;
     let point = null;
     const place = () => {
@@ -5554,7 +5617,7 @@ function useGaze(ref, enabled) {
       window.removeEventListener("pointermove", onMove);
       document.documentElement.removeEventListener("pointerleave", onLeave);
     };
-  }, [enabled]);
+  }, [enabled2]);
 }
 var FIDGETS = ["hop", "sway", "stretch", "look"];
 var GENIE_PET = Object.freeze({ source: "builtin", id: "genie-clay", version: 2, sleep: true });
@@ -6004,9 +6067,9 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
   (0, import_react10.useEffect)(() => {
     const { id, key, digest } = displayed.current;
     if (key === null) return;
-    let active = true;
+    let active2 = true;
     Promise.resolve().then(() => fetchDetail(id)).then((value2) => {
-      if (!active) return;
+      if (!active2) return;
       const { commandDigest, snapshot: snapshot2, provider, item, field, name, collection, created } = value2 ?? {};
       let verified = commandDigest === digest && [commandDigest, snapshot2, provider, field].every((part) => typeof part === "string");
       let displayItem = item;
@@ -6025,10 +6088,10 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
       }
       setVaultDetail(verified ? { key, value: { commandDigest, snapshot: snapshot2, provider, item: displayItem, field, collection, created } } : { key, error: vaultDetailUnavailable });
     }, () => {
-      if (active) setVaultDetail({ key, error: vaultDetailUnavailable });
+      if (active2) setVaultDetail({ key, error: vaultDetailUnavailable });
     });
     return () => {
-      active = false;
+      active2 = false;
     };
   }, [fetchDetail]);
   const secret = (roster.secrets ?? []).find((entry) => entry.name === request.name);
@@ -7534,12 +7597,12 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
   const testLease = (0, import_react15.useRef)(null);
   const testRequest = (0, import_react15.useRef)(null);
   const saving = (0, import_react15.useRef)(false);
-  const progress = (0, import_react15.useRef)(null);
+  const progress2 = (0, import_react15.useRef)(null);
   const stopProgress = () => {
-    if (!progress.current) return;
-    clearTimeout(progress.current.timer);
-    progress.current.controller.abort();
-    progress.current = null;
+    if (!progress2.current) return;
+    clearTimeout(progress2.current.timer);
+    progress2.current.controller.abort();
+    progress2.current = null;
   };
   const epoch = (0, import_react15.useRef)(0);
   const live = (0, import_react15.useRef)(true);
@@ -7753,7 +7816,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     setError(null);
     setTest(null);
     const polling = { controller: new AbortController(), timer: null };
-    progress.current = polling;
+    progress2.current = polling;
     const poll = async () => {
       try {
         const answer2 = await call("hermes-remote-test-status", { requestId }, polling.controller.signal);
@@ -7778,7 +7841,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       failed(failure, payload, detail, requestId);
       return;
     } finally {
-      if (progress.current === polling) stopProgress();
+      if (progress2.current === polling) stopProgress();
       if (live.current && generation === epoch.current) setDraft(freshSecrets);
     }
     const profiles = answer.profiles ?? [];
@@ -12035,9 +12098,9 @@ function chartData(node, lookup) {
 }
 var csvCell = (value) => /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 function chartCsv({ categories, series, unit }, t2 = (key) => key) {
-  const head2 = ["", ...series.map((item, index) => item.name || (series.length === 1 ? unit || t2("Value") : `${t2("Series")} ${index + 1}`))];
+  const head = ["", ...series.map((item, index) => item.name || (series.length === 1 ? unit || t2("Value") : `${t2("Series")} ${index + 1}`))];
   const rows2 = categories.map((label, at) => [label, ...series.map((item) => String(item.values[at]))]);
-  return [head2, ...rows2].map((row) => row.map((cell) => csvCell(String(cell))).join(",")).join("\n");
+  return [head, ...rows2].map((row) => row.map((cell) => csvCell(String(cell))).join(",")).join("\n");
 }
 function valueAxis(values, zero) {
   const finite = values.length > 0 ? values : [0];
@@ -12047,7 +12110,7 @@ function valueAxis(values, zero) {
   const pad2 = (high - low) * 0.1 || Math.abs(high) * 0.1 || 1;
   return niceTicks(low - pad2, high + pad2);
 }
-function columns({ categories, series, unit, kind }, width, active, shown2) {
+function columns({ categories, series, unit, kind }, width, active2, shown2) {
   const visible = series.filter((_, index) => shown2[index]);
   const ticks = valueAxis(visible.flatMap((item) => item.values), kind !== "line");
   const lo = ticks[0];
@@ -12084,7 +12147,7 @@ function columns({ categories, series, unit, kind }, width, active, shown2) {
         const r = Math.min(4, barW / 2, tall);
         const up = value >= 0;
         const d = up ? `M${x},${top2 + tall}V${top2 + r}q0,-${r} ${r},-${r}h${barW - 2 * r}q${r},0 ${r},${r}V${top2 + tall}z` : `M${x},${top2}V${top2 + tall - r}q0,${r} ${r},${r}h${barW - 2 * r}q${r},0 ${r},-${r}V${top2}z`;
-        parts.push((0, import_react24.createElement)("path", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active !== null && active !== at ? "" : void 0, d, style: { fill: item.color } }));
+        parts.push((0, import_react24.createElement)("path", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active2 !== null && active2 !== at ? "" : void 0, d, style: { fill: item.color } }));
       });
     });
   } else {
@@ -12097,15 +12160,15 @@ function columns({ categories, series, unit, kind }, width, active, shown2) {
       }
       parts.push((0, import_react24.createElement)("path", { key: `l${row}`, className: "dv-chart-line", d: line, style: { stroke: item.color } }));
       item.values.forEach((value, at) => {
-        parts.push((0, import_react24.createElement)("circle", { key: `p${row}-${at}`, className: "dv-chart-dot", cx: xs[at], cy: y(value), r: active === at ? 4 : 2.5, style: { fill: item.color } }));
+        parts.push((0, import_react24.createElement)("circle", { key: `p${row}-${at}`, className: "dv-chart-dot", cx: xs[at], cy: y(value), r: active2 === at ? 4 : 2.5, style: { fill: item.color } }));
       });
     });
-    if (active !== null) parts.unshift((0, import_react24.createElement)("line", { key: "guide", className: "dv-chart-guide", x1: xs[active], x2: xs[active], y1: plot.y, y2: plot.y + plot.h }));
+    if (active2 !== null) parts.unshift((0, import_react24.createElement)("line", { key: "guide", className: "dv-chart-guide", x1: xs[active2], x2: xs[active2], y1: plot.y, y2: plot.y + plot.h }));
   }
   const hits = categories.map((_, at) => ({ x: plot.x + band * at, y: plot.y, w: band, h: plot.h }));
   return { parts, height, points, hits };
 }
-function rows({ categories, series, unit }, width, active, shown2) {
+function rows({ categories, series, unit }, width, active2, shown2) {
   const visible = series.filter((_, index) => shown2[index]);
   const ticks = valueAxis(visible.flatMap((item) => item.values), true);
   const lo = ticks[0];
@@ -12133,7 +12196,7 @@ function rows({ categories, series, unit }, width, active, shown2) {
       const by = rowY + row * (barH + 2);
       const left = Math.min(x(value), zero);
       const long = Math.max(1, Math.abs(x(value) - zero));
-      parts.push((0, import_react24.createElement)("rect", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active !== null && active !== at ? "" : void 0, x: left, y: by, width: long, height: barH, rx: Math.min(4, long / 2), style: { fill: item.color } }));
+      parts.push((0, import_react24.createElement)("rect", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active2 !== null && active2 !== at ? "" : void 0, x: left, y: by, width: long, height: barH, rx: Math.min(4, long / 2), style: { fill: item.color } }));
       parts.push((0, import_react24.createElement)("text", { key: `v${at}-${row}`, className: "dv-chart-value", x: left + long + 6, y: by + barH - 3 }, withUnit(value, unit)));
     });
     points.push({ x: Math.max(...visible.map((item) => x(item.values[at])), zero), y: rowY });
@@ -12141,7 +12204,7 @@ function rows({ categories, series, unit }, width, active, shown2) {
   const hits = categories.map((_, at) => ({ x: 0, y: plot.y + rowH * at, w: width, h: rowH }));
   return { parts, height, points, hits };
 }
-function donut({ categories, series }, width, active, hover) {
+function donut({ categories, series }, width, active2, hover) {
   const values = (series[0]?.values ?? []).map((value) => Math.max(0, value));
   const total = values.reduce((sum, value) => sum + value, 0);
   const size = Math.min(180, Math.max(120, width * 0.42));
@@ -12162,7 +12225,7 @@ function donut({ categories, series }, width, active, hover) {
       const full2 = sweep >= Math.PI * 2 - 1e-6;
       const p = (radius, theta) => `${cx + Math.cos(theta) * radius},${cy + Math.sin(theta) * radius}`;
       const d = full2 ? `M${p(r, angle)}A${r},${r} 0 1 1 ${p(r, angle + Math.PI)}A${r},${r} 0 1 1 ${p(r, angle)}M${p(inner, angle)}A${inner},${inner} 0 1 0 ${p(inner, angle + Math.PI)}A${inner},${inner} 0 1 0 ${p(inner, angle)}z` : `M${p(r, angle)}A${r},${r} 0 ${large} 1 ${p(r, end)}L${p(inner, end)}A${inner},${inner} 0 ${large} 0 ${p(inner, angle)}z`;
-      parts.push((0, import_react24.createElement)("path", { key: `s${at}`, className: "dv-chart-mark", "data-dim": active !== null && active !== at ? "" : void 0, d, fillRule: "evenodd", style: { fill: colorAt(at) }, onPointerEnter: () => hover(at) }));
+      parts.push((0, import_react24.createElement)("path", { key: `s${at}`, className: "dv-chart-mark", "data-dim": active2 !== null && active2 !== at ? "" : void 0, d, fillRule: "evenodd", style: { fill: colorAt(at) }, onPointerEnter: () => hover(at) }));
     }
     angle = end;
   });
@@ -12240,7 +12303,7 @@ function ChartTable({ data }) {
     (0, import_react24.createElement)(
       "table",
       null,
-      (0, import_react24.createElement)("thead", null, (0, import_react24.createElement)("tr", null, (0, import_react24.createElement)("th", { scope: "col" }), heads.map((head2, index) => (0, import_react24.createElement)("th", { key: index, scope: "col", className: "dv-num" }, head2)))),
+      (0, import_react24.createElement)("thead", null, (0, import_react24.createElement)("tr", null, (0, import_react24.createElement)("th", { scope: "col" }), heads.map((head, index) => (0, import_react24.createElement)("th", { key: index, scope: "col", className: "dv-num" }, head)))),
       (0, import_react24.createElement)("tbody", null, categories.map((label, at) => (0, import_react24.createElement)(
         "tr",
         { key: at },
@@ -12257,7 +12320,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const box = (0, import_react24.useRef)(null);
   const svg2 = (0, import_react24.useRef)(null);
   const width = useWidth(box, 520);
-  const [active, setActive] = (0, import_react24.useState)(null);
+  const [active2, setActive] = (0, import_react24.useState)(null);
   const [hidden, setHidden] = (0, import_react24.useState)([]);
   const [asTable, setAsTable] = (0, import_react24.useState)(false);
   const [copied, setCopied] = (0, import_react24.useState)(false);
@@ -12273,7 +12336,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const label = typeof node.caption === "string" && node.caption !== "" ? node.caption : ui2.t("Chart");
   const isDonut = kind === "donut";
   const legendBeside = isDonut && width >= 360;
-  const drawn2 = isDonut ? donut(data, legendBeside ? width - 200 : width, active, setActive) : kind === "hbar" ? rows(data, width, active, shown2) : columns(data, width, active, shown2);
+  const drawn2 = isDonut ? donut(data, legendBeside ? width - 200 : width, active2, setActive) : kind === "hbar" ? rows(data, width, active2, shown2) : columns(data, width, active2, shown2);
   const svgWidth = isDonut ? drawn2.size : width;
   const move2 = (event) => {
     const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
@@ -12285,9 +12348,9 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     event.preventDefault();
     setActive((current) => current === null ? 0 : (current + keys[event.key] + categories.length) % categories.length);
   };
-  const point = active === null ? null : drawn2.points[active];
+  const point = active2 === null ? null : drawn2.points[active2];
   const share = (at) => unit === "%" ? withUnit(drawn2.values[at], unit) : `${withUnit(drawn2.values[at], unit)} · ${drawn2.total > 0 ? Math.round(drawn2.values[at] / drawn2.total * 100) : 0}%`;
-  const tipRows = active === null || isDonut ? [] : series.filter((_, index) => shown2[index]).map((item) => ({ color: item.color, name: item.name, value: withUnit(item.values[active], unit) }));
+  const tipRows = active2 === null || isDonut ? [] : series.filter((_, index) => shown2[index]).map((item) => ({ color: item.color, name: item.name, value: withUnit(item.values[active2], unit) }));
   const copy2 = () => {
     void navigator.clipboard?.writeText(chartCsv(data, ui2.t)).then(() => {
       setCopied(true);
@@ -12320,7 +12383,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     {
       key: at,
       className: "dv-chart-key",
-      "data-dim": active !== null && active !== at ? "" : void 0,
+      "data-dim": active2 !== null && active2 !== at ? "" : void 0,
       onPointerEnter: () => setActive(at),
       onPointerLeave: () => setActive(null)
     },
@@ -12353,17 +12416,17 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
         onPointerLeave: () => setActive(null)
       },
       drawn2.parts,
-      isDonut ? active === null ? (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 5, textAnchor: "middle" }, unit === "%" ? "" : withUnit(drawn2.total, unit)) : (0, import_react24.createElement)(
+      isDonut ? active2 === null ? (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 5, textAnchor: "middle" }, unit === "%" ? "" : withUnit(drawn2.total, unit)) : (0, import_react24.createElement)(
         import_react24.Fragment,
         null,
-        (0, import_react24.createElement)("text", { className: "dv-chart-center-name", x: svgWidth / 2, y: drawn2.height / 2 - 4, textAnchor: "middle" }, fit(categories[active], drawn2.size * 0.56, LABEL)),
-        (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 14, textAnchor: "middle" }, share(active))
+        (0, import_react24.createElement)("text", { className: "dv-chart-center-name", x: svgWidth / 2, y: drawn2.height / 2 - 4, textAnchor: "middle" }, fit(categories[active2], drawn2.size * 0.56, LABEL)),
+        (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 14, textAnchor: "middle" }, share(active2))
       ) : drawn2.hits.map((hit, at) => (0, import_react24.createElement)("rect", { key: `h${at}`, className: "dv-chart-hit", x: hit.x, y: hit.y, width: hit.w, height: hit.h, onPointerEnter: () => setActive(at) }))
     ),
     point && !asTable && !isDonut ? (0, import_react24.createElement)(
       "div",
       { className: "dv-chart-tip", role: "status", style: { left: point.x, top: point.y } },
-      (0, import_react24.createElement)("b", null, categories[active]),
+      (0, import_react24.createElement)("b", null, categories[active2]),
       tipRows.map((row, index) => (0, import_react24.createElement)("span", { key: index }, (0, import_react24.createElement)("i", { style: { background: row.color } }), row.name ? `${row.name}  ` : "", row.value))
     ) : null
   );
@@ -13097,7 +13160,7 @@ function WidgetCard({ title, icon: icon3, footStart, view, onSubmit, onDismiss, 
   const { charts, registerChart, refreshCharts } = useChartHandles();
   const framed = raised2 || hasControls(view);
   const className = ["dv-view", framed ? "dv-q" : "dv-view-bare", settled ? "dv-q-settled" : "", raised2 ? "dv-q-raised" : ""].filter(Boolean).join(" ");
-  const head2 = title || icon3 || onDismiss || countType(view, "chart") > 0 ? (0, import_react26.createElement)(
+  const head = title || icon3 || onDismiss || countType(view, "chart") > 0 ? (0, import_react26.createElement)(
     "div",
     { className: "dv-view-head" },
     icon3 ? (0, import_react26.createElement)("span", { className: "dv-view-icon", "aria-hidden": true }, icon3) : null,
@@ -13114,7 +13177,7 @@ function WidgetCard({ title, icon: icon3, footStart, view, onSubmit, onDismiss, 
       "aria-label": title ? void 0 : ui2.t("View"),
       "aria-busy": busy || void 0
     },
-    head2,
+    head,
     (0, import_react26.createElement)("div", { className: "dv-view-body" }, (0, import_react26.createElement)(WidgetView, { view, onSubmit, settled, answer, busy, footStart: settled ? null : footStart, registerChart, refreshCharts }))
   );
 }
@@ -13362,8 +13425,8 @@ function viewCardText(args) {
   if (!shown2.interactive && card?.await_reply === true) return "";
   if (shown2.interactive && card?.await_reply === false) return "";
   const summary = viewSummary(shown2.view);
-  const head2 = shown2.title === "" ? "[View card]" : `[View card] ${shown2.title}`;
-  return summary === "" ? head2 : `${head2}
+  const head = shown2.title === "" ? "[View card]" : `[View card] ${shown2.title}`;
+  return summary === "" ? head : `${head}
 ${summary}`;
 }
 function viewReply(record, action, values, sourceKind = REPLY_KIND) {
@@ -13829,9 +13892,9 @@ async function copyImage(url) {
 }
 function ImageCell({ callId, prompt, size, done, content, isError, bot, onAsk }) {
   const running2 = !done;
-  const progress = useProgress(callId, running2);
+  const progress2 = useProgress(callId, running2);
   const [shown2] = (0, import_react30.useState)(() => Date.now());
-  const elapsed = useElapsed(running2, progress.started ?? shown2);
+  const elapsed = useElapsed(running2, progress2.started ?? shown2);
   const id = done ? imageIdOf(content) : void 0;
   const [image, setImage] = (0, import_react30.useState)("loading");
   const loaded = image === "loaded";
@@ -13854,8 +13917,8 @@ function ImageCell({ callId, prompt, size, done, content, isError, bot, onAsk })
     );
   }
   const url = id ? imageUrl(id) : void 0;
-  const partial = url ? void 0 : progress.partial;
-  const step2 = progress.count > 0 ? Math.min(progress.count, 2) : 0;
+  const partial = url ? void 0 : progress2.partial;
+  const step2 = progress2.count > 0 ? Math.min(progress2.count, 2) : 0;
   const state2 = url ? loaded ? "done" : "arriving" : partial ? "partial" : "drawing";
   const painting = state2 === "drawing" || state2 === "arriving";
   return (0, import_react30.createElement)(
@@ -14538,18 +14601,18 @@ function FolderMenu({ value, group = false, team = false, actions, run: run3, on
   const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu();
   const [warning, setWarning] = (0, import_react33.useState)(null);
   (0, import_react33.useEffect)(() => {
-    let active = true;
+    let active2 = true;
     if (group && !value) {
       setWarning(null);
       return;
     }
     Promise.resolve(actions.folderProbe?.(value)).then((note) => {
-      if (active) setWarning(note);
+      if (active2) setWarning(note);
     }, () => {
-      if (active) setWarning(null);
+      if (active2) setWarning(null);
     });
     return () => {
-      active = false;
+      active2 = false;
     };
   }, [value, group, actions.folderProbe]);
   const [info, setInfo] = (0, import_react33.useState)(null);
@@ -15370,7 +15433,7 @@ function BotCapabilitiesCard({ bot, roster, actions, run: run3, Card: Card3, Swi
       label: item.name,
       hint: attached.has(item.name) ? statusText2(statuses[item.name]) : void 0,
       on: attached.has(item.name),
-      onChange: (enabled) => void run3(actions.setBotCapability(bot.id, item.name, enabled))
+      onChange: (enabled2) => void run3(actions.setBotCapability(bot.id, item.name, enabled2))
     }))
   );
 }
@@ -15591,9 +15654,9 @@ function MoveMenu({ menuRef, moving, view, move: move2, leaving }) {
   const { entry, box } = moving;
   const here = view.keys[entry.scope];
   const item = (key, label) => (0, import_react37.createElement)("button", { key, type: "button", role: "menuitem", onClick: () => move2(entry, key) }, (0, import_react37.createElement)("span", { className: "bt-menu-label" }, label));
-  const list = (kind, head2) => {
+  const list = (kind, head) => {
     const places = view.places.filter((place) => place.kind === kind && place.key !== here);
-    return places.length === 0 ? null : (0, import_react37.createElement)(import_react37.Fragment, { key: kind }, (0, import_react37.createElement)("div", { className: "bt-menu-sub-head" }, head2), places.map((place) => item(place.key, place.name)));
+    return places.length === 0 ? null : (0, import_react37.createElement)(import_react37.Fragment, { key: kind }, (0, import_react37.createElement)("div", { className: "bt-menu-sub-head" }, head), places.map((place) => item(place.key, place.name)));
   };
   return (0, import_react37.createElement)(
     "div",
@@ -16223,7 +16286,7 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
   (0, import_react39.useEffect)(() => {
     setForm((current) => current?.offerId === offerId ? current : null);
   }, [offerId]);
-  const active = offerId !== void 0 && form?.offerId === offerId ? form : null;
+  const active2 = offerId !== void 0 && form?.offerId === offerId ? form : null;
   const edit = (claim) => {
     setProblem(null);
     setForm({
@@ -16249,8 +16312,8 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
     }
   };
   function submit() {
-    if (!active || busy) return;
-    const { offerId: offerId2, label, claimId, rev, machineId } = active;
+    if (!active2 || busy) return;
+    const { offerId: offerId2, label, claimId, rev, machineId } = active2;
     const claim = machineId ? { machineId } : claimId === void 0 ? void 0 : { claimId, rev };
     void change(() => claim ? actions.cliLoginReserve(offerId2, label, claim) : actions.cliLoginReserve(offerId2, label));
   }
@@ -16272,11 +16335,11 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
       "div",
       { key: claim.claimId },
       (0, import_react39.createElement)("span", null, t(!claim.mine ? "Reserved by another installation: {label}." : claim.current ? "Reserved for {label}. This holds in this installation only for now; other installations are not checked yet." : state2 === "complete" ? "Also reserved here: {label} (another {vendor} account)." : "Reserved here: {label}.", { label: claim.label, vendor: CLI_NAMES[provider] })),
-      claim.mine && claim.current && offerId ? button("Rename", () => edit(claim), busy || active !== null) : null,
+      claim.mine && claim.current && offerId ? button("Rename", () => edit(claim), busy || active2 !== null) : null,
       claim.mine ? button(
         "Make shared",
         () => void change(() => actions.cliLoginRelease(claim.claimId, claim.rev)),
-        busy || active !== null
+        busy || active2 !== null
       ) : null
     )),
     ...machineClaims.map((claim) => (0, import_react39.createElement)(
@@ -16286,11 +16349,11 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
         label: claim.label,
         vendor: CLI_NAMES[provider]
       })),
-      claim.current && offerId ? button("Rename", () => edit(claim), busy || active !== null) : null,
+      claim.current && offerId ? button("Rename", () => edit(claim), busy || active2 !== null) : null,
       button(
         "Make shared",
         () => void change(() => actions.cliLoginReleaseMachine(claim.machineId)),
-        busy || active !== null
+        busy || active2 !== null
       ),
       owner(claim.owner)
     )),
@@ -16305,8 +16368,8 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
     notice && notice !== line ? (0, import_react39.createElement)("div", null, (0, import_react39.createElement)("span", { className: "bt-set-hint" }, t(notice))) : null,
     line ? (0, import_react39.createElement)("span", { className: "bt-set-hint" }, t(line)) : null,
     !hasCurrent && offerId ? (0, import_react39.createElement)("span", null, t("Shared with other instances (default).")) : null,
-    !hasCurrent && !active ? (0, import_react39.createElement)("div", null, button("Reserve for a project", () => edit(), busy || !offerId)) : null,
-    active ? (0, import_react39.createElement)(
+    !hasCurrent && !active2 ? (0, import_react39.createElement)("div", null, button("Reserve for a project", () => edit(), busy || !offerId)) : null,
+    active2 ? (0, import_react39.createElement)(
       "div",
       null,
       (0, import_react39.createElement)(
@@ -16316,10 +16379,10 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
         (0, import_react39.createElement)("input", {
           className: "bt-input",
           autoFocus: true,
-          value: active.label,
+          value: active2.label,
           maxLength: 120,
           disabled: busy,
-          onChange: (event) => setForm({ ...active, label: event.target.value }),
+          onChange: (event) => setForm({ ...active2, label: event.target.value }),
           onKeyDown: (event) => {
             if (event.key === "Enter" && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -18464,9 +18527,9 @@ function parseReplies(text2) {
   } catch {
   }
   const replies = [];
-  const head2 = RELAY_LIST.exec(text2);
-  if (head2) {
-    for (const piece of text2.slice(head2.index + head2[0].length).split(PRUNE_MARKER)) {
+  const head = RELAY_LIST.exec(text2);
+  if (head) {
+    for (const piece of text2.slice(head.index + head[0].length).split(PRUNE_MARKER)) {
       const first = piece.indexOf('{"');
       if (first !== -1) scanReplies(piece, first, replies);
     }
@@ -18570,20 +18633,20 @@ function foldView(text2, limit = FOLD_AT, markdown = true) {
   if (text2.length <= limit.chars && !moreLines(text2, limit.lines)) return null;
   const body = text2.replace(/^(\s*\n)+/, "");
   if (body.trim() === "") return null;
-  let head2 = body.split("\n", PREVIEW_LINES).join("\n");
-  if (head2.length > PREVIEW_CHARS) {
-    const cut = head2.lastIndexOf("\n", PREVIEW_CHARS);
-    head2 = cutAt(head2, cut > 0 ? cut : PREVIEW_CHARS);
+  let head = body.split("\n", PREVIEW_LINES).join("\n");
+  if (head.length > PREVIEW_CHARS) {
+    const cut = head.lastIndexOf("\n", PREVIEW_CHARS);
+    head = cutAt(head, cut > 0 ? cut : PREVIEW_CHARS);
   }
-  if (head2.trim() === "") head2 = cutAt(body, PREVIEW_CHARS);
-  if (!markdown) return { head: head2 };
-  let opened = openedFence(head2.split("\n"));
-  if (opened !== null && head2.split("\n").slice(opened.line + 1).join("").trim() === "") {
-    head2 = cutAt(body, PREVIEW_CHARS);
-    opened = openedFence(head2.split("\n"));
+  if (head.trim() === "") head = cutAt(body, PREVIEW_CHARS);
+  if (!markdown) return { head };
+  let opened = openedFence(head.split("\n"));
+  if (opened !== null && head.split("\n").slice(opened.line + 1).join("").trim() === "") {
+    head = cutAt(body, PREVIEW_CHARS);
+    opened = openedFence(head.split("\n"));
   }
-  if (opened === null) return { head: head2 };
-  const lines = head2.split("\n");
+  if (opened === null) return { head };
+  const lines = head.split("\n");
   lines[opened.line] = opened.marker;
   return {
     head: `${lines.join("\n")}
@@ -20127,10 +20190,10 @@ function ThinkingRow({ text: text2, live, at, ms, viewKey }) {
     if (viewKey !== void 0) rowViews.set(viewKey, { ...rowViews.get(viewKey), ...patch });
   };
   const measure = () => {
-    const el2 = box.current;
-    atEnd.current = el2.scrollHeight - el2.scrollTop - el2.clientHeight < 2;
-    remember({ atEnd: atEnd.current, top: el2.scrollTop });
-    const above = el2.scrollTop > 0;
+    const el = box.current;
+    atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 2;
+    remember({ atEnd: atEnd.current, top: el.scrollTop });
+    const above = el.scrollTop > 0;
     setFade(above && !atEnd.current ? "both" : above ? "top" : !atEnd.current ? "bottom" : void 0);
   };
   const toggle = (event) => {
@@ -20141,11 +20204,11 @@ function ThinkingRow({ text: text2, live, at, ms, viewKey }) {
   };
   (0, import_react48.useLayoutEffect)(() => {
     if (!open) return;
-    const el2 = box.current;
+    const el = box.current;
     const restore = view.current;
     view.current = void 0;
-    if (atEnd.current) el2.scrollTop = el2.scrollHeight;
-    else if (restore?.top !== void 0) el2.scrollTop = restore.top;
+    if (atEnd.current) el.scrollTop = el.scrollHeight;
+    else if (restore?.top !== void 0) el.scrollTop = restore.top;
     measure();
   }, [text2, open]);
   const title = live ? t("Thinking") : t("Thought it through");
@@ -20193,7 +20256,7 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
   if (texts2.length === 0 && !reasoning && relays.length === 0 && activity.length === 0) return (0, import_react48.createElement)(CellEmpty);
   const selfId = roster.byId[sessionId]?.id ?? sessionId;
   const speaker = layoutOf(roster.prefs) === "flat" ? roster.byId[sessionId] : void 0;
-  const head2 = speaker !== void 0 && opensReply(steps, data, shown2) && (reasoning !== "" || texts2.length > 0 && !(groupPart === "response" && shown2 && turnReasoning(steps, data) !== ""));
+  const head = speaker !== void 0 && opensReply(steps, data, shown2) && (reasoning !== "" || texts2.length > 0 && !(groupPart === "response" && shown2 && turnReasoning(steps, data) !== ""));
   return (0, import_react48.createElement)(
     import_react48.Fragment,
     null,
@@ -20210,7 +20273,7 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
         whole: true
       });
     }),
-    head2 ? (0, import_react48.createElement)(SpeakerHead, { bot: speaker, time: data.time }) : null,
+    head ? (0, import_react48.createElement)(SpeakerHead, { bot: speaker, time: data.time }) : null,
     activity.length ? (0, import_react48.createElement)("div", { className: "bt-agent-activity" }, activity.map((line, index) => (0, import_react48.createElement)("div", { key: index, className: "bt-agent-act", title: line }, (0, import_react48.createElement)("span", { className: "bt-agent-act-mark", "aria-hidden": true }), (0, import_react48.createElement)("span", { className: "bt-agent-act-text" }, activityParts(line))))) : null,
     reasoning ? (0, import_react48.createElement)(ThinkingRow, {
       text: reasoning,
@@ -20296,9 +20359,9 @@ function scheduleGroupChains(flow) {
 function GroupMessage({ bot, text: text2, texts: texts2 = [text2], room: room2, roster, actions, msgKey, useUi, whole, time, duration: duration2 }) {
   const ref = (0, import_react48.useRef)(null);
   (0, import_react48.useLayoutEffect)(() => {
-    const el2 = ref.current;
-    if (!el2?.closest) return void 0;
-    const flow = el2.closest("[data-chat-flow]");
+    const el = ref.current;
+    if (!el?.closest) return void 0;
+    const flow = el.closest("[data-chat-flow]");
     if (!flow) return void 0;
     scheduleGroupChains(flow);
     return () => scheduleGroupChains(flow);
@@ -21535,360 +21598,6 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
   };
 }
 
-// src/client/self-update-flag.js
-var MOCK_FLAG = "mock-1540";
-function mock1540On(location2 = globalThis.location) {
-  const search = typeof location2?.search === "string" ? location2.search : "";
-  const hash = typeof location2?.hash === "string" ? location2.hash : "";
-  return search.replace(/^\?/, "").split("&").some((part) => part.split("=")[0] === MOCK_FLAG) || new RegExp(`(?:^#|&)${MOCK_FLAG}(?:=|&|$)`).test(hash);
-}
-
-// src/client/self-update-mock.js
-var MOCK_STEPS = Object.freeze([
-  { key: "download", label: () => t("Downloading the new version") },
-  { key: "signature", label: () => t("Checking the signature") },
-  { key: "install", label: () => t("Installing beside the current version") },
-  { key: "restart", label: () => t("Restarting") },
-  { key: "health", label: () => t("Checking that it is healthy") }
-]);
-var MOCK_DATA = Object.freeze({
-  current: "3.151.0",
-  next: "3.152.0",
-  downloadMb: 42,
-  seconds: 3
-});
-var STEP_MS = 900;
-var SUCCESS_MS = 700;
-var CSS2 = `
-/* The nod is one of the bar's own round buttons (.bt-round), seated in the bottom row like the
-   other footer entries, never a floating pill of its own: same 36px circle, same --bt-* colours. */
-.su-nod{position:relative}
-.su-nod .su-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:var(--bt-accent);box-shadow:0 0 0 2px var(--bt-main)}
-.su-nod .su-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-.su-layer{position:fixed;inset:0;z-index:80;display:flex;background:var(--bt-main);animation:su-veil .18s ease-out;font-family:var(--bt-font,system-ui)}
-.su-modal{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bt-main);color:var(--bt-ink);animation:su-pop .22s cubic-bezier(.34,1.3,.64,1)}
-.su-head{display:flex;align-items:flex-start;gap:12px;padding:20px max(24px,calc((100vw - 760px)/2)) 0}
-.su-head h2{margin:0;font-size:17px;line-height:24px;font-weight:600}
-.su-close{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 13px/18px var(--bt-font,system-ui);cursor:pointer;padding:2px 4px;border-radius:8px}
-.su-close:hover{background:var(--bt-hover);color:var(--bt-ink)}
-.su-body{flex:1;overflow:auto;padding:18px max(24px,calc((100vw - 760px)/2)) 24px;display:flex;flex-direction:column;gap:14px}
-.su-body.su-fill{justify-content:center}
-.su-body.su-center{align-items:center;text-align:center}
-.su-body.su-center .su-example{align-self:center}
-.su-example{align-self:flex-start;padding:2px 8px;border-radius:999px;background:var(--bt-accent-soft);color:var(--bt-accent);font:600 11px/16px var(--bt-font,system-ui);letter-spacing:.02em;text-transform:uppercase}
-.su-line{margin:0;font-size:14px;line-height:21px;color:var(--bt-ink)}
-.su-versions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--bt-ink-2)}
-.su-version{padding:3px 8px;border-radius:8px;background:var(--bt-tag-bg);font-variant-numeric:tabular-nums;color:var(--bt-ink)}
-.su-changes{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:14px;line-height:21px}
-.su-steps{display:flex;flex-direction:column;gap:2px}
-.su-step{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:14px;line-height:20px;color:var(--bt-ink-2)}
-.su-step[data-state=active]{background:var(--bt-accent-soft);color:var(--bt-ink)}
-.su-step[data-state=active] .su-mark{border-color:var(--bt-accent);background:var(--bt-accent-soft);color:var(--bt-accent)}
-.su-step[data-state=done]{color:var(--bt-ink)}
-.su-mark{width:20px;height:20px;flex:none;border-radius:50%;border:1.5px solid var(--bt-line-2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
-.su-step[data-state=done] .su-mark{border-color:transparent;background:var(--bt-accent);color:var(--bt-accent-ink)}
-.su-step[data-state=failed] .su-mark{border-color:transparent;background:var(--bt-danger);color:var(--bt-accent-ink)}
-.su-step[data-state=failed]{color:var(--bt-ink)}
-.su-note{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
-.su-caution{margin:0;padding:9px 11px;border-radius:10px;background:var(--bt-accent-soft);color:var(--bt-ink);font:500 13px/20px var(--bt-font,system-ui)}
-.su-foot{display:flex;gap:10px;align-items:center;padding:14px max(24px,calc((100vw - 760px)/2)) 18px;border-top:.5px solid var(--bt-line);background:var(--bt-main)}
-.su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-accent-ink);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
-.su-primary:hover{filter:brightness(1.05)}
-.su-ghost{border:.5px solid var(--bt-line-2);border-radius:10px;padding:9px 14px;background:transparent;color:var(--bt-ink);font:500 14px/18px var(--bt-font,system-ui);cursor:pointer}
-.su-ghost:hover{background:var(--bt-hover)}
-.su-link{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 12px/18px var(--bt-font,system-ui);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
-.su-result{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8vh 0 4px;text-align:center}
-.su-result .su-badge{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--bt-accent-ink);background:var(--bt-accent)}
-.su-result[data-kind=rollback] .su-badge{background:var(--bt-danger)}
-.su-result h3{margin:0;font-size:16px;line-height:22px;font-weight:600}
-.su-result p{margin:0;max-width:52ch;font-size:13px;line-height:20px;color:var(--bt-ink-2)}
-@keyframes su-nod-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-@keyframes su-pulse{0%{transform:scale(.9);opacity:.5}70%{transform:scale(1.5);opacity:0}100%{opacity:0}}
-@keyframes su-veil{from{opacity:0}to{opacity:1}}
-@keyframes su-pop{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){.su-nod,.su-modal,.su-layer,.su-dot::after{animation:none}}
-`;
-function installStyle(css, doc) {
-  const style = doc.createElement("style");
-  style.dataset.mock = MOCK_FLAG;
-  style.textContent = css;
-  doc.head.append(style);
-  return () => style.remove();
-}
-var arrowSvg = () => {
-  const svg2 = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg2.setAttribute("viewBox", "0 0 20 20");
-  svg2.setAttribute("width", "18");
-  svg2.setAttribute("height", "18");
-  svg2.setAttribute("fill", "none");
-  svg2.setAttribute("stroke", "currentColor");
-  svg2.setAttribute("stroke-width", "1.5");
-  svg2.setAttribute("stroke-linecap", "round");
-  svg2.setAttribute("stroke-linejoin", "round");
-  svg2.setAttribute("aria-hidden", "true");
-  const path2 = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path2.setAttribute("d", "M10 3v8.5M6.5 8.5 10 12l3.5-3.5M4 16h12");
-  svg2.append(path2);
-  return svg2;
-};
-var el = (tag, className, text2) => {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text2 !== void 0) node.append(document.createTextNode(text2));
-  return node;
-};
-var EXAMPLE = () => el("span", "su-example", t("Example data"));
-function modal() {
-  const layer = el("div", "su-layer");
-  const box = el("div", "su-modal");
-  box.setAttribute("role", "dialog");
-  box.setAttribute("aria-modal", "true");
-  box.setAttribute("aria-label", t("Update Automagik"));
-  layer.append(box);
-  return { layer, box };
-}
-function head(box, title, onClose) {
-  const row = el("div", "su-head");
-  row.append(el("h2", null, title));
-  const close = el("button", "su-close", t("Close"));
-  close.type = "button";
-  close.addEventListener("click", onClose);
-  row.append(close);
-  box.append(row);
-}
-function mountSelfUpdateMock(root, {
-  sample = MOCK_DATA,
-  stepMs = STEP_MS,
-  successMs = SUCCESS_MS,
-  seat = null,
-  getSeat = null
-} = {}) {
-  let timers = [];
-  let nodButton = null;
-  const stop3 = () => {
-    for (const id of timers) clearTimeout(id);
-    timers = [];
-  };
-  const later = (fn, ms) => {
-    timers.push(setTimeout(fn, ms));
-  };
-  const place = (node) => {
-    root.replaceChildren(node);
-  };
-  const placeNod = () => {
-    if (!nodButton || root.querySelector(".su-layer")) return;
-    const target = (getSeat ? getSeat() : seat) ?? root;
-    if (nodButton.parentNode !== target) target.append(nodButton);
-  };
-  const nod = () => {
-    stop3();
-    nodButton?.remove();
-    nodButton = el("button", "su-nod bt-round");
-    nodButton.type = "button";
-    nodButton.dataset.mock = MOCK_FLAG;
-    nodButton.title = t("Update available");
-    nodButton.setAttribute("aria-label", t("Update available"));
-    nodButton.append(arrowSvg(), el("span", "su-dot"), el("span", "su-label", t("Update available")));
-    nodButton.addEventListener("click", () => open());
-    root.replaceChildren();
-    placeNod();
-  };
-  const open = () => changes();
-  const changes = () => {
-    stop3();
-    const { layer, box } = modal();
-    head(box, t("Update Automagik"), nod);
-    const body = el("div", "su-body");
-    body.append(EXAMPLE());
-    body.append(el("p", "su-line", t("A new version is ready. From now on it updates itself from this menu.")));
-    const versions = el("div", "su-versions");
-    versions.append(
-      el("span", null, t("You have")),
-      el("span", "su-version", sample.current),
-      el("span", null, "→"),
-      el("span", "su-version", sample.next)
-    );
-    body.append(versions);
-    body.append(el("h3", null, t("What changes")));
-    const list = el("ul", "su-changes");
-    for (const line of [
-      t("Signing in to a coding agent is one click, and a failure says why."),
-      t("A Bot that moves to a new part of its chat keeps what it was doing."),
-      t("This menu gets the update button, so you stop updating by hand.")
-    ]) list.append(el("li", null, line));
-    body.append(list);
-    body.append(el("p", "su-note", t("Your previous version stays kept. If the new one does not start, Automagik goes back by itself.")));
-    const caution = el("p", "su-caution", t("Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost."));
-    caution.setAttribute("role", "note");
-    body.append(caution);
-    box.append(body);
-    const foot = el("div", "su-foot");
-    const primary = el("button", "su-primary", t("Update now"));
-    primary.type = "button";
-    primary.addEventListener("click", () => steps());
-    const ghost = el("button", "su-ghost", t("Not now"));
-    ghost.type = "button";
-    ghost.addEventListener("click", nod);
-    const failure = el("button", "su-link", t("Show the failure instead"));
-    failure.type = "button";
-    failure.addEventListener("click", () => steps({ failAtHealth: true }));
-    foot.append(primary, ghost, failure);
-    box.append(foot);
-    place(layer);
-  };
-  const steps = ({ failAtHealth = false } = {}) => {
-    stop3();
-    const { layer, box } = modal();
-    head(box, t("Updating Automagik"), nod);
-    const body = el("div", "su-body");
-    body.append(EXAMPLE());
-    const list = el("div", "su-steps");
-    const rows2 = MOCK_STEPS.map((step2, index2) => {
-      const row = el("div", "su-step");
-      row.dataset.step = step2.key;
-      row.dataset.state = "waiting";
-      row.append(el("span", "su-mark", String(index2 + 1)), el("span", null, step2.label()));
-      list.append(row);
-      return row;
-    });
-    body.append(list);
-    body.append(el("p", "su-note", t("In this preview the steps are timers and nothing is downloaded.")));
-    body.classList.add("su-fill");
-    box.append(body);
-    const foot = el("div", "su-foot");
-    foot.append(el("span", "su-note", t("The previous version stays kept for the rollback.")));
-    box.append(foot);
-    place(layer);
-    const mark2 = (row, state2, glyph) => {
-      row.dataset.state = state2;
-      row.querySelector(".su-mark").textContent = glyph;
-    };
-    let index = 0;
-    const advance = () => {
-      if (index >= rows2.length) {
-        later(success, successMs);
-        return;
-      }
-      const row = rows2[index];
-      const key = MOCK_STEPS[index].key;
-      mark2(row, "active", "•");
-      index += 1;
-      later(() => {
-        if (failAtHealth && key === "health") {
-          mark2(row, "failed", "!");
-          body.append(el("p", "su-note", t("The new version did not answer the health check.")));
-          later(rollback, successMs);
-          return;
-        }
-        mark2(row, "done", "✓");
-        advance();
-      }, stepMs);
-    };
-    advance();
-  };
-  const result = (kind, badge, title, text2, extra = []) => {
-    const { layer, box } = modal();
-    head(box, t("Update Automagik"), nod);
-    const body = el("div", "su-body");
-    const card = el("div", "su-result");
-    card.dataset.kind = kind;
-    card.append(el("span", "su-badge", badge));
-    card.append(el("h3", null, title));
-    card.append(el("p", null, text2));
-    body.append(card, EXAMPLE());
-    body.classList.add("su-fill", "su-center");
-    for (const node of extra) body.append(node);
-    box.append(body);
-    return { layer, box, body };
-  };
-  const success = () => {
-    stop3();
-    const { layer, box } = result(
-      "success",
-      "✓",
-      t("Done: you are on the new version."),
-      t("Keep working. Your chats, Bots and files are where they were."),
-      [el("p", "su-note", t("In the real thing the instance restarts here, and the chat you had open comes back where it was."))]
-    );
-    const foot = el("div", "su-foot");
-    const primary = el("button", "su-primary", t("Close"));
-    primary.type = "button";
-    primary.addEventListener("click", nod);
-    foot.append(primary);
-    box.append(foot);
-    place(layer);
-  };
-  const rollback = () => {
-    stop3();
-    const versions = el("div", "su-versions");
-    versions.append(el("span", null, t("You are on")), el("span", "su-version", sample.current));
-    const { layer, box } = result(
-      "rollback",
-      "↩",
-      t("Back to the previous version"),
-      t("The new version did not start well. Automagik went back to the one that worked. Nothing was lost: your chats, Bots and files are where they were."),
-      [versions]
-    );
-    const foot = el("div", "su-foot");
-    const primary = el("button", "su-primary", t("Close"));
-    primary.type = "button";
-    primary.addEventListener("click", nod);
-    const retry = el("button", "su-ghost", t("See the announcement again"));
-    retry.type = "button";
-    retry.addEventListener("click", changes);
-    foot.append(primary, retry);
-    box.append(foot);
-    place(layer);
-  };
-  const doc = root.ownerDocument ?? globalThis.document;
-  const onKeydown = (event) => {
-    if (event.key !== "Escape") return;
-    if (root.querySelector(".su-layer") === null) return;
-    event.preventDefault();
-    nod();
-  };
-  doc?.addEventListener("keydown", onKeydown);
-  nod();
-  const Observer = doc?.defaultView?.MutationObserver;
-  const observer = getSeat && Observer ? new Observer(placeNod) : null;
-  observer?.observe(doc.body, { childList: true, subtree: true });
-  return {
-    open,
-    close: nod,
-    /** The screen the preview is on: nod, changes, steps, success or rollback. */
-    screen: () => {
-      if (root.querySelector(".su-layer") === null) return "nod";
-      if (root.querySelector(".su-result[data-kind=success]") !== null) return "success";
-      if (root.querySelector(".su-result[data-kind=rollback]") !== null) return "rollback";
-      if (root.querySelector(".su-steps") !== null) return "steps";
-      return "changes";
-    },
-    dispose: () => {
-      observer?.disconnect();
-      stop3();
-      doc?.removeEventListener("keydown", onKeydown);
-      nodButton?.remove();
-      nodButton = null;
-      root.replaceChildren();
-      root.remove();
-    }
-  };
-}
-function installSelfUpdateMock({ location: location2 = globalThis.location, document: doc = globalThis.document } = {}) {
-  if (!doc || !mock1540On(location2)) return () => {
-  };
-  const offStyles = installStyle(CSS2, doc);
-  const root = doc.createElement("div");
-  root.id = "ds-bot-self-update-mock";
-  doc.body.append(root);
-  const getSeat = () => doc.querySelector(".lb-foot") ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div') ?? doc.querySelector("[data-mock-seat]");
-  const control2 = mountSelfUpdateMock(root, { getSeat });
-  return () => {
-    control2.dispose();
-    offStyles();
-  };
-}
-
 // src/client/team-actions.js
 function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession, loginState, panelFolded }) {
   const openCliLogin = (botId, provider, ref) => {
@@ -22033,7 +21742,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     grantRole: (id, role, capability, on) => after(call2("role-grant", { id, role, capability, on })),
     roleSettings: (id, role) => call2("role-settings", { id, role }),
     setRoleSettings: (id, role, values) => call2("role-settings-set", { id, role, values }),
-    voicePane: (sessionId, paneId, open, active) => call2("voice-pane", { sessionId, paneId, open, active }),
+    voicePane: (sessionId, paneId, open, active2) => call2("voice-pane", { sessionId, paneId, open, active: active2 }),
     voiceWait: (sessionId, paneId, callId, signal) => call2("voice-wait", { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call2("voice-spoken", { sessionId, paneId, callId, outcome }),
     // A model on another route: the host changes it in place on a chat with nothing said.
@@ -22133,7 +21842,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     dismissView: (sessionId) => after(call2("dismiss-view", { sessionId: partFor(sessionId) })),
     deleteBtw: (sessionId, cardId) => after(call2("btw-delete", { sessionId, cardId })),
     answerApproval: (id, choice) => after(call2("approval-answer", { id, choice, client: "web" })),
-    computerSetEnabled: (enabled) => after(call2("computer-set-enabled", { enabled })),
+    computerSetEnabled: (enabled2) => after(call2("computer-set-enabled", { enabled: enabled2 })),
     computerSetLevel: (botId, level) => after(call2("computer-set-level", { botId, level })),
     computerRevokeApp: (botId, appKey) => after(call2("computer-revoke-app", { botId, appKey })),
     computerProviderRetry: () => after(call2("computer-provider-retry", {})),
@@ -22260,7 +21969,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     repoStars: () => call2("repo-stars"),
     checkSelfUpdate: () => call2("self-update-check"),
     selfUpdateResult: (runId) => call2("self-update-check-result", { runId }),
-    selfUpdateStatus: () => call2("self-update-status"),
+    selfUpdateStatus: (signal) => call2("self-update-status", void 0, signal),
     startSelfUpdate: (body) => call2("self-update-start", body),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = "action") => {
@@ -22317,14 +22026,21 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
 }
 
 // src/client/styles.js
+var SHELL_LIGHT_PALETTE = `--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)`;
+var SHELL_DARK_PALETTE = `--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff`;
+var roundButtonCss = (selector) => `
+${selector}{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
+${selector}:hover{background:var(--bt-hover)}
+${selector}:active{transform:scale(.94)}
+`;
 var SHELL_CSS = `
-body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
+body{${SHELL_LIGHT_PALETTE}}
 /* The --bt-glass-* tokens keep upstream's names, which its cards, menus and docks read, and
    hold solid surfaces here: this look is clay depth on a plain ground, not frosted glass. */
 /* iOS waits out a double-tap zoom on buttons; the plugin's own controls never zoom. */
 :is(.bt-tool,.bt-uaction,.bt-menu button,.bt-menu-item,.bt-icon-btn,.bt-round,.bt-pill,.bt-account,.bt-set-row,.bt-settings-item,.bt-react-strip button,.bt-palette-row,.bt-palette-clear,.bt-tab,.bt-ptab,.bt-ptab-x,.bt-bcard-x,.bt-plus,.bt-q-btn,.bt-q-x,.bt-x,.bt-nc-send,.bt-send,.bt-soft,.bt-mini,.bt-side-send,.bt-shape,.bt-swatch,.bt-color,.bt-newchat,.bt-task-day,.bt-task-remove,.bt-fb-btn){touch-action:manipulation}
 :is(.bt-round,.bt-you,.bt-account,.bt-color,.bt-color span,.bt-swatch,.bt-icon-btn,.bt-avatar-trigger,.bt-avatar-pencil,.bt-plus,.bt-mic,.bt-voice){corner-shape:round}
-body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff}
+body[data-ds-dark-theme]{${SHELL_DARK_PALETTE}}
 body{--bt-gold:#f2b84b;--bt-gold-edge:#c98a1a;--bt-gold-band:#e9a636;--bt-gold-shine:#fff3d4;--bt-gem:#8fdcec;--bt-gem-2:#f0bddf;--bt-role-bg:#fbe7bf;--bt-role-ink:#8a5a12;--bt-role-edge:#e7c88a;--bt-role-shine:#fff6e2;--bt-magic-cyan:#3ccbf4;--bt-magic-violet:#9a6cf6;--bt-magic-pink:#ff4fa0;--bt-arena:#120f24;--bt-arena-2:#231a44;--bt-arena-ink:#f4f1ff}
 body[data-ds-dark-theme]{--bt-role-bg:#4a3a1c;--bt-role-ink:#f6d48f;--bt-role-edge:#2a1f0c;--bt-role-shine:rgba(255,240,200,.12)}
 ${Object.entries(INKS).map(([name, [light2]]) => `body{--bt-ink-${name}:${light2}}`).join("")}
@@ -22442,9 +22158,7 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .omni-logo{flex:none;overflow:visible}
 .omni-mark{object-fit:contain;-webkit-user-drag:none;user-select:none}
 .bt-you .omni-logo{color:var(--bt-ink)}
-.bt-round{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
-.bt-round:hover{background:var(--bt-hover)}
-.bt-round:active{transform:scale(.94)}
+${roundButtonCss(".bt-round")}
 .bt-list{display:flex;flex-direction:column;gap:3px;overflow-y:auto;min-height:0;flex:1 1 auto}
 /* Chromium ignores ::-webkit-scrollbar when scrollbar-width or scrollbar-color (inherited) is non-auto. */
 .bt-side:not(.bt-rail)>.bt-list{margin-right:-12px;scrollbar-gutter:stable;scrollbar-width:auto;scrollbar-color:auto}
@@ -23709,24 +23423,24 @@ function botOwnCss(css) {
       else if (css[close] === "}") depth -= 1;
       close += 1;
     }
-    const head2 = css.slice(index, open).replace(/\/\*[\s\S]*?\*\//g, "").trim();
+    const head = css.slice(index, open).replace(/\/\*[\s\S]*?\*\//g, "").trim();
     const body = css.slice(open + 1, close - 1);
     index = close;
-    if (head2.startsWith("@keyframes") || head2.startsWith("@font-face")) {
-      out += `${head2}{${body}}
+    if (head.startsWith("@keyframes") || head.startsWith("@font-face")) {
+      out += `${head}{${body}}
 `;
       continue;
     }
-    if (head2.startsWith("@")) {
+    if (head.startsWith("@")) {
       const inner = botOwnCss(body);
-      if (inner.trim() !== "") out += `${head2}{${inner}}
+      if (inner.trim() !== "") out += `${head}{${inner}}
 `;
       continue;
     }
-    const selectors = splitTopLevel(head2, ",").map((part) => part.trim());
+    const selectors = splitTopLevel(head, ",").map((part) => part.trim());
     if (selectors.every((selector) => ROOT_SELECTOR.test(selector))) {
       const custom = splitTopLevel(body, ";").map((part) => part.trim()).filter((part) => part.startsWith("--"));
-      if (custom.length > 0) out += `${head2}{${custom.join(";")}}
+      if (custom.length > 0) out += `${head}{${custom.join(";")}}
 `;
       continue;
     }
@@ -23971,8 +23685,8 @@ function paneDetails(pane, tree) {
 function togglePane(list, pane, tree, max = MAX_PANES) {
   const selected = stillThere(pane, tree);
   if (!selected) return { list };
-  const terminal = paneDetails(selected, tree).terminal;
-  const index = list.findIndex((candidate) => candidate.botId === selected.botId && (candidate.worker ?? null) === selected.worker || terminal && paneDetails(candidate, tree)?.terminal === terminal);
+  const terminal2 = paneDetails(selected, tree).terminal;
+  const index = list.findIndex((candidate) => candidate.botId === selected.botId && (candidate.worker ?? null) === selected.worker || terminal2 && paneDetails(candidate, tree)?.terminal === terminal2);
   if (index !== -1) return { list: list.filter((_, at) => at !== index) };
   if (list.length >= max) return { list, refused: list.map((candidate) => paneDetails(candidate, tree)?.title).filter(Boolean) };
   return { list: [...list, selected] };
@@ -23983,8 +23697,8 @@ function prunePanes(list, tree) {
   for (const pane of list) {
     const selected = stillThere(pane, tree);
     if (!selected) continue;
-    const terminal = paneDetails(selected, tree).terminal;
-    const key = terminal ?? `${selected.botId}:${selected.worker ?? "seat"}`;
+    const terminal2 = paneDetails(selected, tree).terminal;
+    const key = terminal2 ?? `${selected.botId}:${selected.worker ?? "seat"}`;
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push(selected);
@@ -24122,7 +23836,7 @@ function CodeSideSwitch({ current, onSelect }) {
 }
 function codePanelNavigation(layout) {
   let previous = null;
-  const active = () => layout.panelInfo.getSnapshot().activePanelId;
+  const active2 = () => layout.panelInfo.getSnapshot().activePanelId;
   return {
     open(selected, { beside = false } = {}) {
       let next = barPanes([selected]);
@@ -24132,14 +23846,14 @@ function codePanelNavigation(layout) {
         if (list === previous2 && !refused) return;
         next = barPanes(list, refused);
       }
-      if (active() !== CODE_PANEL) {
-        previous = active();
+      if (active2() !== CODE_PANEL) {
+        previous = active2();
         layout.selectPanel(CODE_PANEL);
       }
       set(next);
     },
     close() {
-      if (active() === CODE_PANEL) {
+      if (active2() === CODE_PANEL) {
         try {
           layout.selectPanel(previous);
         } catch {
@@ -24270,10 +23984,10 @@ function findHost() {
   }
   return node;
 }
-function useRunningHost(active) {
+function useRunningHost(active2) {
   const [host, setHost] = (0, import_react53.useState)(null);
   (0, import_react53.useEffect)(() => {
-    if (!active) {
+    if (!active2) {
       setHost(null);
       return void 0;
     }
@@ -24294,7 +24008,7 @@ function useRunningHost(active) {
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [active]);
+  }, [active2]);
   return host;
 }
 function useRowEntrances(replacing) {
@@ -24880,8 +24594,8 @@ function BotChannels({ row, source, renderRow, folded, loads }) {
 }
 function BotRows({ row, channels, source, renderRow, folded = NO_FOLDS }) {
   const bot = { ...row.bot, channels };
-  const head2 = { ...row, bot, status: botRowStatus(bot), channelSource: source ?? row.bot.channelSource };
-  return [renderRow(head2), ...channelRows(bot, channels, folded).map(renderRow)];
+  const head = { ...row, bot, status: botRowStatus(bot), channelSource: source ?? row.bot.channelSource };
+  return [renderRow(head), ...channelRows(bot, channels, folded).map(renderRow)];
 }
 function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label, skin, renderArt: renderArt2 = drawBot, renderGlyph, worded = WORDED, quiet: quiet2 = QUIET, folded = NO_FOLDS, loads }) {
   const ref = (0, import_react57.useRef)(null);
@@ -25181,7 +24895,7 @@ html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) .lb-bar[dat
 html[data-automagik-desktop=darwin] .lb-head{-webkit-app-region:drag}
 html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[aria-haspopup],[tabindex]){-webkit-app-region:no-drag}
 .lb-host .bt-hint{margin:2px 10px 8px}
-.lb-foot{flex:none;padding:6px 8px 2px}
+.lb-foot{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:6px 8px 2px}
 .lb-foot:empty{display:none}
 .lb-agent .bt-agent-sub-in{margin-left:calc(8px + var(--lb-art) + var(--lb-art-gap) - 8px)}
 .lb-host .bt-threads{margin-left:calc(8px + var(--lb-art) / 2)}
@@ -25388,7 +25102,6 @@ function SpaceNote({ anchor, onClose }) {
   ), document.body);
 }
 function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown, sideSwitch, codeList }) {
-  const mock = mock1540On();
   const shownId = useSessions((list) => list.ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const current = currentKey2(roster, shownId);
   const status = useTeamStatus({ roster, useSessionStatus, useWork });
@@ -25441,17 +25154,13 @@ function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionSta
         (0, import_react58.createElement)(
           "div",
           { className: "lb-head" },
-          // Without the flag: the wordmark and the tools, exactly where dev draws them. With it:
-          // Search and New only, and the tools move to the foot below.
-          mock ? null : (0, import_react58.createElement)("span", { className: "lb-brand" }, (0, import_react58.createElement)(Wordmark, { height: 22 })),
-          mock ? null : tools,
           (0, import_react58.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("Search"), title: t("Search"), onClick: () => actions.openPalette() }, (0, import_react58.createElement)(SearchIcon)),
           (0, import_react58.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react58.createElement)(PlusIcon))
         ),
         sideSwitch ?? null,
         notice,
         codeList ?? (team.bots.length === 0 && empty ? empty : (0, import_react58.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : void 0, label: t("Bot list") })),
-        mock ? (0, import_react58.createElement)("div", { className: "lb-foot" }, tools, foot ?? null) : foot ? (0, import_react58.createElement)("div", { className: "lb-foot" }, foot) : null
+        (0, import_react58.createElement)("div", { className: "lb-foot" }, tools, foot ?? null)
       )
     ),
     note ? (0, import_react58.createElement)(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null
@@ -25507,11 +25216,11 @@ function seatWithFreshPane(seat, fresh) {
   return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status ? null : next;
 }
 var NO_SEATS = Object.freeze([]);
-function useSeats(list, enabled = true) {
+function useSeats(list, enabled2 = true) {
   const [seats, setSeats] = (0, import_react59.useState)(NO_SEATS);
   (0, import_react59.useEffect)(() => {
     const empty = () => setSeats((now) => now.length === 0 ? now : NO_SEATS);
-    if (!enabled || typeof list !== "function") {
+    if (!enabled2 || typeof list !== "function") {
       empty();
       return void 0;
     }
@@ -25535,18 +25244,18 @@ function useSeats(list, enabled = true) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [list, enabled]);
+  }, [list, enabled2]);
   return seats;
 }
 var EMPTY_FACE = Object.freeze({ terminal: null, rows: [], screen: [], status: null, approval: null, question: null, loading: false, error: null });
-function mergeFace(now, value, terminal) {
-  const sameSeat = now.terminal === terminal;
+function mergeFace(now, value, terminal2) {
+  const sameSeat = now.terminal === terminal2;
   const rows2 = value.reset === true || !sameSeat ? value.rows ?? [] : [...now.rows, ...value.rows ?? []];
   const seen = /* @__PURE__ */ new Set();
   const unique = rows2.filter((row) => seen.has(row.id) ? false : (seen.add(row.id), true));
   return {
     ...now,
-    terminal,
+    terminal: terminal2,
     rows: unique,
     screen: value.screen ?? (sameSeat ? now.screen : []),
     status: value.status ?? null,
@@ -25558,23 +25267,23 @@ function mergeFace(now, value, terminal) {
 }
 function useSeatFace(seat) {
   const [face, setFace] = (0, import_react59.useState)(EMPTY_FACE);
-  const terminal = typeof seat?.terminal === "string" ? seat.terminal : null;
+  const terminal2 = typeof seat?.terminal === "string" ? seat.terminal : null;
   (0, import_react59.useEffect)(() => {
     let alive = true;
     let timer;
     let cursor = null;
     let client = null;
-    if (terminal === null) {
+    if (terminal2 === null) {
       setFace(EMPTY_FACE);
       return void 0;
     }
     client = seatClientId();
     const read = async () => {
       try {
-        const value = await call("seat-chat-read", { client, terminal, after: cursor });
+        const value = await call("seat-chat-read", { client, terminal: terminal2, after: cursor });
         if (!alive) return;
         cursor = (value.rows ?? []).at(-1)?.id ?? cursor;
-        setFace((now) => mergeFace(now, value, terminal));
+        setFace((now) => mergeFace(now, value, terminal2));
       } catch (error) {
         if (alive) setFace((now) => ({ ...now, loading: false, error: hostText(error?.message ?? "") }));
         return;
@@ -25582,16 +25291,16 @@ function useSeatFace(seat) {
       if (alive) timer = setTimeout(read, READ_MS);
     };
     const open = async () => {
-      setFace((now) => now.terminal === terminal ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, terminal, loading: true });
+      setFace((now) => now.terminal === terminal2 ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, terminal: terminal2, loading: true });
       try {
-        const value = await call("seat-chat-open", { client, terminal });
+        const value = await call("seat-chat-open", { client, terminal: terminal2 });
         if (!alive) return;
         if (value === null) {
           setFace((now) => ({ ...now, loading: false, error: t("This seat holds the chat already open in another window.") }));
           return;
         }
         cursor = (value.rows ?? []).at(-1)?.id ?? null;
-        setFace((now) => mergeFace(now, value, terminal));
+        setFace((now) => mergeFace(now, value, terminal2));
         timer = setTimeout(read, READ_MS);
       } catch (error) {
         if (alive) setFace((now) => ({ ...now, loading: false, error: hostText(error?.message ?? "") }));
@@ -25601,10 +25310,10 @@ function useSeatFace(seat) {
     return () => {
       alive = false;
       clearTimeout(timer);
-      if (client) void call("seat-chat-close", { client, terminal }).catch(() => {
+      if (client) void call("seat-chat-close", { client, terminal: terminal2 }).catch(() => {
       });
     };
-  }, [terminal]);
+  }, [terminal2]);
   return face;
 }
 var toolText = (row) => typeof row?.summary === "string" && row.summary.trim() !== "" ? row.summary : "";
@@ -25664,9 +25373,9 @@ function SeatChatPanel({ onBack }) {
   const face = useSeatFace(seat);
   const botId = seatBotId(seat);
   const code = useCodeFace(botId, { seat: true });
-  const terminal = code.face === "terminal";
+  const terminal2 = code.face === "terminal";
   const why = seatTerminalWhy(seat);
-  const showingTerminal = terminal && why === null;
+  const showingTerminal = terminal2 && why === null;
   const scroll = (0, import_react59.useRef)(null);
   const [pinned, setPinned] = (0, import_react59.useState)(true);
   const length = face.rows.length;
@@ -25675,8 +25384,8 @@ function SeatChatPanel({ onBack }) {
     if (node && pinned) node.scrollTop = node.scrollHeight;
   }, [length, pinned, seat?.terminal]);
   (0, import_react59.useEffect)(() => {
-    if (why !== null && terminal) closeTerminal();
-  }, [why, terminal]);
+    if (why !== null && terminal2) closeTerminal();
+  }, [why, terminal2]);
   (0, import_react59.useEffect)(() => () => {
     if (showingTerminal) closeTerminal();
   }, [showingTerminal]);
@@ -25975,10 +25684,10 @@ function NativeWorkers({ bot, useWork, wide, age }) {
 // src/client/sidebar.js
 var import_react61 = require("react");
 var import_react_dom11 = require("react-dom");
-function useMarkedUnread(id, active, marked, actions) {
+function useMarkedUnread(id, active2, marked, actions) {
   (0, import_react61.useEffect)(() => {
-    if (active && marked) actions.clearUnread(id);
-  }, [active, marked]);
+    if (active2 && marked) actions.clearUnread(id);
+  }, [active2, marked]);
 }
 var PinMark = () => (0, import_react61.createElement)("span", { className: "bt-pin", "aria-hidden": true }, (0, import_react61.createElement)(PinMarkIcon));
 var nameIfCut2 = (event) => {
@@ -26002,9 +25711,9 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const part = currentPart(bot);
   const preview = useSessions((list) => previewOf(list, part, roster.exchangeTurns[part]));
   const running2 = useSessionStatus((map) => map.get(part)?.running === true);
-  const active = useSessionRetainInfo(part, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
-  const unread = useSessionStatus((map) => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== void 0) || marked && !active;
-  useMarkedUnread(id, active, marked, actions);
+  const active2 = useSessionRetainInfo(part, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
+  const unread = useSessionStatus((map) => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== void 0) || marked && !active2;
+  useMarkedUnread(id, active2, marked, actions);
   const main = isMainOf(roster, id);
   const crowned = roster.mainBotId === id;
   const approval = useApproval(useWork, (entry) => entry.botId === id);
@@ -26018,7 +25727,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const groups = workKeys(useGroupWork(useWork, (rooms) => Object.entries(rooms).flatMap(([roomId, entries2]) => entries2.filter((entry) => entry.botId === id).map((entry) => ({ id: roomId, ...doingOf(entry) })))));
   const away = !running2 && groups.length > 0;
   const failed = useWork ? useWork((work) => work.failed?.[id] !== void 0) : false;
-  const replied = useSessionStatus((map) => map.get(part)?.completionUnread === true) && !active;
+  const replied = useSessionStatus((map) => map.get(part)?.completionUnread === true) && !active2;
   const state2 = botState(running2 || away, doing, alert, { failed, unread: replied });
   const runningLine = running2 && doing ? doingLine(doing) : null;
   const awayLine = away ? workLine(roster.roomsById[groups[0].id]?.name ?? t("a group chat"), groups[0], groups.length - 1) : null;
@@ -26027,7 +25736,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const nativeRunning = useWork ? useWork((work) => runningWorkers(work, id)) : 0;
   const threads = runningTasksOf(roster, id).length + nativeRunning;
   const threadsLine = threads === 0 ? "" : threads === 1 ? t("Working on 1 thing") : t("Working on {n} things", { n: threads });
-  if (bot.hidden && !active && !main) return null;
+  if (bot.hidden && !active2 && !main) return null;
   const onContextMenu = (event) => {
     event.preventDefault();
     actions.openMenu({ kind: "bot", id, x: event.clientX, y: event.clientY });
@@ -26042,7 +25751,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       type: "button",
       className: crowned ? "bt-row bt-row-crowned" : "bt-row",
       "aria-label": label,
-      "aria-current": active ? "page" : void 0,
+      "aria-current": active2 ? "page" : void 0,
       "data-bot-id": id,
       title: wide ? void 0 : bot.name,
       onMouseEnter: wide ? nameIfCut2 : void 0,
@@ -26061,7 +25770,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
     ) : null,
     // Badges other Omni plugins add (extend.js): Omni's row counts the automation runs waiting for you.
     wide ? (0, import_react61.createElement)(RowBadges, { bot, roster, useWork }) : null,
-    wide && unread && !active ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
+    wide && unread && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
   );
 }
 function RowBadges(props) {
@@ -26143,15 +25852,15 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
   const sessionId = room2.sessionId ?? id;
   const fallback = useSessions((list) => previewOf(list, sessionId));
   const preview = room2.preview?.replace(/\s+/g, " ").trim() || fallback;
-  const active = useSessionRetainInfo(sessionId, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
-  const unread = useSessionStatus((map) => map.get(sessionId)?.completionUnread === true) || marked && !active;
-  useMarkedUnread(id, active, marked, actions);
+  const active2 = useSessionRetainInfo(sessionId, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
+  const unread = useSessionStatus((map) => map.get(sessionId)?.completionUnread === true) || marked && !active2;
+  useMarkedUnread(id, active2, marked, actions);
   const approval = useApproval(useWork, (entry) => entry.roomId === id);
   const waitingCount = useWork ? useWork((work) => approvalCount(work, (entry) => entry.roomId === id)) : 0;
   const members = workKeys(useGroupWork(useWork, (rooms) => (rooms[id] ?? []).filter((entry) => entry.botId !== void 0).map((entry) => ({ id: entry.botId, ...doingOf(entry) }))));
   const first = roster.byId[members[0]?.id];
   const workingLine = first ? workLine(first.name, members[0], members.length - 1) : null;
-  if (room2.hidden && !active) return null;
+  if (room2.hidden && !active2) return null;
   const pinned = room2.pinned === true;
   const label = [room2.name, pinned ? t("Pinned") : "", members.length > 0 ? t("Working") : "", approval ? waitingLabel(waitingCount) : ""].filter(Boolean).join(", ");
   return (0, import_react61.createElement)(
@@ -26160,7 +25869,7 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
       type: "button",
       className: "bt-row",
       "aria-label": label,
-      "aria-current": active ? "page" : void 0,
+      "aria-current": active2 ? "page" : void 0,
       "data-room-id": id,
       title: wide ? void 0 : room2.name,
       onMouseEnter: wide ? nameIfCut2 : void 0,
@@ -26178,7 +25887,7 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
       (0, import_react61.createElement)("span", { className: "bt-row-name" }, (0, import_react61.createElement)("span", { className: "bt-row-title" }, room2.name), waitingCount > 0 ? (0, import_react61.createElement)("span", { className: "bt-tag" }, String(waitingCount)) : null, pinned ? (0, import_react61.createElement)(PinMark) : null),
       workingLine ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, workingLine) : preview ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, preview) : null
     ) : null,
-    wide && approval && !active ? (0, import_react61.createElement)("span", { className: "bt-unread bt-unread-wait", "aria-hidden": true }) : wide && unread && !active ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
+    wide && approval && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread bt-unread-wait", "aria-hidden": true }) : wide && unread && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
   );
 }
 function AgentSessionRow({ session, agent, actions, renaming, index }) {
@@ -26270,14 +25979,14 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
     };
   });
   const renaming = useUi((value) => value.renameAgent);
-  const active = sessions.some((session) => session.active);
+  const active2 = sessions.some((session) => session.active);
   const running2 = sessions.some((session) => session.running);
-  const unread = sessions.some((session) => session.unread) || marked && !active;
-  useMarkedUnread(agent.id, active, marked, actions);
+  const unread = sessions.some((session) => session.unread) || marked && !active2;
+  useMarkedUnread(agent.id, active2, marked, actions);
   if (tasks && own2.length === 0) return null;
   const preview = sessions[0]?.title ?? t("New session");
   const label = [name, running2 ? t("Working") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
-  const open = active && wide;
+  const open = active2 && wide;
   const first = tasks ? 0 : 1;
   const list = (0, import_react61.createElement)(
     "div",
@@ -26313,7 +26022,7 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
         type: "button",
         className: "bt-row",
         "aria-label": label,
-        "aria-current": active ? "page" : void 0,
+        "aria-current": active2 ? "page" : void 0,
         "data-agent-id": agent.id,
         title: wide ? void 0 : name,
         onClick: () => actions.openAgent(agent.id),
@@ -26329,7 +26038,7 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
         (0, import_react61.createElement)("span", { className: "bt-row-name" }, (0, import_react61.createElement)("span", { className: "bt-row-title" }, name), agent.pinned ? (0, import_react61.createElement)(PinMark) : null),
         preview ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, preview) : null
       ) : null,
-      wide && unread && !active ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
+      wide && unread && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
     ),
     list
   );
@@ -26556,6 +26265,14 @@ function SidebarTools(props) {
   const entries2 = useEntries(sidebarTools);
   return entries2.map((entry) => (0, import_react61.createElement)(toolBoundary(), { key: entry.id, entry, tool: props }));
 }
+function updatePopoverPlacement(rect, { width, height, top, bottom, left = 0 }) {
+  const inset = 8;
+  const gap = 6;
+  const below = Math.max(0, bottom - Math.max(top + inset, rect.bottom + gap) - inset);
+  const above = Math.max(0, Math.min(bottom - inset, rect.top - gap) - top - inset);
+  const x = Math.max(left + inset, Math.min(rect.left, left + width - 280 - inset));
+  return above > below ? { left: x, bottom: height - top - inset - above, maxHeight: above, maxWidth: width - 2 * inset } : { left: x, top: bottom - inset - below, maxHeight: below, maxWidth: width - 2 * inset };
+}
 function UpdateButton({ useUpdate, actions }) {
   const update = useUpdate((value) => value);
   const [open, setOpen] = (0, import_react61.useState)(false);
@@ -26590,8 +26307,20 @@ function UpdateButton({ useUpdate, actions }) {
   const tick = useViewport();
   (0, import_react61.useLayoutEffect)(() => {
     if (!open) return;
-    const rect = button2.current?.getBoundingClientRect();
-    if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 });
+    const place = () => {
+      const rect = button2.current?.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      if (rect) setBox(updatePopoverPlacement(rect, {
+        width: viewport?.width ?? window.innerWidth,
+        height: window.innerHeight,
+        top: viewport?.offsetTop ?? 0,
+        bottom: viewBottom(),
+        left: viewport?.offsetLeft
+      }));
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
   }, [open, tick]);
   if (!update?.available && !dshRow && phase === "idle" && dshPhase === "idle") return null;
   const cloudPhase = phase === "installing" || dshPhase === "installing" ? "installing" : phase !== "idle" ? phase : dshPhase;
@@ -27105,7 +26834,7 @@ ${NATIVE_WORKERS_CSS}
 .bt-update[data-phase=installing] .bt-cloud-arrow{animation:bt-cloud-drop 1.1s cubic-bezier(.45,0,.55,1) infinite}
 @keyframes bt-cloud-drop{0%{transform:translateY(-3px);opacity:0}35%{opacity:1}70%{transform:translateY(1px);opacity:1}100%{transform:translateY(2px);opacity:0}}
 .bt-update-dot{position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#E5484D;box-shadow:0 0 0 1.5px var(--bt-sidebar)}
-.bt-update-pop{position:fixed;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
+.bt-update-pop{position:fixed;overflow:auto;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
 @keyframes bt-update-pop{from{opacity:0;transform:scale(.96);filter:blur(4px)}}
 .bt-update-title{font-size:14px;line-height:20px;font-weight:600}
 .bt-update-text{margin-top:2px;font-size:12.5px;line-height:18px;color:var(--bt-ink-2)}
@@ -27902,8 +27631,8 @@ function PermissionSelect({ catalog, saved, onPick, repick = false, disabled = f
     const buttons = [...menu.current.querySelectorAll("button:not(:disabled)")];
     const first = buttons[0];
     const last = buttons.at(-1);
-    const active = document.activeElement;
-    if (!first || (event.shiftKey ? active === first || active === menu.current : active === last)) {
+    const active2 = document.activeElement;
+    if (!first || (event.shiftKey ? active2 === first || active2 === menu.current : active2 === last)) {
       event.preventDefault();
       (event.shiftKey ? last ?? menu.current : first ?? menu.current).focus();
     }
@@ -28442,8 +28171,8 @@ function parseSideLine(line) {
   return { args, bare: args.trim() === "" };
 }
 function sideQueryMatches(query) {
-  const head2 = String(query ?? "").trim().toLowerCase().split(/\s/, 1)[0] ?? "";
-  return head2 === "" || "side".startsWith(head2);
+  const head = String(query ?? "").trim().toLowerCase().split(/\s/, 1)[0] ?? "";
+  return head === "" || "side".startsWith(head);
 }
 function matchSideSpace(roster, sessionId, token) {
   if (!SIDE_COMMANDS.has(token) || sideSurface(roster, sessionId) !== "bot") return void 0;
@@ -30433,15 +30162,15 @@ function CommandPalette({ start: start2, token, roster, actions, useSessions }) 
   ].filter((command) => matchesName(command.title));
   if (commands.length) sections.push([t("Commands"), commands]);
   const rows2 = sections.flatMap(([, items]) => items);
-  const active = Math.min(cursor, Math.max(rows2.length - 1, 0));
+  const active2 = Math.min(cursor, Math.max(rows2.length - 1, 0));
   const shown2 = rows2.map((row) => row.key).join("\n");
-  const glide = useGlide(`${active}
+  const glide = useGlide(`${active2}
 ${shown2}`, { axis: "y", ...QUICK_EDGES });
   const listRef = glide.box;
   useFlip(listRef, shown2, "[data-flip]");
   (0, import_react72.useEffect)(() => {
     listRef.current?.querySelector("[aria-selected=true]")?.scrollIntoView({ block: "nearest" });
-  }, [active, query]);
+  }, [active2, query]);
   const choose = (row) => {
     if (!row || leaving) return;
     void Promise.resolve(row.run()).catch((error) => actions.reportError(error, "menu"));
@@ -30475,13 +30204,13 @@ ${shown2}`, { axis: "y", ...QUICK_EDGES });
             if (event.nativeEvent.isComposing) return;
             if (event.key === "ArrowDown") {
               event.preventDefault();
-              setCursor(Math.min(active + 1, rows2.length - 1));
+              setCursor(Math.min(active2 + 1, rows2.length - 1));
             } else if (event.key === "ArrowUp") {
               event.preventDefault();
-              setCursor(Math.max(active - 1, 0));
+              setCursor(Math.max(active2 - 1, 0));
             } else if (event.key === "Enter") {
               event.preventDefault();
-              choose(rows2[active]);
+              choose(rows2[active2]);
             }
           }
         }),
@@ -30514,7 +30243,7 @@ ${shown2}`, { axis: "y", ...QUICK_EDGES });
                 type: "button",
                 role: "option",
                 className: "bt-palette-row",
-                "aria-selected": at === active,
+                "aria-selected": at === active2,
                 "data-flip": row.key,
                 onMouseMove: () => {
                   if (cursor !== at) setCursor(at);
@@ -30693,13 +30422,13 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const [effort, setEffort] = (0, import_react73.useState)(void 0);
   const [folderWarning, setFolderWarning] = (0, import_react73.useState)(null);
   (0, import_react73.useEffect)(() => {
-    let active = true;
+    let active2 = true;
     Promise.resolve(actions.folderProbe?.()).then((note) => {
-      if (active) setFolderWarning(note);
+      if (active2) setFolderWarning(note);
     }, () => {
     });
     return () => {
-      active = false;
+      active2 = false;
     };
   }, [actions.folderProbe]);
   const [busy, setBusy] = (0, import_react73.useState)(false);
@@ -31243,9 +30972,9 @@ function NewChat({ mode, sectionId = null, roster, actions }) {
     options.push({ key: bot.id, bot, label: bot.name, hint: choosingAdmin ? t("Make admin") : group || picked.length > 0 ? t("Add to group chat") : void 0, run: () => openBot(bot) });
   }
   if (wanted !== "" && !exact && mode !== "search") options.push({ key: "create", icon: (0, import_react76.createElement)(PlusIcon), label: t("Create new Bot “{name}”", { name: query.trim() }), run: createBot });
-  const active = Math.min(cursor, Math.max(options.length - 1, 0));
+  const active2 = Math.min(cursor, Math.max(options.length - 1, 0));
   const listed = options.map((option) => option.key).join("\n");
-  const glide = useGlide(`${active}
+  const glide = useGlide(`${active2}
 ${listed}`, { axis: "y", ...QUICK_EDGES });
   useFlip(glide.box, listed, "[data-flip]");
   const drop = (0, import_react76.useRef)(null);
@@ -31343,13 +31072,13 @@ ${listed}`, { axis: "y", ...QUICK_EDGES });
             if (event.nativeEvent.isComposing) return;
             if (event.key === "ArrowDown") {
               event.preventDefault();
-              setCursor(Math.min(active + 1, options.length - 1));
+              setCursor(Math.min(active2 + 1, options.length - 1));
             } else if (event.key === "ArrowUp") {
               event.preventDefault();
-              setCursor(Math.max(active - 1, 0));
-            } else if (event.key === "Enter" && options[active]) {
+              setCursor(Math.max(active2 - 1, 0));
+            } else if (event.key === "Enter" && options[active2]) {
               event.preventDefault();
-              options[active].run();
+              options[active2].run();
             } else if (event.key === "Backspace" && query === "") unpick();
           }
         }),
@@ -31373,14 +31102,14 @@ ${listed}`, { axis: "y", ...QUICK_EDGES });
             type: "button",
             role: "option",
             className: "bt-option",
-            "aria-selected": index === active,
+            "aria-selected": index === active2,
             "data-flip": option.key,
             onMouseEnter: () => setCursor(index),
             onClick: option.run
           },
           option.bot ? (0, import_react76.createElement)(BotMark, { bot: option.bot, size: 22 }) : (0, import_react76.createElement)("span", { className: "bt-option-icon" }, option.icon),
           (0, import_react76.createElement)("span", { className: "bt-option-label" }, option.label),
-          option.hint && index === active ? (0, import_react76.createElement)("span", { className: "bt-option-hint" }, option.hint) : null
+          option.hint && index === active2 ? (0, import_react76.createElement)("span", { className: "bt-option-hint" }, option.hint) : null
         ))
       )),
       (0, import_react76.createElement)("div", { className: "bt-nc-spacer" }),
@@ -31552,9 +31281,9 @@ function useRolePlayback({ sessionId, actions, paused, closing, afterSpeech }) {
       if (seen.size > 128) seen.delete(seen.values().next().value);
       setOffer({ ...next, id, signal });
     };
-    const renew = async (active) => {
+    const renew = async (active2) => {
       if (signal.aborted) return;
-      const open = await actions.voicePane(sessionId, id, true, active).catch(() => false);
+      const open = await actions.voicePane(sessionId, id, true, active2).catch(() => false);
       if (!open) return;
       if (signal.aborted) await actions.voicePane(sessionId, id, false).catch(() => {
       });
@@ -31666,10 +31395,10 @@ function watchReply(read, watch, consume) {
     off();
   };
 }
-function useMicLevel(enabled) {
+function useMicLevel(enabled2) {
   const [level, setLevel] = (0, import_react79.useState)(0);
   (0, import_react79.useEffect)(() => {
-    if (!enabled || !navigator.mediaDevices?.getUserMedia) return void 0;
+    if (!enabled2 || !navigator.mediaDevices?.getUserMedia) return void 0;
     let stream = null;
     let audio = null;
     let frame = 0;
@@ -31705,7 +31434,7 @@ function useMicLevel(enabled) {
       });
       setLevel(0);
     };
-  }, [enabled]);
+  }, [enabled2]);
   return level;
 }
 function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }) {
@@ -32498,10 +32227,10 @@ function useTween(value) {
     const started = performance.now();
     let frame;
     const step2 = (now) => {
-      const progress = Math.min(1, (now - started) / 650);
-      from.current = begin + (value - begin) * (1 - (1 - progress) ** 3);
+      const progress2 = Math.min(1, (now - started) / 650);
+      from.current = begin + (value - begin) * (1 - (1 - progress2) ** 3);
       setShown(from.current);
-      if (progress < 1) frame = requestAnimationFrame(step2);
+      if (progress2 < 1) frame = requestAnimationFrame(step2);
     };
     frame = requestAnimationFrame(step2);
     return () => cancelAnimationFrame(frame);
@@ -32741,7 +32470,7 @@ function Profile({ face, share, range }) {
 }
 var monthOf = (ms) => Date.UTC(yearOf(ms), new Date(ms).getUTCMonth(), 1);
 var addMonths = (ms, count) => Date.UTC(yearOf(ms), new Date(ms).getUTCMonth() + count, 1);
-function SpanPicker({ span, today, oldest, active, near, onPick, onClose }) {
+function SpanPicker({ span, today, oldest, active: active2, near, onPick, onClose }) {
   const box = (0, import_react82.useRef)(null);
   const todayMs = hourMs(today);
   const thisMonth = monthOf(todayMs);
@@ -32797,7 +32526,7 @@ function SpanPicker({ span, today, oldest, active, near, onPick, onClose }) {
         "data-l": flag(weekday === 0 || day2 === 1),
         "data-r": flag(weekday === 6 || day2 === length),
         "data-today": flag(key === today),
-        "data-has": flag(active.has(key)),
+        "data-has": flag(active2.has(key)),
         onMouseEnter: () => setHover(key),
         onClick: () => press(key)
       }, (0, import_react82.createElement)("b", null, day2)));
@@ -32877,8 +32606,8 @@ function Heat({ view, keep, paint, index }) {
     ...hover.week >= HEAT_WEEKS / 2 ? { right: `calc(${(HEAT_WEEKS - hover.week) / HEAT_WEEKS * 100}% + 8px)` } : { left: `calc(${(hover.week + 1) / HEAT_WEEKS * 100}% + 8px)` },
     ...hover.day < 4 ? { top: `calc(${hover.day / 7 * 100}% - 2px)` } : { top: "auto", bottom: `calc(${(6 - hover.day) / 7 * 100}% - 2px)` }
   } : null;
-  const active = [...daily.values()].filter((value) => value > 0).length;
-  const summary = active === 1 ? t("Active on 1 day in the last year") : t("Active on {count} days in the last year", { count: active });
+  const active2 = [...daily.values()].filter((value) => value > 0).length;
+  const summary = active2 === 1 ? t("Active on 1 day in the last year") : t("Active on {count} days in the last year", { count: active2 });
   return (0, import_react82.createElement)(
     "section",
     { className: "bt-us-card bt-us-heat", style: { "--i": index } },
@@ -35021,6 +34750,35 @@ var FEEDBACK_CSS = `
 // src/shared/self-update.js
 var CHECK_FRESH_MS = 10 * 6e4;
 
+// src/client/self-update-recovery.js
+var stateText = { pending: "Pending", resumed: "Resumed", failed: "Could not resume" };
+var kindText = { turn: "Turn", input: "Queued input", delivery: "Queued delivery" };
+function recoveryDetails(run3, recovery) {
+  if (!recovery || recovery.runId !== run3.runId || recovery.requestId !== run3.requestId) {
+    return { message: t("Work recovery results are not available yet.") };
+  }
+  const { items, omitted, complete, inventoryUnconfirmed } = recovery;
+  const message = inventoryUnconfirmed ? t("Work recovery is unconfirmed because the saved notes could not be read.") : void 0;
+  if (complete && items.length === 0 && !omitted) {
+    return { message: message ?? t("There was no stopped work to recover.") };
+  }
+  return {
+    message,
+    items: items.map((item) => ({
+      sessionId: item.sessionId,
+      text: t("{name} ({kind}) · {state}", {
+        name: item.name,
+        kind: t(kindText[item.kind]),
+        state: t(stateText[item.state])
+      })
+    })),
+    truncation: omitted && t("More work items than can be shown here ({pending} pending, {resumed} resumed, {failed} could not resume, {unconfirmed} unconfirmed).", {
+      unconfirmed: 0,
+      ...omitted
+    })
+  };
+}
+
 // src/client/about.js
 var import_react89 = require("react");
 var CHEER_MS = 1800;
@@ -35476,19 +35234,19 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
     let stopped = false;
     let timer;
     let polls = 0;
-    const active = () => !stopped && (forcePollId === void 0 || forceCheckActive(forcePollId));
+    const active2 = () => !stopped && (forcePollId === void 0 || forceCheckActive(forcePollId));
     const finish = (value) => forcePollId === void 0 ? setResult(value) : finishForceCheck(forcePollId, value);
     const poll = async () => {
-      if (!active()) return;
+      if (!active2()) return;
       try {
         const value = await readResult(pollRunId);
-        if (!active()) return;
+        if (!active2()) return;
         if (value.state !== "checking") {
           void finish(value);
           return;
         }
       } catch (error) {
-        if (!active()) return;
+        if (!active2()) return;
         const code = error?.code;
         if (code && code !== "NETWORK" && !/^HTTP_5\d\d$/.test(code)) {
           void finish(failedCheck(error));
@@ -35568,7 +35326,7 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
   };
   const requestStart = async (id, previousRunId) => {
     const forced = id !== void 0;
-    const active = () => !forced || forceFlow.id === id;
+    const active2 = () => !forced || forceFlow.id === id;
     if (!forced) setUpdating(true);
     setRefused(null);
     let message2 = null;
@@ -35584,14 +35342,14 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
     }) : null;
     try {
       const answer = forced ? await Promise.race([start2({ force: true }), timeout]) : await start2();
-      if (!active()) return;
+      if (!active2()) return;
       if (forced && (answer === timedOut || Date.now() >= deadline)) {
         followAttempt({ previousRunId });
       } else if (answer?.started === true) {
         followAttempt({ requestId: answer.requestId });
       } else setRefused(answer?.reason ?? null);
     } catch (error) {
-      if (!active()) return;
+      if (!active2()) return;
       if (forced && error?.code !== "bot/read-only") {
         message2 = t("The update status could not be confirmed. Check again shortly.");
       } else {
@@ -35600,7 +35358,7 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
     } finally {
       clearTimeout(timer);
       if (!forced) setUpdating(false);
-      else if (active()) endForce(message2);
+      else if (active2()) endForce(message2);
     }
   };
   const onUpdate = async () => {
@@ -35684,6 +35442,28 @@ function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2
   );
 }
 var linkProps = (href) => ({ className: "bt-soft bt-soft-sm bt-about-link", href, target: "_blank", rel: "noopener noreferrer" });
+function SelfUpdateRecoveryDetail({ source }) {
+  const status = (0, import_react89.useSyncExternalStore)(source.subscribe, source.getSnapshot);
+  const run3 = status?.run;
+  if (!VERDICT_PHASES.has(run3?.phase) || run3.phase === "manualRecovery") return null;
+  const { message, items, truncation } = recoveryDetails(run3, status.recovery);
+  return (0, import_react89.createElement)(
+    "div",
+    { className: "bt-set-row" },
+    (0, import_react89.createElement)(
+      "div",
+      { className: "bt-set-copy" },
+      (0, import_react89.createElement)("span", null, t("Work recovery")),
+      (0, import_react89.createElement)(
+        "div",
+        { className: "bt-set-hint", "aria-live": "polite" },
+        message,
+        truncation ? (0, import_react89.createElement)("p", null, truncation) : null,
+        items?.length ? (0, import_react89.createElement)("ul", null, items.map(({ sessionId, text: text2 }, index) => (0, import_react89.createElement)("li", { key: index, title: sessionId }, text2))) : null
+      )
+    )
+  );
+}
 function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3 }) {
   const update = useUpdate((value) => value) ?? {};
   const app = useDesktopUpdate();
@@ -35798,6 +35578,7 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
       Section3,
       { key: "updates", title: t("Updates") },
       !ours && update.hostAnswered ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate, force: true }) : null,
+      !ours && update.hostAnswered && actions.selfUpdateStatusSource ? (0, import_react89.createElement)(SelfUpdateRecoveryDetail, { source: actions.selfUpdateStatusSource }) : null,
       (0, import_react89.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react89.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),
@@ -38183,7 +37964,7 @@ function menuItemFor(key, actions, subject) {
   }
 }
 var sideTitle = (chat) => chat?.entries?.[0]?.question?.trim() || t("Side chat");
-function PanelStrip({ bot, subject, view, ids, active, sides, side, canBrowse, reading: reading2, onView, actions, useBrowserPages }) {
+function PanelStrip({ bot, subject, view, ids, active: active2, sides, side, canBrowse, reading: reading2, onView, actions, useBrowserPages }) {
   const pages2 = useBrowserPages((map) => map);
   const wrap = (0, import_react96.useRef)(null);
   const ind = (0, import_react96.useRef)(null);
@@ -38194,7 +37975,7 @@ function PanelStrip({ bot, subject, view, ids, active, sides, side, canBrowse, r
     const box = wrap.current;
     const capsule = ind.current;
     if (!box || !capsule) return void 0;
-    const node = view === "details" ? box.querySelector(".bt-ptab-bot") : view === "side" ? box.querySelector(`[data-side="${side}"]`) : box.querySelector(`[data-tab="${active}"]`);
+    const node = view === "details" ? box.querySelector(".bt-ptab-bot") : view === "side" ? box.querySelector(`[data-side="${side}"]`) : box.querySelector(`[data-tab="${active2}"]`);
     if (under.current !== node) {
       if (under.current) watcher.current?.unobserve(under.current);
       under.current = node;
@@ -38268,7 +38049,7 @@ function PanelStrip({ bot, subject, view, ids, active, sides, side, canBrowse, r
       ),
       ids.map((tabId) => {
         const page = pages2[tabId] ?? EMPTY_PAGE;
-        const on = view === "browser" && tabId === active;
+        const on = view === "browser" && tabId === active2;
         return (0, import_react96.createElement)(
           "button",
           {
@@ -38720,8 +38501,8 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
   const sideChat = sideChats.find((chat) => chat?.id === pane.side);
   const view = pane.view === "browser" && canBrowse ? "browser" : pane.view === "side" && sideChat !== void 0 ? "side" : "details";
   const tabState = useBrowserTabs((map) => bot ? map[bot.id] ?? EMPTY_TABS2 : EMPTY_TABS2);
-  const active = tabState.active;
-  const page = useBrowserPages((pages2) => (active ? pages2[active] : null) ?? EMPTY_PAGE);
+  const active2 = tabState.active;
+  const page = useBrowserPages((pages2) => (active2 ? pages2[active2] : null) ?? EMPTY_PAGE);
   const hold = useBrowserHolds?.((map) => bot ? map[bot.id] ?? null : null) ?? null;
   const root = (0, import_react96.useRef)(null);
   const fly = (0, import_react96.useRef)(null);
@@ -38825,8 +38606,8 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
     if (canBrowse) actions.browserEnsure(bot.id);
   }, [bot?.id, canBrowse]);
   (0, import_react96.useEffect)(() => {
-    if (view === "browser" && (active === null || !tabState.ids.includes(active))) actions.setPanelView("details");
-  }, [view, active, tabState.ids.length]);
+    if (view === "browser" && (active2 === null || !tabState.ids.includes(active2))) actions.setPanelView("details");
+  }, [view, active2, tabState.ids.length]);
   (0, import_react96.useEffect)(() => {
     if (pane.view === "side" && sideChat === void 0) actions.setPanelView("details");
   }, [pane.view, sideChat]);
@@ -38991,8 +38772,8 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
     // Over the whole window while dragging: the cursor stays a resize cursor and the
     // pages underneath (the chat, the guest) see no pointer.
     dragging ? (0, import_react_dom16.createPortal)((0, import_react96.createElement)("div", { className: "bt-drag-shield", "aria-hidden": true }), document.body) : null,
-    hasStrip ? (0, import_react96.createElement)(PanelStrip, { bot, subject: pane.id, view, ids: tabState.ids, active, sides: sideChats, side: pane.side, canBrowse, reading: reading2, onView: switchView, actions: panelActions, useBrowserPages }) : null,
-    view === "browser" && bot ? (0, import_react96.createElement)(BrowserView, { key: `browser:${active}`, bot, tabId: active, leaving, landed: landed && !settling, actions, useBrowserPages, hold }) : view === "side" && sideChat ? (0, import_react96.createElement)("div", { key: `side:${sideChat.id}`, className: "bt-panel-view" }, (0, import_react96.createElement)(SideChatView, { subject: pane.id, chat: sideChat, roster, actions: panelActions })) : (0, import_react96.createElement)(
+    hasStrip ? (0, import_react96.createElement)(PanelStrip, { bot, subject: pane.id, view, ids: tabState.ids, active: active2, sides: sideChats, side: pane.side, canBrowse, reading: reading2, onView: switchView, actions: panelActions, useBrowserPages }) : null,
+    view === "browser" && bot ? (0, import_react96.createElement)(BrowserView, { key: `browser:${active2}`, bot, tabId: active2, leaving, landed: landed && !settling, actions, useBrowserPages, hold }) : view === "side" && sideChat ? (0, import_react96.createElement)("div", { key: `side:${sideChat.id}`, className: "bt-panel-view" }, (0, import_react96.createElement)(SideChatView, { subject: pane.id, chat: sideChat, roster, actions: panelActions })) : (0, import_react96.createElement)(
       "div",
       { key: `details:${pane.id}:${pane.renaming ? "rename" : ""}:${pane.tab ?? ""}`, className: "bt-panel-view" },
       (0, import_react96.createElement)(DetailsDrawer, {
@@ -39630,10 +39411,10 @@ function readPage(limits) {
   let chars = 0;
   let stop3 = "";
   const collapse = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const isSecret = (el2) => {
-    if (el2.localName !== "input" && el2.localName !== "textarea") return false;
-    const auto = String(el2.getAttribute("autocomplete") || "").toLowerCase();
-    return el2.type === "password" || /(^|\s)(cc-|one-time-code)/.test(auto) || SECRET_HINT.test(`${el2.getAttribute("name") || ""} ${el2.id || ""}`);
+  const isSecret = (el) => {
+    if (el.localName !== "input" && el.localName !== "textarea") return false;
+    const auto = String(el.getAttribute("autocomplete") || "").toLowerCase();
+    return el.type === "password" || /(^|\s)(cc-|one-time-code)/.test(auto) || SECRET_HINT.test(`${el.getAttribute("name") || ""} ${el.id || ""}`);
   };
   const keep = (text3, end = "") => {
     if (text3 === "") return "";
@@ -39648,14 +39429,14 @@ function readPage(limits) {
   const flow = (text3) => text3.split("\n").map((line) => line.replace(/[ \t\f\v\u00a0\u2028\u2029]+/g, " ").trim().replace(/^· /, "")).join("\n").replace(/\n{3,}/g, "\n\n").replace(/\u0003\n\n(?=\u0001\d+\u0003)/g, "\n").trim();
   const block = (text3) => expand(flow(text3));
   const oneLine = (text3) => block(text3).replace(/\s*\n+\s*/g, " ").trim();
-  const styleOf = (el2) => (el2.ownerDocument.defaultView || window).getComputedStyle(el2);
-  const childrenOf = (el2) => {
-    if (el2.shadowRoot) return el2.shadowRoot.childNodes;
-    if (el2.localName === "slot" && typeof el2.assignedNodes === "function") {
-      const assigned = el2.assignedNodes();
+  const styleOf = (el) => (el.ownerDocument.defaultView || window).getComputedStyle(el);
+  const childrenOf = (el) => {
+    if (el.shadowRoot) return el.shadowRoot.childNodes;
+    if (el.localName === "slot" && typeof el.assignedNodes === "function") {
+      const assigned = el.assignedNodes();
       if (assigned.length > 0) return assigned;
     }
-    return el2.childNodes;
+    return el.childNodes;
   };
   const over = () => {
     if (stop3) return true;
@@ -39664,25 +39445,25 @@ function readPage(limits) {
     else if (stats.nodes % 512 === 0 && performance.now() - started > limits.ms) stop3 = `reading took longer than ${limits.ms} ms`;
     return stop3 !== "";
   };
-  const roleOf = (el2) => el2.getAttribute("role") || ROLES[el2.localName] || (el2.localName === "input" ? INPUT_ROLES[el2.type] || "textbox" : el2.isContentEditable ? "textbox" : el2.localName);
-  const sized = (el2) => {
-    const box = el2.getBoundingClientRect();
+  const roleOf = (el) => el.getAttribute("role") || ROLES[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
+  const sized = (el) => {
+    const box = el.getBoundingClientRect();
     return box.width > 0 && box.height > 0;
   };
-  const itemFor = (el2, style) => {
-    if (items.length >= limits.items || style.visibility !== "visible" || !el2.matches(ITEM) || !sized(el2)) return null;
-    const item = { role: roleOf(el2) };
-    const secret = isSecret(el2);
-    if (el2.href) item.href = String(el2.href);
-    if ((el2.localName === "input" || el2.localName === "textarea") && !secret && !NO_VALUE_TYPES.has(el2.type) && el2.value) item.value = String(el2.value).slice(0, 120);
-    if (el2.localName === "select" && el2.selectedOptions?.length) item.value = collapse([...el2.selectedOptions].map((option) => option.label || option.text).join(", ")).slice(0, 120);
-    if (el2.checked) item.checked = true;
-    if (el2.disabled) item.disabled = true;
+  const itemFor = (el, style) => {
+    if (items.length >= limits.items || style.visibility !== "visible" || !el.matches(ITEM) || !sized(el)) return null;
+    const item = { role: roleOf(el) };
+    const secret = isSecret(el);
+    if (el.href) item.href = String(el.href);
+    if ((el.localName === "input" || el.localName === "textarea") && !secret && !NO_VALUE_TYPES.has(el.type) && el.value) item.value = String(el.value).slice(0, 120);
+    if (el.localName === "select" && el.selectedOptions?.length) item.value = collapse([...el.selectedOptions].map((option) => option.label || option.text).join(", ")).slice(0, 120);
+    if (el.checked) item.checked = true;
+    if (el.disabled) item.disabled = true;
     items.push(item);
     return { item, number: items.length, secret };
   };
-  const nameOf3 = (el2, text3, secret) => collapse(
-    el2.getAttribute("aria-label") || text3 || (el2.localName === "input" && !secret && NO_VALUE_TYPES.has(el2.type) ? el2.value : "") || el2.getAttribute("placeholder") || el2.title || el2.getAttribute("alt") || el2.querySelector?.("img[alt]")?.alt || el2.getAttribute("name") || ""
+  const nameOf3 = (el, text3, secret) => collapse(
+    el.getAttribute("aria-label") || text3 || (el.localName === "input" && !secret && NO_VALUE_TYPES.has(el.type) ? el.value : "") || el.getAttribute("placeholder") || el.title || el.getAttribute("alt") || el.querySelector?.("img[alt]")?.alt || el.getAttribute("name") || ""
   ).slice(0, 80);
   const fenced = (code, lang) => {
     const longest = Math.max(2, ...(code.match(/`{3,}/g) || []).map((run3) => run3.length));
@@ -39691,15 +39472,15 @@ function readPage(limits) {
 ${code.replace(/\n+$/, "")}
 ${fence}`;
   };
-  const langOf = (el2) => {
-    const names = `${el2.className || ""} ${el2.querySelector?.("code")?.className || ""}`;
+  const langOf = (el) => {
+    const names = `${el.className || ""} ${el.querySelector?.("code")?.className || ""}`;
     return /(?:^|\s)(?:lang|language)-([\w+#.-]+)/.exec(names)?.[1] || "";
   };
-  const list = (el2, ctx) => {
-    const ordered2 = el2.localName === "ol";
-    let number = ordered2 ? Number(el2.getAttribute("start") || 1) || 1 : 1;
+  const list = (el, ctx) => {
+    const ordered2 = el.localName === "ol";
+    let number = ordered2 ? Number(el.getAttribute("start") || 1) || 1 : 1;
     const lines = [];
-    for (const child of childrenOf(el2)) {
+    for (const child of childrenOf(el)) {
       if (over()) break;
       if (child.nodeType !== 1 || child.localName !== "li") {
         const loose = block(render(child, ctx));
@@ -39777,18 +39558,18 @@ ${caption}
 
 Table: ${caption}` : ""}${keep(out.join("\n"))}`;
   };
-  const frame = (el2, ctx) => {
+  const frame = (el, ctx) => {
     let doc = null;
     try {
-      doc = el2.contentDocument;
+      doc = el.contentDocument;
     } catch {
       doc = null;
     }
     const address = (() => {
       try {
-        return doc?.location?.href || el2.src || el2.getAttribute("src") || "about:blank";
+        return doc?.location?.href || el.src || el.getAttribute("src") || "about:blank";
       } catch {
-        return el2.src || "about:blank";
+        return el.src || "about:blank";
       }
     })();
     if (!doc) return `
@@ -39802,15 +39583,15 @@ Table: ${caption}` : ""}${keep(out.join("\n"))}`;
 
 `;
     stats.frames += 1;
-    const title = collapse(el2.title || doc.title);
+    const title = collapse(el.title || doc.title);
     const body2 = doc.body ? block(children(doc.body, { ...ctx, frames: ctx.frames + 1, depth: ctx.depth + 1, shown: true, pre: false })) : "";
     return keep(`[iframe: ${title ? `${title} (${address})` : address}]
 ${body2 || "(no text)"}
 [iframe end]`);
   };
-  function children(el2, ctx) {
+  function children(el, ctx) {
     let out = "";
-    for (const child of childrenOf(el2)) {
+    for (const child of childrenOf(el)) {
       if (over()) break;
       out += render(child, ctx);
     }
@@ -39826,57 +39607,57 @@ ${body2 || "(no text)"}
       return text3;
     }
     if (node.nodeType !== 1) return "";
-    const el2 = node;
-    const tag = el2.localName;
+    const el = node;
+    const tag = el.localName;
     if (SKIP.has(tag) || ctx.depth > limits.depth || over()) return "";
-    const style = styleOf(el2);
+    const style = styleOf(el);
     const display = style.display;
     if (display === "none" || style.contentVisibility === "hidden") return "";
     const shown2 = style.visibility === "visible";
     const keepsSpace = String(style.whiteSpace || "").startsWith("pre") || style.whiteSpace === "break-spaces";
     const next = { ...ctx, depth: ctx.depth + 1, shown: shown2 };
-    if (display === "contents" && !SEMANTIC.test(tag) && !el2.matches(ITEM)) return children(el2, next);
+    if (display === "contents" && !SEMANTIC.test(tag) && !el.matches(ITEM)) return children(el, next);
     if (style.overflowX !== "visible" || style.overflowY !== "visible") {
-      const box = el2.getBoundingClientRect();
+      const box = el.getBoundingClientRect();
       if (box.width === 0 || box.height === 0) return "";
     }
     if (tag === "br") return "\n";
     if (tag === "hr") return "\n\n---\n\n";
     if (tag === "img") {
-      const alt = collapse(el2.getAttribute("alt"));
+      const alt = collapse(el.getAttribute("alt"));
       return shown2 && alt ? `[image: ${alt}]` : "";
     }
     if (tag === "canvas") {
-      const box = el2.getBoundingClientRect();
+      const box = el.getBoundingClientRect();
       return box.width >= 200 && box.height >= 100 ? "\n\n[canvas: drawn content, not readable]\n\n" : "";
     }
     if (tag === "iframe" || tag === "frame") {
-      const box = el2.getBoundingClientRect();
-      return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el2, next);
+      const box = el.getBoundingClientRect();
+      return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el, next);
     }
-    const found = itemFor(el2, style);
+    const found = itemFor(el, style);
     const mark2 = found ? `[#${found.number}]` : "";
     if (tag === "input" || tag === "textarea" || tag === "select") {
-      if (found) found.item.name = nameOf3(el2, tag === "select" ? "" : el2.labels?.[0] ? collapse(el2.labels[0].textContent) : "", found.secret);
+      if (found) found.item.name = nameOf3(el, tag === "select" ? "" : el.labels?.[0] ? collapse(el.labels[0].textContent) : "", found.secret);
       return mark2 ? ` ${mark2} ` : "";
     }
     let body2;
     if (tag === "pre") {
-      const code = shown2 ? String(el2.innerText || el2.textContent || "") : "";
+      const code = shown2 ? String(el.innerText || el.textContent || "") : "";
       chars += code.length;
-      body2 = code.trim() ? keep(fenced(code, langOf(el2))) : "";
+      body2 = code.trim() ? keep(fenced(code, langOf(el))) : "";
     } else if (tag === "table") {
-      body2 = tableMarkdown(el2, next);
+      body2 = tableMarkdown(el, next);
     } else if (tag === "ul" || tag === "ol") {
-      body2 = list(el2, next);
-    } else if (tag === "details" && !el2.open) {
-      const summary = [...el2.children].find((child) => child.localName === "summary");
+      body2 = list(el, next);
+    } else if (tag === "details" && !el.open) {
+      const summary = [...el.children].find((child) => child.localName === "summary");
       body2 = summary ? render(summary, next) : "";
     } else {
-      body2 = children(el2, { ...next, pre: keepsSpace });
+      body2 = children(el, { ...next, pre: keepsSpace });
     }
-    if (found) found.item.name = nameOf3(el2, oneLine(body2), found.secret);
-    const level = /^h([1-6])$/.exec(tag)?.[1] || (el2.getAttribute("role") === "heading" ? el2.getAttribute("aria-level") || "2" : "");
+    if (found) found.item.name = nameOf3(el, oneLine(body2), found.secret);
+    const level = /^h([1-6])$/.exec(tag)?.[1] || (el.getAttribute("role") === "heading" ? el.getAttribute("aria-level") || "2" : "");
     if (level) {
       const title = oneLine(body2);
       return title ? `
@@ -40142,9 +39923,9 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
     if (appTabs) return ensureAppTabs(botId);
     const entries2 = saved[botId]?.tabs ?? [];
     const ids = entries2.map((entry) => entry.id);
-    const active = ids.includes(saved[botId]?.active) ? saved[botId].active : ids.at(-1) ?? null;
+    const active2 = ids.includes(saved[botId]?.active) ? saved[botId].active : ids.at(-1) ?? null;
     for (const entry of entries2) owner.set(entry.id, botId);
-    tabs.set((state2) => ({ ...state2, [botId]: { ids, active } }));
+    tabs.set((state2) => ({ ...state2, [botId]: { ids, active: active2 } }));
     for (const entry of entries2) publish3(entry.id, { url: entry.url ?? "", title: entry.title ?? "", live: false });
   };
   function ensureAppTabs(botId) {
@@ -40361,10 +40142,10 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
       if (current === void 0 || !current.ids.includes(tabId)) return snapshot2;
       const at = current.ids.indexOf(tabId);
       const ids = current.ids.filter((id) => id !== tabId);
-      const active = current.active === tabId ? ids[Math.min(at, ids.length - 1)] ?? null : current.active;
+      const active2 = current.active === tabId ? ids[Math.min(at, ids.length - 1)] ?? null : current.active;
       const next = { ...snapshot2 };
       if (ids.length === 0) delete next[botId];
-      else next[botId] = { ids, active };
+      else next[botId] = { ids, active: active2 };
       return next;
     });
     owner.delete(tabId);
@@ -42777,6 +42558,7 @@ body[data-bt-motion=quiet] .bt-genui-row[data-state=work] .bt-genui-dot{animatio
 // src/client/reopen.js
 var OPEN_CHAT = "omni-ui:open-chat";
 var REOPEN = "omni-ui:reopen";
+var UPDATE_REOPEN = "omni-ui:update-reopen";
 var storageOf = () => {
   try {
     return globalThis.sessionStorage ?? null;
@@ -42786,13 +42568,33 @@ var storageOf = () => {
 };
 function rememberOpen(id, storage = storageOf()) {
   try {
+    if (storage?.getItem(UPDATE_REOPEN) === "1" && storage.getItem(REOPEN) === "1") return;
     if (typeof id === "string" && id !== "") storage?.setItem(OPEN_CHAT, id);
     else storage?.removeItem(OPEN_CHAT);
   } catch {
   }
 }
+function armUpdateReopen(id, storage = storageOf()) {
+  try {
+    if (typeof id !== "string" || id === "" || storage?.getItem(REOPEN) === "1") return;
+    rememberOpen(id, storage);
+    storage?.setItem(UPDATE_REOPEN, "1");
+    storage?.setItem(REOPEN, "1");
+  } catch {
+  }
+}
+function endUpdateReopen(restore, storage = storageOf()) {
+  try {
+    if (storage?.getItem(UPDATE_REOPEN) !== "1") return null;
+    const id = takeReopen(storage);
+    return restore ? id : null;
+  } catch {
+    return null;
+  }
+}
 function takeReopen(storage = storageOf()) {
   try {
+    storage?.removeItem(UPDATE_REOPEN);
     if (storage?.getItem(REOPEN) !== "1") return null;
     storage.removeItem(REOPEN);
     const id = storage.getItem(OPEN_CHAT);
@@ -42800,6 +42602,55 @@ function takeReopen(storage = storageOf()) {
   } catch {
     return null;
   }
+}
+var isTeamChat = (snapshot2, id) => snapshot2.byId?.[id] !== void 0 || snapshot2.roomsById?.[id] !== void 0 || snapshot2.tasks?.[id] !== void 0;
+function ensureBotHome({ roster, mainView, openSession }) {
+  const home = (snapshot3) => {
+    const main = mainView();
+    if (snapshot3.mainBotId && main !== void 0 && !isTeamChat(snapshot3, main)) openSession(snapshot3.mainBotId);
+  };
+  const snapshot2 = roster.getSnapshot();
+  if (snapshot2.ready) home(snapshot2);
+  else {
+    const off = roster.subscribe(() => {
+      const ready = roster.getSnapshot();
+      if (!ready.ready) return;
+      off();
+      home(ready);
+    });
+  }
+}
+function watchChatReopen({ roster, sessions, mainView, isAgentSession: isAgentSession2, openSession, storage = storageOf() }) {
+  let pending = null;
+  const note = () => {
+    if (pending === null) rememberOpen(mainView(), storage);
+  };
+  const reopen = () => {
+    const snapshot2 = roster.getSnapshot();
+    if (pending === null || !snapshot2.ready) return;
+    const id = pending;
+    pending = null;
+    if (isAgentSession2(id) || isTeamChat(snapshot2, id)) {
+      if (mainView() !== id) openSession(id);
+    }
+    note();
+  };
+  const setPending = (id) => {
+    pending = id;
+    reopen();
+  };
+  const offList = sessions.subscribe(note);
+  const offRoster = roster.subscribe(reopen);
+  setPending(takeReopen(storage));
+  note();
+  return {
+    setPending,
+    getPending: () => pending,
+    dispose() {
+      offList();
+      offRoster();
+    }
+  };
 }
 
 // src/client/right-panel.js
@@ -43339,6 +43190,772 @@ function SessionReadScope({ sessionId }) {
   );
 }
 
+// src/client/self-update.js
+var classic = 'html:not(:has(style[data-dsh-bot="shell"]))';
+var CSS2 = `
+/* The dialog and nod also appear in classic Agent mode, where the Bot shell sheet is absent. */
+${classic} body :is(.su-layer,.su-nod){${SHELL_LIGHT_PALETTE}}
+${classic} body[data-ds-dark-theme] :is(.su-layer,.su-nod){${SHELL_DARK_PALETTE}}
+${roundButtonCss(`${classic} body .su-nod.bt-round`)}
+/* The nod is one of the bar's own round buttons (.bt-round), seated in the bottom row like the
+   other footer entries, never a floating pill of its own: same 36px circle, same --bt-* colours. */
+.su-nod{position:relative}
+.su-nod .su-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:var(--bt-accent);box-shadow:0 0 0 2px var(--bt-main)}
+.su-layer{position:fixed;inset:0;z-index:80;display:flex;background:var(--bt-main);animation:su-veil .18s ease-out;font-family:var(--bt-font,system-ui)}
+.su-modal{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bt-main);color:var(--bt-ink);animation:su-pop .22s cubic-bezier(.34,1.3,.64,1)}
+.su-head{display:flex;align-items:flex-start;gap:12px;padding:20px max(24px,calc((100vw - 760px)/2)) 0}
+.su-head h2{margin:0;font-size:17px;line-height:24px;font-weight:600}
+.su-close{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 13px/18px var(--bt-font,system-ui);cursor:pointer;padding:2px 4px;border-radius:8px}
+.su-close:hover{background:var(--bt-hover);color:var(--bt-ink)}
+.su-body{flex:1;overflow:auto;padding:18px max(24px,calc((100vw - 760px)/2)) 24px;display:flex;flex-direction:column;gap:14px}
+.su-body.su-fill{justify-content:safe center}
+.su-body.su-center{align-items:center;text-align:center}
+.su-line{margin:0;font-size:14px;line-height:21px;color:var(--bt-ink)}
+.su-versions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--bt-ink-2)}
+.su-version{padding:3px 8px;border-radius:8px;background:var(--bt-tag-bg);font-variant-numeric:tabular-nums;color:var(--bt-ink)}
+.su-changes{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:14px;line-height:21px}
+.su-steps{display:flex;flex-direction:column;gap:2px}
+.su-step{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:14px;line-height:20px;color:var(--bt-ink-2)}
+.su-step[data-state=active]{background:var(--bt-accent-soft);color:var(--bt-ink)}
+.su-step[data-state=active] .su-mark{border-color:var(--bt-accent);background:var(--bt-accent-soft);color:var(--bt-accent)}
+.su-step[data-state=done]{color:var(--bt-ink)}
+.su-mark{width:20px;height:20px;flex:none;border-radius:50%;border:1.5px solid var(--bt-line-2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.su-step[data-state=done] .su-mark{border-color:transparent;background:var(--bt-accent);color:var(--bt-accent-ink)}
+.su-note{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
+.su-caution{margin:0;padding:9px 11px;border-radius:10px;background:var(--bt-accent-soft);color:var(--bt-ink);font:500 13px/20px var(--bt-font,system-ui)}
+.su-foot{display:flex;gap:10px;align-items:center;padding:14px max(24px,calc((100vw - 760px)/2)) 18px;border-top:.5px solid var(--bt-line);background:var(--bt-main)}
+.su-foot:empty{display:none}
+.su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-accent-ink);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
+.su-primary:hover{filter:brightness(1.05)}
+.su-ghost{border:.5px solid var(--bt-line-2);border-radius:10px;padding:9px 14px;background:transparent;color:var(--bt-ink);font:500 14px/18px var(--bt-font,system-ui);cursor:pointer}
+.su-ghost:hover{background:var(--bt-hover)}
+.su-result{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8vh 0 4px;text-align:center}
+.su-result .su-badge{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--bt-accent-ink);background:var(--bt-accent)}
+.su-result[data-kind=rollback] .su-badge{background:var(--bt-danger)}
+.su-result h3{margin:0;font-size:16px;line-height:22px;font-weight:600}
+.su-result p{margin:0;max-width:52ch;font-size:13px;line-height:20px;color:var(--bt-ink-2)}
+@keyframes su-veil{from{opacity:0}to{opacity:1}}
+@keyframes su-pop{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.su-modal,.su-layer{animation:none}}
+`;
+var STEPS = [
+  ["checking", "Checking the signed release"],
+  ["downloading", "Downloading the new version"],
+  ["verifying", "Verifying the downloaded packages"],
+  ["staging", "Installing beside the current version"],
+  ["restarting", "Restarting and checking health"]
+];
+var PHASE_STEP = { checking: 0, downloading: 1, verifying: 2, staging: 3, switching: 3, restarting: 4, health: 4 };
+var active = (run3) => Object.hasOwn(PHASE_STEP, run3?.phase) || run3?.phase === "rollingBack";
+var terminal = (run3) => ["healthy", "rolledBack", "notUpdated", "manualRecovery"].includes(run3?.phase);
+var enabled = (status) => status?.startEnabled === true && status.supervisor != null && status.reason !== "desktop-app";
+var pendingWindowMs = 75e3;
+var statusTimeoutMs = 1e4;
+var terminalKey = "omni-ui:self-update-result:";
+var documentUpdate = /* @__PURE__ */ Symbol.for("omni-ui:web-self-update");
+function canOffer(status, now) {
+  const check = status?.check;
+  const checkedAt = Date.parse(check?.checkedAt);
+  const age = now - checkedAt;
+  return enabled(status) && status.available === true && status.startRefusal === null && !active(status.run) && status.run?.phase !== "manualRecovery" && (!terminal(status.run) || !(checkedAt <= Date.parse(status.run.startedAt))) && check?.state === "available" && check.newer === true && check.fresh === true && age >= 0 && age < CHECK_FRESH_MS;
+}
+var candidateOf = ({ check: { sequence, laneVersion, plugins }, rollback }) => JSON.stringify([
+  sequence,
+  laneVersion,
+  plugins.map(({ name, from, to }) => [name, from, to]),
+  rollback === true
+]);
+function createSelfUpdateController({
+  readStatus,
+  startUpdate,
+  present,
+  onStatus = () => {
+  },
+  keepChat = () => {
+  },
+  storage,
+  now = Date.now,
+  visible = () => true
+}) {
+  let status;
+  let run3;
+  let screen = null;
+  let dismissed;
+  let offline = false;
+  let connectionLost = false;
+  let refused = null;
+  let confirmation = null;
+  let attempt = null;
+  let latestRead = 0;
+  let reading2;
+  let disposed = false;
+  let disconnected = false;
+  let keeping = false;
+  let connection;
+  let offConnection;
+  const shown2 = /* @__PURE__ */ new Set();
+  const offer = () => !attempt && !offline && canOffer(status, now());
+  const paint = () => {
+    const nod = active(run3) || attempt ? "progress" : offer() ? "offer" : null;
+    present({
+      nod,
+      screen,
+      run: run3,
+      offline,
+      connectionLost,
+      refused,
+      check: status?.check,
+      rollback: status?.rollback === true,
+      recovery: status?.recovery,
+      retry: !confirmation && offer()
+    });
+  };
+  const holdChat = () => {
+    if (keeping) return;
+    keeping = true;
+    keepChat(true);
+  };
+  const releaseChat = (restore = false) => {
+    if (!keeping) return;
+    keeping = false;
+    keepChat(false, restore && disconnected);
+    disconnected = false;
+  };
+  const seen = (id) => {
+    if (shown2.has(id)) return true;
+    try {
+      return storage?.getItem(terminalKey + id) === "1";
+    } catch {
+      return false;
+    }
+  };
+  const noteShown = (id) => {
+    shown2.add(id);
+    try {
+      storage?.setItem(terminalKey + id, "1");
+    } catch {
+    }
+  };
+  const showResult = () => {
+    const id = run3?.runId;
+    if (!terminal(run3) || !visible() || seen(id)) return false;
+    screen = "result";
+    paint();
+    noteShown(id);
+    return true;
+  };
+  const clear = () => {
+    status = void 0;
+    run3 = void 0;
+    screen = null;
+    confirmation = null;
+    attempt = null;
+    offline = false;
+    connectionLost = false;
+    refused = null;
+    releaseChat();
+    paint();
+  };
+  const apply2 = (next) => {
+    if (!enabled(next)) {
+      clear();
+      return;
+    }
+    if (next.problem) {
+      offline = true;
+      paint();
+      return;
+    }
+    offline = false;
+    connectionLost = false;
+    status = next;
+    const live = next.run;
+    if (attempt) {
+      const expired2 = now() - attempt.at >= pendingWindowMs;
+      const matches2 = attempt.requestId ? live?.requestId === attempt.requestId : (attempt.lost || expired2) && live?.requestId && live.runId !== attempt.before;
+      if (matches2) {
+        if (attempt.dismissed) dismissed = live.runId;
+        attempt = null;
+      } else {
+        if (!expired2) {
+          paint();
+          return;
+        }
+        attempt = null;
+        refused = "unconfirmed";
+        releaseChat();
+      }
+    }
+    const previousRun = run3?.runId;
+    run3 = live;
+    if (active(run3)) {
+      holdChat();
+      if (run3.runId !== dismissed) screen = "progress";
+    } else {
+      releaseChat(terminal(run3));
+      if (showResult()) return;
+      if (screen === "progress" || screen === "offer" && !offer()) {
+        screen = refused ? "refused" : null;
+      } else if (screen === "result" && (!terminal(run3) || run3.runId !== previousRun)) {
+        screen = null;
+      }
+    }
+    paint();
+  };
+  const refresh = async ({ force = false } = {}) => {
+    if (disposed || reading2 && !force) return;
+    if (connection && ["connecting", "disconnected"].includes(connection.getSnapshot())) return;
+    const read = ++latestRead;
+    reading2?.abort();
+    const controller = new AbortController();
+    const { signal } = controller;
+    reading2 = controller;
+    const stopped = new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    const timeout = setTimeout(() => controller.abort(), statusTimeoutMs);
+    try {
+      const next = await Promise.race([stopped, readStatus(signal)]);
+      if (!disposed && read === latestRead) {
+        if (!next?.problem) onStatus(next);
+        apply2(next);
+        return next;
+      }
+    } catch (error) {
+      if (disposed || read !== latestRead) return;
+      if (error?.code === "bot/read-only") {
+        onStatus(null);
+        clear();
+        return;
+      }
+      offline = true;
+      if (error?.code === "NETWORK") {
+        connectionLost = true;
+        if (keeping) disconnected = true;
+      }
+      paint();
+    } finally {
+      clearTimeout(timeout);
+      if (read === latestRead) reading2 = void 0;
+    }
+  };
+  const cancelRead = () => {
+    latestRead += 1;
+    reading2?.abort();
+    reading2 = void 0;
+  };
+  const unconfirm = (lostConnection) => {
+    offline = true;
+    connectionLost ||= lostConnection;
+    if (keeping) disconnected = true;
+    if (attempt && !attempt.requestId) attempt.lost = true;
+    paint();
+  };
+  const watchConnection = (source, detached = false) => {
+    offConnection?.();
+    cancelRead();
+    connection = source;
+    let state2 = source?.getSnapshot();
+    offConnection = source?.subscribe(() => {
+      const next = source.getSnapshot();
+      if (state2 === next) return;
+      state2 = next;
+      cancelRead();
+      if (next === "connected") void refresh();
+      else unconfirm(true);
+    });
+    const unavailable = state2 === "connecting" || state2 === "disconnected";
+    if (detached || unavailable) unconfirm(unavailable);
+    else void refresh();
+  };
+  const open = () => {
+    if (active(run3) || attempt) {
+      dismissed = void 0;
+      if (attempt) attempt.dismissed = false;
+      screen = "progress";
+    } else if (offer()) {
+      refused = null;
+      screen = "offer";
+    }
+    paint();
+  };
+  const close = () => {
+    confirmation = null;
+    if (screen === "progress") {
+      dismissed = run3?.runId;
+      if (attempt) attempt.dismissed = true;
+    }
+    screen = null;
+    paint();
+  };
+  const start2 = async () => {
+    if (disposed || screen !== "offer" || confirmation) return;
+    if (!offer()) {
+      if (!offline) screen = null;
+      paint();
+      return;
+    }
+    const candidate = candidateOf(status);
+    const confirming = {};
+    confirmation = confirming;
+    paint();
+    const next = await refresh({ force: true });
+    if (disposed || confirmation !== confirming) return;
+    confirmation = null;
+    if (next !== status || screen !== "offer" || !offer() || candidateOf(status) !== candidate) {
+      paint();
+      return;
+    }
+    refused = null;
+    const pending = { at: now(), before: run3?.runId };
+    attempt = pending;
+    run3 = null;
+    screen = "progress";
+    holdChat();
+    paint();
+    try {
+      const reply = await startUpdate();
+      if (disposed || attempt !== pending) return;
+      if (reply?.started === true && typeof reply.requestId === "string") {
+        pending.requestId = reply.requestId;
+      } else if (reply?.started === false) {
+        attempt = null;
+        refused = reply.reason;
+        if (!pending.dismissed) screen = "refused";
+        releaseChat();
+      } else {
+        pending.lost = true;
+      }
+    } catch (error) {
+      if (disposed || attempt !== pending) return;
+      if (error?.code === "bot/read-only") {
+        clear();
+        return;
+      }
+      pending.lost = true;
+    }
+    if (!disposed) {
+      paint();
+      await refresh({ force: true });
+    }
+  };
+  return {
+    refresh,
+    open,
+    close,
+    start: start2,
+    watchConnection,
+    onVisibilityChange() {
+      if (visible()) void refresh({ force: true });
+    },
+    dispose() {
+      disposed = true;
+      reading2?.abort();
+      offConnection?.();
+    }
+  };
+}
+var RECOVERY_GUIDE = "https://github.com/automagik-si/automagik/blob/dev/docs/upgrade.md#in-app-updates-the-supervisor";
+function announcement(body, check, rollback, el) {
+  body.append(el("p", "su-line", t("Automagik {version} is ready to install.", { version: check.laneVersion })));
+  const current = check.plugins[0]?.from;
+  const versions = el("div", "su-versions");
+  if (current && check.plugins.every((plugin) => plugin.from === current)) {
+    versions.append(el("span", null, t("You have")), el("span", "su-version", current), el("span", null, "→"));
+  }
+  versions.append(el("span", "su-version", check.laneVersion));
+  body.append(versions, el("h3", null, t("What changes")));
+  const changes = el("ul", "su-changes");
+  for (const plugin of check.plugins) {
+    changes.append(el("li", null, sameVersion(plugin.from, plugin.to) ? t("{plugin} is already on {version}.", { plugin: pluginName(plugin.name), version: plugin.to }) : changeText(plugin)));
+  }
+  body.append(changes, el("p", "su-note", rollback ? t("Your previous version stays kept. If the new one does not start, Automagik goes back by itself.") : t("Your previous version stays kept.")));
+  const caution = el("p", "su-caution", t("Work in progress stops when you click Update now. Automagik will pick it up again once a healthy version is ready."));
+  caution.setAttribute("role", "note");
+  body.append(caution);
+}
+function progress(body, run3, offline, connectionLost, el) {
+  body.classList.add("su-fill");
+  const confirmedStep = PHASE_STEP[run3?.phase];
+  const phase = connectionLost && confirmedStep < PHASE_STEP.restarting ? PHASE_STEP.restarting : confirmedStep;
+  if (run3?.phase === "rollingBack") {
+    body.append(el("p", "su-line", runMessage(run3)));
+    if (failedHealthCheck(run3.rollback?.failed)) body.append(el("p", "su-note", failedHealthCheck(run3.rollback.failed)));
+  } else {
+    const list = el("div", "su-steps");
+    for (const [i, [key, label]] of STEPS.entries()) {
+      const row = el("div", "su-step");
+      row.dataset.step = key;
+      row.dataset.state = i < phase ? "done" : i === phase ? "active" : "waiting";
+      const mark2 = el("span", "su-mark", i < phase ? "✓" : i === phase ? "•" : String(i + 1));
+      mark2.setAttribute("aria-hidden", "true");
+      if (i === phase) row.setAttribute("aria-current", "step");
+      row.append(mark2, el("span", null, t(label)));
+      list.append(row);
+    }
+    body.append(list);
+    body.append(el("p", "su-note", !run3 ? t("Waiting for the update supervisor to confirm the request.") : run3.phase === "switching" ? t("Switching versions…") : run3.phase === "health" ? t("Checking that it is healthy") : t("The previous version stays kept for the rollback.")));
+  }
+  if (offline) {
+    body.append(el("p", "su-note", t("The update status is unconfirmed.")), guideLink(el));
+  }
+}
+function guideLink(el) {
+  const link = el("a", "su-note", t("In-app update recovery guide"));
+  link.href = RECOVERY_GUIDE;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+var restoreReason = (why) => {
+  switch (why) {
+    case "same-format":
+      return t("The previous version can read the team data format.");
+    case "unknown":
+      return t("The team data format could not be determined.");
+    case "team-in-use":
+      return t("The team data was in use.");
+    case "superseded":
+      return t("The team data changed after the restore was planned.");
+    case "snapshot-changed":
+      return t("The saved team snapshot had changed.");
+    default:
+      return null;
+  }
+};
+var rollbackStep = {
+  stop: "Stop DSH",
+  manifest: "Restore the plugin entries",
+  rename: "Put back the kept files",
+  current: "Restore the version record",
+  data: "Restore team data",
+  verify: "Verify the profile",
+  restart: "Restart DSH",
+  health: "Check health"
+};
+var rollbackAction = {
+  "rename-back": "Put back the kept files",
+  "data-restore": "Restore team data",
+  restart: "Restart DSH",
+  health: "Check health"
+};
+var fileLocation = { live: "Live profile", kept: "Kept version", staging: "Staging folder", missing: "Missing" };
+function rollbackFacts(card, rollback, el) {
+  if (rollback?.data?.restored) {
+    card.append(el("p", null, t("The saved team snapshot was restored. Sessions, memory, settings and keys are kept separately.")));
+    if (rollback.trialFrom && rollback.trialTo) {
+      const time = (value) => new Date(value).toLocaleString(language());
+      card.append(el("p", null, t("If you saved a team change between {start} and {end}, it may have been replaced.", {
+        start: time(rollback.trialFrom),
+        end: time(rollback.trialTo)
+      })));
+    }
+    const { trialKept } = rollback.data;
+    card.append(el("p", null, trialKept === true ? t("A copy of the trial team data was kept.") : trialKept === false ? t("No copy of the trial team data was kept.") : t("The supervisor did not record whether a copy of the trial team data was kept.")));
+  } else if (rollback?.data?.restored === false) {
+    card.append(el("p", null, t("The team snapshot was skipped. {reason}", { reason: restoreReason(rollback.data.why) ?? "" })));
+  } else {
+    card.append(el("p", null, t("The supervisor recorded no team snapshot outcome.")));
+  }
+}
+function recoveryFacts(body, run3, recovery, el) {
+  const { message, items, truncation } = recoveryDetails(run3, recovery);
+  if (message) body.append(el("p", "su-note", message));
+  if (!items) return;
+  const list = el("ul", "su-changes");
+  for (const { text: text2, sessionId } of items) {
+    const line = el("li", null, text2);
+    line.title = sessionId;
+    list.append(line);
+  }
+  body.append(el("h3", null, t("Work recovery")));
+  if (truncation) body.append(el("p", "su-note", truncation));
+  if (items.length) body.append(list);
+}
+function verdict(body, run3, recovery, el) {
+  const card = el("div", "su-result");
+  card.dataset.kind = run3.phase === "healthy" ? "success" : "rollback";
+  const badge = el("span", "su-badge", run3.phase === "healthy" ? "✓" : run3.phase === "rolledBack" ? "↩" : "!");
+  badge.setAttribute("aria-hidden", "true");
+  card.append(badge);
+  const reason = failedHealthCheck(run3.rollback?.failed);
+  switch (run3.phase) {
+    case "healthy":
+      card.append(el("h3", null, t("Done: you are on the new version.")), el("p", null, runMessage(run3)));
+      break;
+    case "rolledBack":
+      card.append(
+        el("h3", null, t("Back to the previous version")),
+        el("p", null, t("The previous plugin set passed its checks."))
+      );
+      if (run3.to) card.append(el("p", null, t("Update target {version}.", { version: run3.to })));
+      if (run3.from) card.append(el("p", null, t("Oldest plugin version before the update: {version}.", { version: run3.from })));
+      if (reason) card.append(el("p", null, reason));
+      rollbackFacts(card, run3.rollback, el);
+      break;
+    case "notUpdated":
+      card.append(el("h3", null, t("Automagik was not updated")), el("p", null, run3.detail === "previous-unsupported" ? t("This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).") : run3.reason === "not-newer" ? t("The signed release did not offer a newer compatible plugin set.") : t("Cannot update: {reason}", { reason: selfUpdateReason(run3.reason) })));
+      if (run3.detail === "previous-unsupported") card.append(guideLink(el));
+      break;
+    case "manualRecovery": {
+      const rollback = run3.rollback;
+      card.append(el("h3", null, t("Manual recovery required")), el(
+        "p",
+        null,
+        t("See the recovery guide and the supervisor’s state.json before moving any files.")
+      ));
+      if (run3.from) card.append(el("p", null, t("Previous plugin version recorded for the update: {version}.", { version: run3.from })));
+      if (run3.reason === "health-failed") {
+        card.append(el("p", null, t("The supervisor could not confirm a healthy running instance.")));
+      } else if (run3.reason) {
+        card.append(el("p", null, t("Cannot update: {reason}", { reason: selfUpdateReason(run3.reason) })));
+      }
+      if (reason) card.append(el("p", null, reason));
+      if (rollback?.previousFailed) card.append(el("p", null, t("Previous version check: {reason}", { reason: failedHealthCheck(rollback.previousFailed) })));
+      if (rollback?.step) card.append(el("p", null, t("Last rollback step: {step}.", { step: t(rollbackStep[rollback.step]) })));
+      if (rollback?.tried?.length) card.append(el("p", null, t("Rollback actions tried: {actions}.", {
+        actions: rollback.tried.map((action) => t(rollbackAction[action])).join(", ")
+      })));
+      if (rollback?.location) {
+        for (const [file, location2] of Object.entries({
+          "node_modules/": rollback.location.modules,
+          "pnpm-lock.yaml": rollback.location.lockfile
+        })) {
+          card.append(el("p", null, t("{file}: previous — {previous}; candidate — {candidate}.", {
+            file,
+            previous: t(fileLocation[location2.previous]),
+            candidate: t(fileLocation[location2.candidate])
+          })));
+        }
+      }
+      if (rollback) rollbackFacts(card, rollback, el);
+      card.append(guideLink(el));
+      break;
+    }
+  }
+  body.classList.add("su-fill", "su-center");
+  body.append(card);
+  if (run3.phase !== "manualRecovery") recoveryFacts(body, run3, recovery, el);
+}
+function installSelfUpdate({ desktop = false, document: doc = globalThis.document, ...bindings }) {
+  if (desktop || !doc?.body) return null;
+  doc[documentUpdate] ??= createDocumentUpdate(doc, bindings.storage);
+  return doc[documentUpdate].attach(bindings);
+}
+function createDocumentUpdate(doc, storage = (() => {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return null;
+  }
+})()) {
+  const el = (tag, className, text2) => {
+    const node = doc.createElement(tag);
+    if (className) node.className = className;
+    if (text2 !== void 0) node.textContent = text2;
+    return node;
+  };
+  const makeButton = (className, label, click) => {
+    const button2 = el("button", className, label);
+    button2.type = "button";
+    button2.addEventListener("click", click);
+    return button2;
+  };
+  const svgNs = "http://www.w3.org/2000/svg";
+  const icon3 = doc.createElementNS(svgNs, "svg");
+  for (const [name, value] of Object.entries({
+    viewBox: "0 0 20 20",
+    width: "18",
+    height: "18",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "1.5",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true"
+  })) icon3.setAttribute(name, value);
+  const path2 = doc.createElementNS(svgNs, "path");
+  path2.setAttribute("d", "M10 3v8.5M6.5 8.5 10 12l3.5-3.5M4 16h12");
+  icon3.append(path2);
+  const style = el("style", null, CSS2);
+  doc.head.append(style);
+  const nod = makeButton("su-nod bt-round", void 0, () => controller.open());
+  const dot = el("span", "su-dot");
+  dot.setAttribute("aria-hidden", "true");
+  nod.append(icon3, dot);
+  nod.setAttribute("aria-haspopup", "dialog");
+  const layer = el("div", "su-layer");
+  const box = el("div", "su-modal");
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-modal", "true");
+  box.setAttribute("aria-labelledby", "su-title");
+  box.tabIndex = -1;
+  layer.append(box);
+  const head = el("div", "su-head");
+  const title = el("h2");
+  title.id = "su-title";
+  const close = makeButton("su-close", t("Close"), () => controller.close());
+  head.append(title, close);
+  const body = el("div", "su-body");
+  body.setAttribute("aria-live", "polite");
+  const foot = el("div", "su-foot");
+  box.append(head, body, foot);
+  let nodVisible = false;
+  let modalVisible = false;
+  let focusBack = null;
+  let lastView;
+  const placeNod = () => {
+    if (!nodVisible) {
+      nod.remove();
+      return;
+    }
+    const seat = doc.querySelector(".lb-foot") ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div');
+    if (!seat) nod.remove();
+    else if (nod.parentNode !== seat) seat.append(nod);
+  };
+  const placeLayer = () => {
+    if (modalVisible && doc.body && layer.parentNode !== doc.body) {
+      doc.body.append(layer);
+      close.focus();
+    }
+  };
+  const Observer = doc.defaultView?.MutationObserver;
+  const observer = Observer ? new Observer(() => {
+    placeNod();
+    placeLayer();
+  }) : null;
+  observer?.observe(doc.documentElement, { childList: true, subtree: true });
+  const present = (view) => {
+    const { screen, run: run3, check, recovery, offline, connectionLost, refused, retry, rollback } = view;
+    const key = JSON.stringify([language(), view]);
+    if (lastView === key) return;
+    lastView = key;
+    if (screen && !modalVisible) focusBack = doc.activeElement;
+    modalVisible = Boolean(screen);
+    nodVisible = !screen && view.nod !== null;
+    if (nodVisible) {
+      const label = view.nod === "progress" ? t("Updating Automagik") : t("Update available");
+      nod.title = label;
+      nod.setAttribute("aria-label", label);
+    }
+    placeNod();
+    if (!screen) {
+      if (layer.parentNode) {
+        layer.remove();
+        if (focusBack?.isConnected) focusBack.focus();
+        else if (nod.isConnected) nod.focus();
+      }
+      focusBack = null;
+      return;
+    }
+    const focused = doc.activeElement;
+    const scroll = body.scrollTop;
+    title.textContent = screen === "progress" ? t("Updating Automagik") : t("Update Automagik");
+    close.textContent = t("Close");
+    body.className = "su-body";
+    body.replaceChildren();
+    foot.replaceChildren();
+    if (screen === "offer") {
+      announcement(body, check, rollback, el);
+      if (offline) body.append(el("p", "su-note", t("The update status is unconfirmed.")));
+      const update = makeButton("su-primary", t("Update now"), () => void controller.start());
+      update.disabled = !retry;
+      foot.append(update, makeButton("su-ghost", t("Not now"), () => controller.close()));
+    } else if (screen === "progress") {
+      progress(body, run3, offline, connectionLost, el);
+    } else if (screen === "result") {
+      verdict(body, run3, recovery, el);
+      if (run3.phase === "rolledBack" && retry) {
+        foot.append(makeButton("su-ghost", t("See the announcement again"), () => controller.open()));
+      }
+    } else {
+      body.append(el("p", "su-line", refused === "unconfirmed" ? t("The supervisor has not confirmed the update request.") : t("Cannot update: {reason}", { reason: selfUpdateReason(refused) })));
+    }
+    placeLayer();
+    body.scrollTop = scroll;
+    if (focused && !focused.isConnected) close.focus();
+  };
+  let owner;
+  let readStatus;
+  let deferredChat;
+  let tracking = false;
+  let retryTimer;
+  const pollDetached = () => {
+    if (owner || !tracking) return;
+    void controller.refresh();
+    retryTimer = setTimeout(pollDetached, doc.hidden ? 1e4 : 1500);
+  };
+  const controller = createSelfUpdateController({
+    readStatus: (signal) => readStatus(signal),
+    startUpdate: () => owner.startUpdate(),
+    onStatus: (status) => owner?.onStatus?.(status),
+    keepChat(...args) {
+      if (owner) owner.keepChat?.(...args);
+      else deferredChat = args;
+    },
+    present(view) {
+      tracking = view.nod === "progress";
+      present(view);
+      if (!owner && !tracking && !view.screen) dispose();
+    },
+    storage,
+    visible: () => doc.visibilityState === "visible"
+  });
+  doc.addEventListener("visibilitychange", controller.onVisibilityChange);
+  const onKeyDown = (event) => {
+    if (!layer.isConnected) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      controller.close();
+    } else if (event.key === "Tab") {
+      const stops = [...box.querySelectorAll("button:not(:disabled),a[href]")];
+      const at = stops.indexOf(doc.activeElement);
+      event.preventDefault();
+      const next = event.shiftKey ? at <= 0 ? stops.length - 1 : at - 1 : (at + 1) % stops.length;
+      stops[next]?.focus();
+    }
+  };
+  doc.addEventListener("keydown", onKeyDown, true);
+  function dispose() {
+    delete doc[documentUpdate];
+    clearTimeout(retryTimer);
+    controller.dispose();
+    observer?.disconnect();
+    doc.removeEventListener("visibilitychange", controller.onVisibilityChange);
+    doc.removeEventListener("keydown", onKeyDown, true);
+    nod.remove();
+    layer.remove();
+    style.remove();
+    if (focusBack?.isConnected) focusBack.focus();
+  }
+  return {
+    attach(bindings) {
+      owner = bindings;
+      readStatus = bindings.readStatus;
+      clearTimeout(retryTimer);
+      if (deferredChat) {
+        bindings.keepChat?.(...deferredChat);
+        deferredChat = void 0;
+      }
+      controller.watchConnection(bindings.connection);
+      return {
+        refresh: (options) => owner === bindings ? controller.refresh(options) : void 0,
+        dispose() {
+          if (owner !== bindings) return;
+          owner = void 0;
+          if (!tracking) {
+            dispose();
+            return;
+          }
+          controller.watchConnection(void 0, true);
+          retryTimer = setTimeout(pollDetached, 1500);
+        }
+      };
+    }
+  };
+}
+
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 var LIVE_OWN = /* @__PURE__ */ new Set(["revision", "unchanged", "activity", "work", "memoryNews", "memoryReviews", "liveKey", "computerLive"]);
@@ -43573,6 +44190,8 @@ function apply(ctx) {
       void Promise.resolve(ctx.sessions.refreshProjections?.(id)).catch(quietly("refresh projections"));
     }
   };
+  let selfUpdate;
+  const selfUpdateStatusSource = createSource(null);
   ctx.effect(() => {
     let stopped = false;
     let running2 = false;
@@ -43582,6 +44201,7 @@ function apply(ctx) {
       clearTimeout(timer);
       if (running2 || stopped) return;
       running2 = true;
+      void selfUpdate?.refresh();
       try {
         await pull();
         misses = 0;
@@ -43811,28 +44431,12 @@ function apply(ctx) {
     return frameLayout({ viewport: frame.getSnapshot().viewport, sidebarWidth: 0, pref: "hidden", panel: { view: view ?? state2.view, yielded: state2.panelYield === true } }).panel === "folded";
   };
   const yieldBrowser = (state2) => state2.panelYield === true || panelFolded("browser");
-  const homeToMainBot = () => {
-    const snapshot2 = roster.getSnapshot();
-    if (!snapshot2.ready || !snapshot2.mainBotId) return;
-    const main = mainView();
-    if (main !== void 0 && snapshot2.byId[main] === void 0 && snapshot2.roomsById[main] === void 0) {
-      actions.openSession(snapshot2.mainBotId);
-    }
-  };
-  const ensureBotHome = () => {
-    if (roster.getSnapshot().ready) homeToMainBot();
-    else {
-      const off = roster.subscribe(() => {
-        if (!roster.getSnapshot().ready) return;
-        off();
-        homeToMainBot();
-      });
-    }
-  };
+  const ensureBotHome2 = () => ensureBotHome({ roster, mainView, openSession: actions.openSession });
   let cliLogin;
   const codePanel = codePanelNavigation(ctx.layout);
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession: (id) => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
+    selfUpdateStatusSource,
     learningAnswer: (id, approve) => after(call("learning-answer", { id, approve })),
     // The full-pane overlays sit above the conversation, so opening one must dismiss them
     // or the click appears to do nothing.
@@ -43964,7 +44568,7 @@ function apply(ctx) {
     setSurface: (mode) => {
       if (mode !== "bot" && mode !== "agent") return;
       if (surface.getSnapshot().mode === mode) {
-        if (mode === "bot") ensureBotHome();
+        if (mode === "bot") ensureBotHome2();
         return;
       }
       if (mode === "agent") {
@@ -43973,7 +44577,7 @@ function apply(ctx) {
       writeMode(mode);
       surface.set((state2) => ({ ...state2, mode }));
       if (mode !== "bot") return;
-      ensureBotHome();
+      ensureBotHome2();
     },
     markUnread: (id) => writeUnread(id, true),
     beginVisit: (id) => {
@@ -44311,9 +44915,9 @@ function apply(ctx) {
       const next = rightColumnOpen(document);
       const opening = next && !open;
       open = next;
-      const verdict = opening ? columnOpened(ui2.getSnapshot().details !== null, switchWindow.pending) : null;
-      if (verdict === "close-drawer") actions.closePanel();
-      else if (verdict === "collapse-column") collapseColumn();
+      const verdict2 = opening ? columnOpened(ui2.getSnapshot().details !== null, switchWindow.pending) : null;
+      if (verdict2 === "close-drawer") actions.closePanel();
+      else if (verdict2 === "collapse-column") collapseColumn();
     });
     observer.observe(document.documentElement, {
       subtree: true,
@@ -44756,29 +45360,18 @@ function apply(ctx) {
       offRoster();
     };
   }, "ds-bot: agent surface");
+  let chatReopen;
   ctx.effect(() => {
-    let reopening = takeReopen();
-    const note = () => {
-      if (reopening === null) rememberOpen(mainView());
-    };
-    const reopen = () => {
-      const snapshot2 = roster.getSnapshot();
-      if (!snapshot2.ready) return;
-      const id = reopening;
-      reopening = null;
-      if (isAgentSessionId(id) || snapshot2.byId?.[id] !== void 0 || snapshot2.roomsById?.[id] !== void 0) actions.openSession(id);
-      note();
-    };
-    const offList = ctx.sessions.list.subscribe(note);
-    const offRoster = reopening === null ? () => {
-    } : roster.subscribe(() => {
-      if (reopening !== null) reopen();
+    chatReopen = watchChatReopen({
+      roster,
+      sessions: ctx.sessions.list,
+      mainView,
+      isAgentSession: isAgentSessionId,
+      openSession: actions.openSession
     });
-    if (reopening !== null) reopen();
-    note();
     return () => {
-      offList();
-      offRoster();
+      chatReopen.dispose();
+      chatReopen = void 0;
     };
   }, "ds-bot: keep the open chat across a DSH restart");
   ctx.effect(() => {
@@ -44818,7 +45411,7 @@ function apply(ctx) {
       verifyTimer = setTimeout(verifySidebar, 250);
     };
     reconcile();
-    if (surface.getSnapshot().mode === "bot") ensureBotHome();
+    if (surface.getSnapshot().mode === "bot") ensureBotHome2();
     const unsub = surface.subscribe(reconcile);
     return () => {
       unsub();
@@ -44826,7 +45419,28 @@ function apply(ctx) {
       groups.dispose();
     };
   }, "ds-bot: surface");
-  ctx.effect(() => installSelfUpdateMock(), "ds-bot: self-update preview (issue 1540)");
+  ctx.effect(() => {
+    const connection = ctx.get("connection")?.state;
+    const update2 = installSelfUpdate({
+      readStatus: actions.selfUpdateStatus,
+      startUpdate: actions.startSelfUpdate,
+      connection,
+      onStatus: selfUpdateStatusSource.set,
+      desktop: window.dshDesktop?.protocolVersion === 1,
+      keepChat(active2, restore) {
+        if (active2) armUpdateReopen(chatReopen?.getPending() ?? mainView());
+        else {
+          const id = endUpdateReopen(restore);
+          if (id !== null) chatReopen?.setPending(id);
+        }
+      }
+    });
+    selfUpdate = update2;
+    return () => {
+      update2?.dispose();
+      if (selfUpdate === update2) selfUpdate = null;
+    };
+  }, "ds-bot: web self-update");
 }
 return Object.defineProperty({ ...module.exports }, Symbol.toStringTag, { value: 'Module' })
   },

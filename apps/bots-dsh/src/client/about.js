@@ -2,7 +2,7 @@
 // and the links to the repository. The sidebar's cloud button shows the same update state.
 // Inside the Automagik app the page is the app's: its version, its update and its plugins come
 // from the app (desktop-update.js); in a plain DSH the Bot team's own update (Omni's) shows.
-import { createElement as h, useEffect, useRef, useState } from 'react'
+import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { CHECK_FRESH_MS } from '../shared/self-update.js'
 import { GitHubMark } from './connector-marks.js'
 import { whenText } from './feedback.js'
@@ -15,6 +15,7 @@ import { showsDshRow } from './dsh-offer.js'
 import { appState, pluginName, updatePill, useDesktopUpdate, useDesktopVersions } from './desktop-update.js'
 import { opensIntoPlugins, splitsPlugins } from './update-hold.js'
 import { Switch } from './bot-settings.js'
+import { recoveryDetails } from './self-update-recovery.js'
 
 // The length of the mark's `done` hop (bt-done in styles.js).
 const CHEER_MS = 1800
@@ -158,7 +159,7 @@ function pluginReason(versions) {
   }
 }
 
-function selfUpdateReason(reason) {
+export function selfUpdateReason(reason) {
   switch (reason) {
     case 'desktop-app': return t('updates come with the desktop app.')
     case 'no-store': return t('the update store is unavailable.')
@@ -213,7 +214,7 @@ function runStep(phase) {
   }
 }
 
-function failedHealthCheck(failed) {
+export function failedHealthCheck(failed) {
   switch (failed) {
     case 'exited': return t('DSH stopped during the health check.')
     case 'port': return t('The local web listener did not answer.')
@@ -226,7 +227,7 @@ function failedHealthCheck(failed) {
 }
 
 // What the live update run of this supervisor says (RFC 0041 state.json, read through self-update-status).
-function runMessage(run) {
+export function runMessage(run) {
   if (!run) return null
   if (RUNNING_PHASES.has(run.phase)) return runStep(run.phase)
   switch (run.phase) {
@@ -618,6 +619,18 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
 
 const linkProps = href => ({ className: 'bt-soft bt-soft-sm bt-about-link', href, target: '_blank', rel: 'noopener noreferrer' })
 
+export function SelfUpdateRecoveryDetail({ source }) {
+  const status = useSyncExternalStore(source.subscribe, source.getSnapshot)
+  const run = status?.run
+  if (!VERDICT_PHASES.has(run?.phase) || run.phase === 'manualRecovery') return null
+  const { message, items, truncation } = recoveryDetails(run, status.recovery)
+  return h('div', { className: 'bt-set-row' },
+    h('div', { className: 'bt-set-copy' }, h('span', null, t('Work recovery')),
+      h('div', { className: 'bt-set-hint', 'aria-live': 'polite' }, message,
+        truncation ? h('p', null, truncation) : null,
+        items?.length ? h('ul', null, items.map(({ sessionId, text }, index) => h('li', { key: index, title: sessionId }, text))) : null)))
+}
+
 export function AboutPage({ useUpdate, actions, run, Section, Row }) {
   const update = useUpdate(value => value) ?? {}
   const app = useDesktopUpdate()
@@ -718,6 +731,8 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
     h(Section, { key: 'updates', title: t('Updates') },
       !ours && update.hostAnswered
         ? h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate, force: true }) : null,
+      !ours && update.hostAnswered && actions.selfUpdateStatusSource
+        ? h(SelfUpdateRecoveryDetail, { source: actions.selfUpdateStatusSource }) : null,
       h(Row, { label: ours ? 'Automagik' : 'Omni', hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)
         // With the plugin's own check off, the app still knows the runtime it carries.
