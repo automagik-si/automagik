@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued (the direction is decided: one Bot, roles make the difference; the P1-P6 order and Q1-Q10 await the owner's verdict) |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: one Bot, roles make the difference; the P1-P6 order as written; Q1-Q10 answered with this RFC's own recommendations, see Answers; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-19 |
@@ -534,6 +534,38 @@ being created and is migrated.
 10. **Do Omni and Unfold follow Genie into roles?** **Recommend a separate RFC after P6.** Omni
     is the Main Bot's product and Unfold has left the repository; converting either here would
     widen the trust and migration work without proving the role path first.
+
+## Answers (2026-11-19)
+
+The owner's delegate approved this RFC on 2026-11-19: the direction (one Bot, roles make the
+difference), the deliveries in the order P1 to P6, and an answer to every open question. Each
+answer is the recommendation the question itself makes, restated; every question had one, so
+none needed a fallback. The questions above stay as they were asked.
+
+1. **Q1, more than one role per Bot:** one role per Bot through P6. `bot.roles` stays a list,
+   so allowing more later needs no migration; how two roles compose is decided when a product
+   needs it.
+2. **Q2, is the Main Bot a role:** no. It stays a team-level power; a role may be attached to a
+   Main Bot but cannot grant or remove that power.
+3. **Q3, do attachments pin a version:** yes. A Bot stays on the version it was attached at, and
+   updating is an explicit act by the person.
+4. **Q4, role data and uninstall:** the role's data folder lives under the team home and is kept
+   on detach and on uninstall. A delete action comes later, with its own confirmation.
+5. **Q5, who may install and attach:** the person only. A Bot may ask in its chat; there is no
+   Bot tool for install, attach, detach or uninstall in P1-P6, and an exposed Herdr Bot is not an
+   attach target in these deliveries.
+6. **Q6, what may run before P5:** official Automagik roles only. A community role is listed and
+   not installable until P5 and a named-owner review exist; a signature alone is not enough for
+   host code.
+7. **Q7, P5's runtime:** one separate process per role and Bot, with a declared capability API
+   and no host imports, killed on detach.
+8. **Q8, the official catalog:** a signed `roles.json` on each release, beside the role
+   artifacts, signed with the plugin lane's key. No separately hosted index.
+9. **Q9, the product word:** "role" in the UI and "role package" in docs; the Apps page section
+   is "Roles". The free-text `bot.role` label keeps its field and is shown as the Bot's
+   description.
+10. **Q10, Omni and Unfold:** not in this RFC. Whether either follows Genie into roles is a
+    separate RFC after P6.
 
 ## Links
 
