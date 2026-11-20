@@ -703,8 +703,8 @@ reader of a remote seat's transcript on the owner's computer, and it needs a mac
 that computer to the box. (f) gives the detail; in short:
 
 - **Who can reach the view.** Only the person in the desktop app's own window. No DSH tool,
-  automation, schedule, plugin or Bot reaches the engine's send or interrupt, or Code mode's
-  attach.
+  automation, schedule, host plugin or Bot reaches the engine's send or interrupt, or Code mode's
+  attach. DSH client plugins in the window's page are trusted, as in RFC 0013 ((f)).
 - **Who can reach Chat's terminal anyway: anything that can use the link.** The machine link
   gives every process of the owner's account on that computer `hc send`, `hc keys` and
   `hc exec --on <box>`, the shells of DSH Bots in the same app included. Today's guards (the
@@ -724,7 +724,8 @@ that computer to the box. (f) gives the detail; in short:
 - **Provenance.** Tagged rows are a bot's and are data; rows the view sent are the owner's; other
   untagged rows are "typed in the terminal", never claimed as the owner's.
 - **The window's other code.** The desktop host runs plugins, tools and automations. They never
-  get the engine; a test fails if the engine is reachable as a tool.
+  get the engine; a test fails if the engine is reachable as a tool. Client plugins in the
+  window's page are the exception, trusted as in RFC 0013 ((f)).
 - **Undo.** In (f).
 
 ## Deliveries
