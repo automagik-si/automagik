@@ -7,6 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import { HELD_NOT_SET, HELD_UNREAD } from '../shared/held.js'
 import { AUTO, AUTO_FALLBACK } from '../shared/permission-levels.js'
+import { MAX_SESSION_LINEAGE_DEPTH } from './bot-sessions.js'
 import { refusal } from './refusal.js'
 import { narrowerLevel, narrowestOffered, rankOf } from './permission-rank.js'
 import { shellHoldText } from '../shared/routes.js'
@@ -684,10 +685,10 @@ export function install(rt) {
   // while a Session is marked (levelHolds): a Session DSH cannot read then may be a marked
   // one's child, so its call is refused, never let through.
   const UNREAD = 'DeepSeek Harness could not read where this conversation comes from while a permission level is not set, so no tool runs here until it can. Try again; if this goes on, tell the user to restart DeepSeek Harness.'
-  function markedFor(agent) {
+  function markedFor(agent, requireLineage = false) {
     let current = agent?.id ?? agent?.session?.id
     let header = agent?.session?.header
-    for (let depth = 0; typeof current === 'string' && depth < 32; depth += 1) {
+    for (let depth = 0; typeof current === 'string' && depth <= MAX_SESSION_LINEAGE_DEPTH; depth += 1) {
       if (unapplied.has(current)) return current
       try {
         header ??= ctx.sessions?.get?.(current)?.header
@@ -695,12 +696,16 @@ export function install(rt) {
         rt.warn('ds-bot: the Session %s could not be read while a permission level is not set: %s', current, error)
         throw Object.assign(refusal(UNREAD, { cause: error }), { held: HELD_UNREAD })
       }
+      if (requireLineage && (header === null || typeof header !== 'object')) break
       if (header?.origin !== 'subagent') return undefined
       current = header.parentSession
       header = undefined
     }
-    return undefined
+    if (requireLineage) throw Object.assign(refusal(UNREAD), { held: HELD_UNREAD })
   }
+  // The runner needs a synchronous hold check at dispatch, without retrying or lifting a mark.
+  rt.levelHeldFor = sessionId => unapplied.size > 0 && markedFor({ id: sessionId }, true) !== undefined
+
   // Whether the Session reads the level it should run at: a saved Auto DSH does not offer
   // runs as workspace-write. False when DSH cannot tell.
   function reads(session, level) {
