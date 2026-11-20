@@ -19,6 +19,9 @@ import { LEFT_BAR_CSS } from '../../src/client/left-bar-css.js'
 import { WORK_CODE_SWITCH_CSS } from '../../src/client/work-code-switch.js'
 import { allThemes, themeCss } from '../../src/client/themes.js'
 import { createSource, indexRoster } from '../../src/client/sources.js'
+import { CODE_PANEL, CodeMainPanel, codePanelNavigation, codeStore } from '../../src/client/code-side.js'
+import { CodeTree, CodeTerminal } from '../../src/client/code-side-pane.js'
+import { SEAT_CHAT_CSS } from '../../src/client/seat-chat.js'
 
 const { createRoot } = window.nativeSeeds['react-dom/client']
 
@@ -96,11 +99,12 @@ function render() {
   const layout = window.layoutPrefix
   const frame = document.querySelector('#frame')
   frame.className = `${layout}_frame`
+  frame.toggleAttribute('data-sidebar-collapsed', state.collapsed)
   if (state.drawer) frame.setAttribute('data-sidebar-drawer', '')
   else frame.removeAttribute('data-sidebar-drawer')
   frame.style.gridTemplateColumns = `${state.drawer ? 0 : state.collapsed ? 56 : state.width}px minmax(0px, 1fr) minmax(0px, 0px)`
   document.querySelector('#col').className = `${layout}_sidebarCol`
-  document.querySelector('#center').className = `${layout}_center`
+  document.querySelector('#center').className = `${layout}_centerCol`
   roster.set(indexRoster({ bots: BOTS.slice(0, state.bots), rooms: [], agents: [], models: [], prefs: {}, exchangeTurns: {} }))
   root.render(h(Root, {
     collapsed: state.collapsed, width: state.width, drawer: state.drawer,
@@ -117,3 +121,69 @@ window.mount = (options = {}) => {
   render()
 }
 window.setState = (options) => { Object.assign(state, options); render() }
+
+// The Code drawer uses the same SidebarRoot and TeamSidebar as the other cases. The
+// fixture's layout keeps a seat selected under the real Code panel and records its stream.
+window.mountCodeDrawer = ({ multi = false } = {}) => {
+  const styles = document.createElement('style')
+  styles.textContent = SEAT_CHAT_CSS
+  document.head.append(styles)
+  const panelInfo = createSource({ activePanelId: 'fixture-seat' })
+  const layout = { panelInfo, selectPanel: activePanelId => panelInfo.set({ activePanelId }) }
+  const code = codePanelNavigation(layout)
+  actions.openCodePane = code.open
+  actions.closeCodePane = code.close
+  window.__dshChunk = async () => ({ CodeTree, CodeTerminal })
+  codeStore.reset()
+  window.codeTraffic = { calls: [], streams: [], closed: [] }
+  const traffic = window.codeTraffic
+  window.EventSource = class {
+    constructor(url) { this.url = url; traffic.streams.push(url) }
+    addEventListener(type, listener) {
+      if (type !== 'pane' && type !== 'data') return
+      const count = new URL(this.url, location.href).searchParams.getAll('bot').length
+      const output = btoa('fixture output')
+      queueMicrotask(() => {
+        for (let p = 0; p < count; p += 1) {
+          const tagged = type === 'pane' ? { p } : { p, d: output }
+          listener({ data: count > 1 ? JSON.stringify(tagged) : type === 'pane' ? '{}' : output })
+        }
+      })
+    }
+    close() { traffic.closed.push(this.url) }
+  }
+  const tree = { machine: { name: 'Local machine' }, projects: [{
+    folder: '/fixture/project', name: 'Fixture project', bots: [
+      { id: 'b-aaaaaaaaaa', name: 'Atlas', status: 'idle', terminal: { id: 't7' }, workers: [{ terminal: 't8', role: 'Reviewer', status: 'needs-you' }] },
+    ],
+  }] }
+  if (multi) {
+    const [atlas] = tree.projects[0].bots
+    atlas.workers[0].branch = 'refs/heads/feature'
+    atlas.workers.push(...['Builder', 'Tester', 'Runner'].map((role, index) => ({
+      terminal: `t${9 + index}`, role, status: 'idle',
+    })))
+    traffic.tree = tree
+    traffic.refresh = () => codeStore.loadTree({ fresh: true })
+    traffic.snapshot = codeStore.snapshot
+  }
+  window.fetch = async (url, init = {}) => {
+    const body = JSON.parse(init.body)
+    traffic.calls.push({ url, body })
+    if (body.endpoint === 'code-tree') return Response.json({ ok: true, value: tree })
+    if (url.endsWith('/take')) {
+      if (traffic.pauseTake) await new Promise(resolve => { traffic.finishTake = resolve })
+      return Response.json({ session: 'fixture-typing', mode: 'typing' })
+    }
+    if (url.endsWith('/release')) return new Response(null, { status: 204 })
+    throw new Error(`Unexpected request: ${url}`)
+  }
+  function Main() {
+    const { activePanelId } = useSyncExternalStore(panelInfo.subscribe, panelInfo.getSnapshot)
+    if (activePanelId === CODE_PANEL) return h(CodeMainPanel, { onBack: code.close })
+    if (activePanelId === 'fixture-seat') return h('p', { 'data-fixture-seat': '' }, 'Retained seat chat')
+    return null
+  }
+  createRoot(document.querySelector('#center')).render(h(Main))
+  window.mount({ drawer: !multi, width: 336 })
+}

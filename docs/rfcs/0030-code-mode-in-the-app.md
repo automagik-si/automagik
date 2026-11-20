@@ -71,6 +71,10 @@ Copied word for word from issue #1007, "Decided by the owner" (2026-11-10 brains
    both modes. Every other seat keeps its agent's own native terminal (native Claude Code stays as it is).
 5. **No Automagik TUI.** dsh-tui is not reworked into a parity TUI.
 6. **Harness change = new conversation with a handoff note.** No history is carried across harnesses.
+
+   **2026-11-20, Q7a B-min amendment.** The host refuses an explicit harness pick in a Bot's
+   own chat with history. Use New conversation, then pick the route. Pause an active goal
+   first. A chat with nothing said can take the route in place.
 7. **The model selector is harness first, then model**, so the person sees a cross-harness choice. The
    owner has a mockup for this that was never applied (to be attached).
 8. **One application.** The pack's sidebar and mods move into DSH plugins. herdr-core stays as the
@@ -88,6 +92,9 @@ first level is the route", relayed by the orchestrator):
     comes second, listed under the chosen route. Changing the route is the cross-harness move: it
     starts a new conversation with a handoff note (Decided 6), and the selector says so before the
     person confirms. Changing only the model inside a route does not.
+
+The [2026-11-20 Q7a B-min amendment](#decided) to Decided 6 supersedes the crossing and
+confirmation described in Decided 10.
 
 ## Words
 
@@ -255,7 +262,7 @@ described as a model, not a drawing:
 | 1. Route | **Native**, **ACP**, **Herdr**, always in that order | The bot type limits which routes show (Q13). A route with nothing set up says what it needs ("Add an API key", "Sign in", "Set up herdr-core") instead of hiding. |
 | 2. Agent (ACP and Herdr only) | Every supported agent: Claude Code, Codex, Hermes, Antigravity, omp and any added later (RFC 0003, #973), each with its sign-in state | An agent that is not signed in shows "Sign in" (RFC 0003's sign-in from the Bot's chat). Native has no agent step. |
 | 3. Model | The chosen route's, and agent's, models: on Native every model DSH supports, marked "needs an API key" where the key is missing (Decided 2); on ACP the models the agent's own sign-in gives; on Herdr the models the agent's terminal takes at launch, as the pack's worker settings pass them today (`herdr/mods/am-sidebar/models.js`) | A model that cannot run is marked, never picked silently (`model-menu.js`'s rule, kept). |
-| Crossing | A route change | The selector says so before the person confirms: "Changing the route starts a new conversation; the bot writes a handoff note first" (Decided 6 and 10). A model change inside a route keeps the conversation. An agent change inside ACP or Herdr is Q14. |
+| Crossing | A route change | Before confirmation the selector says "Changing the route requires a new conversation if this one has history." A model change inside one harness keeps the conversation. An agent change inside ACP or Herdr is Q14. |
 
 What each route means for the pane: on Native and ACP the conversation is a DSH Session, so its
 pane is the DSH chat (Decided 4); on Herdr the conversation runs in the agent's native terminal
@@ -273,32 +280,28 @@ the owner rules on it at approval, so no control ships that does nothing.
 
 ### Handoff note
 
-Decided 6: a harness change is a new conversation with a handoff note, and no history crosses.
+Q7a replaces the explicit own-chat route change that opened a new part with a handoff and
+transcript. For picks that reach the history decision, a crossing pick with history returns
+`bot/refused` with reason `needs-new-conversation` and keeps the original selection. A hookless
+host keeps its earlier `handoff unavailable` refusal for ordinary history. Use New conversation,
+then pick the route again. If the Bot has an active goal, pause it before New conversation.
 
-**Recommended:**
+For this decision, every derived user message counts except the team kickoff, the exact
+fresh opening for the current part, and the following source kinds: `runtime-context`,
+`working-directory`, `time-context`, `tmux-context`, `agent-instructions`, `skill-catalog`,
+`plan-mode`, `ds-bot-time-context`, and `ds-bot-memory-recall`. The DSH route-selection notice
+is excluded by its text framing. A Bot-team fallback notice counts even though it shares
+the `model-selection` source kind. Bot memory belongs to the Bot on every harness. Rollover and
+edited openings, goal rounds, and every other user message count. A part with nothing said
+takes the existing in-place path.
 
-- **Who writes it.** The old harness, asked by the plugin with a fixed prompt at the moment of the
-  switch: goal, decisions made, open work, files touched, what the person asked last. If the old
-  harness cannot answer (signed out, quota, error), the plugin writes a plain note from the
-  Session's own record instead: the last request, open tasks and the files named, with no model
-  call. The note is never longer than a set cap (proposed: 4,000 characters).
-- **Redaction.** It passes the same redactor RFC 0003's live switching uses
-  (`apps/bots-dsh/src/host/secrets.js`, `diagnostics.js`) before it is stored or sent.
-- **Where it lives.** In the Bot team's home, in the old Session's folder, as one Markdown file
-  named by the new Session's id; never in a repository. Both Sessions link it: the old one ends
-  with "Continued in a new conversation", the new one starts with a handoff card.
-- **How the new harness receives it.** As the new conversation's first message, framed as a note
-  from the previous conversation (not the person's words, not a system message), shown to the
-  person as a card they can open before their first message is sent. The person may delete it
-  from the card; then nothing crosses at all.
-- **What changes in RFC 0003.** Only replay at a harness change: its delivery 7 (live switching,
-  the transcript replayed into the target) is replaced there by this note. Nothing else in RFC
-  0003 changes. `dshTools` is not touched, and its kill switch (`false`, RFC 0003 "Replay
-  independent of the bridge") is never used for this, since it would also take the DSH tool
-  bridge off agent routes. Replay without a harness change stays as RFC 0003's 2026-11-08
-  amendment has it: a new agent session in a chat that already has answers (a restart), a live
-  session resumed after the chat answered elsewhere, and a Bot part's handoff package. Q7 asks
-  what happens to Sessions that already crossed.
+RFC 0003 still describes the DSH tool bridge, same-harness replay and the records of
+Sessions that crossed earlier. Q7a leaves the in-place path's races, effort, rollback and
+default fallbacks, automatic moves, the kickoff exclusion, and other route writers (Q7c)
+owed. New conversation starts on the current route, so a Full access Bot whose CLI cannot
+start a fresh Session needs that route restored or an access level that allows another
+route. A managed history-free move onto the selected route belongs to the pending-input
+delivery.
 
 ### Mod by mod
 
@@ -393,7 +396,7 @@ about where it runs:
 - `am mailbox send` and `<app home>/automagik-herdr/mailbox.jsonl` (rows: `v`, `id`, `kind`
   `answer` or `question`, `bot`, `request` for an answer, `text`, `terminal` and `core` stamped by
   the verb, `at`). New.
-- A handoff note file per crossed Session, and the handoff message kind in a Session. New.
+- The own-chat crossing refusal returns `needs-new-conversation` in the Bot error response.
 - RFC 0028's worker kind `lead`, if Q8 is yes. An amendment to RFC 0028.
 - No new plugin id or storage prefix; `<app home>/automagik-herdr/` is kept.
 
@@ -406,7 +409,7 @@ about where it runs:
 | The orchestrator floods or steers the person through the Genie | Only `answer` (to a request the Genie made) and `question` rows cross; a row is data, tags quoted |
 | Another local process posts to the mailbox as the orchestrator | `am` stamps the posting terminal; the follower accepts only the Genie's lead terminal; the per-start token if delivery 3 finds it possible, else the residual is recorded |
 | The Genie types into the team behind the orchestrator | The grant reaches only the orchestrator's terminal; its children carry no Genie label |
-| A secret crosses in a handoff note | RFC 0003's redactor runs before the note is stored or sent; the person can delete the note |
+| A populated own chat crosses through the model picker | Q7a refuses the pick before selecting a route or starting a switch |
 | A watching view reflows a terminal someone is using | Only the typing client resizes; a watching view letterboxes |
 | A terminal on a linked machine is reached before its link is scoped | Linked machines are view-only and unlisted until delivery H (RFC 0022 (k)) |
 
@@ -416,7 +419,8 @@ Each is one PR on one lane. Two tracks run in parallel:
 
 - **The selector track:** delivery 4 (issue #1016, an overdue build ask of the owner's) runs
   after Q13 and Q14 only. It needs nothing from deliveries 0-3, Q1-Q3, #1009 or RFC 0028: it
-  changes the model menu and adds the handoff note, and attaches to no terminal.
+  changes the model menu, and Q7a adds the populated own-chat refusal. The track attaches to no
+  terminal.
 - **The Code track:** 0, 1, 2, 3a, 3b, then 5, 6, 7 and 8.
 
 Every test uses temp homes, fake ledgers and a herdr-core started for the test, never a live
@@ -456,16 +460,16 @@ Herdr install.
    orchestrator starts its own workers, while the Genie's `code_send` and `code_read` on those
    workers are refused by the grant. *Rollback:* a release without the mailbox; the orchestrator
    keeps its terminal.
-4. **Route, then model, and the handoff note** (plugin; the selector is issue #1016; after Q13
+4. **Route, then model, and the Q7a refusal** (plugin, selector issue #1016, after Q13
    and Q14, approved by the owner in a running build with light and dark screenshots).
-   *Check:* the routes list Native, ACP, Herdr in that order; each bot type lists only the
-   routes Q13 gives it (a DSH bot: Native only); a route change warns before the person
-   confirms; the note is written by the old harness, falls back to the plain note when
-   the old harness fails, is redacted (a saved secret in the transcript never appears in it),
-   and the new conversation starts with it as a card; a model change inside a route keeps the
-   conversation; the DSH tool bridge is still on for agent routes, and a restart inside one
-   harness still replays the chat as RFC 0003 has it. *Rollback:* today's menu and RFC 0003's
-   replay.
+   *Check:* the routes list Native, ACP, Herdr in that order and each bot type lists the
+   routes Q13 gives it (a DSH bot lists Native only). A crossing asks for confirmation.
+   A populated own chat refuses the pick, keeps its selection, and shows the guidance in
+   the recovery card. After New conversation a crossing can apply in place while the
+   fresh part contains only the opening and context listed above. A same-harness model
+   change keeps the conversation. The DSH tool bridge and same-harness replay follow
+   RFC 0003. Pending input and the other writers are later deliveries.
+   *Rollback:* revert the selector and refusal to the preceding release.
 5. **Automations and Accounts as pages** (plugin; any shared code it needs moves through the
    pack's source and `am-copies`, as in 3a). *Check:* the page lists, adds and
    removes an automation through the `herdr-automations` CLI's `--json`, and a quota switch
@@ -494,8 +498,8 @@ not of this one.
 ## Answers (2026-11-19)
 
 The owner's delegate accepted this RFC on 2026-11-19 (issue #1007) and answered every open
-question with this RFC's own recommendation. Each answer is that recommendation, restated; the
-questions below stay as they were asked.
+question with this RFC's own recommendation. The answers restate those recommendations.
+Q7a amends the crossing rule in Q7 and Q14.
 
 1. **Q1:** Decided 3 governs the Genie product. RFC 0022's rejection of a separate Genie bot, and
    its revision's (j), stay for the team's own seats (Chat, the General Orchestrator) until the
@@ -512,12 +516,12 @@ questions below stay as they were asked.
    image.
 6. **Q6:** the Community entry is never opened, and `herdr/` stops being its folder when the pack
    is retired.
-7. **Q7:** Sessions that already crossed harnesses keep their record as it is; the next crossing
-   uses the handoff note; from delivery 4 on, replay stops at a harness change only, and
-   `dshTools` and same-harness replay stay as RFC 0003 has them. Owed in delivery 4: on a
-   harness change, send only the redacted handoff note; a crossing today (#1025) still sends
-   earlier and latest messages to the new conversation (`apps/bots-dsh/src/host/parts.js`, the
-   handoff package).
+7. **Q7:** Sessions that already crossed harnesses keep their records. Q7a removes
+   `switchRoute`'s managed history-carrying switch for a populated own chat. Use
+   **New conversation**, then pick the route again. Pause an active goal before New conversation.
+   An own chat with nothing said can change in place as defined under Handoff note.
+   `dshTools` and same-harness replay follow RFC 0003. The limitations and later work
+   listed under Handoff note remain owed.
 8. **Q8:** yes. RFC 0028 gains a worker kind `lead`: long-lived, outside the cap, woken only by
    the mailbox, and a send to it while it works is held until its turn ends, then sent, rather
    than refused. It is an amendment to RFC 0028 in its own PR. Owed: that amendment.
@@ -539,8 +543,8 @@ questions below stay as they were asked.
     route policy (#1025) applies this table to the three routes it covers, telling a Genie's
     human-facing bot from its team seats; which bots may take RFC 0003's fourth route (Remote
     Hermes, 2026-11-11) is outside Q13.
-14. **Q14:** an agent change inside ACP or Herdr counts as a route change: a new conversation with
-    a handoff note. Only a model change inside one agent keeps the conversation.
+14. **Q14:** an agent change inside ACP or Herdr counts as a route change under Decided 6.
+    A model change inside one agent keeps the conversation.
 
 From this acceptance the pack is fix-only (The pack after the move, 1): security and breakage
 fixes on the herdr lane as today, no new features in its UI, until deliveries 1 and 2 are in a
@@ -548,9 +552,9 @@ stable release.
 
 ## Open questions
 
-Answered on 2026-11-19 (Answers, above); kept as asked. Each has a recommendation. Q1-Q3 were
-real conflicts with #1009 (RFC 0022's revision), then an open pull request; Q8-Q9 with #1008
-(RFC 0028), then open too; Q7 with RFC 0003.
+Answered on 2026-11-19. Q7 and Q14 reflect the Q7a amendment. Q1-Q3 were conflicts with
+#1009 (RFC 0022's revision), then an open pull request. Q8-Q9 were conflicts with #1008
+(RFC 0028), also open then. Q7 concerns RFC 0003.
 
 1. **The Genie's two seats vs RFC 0022's rejection.** RFC 0022 rejected "a separate DSH Genie
    bot as the owner's interface, delegating to Chat through hc", because a second agent would
@@ -575,9 +579,8 @@ real conflicts with #1009 (RFC 0022's revision), then an open pull request; Q8-Q
    into the image for a faster first start?
 6. **The Community entry.** Never opened, and `herdr/` stops being its folder at retirement
    (recommended), or opened for the fix-only period?
-7. **Sessions that already crossed harnesses under RFC 0003's replay.** Recommended: they keep
-   their record as it is; the next crossing uses the handoff note; from delivery 4 on, replay stops
-   at a harness change only, and `dshTools` and same-harness replay stay as RFC 0003 has them.
+7. **Sessions that already crossed harnesses under RFC 0003's replay.** Keep their records.
+   For the next explicit crossing pick in a Bot's own chat, use the Q7 answer above.
 8. **A lead worker kind in RFC 0028.** Long-lived, outside the cap, woken only by the mailbox,
    and a send to it while it works is held until its turn ends, then sent, rather than refused.
    Recommended: yes, as an amendment to RFC 0028 in its own PR, so #1008 is not blocked.
@@ -609,10 +612,9 @@ real conflicts with #1009 (RFC 0022's revision), then an open pull request; Q8-Q
     with: a chat bot on Herdr would be a seat whose chat is RFC 0022's rendered view, which #1009
     keeps for the team's existing seats ("a view first"), and it would break Decided 4's rule
     that the human-facing pane is the real DSH chat. Revisit once RFC 0022's delivery 1L ships.
-14. **An agent change inside a route** (Claude Code to Codex, both ACP). Recommended: it counts
-    as a route change, a new conversation with a handoff note, because each agent is its own
-    harness and Decided 6 carries no history across harnesses; only a model change inside one
-    agent keeps the conversation.
+14. **An agent change inside a route** (Claude Code to Codex, both ACP). Each agent is its
+    own harness, so the change follows Decided 6. A model change inside one agent keeps the
+    conversation.
 
 ## Links
 

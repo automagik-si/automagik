@@ -110,7 +110,7 @@ describe('market index', () => {
     });
     // only plugins with a market block join (ACP agents, the pt-BR pack); the Bot team and the
     // welcome are listed by hand
-    expect(pinned.plugins.map((plugin) => plugin.name)).toEqual(['@automagik/acp-dsh', '@automagik/locale-pt-br-dsh']);
+    expect(pinned.plugins.map((plugin) => plugin.name)).toEqual(['@automagik/acp-dsh', '@automagik/locale-pt-br-dsh', '@automagik/vault-dsh']);
     expect(checkIndex(pinned, repoDir)).toEqual([]);
   });
 

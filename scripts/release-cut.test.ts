@@ -232,7 +232,7 @@ exec "$@"
   mkdirSync(join(work, 'scripts'));
   copyFileSync(join(root, 'scripts', 'release-cut.sh'), join(work, 'scripts', 'release-cut.sh'));
   copyFileSync(join(root, 'scripts', 'release-gates.sh'), join(work, 'scripts', 'release-gates.sh'));
-  for (const app of ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'welcome-dsh']) mkdirSync(join(work, 'apps', app), { recursive: true });
+  for (const app of ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh']) mkdirSync(join(work, 'apps', app), { recursive: true });
   mkdirSync(join(work, 'am'));
   mkdirSync(join(work, 'herdr'));
   writeFileSync(join(work, 'herdr', 'install.sh'), '');
@@ -723,6 +723,7 @@ describe('a merge that lands while the gates run', () => {
         'acp-dsh :: install --frozen-lockfile --ignore-scripts',
         'bots-dsh :: install --frozen-lockfile --ignore-scripts',
         'locale-pt-br-dsh :: install --frozen-lockfile --ignore-scripts',
+        'vault-dsh :: install --frozen-lockfile --ignore-scripts',
         'welcome-dsh :: install --frozen-lockfile --ignore-scripts',
         'am :: ../scripts/am-copies.mjs --check',
         'am :: --test test/*.test.mjs',
@@ -831,6 +832,7 @@ describe('the gates script runs the gates for real', () => {
         'acp-dsh :: install --frozen-lockfile --ignore-scripts',
         'bots-dsh :: install --frozen-lockfile --ignore-scripts',
         'locale-pt-br-dsh :: install --frozen-lockfile --ignore-scripts',
+        'vault-dsh :: install --frozen-lockfile --ignore-scripts',
         'welcome-dsh :: install --frozen-lockfile --ignore-scripts',
         'am :: ../scripts/am-copies.mjs --check',
         'am :: --test test/*.test.mjs',

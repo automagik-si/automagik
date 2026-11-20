@@ -40,6 +40,7 @@ export function install(rt) {
       : `[Message from ${fromName} · DeepSeek Harness restarted while you were working on it]`
     if (resent && role === 'reply' && hasSender) return `[Reply from ${fromName} · DeepSeek Harness restarted before it could reach you]`
     if (resent && role === 'task-done') return `[Task "${note}" finished · DeepSeek Harness restarted before this report could reach you · its last words follow; tell the user what matters in a line or two]`
+    if (resent && role === 'report') return `[Group chat "${roomName}" · replies to your post · DeepSeek Harness restarted before this report could reach you${goesOn}]`
     if (resent && hasSender && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted before it could reach you]`
     if (role === 'reply') return `[Reply from ${fromName}${goesOn}]`
     if (role === 'stopped') return `[Stopped by ${fromName}]`
@@ -57,6 +58,12 @@ export function install(rt) {
     if (audience === 'user') return `[Message from ${fromName} · the user sees your reply here]`
     return `[Message from ${fromName}]`
   }
+
+  const headerText = (role, fromName, audience, note, deferred, { roomId, work, ...flags }) =>
+    headerFor(role, fromName, rt.roomOf(roomId)?.name ?? (role === 'report' ? note : undefined), audience, note, deferred, {
+      ...flags, asker: work === undefined ? undefined : rt.botOf(state.works?.[work]?.from)?.name,
+    })
+  rt.reportHeader = ({ role, note, roomId, work, resent }) => headerText(role, 'You', undefined, note, false, { roomId, work, resent })
 
   // Roles recorded as team exchanges.
   const EXCHANGE_ROLES = new Set(['request', 'reply', 'stopped'])
@@ -227,13 +234,11 @@ export function install(rt) {
   // result that came back goes on with. `merged`: a request that takes in an earlier
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend } = {}) {
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend, made } = {}) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
     const fromName = senderName ?? from?.name ?? 'You'
-    const room = rt.roomOf(roomId)
-    const asker = work === undefined ? undefined : rt.botOf(state.works?.[work]?.from)?.name
     // Session events reject `undefined` members, so optional fields are omitted instead.
     const source = {
       kind: SOURCE_KIND,
@@ -270,7 +275,7 @@ export function install(rt) {
     // queues for the next turn (see turns.js for how each is routed).
     const message = createUserMessage({
       content: [
-        { type: 'text', text: `${headerFor(role, fromName, room?.name, audience, note, deferred, { resumed, retried, resent, abandoned, asker, hasSender: fromId !== undefined || senderName !== undefined, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
+        { type: 'text', text: `${headerText(role, fromName, audience, note, deferred, { roomId, work, resumed, retried, resent, abandoned, hasSender: fromId !== undefined || senderName !== undefined, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
         ...images.map(attachment => ({ type: 'image', attachment })),
         ...files.map(attachment => ({ type: 'file', attachment })),
       ],
@@ -302,6 +307,7 @@ export function install(rt) {
       } else {
         if (steer) agent.steer(message)
         else agent.followup(message)
+        made?.(message)
         await ctx.sessions.flush(agent.session)
       }
     } catch (error) {
@@ -380,8 +386,8 @@ export function install(rt) {
         text += decoder.decode(chunk, { stream: true })
         if (text.length > TEXT_SHOW_MAX) return { text: headOf(text, TEXT_SHOW_MAX), whole: false }
       }
-    } catch (error) {
-      rt.warn('omni-ui: file %s not read: %s', file?.name, error)
+    } catch {
+      rt.warn('omni-ui: a file was not read')
       return undefined
     }
     text += decoder.decode()

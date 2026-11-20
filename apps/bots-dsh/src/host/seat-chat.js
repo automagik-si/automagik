@@ -17,6 +17,8 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fromWindow } from './desktop-window.js'
+import { windowEndpoint } from './extend.js'
 import { createEngine } from './live-chat/engine.js'
 import { addressParts } from './live-chat/hc.js'
 import { agentOf } from './live-chat/find.js'
@@ -250,16 +252,18 @@ export function install(rt, { engine: injected } = {}) {
     if (engine) chat = new SeatChat({ engine, registryPath: path, warn: (...args) => rt.warn?.(...args) })
     return chat
   }
-  const answer = (fn) => async (body) => {
+  // `windowSeen` must be the shared route's proof (desktop-window.js), never a caller's `true`.
+  const answer = (fn, { screen = false } = {}) => async (body, _signal, windowSeen = false) => {
+    if (screen && !fromWindow(windowSeen)) throw refused('desktop-only')
     const seat = seatChat()
     if (!seat) throw refused('Seat chat is not available on this computer.')
     return fn(seat, body ?? {})
   }
   const offs = [
     rt.hooks.endpoint('seat-chat-list', answer(async (seat) => ({ seats: await seat.list() })), { read: true }),
-    rt.hooks.endpoint('seat-chat-open', answer((seat, body) => seat.open(String(body.client ?? ''), body.terminal)), { read: true }),
-    rt.hooks.endpoint('seat-chat-read', answer((seat, body) => seat.read(String(body.client ?? ''), body.terminal, body.after ?? null)), { read: true }),
-    rt.hooks.endpoint('seat-chat-close', answer((seat, body) => ({ closed: seat.close(String(body.client ?? ''), body.terminal) })), { read: true }),
+    windowEndpoint(rt, 'seat-chat-open', answer((seat, body) => seat.open(String(body.client ?? ''), body.terminal), { screen: true }), { read: true }),
+    windowEndpoint(rt, 'seat-chat-read', answer((seat, body) => seat.read(String(body.client ?? ''), body.terminal, body.after ?? null), { screen: true }), { read: true }),
+    windowEndpoint(rt, 'seat-chat-close', answer((seat, body) => ({ closed: seat.close(String(body.client ?? ''), body.terminal) }), { screen: true }), { read: true }),
   ]
   if (typeof rt.ctx?.effect === 'function') {
     rt.ctx.effect(() => () => {

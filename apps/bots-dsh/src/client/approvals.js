@@ -1,4 +1,11 @@
 import { t } from './i18n.js'
+
+export function withdrawnText(why) {
+  switch (why) {
+    case 'task': return t('This step was withdrawn: its task ended')
+    default: return ''
+  }
+}
 // Whether an approval waits for the user: for a Bot, in any of its Sessions; for a group,
 // from any of its members there. The sidebar, the header and the details panel all read it,
 // so a Bot blocked on the user shows the same `alert` everywhere.

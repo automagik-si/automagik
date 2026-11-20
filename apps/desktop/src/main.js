@@ -23,11 +23,12 @@ import { startUp } from './startup.js'
 import { dismissSplash, markSplashStep, showUpdateSplash } from './splash.js'
 import { PUBLISHERS, TRIAL_MS, beforeStart, checkLane, confirm as confirmLane, installedVersions, laneMemory, stage as stageLane, stagedOf, stagedVersion, trialFailed } from './lane.js'
 import {
-  ANONYMOUS_ID, appHome, automagikHome, backupSettingsOrLog, busyFileOf, dshEnv, dshRun,
+  ANONYMOUS_ID, appHome, automagikHome, backupSettingsOrLog, busyFileOf, dshEnv, dshRun, dshWindowMarker,
   forgetDshLogins, launchUrlFileOf, privacyFileOf, privacyPatchOf, guardContents, installProfile,
   launchPort, pageUrlOf, pinProfileStore, portFileOf, preloadOf, resourcesOf, serveDsh,
   storeLayoutOf, writeTools,
 } from './dsh.js'
+import { launchInstance } from './owner-record.js'
 import { BotCursor } from './bot-cursor.js'
 import { BotRelay } from './bot-relay.js'
 import { BotViews, isBotId, isTabId } from './bot-views.js'
@@ -65,7 +66,8 @@ let dsh = null
 // The dsh this start runs, whichever process that is now (a retry on another port replaces the
 // first): every way out stops it, and one that spawns after that is stopped at once. A restart of
 // DSH alone, for plugins the lane staged (auto-apply.js), stops it and makes a new one.
-let dshProcess = dshRun()
+const windowMarker = dshWindowMarker()
+let dshProcess = dshRun({ beforeStop: windowMarker.clear })
 let window = null
 let page = null
 let quitting = false
@@ -293,7 +295,10 @@ async function launch() {
     // Then the plugins the lane staged go in, and this start is their trial (lane.js).
     lane: () => { if (app.isPackaged) laneTrial = beforeStart({ home, target: laneProfile, log: laneLog }) },
     // Electron's own binary runs dsh as Node, so the app ships one runtime.
-    tools: () => { dshTools = { resources, binDir: writeTools({ dir: join(home, 'bin'), node: process.execPath, pnpm: resources.pnpm }) } },
+    tools: () => {
+      dshTools = { resources, binDir: writeTools({ dir: join(home, 'bin'), node: process.execPath, pnpm: resources.pnpm }) }
+      instance ??= launchInstance({ home, log: reason => startLog(`${new Date().toISOString()} start: ${reason}\n`) })
+    },
     spawn: port => spawnDsh(port, started),
     // Earlier starts' dsh logins would pile up until dsh refuses the page (dsh.js forgetDshLogins).
     // dsh's page has the default session, and cookies ignore the port.
@@ -356,6 +361,7 @@ function publishAccount(status) {
 // What dsh is started with (the app's resources, and the tools on its PATH), for a start and for
 // each restart of DSH alone.
 let dshTools = null
+let instance
 let dshLog = null
 
 // A start that waited for dsh's last port (dsh.js launchPort) notes it in `steps` (start.log).
@@ -381,7 +387,13 @@ function spawnDsh(port, steps) {
   }
   // Only a port dsh bound and served on is kept for the next launch (dsh.js serveDsh).
   const onUnkept = error => startLog(`${new Date().toISOString()} start: port not kept (${error.message})\n`)
-  const env = dshEnv({ home, electronAsNode: true, binDir, preload, privacy })
+  const run = dshProcess
+  let marker
+  // Called for each child, including a retry if the first port was taken.
+  const env = () => {
+    marker = windowMarker.start()
+    return dshEnv({ home, electronAsNode: true, binDir, preload, privacy, windowDigest: marker.digest, instanceId: instance?.instanceId })
+  }
   // dsh's web app records its launch URL here (runtime patch web-launch-token-persistence); the
   // launcher reads it when dsh's output is unavailable.
   const urlFile = launchUrlFileOf(join(home, 'dsh'))
@@ -398,6 +410,7 @@ function spawnDsh(port, steps) {
     },
   })
     .then((running) => {
+      if (run === dshProcess && !run.stopped) marker.ready(running, dshOrigin)
       dsh = running
       steps.mark('dsh ready')
       // Only the dsh that runs now: one stopped for a restart of DSH alone exits on purpose.
@@ -422,6 +435,7 @@ function makePage() {
       spellcheck: process.platform === 'darwin' || readChoices(privacyFileOf(home)).spellcheck === true,
     },
   })
+  windowMarker.bind(page.webContents)
   page.setBackgroundColor(tableColor(nativeTheme.shouldUseDarkColors))
   page.webContents.on('before-input-event', (event, input) => shortcut(event, input))
   // dsh's page loads again: its browser panel is gone until it draws again.
@@ -589,7 +603,7 @@ function restartForLane({ away = false, why } = {}) {
 }
 
 // What a plugin is called in the app's own words (the update log, the frame's status).
-const PLUGIN_NAMES = { '@automagik/bots-dsh': 'Bot team', '@automagik/welcome-dsh': 'Welcome', '@automagik/acp-dsh': 'ACP agents', '@automagik/genie-dsh': 'Genie', '@automagik/locale-pt-br-dsh': 'Português (Brasil)' }
+const PLUGIN_NAMES = { '@automagik/bots-dsh': 'Bot team', '@automagik/welcome-dsh': 'Welcome', '@automagik/acp-dsh': 'ACP agents', '@automagik/genie-dsh': 'Genie', '@automagik/locale-pt-br-dsh': 'Português (Brasil)', '@automagik/vault-dsh': 'Vault (Bitwarden)' }
 const changeText = changes => changes.map(({ name, from, to }) => `${PLUGIN_NAMES[name] ?? name.replace(/^@[^/]+\//, '')} ${from ? `${from} → ` : ''}${to}`).join(', ')
 
 // Put the staged plugins in now, with DSH restarted alone (auto-apply.js): the window stays, the
@@ -674,7 +688,7 @@ async function cycleDsh(prepare, status, reason = forcing ? 'force' : 'lane') {
     await prepareAndStop(reason)
     out.mark('dsh stopped')
     if (quitting) throw appStopped('the app is quitting')
-    dshProcess = dshRun()
+    dshProcess = dshRun({ beforeStop: windowMarker.clear })
     const prepared = prepare()
     const running = await spawnDsh(await launchPort(portFileOf(home), undefined, { onWaited: portWaited(out) }), out)
     await forgetDshLogins(session.defaultSession.cookies, dshOrigin).catch(() => {})

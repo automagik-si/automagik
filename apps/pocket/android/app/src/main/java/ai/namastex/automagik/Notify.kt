@@ -1,6 +1,8 @@
 package ai.namastex.automagik
 
 import android.Manifest
+import android.app.KeyguardManager
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -51,10 +53,9 @@ object Notify {
         post(context, alert.ref, alert.kind, alert.text, detail, silent, lockScreen, null,
             Prompt.choices(alert.terminal.kind, menu), menu?.options.orEmpty(), alert.terminal.message, menu?.dialog.orEmpty())
 
-    /** [sent]: a reply's outcome, shown in place of [detail] without alerting again. */
-    fun post(context: Context, ref: TerminalRef, kind: String, title: String, detail: String, silent: Boolean, lockScreen: Boolean, sent: String?,
-             choices: List<Prompt.Choice> = emptyList(), options: List<String> = emptyList(), msg: String = "", dialog: String = "") {
-        if (!allowed(context)) return
+    /** The alert and its actions when answers from notifications are available. */
+    private fun detailed(context: Context, ref: TerminalRef, kind: String, title: String, detail: String, silent: Boolean, lockScreen: Boolean,
+                         sent: String?, choices: List<Prompt.Choice>, options: List<String>, msg: String, dialog: String): Notification {
         // One button per option; each remembers the question and the whole menu, so a stale tap presses nothing.
         // A permission with a "don't ask again" option fills all three: Yes, Always, No, and Reply goes (Android shows at
         // most three); tapping the notification still opens the agent to type. Always is locked like the others.
@@ -76,7 +77,7 @@ object Notify {
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY).build()
         // "Always" alone doesn't say what it allows: the text does.
         val text = sent ?: choices.firstOrNull { it.always }?.let { "$detail\nAlways: ${Prompt.scope(it.label)}" } ?: detail
-        val n = NotificationCompat.Builder(context, if (kind == Alerts.BLOCKED) NEEDS_YOU else DONE)
+        return alertBuilder(context, kind)
             .setSmallIcon(R.drawable.ic_notify).setColor(BrandArgb)
             .setContentTitle(title).setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setCategory(if (kind == Alerts.BLOCKED) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_STATUS)
@@ -85,11 +86,57 @@ object Notify {
             .setContentIntent(open(context, ref)).setAutoCancel(true)
             .setSilent(silent || sent != null).setOnlyAlertOnce(sent != null)
             .apply { picks.forEach(::addAction); if (picks.size < 3) addAction(reply) }.build()
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        runCatching { NotificationManagerCompat.from(context).notify(id(ref), n) }
+    }
+
+    /** [sent]: a reply's outcome, shown in place of [detail] without alerting again. */
+    fun post(context: Context, ref: TerminalRef, kind: String, title: String, detail: String, silent: Boolean, lockScreen: Boolean, sent: String?,
+             choices: List<Prompt.Choice> = emptyList(), options: List<String> = emptyList(), msg: String = "", dialog: String = "") {
+        if (!allowed(context)) return
+        synchronized(AppLock.notifyLock) {
+            val n = if (AppLock.enabled || sent == UNLOCK_OUTCOME) generic(context, ref, kind, silent, sent)
+                else detailed(context, ref, kind, title, detail, silent, lockScreen, sent, choices, options, msg, dialog)
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+            runCatching { NotificationManagerCompat.from(context).notify(id(ref), n) }
+        }
+    }
+
+    private const val LOCKED_OUTCOME = "Not sent: Automagik is locked. Open it to answer."
+    private const val UNLOCK_OUTCOME = "Not sent: unlock the phone to answer."
+
+    internal fun needsUnlock(lockAnswers: Boolean, keyguardLocked: Boolean) = !lockAnswers && keyguardLocked
+
+    private fun alertBuilder(context: Context, kind: String) = NotificationCompat.Builder(context, if (kind == Alerts.BLOCKED) NEEDS_YOU else DONE)
+
+    private fun generic(context: Context, ref: TerminalRef, kind: String, silent: Boolean, sent: String?): Notification {
+        val text = when {
+            sent == LOCKED_OUTCOME -> LOCKED_OUTCOME
+            sent == UNLOCK_OUTCOME -> UNLOCK_OUTCOME
+            kind == Alerts.BLOCKED -> "An agent needs you."
+            else -> "An agent finished."
+        }
+        return alertBuilder(context, kind).setSmallIcon(R.drawable.ic_notify).setColor(BrandArgb)
+            .setContentTitle("Automagik").setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setCategory(if (kind == Alerts.BLOCKED) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_STATUS)
+            .setPriority(if (kind == Alerts.BLOCKED) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setContentIntent(open(context, ref)).setAutoCancel(true)
+            .setSilent(silent || sent != null).setOnlyAlertOnce(sent != null).build()
+    }
+
+    /** A stale action can arrive without a view model, including at process start. */
+    private fun rejectLocked(context: Context, ref: TerminalRef, kind: String): Boolean = synchronized(AppLock.notifyLock) {
+        if (!AppLock.enabled) return@synchronized false
+        post(context, ref, kind, "", "", silent = true, lockScreen = false, sent = LOCKED_OUTCOME)
+        true
     }
 
     fun cancel(context: Context, ref: TerminalRef) = NotificationManagerCompat.from(context).cancel(id(ref))
+
+    fun cancelAlerts(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.activeNotifications.filter { it.notification.channelId == NEEDS_YOU || it.notification.channelId == DONE }
+            .forEach { manager.cancel(it.tag, it.id) }
+    }
 
     private fun open(context: Context, ref: TerminalRef) = PendingIntent.getActivity(context, id(ref),
         Intent(context, MainActivity::class.java).putExtra(EXTRA_HOST, ref.hostId).putExtra(EXTRA_ADDRESS, ref.address)
@@ -113,12 +160,17 @@ object Notify {
     class ChoiceReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val ref = opened(intent) ?: return
-            val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
             val kind = intent.getStringExtra(EXTRA_KIND) ?: Alerts.BLOCKED
+            if (rejectLocked(context, ref, kind)) return
+            val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
             val detail = intent.getStringExtra(EXTRA_DETAIL).orEmpty()
             fun show(outcome: String) = post(context, ref, kind, title, detail, silent = true,
                 lockScreen = PocketViewModel.current?.state?.value?.lockAnswers ?: false, sent = outcome)
             val vm = PocketViewModel.current ?: run { show("Not sent: open Automagik and connect first."); return }
+            if (needsUnlock(vm.state.value.lockAnswers, context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)) {
+                show(UNLOCK_OUTCOME)
+                return
+            }
             val pending = goAsync()
             scope.launch {
                 try {
@@ -134,16 +186,20 @@ object Notify {
     class ReplyReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val ref = opened(intent) ?: return
+            val kind = intent.getStringExtra(EXTRA_KIND) ?: Alerts.BLOCKED
+            if (rejectLocked(context, ref, kind)) return
             val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)?.toString()?.trim().orEmpty()
             val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
-            val kind = intent.getStringExtra(EXTRA_KIND) ?: Alerts.BLOCKED
             val detail = intent.getStringExtra(EXTRA_DETAIL).orEmpty()
             fun show(outcome: String) = post(context, ref, kind, title, detail, silent = true,
                 lockScreen = PocketViewModel.current?.state?.value?.lockAnswers ?: false, sent = outcome)
             if (text.isBlank()) return
+            val vm = PocketViewModel.current ?: run { show("Not sent: open Automagik and connect first."); return }
+            if (needsUnlock(vm.state.value.lockAnswers, context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)) {
+                show(UNLOCK_OUTCOME)
+                return
+            }
             val pending = goAsync()
-            val vm = PocketViewModel.current
-            if (vm == null) { show("Not sent: open Automagik and connect first."); pending.finish(); return }
             scope.launch {
                 try { show(vm.reply(ref, text)) } finally { pending.finish() }
             }

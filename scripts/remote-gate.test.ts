@@ -35,16 +35,16 @@ exit 0
 `;
 
 let runs = 0;
-function gate(packageJson: Record<string, unknown>, lintExit = 0) {
+function gate(packageJson: Record<string, unknown>, lintExit = 0, app = 'fixture') {
   const dir = join(work, `gate-${runs++}`);
-  const app = join(dir, 'apps', 'fixture');
+  const plugin = join(dir, 'apps', app);
   const bin = join(dir, 'bin');
   const calls = join(dir, 'calls');
-  mkdirSync(join(app, 'test'), { recursive: true });
+  mkdirSync(join(plugin, 'test'), { recursive: true });
   mkdirSync(bin);
   mkdirSync(join(dir, 'logs'));
-  writeFileSync(join(app, 'package.json'), JSON.stringify(packageJson));
-  writeFileSync(join(app, 'test', 'fixture.test.js'), '');
+  writeFileSync(join(plugin, 'package.json'), JSON.stringify(packageJson));
+  writeFileSync(join(plugin, 'test', 'fixture.test.js'), '');
   writeFileSync(join(bin, 'node'), '#!/usr/bin/env bash\necho v22.0.0\n');
   writeFileSync(join(bin, 'bun'), BUN);
   chmodSync(join(bin, 'node'), 0o755);
@@ -61,7 +61,7 @@ ${fn('node_counts')}
 ${fn('judge')}
 ${fn('gate_plugin')}
 wt=$PWD
-app=fixture
+app=${app}
 plugin_node=24.9
 logs=$PWD/logs
 failed=0
@@ -113,6 +113,16 @@ describe('the plugin gate lint step (#714)', () => {
     expect(result.stdout).toContain('tests=2 pass=2 fail=0');
     expect(result.stdout).toContain('gate failed=1');
   });
+});
+
+test('only the bots-dsh gate installs the ACP dependencies for its role identity test', () => {
+  const install = 'install --cwd ../acp-dsh --frozen-lockfile';
+  const bots = gate({ name: 'bots-dsh' }, 0, 'bots-dsh');
+  const fixture = gate({ name: 'fixture' });
+  expect(bots.status).toBe(0);
+  expect(fixture.status).toBe(0);
+  expect(bots.calls).toContain(install);
+  expect(fixture.calls).not.toContain(install);
 });
 
 // #586: the held Lows from the #577 reviews. The lock, stamp and count helpers are extracted from

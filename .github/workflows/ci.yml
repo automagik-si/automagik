@@ -26,8 +26,8 @@ env:
   HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
   SCHEDULER_CHANGED_PATHS: '^(herdr/scheduler/|\.github/workflows/ci\.yml$)'
   AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
-  POCKET_CHANGED_PATHS: '^(apps/pocket/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
-  POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|\.github/workflows/ci\.yml$)'
+  POCKET_CHANGED_PATHS: '^(apps/pocket/|meter/schema/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
+  POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|docs/rfcs/fixtures/0033-document-names\.json$|\.github/workflows/ci\.yml$)'
   METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
   USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
@@ -386,8 +386,188 @@ jobs:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run check
+
+      # A browser hit skips both the Chromium download and Playwright's apt step; a browser
+      # miss still installs under a hard bound. The archive cache keeps a miss's deb downloads
+      # from repeating. Both keys carry the image or the pinned Playwright version, plus a
+      # suffix to bump when this step changes.
+      - name: Prepare the browser and apt caches
+        id: caches
+        run: |
+          set -euo pipefail
+          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
+          # here; the cache key must move when the hosted image (and its apt indexes) moves.
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "playwright=$(node -p "require('./node_modules/playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /var/cache/apt/archives/partial
+          # actions/cache restores as the runner user; the install then hands the cache to apt.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          sudo chmod -R u+rwX /var/cache/apt/archives
+
+      - name: Restore the Chromium package cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.caches.outputs.image }}-v1
+
+      - name: Restore the Playwright browser cache
+        id: browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.caches.outputs.playwright }}-${{ steps.caches.outputs.image }}-v1
+
+      # The apt phase below runs on a disposable runner whose own sources can point at a
+      # regional mirror that is down (run 44534018166). Rewrite the host to the canonical
+      # archive first: Playwright runs `apt-get update` inside `--with-deps`/`install-deps`,
+      # so the rewrite has to happen before the step below calls it.
+      - name: Point apt at the canonical Ubuntu archive
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/apt-canonical-sources.sh"
+
       - name: Chromium for the page tests
-        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+        run: |
+          set -euo pipefail
+
+          # Hard wall-clock bounds, in seconds, around every phase. An install gets 240s
+          # (4 min) and `update` 120s (2 min), as in the herdr step: generous for a slow but
+          # working mirror, while a stalled one is killed at the bound. Each sends TERM, then
+          # KILL 15s later. The browser download is not apt and gets its own 120s bound, so
+          # even the full 240+120+240+120 path plus four 15s graces stays under the job's cap.
+          readonly APT_INSTALL_LIMIT=240
+          readonly APT_UPDATE_LIMIT=120
+          readonly APT_KILL_AFTER=15
+          readonly BROWSER_LIMIT=120
+
+          log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+          # A hit means the browser tree is restored; trust it only if its executable is there.
+          if [ "${{ steps.browsers.outputs.cache-hit }}" = "true" ]; then
+            executable="$(node -e 'process.stdout.write(require("playwright-core").chromium.executablePath())' 2>/dev/null || true)"
+            if [ -n "${executable}" ] && [ -x "${executable}" ]; then
+              log "Playwright's Chromium came from the browser cache; skipping download and apt"
+              exit 0
+            fi
+            log "::warning::the browser cache reported a hit without an executable; installing again"
+          fi
+
+          # apt downloads as _apt; the restored archive cache must be writable by it, and handed
+          # back to the runner user afterwards so actions/cache can save the new debs.
+          sudo chown -R _apt:root /var/cache/apt/archives
+          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
+          hand_back() { sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives; }
+          trap hand_back EXIT
+
+          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
+          # stall visible in the log while apt still prints no secrets.
+          apt_opts=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+
+          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
+          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
+          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
+          run_apt() {
+            local limit="$1" phase="$2"
+            shift 2
+            local started="$SECONDS" status=0
+            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
+            local elapsed=$((SECONDS - started))
+            case "${status}" in
+              0)
+                log "apt phase '${phase}' finished in ${elapsed}s"
+                return 0
+                ;;
+              124|137)
+                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+              *)
+                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+            esac
+          }
+
+          # fail_phase <phase> <status>: end the step naming the phase; when the phase was a
+          # fetch, say the mirror did not answer so a red job points at it, not at this change.
+          fail_phase() {
+            local phase="$1" status="$2"
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              echo "::error::the Chromium dependency phase '${phase}' was killed at its wall-clock bound (exit ${status}); the apt mirror or browser CDN, not the code under test, did not answer"
+            else
+              echo "::error::the Chromium dependency phase '${phase}' failed (exit ${status}); the apt mirror or browser CDN is the likely cause, not the code under test"
+            fi
+            exit 1
+          }
+
+          # The pinned Playwright knows the system libraries Chromium needs. `--dry-run` prints
+          # its apt plan without touching the network, so the restored .deb cache can be tried
+          # before any `apt-get update`; a cache that covers them needs no mirror at all.
+          plan="$(node node_modules/playwright-core/cli.js install-deps --dry-run chromium 2>/dev/null || true)"
+          packages=()
+          if [[ "${plan}" == *--no-install-recommends* ]]; then
+            packages_line="${plan#*--no-install-recommends }"
+            packages_line="${packages_line%\"}"
+            read -r -a packages <<< "${packages_line}"
+          fi
+          if [ "${#packages[@]}" -eq 0 ]; then
+            # The plan format belongs to Playwright; if it moves, fall back to its own bounded
+            # --with-deps rather than guessing the package list.
+            log "::warning::could not read Playwright's dependency plan; falling back to install --with-deps under one bound"
+            status=0
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" 420 \
+              node node_modules/playwright-core/cli.js install --with-deps chromium || status=$?
+            if [ "${status}" -ne 0 ]; then
+              fail_phase "browser and system dependencies" "${status}"
+            fi
+            exit 0
+          fi
+
+          # Cache first: --no-download makes apt use /var/cache/apt/archives or fail, so a hit
+          # installs without a mirror and without an update.
+          status=0
+          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
+            install -y --no-install-recommends --no-download "${packages[@]}" || status=$?
+          if [ "${status}" -ne 0 ]; then
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              # A local install should not hit the bound; if it did, apt is wedged.
+              fail_phase "cache install (--no-download)" "${status}"
+            fi
+            log "apt: the package cache does not cover this image; refreshing indexes once from the canonical archive"
+            update_status=0
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || update_status=$?
+            if [ "${update_status}" -ne 0 ]; then
+              # The host was rewritten before this step; if update still fails, try the cache
+              # once more before giving up, so a stale index cannot red the job either.
+              log "apt: update failed (exit ${update_status}); trying the package cache once before giving up"
+              if ! run_apt "${APT_INSTALL_LIMIT}" "cache install after update failure (--no-download)" \
+                install -y --no-install-recommends --no-download "${packages[@]}"; then
+                echo "::error::the Chromium dependency phase 'update' failed (exit ${update_status}) and the package cache could not cover it; the Ubuntu mirror, not the code under test, is the cause"
+                exit 1
+              fi
+            else
+              run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+                install -y --no-install-recommends "${packages[@]}" \
+                || fail_phase "install (after update)" "$?"
+            fi
+          fi
+
+          # apt is done; fetch the browser itself under its own bound.
+          started=$SECONDS
+          status=0
+          log "Playwright's Chromium download started (bound ${BROWSER_LIMIT}s, kill-after ${APT_KILL_AFTER}s)"
+          timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${BROWSER_LIMIT}" \
+            node node_modules/playwright-core/cli.js install chromium || status=$?
+          elapsed=$((SECONDS - started))
+          if [ "${status}" -eq 0 ]; then
+            log "Playwright's Chromium finished in ${elapsed}s"
+          else
+            fail_phase "browser download" "${status}"
+          fi
       - run: bun run test
       - run: node scripts/mutations.mjs
 
@@ -450,6 +630,36 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      # The archive cache lets a later run install the libraries it already downloaded instead
+      # of fetching them again; the key carries the hosted image (ImageOS/ImageVersion) and a
+      # suffix to bump when this step changes. A miss still installs, bounded below.
+      - name: Prepare the apt archive cache
+        if: matrix.node == '24'
+        id: image
+        run: |
+          set -euo pipefail
+          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
+          # here; the cache key must move when the hosted image (and its apt indexes) moves.
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /var/cache/apt/archives/partial
+          # actions/cache restores as the runner user; the install then hands the cache to apt.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          sudo chmod -R u+rwX /var/cache/apt/archives
+
+      - name: Restore the herdr-app package cache
+        if: matrix.node == '24'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-herdr-app-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-v1
+
+      # The apt step below runs on a disposable runner whose own sources can point at a
+      # regional mirror that is down (run 44534018166). Rewrite the host to the canonical
+      # archive before `apt-get update` so a dead mirror cannot red this job.
+      - name: Point apt at the canonical Ubuntu archive
+        if: matrix.node == '24'
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/apt-canonical-sources.sh"
+
       # The app's own mod loader, not a stand-in: every PACK_MODS mod of the pack built from this
       # commit must load in the pinned Linux herdr-app. #624's node:url import passed the pack's
       # tests and failed only here, so this runs before them and prints herdr-app's own output.
@@ -458,8 +668,104 @@ jobs:
       - name: herdr-app system libraries
         if: matrix.node == '24'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libxkbcommon-x11-0 libxcb-xkb1
+          set -euo pipefail
+          sudo chown -R _apt:root /var/cache/apt/archives
+          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
+
+          # Hard wall-clock bounds, in seconds, around every apt phase. An install gets 240s
+          # (4 min) and `update` 120s (2 min): this two-package install took 2m33 in the slow
+          # run, so both are generous for a slow but working mirror, while a stalled one is
+          # killed at the bound. Each bound sends TERM, then KILL 15s later, so the worst path
+          # here (cache try, update, install) is 240+120+240 plus three 15s graces = 10m45s,
+          # under the job's 20-minute cap. PR #1690's run 44521928357 failed this step with
+          # `Unable to connect to azure.archive.ubuntu.com:http` and no phase visible, because
+          # every apt call was `-qq`.
+          readonly APT_INSTALL_LIMIT=240
+          readonly APT_UPDATE_LIMIT=120
+          readonly APT_KILL_AFTER=15
+
+          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
+          # stall visible in the log while apt still prints no secrets.
+          apt_opts=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+
+          log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
+          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
+          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
+          run_apt() {
+            local limit="$1" phase="$2"
+            shift 2
+            local started="$SECONDS" status=0
+            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
+            local elapsed=$((SECONDS - started))
+            case "${status}" in
+              0)
+                log "apt phase '${phase}' finished in ${elapsed}s"
+                return 0
+                ;;
+              124|137)
+                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+              *)
+                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+            esac
+          }
+
+          # fail_phase <phase> <status>: end the step, naming the phase, instead of retrying.
+          fail_phase() {
+            local phase="$1" status="$2"
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              echo "::error::the herdr-app system-libraries phase '${phase}' was killed at its wall-clock bound (exit ${status}); apt must not hang the herdr job"
+            else
+              echo "::error::the herdr-app system-libraries phase '${phase}' failed (apt exit ${status}); the step fails instead of retrying forever"
+            fi
+            exit 1
+          }
+
+          packages=(libxkbcommon-x11-0 libxcb-xkb1)
+
+          # A restored cache hit installs from its .debs only: --no-download makes apt use
+          # /var/cache/apt/archives or fail, so a hit needs no mirror at all.
+          status=0
+          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
+            install -y --no-install-recommends --no-download "${packages[@]}" || status=$?
+          if [ "${status}" -eq 0 ]; then
+            :
+          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            fail_phase "cache install (--no-download)" "${status}"
+          else
+            # A miss or an incomplete cache falls through to one bounded update + install; that
+            # is the single retry, and both of its phases stay bounded too.
+            log "apt: the package cache does not cover this image; refreshing indexes once, then installing"
+            update_status=0
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || update_status=$?
+            if [ "${update_status}" -ne 0 ]; then
+              # The sources were rewritten to the canonical archive before this step; if the
+              # update still fails, try the cache once more before giving up.
+              log "apt: update failed (exit ${update_status}); trying the package cache once before giving up"
+              if ! run_apt "${APT_INSTALL_LIMIT}" "cache install after update failure (--no-download)" \
+                install -y --no-install-recommends --no-download "${packages[@]}"; then
+                echo "::error::the herdr-app system-libraries phase 'update' failed (exit ${update_status}) and the package cache could not cover it; the Ubuntu mirror, not the code under test, is the cause"
+                exit 1
+              fi
+            else
+              run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+                install -y --no-install-recommends "${packages[@]}" || fail_phase "install (after update)" "$?"
+            fi
+          fi
+
+          # Hand the downloaded debs back to the runner user so actions/cache can save them.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
       - name: Every pack mod loads in herdr-app
         if: matrix.node == '24'
@@ -1281,7 +1587,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, welcome-dsh]
+        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, vault-dsh, welcome-dsh]
     defaults:
       run:
         working-directory: apps/${{ matrix.app }}
@@ -1310,6 +1616,12 @@ jobs:
         run: |
           bun install --frozen-lockfile
           [ -d dev/harness/node_modules ] || bun run harness
+
+      - name: ACP plugin dependencies for the role identity test
+        # role-runtime.test.js drives acp-dsh's adapter with the Bot team's identity reader.
+        if: matrix.app == 'bots-dsh'
+        working-directory: apps/acp-dsh
+        run: bun install --frozen-lockfile
 
       - name: Desktop dependencies for ACP lifecycle tests
         # The app-build upgrade case calls Desktop's profile merger, which resolves yaml here.
@@ -1378,6 +1690,31 @@ jobs:
           bin="$(node -p "require('electron')")"
           test -x "${bin}"
           echo "ELECTRON_BIN=${bin}" >> "$GITHUB_ENV"
+
+      - name: Two OS users for the machine reservation record
+        # RFC 0024 R4: exercise sticky-bit and group permissions with two distinct users.
+        if: matrix.app == 'bots-dsh'
+        run: |
+          set -euo pipefail
+          shellcheck -s sh scripts/reservations-setup.sh
+          root=/srv/automagik-ci
+          sudo groupadd automagik-ci
+          sudo useradd -M -N -g automagik-ci -s /usr/sbin/nologin amres-a
+          sudo useradd -M -N -g automagik-ci -s /usr/sbin/nologin amres-b
+          sudo sh scripts/reservations-setup.sh --group automagik-ci "${root}/reservations"
+          sudo install -d -m 0755 "${root}/bin" "${root}/plugin" \
+            "${root}/acp/src/host" "${root}/run"
+          sudo install -m 0755 "$(command -v node)" "${root}/bin/node"
+          sudo cp -R src "${root}/plugin/src"
+          sudo install -m 0644 test/fixtures/reservation-driver.mjs "${root}/plugin/"
+          sudo install -m 0644 ../acp-dsh/src/host/reservation-evidence.js "${root}/acp/src/host/"
+          sudo chmod -R a+rX "${root}/plugin" "${root}/acp"
+          for u in amres-a amres-b; do
+            (cd "${root}/run" && sudo -n -u "$u" -- "${root}/bin/node" \
+              "${root}/plugin/reservation-driver.mjs" probe "{\"dir\":\"${root}/reservations\"}")
+          done
+          printf 'RESERVATION_TWO_USERS={"root":"%s","dir":"%s","a":"%s","b":"%s"}\n' \
+            "$root" "${root}/reservations" amres-a amres-b >> "$GITHUB_ENV"
 
       - name: Generated files are current
         # A package with no browser half has no client to build.
@@ -1596,6 +1933,31 @@ jobs:
       - name: Test
         run: node --test test/batch-spawn.test.js test/process-identity.test.js
 
+      - name: Test native Windows vault keychain
+        working-directory: apps/vault-dsh
+        run: node --test test/keychain-windows-native.test.js
+
+  vault-keychain-macos:
+    name: vault-keychain-macos
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Test disposable macOS vault keychain
+        working-directory: apps/vault-dsh
+        run: node --test test/keychain-macos-native.test.js
+
   boot:
     # The plugins booted for real with Omni's channels and canvases (the release omni.json
     # pins): boot-check.yml, which Follow Omni also runs on a candidate Omni before carrying it.
@@ -1611,7 +1973,7 @@ jobs:
     name: CI result
     needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
-            plugin, acp-image-read, pets, desktop, acp-windows, boot]
+            plugin, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

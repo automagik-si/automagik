@@ -497,6 +497,20 @@ no longer shows the dialog, whatever the pane's status. A setup with Herdr's aut
 should pause an automation that targets a parked bot until its wake: `am` cannot stop the
 scheduler's own sends.
 
+**Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
+`am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
+including for a linked project named with `--machine M --project DIR`. Its scheduler must
+be running, with backend `hc` and bot targets (`herdr-automations` 0.12.1-am.2 or later, the
+pinned release). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
+just before the send, hc refuses to type into it and the failed run shows the reason.
+A new wake starts at its next occurrence. An already registered wake missed while the
+scheduler was stopped can catch up once on startup within 1380 elapsed minutes (23 hours).
+Daylight saving time follows the scheduler's cron library.
+
+`am ls` and `am show` report the schedule and the last run. Rerun the same `am edit` with
+`--wake` or `--no-wake` to repair a failed sync. A worktree edit saves to that worktree's
+roster. Run the same edit against the main checkout to change the live schedule.
+
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
@@ -1362,20 +1376,27 @@ Herdr starts `am machines update`: on each connected machine it runs that machin
 own `am update` (am, then the pack where one is installed), so every check is made there, by the
 copy installed there, against the keys it pins: the signed pointer, the tarball's sha256, never a
 release older than one it took, and the replaced copy kept (`am rollback automagik.am`,
-`am update --rollback`). Then usagemeter, as `meter install` does (the signed
-meter-lane pointer checked here, the build's sha256 on the machine, never a downgrade, the old
-binary kept as `usagemeter.prev`): on a machine that has one, or on all of them once you agreed to
-that, and never after `install.sh --no-usagemeter`. This computer's am and usagemeter follow in the
-same run; its pack is the sidebar's own update above.
+`am update --rollback`). The pack there takes the machine's **automatic** path (#1505): its own
+setting (`am update --auto off` on that machine) and a release it rolled back hold the pack,
+exactly as they hold the machine's own auto-update; a person's explicit `am update` there
+(`--retry-skipped` also clears the record) is still the only way to install a skipped release.
+Then usagemeter, as `meter
+install` does (the signed meter-lane pointer checked here, the build's sha256 on the machine, never
+a downgrade, the old binary kept as `usagemeter.prev`): on a machine that has one, or on all of
+them once you agreed to that, and never after `install.sh --no-usagemeter`. This computer's am and
+usagemeter follow in the same run; its pack is the sidebar's own update above.
 
 `am machines` shows the last answer of each machine: its am, pack and usagemeter
-versions, and what the last run did or why it did not (a pointer it could not verify, a download
-that failed, a machine that was not connected). A machine that was not updated is also said once in
-a notice. The record is `<app home>/automagik-herdr/linked-updates.json`.
+versions, both switches (its own pack auto setting and the linked updater's) and what the last run
+did or why it did not (a pointer it could not verify, a download that failed, a machine that was
+not connected). A machine that was not updated is also said once in a notice. The record is
+`<app home>/automagik-herdr/linked-updates.json`.
 
-It is on by default. A machine opts out with its own switch, the file `~/.automagik/linked-update`
-holding `off` (`am machines --auto off` there, or `--machine M` from here): the run
-reads it first and starts nothing on that machine. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
+The linked updater is on by default. A machine opts out with its own switch, the file
+`~/.automagik/linked-update` holding `off` (`am machines --auto off` there, or `--machine M` from
+here): the run reads it first and starts nothing on that machine. This is not the machine's pack
+setting (`am update --auto off`, shown as `pack auto`): that one holds the pack alone, while this
+one stops the whole linked run. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
 that runs Herdr turns the whole run off.
 
 Updates come from the Automagik monorepo's GitHub releases, through one signed pointer: the

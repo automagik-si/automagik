@@ -14,6 +14,7 @@ import { BRIDGE_NAME, isBridgeName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
+import { usageLimitOf } from './usage-limit.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -180,7 +181,7 @@ function stopped(what) {
 export class AgentRun {
   /**
    * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
-   *   name: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
+   *   name: string, provider?: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
    *   onWarn?: (message: string) => void, startMs?: number, requestMs?: number,
    *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
@@ -266,6 +267,7 @@ export class AgentRun {
         throw error
       }
       const identity = this.spec.botIdentity?.()
+      this.spec.botIdentity = undefined
       this.identityDelivery = identity
         ? this.init.agentCapabilities?.sessionCapabilities?.systemPrompt != null
           ? 'systemPrompt' : 'preamble'
@@ -458,14 +460,29 @@ export class AgentRun {
       this.tools.delete(id)
     }
     this.holdOn()
-    if (this.identityPreamble !== undefined) {
+    const carried = this.identityPreamble !== undefined
+    if (carried) {
       prompt = [{ type: 'text', text: this.identityPreamble }, ...prompt]
       this.identityPreamble = undefined
     }
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
-      result => this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' }),
-      error => this.endPrompt({ type: 'error', message: error?.message ?? String(error), ...(error?.code === undefined ? {} : { code: error.code }) }),
+      result => {
+        if (carried) {
+          this.preambleOutcome = result?.stopReason !== 'cancelled' && !this.cancelled
+            ? 'delivered' : 'unsure'
+        }
+        return this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' })
+      },
+      error => {
+        if (carried) this.preambleOutcome = 'unsure'
+        return this.endPrompt({
+          type: 'error', message: error?.message ?? String(error),
+          ...(error?.code === undefined ? {} : { code: error.code }),
+          ...(this.exited === undefined && usageLimitOf(this.spec.provider, error)
+            ? { usageLimit: true } : {}),
+        })
+      },
     )
     return this.prompting
   }
@@ -836,14 +853,20 @@ export class AgentRun {
     permission?.answer(refusal(tool.refused, permission.options))
   }
 
-  /** A skipped fork MCP call has no mirror to answer its question. */
+  /**
+   * A skipped fork MCP call has no mirror to answer its question. An unanswerable question is
+   * cancelled first. The bridge server's call gets `allow_once` when offered and is cancelled
+   * otherwise. Answering `allow_always` would let the agent record a standing rule nobody
+   * approved (RFC 0039). The bridge's own `approval/request` is the person's dialog. Other
+   * servers get the agent's reject option, or are cancelled when none is offered.
+   */
   answerSkippedMcp(tool, options) {
     if (this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
     const answerFor = (choices) => {
       if (tool.unanswerable === true) return CANCELLED
       if (tool.mcpServer !== BRIDGE_NAME) return refusal('rejected', choices)
-      const allow = choices.find(option => option.kind === 'allow_once') ?? choices.find(option => option.kind === 'allow_always')
-      return allow === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: allow.optionId } }
+      const once = choices.find(option => option.kind === 'allow_once')
+      return once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } }
     }
     // A question already stored is answered from its own options, a new one (`options`) from its own.
     const stored = tool.permission
@@ -878,12 +901,13 @@ export class AgentRun {
       if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
     }
     // The bridge's call is not the mirror's: acp-dsh answers this ACP request itself with
-    // `allow-once` and raises no DSH dialog from it. The bridge's own `approval/request` is the
-    // one dialog the person sees (RFC 0003, amendment, "One dialog per call").
+    // `allow-once` or cancels a question that offers no `allow_once`: never `allow_always`,
+    // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
+    // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
+    // person sees (RFC 0003, amendment, "One dialog per call").
     if (this.spec.dshTools === true && tool.bridge === true) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
-        ?? (params.options ?? []).find(option => option.kind === 'allow_always')
-      return Promise.resolve(once === undefined ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: once.optionId } })
+      return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }
     const skipped = this.answerSkippedMcp(tool, params.options ?? [])
     if (skipped !== undefined) return Promise.resolve(skipped)
@@ -908,6 +932,8 @@ export class AgentRun {
         signal: lifetime.signal,
         invalidate: () => lifetime.abort(),
         options: params.options ?? [],
+        // codex-acp renders execute/pending on the question only before the command starts (dist/index.js:35333).
+        startsCommand: params.toolCall?.kind === 'execute' && params.toolCall?.status === 'pending',
         answer: (response) => {
           if (done) return
           done = true

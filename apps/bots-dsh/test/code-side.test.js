@@ -3,6 +3,7 @@
 // computer's own terminal. Every core here is the test's own fake (`fixtures/fake-hc-core.mjs`):
 // no live herdr, no real pane, no real team.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -17,9 +18,19 @@ import { HOME_PATH, REPO_PATH } from '../src/shared/registry.js'
 import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
 import { buildCodeTree, readCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
 import { connectCore } from '../src/host/code-core.js'
-import { CODE_STREAM_ROUTE, CODE_TREE_ENDPOINT, install, openPaneStream, streamAdmission, streamTarget } from '../src/host/code-side.js'
+import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
+import { connectFakeCore } from './fixtures/fake-core-connection.mjs'
+import { aWindowProof } from './fixtures/window-proof.mjs'
+import { CODE_STREAM_ROUTE, CODE_TREE_ENDPOINT, MAX_QUEUED_BYTES, install, openPaneStream, streamAdmission, streamTarget, streamTargets } from '../src/host/code-side.js'
 import { CODE_INPUT_ROUTE, CODE_RELEASE_ROUTE, CODE_TAKE_ROUTE } from '../src/host/code-typing.js'
-import { install as installHooks } from '../src/host/extend.js'
+import { install as installChannel } from '../src/host/channel.js'
+import { install as installSeats } from '../src/host/seat-chat.js'
+import { install as installHooks, windowEndpoint } from '../src/host/extend.js'
+import { fromWindow } from '../src/host/desktop-window.js'
+
+const WINDOW = 'ab'.repeat(32)
+const DIGEST = createHash('sha256').update(WINDOW, 'ascii').digest('hex')
+const WINDOW_HEADERS = { 'x-automagik-window': WINDOW }
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-hc-core.mjs', import.meta.url))
 const LEAD = 'b-aaaaaaaaaa'
@@ -33,7 +44,7 @@ const TERMINALS = [
   { address: 't9', created_ms: 900, state: 'live', cols: 90, rows: 25, status: 'blocked', agent: 'claude-code' },
 ]
 
-function fixture(t) {
+function fixture(t, { probe = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'automagik-code-side-'))
   // A plugin's own writes can still be in flight when the test ends: retry the tree removal.
   t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
@@ -47,6 +58,7 @@ function fixture(t) {
   writeFileSync(join(automagikHome, 'bots', 'bots.json'), JSON.stringify({
     version: 2,
     projects: [{ folder: project }],
+    shown: [{ project, bots: [LEAD, DEV] }],
     bots: [
       { id: LEAD, name: 'Atlas', role: 'lead', agent: 'claude', main: true, folder: project },
       { id: DEV, name: 'Dev', role: 'dev', agent: 'claude', folder: project },
@@ -68,8 +80,11 @@ function fixture(t) {
   const terminalsFile = join(root, 'terminals.json')
   writeFileSync(terminalsFile, JSON.stringify(TERMINALS))
   const log = join(root, 'core.log')
+  const probeEnv = probe ? coreProbeFixture(t, root) : {}
   const env = {
     ...process.env,
+    ...probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: root,
     AUTOMAGIK_HOME: automagikHome,
     HERDR_APP_HOME: appHome,
@@ -77,7 +92,7 @@ function fixture(t) {
     FAKE_CORE_LOG: log,
     FAKE_CORE_TERMINALS: terminalsFile,
   }
-  return { root, project, automagikHome, appHome, ledgerDir, env, log, terminalsFile }
+  return { root, project, automagikHome, appHome, ledgerDir, env, probeEnv, log, terminalsFile }
 }
 
 const readLog = (path) => {
@@ -177,6 +192,7 @@ test('a global Bot with no folder is a seat: the tree lists it and its pane reso
   writeFileSync(join(f.automagikHome, 'bots', 'bots.json'), JSON.stringify({
     version: 2,
     projects: [{ folder: f.project }],
+    shown: [{ project: f.project, bots: [LEAD] }],
     bots: [
       { id: LEAD, name: 'Atlas', role: 'lead', agent: 'claude', main: true, folder: f.project },
       // RFC 0014: a home-file Bot with no folder. RFC 0022 lists it as a seat.
@@ -323,7 +339,7 @@ test('owner only: the exact stream route refuses a share viewer, and an unauthen
   const connection = { fetchRoutes: new Map(), interceptors: new Map() }
   HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, route)
   const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
-  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/stream?bot=b-aaaaaaaaaa', { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin', host: '127.0.0.1' } })
+  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/stream?bot=b-aaaaaaaaaa', { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin', host: '127.0.0.1' } })
   const viewer = { principal: { kind: 'share-viewer', shareId: 'share', actor: { providerId: 'p', tenantId: 't', subjectId: 's' } } }
   // A Bot's own tool call speaks for its Session, never for the owner's window.
   const botSession = { principal: { kind: 'agent', sessionId: 'session-341a3de3-87c4-4dda-b228-67efca79821b' } }
@@ -350,7 +366,7 @@ test('owner only: the exact stream route refuses a share viewer, and an unauthen
 
 
 /** The stream route as install registers it, with a fake ctx whose Connection can be stopped. */
-function startHost(t, env = process.env) {
+function startHost(t, env = process.env, connect) {
   let route = null
   let connectionLive = true
   const disposers = []
@@ -361,13 +377,13 @@ function startHost(t, env = process.env) {
     get: name => (name === 'connection' ? (connectionLive ? connection : undefined) : undefined),
   }
   const rt = { ctx, hooks: { endpoint: () => () => {} }, warn: () => {}, home: process.cwd() }
-  const off = install(rt, { env, desktop: true })
+  const off = install(rt, { env, desktop: true, connect })
   t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
-  const request = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
+  const request = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
   return { request, get route() { return route }, off, stopConnection: () => { connectionLive = false } }
 }
 
-const streamAsk = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
+const streamAsk = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
 
 test('a refused open frees its stream slot, so refusals never spend the pane budget', async (t) => {
   const f = fixture(t)
@@ -436,7 +452,7 @@ test('installing the Code side reads no tree: the read starts with the first Ter
     effect: (fn) => { const off = fn(); if (typeof off === 'function') disposers.push(off); return () => {} },
     connection: { fetch: { register: () => () => {} } },
   }
-  const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = fn; return () => {} } }, warn: () => {}, home: f.root }
+  const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = () => fn(undefined, undefined, aWindowProof()); return () => {} } }, warn: () => {}, home: f.root }
   const off = install(rt, { env: f.env, desktop: true, connect: (...args) => { connects += 1; return connectCore(...args) } })
   t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
   assert.equal(typeof endpoint, 'function', 'the tree endpoint is served')
@@ -537,6 +553,8 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
   mkdirSync(team, { recursive: true })
   const saved = {}
   const env = {
+    ...f.probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: f.root,
     AUTOMAGIK_HOME: f.automagikHome,
     AUTOMAGIK_BOTS_HOME: team,
@@ -583,7 +601,7 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
   const fork = root.plugin(plugin, { home: team, browserPlugin: false })
   await fork
   assert.ok(route, 'the Code stream route is registered in the real plugin scope')
-  const response = await route.fetch(new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } }))
+  const response = await route.fetch(new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`, { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } }))
   assert.equal(response.status, 200)
   const reader = response.body.getReader()
   await reader.read()
@@ -605,4 +623,579 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
     if (saved[key] === undefined) delete process.env[key]
     else process.env[key] = saved[key]
   }
+})
+
+test('the Code tree and pane resolver skip projects without a local shown entry', async (t) => {
+  const f = fixture(t)
+  const hidden = join(f.root, 'hidden')
+  const id = 'b-dddddddddd'
+  const homePath = join(f.automagikHome, HOME_PATH)
+  const home = JSON.parse(readFileSync(homePath, 'utf8'))
+  home.projects.push({ folder: hidden })
+  home.bots.push({ id, name: 'Hidden Bot', folder: hidden })
+  home.shown.push({ project: hidden, machine: 'lab', bots: [id] })
+  writeFileSync(homePath, JSON.stringify(home))
+  const ledger = join(f.ledgerDir, 'attach.jsonl')
+  writeFileSync(ledger, readFileSync(ledger, 'utf8') + JSON.stringify({
+    v: 1, event: 'attach', bot: id, project: hidden, terminal: 't7', core: CORE, created_ms: 700,
+    machine: null, at: '2026-11-15T00:00:00.000Z', by: 'start',
+  }) + '\n')
+  const connect = t.mock.fn(connectCore)
+  const { tree } = await readCodeTree({ env: f.env, connect })
+  assert.deepEqual(tree.projects.map(project => project.folder), [f.project])
+  connect.mock.resetCalls()
+  assert.equal(await resolvePane({ botId: id, env: f.env, connect }), null)
+  assert.equal(connect.mock.callCount(), 0, 'resolvePane refuses the project before talking to a core')
+})
+
+test('the real owner dispatcher requires the window marker for the tree and seat screen', async (t) => {
+  const f = fixture(t)
+  const ctx = fakeContext()
+  const connection = { fetchRoutes: new Map(), interceptors: new Map() }
+  ctx.connection.fetch.register = options => HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, options)
+  const rt = {
+    ctx, state: { bots: {} }, home: f.root, registryPath: join(f.automagikHome, HOME_PATH),
+    load: async () => {}, refresh: async () => {}, readOnly: () => undefined, warn: () => {},
+  }
+  t.after(() => ctx.dispose())
+  const saved = process.send
+  process.send = () => true
+  t.after(() => {
+    if (saved === undefined) delete process.send
+    else process.send = saved
+  })
+  const was = { flag: process.env.AUTOMAGIK_APP_BROWSER, digest: process.env.AUTOMAGIK_WINDOW_DIGEST }
+  process.env.AUTOMAGIK_APP_BROWSER = '1'
+  process.env.AUTOMAGIK_WINDOW_DIGEST = DIGEST
+  t.after(() => {
+    if (was.flag === undefined) delete process.env.AUTOMAGIK_APP_BROWSER
+    else process.env.AUTOMAGIK_APP_BROWSER = was.flag
+    if (was.digest === undefined) delete process.env.AUTOMAGIK_WINDOW_DIGEST
+    else process.env.AUTOMAGIK_WINDOW_DIGEST = was.digest
+  })
+
+  installHooks(rt)
+  t.after(install(rt, { env: f.env, desktop: true }))
+  const screen = ['fixture screen']
+  const watch = t.mock.fn(() => ({
+    rows: () => [], screen: () => screen, status: () => null,
+    approval: () => null, question: () => null, close() {},
+  }))
+  installSeats(rt, { engine: {
+    ready: async () => {}, hub: { all: () => [{ address: 't7', labels: { bot: LEAD } }] }, watch, close() {},
+  } })
+  installChannel(rt)
+  const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
+  const owner = { principal: { kind: 'owner' } }
+  const request = (path, { marker, method = 'POST', body } = {}) => {
+    const headers = new Headers({ accept: 'text/event-stream', 'content-type': 'application/json' })
+    if (marker) headers.set('x-automagik-window', marker)
+    const init = { method, headers, ...(body ? { body: JSON.stringify(body) } : {}) }
+    return handler.fetch(new Request(`http://127.0.0.1${path}`, init), owner)
+  }
+  const seat = { client: 'seat-window', terminal: 't7' }
+  const call = async (endpoint, marker, payload) => (await request('/api/omni-ui', { marker, body: { endpoint, payload } })).json()
+  for (const marker of [undefined, 'cd'.repeat(32), DIGEST]) {
+    assert.deepEqual(await call('code-tree', marker), { ok: true, value: DESKTOP_ONLY })
+    for (const endpoint of ['seat-chat-open', 'seat-chat-read']) {
+      const answer = await call(endpoint, marker, seat)
+      assert.deepEqual(answer, { ok: false, error: { code: 'bot/refused', message: 'desktop-only', details: {} } })
+      assert.equal(JSON.stringify(answer).includes('screen'), false)
+    }
+    for (const path of DESKTOP_ROUTES) {
+      const response = await request(path, { marker, method: path === CODE_STREAM_ROUTE ? 'GET' : 'POST' })
+      assert.equal(response.status, 403)
+      assert.deepEqual(await response.json(), { error: 'desktop-only' })
+    }
+  }
+  assert.equal(watch.mock.callCount(), 0)
+  assert.equal(readLog(f.log).length, 0)
+  assert.equal((await call('code-tree', WINDOW)).value.machine.core, CORE)
+  assert.deepEqual((await call('seat-chat-open', WINDOW, seat)).value.screen, screen)
+  assert.deepEqual((await call('seat-chat-read', WINDOW, seat)).value.screen, screen)
+  assert.equal((await call('seat-chat-read', undefined, seat)).error.message, 'desktop-only')
+  // An unmarked close is refused and leaves the watch; the window's own close releases it.
+  assert.equal((await call('seat-chat-close', undefined, seat)).error.message, 'desktop-only')
+  assert.deepEqual((await call('seat-chat-read', WINDOW, seat)).value.screen, screen)
+  assert.deepEqual((await call('seat-chat-close', WINDOW, seat)).value, { closed: true })
+  assert.match((await call('seat-chat-read', WINDOW, seat)).error.message, /not open/)
+  // Another plugin's endpoint, called by the window itself, gets no proof to keep.
+  const seen = []
+  const off = rt.hooks.endpoint('another-plugin-endpoint', async (_body, _signal, windowSeen) => { seen.push(windowSeen); return 'ok' }, { read: true })
+  assert.deepEqual(await call('another-plugin-endpoint', WINDOW, {}), { ok: true, value: 'ok' })
+  off()
+  assert.deepEqual(seen, [false])
+  // A window-only endpoint gets the proof for its request, and the route revokes it when the request ends.
+  let kept
+  const offWindow = windowEndpoint(rt, 'test-window-endpoint', async (_body, _signal, windowSeen) => { kept = windowSeen; return fromWindow(windowSeen) }, { read: true })
+  assert.deepEqual(await call('test-window-endpoint', WINDOW, {}), { ok: true, value: true })
+  offWindow()
+  assert.equal(fromWindow(kept), false, 'a proof kept after its request opens nothing')
+  delete process.env.AUTOMAGIK_WINDOW_DIGEST
+  assert.deepEqual((await call('code-tree', WINDOW)).value, DESKTOP_ONLY)
+})
+
+test('the stream distinguishes a failed pane resolution from a failed second connect', async (t) => {
+  const f = fixture(t)
+  const url = `http://127.0.0.1${CODE_STREAM_ROUTE}?bot=${LEAD}`
+  const unavailable = () => { throw new Error('fixture core has stopped') }
+  const noPane = await openPaneStream({ url, env: f.env, connect: unavailable })
+  assert.equal(noPane.status, 404)
+  assert.deepEqual(await noPane.json(), { error: 'no-pane' })
+  const connect = t.mock.fn(unavailable)
+  connect.mock.mockImplementationOnce(async () => ({
+    info: { core: { id: CORE } }, call: async () => TERMINALS[0], close() {},
+  }))
+  const noCore = await openPaneStream({ url, env: f.env, connect })
+  assert.equal(noCore.status, 503)
+  assert.deepEqual(await noCore.json(), { error: 'no-core' })
+})
+
+async function paneEvent(reader) {
+  const { value } = await reader.read()
+  const [, event, data] = /^event: (\w+)\ndata: (.*)\n\n$/.exec(new TextDecoder().decode(value)) ?? []
+  assert.ok(event, 'one SSE event per chunk')
+  return { event, data: event === 'data' ? Buffer.from(data, 'base64').toString() : JSON.parse(data) }
+}
+
+for (const [resizeTo, event] of [['92x28', 'reset'], ['0x28', 'close'], ['5000x28', 'close']]) {
+  test(`an observer resize hint to ${resizeTo} yields ${event} after the old paint`, { timeout: 5000 }, async (t) => {
+    const f = fixture(t, { probe: false })
+    const abort = new AbortController()
+    t.after(() => abort.abort())
+    const response = await openPaneStream({
+      url: `http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`,
+      env: { ...f.env, FAKE_CORE_KEEP_OPEN: '1', FAKE_CORE_RESIZE_TO: resizeTo }, signal: abort.signal, connect: connectFakeCore,
+    })
+    assert.equal(response.status, 200)
+    const reader = response.body.getReader()
+    assert.deepEqual(await paneEvent(reader), { event: 'pane', data: { bot: LEAD, terminal: 't7', cols: 120, rows: 40, name: 'Atlas' } })
+    const old = await paneEvent(reader)
+    assert.equal(old.event, 'data')
+    assert.match(old.data, /fake-pane/)
+    if (event === 'reset') {
+      assert.deepEqual(await paneEvent(reader), { event: 'reset', data: { cols: 92, rows: 28 } })
+      const paint = 'resized-paint\r\n'
+      assert.deepEqual(await paneEvent(reader), { event: 'data', data: paint })
+      const credits = () => readLog(f.log).filter(row => row.type === 'frame' && row.kind === 1)
+      assert.ok(await wait(() => credits().length === 2))
+      assert.deepEqual(credits().map(row => [row.channel, Buffer.from(row.payload, 'base64').readInt32LE()]),
+        [[7, Buffer.byteLength(old.data)], [8, Buffer.byteLength(paint)]])
+    } else {
+      assert.deepEqual(await paneEvent(reader), { event: 'close', data: { reason: 'resize' } })
+      assert.equal((await reader.read()).done, true)
+    }
+    const trace = readLog(f.log)
+    const attaches = trace.filter(row => row.type === 'call' && row.method === 'terminal.attach')
+    assert.equal(attaches.length, 2)
+    assert.ok(attaches.every(row => row.params.observe === true && row.params.history === 1000))
+    assert.ok(trace.some(row => row.type === 'detached' && row.channel === 7))
+    assert.equal(trace.some(row => row.type === 'frame' && row.kind === 3), false)
+    await reader.cancel()
+  })
+}
+
+test('a slow reader sees only the newest queued reset and its paint, after the old bytes', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  let attachCount = 0
+  const watcher = new Map()
+  const credits = []
+  const detached = []
+  const core = {
+    async attach() {
+      const channel = ++attachCount
+      return { channel, terminal: { cols: 80 + channel, rows: 24 } }
+    },
+    detach: channel => detached.push(channel),
+    close() {},
+    credit: (channel, bytes) => credits.push([channel, bytes]),
+    watch(channel, handlers) {
+      watcher.set(channel, handlers)
+      handlers.onData(Buffer.from(`paint-${channel}`))
+      if (channel < 3) handlers.onResize()
+    },
+  }
+  let connections = 0
+  const response = await openPaneStream({
+    url: `http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`, env: f.env, signal: abort.signal,
+    connect: options => (++connections === 1 ? connectFakeCore(options) : core),
+  })
+  const reader = response.body.getReader()
+  assert.deepEqual(credits, [])
+  assert.ok(await wait(() => watcher.has(3)))
+  assert.deepEqual(detached, [1, 2])
+  watcher.get(1).onData(Buffer.from('late-old'))
+  assert.deepEqual(credits, [])
+  assert.deepEqual(await paneEvent(reader), { event: 'pane', data: { bot: LEAD, terminal: 't7', cols: 81, rows: 24, name: 'Atlas' } })
+  assert.deepEqual(await paneEvent(reader), { event: 'data', data: 'paint-1' })
+  assert.deepEqual(await paneEvent(reader), { event: 'reset', data: { cols: 83, rows: 24 } })
+  assert.deepEqual(await paneEvent(reader), { event: 'data', data: 'paint-3' })
+  assert.deepEqual(credits, [[3, 7]])
+  await reader.cancel()
+})
+
+test('the registered route admits six distinct live streams and reuses a closed slot', async (t) => {
+  const f = fixture(t, { probe: false })
+  const workers = [10, 11, 12, 13, 14, 15].map(n => ({ address: `t${n}`, created_ms: n * 100, state: 'live', cols: 80, rows: 24 }))
+  writeFileSync(f.terminalsFile, JSON.stringify([...TERMINALS, ...workers]))
+  for (const terminal of workers) {
+    writeFileSync(join(f.ledgerDir, 'workers.jsonl'), JSON.stringify({
+      event: 'start', kind: 'worker', terminal: terminal.address, created_ms: terminal.created_ms, botId: LEAD,
+      lead: LEAD, role: 'dev', project: f.project, worktree: f.project, core: CORE, at: '2026-11-15T00:00:00.000Z',
+    }) + '\n', { flag: 'a' })
+  }
+  const host = startHost(t, { ...f.env, FAKE_CORE_KEEP_OPEN: '1' }, connectFakeCore)
+  const workerAsk = terminal => new Request(`${streamAsk(LEAD).url}&worker=${terminal}`, { headers: streamAsk(LEAD).headers })
+  const requests = [streamAsk(LEAD), streamAsk(DEV), ...['t9', 't10', 't11', 't12', 't13'].map(workerAsk)]
+  const live = []
+  for (const request of requests.slice(0, 6)) {
+    const response = await host.route.fetch(request)
+    assert.equal(response.status, 200)
+    live.push(response)
+  }
+  // Keep the six original opens, then fill the two slots added for a second Code view.
+  for (const terminal of ['t14', 't15']) {
+    const response = await host.route.fetch(workerAsk(terminal))
+    assert.equal(response.status, 200)
+    live.push(response)
+  }
+  assert.equal((await host.route.fetch(requests[0])).status, 409)
+  assert.equal((await host.route.fetch(requests[6])).status, 429)
+  await live.pop().body.cancel()
+  const reused = await host.route.fetch(requests[6])
+  assert.equal(reused.status, 200)
+  await Promise.all([...live, reused].map(response => response.body.cancel()))
+})
+
+const multiTargets = targets => targets.map(([bot, worker, viewer]) => ({ bot, worker, viewer }))
+const streamUrl = (targets, multi = targets.length > 1) => {
+  const params = new URLSearchParams()
+  for (const { bot, worker, viewer } of targets) {
+    params.append('bot', bot)
+    if (multi || worker) params.append('worker', worker ?? '')
+    if (viewer) params.append('viewer', viewer)
+  }
+  return `http://127.0.0.1${CODE_STREAM_ROUTE}?${params}`
+}
+
+test('multiplexed queries align the seat and worker tags and refuse malformed sets', () => {
+  const targets = multiTargets([[LEAD, null, 'viewer-1'], [LEAD, 't9', 'viewer-2']])
+  assert.deepEqual(streamTargets(streamUrl(targets)), targets)
+  assert.equal(streamTargets(streamUrl([...targets, { bot: DEV, worker: null, viewer: 'viewer-3' }])).length, 3)
+  const url = streamUrl(targets)
+  const [first, second] = targets
+  for (const [query, error] of [
+    [streamUrl([first], true), 'no-bot'],
+    [streamUrl([first, { ...second, bot: 'bad' }]), 'no-bot'],
+    [url.replace('&worker=t9', ''), 'no-worker'],
+    [url + '&worker=', 'no-worker'],
+    [url.replace('t9', 'a%20b'), 'no-worker'],
+    [url.replace('&viewer=viewer-2', ''), 'no-viewer'],
+    [url + '&viewer=viewer-3', 'no-viewer'],
+    [url.replace('viewer-2', 'short'), 'no-viewer'],
+    [url.replace('viewer-2', 'viewer-1'), 'no-viewer'],
+    [url.replace('t9', ''), 'duplicate-pane'],
+    [url + '&terminal=t9', 'unknown-parameter'],
+    [streamUrl([first, second, first, second, first]), 'too-many-panes'],
+  ]) assert.deepEqual(streamTargets(query), { error }, query)
+})
+
+function multiHost(t, f, connect) {
+  const { rt, routes } = codeRuntime(t)
+  rt.home = f.root
+  rt.ctx.connection.admit = () => ({})
+  t.after(install(rt, { env: f.env, desktop: true, connect }))
+  const request = (targets, { signal, headers } = {}) => new Request(streamUrl(targets), {
+    signal, headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin', ...headers },
+  })
+  return {
+    request,
+    open: request => routes.get(CODE_STREAM_ROUTE).fetch(request),
+    post: (route, body) => routes.get(route).fetch(new Request(`http://127.0.0.1${route}`, {
+      method: 'POST', headers: { ...WINDOW_HEADERS, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })),
+  }
+}
+
+async function taggedEvent(reader) {
+  const { value } = await reader.read()
+  const [, event, data] = /^event: (\w+)\ndata: (.*)\n\n$/.exec(new TextDecoder().decode(value)) ?? []
+  assert.ok(event, 'one tagged SSE event per chunk')
+  return { event, data: JSON.parse(data) }
+}
+
+function controlledCore(f, { attachGrid, refuseAttach } = {}) {
+  const terminals = JSON.parse(readFileSync(f.terminalsFile, 'utf8'))
+  const attaches = []
+  const credits = []
+  const connect = async () => {
+    let channel = 0
+    const channels = new Map()
+    return {
+      info: { core: { id: CORE } },
+      call: async (_method, { terminal }) => terminals.find(row => row.address === terminal),
+      async attach(params) {
+        if (params.terminal === refuseAttach) throw new Error('fixture refused the attach')
+        channel += 1
+        const attachment = { ...params, channel }
+        attaches.push(attachment)
+        channels.set(channel, attachment)
+        return { channel, terminal: attachGrid?.(channel) ?? { cols: params.cols, rows: params.rows } }
+      },
+      watch(channel, handlers) {
+        const attachment = channels.get(channel)
+        attachment.handlers = handlers
+        if (!attachment.observe) handlers.onData(Buffer.from('typing-ready'))
+      },
+      credit(channel, bytes) { credits.push([channels.get(channel).terminal, channel, bytes]) },
+      detach(channel) { channels.get(channel).detached = true },
+      writeFrame() {},
+      close() { for (const attachment of channels.values()) attachment.closed = true },
+    }
+  }
+  return { connect, attaches, credits, watching: (terminal, channel = 1) => attaches.find(a => a.terminal === terminal && a.channel === channel && a.observe)?.handlers }
+}
+
+const dataEvent = (p, text) => ({ event: 'data', data: { p, d: Buffer.from(text).toString('base64') } })
+const closeEvent = (p, reason) => ({ event: 'close', data: { p, reason } })
+
+test('the registered multi stream isolates a terminal close, failed resolution and refused attach', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  const core = controlledCore(f, { refuseAttach: 't9' })
+  const host = multiHost(t, f, core.connect)
+  const targets = multiTargets([[LEAD, null, 'viewer-1'], [DEV, null, 'viewer-2'],
+    [ELSEWHERE, null, 'viewer-3'], [LEAD, 't9', 'viewer-4']])
+  const response = await host.open(host.request(targets))
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  const opening = await Promise.all(Array.from({ length: 4 }, () => taggedEvent(reader)))
+  assert.deepEqual(opening.sort((a, b) => a.data.p - b.data.p), [
+    { event: 'pane', data: { p: 0, bot: LEAD, terminal: 't7', cols: 120, rows: 40, name: 'Atlas' } },
+    { event: 'pane', data: { p: 1, bot: DEV, terminal: 't8', cols: 100, rows: 30, name: 'Dev' } },
+    closeEvent(2, 'no-pane'),
+    closeEvent(3, 'attach-refused'),
+  ])
+  const a = core.watching('t7')
+  const b = core.watching('t8')
+  a.onData(Buffer.from('atlas'))
+  b.onData(Buffer.from('dev'))
+  assert.deepEqual(await taggedEvent(reader), dataEvent(0, 'atlas'))
+  assert.deepEqual(await taggedEvent(reader), dataEvent(1, 'dev'))
+  a.onClose('terminal-ended')
+  b.onData(Buffer.from('still watching'))
+  assert.deepEqual(await taggedEvent(reader), closeEvent(0, 'terminal-ended'))
+  assert.deepEqual(await taggedEvent(reader), dataEvent(1, 'still watching'))
+  b.onClose('ended')
+  assert.deepEqual(await taggedEvent(reader), closeEvent(1, 'ended'))
+  assert.equal((await reader.read()).done, true)
+  assert.deepEqual(core.credits, [['t7', 1, 5], ['t8', 1, 3], ['t8', 1, 14]])
+  assert.ok(core.attaches.every(a => a.closed && a.observe && a.history === 1000))
+})
+
+test('the registered 2-pane form reports a failed observer connection and still serves the other core', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  const core = controlledCore(f)
+  let connects = 0
+  const host = multiHost(t, f, async () => {
+    if (++connects === 3) throw new Error('fixture connection failed')
+    return core.connect()
+  })
+  const response = await host.open(host.request(multiTargets([[LEAD, null, 'viewer-1'], [DEV, null, 'viewer-2']])))
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  assert.equal(response.status, 200)
+  const events = await Promise.all([taggedEvent(reader), taggedEvent(reader)])
+  assert.deepEqual(events.find(item => item.event === 'close'), closeEvent(0, 'no-core'))
+  assert.equal(events.find(item => item.event === 'pane').data.p, 1)
+  core.watching('t8').onData(Buffer.from('other core'))
+  assert.deepEqual(await taggedEvent(reader), dataEvent(1, 'other core'))
+})
+
+test('an unread reset replaces only its pane paint and credits only current attachments', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  const core = controlledCore(f, { attachGrid: channel => ({ cols: 80 + channel, rows: 24 }) })
+  const host = multiHost(t, f, core.connect)
+  const response = await host.open(host.request(multiTargets([[LEAD, null, 'viewer-1'], [DEV, null, 'viewer-2']])))
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  assert.ok(await wait(() => core.watching('t7') && core.watching('t8')))
+  core.watching('t7').onData(Buffer.from('old A'))
+  core.watching('t7').onResize()
+  assert.ok(await wait(() => core.watching('t7', 2)))
+  core.watching('t7', 2).onData(Buffer.from('superseded A'))
+  core.watching('t8').onData(Buffer.from('live B'))
+  core.watching('t7', 2).onResize()
+  core.watching('t8').onData(Buffer.from('last B'))
+  core.watching('t8').onClose('ended')
+  assert.ok(await wait(() => core.watching('t7', 3)))
+  core.watching('t7', 3).onData(Buffer.from('new A'))
+  assert.deepEqual(core.credits, [])
+  const panes = await Promise.all([taggedEvent(reader), taggedEvent(reader)])
+  assert.deepEqual(panes.map(pane => pane.data.p).sort(), [0, 1])
+  assert.deepEqual(await taggedEvent(reader), dataEvent(0, 'old A'))
+  assert.deepEqual(await taggedEvent(reader), dataEvent(1, 'live B'))
+  assert.deepEqual(await taggedEvent(reader), dataEvent(1, 'last B'))
+  assert.deepEqual(await taggedEvent(reader), closeEvent(1, 'ended'))
+  assert.deepEqual(await taggedEvent(reader), { event: 'reset', data: { p: 0, cols: 83, rows: 24 } })
+  assert.deepEqual(await taggedEvent(reader), dataEvent(0, 'new A'))
+  assert.deepEqual(core.credits, [['t7', 3, 5]])
+})
+
+test('the byte cap is shared across pane queues and ends the response', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  const core = controlledCore(f)
+  const host = multiHost(t, f, core.connect)
+  const response = await host.open(host.request(multiTargets([[LEAD, null, 'viewer-1'], [DEV, null, 'viewer-2']])))
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  assert.ok(await wait(() => core.watching('t7') && core.watching('t8')))
+  core.watching('t7').onData(Buffer.alloc(MAX_QUEUED_BYTES / 2))
+  core.watching('t8').onData(Buffer.alloc(MAX_QUEUED_BYTES / 2 + 1))
+  const hello = await taggedEvent(reader)
+  assert.equal(hello.event, 'pane')
+  assert.deepEqual(await taggedEvent(reader), closeEvent(0, 'slow'))
+  assert.deepEqual(await taggedEvent(reader), closeEvent(1, 'slow'))
+  assert.equal((await reader.read()).done, true)
+  assert.deepEqual(core.credits, [])
+})
+
+test('eight pane slots are atomic across views and abort frees tags before the replacement opens', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  const workers = [10, 11, 12, 13, 14].map(n => ({ address: `t${n}`, created_ms: n * 100, state: 'live', cols: 80, rows: 24 }))
+  writeFileSync(f.terminalsFile, JSON.stringify([...TERMINALS, ...workers]))
+  for (const terminal of workers) {
+    writeFileSync(join(f.ledgerDir, 'workers.jsonl'), JSON.stringify({
+      event: 'start', kind: 'worker', terminal: terminal.address, created_ms: terminal.created_ms, botId: LEAD,
+      lead: LEAD, role: 'dev', project: f.project, worktree: f.project, core: CORE, at: '2026-11-15T00:00:00.000Z',
+    }) + '\n', { flag: 'a' })
+  }
+  const core = controlledCore(f)
+  const host = multiHost(t, f, core.connect)
+  const first = multiTargets([[LEAD, null, 'viewer.a.1'], [LEAD, 't9', 'viewer.a.2'],
+    [LEAD, 't10', 'viewer.a.3'], [LEAD, 't11', 'viewer.a.4']])
+  const second = multiTargets([[DEV, null, 'viewer.b.1'], [LEAD, 't12', 'viewer.b.2'],
+    [LEAD, 't13', 'viewer.b.3'], [LEAD, 't14', 'viewer.b.4']])
+  const extra = { bot: DEV, worker: 't8', viewer: 'viewer.a.9' }
+  const abort = new AbortController()
+  const firstRequest = host.request(first, { signal: abort.signal })
+  let reopening
+  // Enter the route after the signal changes, before the older handler's abort listener.
+  firstRequest.signal.addEventListener('abort', () => { reopening = host.open(host.request(first)) })
+  const a = host.open(firstRequest)
+  const collision = await host.open(host.request([extra, first[0]]))
+  assert.equal(collision.status, 409, 'all four tags are reserved before the first attach awaits')
+  assert.deepEqual(await collision.json(), { error: 'already-open' })
+  const b = host.open(host.request(second))
+  const full = await host.open(host.request([extra]))
+  assert.equal(full.status, 429, 'a viewer prefix cannot evict a live stream')
+  assert.deepEqual(await full.json(), { error: 'busy' })
+  const overlapAtCapacity = await host.open(host.request([extra, first[0]]))
+  assert.equal(overlapAtCapacity.status, 409)
+  const firstResponse = await a
+  const secondResponse = await b
+  assert.equal(firstResponse.status, 200)
+  assert.equal(secondResponse.status, 200)
+  const firstReader = firstResponse.body.getReader()
+  assert.ok(await wait(() => core.attaches.length === 8 && core.attaches.every(a => a.handlers)))
+  abort.abort()
+  assert.equal(core.attaches.filter(a => a.detached).length, 4, 'abort detaches only its panes')
+  const replacement = await reopening
+  assert.equal(replacement.status, 200)
+  assert.equal((await host.open(host.request([extra]))).status, 429)
+  await firstReader.read()
+  assert.equal((await firstReader.read()).done, true)
+  // One pane ending or failing frees its slot without ending the shared response.
+  core.watching('t12').onClose('ended')
+  const spare = await host.open(host.request([extra]))
+  assert.equal(spare.status, 200)
+  await Promise.all([replacement, secondResponse, spare].map(res => res.body.cancel()))
+})
+
+test('pane ends release typing per viewer and older observers cannot release a newer take', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  const core = controlledCore(f)
+  const host = multiHost(t, f, core.connect)
+  const first = multiTargets([[LEAD, null, 'viewer-shared'], [DEV, null, 'viewer-other']])
+  const response = await host.open(host.request(first))
+  t.after(() => response.body.cancel())
+  assert.ok(await wait(() => core.watching('t7') && core.watching('t8')))
+  const take = async (target) => {
+    const result = await host.post(CODE_TAKE_ROUTE, target)
+    assert.equal(result.status, 200)
+    return (await result.json()).session
+  }
+  const batch = session => host.post(CODE_INPUT_ROUTE, { session, data: 'eA==' })
+  const a = await take(first[0])
+  const b = await take(first[1])
+  core.watching('t7').onClose('ended')
+  assert.equal((await batch(a)).status, 409)
+  assert.equal((await batch(b)).status, 204)
+  // Reuse the still-live pane's viewer on a different tag. The old close cannot cancel this take.
+  const next = { bot: LEAD, worker: 't9', viewer: first[1].viewer }
+  const newer = await host.open(host.request([next]))
+  assert.equal(newer.status, 200)
+  t.after(() => newer.body.cancel())
+  const moved = await take(next)
+  core.watching('t8').onClose('ended')
+  assert.equal((await batch(moved)).status, 204)
+  await newer.body.cancel()
+  assert.equal((await batch(moved)).status, 409)
+})
+
+test('multi admission requires the window marker, then SSE admission, then target validation', async (t) => {
+  const f = fixture(t, { probe: false })
+  const connect = t.mock.fn(() => { throw new Error('must refuse without connecting') })
+  const host = multiHost(t, f, connect)
+  const duplicateViewers = multiTargets([[LEAD, null, 'viewer-1'], [DEV, null, 'viewer-1']])
+  for (const [headers, status, error] of [
+    [{ 'x-automagik-window': 'invalid', accept: '*/*', 'sec-fetch-site': 'cross-site' }, 403, 'desktop-only'],
+    [{ 'sec-fetch-site': 'cross-site' }, 403, 'cross-site'],
+    [{ accept: '*/*' }, 406, 'not-an-event-stream'],
+    [{}, 404, 'no-viewer'],
+  ]) {
+    const response = await host.open(host.request(duplicateViewers, { headers }))
+    assert.equal(response.status, status)
+    assert.deepEqual(await response.json(), { error })
+  }
+  const tooMany = Array(5).fill(duplicateViewers[0])
+  const response = await host.open(host.request(tooMany))
+  assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'too-many-panes' })
+  assert.equal(connect.mock.callCount(), 0)
+})
+
+test('the framed fake serves legacy SSE bytes and two independently tagged pane sequences', { timeout: 5000 }, async (t) => {
+  const f = fixture(t, { probe: false })
+  Object.assign(f.env, { FAKE_CORE_KEEP_OPEN: '0', FAKE_CORE_OUTPUT: 'fixture first\n', FAKE_CORE_RESIZE_TO: '' })
+  const host = multiHost(t, f, connectFakeCore)
+  const legacy = await host.open(host.request([{ bot: LEAD }]))
+  assert.equal(legacy.status, 200)
+  const first = 'fixture first\r\n'
+  const second = 'second-line\r\n'
+  assert.equal(await legacy.text(), [
+    'event: pane\ndata: {"bot":"b-aaaaaaaaaa","terminal":"t7","cols":120,"rows":40,"name":"Atlas"}\n\n',
+    `event: data\ndata: ${Buffer.from(first).toString('base64')}\n\n`,
+    `event: data\ndata: ${Buffer.from(second).toString('base64')}\n\n`,
+    'event: close\ndata: {"reason":"ended"}\n\n',
+  ].join(''))
+
+  const response = await host.open(host.request(multiTargets([[LEAD, null, 'viewer-1'], [DEV, null, 'viewer-2']])))
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  const panes = [[], []]
+  for (let i = 0; i < 8; i += 1) {
+    const event = await taggedEvent(reader)
+    panes[event.data.p].push(event)
+  }
+  assert.deepEqual(panes, [
+    [{ event: 'pane', data: { p: 0, bot: LEAD, terminal: 't7', cols: 120, rows: 40, name: 'Atlas' } },
+      dataEvent(0, first), dataEvent(0, second), closeEvent(0, 'ended')],
+    [{ event: 'pane', data: { p: 1, bot: DEV, terminal: 't8', cols: 100, rows: 30, name: 'Dev' } },
+      dataEvent(1, first), dataEvent(1, second), closeEvent(1, 'ended')],
+  ])
+  assert.equal((await reader.read()).done, true)
 })

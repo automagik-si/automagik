@@ -281,7 +281,12 @@ export default class PocketLink extends View {
           .flex_1()
           .min_w(0)
           .child(div().text_size(13).font_semibold().child(on ? `On · ${s.name ?? "this computer"}` : "Off"))
-          .child(div().text_size(12).text_color(t.dim).truncate().child(on ? (s.login ? "Starts with your login." : "Running until you log out.") : "Phones can't reach this computer.")),
+          .child(div().text_size(12).text_color(t.dim).truncate().child(on ? (s.login ? "Starts with your login." : "Running until you log out.") : "Phones can't reach this computer."))
+          .when(on && Boolean(s.fingerprint), (el) => el.child(
+            h_flex().gap(4).min_w(0).text_size(12).text_color(t.dim)
+              .child(div().truncate().child("Computer key fingerprint"))
+              .child(div().flex_none().child(s.fingerprint)),
+          )),
       )
       .child(
         on

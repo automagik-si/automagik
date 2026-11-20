@@ -6,7 +6,6 @@ import { currentPart, latestMemoryChange } from './text.js'
 import { ArrowUpIcon, CloseIcon, ArrowDownIcon, DotsIcon, GoalIcon, InfoIcon, MemoryIcon } from './icons.js'
 import { botState, BotAvatar, RoomAvatar } from './mark.js'
 import { useApproval } from './approvals.js'
-import { AgentBadge } from './agent-badge.js'
 import { ActivityIndicator } from './activity-row.js'
 import { clockLabel, openingTurn, unseenSince } from './cells.js'
 import { GoalIsland, goalView } from './goal.js'
@@ -165,7 +164,7 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
       ? h('span', { className: 'bt-pill-swap' },
         h('span', { className: 'bt-pill-goal' }, h('span', { className: 'bt-pill-ico', 'aria-hidden': true }, h(GoalIcon)), h('span', { className: 'bt-pill-title' }, view.title)),
         h('span', { className: 'bt-pill-name' }, name))
-      : h('span', { className: 'bt-pill-name' }, away ? t('Back to chat') : bot?.name ?? room?.name ?? (title || t('New chat')), !away && bot?.engine ? h(AgentBadge, { engine: bot.engine }) : null),
+      : h('span', { className: 'bt-pill-name' }, away ? t('Back to chat') : bot?.name ?? room?.name ?? (title || t('New chat'))),
     goalShown && view?.number !== undefined ? h('span', { className: 'bt-pill-count' }, `${view.number}/${view.count}`) : null,
     h(MemoryNotice, { shown: memoryNotice }),
     h('span', { className: 'bt-pill-go', 'aria-hidden': true }, h(GoArrow))) : null
@@ -190,9 +189,7 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
   return h('div', { className: native ? 'bt-native-head' : 'bt-head' },
     showGoal ? h(GoalIsland, { room, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     h('span', { className: 'bt-sr', role: 'status' }, memoryNotice ? t('Memory updated') : ''),
-    // The open Bot's two faces (left-bar-faces.js): Chat, and the herdr-core terminal the Code
-    // side watches (code-side.js). A Bot without a pane keeps Terminal on screen, says why it
-    // cannot open yet, and opens nothing; no shell is started.
+    // A seat can have a Terminal face. A DSH conversation stays in Chat.
     bot && !away && !native ? h(BotFaceSwitch, { bot }) : null,
     narrow ? more : h(Fragment, null, headButtons, liveButtons, details),
     native && bot ? h('button', { type: 'button', className: 'bt-head-details', 'aria-label': t('Bot settings'), title: t('Bot settings'), onClick: () => actions.openSettings('bots', bot.id) }, h(InfoIcon)) : null,

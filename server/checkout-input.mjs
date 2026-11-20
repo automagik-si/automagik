@@ -10,6 +10,7 @@ export const CHECKOUT_PACKAGES = Object.freeze({
   '@automagik/acp-dsh': 'apps/acp-dsh',
   '@automagik/bots-dsh': 'apps/bots-dsh',
   '@automagik/locale-pt-br-dsh': 'apps/locale-pt-br-dsh',
+  '@automagik/vault-dsh': 'apps/vault-dsh',
   '@automagik/welcome-dsh': 'apps/welcome-dsh',
 })
 export const CHILD = 'apps/bots-dsh/src/host/browser/script-child.js'

@@ -3,6 +3,8 @@
 services:
   dsh:
     image: ${AUTOMAGIK_SERVER_IMAGE:?set a server image digest}
+    environment:
+      AUTOMAGIK_GATE_CLOUD_WORKSPACE: ${AUTOMAGIK_GATE_CLOUD_WORKSPACE:-}
     volumes:
       - dsh-data:/data
   gate:

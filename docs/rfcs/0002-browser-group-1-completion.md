@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (unverified: no delivery PR found; #103, #121 and #127 predate the RFC) |
+| Status | In delivery (delivery 1 (3a): #1190, with #1230, #1501 and #1737; delivery 3 (3c), cookie storage: the browser keeps the sign-ins and Automagik's `cookies.json` is deleted; delivery 2 (3b) split on 2026-11-20 by the owner's delegate: 2a, browser navigation and request policy on launched Chrome, and 2b, the remaining hosts and cases, open; delivery 4 (3d) open; #103, #121 and #127 predate the RFC) |
 | Milestone | 1. Safe browser and everyday fixes |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-10-30 |
@@ -75,6 +75,10 @@ must never contain half of a security change. Each slice below is safe on its ow
 2. **3b, navigation and request policy.** Lane: plugin. Check: one test that a non-web scheme
    and the local server are refused from a page, a cross-origin frame and a worker, and that a
    local dev server still opens outside a run. Rollback: revert; no data changes.
+   Amended 2026-11-20 (approved by the owner's delegate): split in two. **2a.** Browser
+   navigation and request policy on launched Chrome: the check above on that host. **2b.**
+   Browser navigation and request policy, the remaining hosts and cases, including the run
+   rule. 2b keeps this delivery's check and rollback.
 3. **3c, cookie storage.** Lane: plugin. Check: after first open no cookie file exists, a
    persistent sign-in survives a restart, and deleting a Bot removes its folders. Rollback: the
    deleted file does not come back; affected users sign in again.

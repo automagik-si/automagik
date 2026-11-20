@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import { heldText } from '../src/client/stops.js'
 import { HELD_LINES } from '../src/shared/held.js'
 import { DICTIONARY, hostText, hostTemplateOf, installLocale, language, t } from '../src/client/i18n.js'
+import { ACCESS_MESSAGES } from '../src/host/models.js'
 
 function fakeLocale(active) {
   const dicts = new Map()
@@ -28,6 +29,27 @@ test('every literal the client translates has a Chinese entry', () => {
     }
   }
   assert.deepEqual(missing, [])
+})
+
+test('coding agent access messages name the renamed Settings section in all three languages', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(ACCESS_MESSAGES.off, 'Turn on {connection} in Settings → Coding agents before using this model.')
+  assert.equal(ACCESS_MESSAGES.installing, 'Wait for {connection} to finish installing, or retry it in Settings → Coding agents.')
+  for (const key of [ACCESS_MESSAGES.off, ACCESS_MESSAGES.installing]) {
+    assert.match(DICTIONARY.zh[key], /设置 → 编程助手/)
+    assert.match(pt[key], /Configurações → Agentes de código/)
+    assert.equal(hostTemplateOf(key.replace('{connection}', 'Codex')), key)
+  }
+  const notReady = 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
+  assert.match(DICTIONARY.zh[notReady], /设置 → 编程助手/)
+  assert.match(pt[notReady], /Configurações → Agentes de código/)
+})
+
+test('Codex Auto confirmation describes unreviewed reads in Chinese and Brazilian Portuguese', () => {
+  const key = "On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps. With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads."
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(DICTIONARY.zh[key], "在自动模式下，Codex 通过自己的审查器决定执行哪些步骤、拒绝哪些步骤或询问你。它可能不经询问就修改{name}文件夹之外的文件，Automagik 不会审查这些步骤。它还可能用自有工具不经询问就读取 Automagik 本身能打开的任何文件，包括该文件夹之外的文件，它的审查器和 Automagik 都不会检查这些读取。")
+  assert.equal(pt[key], "No Automático, o Codex decide por conta própria, com seu próprio revisor, quais etapas executa, recusa ou pergunta a você. Pode alterar arquivos fora da pasta de {name} sem perguntar, e o Automagik não revisa essas etapas. Com suas próprias ferramentas, também pode ler qualquer arquivo que o próprio Automagik consegue abrir, inclusive fora dessa pasta, sem perguntar, e nem o revisor do Codex nem o Automagik verificam essas leituras.")
 })
 
 test('copy follows the DSH language and stays English without a locale service', () => {
@@ -88,4 +110,46 @@ test('only whole held replies translate, with Chinese and Portuguese entries for
     assert.equal(heldText('Model'), 'Model')
     assert.equal(heldText('x'), 'x')
   } finally { off() }
+})
+
+test('package role refusals localize the template and preserve the supplied name literally', () => {
+  const template = 'Detach {name} first.'
+  const name = '<Fixture>'
+  const message = template.replace('{name}', name)
+  assert.equal(hostTemplateOf(message), template)
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(hostText(message), `请先移除 ${name}。`)
+  } finally {
+    off()
+  }
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(pt[template].replace('{name}', name), `Remova ${name} primeiro.`)
+  for (const key of ['Choose None first.', "This role's source cannot be confirmed right now."]) {
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+    assert.ok(DICTIONARY.zh[key] && pt[key])
+  }
+})
+
+test('Voice / Mouth card and recovery copy has Chinese and Brazilian Portuguese entries', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const key of ['Active tools', 'Allow speech', 'Saved voice unavailable', 'ACP coding agents do not receive this role’s prompt.',
+    'The signed role install evidence is missing or unreadable.', 'The installed role files differ from the signed package.']) {
+    assert.ok(DICTIONARY.zh[key] && pt[key], key)
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+  }
+})
+
+test('rfc0039 [P] I1 Chinese withdrawn and stale texts', async () => {
+  const clientApprovals = await import('../src/client/approvals.js')
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(clientApprovals.withdrawnText?.('task'), '这一步已撤回：它的任务结束了')
+    assert.equal(t('The task ended with an approval unanswered'), '任务结束时还有一个审批没有回答')
+    assert.equal(hostText('This approval is no longer open'), '这个审批已经关闭了')
+  } finally {
+    off()
+  }
 })

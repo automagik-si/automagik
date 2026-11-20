@@ -15,6 +15,12 @@
 // - A machine opts out with one file of its own, <AM_HOME, else ~/.automagik>/linked-update
 //   holding `off` (`automagik-herdr machines --auto off`, there or with --machine): the cycle
 //   reads it first and runs nothing on that machine. No file: on.
+// - The pack part runs on the machine's AUTOMATIC path (#1505): the cycle exports
+//   LINKED_UPDATE_ENV and the pack's update takes the same hold as an automatic update, so the
+//   machine's own `am update --auto off` and its rollback skip are honoured. A person's explicit
+//   `am update` (or `--retry-skipped`) is still the only way to install a skipped release, and
+//   before this route existed every cycle pushed the broken release again. Older targets ignore
+//   the variable (an explicit update, as before); the next cycle runs the new copy and follows it.
 // - What each machine runs and how its last update went is kept in
 //   <app home>/automagik-herdr/linked-updates.json, which `automagik-herdr machines` shows.
 //
@@ -29,6 +35,14 @@ export const STATE_FILE = "linked-updates.json";
 export const LOCK_FILE = "linked-updates.lock";
 /** A machine's own switch, under its AM_HOME (else ~/.automagik): `off` opts it out. */
 export const SETTING_FILE = "linked-update";
+/**
+ * Exported around the machine's own update (#1505): the pack updates on its AUTOMATIC path there,
+ * so `am update --auto off` and a rollback's skip hold. A target from before this change ignores
+ * it and updates explicitly, as it did; the next cycle runs the copy this cycle installed.
+ */
+export const LINKED_UPDATE_ENV = "AUTOMAGIK_HERDR_LINKED_UPDATE";
+/** Whether `env` asks the pack's update for its automatic path (`LINKED_UPDATE_ENV=1`). */
+export const linkedUpdate = (env = {}) => String(env?.[LINKED_UPDATE_ENV] ?? "").trim() === "1";
 
 /** The sidebar starts a cycle this long after load, then looks every MACHINES_TICK_MS. */
 export const MACHINES_FIRST_MS = 90_000;
@@ -44,9 +58,10 @@ app_home=\${HERDR_APP_HOME:-$HOME/.config/herdr-app}
 setting=$am_home/${SETTING_FILE}`;
 
 /**
- * Run as `sh -c PROBE`: four lines, `am <v>`, `pack <v>`, `meter <v>` (`-`: not installed; `?`: a
- * usagemeter that reports no version) and `auto on|off`. It reads files and asks usagemeter its
- * version; it changes nothing.
+ * Run as `sh -c PROBE`: five lines, `am <v>`, `pack <v>`, `meter <v>` (`-`: not installed; `?`: a
+ * usagemeter that reports no version), `auto on|off` (the linked updater's switch, the file above)
+ * and `packauto on|off|-` (the machine's own pack setting from auto-update.json, `-`: no pack). It
+ * reads files and asks usagemeter its version; it changes nothing.
  */
 export const PROBE = `set -u
 ${HOMES}
@@ -60,17 +75,28 @@ if [ -x "$m" ] && [ ! -d "$m" ]; then
   [ -n "$v" ] || v='?'
 fi
 echo "meter \${v:--}"
-if [ "$(head -n 1 "$setting" 2>/dev/null | tr -d '[:space:]')" = off ]; then echo "auto off"; else echo "auto on"; fi`;
+if [ "$(head -n 1 "$setting" 2>/dev/null | tr -d '[:space:]')" = off ]; then echo "auto off"; else echo "auto on"; fi
+pa=-
+f=$app_home/mods/am-sidebar/VERSION
+[ -f "$f" ] || f=$app_home/mods/spaces-agents/VERSION
+if [ -f "$f" ]; then
+  pa=on
+  if [ -f "$app_home/automagik-herdr/auto-update.json" ] && tr -d '[:space:]' < "$app_home/automagik-herdr/auto-update.json" | grep -q '"auto":false'; then pa=off; fi
+fi
+echo "packauto $pa"`;
 
 /**
  * Run as `sh -c UPDATE sh [automagik.am]`: the machine's own update, by its own command. First
  * line `via am` (then `am update [automagik.am] --json`'s one JSON value: am, then the pack where
  * installed), `via pack` (no am there, a pack: its `automagik-herdr update --json`) or `via none`
  * (neither; nothing runs). With `automagik.am` (this computer, whose pack the sidebar's own updater
- * installs): am alone, and never the pack's command.
+ * installs): am alone, and never the pack's command. Elsewhere LINKED_UPDATE_ENV marks the pack
+ * update as the automatic one (#1505): the target's own auto setting and rollback skip hold, and an
+ * older target that ignores the variable keeps the explicit update it had.
  */
 export const UPDATE = `set -u
 ${HOMES}
+export ${LINKED_UPDATE_ENV}=1
 am=$HOME/.local/bin/am
 if [ -f "$am" ]; then
   echo "via am"
@@ -108,7 +134,7 @@ exit 0`;
 const short = (s) => String(s ?? "").trim().split("\n").filter(Boolean).pop()?.slice(0, 400) ?? "";
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,39}$/;
 
-/** PROBE's answer: `{ am, pack, meter (null: not installed; "?": no version), auto }`, or null when it is not one. */
+/** PROBE's answer: `{ am, pack, meter (null: not installed; "?": no version), auto, packAuto (null: no pack) }`, or null when it is not one. */
 export function parseProbe(stdout) {
   const found = {};
   for (const line of String(stdout ?? "").split("\n")) {
@@ -116,18 +142,22 @@ export function parseProbe(stdout) {
     if (rest.length || value === undefined) continue;
     if (["am", "pack", "meter"].includes(key)) found[key] = value === "-" ? null : VERSION.test(value) || (key === "meter" && value === "?") ? value : undefined;
     else if (key === "auto" && (value === "on" || value === "off")) found.auto = value === "on";
+    else if (key === "packauto") {
+      if (!["on", "off", "-"].includes(value)) return null;
+      found.packAuto = value === "on" ? true : value === "off" ? false : null;
+    }
   }
-  for (const key of ["am", "pack", "meter", "auto"]) if (found[key] === undefined) return null;
-  return { am: found.am, pack: found.pack, meter: found.meter, auto: found.auto };
+  for (const key of ["am", "pack", "meter", "auto", "packAuto"]) if (found[key] === undefined) return null;
+  return { am: found.am, pack: found.pack, meter: found.meter, auto: found.auto, packAuto: found.packAuto };
 }
 
-/** What a machine runs and its switch: `{ versions: { am, pack, meter }, auto }`, or `{ why }`. */
+/** What a machine runs and its switches: `{ versions: { am, pack, meter }, auto, packAuto }`, or `{ why }`. */
 export async function probeOn(run, machine) {
   const r = await run(["sh", "-c", PROBE], { on: machine, timeout: 30 });
   if (r.code !== 0) return { why: short(r.stderr) || "could not reach it" };
   const p = parseProbe(r.stdout);
   if (!p) return { why: `unexpected answer: ${short(r.stdout) || "(none)"}` };
-  return { versions: { am: p.am, pack: p.pack, meter: p.meter }, auto: p.auto };
+  return { versions: { am: p.am, pack: p.pack, meter: p.meter }, auto: p.auto, packAuto: p.packAuto };
 }
 
 /** The most one machine's own update may take (hc exec ends a program at 600 s at most). */
@@ -151,6 +181,9 @@ function packStep(value, stderr) {
   if (value && typeof value === "object" && value.state === "not-installed") return step("pack", "absent");
   if (!value || typeof value !== "object") return step("pack", "failed", { why: short(stderr) || "the pack's update gave no answer" });
   if (value.disabled) return step("pack", "off", { to: value.current ?? null, why: "update checks are off there (AUTOMAGIK_HERDR_NO_UPDATE=1)" });
+  // The automatic path left it alone (#1505): the machine's own setting is off, its pack is not
+  // one install.sh manages, or the release was rolled back there. Not a failure: nothing ran.
+  if (value.held) return step("pack", "off", { to: value.current ?? null, why: short(value.held) });
   const done = value.installed;
   if (done?.restored) return step("pack", "failed", { to: done.restored.version ?? null, why: `${done.restored.failedVersion ?? done.version} did not load there; ${done.restored.version} is back` });
   if (done?.restoreError) return step("pack", "failed", { to: done.version ?? null, why: `${done.version} did not load there, and ${done.restoreError}` });
@@ -196,7 +229,7 @@ export async function updateOn(run, machine, { lane = async () => null, scope = 
   const at = now().toISOString();
   const before = await probeOn(run, machine);
   if (before.why) return { machine, at, result: "failed", auto: null, versions: null, steps: [], why: [before.why] };
-  if (!before.auto) return { machine, at, result: "off", auto: false, versions: before.versions, steps: [], why: [] };
+  if (!before.auto) return { machine, at, result: "off", auto: false, packAuto: before.packAuto, versions: before.versions, steps: [], why: [] };
   const amOnly = machine === null;
   const r = await run(["sh", "-c", UPDATE, "sh", ...(amOnly ? ["automagik.am"] : [])], { on: machine, timeout: UPDATE_SECONDS });
   const steps = readUpdate(r, { amOnly });
@@ -207,7 +240,7 @@ export async function updateOn(run, machine, { lane = async () => null, scope = 
   const after = await probeOn(run, machine);
   const why = steps.filter((s) => s.state === "failed").map((s) => `${NAMES[s.part]}: ${s.why}`);
   const result = why.length ? "failed" : steps.some((s) => s.state === "updated") ? "updated" : "current";
-  return { machine, at, result, auto: true, versions: after.versions ?? before.versions, steps, why };
+  return { machine, at, result, auto: true, packAuto: after.packAuto === undefined ? before.packAuto : after.packAuto, versions: after.versions ?? before.versions, steps, why };
 }
 
 const NAMES = { am: "am", pack: "the pack", meter: "usagemeter" };
@@ -233,7 +266,9 @@ export function stateAfter(state, entries, { at, linked = null } = {}) {
   let here = state.here;
   for (const e of entries) {
     if (e.machine === null) here = e;
-    else machines[e.machine] = e.result === "disconnected" ? { ...e, versions: state.machines[e.machine]?.versions ?? null, auto: state.machines[e.machine]?.auto ?? null } : e;
+    else machines[e.machine] = e.result === "disconnected"
+      ? { ...e, versions: state.machines[e.machine]?.versions ?? null, auto: state.machines[e.machine]?.auto ?? null, packAuto: state.machines[e.machine]?.packAuto }
+      : e;
   }
   return { schemaVersion: 1, at: at ?? state.at, here, machines };
 }
@@ -255,12 +290,16 @@ export function resultText(e) {
   return said.length ? said.join("; ") : "up to date";
 }
 
-/** One line for a person per machine: what it runs, then how its last update went. */
+/** The machine's own pack switch, as words (`unknown`: an entry from before #1505 recorded it). */
+const packAutoText = (packAuto) => (packAuto === true ? "on" : packAuto === false ? "off" : packAuto === null ? "no pack" : "unknown");
+
+/** One line for a person per machine: what it runs, both switches, then how its last update went. */
 export function entryLine(e) {
   const where = e.machine ?? "this computer";
   const v = e.versions;
   const runs = v ? `am ${v.am ?? "none"}, pack ${v.pack ?? "none"}, usagemeter ${v.meter === "?" ? "(no version)" : v.meter ?? "none"}` : "versions not known";
-  return `${where}: ${runs}. ${e.at ? `${e.at}: ` : ""}${resultText(e)}.`;
+  const linked = e.auto === true ? "on" : e.auto === false ? "off" : "unknown";
+  return `${where}: ${runs}. pack auto: ${packAutoText(e.packAuto)}; linked auto: ${linked}. ${e.at ? `${e.at}: ` : ""}${resultText(e)}.`;
 }
 
 /** The lines `automagik-herdr machines` prints. `linked`: names with no entry yet. */

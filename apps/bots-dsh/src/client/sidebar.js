@@ -1,3 +1,4 @@
+import { CodeBarList, CodeSideSwitch, setCodeSide, useCodeSide } from './code-side.js'
 import { openStops } from './stops.js'
 import { Component, createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
@@ -6,7 +7,6 @@ import { isMainOf } from './sources.js'
 import { currentPart, previewOf, relativeShort } from './text.js'
 import { PlusIcon, SearchIcon, SidebarIcon, GaugeIcon, PlugIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, TasksIcon, SignOutIcon } from './icons.js'
 import { botState, BotAvatar, BotMark, RoomAvatar } from './mark.js'
-import { AgentBadge } from './agent-badge.js'
 import { DSH_LOOK } from './characters.js'
 import { reducedMotion } from './activity-row.js'
 import { Shimmer, workPhrase } from './cells.js'
@@ -22,6 +22,7 @@ import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
 import { seatBotId, seatChatView, seatWithFreshPane, useSeats } from './seat-chat.js'
 import { NATIVE_WORKERS_CSS, NativeWorkers, runningWorkers } from './native-workers.js'
+import { roleOutletVisible, roleTagOf } from '../shared/roles.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -107,7 +108,8 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   }
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
-  const label = [bot.name, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
+  const tag = roleTagOf(bot, roster.prefs, roster, t)
+  const label = [bot.name, tag, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-bot-id': id, title: wide ? undefined : bot.name,
@@ -116,7 +118,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, tag) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
     blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
@@ -142,7 +144,8 @@ function RowBadges(props) {
 function BotChildren({ wide, ...props }) {
   const entries = useEntries(botChildren)
   if (!wide || entries.length === 0) return null
-  return entries.map(entry => h(entry.Component, { key: entry.id, ...props, wide }))
+  return entries.filter(entry => roleOutletVisible('botChildren', entry.id, props.bot, props.roster))
+    .map(entry => h(entry.Component, { key: entry.id, ...props, wide }))
 }
 
 // A short age for a thread: now, 4m, 2h, 3d.
@@ -402,6 +405,7 @@ export function TeamSidebar(props) {
   const closing = useRef(false)
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
+  const code = useCodeSide()
   // The seats on this computer (RFC 0022 1L): the registry's orchestrators as the bar's rows.
   // An open seat keeps polling even where the bar is a narrow rail, so its switch learns a
   // pane that starts or stops while the panel stays open.
@@ -440,8 +444,8 @@ export function TeamSidebar(props) {
   // The shell keeps wide content during its collapse fade. Normalize through its
   // public expansion action before toggling; coalesce synchronous activations
   // until React commits the result.
-  const navigate = (open, id) => {
-    const result = open(id)
+  const navigate = (open, ...args) => {
+    const result = open(...args)
     if (wide && window.innerWidth < 1024 && !closing.current) {
       closing.current = true
       expandSidebar?.()
@@ -449,12 +453,17 @@ export function TeamSidebar(props) {
     }
     return result
   }
+  const team = () => {
+    if (code.side === 'team') return
+    actions.closeCodePane?.()
+    setCodeSide('team')
+  }
   const rowActions = {
     ...actions,
-    openSession: id => navigate(actions.openSession, id),
-    openAgent: id => navigate(actions.openAgent, id),
-    openAgentSession: id => navigate(actions.openAgentSession, id),
-    newAgentSession: id => navigate(actions.newAgentSession, id),
+    openSession: (id) => { team(); return navigate(actions.openSession, id) },
+    openAgent: (id) => { team(); return navigate(actions.openAgent, id) },
+    openAgentSession: (id) => { team(); return navigate(actions.openAgentSession, id) },
+    newAgentSession: (id) => { team(); return navigate(actions.newAgentSession, id) },
   }
   const rowProps = { roster, actions: rowActions, useSessions, useUi, useSessionStatus: props.useSessionStatus, useSessionRetainInfo: props.useSessionRetainInfo, useActivity: props.useActivity, useWork: props.useWork, wide }
   // Typing while the sidebar has focus starts a search.
@@ -469,10 +478,14 @@ export function TeamSidebar(props) {
   if (wide) {
     // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
     const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
-    const open = row => (row.bot?.seat ? rowActions.openSeat(row.bot)
-      : row.kind === 'chat' ? row.source?.open?.(row.id)
-        : row.kind === 'group' ? rowActions.openSession(row.id)
-          : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
+    const open = (row) => {
+      team()
+      if (row.bot?.seat) return rowActions.openSeat(row.bot)
+      if (row.kind === 'chat') return row.source?.open?.(row.id)
+      if (row.kind === 'group') return rowActions.openSession(row.id)
+      if (row.bot?.dsh) return rowActions.openAgent(row.id)
+      if (row.kind === 'bot') return rowActions.openSession(row.id)
+    }
     const menu = (row, event) => {
       // A seat is read here and run in Herdr: it has no Bot settings or context menu.
       if (row.bot?.seat) return
@@ -494,6 +507,8 @@ export function TeamSidebar(props) {
     return h(LeftBar, {
       roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
       open, menu, renderAfter, notice, onKeyDown: typeToSearch,
+      sideSwitch: h(CodeSideSwitch, { current: code, onSelect: side => (side === 'team' ? team() : setCodeSide(side)) }),
+      codeList: code.side === 'code' ? h(CodeBarList, { current: code, onSelect: (selected, options) => navigate(actions.openCodePane, selected, options) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {
         const bot = row.bot.dsh ? undefined : roster.byId[row.id]

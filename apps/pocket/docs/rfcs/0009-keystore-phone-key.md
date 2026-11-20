@@ -54,6 +54,31 @@ Before #244, the endpoint read the phone's 32-byte iroh key from `iroh.key` in
   storage also removes the app's other local data. The app never replaces an existing identity
   automatically.
 
+### Saved machines
+
+- Seal the whole saved list in `hosts.sealed` in no-backup storage. Use the dedicated
+  `pocket-hosts` alias and a fresh AES-GCM IV for each write. Reuse the key across frequent
+  list updates, while phone identity writes use a fresh alias. Generate the host key only
+  when both the alias and sealed record are absent. Keep the alias on read or write failure.
+  `android/app/src/main/java/ai/namastex/automagik/HostSeal.kt:17`
+  `android/app/src/main/java/ai/namastex/automagik/HostSeal.kt:47`
+- Migrate the exact UTF-8 preference bytes, including fields this version does not use.
+  Keep the original copy if it exceeds 1 MiB or migration fails. Allow plain saves if sealing
+  fails before the first sealed record exists. Once present, the sealed record takes precedence.
+  If it cannot be validated, block saves and retry the read before offering or starting pairing.
+  `android/app/src/main/java/ai/namastex/automagik/HostStore.kt:29`
+  `android/app/src/main/java/ai/namastex/automagik/HostStore.kt:40`
+  `android/app/src/main/java/ai/namastex/automagik/PocketViewModel.kt:301`
+- Sync the staging file, decrypt it to verify the bytes, replace the record by rename, then
+  validate the visible record and sync the directory before removing the preference. Retry
+  a failed preference cleanup on a later save or process start. Report pairing as saved only
+  after the write succeeds. Wait for a durable write before evicting Teams entries for a
+  removed machine or retiring an unused SSH key.
+  `android/app/src/main/java/ai/namastex/automagik/HostStore.kt:56`
+  `android/app/src/main/java/ai/namastex/automagik/HostStore.kt:86`
+  `android/app/src/main/java/ai/namastex/automagik/PocketViewModel.kt:263`
+  `android/app/src/main/java/ai/namastex/automagik/PocketViewModel.kt:558`
+
 ### Verification
 
 - Run the Pocket build, tests and lint in the monorepo's Pocket CI job. JVM tests cover frame
@@ -69,17 +94,15 @@ Before #244, the endpoint read the phone's 32-byte iroh key from `iroh.key` in
 - On each emulator, remove the wrapping alias with `KeyStore.deleteEntry(alias)` in one case
   and flip a tag byte in another. Confirm that opening throws in each case and that loading
   leaves the existing record intact.
+- On disposable API 26 and 35 emulators, plant a plain saved list with a test ticket in the
+  dev APK, update in place and launch. Verify the cards, the sealed record without the plain
+  ticket and the preference cleanup. Restart without a rewrite, remove the SSH card (its old
+  key goes after the save), then remove the last card and restart (an empty sealed list).
 
 ### Next
 
-- **Saved machines and tickets.** Sealing them needs persistence results carried through the
-  view model. A successful save determines when to delete an old SSH key, a pairing code may
-  already be consumed before a save fails, `rememberLinked` saves the full list, and Watch
-  reconciles `watched_hosts` against it. The desktop ticket exposes the endpoint ID and
-  addresses. The paired phone key controls desktop access.
-- **App lock.** Set policy for notification Reply and Yes writes, Assist keyguard ordering,
-  intents with side effects, the lock timeout, Recents below API 33, and older Android versions
-  with gaps in AndroidX Biometric support.
+- **Next → [App lock](0010-app-lock.md).** Decide when to require authentication and how to
+  protect Assist, notifications and Recents.
 
 ## Decisions
 
@@ -97,16 +120,26 @@ Before #244, the endpoint read the phone's 32-byte iroh key from `iroh.key` in
 | One fixed alias | Reusing the alias could invalidate an existing sealed record during key generation. |
 | Automatic regeneration | Replaces the identity recognised by paired desktops after a key read failure. |
 | No plaintext fallback | Pairing would fail on phones that cannot write a sealed key. |
+| Seal the ticket only | Leaves other connection details plain and requires field-level migration. |
+| Fresh alias per saved-list write | Accumulates keys during regular updates or requires separate alias cleanup. |
 
 ## Open questions
 
 1. Accept the plain fallback in no-backup storage? — the owner.
+   **Proposed:** Keep the fallback in no-backup storage so pairing works if Keystore is unavailable.
 2. Keep clearing app storage and pairing again as the recovery path, or add a “new phone key”
    action that preserves other app data? — the owner.
+   **Proposed:** Clear app storage and pair again. Use this deliberate recovery path for a rare failure.
 3. When should the future app lock time out? — the owner.
+   **Proposed:** Require authentication at each process start and after 60 seconds off screen.
 4. Which notification actions should take precedence over the app lock? — the owner.
+   **Proposed:** While the app lock is enabled, post generic alerts and require opening Automagik
+   to answer. Refuse stale notification actions.
 5. How should the app handle Recents below API 33? — the owner.
+   **Proposed:** Use `FLAG_SECURE` on API 26–32. This keeps content out of Recents and also blocks
+   screenshots and screen sharing. On API 33 and later, omit only the Recents screenshot.
 6. Which saved machine fields and tickets should be sealed? — the owner.
+   **Proposed:** Seal the whole saved list, including tickets, addresses and linked names.
 
 ## Related
 

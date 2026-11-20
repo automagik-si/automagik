@@ -115,6 +115,7 @@ function attachedWire(t) {
   class Socket extends EventTarget {
     constructor() {
       super()
+      this.turns = 0
       queueMicrotask(() => this.event('gateway.ready', { replay_epoch: 'epoch-a' }))
     }
     frame(frame) {
@@ -138,6 +139,8 @@ function attachedWire(t) {
                 ? { events: [], latest_seq: 0, epoch: 'epoch-a', count: 0,
                   truncated: false, open_requests: [] }
                 : { status: 'streaming' }
+      // A real Hermes opens the turn with a stamped `message.start` before it streams.
+      if (frame.method === 'prompt.submit') this.event('message.start', { turn_id: `turn-${++this.turns}` })
       queueMicrotask(() => this.frame({ jsonrpc: '2.0', id: frame.id, result }))
     }
     close() { this.dispatchEvent(new Event('close')) }

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-19, approved by the owner's delegate: the design and its proposed bounds; amends RFC 0015; no delivery merged) |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: the design and its proposed bounds; amends RFC 0015; delivery 0: the final contract is written in [RFC 0015's amendment](0015-live-chat-projection.md#rfc-0033-attachments-from-pocket-images-on-dshbotid-chats); delivery 4a: the documents contract in [RFC 0015](0015-live-chat-projection.md#rfc-0033-delivery-4-documents-txt-pdf-on-dshbotid-chats)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-14 |
@@ -122,7 +122,7 @@ disk caching. `attachments.readImage(ref,signal)` is verified in
 
 ## Contracts introduced
 
-All method names and limits here are proposed. The proposed RFC 0015 amendment covers message
+All method names and limits here are proposed; the final ones, which supersede them, are in RFC 0015's amendment (delivery 0, 2026-11-20). The proposed RFC 0015 amendment covers message
 and row shapes, attachment transport and limits, rendering, privacy and its DSH-write amendment:
 `docs/rfcs/0015-live-chat-projection.md:254`, `docs/rfcs/0015-live-chat-projection.md:331`,
 `docs/rfcs/0015-live-chat-projection.md:577`. Write it into 0015 with this RFC's delivery 0,
@@ -164,9 +164,10 @@ Pocket promises memory-only chat data (`apps/pocket/docs/privacy.md:31`), no aut
 loads (`apps/pocket/docs/privacy.md:59`) and camera use only for pairing
 (`apps/pocket/docs/privacy.md:97`). Propose memory-only previews and tap-to-load reads, with no
 camera capture initially. The pocket delivery would update `privacy.md` in the same PR to name
-picker bytes and display names sent to the computer, desktop persistence and workspace copies,
-retention/cleanup, and authenticated thumbnail reads. It would keep the phone-memory, explicit
-load and pairing-only camera promises. This follows `apps/pocket/AGENTS.md:43`.
+picker bytes, declared type and length and opaque upload ids sent to the computer, desktop
+persistence and workspace copies, retention/cleanup, and authenticated thumbnail reads. Images
+carry no display name. Documents carry a reduced display name. The privacy notice would keep the
+phone-memory, explicit load and pairing-only camera promises. This follows `apps/pocket/AGENTS.md:43`.
 
 ## Deliveries
 
@@ -188,9 +189,11 @@ its peers negotiate support. Owner answers precede any delivery they block.
    privacy changes in the same PR. *Check:* Android gate and all staggered-version cases above,
    including reconnect without retargeting. *Rollback:* a later APK hides attachments;
    desktop copies remain.
-4. **Later, separate PRs on all three lanes.** Explicit documents, then broader files or camera
-   capture only if approved. *Check:* each negotiated type passes admission and privacy checks.
-   *Rollback:* withdraw each capability independently; already admitted data remains.
+4. **Documents (TXT, PDF).** 4a writes the contract in RFC 0015. The acp-dsh copy-warning fix
+   (#1829) precedes 4b (plugin admission and sends), then 4c (Pocket Link) and 4d (Pocket picker
+   and privacy update). Broader files or camera capture need separate approval.
+   *Check:* each negotiated type passes admission and privacy checks.
+   *Rollback:* withdraw the documents offer. Already admitted data remains.
 
 ## Open questions
 
