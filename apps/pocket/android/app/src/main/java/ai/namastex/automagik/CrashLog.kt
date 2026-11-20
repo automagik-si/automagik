@@ -15,6 +15,7 @@ class PocketApplication : Application() {
         super.onCreate()
         CrashLog.install(this)
         AppUpdates.init(this)
+        kotlin.concurrent.thread(name = "pocket-key-wrap", isDaemon = true) { PhoneKey.migrate(noBackupFilesDir, Seal.sealer()) }
     }
 }
 

@@ -2924,6 +2924,7 @@ const HOST_ZH = {
   'No project has a Bot on this computer yet.': '本机还没有任何项目包含 Bot。',
   'Reading this computer’s team…': '正在读取本机的团队…',
   'The Code side could not load here.': '代码端无法在此加载。',
+  'Terminals show in the Automagik desktop app.': '终端会显示在 Automagik 桌面应用中。',
   'View only · click to type': '只读 · 点击输入',
   'Typing · Esc to stop': '输入中 · 按 Esc 停止',
   'Taking the pane…': '正在接管终端…',

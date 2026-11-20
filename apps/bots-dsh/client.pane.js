@@ -11910,6 +11910,7 @@ var HOST_ZH = {
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
   "The Code side could not load here.": "代码端无法在此加载。",
+  "Terminals show in the Automagik desktop app.": "终端会显示在 Automagik 桌面应用中。",
   "View only · click to type": "只读 · 点击输入",
   "Typing · Esc to stop": "输入中 · 按 Esc 停止",
   "Taking the pane…": "正在接管终端…",
@@ -15122,8 +15123,8 @@ function CodeBody({ code }) {
   const current = (0, import_react2.useSyncExternalStore)(code.subscribe, code.snapshot, code.snapshot);
   const tree = current.tree;
   (0, import_react2.useEffect)(() => {
-    if (!current.tree && !current.loading) void code.loadTree();
-  }, [code, current.tree, current.loading]);
+    if (!tree && !current.loading && !current.error) void code.loadTree();
+  }, [code, tree, current.loading, current.error]);
   const chosen = selecting(tree, current.selected);
   const title = chosen ? chosen.worker ? `${chosen.bot.name} · ${chosen.worker.role ?? chosen.worker.agent ?? chosen.worker.terminal}` : chosen.bot.name : t("No terminal chosen");
   const choose = (botId, worker = null) => {

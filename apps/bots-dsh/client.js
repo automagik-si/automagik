@@ -2977,6 +2977,7 @@ var HOST_ZH = {
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
   "The Code side could not load here.": "代码端无法在此加载。",
+  "Terminals show in the Automagik desktop app.": "终端会显示在 Automagik 桌面应用中。",
   "View only · click to type": "只读 · 点击输入",
   "Typing · Esc to stop": "输入中 · 按 Esc 停止",
   "Taking the pane…": "正在接管终端…",
@@ -22958,9 +22959,13 @@ function BotFaceSwitch({ bot }) {
   return (0, import_react57.createElement)(FaceSwitch, { face: code.face, onFace: code.onFace });
 }
 function CodeBody() {
+  const current = (0, import_react57.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
+  const desktopOnly = current.tree?.reason === "desktop-only";
+  const shouldLoadPane = current.loadedAt !== 0 && !desktopOnly;
   const [pane, setPane] = (0, import_react57.useState)(null);
   const [failed, setFailed] = (0, import_react57.useState)(false);
   (0, import_react57.useEffect)(() => {
+    if (!shouldLoadPane) return;
     let live = true;
     loadPane().then((module2) => {
       if (live) setPane(module2);
@@ -22970,7 +22975,9 @@ function CodeBody() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [shouldLoadPane]);
+  if (desktopOnly) return (0, import_react57.createElement)("div", { className: "cs-host" }, (0, import_react57.createElement)("p", { className: "cs-empty" }, t("Terminals show in the Automagik desktop app.")));
+  if (!shouldLoadPane) return null;
   if (pane) return (0, import_react57.createElement)(pane.CodeBody, { code: codeApi });
   return failed ? (0, import_react57.createElement)("div", { className: "cs-host" }, (0, import_react57.createElement)("p", { className: "cs-empty" }, t("The Code side could not load here."))) : null;
 }

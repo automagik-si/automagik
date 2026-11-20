@@ -309,7 +309,9 @@ const TreeRow = ({ label, status, depth = 0, current, note, title, onClick }) =>
 export function CodeBody({ code }) {
   const current = useSyncExternalStore(code.subscribe, code.snapshot, code.snapshot)
   const tree = current.tree
-  useEffect(() => { if (!current.tree && !current.loading) void code.loadTree() }, [code, current.tree, current.loading])
+  useEffect(() => {
+    if (!tree && !current.loading && !current.error) void code.loadTree()
+  }, [code, tree, current.loading, current.error])
   const chosen = selecting(tree, current.selected)
   const title = chosen
     ? (chosen.worker ? `${chosen.bot.name} · ${chosen.worker.role ?? chosen.worker.agent ?? chosen.worker.terminal}` : chosen.bot.name)

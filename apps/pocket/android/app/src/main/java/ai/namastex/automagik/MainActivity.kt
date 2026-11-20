@@ -311,7 +311,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
     }
     vm.sheet.collectAsStateWithLifecycle().value?.let { StatsSheetHost(it, onDismiss = vm::closeStats) }
     if (pairDesktop) PairDialog(state.pairing, onDismiss = { pairDesktop = false }, onScan = ::scan, onPair = vm::pair)
-    state.offeredPairing?.let { link -> ConfirmPairDialog(link, onPair = { vm.pair(link) }, onCancel = vm::dismissOfferedPairing) }
+    state.offeredPairing?.let { offer -> ConfirmPairDialog(offer, onPair = { vm.confirmOfferedPairing(offer.id) }, onCancel = { vm.dismissOfferedPairing(offer.id) }) }
     editHost?.takeIf { it.paired }?.let { host -> PairedHostDialog(host, onDismiss = { editHost = null }, onSave = { vm.saveHost(it); editHost = null }) }
     botChats?.let { id -> BotChatsDialog(vm, id) { botChats = null } }
     if (newTerminal) NewTerminalDialog(state, onDismiss = { newTerminal = false }) { host, cwd, command -> vm.startTerminal(host, cwd, command); newTerminal = false }
