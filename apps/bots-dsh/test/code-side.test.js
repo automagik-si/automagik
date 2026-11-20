@@ -3,6 +3,7 @@
 // computer's own terminal. Every core here is the test's own fake (`fixtures/fake-hc-core.mjs`):
 // no live herdr, no real pane, no real team.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -17,9 +18,16 @@ import { HOME_PATH, REPO_PATH } from '../src/shared/registry.js'
 import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
 import { buildCodeTree, readCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
 import { connectCore } from '../src/host/code-core.js'
+import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
 import { CODE_STREAM_ROUTE, CODE_TREE_ENDPOINT, install, openPaneStream, streamAdmission, streamTarget } from '../src/host/code-side.js'
 import { CODE_INPUT_ROUTE, CODE_RELEASE_ROUTE, CODE_TAKE_ROUTE } from '../src/host/code-typing.js'
+import { install as installChannel } from '../src/host/channel.js'
+import { install as installSeats } from '../src/host/seat-chat.js'
 import { install as installHooks } from '../src/host/extend.js'
+
+const WINDOW = 'ab'.repeat(32)
+const DIGEST = createHash('sha256').update(WINDOW, 'ascii').digest('hex')
+const WINDOW_HEADERS = { 'x-automagik-window': WINDOW }
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-hc-core.mjs', import.meta.url))
 const LEAD = 'b-aaaaaaaaaa'
@@ -47,6 +55,7 @@ function fixture(t) {
   writeFileSync(join(automagikHome, 'bots', 'bots.json'), JSON.stringify({
     version: 2,
     projects: [{ folder: project }],
+    shown: [{ project, bots: [LEAD, DEV] }],
     bots: [
       { id: LEAD, name: 'Atlas', role: 'lead', agent: 'claude', main: true, folder: project },
       { id: DEV, name: 'Dev', role: 'dev', agent: 'claude', folder: project },
@@ -68,8 +77,11 @@ function fixture(t) {
   const terminalsFile = join(root, 'terminals.json')
   writeFileSync(terminalsFile, JSON.stringify(TERMINALS))
   const log = join(root, 'core.log')
+  const probeEnv = coreProbeFixture(t, root)
   const env = {
     ...process.env,
+    ...probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: root,
     AUTOMAGIK_HOME: automagikHome,
     HERDR_APP_HOME: appHome,
@@ -77,7 +89,7 @@ function fixture(t) {
     FAKE_CORE_LOG: log,
     FAKE_CORE_TERMINALS: terminalsFile,
   }
-  return { root, project, automagikHome, appHome, ledgerDir, env, log, terminalsFile }
+  return { root, project, automagikHome, appHome, ledgerDir, env, probeEnv, log, terminalsFile }
 }
 
 const readLog = (path) => {
@@ -177,6 +189,7 @@ test('a global Bot with no folder is a seat: the tree lists it and its pane reso
   writeFileSync(join(f.automagikHome, 'bots', 'bots.json'), JSON.stringify({
     version: 2,
     projects: [{ folder: f.project }],
+    shown: [{ project: f.project, bots: [LEAD] }],
     bots: [
       { id: LEAD, name: 'Atlas', role: 'lead', agent: 'claude', main: true, folder: f.project },
       // RFC 0014: a home-file Bot with no folder. RFC 0022 lists it as a seat.
@@ -323,7 +336,7 @@ test('owner only: the exact stream route refuses a share viewer, and an unauthen
   const connection = { fetchRoutes: new Map(), interceptors: new Map() }
   HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, route)
   const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
-  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/stream?bot=b-aaaaaaaaaa', { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin', host: '127.0.0.1' } })
+  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/stream?bot=b-aaaaaaaaaa', { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin', host: '127.0.0.1' } })
   const viewer = { principal: { kind: 'share-viewer', shareId: 'share', actor: { providerId: 'p', tenantId: 't', subjectId: 's' } } }
   // A Bot's own tool call speaks for its Session, never for the owner's window.
   const botSession = { principal: { kind: 'agent', sessionId: 'session-341a3de3-87c4-4dda-b228-67efca79821b' } }
@@ -363,11 +376,11 @@ function startHost(t, env = process.env) {
   const rt = { ctx, hooks: { endpoint: () => () => {} }, warn: () => {}, home: process.cwd() }
   const off = install(rt, { env, desktop: true })
   t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
-  const request = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
+  const request = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
   return { request, get route() { return route }, off, stopConnection: () => { connectionLive = false } }
 }
 
-const streamAsk = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
+const streamAsk = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
 
 test('a refused open frees its stream slot, so refusals never spend the pane budget', async (t) => {
   const f = fixture(t)
@@ -436,7 +449,7 @@ test('installing the Code side reads no tree: the read starts with the first Ter
     effect: (fn) => { const off = fn(); if (typeof off === 'function') disposers.push(off); return () => {} },
     connection: { fetch: { register: () => () => {} } },
   }
-  const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = fn; return () => {} } }, warn: () => {}, home: f.root }
+  const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = () => fn(undefined, undefined, true); return () => {} } }, warn: () => {}, home: f.root }
   const off = install(rt, { env: f.env, desktop: true, connect: (...args) => { connects += 1; return connectCore(...args) } })
   t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
   assert.equal(typeof endpoint, 'function', 'the tree endpoint is served')
@@ -537,6 +550,8 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
   mkdirSync(team, { recursive: true })
   const saved = {}
   const env = {
+    ...f.probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: f.root,
     AUTOMAGIK_HOME: f.automagikHome,
     AUTOMAGIK_BOTS_HOME: team,
@@ -583,7 +598,7 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
   const fork = root.plugin(plugin, { home: team, browserPlugin: false })
   await fork
   assert.ok(route, 'the Code stream route is registered in the real plugin scope')
-  const response = await route.fetch(new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } }))
+  const response = await route.fetch(new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`, { headers: { ...WINDOW_HEADERS, accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } }))
   assert.equal(response.status, 200)
   const reader = response.body.getReader()
   await reader.read()
@@ -605,4 +620,113 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
     if (saved[key] === undefined) delete process.env[key]
     else process.env[key] = saved[key]
   }
+})
+
+test('the Code tree and pane resolver skip projects without a local shown entry', async (t) => {
+  const f = fixture(t)
+  const hidden = join(f.root, 'hidden')
+  const id = 'b-dddddddddd'
+  const homePath = join(f.automagikHome, HOME_PATH)
+  const home = JSON.parse(readFileSync(homePath, 'utf8'))
+  home.projects.push({ folder: hidden })
+  home.bots.push({ id, name: 'Hidden Bot', folder: hidden })
+  home.shown.push({ project: hidden, machine: 'lab', bots: [id] })
+  writeFileSync(homePath, JSON.stringify(home))
+  const ledger = join(f.ledgerDir, 'attach.jsonl')
+  writeFileSync(ledger, readFileSync(ledger, 'utf8') + JSON.stringify({
+    v: 1, event: 'attach', bot: id, project: hidden, terminal: 't7', core: CORE, created_ms: 700,
+    machine: null, at: '2026-11-15T00:00:00.000Z', by: 'start',
+  }) + '\n')
+  const connect = t.mock.fn(connectCore)
+  const { tree } = await readCodeTree({ env: f.env, connect })
+  assert.deepEqual(tree.projects.map(project => project.folder), [f.project])
+  connect.mock.resetCalls()
+  assert.equal(await resolvePane({ botId: id, env: f.env, connect }), null)
+  assert.equal(connect.mock.callCount(), 0, 'resolvePane refuses the project before talking to a core')
+})
+
+test('the real owner dispatcher requires the window marker for the tree and seat screen', async (t) => {
+  const f = fixture(t)
+  const ctx = fakeContext()
+  const connection = { fetchRoutes: new Map(), interceptors: new Map() }
+  ctx.connection.fetch.register = options => HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, options)
+  const rt = {
+    ctx, state: { bots: {} }, home: f.root, registryPath: join(f.automagikHome, HOME_PATH),
+    load: async () => {}, refresh: async () => {}, readOnly: () => undefined, warn: () => {},
+  }
+  t.after(() => ctx.dispose())
+  const saved = process.send
+  process.send = () => true
+  t.after(() => {
+    if (saved === undefined) delete process.send
+    else process.send = saved
+  })
+  const was = { flag: process.env.AUTOMAGIK_APP_BROWSER, digest: process.env.AUTOMAGIK_WINDOW_DIGEST }
+  process.env.AUTOMAGIK_APP_BROWSER = '1'
+  process.env.AUTOMAGIK_WINDOW_DIGEST = DIGEST
+  t.after(() => {
+    if (was.flag === undefined) delete process.env.AUTOMAGIK_APP_BROWSER
+    else process.env.AUTOMAGIK_APP_BROWSER = was.flag
+    if (was.digest === undefined) delete process.env.AUTOMAGIK_WINDOW_DIGEST
+    else process.env.AUTOMAGIK_WINDOW_DIGEST = was.digest
+  })
+
+  installHooks(rt)
+  t.after(install(rt, { env: f.env, desktop: true }))
+  const screen = ['fixture screen']
+  const watch = t.mock.fn(() => ({
+    rows: () => [], screen: () => screen, status: () => null,
+    approval: () => null, question: () => null, close() {},
+  }))
+  installSeats(rt, { engine: {
+    ready: async () => {}, hub: { all: () => [{ address: 't7', labels: { bot: LEAD } }] }, watch, close() {},
+  } })
+  installChannel(rt)
+  const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
+  const owner = { principal: { kind: 'owner' } }
+  const request = (path, { marker, method = 'POST', body } = {}) => {
+    const headers = new Headers({ accept: 'text/event-stream', 'content-type': 'application/json' })
+    if (marker) headers.set('x-automagik-window', marker)
+    const init = { method, headers, ...(body ? { body: JSON.stringify(body) } : {}) }
+    return handler.fetch(new Request(`http://127.0.0.1${path}`, init), owner)
+  }
+  const seat = { client: 'seat-window', terminal: 't7' }
+  const call = async (endpoint, marker, payload) => (await request('/api/omni-ui', { marker, body: { endpoint, payload } })).json()
+  for (const marker of [undefined, 'cd'.repeat(32), DIGEST]) {
+    assert.deepEqual(await call('code-tree', marker), { ok: true, value: DESKTOP_ONLY })
+    for (const endpoint of ['seat-chat-open', 'seat-chat-read']) {
+      const answer = await call(endpoint, marker, seat)
+      assert.deepEqual(answer, { ok: false, error: { code: 'bot/refused', message: 'desktop-only', details: {} } })
+      assert.equal(JSON.stringify(answer).includes('screen'), false)
+    }
+    for (const path of DESKTOP_ROUTES) {
+      const response = await request(path, { marker, method: path === CODE_STREAM_ROUTE ? 'GET' : 'POST' })
+      assert.equal(response.status, 403)
+      assert.deepEqual(await response.json(), { error: 'desktop-only' })
+    }
+  }
+  assert.equal(watch.mock.callCount(), 0)
+  assert.equal(readLog(f.log).length, 0)
+  assert.equal((await call('code-tree', WINDOW)).value.machine.core, CORE)
+  assert.deepEqual((await call('seat-chat-open', WINDOW, seat)).value.screen, screen)
+  assert.deepEqual((await call('seat-chat-read', WINDOW, seat)).value.screen, screen)
+  assert.equal((await call('seat-chat-read', undefined, seat)).error.message, 'desktop-only')
+  delete process.env.AUTOMAGIK_WINDOW_DIGEST
+  assert.deepEqual((await call('code-tree', WINDOW)).value, DESKTOP_ONLY)
+})
+
+test('the stream distinguishes a failed pane resolution from a failed second connect', async (t) => {
+  const f = fixture(t)
+  const url = `http://127.0.0.1${CODE_STREAM_ROUTE}?bot=${LEAD}`
+  const unavailable = () => { throw new Error('fixture core has stopped') }
+  const noPane = await openPaneStream({ url, env: f.env, connect: unavailable })
+  assert.equal(noPane.status, 404)
+  assert.deepEqual(await noPane.json(), { error: 'no-pane' })
+  const connect = t.mock.fn(unavailable)
+  connect.mock.mockImplementationOnce(async () => ({
+    info: { core: { id: CORE } }, call: async () => TERMINALS[0], close() {},
+  }))
+  const noCore = await openPaneStream({ url, env: f.env, connect })
+  assert.equal(noCore.status, 503)
+  assert.deepEqual(await noCore.json(), { error: 'no-core' })
 })

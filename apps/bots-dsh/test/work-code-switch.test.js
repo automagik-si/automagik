@@ -85,7 +85,7 @@ test('the switch shows only with the app\'s bridge and a herdr-app that is set u
     assert.equal(mount(bridge), null, 'nothing shows before status() answers')
     await settle()
     const tree = mount(bridge)
-    assert.ok(segment(tree, 'Work') && button(tree, 'Code'), state)
+    assert.ok(!segment(tree, 'Work') && button(tree, 'Code'), state)
   }
   // herdr-app found but its `status` failed: it is set up, the switch shows.
   assert.equal(showsSwitch({ state: 'error', source: 'path', message: 'boom' }), true)
@@ -105,9 +105,8 @@ test('Code sends the shown Bot\'s id, and nothing calls open() without a click',
   // Mounting, the window's focus and the pointer entering read the state; none opens Herdr.
   for (const listener of listeners.focus ?? []) listener()
   all(tree).find(n => n.props.role === 'group').props.onPointerEnter()
-  // Work is where the person is, a mark and not a control: nothing to click or focus.
-  assert.equal(segment(tree, 'Work').type, 'span')
-  assert.equal(segment(tree, 'Work').props['aria-current'], 'true')
+  assert.equal(segment(tree, 'Work'), undefined)
+  assert.match(button(tree, 'Code').props.title, /Herdr/)
   assert.equal(button(tree, 'Code').props['aria-current'], undefined)
   await settle()
   assert.deepEqual(bridge.calls.open, [])
