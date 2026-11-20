@@ -621,3 +621,49 @@ test('the isolated account card disables Reserve with a reason and closes a repl
   await codex.getByRole('button', { name: 'Cancel', exact: true }).click()
   await label.waitFor({ state: 'detached' })
 })
+
+test('the machine account card renames and releases by handle and shows the OS owner', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  const machineId = 'fixture-machine-handle'
+  await page.evaluate(machineId => window.showReservationAccounts({ isolated: true, machine: {
+    state: 'mine', claims: [{ machineId, label: 'Machine project', owner: 'alice', current: true }],
+  } }), machineId)
+  await page.getByText('Reserved for Machine project on this machine.', { exact: true }).waitFor()
+  await page.getByText('File owner: alice', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  const label = page.getByRole('textbox', { name: 'Project name', exact: true })
+  assert.equal(await label.inputValue(), 'Machine project')
+  await label.fill('Machine rename')
+  await label.press('Enter')
+  await page.getByText('Reserved for Machine rename on this machine.', { exact: true }).waitFor()
+  const [{ payload }] = await calls(page, 'cli-login-reserve')
+  assert.deepEqual(payload, { offerId: payload.offerId, label: 'Machine rename', machineId })
+  await page.getByRole('button', { name: 'Make shared', exact: true }).click()
+  await page.getByText('Shared with other instances (default).', { exact: true }).waitFor()
+  const released = await calls(page, 'cli-login-release')
+  assert.deepEqual(released.map(call => call.payload), [{ machineId }])
+})
+
+test('the machine card shows the sign-out reason and missing folder notice', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showReservationAccounts({ isolated: true, machine: {
+    state: 'refused', label: 'Other project', owner: 'bob', signedOut: true, claims: [],
+  } }))
+  const codex = page.locator('.bt-set-row')
+    .filter({ has: page.getByText('Codex', { exact: true }) })
+  const message = 'Reserved for Other project on another instance. Sign in with another '
+    + 'account, or ask its owner to make it shared.'
+  await codex.getByText(message, { exact: true }).waitFor()
+  await codex.getByText('File owner: bob', { exact: true }).waitFor()
+  await codex.getByText('Bots: Sign in again in the app to resume Bots', { exact: true }).waitFor()
+  const reserve = codex.getByRole('button', { name: 'Reserve for a project', exact: true })
+  assert.equal(await reserve.count(), 0)
+  await page.evaluate(() => window.refreshReservations({
+    machine: { state: 'notice', notice: 'absent', claims: [] },
+  }))
+  const notice = 'Reservations are not checked across instances here: '
+    + 'this machine has no reservations folder.'
+  await codex.getByText(notice, { exact: true }).waitFor()
+})

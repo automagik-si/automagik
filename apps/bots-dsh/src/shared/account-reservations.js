@@ -24,3 +24,16 @@ export function reservationMessage({ state, why }) {
   return (state === 'not-reservable' && Object.hasOwn(RESERVATION_REASONS, why)
     ? RESERVATION_REASONS[why] : RESERVATION_MESSAGES[state])
 }
+
+export const DIGEST = /^[A-Za-z0-9_-]{43}$/
+export const TOKEN = /^[A-Za-z0-9_-]{21}[AQgw]$/
+const UTC_DATE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/
+export const validInstanceId = value => typeof value === 'string'
+  && value.length > 0 && value.length <= 4096 && !value.includes('\0') && value.isWellFormed()
+export const cleanLabel = value => value.replace(/\p{Cc}/gu, '').replace(/\s+/gu, ' ').trim()
+export const validLabel = value => typeof value === 'string'
+  && value.length > 0 && value.length <= 120 && value.isWellFormed()
+  && [...value].length <= 60 && value === cleanLabel(value)
+export const validDate = value => typeof value === 'string' && UTC_DATE.test(value)
+  && Number.isFinite(Date.parse(value))
+  && new Date(value).toISOString() === (value.length === 20 ? value.replace('Z', '.000Z') : value)

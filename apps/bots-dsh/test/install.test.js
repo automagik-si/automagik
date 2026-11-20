@@ -177,6 +177,11 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/request-error (prepend)',
     // A Bot on a signed-out agent fails before dispatch (model-access-hooks.js).
     'on llm/stream',
+    // The machine reservation check observes sign-in and the Bot turn lifecycle.
+    'on acp-dsh/login-ready',
+    'on session/event',
+    'on session/disposed',
+    'on session/created',
     // A CLI sign-in's chosen model, dropped by a turn on another, applied on ready (cli-login.js).
     'on session/event',
     'on acp-dsh/login-ready',

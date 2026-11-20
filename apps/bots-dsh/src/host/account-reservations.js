@@ -3,14 +3,15 @@
 // That requires an additive two-key read in ACP. Two independent reads never promote a claim;
 // a failed read or a conflict leaves the local claim intact.
 import { codexPlanClass } from '../shared/codex-plan-classes.js'
-import { RESERVATION_REASONS, reservationMessage } from '../shared/account-reservations.js'
+import {
+  DIGEST, TOKEN, cleanLabel, validDate, validInstanceId, validLabel,
+  RESERVATION_REASONS, reservationMessage,
+} from '../shared/account-reservations.js'
+import { fill, MACHINE_MESSAGES } from '../shared/machine-reservations.js'
 
 export const RESERVATION_FILE = 'bot-account-reservations.json'
 const VENDORS = { 'acp-claude': 'claude', 'acp-codex': 'codex' }
-const DIGEST = /^[A-Za-z0-9_-]{43}$/
-const TOKEN = /^[A-Za-z0-9_-]{21}[AQgw]$/
 const REF = /^[A-Za-z0-9_-]{1,64}$/
-const UTC_DATE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/
 const OFFER_MS = 10 * 60_000
 const MAX_OFFERS = 20
 const LABEL_HINT = 'Give the project a name, up to 60 characters.'
@@ -21,13 +22,6 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const fields = (value, keys) => object(value) && Object.keys(value).length === keys.length
   && keys.every(key => Object.hasOwn(value, key))
 const matches = (pattern, value) => typeof value === 'string' && pattern.test(value)
-const validInstance = value => typeof value === 'string' && value.length > 0 && value.length <= 4096
-  && !value.includes('\0') && value.isWellFormed()
-const cleanLabel = value => value.replace(/\p{Cc}/gu, '').replace(/\s+/gu, ' ').trim()
-const validLabel = value => typeof value === 'string' && value.length > 0 && value.length <= 120
-  && value.isWellFormed() && [...value].length <= 60 && value === cleanLabel(value)
-const validDate = value => matches(UTC_DATE, value) && Number.isFinite(Date.parse(value))
-  && new Date(value).toISOString() === (value.length === 20 ? value.replace('Z', '.000Z') : value)
 const validClass = value => value === 'personal' || value === 'workspace'
 const goodRecord = record => record.state === 'absent' || record.state === 'ok'
 const unavailable = state => ({ state })
@@ -40,13 +34,17 @@ function validClaim(id, claim) {
   if (claim?.vendor === 'codex') keys.push('class')
   return fields(claim, keys) && (claim.vendor === 'claude' || (claim.vendor === 'codex' && validClass(claim.class)))
     && matches(DIGEST, claim.exact) && matches(DIGEST, claim.loose) && id === `${claim.vendor}:${claim.exact}`
-    && validInstance(claim.instance) && validLabel(claim.label) && validDate(claim.at) && matches(TOKEN, claim.rev)
+    && validInstanceId(claim.instance) && validLabel(claim.label)
+    && validDate(claim.at) && matches(TOKEN, claim.rev)
 }
 
-async function observe(service, provider, key) {
+async function observe(service, provider, key, machineKey) {
   if (typeof service?.accountEvidence !== 'function') return unavailable('unsupported')
   let seen
-  try { seen = await service.accountEvidence(provider, { key }) } catch (error) {
+  try {
+    const options = machineKey ? { key, keys: [machineKey] } : { key }
+    seen = await service.accountEvidence(provider, options)
+  } catch (error) {
     return unavailable(error?.code === 'acp-account/unverified-login' ? 'recovery' : 'unread')
   }
   if (seen?.id !== provider) return unavailable('changed')
@@ -64,7 +62,13 @@ async function observe(service, provider, key) {
   if (seen.reservable !== true || seen.vendor !== vendor || !matches(REF, seen.ref) || seen.ref === 'unknown'
     || !matches(DIGEST, seen.exact) || !matches(DIGEST, seen.loose)
     || (vendor === 'codex' && !validClass(seen.class))) return unavailable('changed')
+  const machine = seen.digests?.[0]
+  if (machineKey && (!Array.isArray(seen.digests) || seen.digests.length !== 1
+    || !matches(DIGEST, machine?.exact) || !matches(DIGEST, machine?.loose))) {
+    return unavailable('changed')
+  }
   return {
+    ...(machineKey ? { machine: { exact: machine.exact, loose: machine.loose } } : {}),
     state: 'complete', vendor, ref: seen.ref, exact: seen.exact, loose: seen.loose,
     ...(vendor === 'codex' ? { class: seen.class } : {}),
   }
@@ -75,21 +79,42 @@ function coherent(account, provider, evidence) {
     && (provider !== 'acp-codex' || codexPlanClass(account.account?.plan) === evidence.class)
 }
 
-export function createAccountReservations(rt, { path, fs, random, decodeKey, instanceId, now = Date.now, pid }) {
+export function createAccountReservations(rt, {
+  path, fs, random, decodeKey, instanceId, now = Date.now, pid, machine,
+}) {
   const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants
   const offers = new Map()
   const handles = new Map()
   const claimIds = new Map()
+  const lastMachine = new Map()
+  const machineHandles = new Map()
   let tail = Promise.resolve()
   let offerKey, activeKey, lastState
   let keyEpoch = 0
 
   const currentInstance = () => {
     const id = instanceId()
-    return validInstance(id) ? id : undefined
+    return validInstanceId(id) ? id : undefined
   }
-  const requireWriter = () => {
-    if (rt.holdsLock() !== true || rt.readOnly() !== undefined) throw refusal(READ_ONLY, 'bot/read-only')
+  const canWrite = () => rt.holdsLock() === true && rt.readOnly() === undefined
+  const requireWriter = () => { if (!canWrite()) throw refusal(READ_ONLY, 'bot/read-only') }
+  const sameFolder = (a, b) => b?.state === 'ready' && a.dir === b.dir
+    && a.key.every((byte, i) => byte === b.key[i])
+  const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino
+
+  function machineFailure(result) {
+    if (result.conflict) {
+      throw refusal(fill(MACHINE_MESSAGES.conflict, result.conflict), 'bot/reservation-conflict')
+    }
+    const code = result.refused
+    if (code === 'changed' || code === 'absent' || code === 'other-instance' || result.mine) {
+      changed()
+    }
+    const messageId = {
+      'not-own-file': 'not-own-file', unreadable: 'unreadable-file', 'not-writable': 'not-set-up',
+    }[code]
+    if (messageId) throw refusal(MACHINE_MESSAGES[messageId], `bot/reservation-${messageId}`)
+    throw refusal(MACHINE_MESSAGES.failed, 'bot/reservation-machine-failed')
   }
   const unsafeStat = info => !info.isFile() || (info.mode & 0o077) !== 0
   function read() {
@@ -190,14 +215,14 @@ export function createAccountReservations(rt, { path, fs, random, decodeKey, ins
     return { offerId }
   }
 
-  function view(provider, record, evidence, instance, key) {
+  function view(provider, record, evidence, instance, key, hidden) {
     if (!goodRecord(record)) return { state: record.state, claims: [] }
     const vendor = VENDORS[provider]
     const { state, why } = evidence
     const current = state === 'complete' && instance !== undefined ? evidence.exact : undefined
     const claims = []
     for (const [id, claim] of Object.entries(record.claims ?? {})) {
-      if (claim.vendor !== vendor) continue
+      if (claim.vendor !== vendor || hidden?.has(id)) continue
       claims.push({
         claimId: claimIdOf(id), label: claim.label, current: claim.exact === current,
         mine: claim.instance === instance, rev: claim.rev,
@@ -211,20 +236,97 @@ export function createAccountReservations(rt, { path, fs, random, decodeKey, ins
     }
   }
 
+  function removeLocal(record, id, instance) {
+    const claims = { ...record.claims }
+    delete claims[id]
+    write(record, record.key, claims, instance)
+    return { ...record, claims }
+  }
+
+  function rememberMachine(provider, ready, files, seen, instance, record) {
+    const old = lastMachine.get(provider) ?? []
+    const hidden = new Set()
+    const next = files.map(file => {
+      const prior = old.find(handle => machineHandles.get(handle)?.exact === file.exact)
+      const previous = machineHandles.get(prior)
+      const same = previous && sameFolder(previous.ready, ready) && previous.instance === instance
+        && sameFile(previous, file)
+      const machineId = same ? prior : random(16, 'base64url')
+      const current = file.exact === seen.machine?.exact
+      const vendor = VENDORS[provider]
+      const localId = current ? `${vendor}:${seen.exact}` : same ? previous.localId : undefined
+      if (record.claims?.[localId]?.instance === instance && localId) hidden.add(localId)
+      machineHandles.set(machineId, {
+        ...file, provider, vendor, ready, instance, localId, current,
+      })
+      return machineId
+    })
+    for (const id of old) if (!next.includes(id)) machineHandles.delete(id)
+    lastMachine.set(provider, next)
+    return hidden
+  }
+
+  function machineClaims(provider) {
+    return (lastMachine.get(provider) ?? []).flatMap(machineId => {
+      const claim = machineHandles.get(machineId)
+      if (!claim) return []
+      const { label, current, owner } = claim
+      return [{ machineId, label, current, owner }]
+    })
+  }
+
+  function reserveMachine(ready, seen, instance, label) {
+    const { vendor, class: plan } = seen
+    return machine.reserve(ready, {
+      vendor, ...seen.machine, ...(plan === undefined ? {} : { class: plan }), instance, label,
+    })
+  }
+
   async function list(service, provider, account, { recoveryRequired = false, unread = false } = {}) {
+    const folder = machine?.open()
+    const ready = folder?.state === 'ready' && service?.reservationEvidence >= 2
+      ? folder : undefined
     const before = read()
-    const probe = goodRecord(before) && !recoveryRequired && !unread && typeof service?.accountEvidence === 'function'
+    const probe = goodRecord(before) && !recoveryRequired && !unread
+      && typeof service?.accountEvidence === 'function'
     const key = keyOf(before, probe)
-    if (!probe) {
-      const state = recoveryRequired ? 'recovery' : unread ? 'unread' : 'unsupported'
-      return view(provider, before, unavailable(state), currentInstance(), key)
-    }
     const epoch = keyEpoch
-    let seen = await observe(service, provider, decodeKey(key))
-    const latest = read()
-    if (keyOf(latest) !== key || epoch !== keyEpoch
-      || (seen.state === 'complete' && !coherent(account, provider, seen))) seen = unavailable('changed')
-    return view(provider, latest, seen, currentInstance(), key)
+    const instance = currentInstance()
+    let seen = probe ? await observe(service, provider, decodeKey(key), ready?.key)
+      : unavailable(recoveryRequired ? 'recovery' : unread ? 'unread' : 'unsupported')
+    let latest = probe ? read() : before
+    if (probe && (keyOf(latest) !== key || epoch !== keyEpoch
+      || (seen.state === 'complete' && !coherent(account, provider, seen)))) {
+      seen = unavailable('changed')
+    }
+    const vendor = VENDORS[provider]
+    let files = []
+    if (ready && instance !== undefined && instance === currentInstance()
+      && sameFolder(ready, machine.open())) {
+      files = machine.listOwn(ready, vendor, instance)
+      const localId = `${vendor}:${seen.exact}`
+      const claim = latest.claims?.[localId]
+      if (seen.machine && claim?.instance === instance && canWrite()) {
+        await enqueue(() => {
+          const record = read()
+          if (!canWrite() || currentInstance() !== instance || record.key !== key
+            || record.claims?.[localId]?.rev !== claim.rev) return
+          const current = machine.open()
+          if (!sameFolder(ready, current)) return
+          const own = machine.listOwn(current, vendor, instance)
+            .some(file => file.exact === seen.machine.exact)
+          const result = own ? { mine: true } : reserveMachine(current, seen, instance, claim.label)
+          if (result.created || result.mine) {
+            try { removeLocal(record, localId, instance) } catch {}
+          }
+        })
+        latest = read()
+        if (sameFolder(ready, machine.open())) files = machine.listOwn(ready, vendor, instance)
+        else files = []
+      }
+    }
+    const hidden = rememberMachine(provider, ready, files, seen, instance, latest)
+    return view(provider, latest, seen, currentInstance(), key, hidden)
   }
 
   function enqueue(fn) {
@@ -236,8 +338,11 @@ export function createAccountReservations(rt, { path, fs, random, decodeKey, ins
   const reserve = (service, payload) => enqueue(async () => {
     requireWriter()
     const rename = fields(payload, ['offerId', 'label', 'claimId', 'rev'])
-    if ((!rename && !fields(payload, ['offerId', 'label'])) || !matches(TOKEN, payload.offerId)
-      || (rename && (!matches(TOKEN, payload.claimId) || !matches(TOKEN, payload.rev)))) {
+    const machineRename = fields(payload, ['offerId', 'label', 'machineId'])
+    if ((!rename && !machineRename && !fields(payload, ['offerId', 'label']))
+      || !matches(TOKEN, payload.offerId)
+      || (rename && (!matches(TOKEN, payload.claimId) || !matches(TOKEN, payload.rev)))
+      || (machineRename && !matches(TOKEN, payload.machineId))) {
       throw refusal(BAD_REQUEST, 'bot/invalid')
     }
     const label = typeof payload.label === 'string' && payload.label.length <= 4096 ? cleanLabel(payload.label) : ''
@@ -253,7 +358,11 @@ export function createAccountReservations(rt, { path, fs, random, decodeKey, ins
     if (offer === undefined || offer.key !== key || offer.keyEpoch !== keyEpoch
       || offer.instance !== instance || !sameKey(before)) changed()
 
-    const seen = await observe(service, offer.provider, decodeKey(offer.key))
+    const folder = machine?.open()
+    const ready = folder?.state === 'ready' ? folder : undefined
+    if (ready && !(service?.reservationEvidence >= 2)) refuse(unavailable('unsupported'))
+    if (!ready && machineRename) changed()
+    const seen = await observe(service, offer.provider, decodeKey(offer.key), ready?.key)
     requireWriter()
     const record = read()
     keyOf(record)
@@ -269,7 +378,37 @@ export function createAccountReservations(rt, { path, fs, random, decodeKey, ins
     if (claim !== undefined && claim.instance !== instance) {
       throw refusal(`This account is reserved for ${claim.label} by another installation that shares this team.`)
     }
-    if (claim === undefined ? rename : !rename || handles.get(payload.claimId) !== id || payload.rev !== claim.rev) changed()
+    if (!machineRename && (claim === undefined ? rename
+      : !rename || handles.get(payload.claimId) !== id || payload.rev !== claim.rev)) changed()
+    if (ready) {
+      const current = machine.open()
+      if (!sameFolder(ready, current)) changed()
+      if (offer.machine && offer.machine.exact !== seen.machine.exact) changed()
+      if (machineRename) {
+        const handle = machineHandles.get(payload.machineId)
+        if (!handle || handle.instance !== instance || handle.provider !== offer.provider
+          || !sameFolder(handle.ready, current) || handle.exact !== seen.machine.exact) changed()
+        const result = machine.relabel(current, {
+          vendor: seen.vendor, exact: handle.exact, instance, label, expect: handle,
+        })
+        if (!result.ok) machineFailure(result)
+        machineHandles.delete(payload.machineId)
+      } else {
+        const result = reserveMachine(current, seen, instance, label)
+        if (!result.created && !(rename && result.mine)) machineFailure(result)
+        if (rename) {
+          if (result.mine) {
+            const updated = machine.relabel(current, {
+              vendor: seen.vendor, exact: seen.machine.exact, instance, label, expect: result.mine,
+            })
+            if (!updated.ok) machineFailure(updated)
+          }
+          try { removeLocal(record, id, instance) } catch {}
+        }
+      }
+      offers.delete(payload.offerId)
+      return view(offer.provider, read(), seen, instance, key, new Set([id]))
+    }
     const claims = {
       ...record.claims,
       [id]: {
@@ -287,6 +426,21 @@ export function createAccountReservations(rt, { path, fs, random, decodeKey, ins
 
   const release = payload => enqueue(() => {
     requireWriter()
+    if (fields(payload, ['machineId']) && matches(TOKEN, payload.machineId)) {
+      const handle = machineHandles.get(payload.machineId)
+      const instance = currentInstance()
+      if (instance === undefined) refuse(unavailable('no-instance'))
+      const ready = machine?.open()
+      if (!handle || handle.instance !== instance || !sameFolder(handle.ready, ready)) changed()
+      const record = read()
+      if (!goodRecord(record)) refuse(record)
+      const localId = handle.localId ?? `${handle.vendor}:${handle.exact}`
+      if (record.claims?.[localId]?.instance === instance) removeLocal(record, localId, instance)
+      const result = machine.makeShared(ready, { ...handle, instance, expect: handle })
+      if (!result.ok) machineFailure(result)
+      machineHandles.delete(payload.machineId)
+      return { state: 'unknown', claims: [] }
+    }
     if (!fields(payload, ['claimId', 'rev']) || !matches(TOKEN, payload.claimId) || !matches(TOKEN, payload.rev)) {
       throw refusal(BAD_REQUEST, 'bot/invalid')
     }
@@ -306,5 +460,5 @@ export function createAccountReservations(rt, { path, fs, random, decodeKey, ins
     return view(`acp-${claim.vendor}`, { ...record, claims }, unavailable('unknown'), instance, record.key)
   })
 
-  return { list, reserve, release }
+  return { list, reserve, release, machineClaims, idle: () => tail }
 }

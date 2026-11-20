@@ -37,7 +37,9 @@ import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
-import { reservationDigests, reservationOutcome, validReservationKey } from './src/host/reservation-evidence.js'
+import {
+  reservationDigests, reservationOutcome, validReservationDigest, validReservationKey,
+} from './src/host/reservation-evidence.js'
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
 
 export const name = 'acp-dsh'
@@ -1085,8 +1087,49 @@ export function apply(ctx, config = {}, {
     return { id, signedIn: true, consent: consentStates.get(id) }
   }
 
-  async function signOutAccount(id) {
+  async function expectAccount(id, expect) {
+    if (!validReservationKey(expect?.key) || !validReservationDigest(expect.loose)
+      || (expect.exact !== undefined && !validReservationDigest(expect.exact))
+      || (expect.recheck !== undefined && typeof expect.recheck !== 'function')) {
+      throw accountFailure('invalid', 'The sign-out request is not valid.')
+    }
+    if (!homes || !consentIds.includes(id) || disposed || !clis.has(id)) {
+      throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
+    }
+    const spec = AGENTS[id]
+    if (accountChanges.has(id) || loginLocks.has(id)
+      || homes.paused(spec.key) || homes.changing(spec.key)) {
+      throw accountFailure('busy', 'The Bot account is changing.')
+    }
+    const cli = clis.get(id)
+    const version = authVersions.get(id)
+    accountChanges.add(id)
+    try {
+      const env = { ...process.env, ...cliEnvironment(spec, cliDetails.get(id)) }
+      const { evidence } = await evidenceOf(spec, cli, { env })
+      const seen = reservationDigests(evidence, expect.key)
+      if (!disposed && (seen.loose !== expect.loose || seen.exact !== expect.exact)) {
+        throw accountFailure('changed', 'The Bot account changed. Look again.')
+      }
+      return { cli, version }
+    } finally {
+      accountChanges.delete(id)
+    }
+  }
+
+  function confirmMatch(id, spec, matched, expect) {
+    let current = false
+    try { current = expect.recheck === undefined || expect.recheck() === true } catch {}
+    if (!current || clis.get(id) !== matched.cli || authVersions.get(id) !== matched.version
+      || signIns.get(id) !== true || loginLocks.has(id)
+      || homes.paused(spec.key) || homes.changing(spec.key)) {
+      throw accountFailure('changed', 'The Bot account changed. Look again.')
+    }
+  }
+
+  async function signOutAccount(id, { expect } = {}) {
     restartGuard()
+    const matched = expect === undefined ? undefined : await expectAccount(id, expect)
     if (!homes || !consentIds.includes(id) || disposed) {
       throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
     }
@@ -1094,6 +1137,7 @@ export function apply(ctx, config = {}, {
     const spec = AGENTS[id]
     const cli = clis.get(id)
     if (!cli) throw accountFailure('unavailable', 'Install the CLI before changing accounts.')
+    if (matched !== undefined) confirmMatch(id, spec, matched, expect)
     if (loginLocks.delete(id)) homes.end(spec.key)
     homes.begin(spec.key)
     accountChanges.add(id)
@@ -1330,6 +1374,7 @@ export function apply(ctx, config = {}, {
 
   const service = {
     ...(homes ? { authScope: 'isolated' } : {}),
+    reservationEvidence: 2,
     settingsEntry: name,
     status,
     // Sign-in, for the DSH owner's views only (the Bot team's owner-only route): never tools,
@@ -1339,7 +1384,7 @@ export function apply(ctx, config = {}, {
       restartGuard()
       return homes && consentIds.includes(id) ? startLogin(id, label) : logins.start(id, { label })
     },
-    accountSignOut: id => signOutAccount(id),
+    accountSignOut: (id, options) => signOutAccount(id, options),
     accountReset: id => resetAccount(id),
     accountRecovery: id => ({ required: !!(homes && consentIds.includes(id)
       && homes.recovery(AGENTS[id].key)) }),
@@ -1372,9 +1417,18 @@ export function apply(ctx, config = {}, {
      * inspect, logs or events. The card compares `ref` with `account()` before offering Reserve.
      * Reserve must match the shown `exact` on a new read; refusal and sign-out must still match
      * under the same outcome on a new read. `changed` asks the caller to retry.
+     * With reservationEvidence >= 2, `keys` adds `digests` from the same observation.
+     * accountSignOut accepts `expect` with matching digests and an optional synchronous
+     * `recheck` that must return true before sign-out proceeds.
      */
-    async accountEvidence(id, { key } = {}) {
-      if (!validReservationKey(key)) throw accountFailure('invalid', 'A reservation key must be 32 bytes.')
+    async accountEvidence(id, { key, keys } = {}) {
+      if (!validReservationKey(key)) {
+        throw accountFailure('invalid', 'A reservation key must be 32 bytes.')
+      }
+      if (keys !== undefined && (!Array.isArray(keys) || keys.length < 1 || keys.length > 4
+        || !Array.from(keys).every(validReservationKey))) {
+        throw accountFailure('invalid', 'Reservation keys must be 32 bytes each.')
+      }
       if (!Object.hasOwn(AGENTS, id)) return undefined
       const spec = AGENTS[id]
       if (isNative(spec) || consents === undefined) return { id, supported: false }
@@ -1396,10 +1450,13 @@ export function apply(ctx, config = {}, {
       const scope = homes ? { authScope: 'isolated' } : {}
       const result = evidence === undefined ? { outcome: 'unread', reservable: false, why: 'unknown' }
         : reservationOutcome(evidence)
+      const digests = reservationDigests(evidence, key)
       return {
         id, ...scope, signedIn: true, vendor: spec.key, ref: refOf(who), ...result,
         ...(spec.key === 'codex' && evidence?.class !== undefined ? { class: evidence.class } : {}),
-        ...reservationDigests(evidence, key),
+        ...digests,
+        ...(keys && digests.loose
+          ? { digests: keys.map(k => reservationDigests(evidence, k)) } : {}),
       }
     },
     // Read-only comparison for the owner's account controls. This never logs in, refreshes a

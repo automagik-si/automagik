@@ -2,6 +2,8 @@
 // Copy is looked up at render time and every slot outlet re-renders on a language
 // switch, so nothing caches a translated string.
 
+import { MACHINE_MESSAGES } from '../shared/machine-reservations.js'
+
 export const NAMESPACE = 'omni-ui'
 
 const ZH = {
@@ -533,6 +535,23 @@ const ZH = {
   "Personal plan": "个人套餐",
   "Workspace plan: covers every ChatGPT workspace of this email": "工作区套餐：涵盖此邮箱的所有 ChatGPT 工作区",
   "The record keeps no email: only keyed digests. Anyone who can read this team's files and the key could test a guessed email.": "记录只保存带密钥的摘要，不保存邮箱。能读取此团队的文件和密钥的人可以验证猜测的邮箱。",
+  [MACHINE_MESSAGES.absent]: "此处不检查跨实例的账号预留：本机没有预留文件夹。",
+  [MACHINE_MESSAGES.unreadable]: "此处不检查跨实例的账号预留：此系统用户无法读取预留文件夹。",
+  [MACHINE_MESSAGES['not-set-up']]: "此处不检查跨实例的账号预留：预留文件夹尚未完整设置。请联系本机管理员。",
+  [MACHINE_MESSAGES.unsupported]: "Windows 上暂不提供跨实例的账号预留。",
+  [MACHINE_MESSAGES.mine]: "已在本机预留给 {label}。",
+  [MACHINE_MESSAGES.other]: "本机也为 {label} 预留了一个账号（另一个 {vendor} 账号）。",
+  [MACHINE_MESSAGES.refused]: "已在另一个实例上预留给 {label}。请使用其他账号登录，或请其所有者将其设为共享。",
+  [MACHINE_MESSAGES['no-organisation']]: "此登录可能是另一个实例上为 {label} 预留的账号：此版本的 Claude Code 不提供组织信息。"
+    + "请更新 Claude Code，或请预留的所有者将其设为共享。",
+  [MACHINE_MESSAGES['unknown-plan']]: "此登录可能是另一个实例上为 {label} 预留的账号：此版本无法识别该 Codex 套餐。"
+    + "请更新 Codex，或请预留的所有者将其设为共享。",
+  [MACHINE_MESSAGES['unreadable-file']]: "无法读取本机上此账号的预留文件，因此此处不使用该账号。请联系本机管理员检查预留文件夹。",
+  [MACHINE_MESSAGES.owner]: "文件所有者：{owner}",
+  [MACHINE_MESSAGES.conflict]: "此账号已在另一个实例上预留给 {label}。",
+  [MACHINE_MESSAGES['not-own-file']]: "只有创建此预留的系统用户才能将其设为共享。请联系本机管理员。",
+  [MACHINE_MESSAGES.privacy]: "本机预留用户组的成员可以验证猜测的邮箱。",
+  [MACHINE_MESSAGES.failed]: "无法在本机保存预留。请重试。",
   "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
   "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.":
@@ -3365,6 +3384,10 @@ const HOST_TEMPLATES = [
   'Could not continue this sign-in ({kind}). Try again.',
   'The account could not be confirmed ({kind}). Try again.',
   'This account is reserved for {label} by another installation that shares this team.',
+  MACHINE_MESSAGES.refused,
+  MACHINE_MESSAGES['no-organisation'],
+  MACHINE_MESSAGES['unknown-plan'],
+  MACHINE_MESSAGES.conflict,
   '{name} could not switch to {model}. It stays on {kept}.',
   { template: '{name} cannot use the {route} route.', host: ['route'] },
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host

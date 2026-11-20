@@ -6,6 +6,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -69,3 +70,5 @@ registerHooks({
     return nextResolve(specifier, context)
   },
 })
+
+process.env.AUTOMAGIK_RESERVATIONS_DIR = join(tmpdir(), `automagik-no-reservations-${process.pid}`)
