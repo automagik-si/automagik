@@ -40,7 +40,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0004](0004-composer-chat-kinds.md) | Composer and chat kinds | Accepted (unverified: no delivery PR found; only #187, the picker's prerequisite, merged) | 2. One message box |
 | [0005](0005-workspace-and-genie-projects.md) | Workspace and Genie projects | Queued (no delivery PR found) | 4. Projects in one place (Publish not scheduled) |
 | [0006](0006-herdr-terminal-mode.md) | Herdr terminal mode | Superseded (D27: herdr-app as the code window, RFC 0013; its Workers section, a herdr subagents provider for DSH, is replaced by [0028](0028-code-workers.md), Accepted 2026-11-19) | not scheduled |
-| [0007](0007-desktop-speed.md) | Desktop speed | In delivery (delivery 2: #184; delivery 4 in part: #179; slices 1, 3, 5 and 6 not found) | 1 (marks, stable port), 5. The app opens fast |
+| [0007](0007-desktop-speed.md) | Desktop speed | In delivery (delivery 2: #184; delivery 4 in part: #179; slice 3 measured with no gain, not built; slices 1, 5 and 6 not found) | 1 (marks, stable port), 5. The app opens fast |
 | [0008](0008-platform-and-web-instances.md) | Platform and web instances | Queued (amended 2026-11-09 by [0024](0024-automagik-cloud.md), #866: web sign-in, the desktop client, questions 2, 6, 7 and the threat model) | not scheduled |
 | [0009](0009-personal-customization.md) | Personal customization | Queued (no delivery PR found) | after 2 (proposed: Make it yours) |
 | [0010](0010-desktop-sandbox.md) | Desktop sandbox and supervision | Queued (answers: D19; question 2 open; only the RFC: #188) | not scheduled |
