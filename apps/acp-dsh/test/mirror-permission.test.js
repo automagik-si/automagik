@@ -694,6 +694,126 @@ test('Auto: a lasting-only question spends the review, so a second one-shot ques
   assert.deepEqual(result.content, [{ type: 'text', text: 'Read complete.' }], 'the lasting-only reason is gone')
 })
 
+// --- Codex profile confinement -------------------------------------------------------------
+
+const CODEX_EXEC_OPTIONS = [
+  { optionId: 'allow_once', kind: 'allow_once', name: 'Yes, proceed' },
+  { optionId: 'accept_execpolicy_amendment', kind: 'allow_always', name: "Yes, and don't ask again ..." },
+  { optionId: 'cancel', kind: 'reject_once', name: 'No, and tell Codex what to do differently' },
+]
+const codexProfile = level => `permission-profile:automagik-${level}-${'a'.repeat(32)}`
+
+async function askCodex(t, { mode = codexProfile('read'), kind = 'execute', title = 'touch /x/probe.txt', input = {}, answer: dialogAnswer } = {}) {
+  const w = await world(t, { preset: 'workspace-write', answer: dialogAnswer })
+  const c = w.chat('s1', [{ question: false }])
+  const { tool, block } = c.call
+  c.live.own = true
+  c.run.modes = { currentModeId: mode }
+  const rawInput = { command: title, cwd: '/w', ...input }
+  c.run.changeTool(tool, { status: 'in_progress', kind, title, rawInput })
+  block.arguments = JSON.stringify(callArguments(tool))
+  const question = c.call.ask(CODEX_EXEC_OPTIONS, { kind, status: 'pending', title, rawInput })
+  const running = c.execute()
+  const answer = await soon(question)
+  if (answer.outcome?.optionId === 'allow_once') {
+    c.run.changeTool(tool, { status: 'completed' })
+  } else {
+    c.run.endPrompt({ type: 'end', stopReason: 'cancelled' })
+  }
+  const [result] = await running
+  return { answer, asked: w.asked, result, w, c }
+}
+
+async function finishCodexTurn({ w, c, result }) {
+  // chat() already made and logged the mirror block that the queued tool event would emit.
+  assert.equal((await c.run.next()).type, 'tool')
+  w.ctx.provide('agents', { get: id => (id === c.session.id ? c.agent : undefined), list: () => [c.agent] })
+  const messages = [{ role: 'tool', toolCallId: c.call.callId, content: result.content }]
+  const chunks = []
+  for await (const chunk of w.adapter.stream({ provider: PROVIDER, model: 'default', sessionId: c.session.id, messages })) chunks.push(chunk)
+  return chunks
+}
+
+for (const [level, name] of [['read', 'Read only'], ['workspace', 'Workspace']]) {
+  test(`confined: a ${name} profile refuses an exec escalation without a dialog`, async (t) => {
+    const { answer, asked, result } = await askCodex(t, { mode: codexProfile(level) })
+    assert.deepEqual(answer, picked('cancel'))
+    assert.equal(asked.length, 0)
+    assert.equal(result.meta.status, 'failed')
+    assert.deepEqual(result.content, [{
+      type: 'text',
+      text: "Test ACP runs inside its own folder at this Bot's level, so an approval cannot run touch /x/probe.txt outside it. Raise the Bot's level to Full access to run it.",
+    }])
+  })
+}
+
+test('a confined Codex escalation ends the turn with the refusal reason and finishes with stop', async t => {
+  const turn = await askCodex(t, { mode: codexProfile('workspace'), answer: 'rejected' })
+  const chunks = await finishCodexTurn(turn)
+  const reason = "Test ACP runs inside its own folder at this Bot's level, so an approval cannot run touch /x/probe.txt outside it. Raise the Bot's level to Full access to run it."
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text), [`[${reason}]`])
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block), [{ type: 'text', text: `[${reason}]` }])
+  assert.deepEqual(turn.answer, picked('cancel'))
+  assert.equal(turn.asked.length, 0)
+  assert.equal(turn.result.meta.status, 'failed')
+  assert.deepEqual(turn.result.content, [{ type: 'text', text: reason }])
+})
+
+test('a cancelled Codex prompt without a confined refusal still finishes aborted', async t => {
+  const turn = await askCodex(t, { mode: 'read-only', answer: 'rejected' })
+  const chunks = await finishCodexTurn(turn)
+  assert.deepEqual(turn.answer, picked('cancel'))
+  assert.equal(turn.asked.length, 1)
+  assert.deepEqual(chunks, [{ type: 'finish', reason: { kind: 'aborted', failure: { message: 'Stopped', code: 'ABORTED' } } }])
+})
+
+test('confined: a command mentioning network access is still refused under the profile', async (t) => {
+  const title = "touch /x/probe.txt || echo 'network access to proxy failed'"
+  const { answer, asked } = await askCodex(t, { title })
+  assert.deepEqual(answer, picked('cancel'))
+  assert.equal(asked.length, 0)
+})
+
+for (const [name, call] of [
+  ['the built-in read-only mode still asks the person', { mode: 'read-only' }],
+  ['a file edit under the profile still asks', { kind: 'edit' }],
+  ['a network question under the profile still asks', { input: { url: 'https://example.com' } }],
+  ['an additional-permissions question under the profile still asks', { input: { additionalPermissions: { network: { enabled: true } } } }],
+]) {
+  test(`confined: ${name}`, async (t) => {
+    const { answer, asked } = await askCodex(t, call)
+    assert.deepEqual(answer, picked('allow_once'))
+    assert.equal(asked.length, 1)
+  })
+}
+
+for (const [name, update, questionUpdate] of [
+  ['an MCP question under the profile still asks', {
+    _meta: { is_mcp_tool_call: true },
+  }, { kind: 'execute', status: 'pending' }],
+  ['a SOCKS network question under the profile still asks', {
+    title: 'curl x', rawInput: { command: 'curl x', cwd: '/w' },
+  }, { kind: 'execute', status: 'pending', title: 'socks5Tcp network access to proxy.example:1080' }],
+  ['a question that is not execute/pending under the profile still asks', {}, {}],
+]) {
+  test(`confined: ${name}`, async (t) => {
+    const w = await world(t, { preset: 'workspace-write' })
+    const c = w.chat('s1', [{ question: false }])
+    const { tool, block } = c.call
+    c.run.modes = { currentModeId: codexProfile('read') }
+    c.run.changeTool(tool, { status: 'in_progress', kind: 'execute', title: 'touch /x/probe.txt', rawInput: { command: 'touch /x/probe.txt', cwd: '/w' }, ...update })
+    block.arguments = JSON.stringify(callArguments(tool))
+    const question = c.call.ask(CODEX_EXEC_OPTIONS, { title: tool.title, rawInput: tool.rawInput, ...questionUpdate })
+    const running = c.execute()
+    const answer = await soon(question)
+    c.run.changeTool(tool, { status: answer.outcome?.optionId === 'allow_once' ? 'completed' : 'failed' })
+    await running
+    assert.deepEqual(answer, picked('allow_once'))
+    assert.equal(w.asked.length, 1)
+  })
+}
+
 // --- other refusals before the body --------------------------------------------------------
 
 test("another plugin's pre-execute gate refuses the call: the ACP question is rejected", async (t) => {
