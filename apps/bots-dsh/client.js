@@ -1326,6 +1326,28 @@ var ZH = {
   "What this Bot can do, on top of what every Bot has.": "这个 Bot 在通用能力之外还能做什么。",
   "Genie can be given to another Bot after the next Genie update.": "Genie 下次更新后，就可以把此角色分配给其他 Bot。",
   "Roles are turned off for this team.": "此团队已关闭角色功能。",
+  "Roles": "角色",
+  "Uninstall": "卸载",
+  "Broken": "文件夹缺失",
+  "Damaged": "已损坏",
+  "Detach this role from every Bot before uninstalling it.": "请先从所有 Bot 移除此角色，再卸载。",
+  "Community: not installable yet": "社区角色：暂不可安装",
+  "Ignored role manifest field: {field}": "已忽略角色清单字段：{field}",
+  "Role package folder left at {folder}.": "角色包文件夹仍位于 {folder}。",
+  "This host does not hold the Bot team.": "此主机未持有 Bot 团队的锁。",
+  "The role catalog is unavailable.": "角色目录不可用。",
+  "This role is not in the catalog.": "目录中没有此角色。",
+  "Community roles cannot be installed yet.": "暂时无法安装社区角色。",
+  "The role install is damaged. Uninstall it first.": "角色安装已损坏。请先卸载。",
+  "Another version is installed. Uninstall it first.": "已安装其他版本。请先卸载。",
+  "The installed role conflicts with this package.": "已安装的角色与此软件包冲突。",
+  "The role download does not match the catalog size or checksum.": "下载的角色包大小或校验和与目录不符。",
+  "Role settings and ui are not supported yet.": "暂不支持角色设置和界面。",
+  "Required role features are not supported yet.": "暂不支持此角色要求的功能。",
+  "The role install record changed. Try again.": "角色安装记录已更改。请重试。",
+  "The role install records are damaged.": "角色安装记录已损坏。",
+  "This role is not installed.": "此角色尚未安装。",
+  "A folder is in the way: {folder}": "已有文件夹占用了路径：{folder}",
   "Unknown role": "未知角色",
   "A Bot's role changes with role-attach and role-detach": "请使用 role-attach 和 role-detach 更改 Bot 的角色",
   "{name} does not have the {tool} tool: its Genie role is off.": "{name} 的 Genie 角色已关闭，无法使用 {tool} 工具。",
@@ -3211,6 +3233,7 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 var HOST_TEMPLATES = [
+  "A folder is in the way: {folder}",
   "{name} does not have the {tool} tool: its Genie role is off.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
   "This step is hard to undo: {step}. Allow it once?",
@@ -15518,6 +15541,14 @@ var BUILTIN_ROLES = Object.freeze({
 });
 var GENIE_ATTACH_REFUSAL = "Genie can be given to another Bot after the next Genie update.";
 var rolesOn = (prefs) => prefs?.roles !== false;
+var RESERVED_ROLE_IDS = Object.freeze(["data"]);
+var isWindowsReservedName = (name) => /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+var isRoleId = (id) => typeof id === "string" && /^[a-z0-9][a-z0-9-]{0,40}$/.test(id) && !RESERVED_ROLE_IDS.includes(id) && !isWindowsReservedName(id);
+var isRoleVersion = (version) => typeof version === "string" && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version);
+function attachedRoleIds(bot) {
+  if (!Object.hasOwn(bot ?? {}, "roles") || !Array.isArray(bot.roles)) return [];
+  return bot.roles.flatMap((entry) => typeof entry?.id === "string" && Object.hasOwn(entry, "id") ? [entry.id] : []);
+}
 var isAttachment = (entry) => typeof entry?.id === "string" && Object.hasOwn(BUILTIN_ROLES, entry.id) && typeof entry.version === "string" && entry.version.length > 0 && typeof entry.attachedAt === "string" && Array.isArray(entry.grants);
 var storedRoles = (bot) => {
   if (!Object.hasOwn(bot ?? {}, "roles")) return void 0;
@@ -15656,6 +15687,58 @@ function denyToolsText(bot) {
 function parseDenyTools(text2) {
   return [...new Set(String(text2 ?? "").split(/[\n,]+/).map((name) => name.trim()).filter(Boolean))];
 }
+function RolePackagesCard({ roster, actions, run: run3 }) {
+  const [result, setResult] = (0, import_react40.useState)(null);
+  const [pending, setPending] = (0, import_react40.useState)(false);
+  const records = roster.roles ?? {};
+  const roles = new Map((roster.roleCatalog?.roles ?? []).map((role) => [role.id, role]));
+  for (const id of Object.keys(records)) {
+    if (!roles.has(id)) roles.set(id, { id, name: id });
+  }
+  if (roles.size === 0 && !result && !pending) return null;
+  const attached = new Set((roster.bots ?? Object.values(roster.byId ?? {})).flatMap(attachedRoleIds));
+  const readOnly = Boolean(roster.readOnly) || roster.roleCatalog?.reason === "read-only";
+  const change = (action, id) => {
+    setPending(true);
+    setResult(null);
+    return run3(action(id).then((value) => {
+      if (value?.warnings?.length || value?.leftover) setResult(value);
+    }).finally(() => setPending(false)));
+  };
+  return (0, import_react40.createElement)(
+    Card2,
+    { title: t("Roles") },
+    [...roles.values()].map((role) => {
+      const record = Object.hasOwn(records, role.id) ? records[role.id] : void 0;
+      const inUse = record && attached.has(role.id);
+      const hints = [
+        record?.status === "broken" && t("Broken"),
+        record?.status === "damaged" && t("Damaged"),
+        inUse && t("Detach this role from every Bot before uninstalling it."),
+        !record && role.reason === "community" && t("Community: not installable yet")
+      ].filter(Boolean);
+      const version = record ? record.version : role.version;
+      const button = record ? (0, import_react40.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled: pending || readOnly || inUse,
+        onClick: () => change(actions.uninstallRole, role.id)
+      }, t("Uninstall")) : role.installable && (0, import_react40.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled: pending || readOnly,
+        onClick: () => change(actions.installRole, role.id)
+      }, t("Install"));
+      return (0, import_react40.createElement)(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(" · "), hint: hints.join(" · ") }, button || null);
+    }),
+    result ? (0, import_react40.createElement)(
+      "div",
+      { className: "bt-bs-shell-note", role: "status" },
+      result.warnings?.map((field) => (0, import_react40.createElement)("div", { key: field }, t("Ignored role manifest field: {field}", { field }))),
+      result.leftover ? (0, import_react40.createElement)("div", null, t("Role package folder left at {folder}.", { folder: result.leftover })) : null
+    ) : null
+  );
+}
 function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const [editing, setEditing] = (0, import_react40.useState)(false);
   const [confirming, setConfirming] = (0, import_react40.useState)(false);
@@ -15673,6 +15756,12 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const privacyHint = bot.private === true ? privateHint : isMainBot ? t("A Main Bot cannot be private.") : inGroup ? t("Leave its group chats before making it private.") : !bot.workDir ? t("Choose a working folder of its own first.") : privateHint;
   const save = (patch) => run3(actions.updateBot(bot.id, patch));
   const teamBot = roster.bots?.some((item) => item.id === bot.id) ?? roster.byId?.[bot.id]?.id === bot.id;
+  const requestedRoleCatalog = (0, import_react40.useRef)();
+  (0, import_react40.useEffect)(() => {
+    if (!teamBot || !actions.roleCatalog || requestedRoleCatalog.current === bot.id) return;
+    requestedRoleCatalog.current = bot.id;
+    void run3(actions.roleCatalog());
+  }, [teamBot, bot.id]);
   const roleTag = teamBot ? roleTagOf(bot, roster.prefs) : void 0;
   const canAttachGenie = bot.kind === BUILTIN_ROLES.genie.kind;
   const [signIn, setSignIn] = (0, import_react40.useState)(null);
@@ -15766,6 +15855,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         )
       ) : null
     ),
+    teamBot && rolesOn(roster.prefs) ? (0, import_react40.createElement)(RolePackagesCard, { key: bot.id, roster, actions, run: run3 }) : null,
     (0, import_react40.createElement)(
       Card2,
       { title: t("Model") },
@@ -20162,6 +20252,9 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     updateBot: (id, patch) => after(call2("update-bot", { id, ...patch })),
     attachRole: (id, role) => after(call2("role-attach", { id, role })),
     detachRole: (id) => after(call2("role-detach", { id })),
+    roleCatalog: () => after(call2("role-catalog")),
+    installRole: (id) => after(call2("role-install", { id })),
+    uninstallRole: (id) => after(call2("role-uninstall", { id })),
     // A model on another route: the host starts a new conversation with a handoff note
     // (parts.js). `patch` carries the thinking level picked with it.
     switchRoute: (id, ref, patch = {}) => after(call2("switch-route", { id, ...patch, model: ref })),
