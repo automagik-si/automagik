@@ -1744,6 +1744,24 @@ test("a skip recorded from a real mod failure holds through an ordinary update",
   } finally { h.done(); }
 });
 
+test("#1505: the linked-machine cycle's env takes the automatic path: the machine's auto off and its skip hold", async () => {
+  for (const [name, setting] of [["auto off", { on: false }], ["rolled-back skip", { skip: "0.2.0" }]]) {
+    const h = autoHome(["0.2.0"]);
+    try {
+      writeAuto(h.mods, setting);
+      // The cycle's variable: same installUpdate, the automatic hold read under its lock.
+      const held = await cmdUpdate({ json: true }, [], { modsDir: h.mods, env: { AUTOMAGIK_HERDR_LINKED_UPDATE: "1" }, keys, fetch: fakeFetch(h.table) });
+      assert.equal(held.installed, null, name);
+      assert.match(held.held, setting.on === false ? /Install updates automatically is off/ : /0\.2\.0 was rolled back here/, name);
+      assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0", name);
+      // The person's explicit retry wins even beside the cycle's variable: it installs and clears a skip.
+      const explicit = await cmdUpdate({ json: true, "retry-skipped": true }, [], { modsDir: h.mods, env: { AUTOMAGIK_HERDR_LINKED_UPDATE: "1" }, keys, fetch: fakeFetch(h.table) });
+      assert.equal(explicit.installed.version, "0.2.0", `${name}: a person's explicit retry still installs`);
+      assert.equal(readAuto(h.mods).skip, null, `${name}: and the record is cleared`);
+    } finally { h.done(); }
+  }
+});
+
 test("am update --retry-skipped with no skip set just updates", async () => {
   const h = autoHome(["0.2.0"]);
   try {
