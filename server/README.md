@@ -1179,6 +1179,33 @@ node /opt/automagik/gate-caller.mjs retire
 In an emergency, `retire --now` skips the wait. In-flight assertions signed by the
 retired key receive 401 once the adapter reloads the key set.
 
+With multiuser on, a member's or guest's only upgrade is the exact `GET /api/remote.mux`
+(RFC 0038 delivery 5b); every other member upgrade, and every member upgrade with multiuser
+off, is 403. The gate signs an assertion for `GET /api/remote.mux` and forwards the handshake
+to the adapter's `/_automagik/caller/api/remote.mux` with only the WebSocket handshake fields
+and the assertion: no DSH cookie, no principal header. The adapter's refusals (400, 401, 403,
+429, 503) reach the browser as they are; any other answer is 502. The owner credential is
+never read or invalidated on this path.
+
+Before it signs a member's HTTP request or upgrade, the gate opens a fresh loopback
+connection to DSH and sends `GET /_automagik/caller/_ready` on it. The gate requires the exact
+status line `HTTP/1.1 204 No Content`, valid HTTP header syntax, exactly one
+`x-automagik-ready: 1`, and a bodyless keep-alive response with at most one
+`Content-Length: 0` and no `Transfer-Encoding`. A malformed reply, a refused connection or
+2 seconds without an answer returns 503 and the gate signs nothing. The member's request then goes on that same connection, so a DSH
+restart between the probe and the request breaks the connection instead of reaching a new
+process before its adapter is live. Browser EOF during an upgrade probe cancels the probe
+before signing. The gate preserves early upgrade bytes in order and closes the connection
+if more than 1 MiB plus 14 KiB arrives after the HTTP upgrade headers have been parsed
+while the probe is pending. Owners are not probed.
+
+The gate tracks every outstanding member HTTP request, including pipelined requests and
+open feeds. A browser disconnect cancels each request on that connection. Revocation,
+Cloud v2 renewal, expiry found by the 1-second sweep, a listener rebind, and shutdown
+close member feeds and carried sockets at both ends. Plain cookie rotation keeps the
+same session family and its connections. A request waiting for its probe when its
+family ends receives 401 and the gate signs nothing.
+
 To roll back, first stop member and guest admission, revoke their sessions and
 close their sockets. Then disable the reroute and set mode off. See the adapter's README for the
 [remote stream WebSocket dependency](../apps/multiuser-dsh/README.md#remote-stream-websocket-upstream-dependency).

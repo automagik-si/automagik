@@ -13,7 +13,8 @@ import { runInNewContext } from 'node:vm'
 import { COOKIE, cookieSecret, createOwner, IDLE_MS, principalOf, readOwner, SessionStore, sessionCookie } from '../gate-store.mjs'
 import { createSigner } from '../gate-caller.mjs'
 import { verifyAssertion } from '../../apps/multiuser-dsh/src/assertion.js'
-import { createGate, pinOrigin } from '../gate.mjs'
+import { CLOUD_RENEW_PATH, createGate, pinOrigin } from '../gate.mjs'
+import { probeDsh } from '../gate-mux.mjs'
 import { DSH_HOST, DshCredentials } from '../gate-upstream.mjs'
 
 // Reserved placeholder; no private deployment address, issuer or account belongs in tests.
@@ -82,13 +83,13 @@ async function fixture(t, { handleRequest, handleUpgrade } = {}) {
     req.on('data', chunk => { body += chunk })
     req.on('end', () => res.writeHead(200, { 'set-cookie': 'dsh-hidden=secret', 'content-type': 'text/plain' }).end(body || 'DSH'))
   })
-  upstream.on('upgrade', (req, socket) => {
+  upstream.on('upgrade', (req, socket, head) => {
     const entry = { url: req.url, headers: req.headers, upgrade: true, chunks: [], closed: once(socket, 'close') }
     seen.push(entry)
     socket.on('error', () => {})
     socket.on('end', () => socket.end())
     if (req.headers.cookie !== `dsh-credential=${generation}`) { socket.end('HTTP/1.1 401 Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'); return }
-    if (handleUpgrade?.(req, socket)) return
+    if (handleUpgrade?.(req, socket, head)) return
     socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSet-Cookie: dsh-hidden=secret\r\n\r\n')
     socket.on('data', data => { entry.chunks.push(data.toString()); socket.write(data) })
   })
@@ -407,19 +408,32 @@ test('every rotated hash uses timingSafeEqual even when the current hash matched
   assert.equal(f.sessions.list().length, 0)
 })
 
-async function callerFixture(t, { multiuser = true, selfHosted, carrierStatus = 200, captureWire = false } = {}) {
-  const { dir, sessions } = store(t, { memory: true, accepts: () => true })
+// The adapter's readiness answer; `seen` and `wire` exclude the probe, so hop counts are the
+// requests the gate forwarded.
+const PROBE_LINE = 'GET /_automagik/caller/_ready HTTP/1.1'
+async function callerFixture(t, { multiuser = true, selfHosted, carrierStatus = 200, captureWire = false, upgradeStatus = 101,
+  probe = res => res.writeHead(204, { 'x-automagik-ready': '1' }).end(), connectDsh, handleRequest, handleUpgrade, now } = {}) {
+  const { dir, sessions } = store(t, { memory: true, accepts: () => true, now })
   const seen = [], cookieCalls = [], signs = [], wire = []
   const workspace = 'caller-workspace'
-  const issue = role => {
+  const issue = (role, options) => {
     const principal = { issuer: 'https://identity.invalid', subject: role, roles: [role], workspace }
-    const issued = sessions.issue(ORIGIN, principal)
+    const issued = sessions.issue(ORIGIN, principal, options)
     return { ...issued, principal, headers: { cookie: `${COOKIE}=${issued.secret}`, origin: ORIGIN } }
   }
+  const probes = []
   const upstream = http.createServer((req, res) => {
     const { method, url, rawHeaders, headers } = req
+    if (method === 'GET' && url === '/_automagik/caller/_ready') {
+      probes.push({ remotePort: req.socket.remotePort })
+      probe(res, req)
+      return
+    }
     const hop = { method, url, rawHeaders, headers }
+    // The connection's remote port, kept out of deep comparisons of hops.
+    Object.defineProperty(hop, 'remotePort', { value: req.socket.remotePort })
     seen.push(hop)
+    if (handleRequest?.(req, res)) return
     const chunks = []
     if (captureWire) req.on('data', chunk => chunks.push(chunk))
     else req.resume()
@@ -428,11 +442,18 @@ async function callerFixture(t, { multiuser = true, selfHosted, carrierStatus = 
       res.writeHead(url.startsWith('/_automagik/caller') ? carrierStatus : 200).end()
     })
   })
-  if (captureWire) upstream.on('connection', socket => socket.on('data', chunk => wire.push(chunk)))
-  upstream.on('upgrade', (req, socket) => {
-    const { method, url, headers } = req
-    seen.push({ method, url, headers })
+  if (captureWire) upstream.on('connection', socket => socket.on('data', chunk => { if (!chunk.toString('latin1').startsWith(PROBE_LINE)) wire.push(chunk) }))
+  const upgraded = new Set()
+  upstream.on('upgrade', (req, socket, head) => {
+    upgraded.add(socket)
+    socket.once('close', () => upgraded.delete(socket))
+    const { method, url, headers, rawHeaders } = req
+    const hop = { method, url, headers }
+    Object.defineProperties(hop, { rawHeaders: { value: rawHeaders }, remotePort: { value: socket.remotePort } })
+    seen.push(hop)
     socket.on('error', () => {})
+    if (handleUpgrade?.(req, socket, head)) return
+    if (upgradeStatus !== 101) { socket.end(`HTTP/1.1 ${upgradeStatus} Refused\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return }
     socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
   })
   const port = await listen(upstream)
@@ -442,16 +463,23 @@ async function callerFixture(t, { multiuser = true, selfHosted, carrierStatus = 
   } }
   const signer = createSigner({ dir, publicDir: dir, instance: () => workspace })
   const caller = { sign(value) { signs.push(value); return signer.sign(value) } }
-  const makeGate = async (enabled, hosted = selfHosted) => {
-    const gate = createGate({ origin: ORIGIN, sessions, credentials, multiuser: enabled, caller, selfHosted: hosted })
+  const gates = []
+  const makeGate = async (enabled, hosted = selfHosted, options = {}) => {
+    const gate = createGate({ origin: ORIGIN, sessions, credentials, multiuser: enabled, caller, selfHosted: hosted, connectDsh, ...options })
     const gatePort = await listen(gate)
+    gates.push(gate)
     t.after(() => gate.closeGate())
     return gatePort
   }
   const gatePort = await makeGate(multiuser)
-  const stopUpstream = () => { upstream.closeAllConnections(); return new Promise(resolve => upstream.close(resolve)) }
+  const stopUpstream = () => {
+    for (const socket of upgraded) socket.destroy()
+    upstream.closeAllConnections()
+    return new Promise(resolve => upstream.close(resolve))
+  }
   t.after(stopUpstream)
-  return { dir, sessions, issue, seen, signs, cookieCalls, gatePort, makeGate, stopUpstream, wire }
+  return { dir, sessions, issue, seen, signs, cookieCalls, gatePort, makeGate, stopUpstream, wire, probes, upstream, port,
+    credentials, signer, workspace, gate: gates[0], gates }
 }
 
 test('the gate sends exactly one framed DELETE or POST with the original body on every HTTP proxy path', async t => {
@@ -624,9 +652,26 @@ test('member frontend allowlist, MCP refusal and rollback never use the owner cr
   const guest = f.issue('guest')
   const off = await f.makeGate(false)
   for (const { headers } of [member, guest]) {
-    assert.equal((await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })).status, 403)
+    const before = f.seen.length
+    const signed = f.signs.length
+    // Delivery 5b carries a member's or guest's exact /api/remote.mux to the adapter, signed.
+    const carried = await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })
+    assert.equal(carried.status, 101)
+    carried.socket.destroy()
+    assert.equal(f.seen.length, before + 1)
+    assert.equal(f.signs.length, signed + 1)
     assert.equal((await request(off, '/api/x', { headers })).status, 403)
+    assert.equal(f.seen.length, before + 1)
+    assert.equal(f.signs.length, signed + 1)
     assert.equal((await request(off, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })).status, 403)
+    assert.equal(f.seen.length, before + 1)
+    assert.equal(f.signs.length, signed + 1)
+  }
+  assert.equal(f.seen.length, 2)
+  for (const hop of f.seen.splice(0)) {
+    assert.equal(hop.url, '/_automagik/caller/api/remote.mux')
+    assert.ok(hop.headers['x-automagik-caller'])
+    assert.equal(hop.headers.cookie, undefined)
   }
   const paths = JSON.parse(source('./fixtures/caller-frontend-paths.json'))
   for (const path of paths.allowed) assert.equal((await request(f.gatePort, path, { headers: member.headers, method: 'HEAD' })).status, 200, path)
@@ -652,11 +697,12 @@ test('carrier unavailability, an upstream 401 and an inactive member never use t
   assert.equal(f.seen.length, 1)
   assert.equal(f.signs.length, 1)
   await f.stopUpstream()
-  assert.equal((await request(f.gatePort, '/api/x', { headers })).status, 502)
-  assert.equal(f.signs.length, 2)
+  // Delivery 5b: with DSH gone the readiness probe fails, so nothing more is signed.
+  assert.equal((await request(f.gatePort, '/api/x', { headers })).status, 503)
+  assert.equal(f.signs.length, 1)
   const staleGate = await f.makeGate(true, { handle() { f.sessions.revoke(family); return false } })
   assert.equal((await request(staleGate, '/api/x', { headers })).status, 401)
-  assert.equal(f.signs.length, 2)
+  assert.equal(f.signs.length, 1)
   assert.deepEqual(f.cookieCalls, [])
 })
 
@@ -681,6 +727,8 @@ test('gate handlers refuse private paths and revoked owner families before reque
     }
     const socket = new EventEmitter()
     socket.destroy = () => socket.emit('close')
+    socket.resume = () => {}
+    socket.pause = () => {}
     let result
     socket.end = (line, callback) => { result = Number(line.split(' ')[1]); callback() }
     await handle(req, socket, Buffer.alloc(0))
@@ -692,7 +740,9 @@ test('gate handlers refuse private paths and revoked owner families before reque
     return { cookie: `${COOKIE}=${secret}`, origin: ORIGIN }
   }
   for (const multiuser of [false, true]) {
-    const gate = createGate({ origin: ORIGIN, sessions, credentials, multiuser, caller: { sign: forbid }, selfHosted: {
+    // No adapter answers the probe here; a refused probe signs nothing.
+    const connectDsh = () => Promise.reject(new Error('No adapter'))
+    const gate = createGate({ origin: ORIGIN, sessions, credentials, multiuser, caller: { sign: forbid }, connectDsh, selfHosted: {
       handle(_req, _res, family) {
         if (family?.principal.roles.some(role => role === 'owner' || role === 'admin')) sessions.revoke(family)
         return false
@@ -738,7 +788,8 @@ test('gate handlers refuse private paths and revoked owner families before reque
         }
       }
       const member = issue('member')
-      assert.equal(await status(gate, request('/api/remote.mux', { ...websocketHeaders, ...member }), 'upgrade'), 403)
+      // Delivery 5b: multiuser carries a member's exact /api/remote.mux once the adapter answers.
+      assert.equal(await status(gate, request('/api/remote.mux', { ...websocketHeaders, ...member }), 'upgrade'), multiuser ? 503 : 403)
       if (!multiuser) assert.equal(await status(gate, request('/api/x', member)), 403)
       else assert.equal(await status(gate, request('/api/omni-mcp', { origin: ORIGIN }, 'POST')), 403)
     } finally { await gate.closeGate() }
@@ -875,4 +926,484 @@ test('DshCredentials invalidates only the matching cached cookie without exchang
   f.restart()
   assert.notEqual(await f.credentials.cookie(), cookie)
   assert.equal(f.exchanges(), 2)
+})
+
+// --- RFC 0038 delivery 5b: the member stream carrier and the readiness probe ----------------
+
+const signedHops = f => f.seen.filter(hop => hop.headers['x-automagik-caller'] !== undefined)
+async function rawUpgrade(port, method, path, headers) {
+  return rawRequest(port, `${method} ${path} HTTP/1.1`, [`Host: ${HOST}`, 'Connection: Upgrade', 'Upgrade: websocket',
+    'Sec-WebSocket-Version: 13', `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`,
+    ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`)])
+}
+
+test('member upgrades are carried only on the exact mux path, signed as GET, without DSH credentials', async t => {
+  const f = await callerFixture(t)
+  const member = f.issue('member')
+  for (const path of ['/api/remote.mux?x=1', '/api/remote.mux/', '/API/remote.mux', '/api//remote.mux', '/api/other', '/']) {
+    assert.equal((await request(f.gatePort, path, { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })).status, 403, path)
+  }
+  assert.equal(await rawUpgrade(f.gatePort, 'POST', '/api/remote.mux', { Cookie: member.headers.cookie, Origin: ORIGIN }), 403)
+  for (const role of ['viewer']) {
+    const roleless = f.issue(role)
+    assert.equal((await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...roleless.headers }, upgrade: true })).status, 403)
+  }
+  assert.deepEqual(f.signs, [])
+  assert.deepEqual(signedHops(f), [])
+  // The exact path: one GET assertion for /api/remote.mux, the handshake fields and nothing else.
+  const carried = await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers,
+    authorization: 'Bearer browser', 'x-automagik-principal': 'spoofed', 'sec-websocket-protocol': 'chat' }, upgrade: true })
+  assert.equal(carried.status, 101)
+  carried.socket.destroy()
+  assert.deepEqual(f.signs.map(({ method, path }) => [method, path]), [['GET', '/api/remote.mux']])
+  const [hop] = signedHops(f)
+  assert.equal(hop.url, '/_automagik/caller/api/remote.mux')
+  assert.deepEqual(Object.keys(hop.headers).sort(), ['connection', 'host', 'origin', 'sec-websocket-key', 'sec-websocket-version',
+    'upgrade', 'x-automagik-caller'])
+  assert.equal(hop.headers.host, `${DSH_HOST}:${f.port}`)
+  // A refused signature answers 403 and sends nothing signed.
+  const refusing = await f.makeGate(true, undefined, { caller: { sign() { throw new Error('refused') } } })
+  assert.equal((await request(refusing, '/api/remote.mux', { headers: { ...websocketHeaders, ...f.issue('member').headers }, upgrade: true })).status, 403)
+  assert.equal(signedHops(f).length, 1)
+  // Multiuser off: member upgrades stay 403 and nothing is probed or signed.
+  const probes = f.probes.length
+  const off = await f.makeGate(false)
+  assert.equal((await request(off, '/api/remote.mux', { headers: { ...websocketHeaders, ...f.issue('guest').headers }, upgrade: true })).status, 403)
+  assert.equal(f.probes.length, probes)
+  assert.equal(f.signs.length, 1)
+  assert.deepEqual(f.cookieCalls, [])
+})
+
+test('a carried upgrade passes carrier refusals and never touches the owner credential', async t => {
+  for (const [status, expected] of [[400, 400], [401, 401], [403, 403], [429, 429], [503, 503], [500, 502]]) {
+    const f = await callerFixture(t, { upgradeStatus: status })
+    const { headers } = f.issue('member')
+    assert.equal((await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })).status, expected)
+    assert.equal(f.signs.length, 1)
+    assert.deepEqual(f.cookieCalls, [])
+  }
+})
+
+test('a strict probe signs nothing on a bad answer', async t => {
+  const raw = text => (_res, req) => { req.socket.write(text) }
+  const answers = {
+    'refused connection': undefined,
+    '404': res => res.writeHead(404).end(),
+    '503': res => res.writeHead(503).end(),
+    'missing header': res => res.writeHead(204).end(),
+    'two ready headers': raw('HTTP/1.1 204 No Content\r\nx-automagik-ready: 1\r\nx-automagik-ready: 1\r\n\r\n'),
+    'truncated status line': raw('HTTP/1.1 204\r\nx-automagik-ready: 1\r\n\r\n'),
+    'invalid status reason': raw('HTTP/1.1 204 No Content\tbad\r\nx-automagik-ready: 1\r\n\r\n'),
+    'space before header colon': raw('HTTP/1.1 204 No Content\r\nx-automagik-ready : 1\r\n\r\n'),
+    'invalid field name': raw('HTTP/1.1 204 No Content\r\nx-automagik-ready: 1\r\ninvalid field: ok\r\n\r\n'),
+    'duplicate zero length': raw('HTTP/1.1 204 No Content\r\nx-automagik-ready: 1\r\nContent-Length: 0\r\ncontent-length: 0\r\n\r\n'),
+    'connection close': res => res.writeHead(204, { 'x-automagik-ready': '1', connection: 'close' }).end(),
+    'a body': raw('HTTP/1.1 204 No Content\r\nx-automagik-ready: 1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n'),
+    'content-length': raw('HTTP/1.1 204 No Content\r\nx-automagik-ready: 1\r\nContent-Length: 2\r\n\r\nok'),
+    'bytes after the header block': raw('HTTP/1.1 204 No Content\r\nx-automagik-ready: 1\r\n\r\nHTTP/1.1 200 OK\r\n\r\n'),
+    'timeout': () => {},
+  }
+  for (const [name, probe] of Object.entries(answers)) {
+    const f = await callerFixture(t, { probe })
+    if (name === 'refused connection') await f.stopUpstream()
+    const member = f.issue('member')
+    assert.equal((await request(f.gatePort, '/api/x', { method: 'POST', body: 'x', headers: member.headers })).status, 503, name)
+    assert.equal((await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })).status, 503, name)
+    assert.deepEqual(f.signs, [], name)
+    assert.deepEqual(f.seen, [], name)
+    assert.deepEqual(f.cookieCalls, [], name)
+  }
+})
+
+function openFeed(port, headers, agent) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: DSH_HOST, port, path: '/api/held', agent, headers: { host: HOST, ...headers } }, res => {
+      const ended = new Promise(done => { res.once('close', done); res.once('error', done) })
+      res.once('data', () => resolve({ res, ended }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+function heldMemberTransports() {
+  const feeds = [], muxes = []
+  return {
+    feeds, muxes,
+    handleRequest(req, res) {
+      if (!req.url.endsWith('/api/held')) return false
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('data: open\n\n')
+      feeds.push({ res, closed: once(res, 'close') })
+      return true
+    },
+    handleUpgrade(_req, socket) {
+      muxes.push({ closed: once(socket, 'close') })
+      // HTTP hands off a half-open socket on upgrade. Acknowledge the gate's FIN.
+      socket.once('end', () => socket.end())
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+      socket.on('data', data => socket.write(data))
+      return true
+    },
+    async open(port, headers) {
+      const feedCount = feeds.length
+      const muxCount = muxes.length
+      const feed = await openFeed(port, headers)
+      assert.equal(feed.res.statusCode, 200)
+      assert.equal(feeds.length, feedCount + 1)
+      const upgrade = await request(port, '/api/remote.mux', { headers: { ...websocketHeaders, ...headers }, upgrade: true })
+      assert.equal(upgrade.status, 101)
+      assert.equal(muxes.length, muxCount + 1)
+      const { socket } = upgrade
+      const closed = once(socket, 'close')
+      socket.resume()
+      return { feed, socket, closed, dshFeed: feeds.at(-1), dshMux: muxes.at(-1) }
+    },
+  }
+}
+
+test('revocation and hard family expiry end a member feed and mux at both ends', { timeout: 5000 }, async t => {
+  let now = Date.now()
+  const held = heldMemberTransports()
+  const f = await callerFixture(t, { ...held, now: () => now })
+  for (const end of ['revocation', 'expiry']) {
+    const { family, headers } = f.issue('member', { expires: now + 5000 })
+    const live = await held.open(f.gatePort, headers)
+    assert.ok(f.sessions.active(family))
+    if (end === 'revocation') f.sessions.revoke(family)
+    else now += 5000
+    assert.equal(f.sessions.active(family), false)
+    await Promise.all([live.feed.ended, live.closed, live.dshFeed.closed, live.dshMux.closed])
+  }
+})
+
+test('Cloud v2 renewal closes the old family feed and mux, and cookie rotation keeps both', { timeout: 5000 }, async t => {
+  const held = heldMemberTransports()
+  const f = await callerFixture(t, held)
+  const expires = Date.now() + 60_000
+  const proof = { aud: f.workspace, exp: Math.floor(expires / 1000), token: 'old-proof' }
+  const { family, principal, headers } = f.issue('member', { expires, proof })
+  const renew = t.mock.fn(async () => ({ principal, expires, proof: { ...proof, token: 'new-proof' } }))
+  const cloud = { config: { workspace: f.workspace }, drops: () => false, renew, pollInterval: 300_000 }
+  const port = await f.makeGate(true, undefined, { cloud })
+  const live = await held.open(port, headers)
+  const rotated = await request(port, '/_gate/session/renew', { method: 'POST', headers })
+  assert.equal(rotated.status, 200)
+  const cookie = rotated.headers['set-cookie'][0].split(';', 1)[0]
+  assert.notEqual(cookie, headers.cookie)
+  assert.equal(f.sessions.authenticate(cookieSecret(cookie), ORIGIN), family)
+  assert.equal(renew.mock.callCount(), 0)
+  const feedData = once(live.feed.res, 'data')
+  const echo = once(live.socket, 'data')
+  live.dshFeed.res.write('data: still open\n\n')
+  live.socket.write('still open')
+  assert.match((await feedData)[0].toString(), /still open/)
+  assert.equal((await echo)[0].toString(), 'still open')
+  const renewed = await request(port, CLOUD_RENEW_PATH, {
+    method: 'POST', headers: { ...headers, cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ version: 2, renew: true, workspace: f.workspace }),
+  })
+  assert.equal(renewed.status, 200)
+  assert.deepEqual(renew.mock.calls.map(call => call.arguments), [[principal, proof]])
+  assert.equal(f.sessions.active(family), false)
+  const fresh = cookieSecret(renewed.headers['set-cookie'][0].split(';', 1)[0])
+  const next = f.sessions.authenticate(fresh, ORIGIN)
+  assert.ok(next)
+  assert.notEqual(next.id, family.id)
+  assert.deepEqual(next.proof, { ...proof, token: 'new-proof' })
+  await Promise.all([live.feed.ended, live.closed, live.dshFeed.closed, live.dshMux.closed])
+})
+
+test('an actual rebind without drop ends member HTTP and mux and finishes listening', { timeout: 5000 }, async t => {
+  const held = heldMemberTransports()
+  const f = await callerFixture(t, held)
+  const { headers } = f.issue('member')
+  for (const [host, drop] of [[DSH_HOST, true], ['127.0.0.2', false]]) {
+    const live = await held.open(f.gatePort, headers)
+    await f.gate.rebind(f.gatePort, host, drop)
+    assert.deepEqual(f.gate.address(), { address: host, family: 'IPv4', port: f.gatePort })
+    await Promise.all([live.feed.ended, live.closed, live.dshFeed.closed, live.dshMux.closed])
+  }
+})
+
+test('a browser disconnect cancels both outstanding pipelined member requests', { timeout: 5000 }, async t => {
+  const held = heldMemberTransports()
+  const both = Promise.withResolvers()
+  const f = await callerFixture(t, { handleRequest(req, res) {
+    const handled = held.handleRequest(req, res)
+    if (held.feeds.length === 2) both.resolve()
+    return handled
+  } })
+  const first = f.issue('member')
+  const second = f.issue('guest')
+  const browser = net.connect(f.gatePort, DSH_HOST)
+  t.after(() => browser.destroy())
+  const responses = []
+  browser.on('data', data => responses.push(data))
+  const firstBytes = once(browser, 'data')
+  const raw = ({ headers }) => `GET /api/held HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: ${ORIGIN}\r\nCookie: ${headers.cookie}\r\n\r\n`
+  browser.write(raw(first) + raw(second))
+  await Promise.all([firstBytes, both.promise])
+  assert.equal(signedHops(f).length, 2)
+  assert.match(Buffer.concat(responses).toString(), /^HTTP\/1\.1 200 /)
+  assert.equal(Buffer.concat(responses).toString().match(/HTTP\/1\.1 200 /g).length, 1)
+  const closed = once(browser, 'close')
+  browser.destroy()
+  await Promise.all([closed, ...held.feeds.map(feed => feed.closed)])
+})
+
+test('finished requests do not tie a later keep-alive feed to the old family, and revocation before signing refuses', async t => {
+  const held = heldMemberTransports()
+  const f = await callerFixture(t, held)
+  // Reuse the connection for a second family after the first response finished.
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  t.after(() => agent.destroy())
+  const first = f.issue('member')
+  const second = f.issue('guest')
+  const done = await new Promise((resolve, reject) => {
+    const req = http.request({ hostname: DSH_HOST, port: f.gatePort, path: '/api/x', agent, headers: { host: HOST, ...first.headers } }, res => {
+      res.resume()
+      res.on('end', () => resolve(res.statusCode))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+  assert.equal(done, 200)
+  const stream = await openFeed(f.gatePort, second.headers, agent)
+  let ended = false
+  stream.ended.then(() => { ended = true })
+  f.sessions.revoke(first.family)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(ended, false, 'the other family\'s response stays open')
+  f.sessions.revoke(second.family)
+  await stream.ended
+  await held.feeds.at(-1).closed
+  // A revocation between the probe's answer and the signing: nothing signed, nothing forwarded, 401.
+  const signs = f.signs.length
+  const hops = signedHops(f).length
+  let victim
+  const racing = await f.makeGate(true, undefined, { connectDsh: async () => {
+    f.sessions.revoke(victim.family)
+    return new net.Socket()
+  } })
+  victim = f.issue('member')
+  assert.equal((await request(racing, '/api/x', { headers: victim.headers })).status, 401)
+  assert.equal(f.signs.length, signs)
+  assert.equal(signedHops(f).length, hops)
+})
+
+test('the probe and the request share one connection', async t => {
+  const f = await callerFixture(t, {
+    probe: res => res.writeHead(204, { 'x-automagik-ready': '1', 'content-length': '0' }).end(),
+  })
+  const member = f.issue('member')
+  assert.equal((await request(f.gatePort, '/api/x', { headers: member.headers })).status, 200)
+  assert.equal(f.probes.length, 1)
+  assert.equal(f.seen.at(-1).remotePort, f.probes.at(-1).remotePort)
+  const upgraded = await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })
+  assert.equal(upgraded.status, 101)
+  upgraded.socket.destroy()
+  assert.equal(f.probes.length, 2)
+  assert.equal(f.seen.at(-1).remotePort, f.probes.at(-1).remotePort)
+  assert.notEqual(f.probes[0].remotePort, f.probes[1].remotePort)
+})
+
+test('browser EOF before a member upgrade probe completes signs nothing', { timeout: 5000 }, async t => {
+  const { sessions } = store(t, { memory: true, accepts: () => true })
+  const { secret } = sessions.issue(ORIGIN, {
+    issuer: 'https://identity.invalid', subject: 'member', roles: ['member'], workspace: 'caller-workspace',
+  })
+  const started = Promise.withResolvers()
+  const answer = Promise.withResolvers()
+  const browser = new EventEmitter()
+  Object.assign(browser, {
+    destroy() {
+      this.destroyed = true
+      this.emit('close')
+    },
+    pause() {},
+    resume() {},
+    end() { this.destroy() },
+  })
+  let signs = 0
+  const gate = createGate({ origin: ORIGIN, sessions, credentials: { port: 1, authority: `${DSH_HOST}:1` }, multiuser: true,
+    caller: { sign() { signs++; throw new Error('unexpected signature') } },
+    connectDsh({ signal }) { started.resolve(signal); return answer.promise },
+  })
+  t.after(() => gate.closeGate())
+  const headers = { ...websocketHeaders, host: HOST, cookie: `${COOKIE}=${secret}` }
+  gate.emit('upgrade', { method: 'GET', url: '/api/remote.mux', headers, rawHeaders: Object.entries(headers).flat() }, browser, Buffer.alloc(0))
+  const signal = await started.promise
+  browser.emit('end') // Readable FIN with the writable half still open.
+  let destroyed = false
+  answer.resolve({ destroy() { destroyed = true } }) // The answer may already have been in flight.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(signs, 0)
+  assert.equal(signal.aborted, true)
+  assert.equal(browser.destroyed, true)
+  assert.equal(destroyed, true)
+})
+
+function pendingMemberUpgrades(t) {
+  const { sessions } = store(t, { memory: true, accepts: () => true })
+  const probes = []
+  const sign = t.mock.fn(() => { throw new Error('unexpected signature') })
+  const gate = createGate({
+    origin: ORIGIN, sessions, credentials: { port: 1, authority: `${DSH_HOST}:1` }, multiuser: true, caller: { sign },
+    connectDsh({ signal }) {
+      probes.push(signal)
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+    },
+  })
+  t.after(() => gate.closeGate())
+  return {
+    probes, sign,
+    issue(subject) {
+      return sessions.issue(ORIGIN, { issuer: 'https://identity.invalid', subject, roles: ['member'], workspace: 'caller-workspace' })
+    },
+    async upgrade({ secret }, { head = Buffer.alloc(0), version = '13' } = {}) {
+      const socket = new EventEmitter()
+      Object.assign(socket, {
+        destroy() {
+          if (this.destroyed) return
+          this.destroyed = true
+          this.emit('close')
+        },
+        end(text, done) { this.status = Number(/^HTTP\/1\.1 (\d+)/.exec(text)?.[1]); done() },
+        pause() {},
+        resume() { this.resumed = true },
+      })
+      const headers = { ...websocketHeaders, 'sec-websocket-version': version, host: HOST, cookie: `${COOKIE}=${secret}` }
+      gate.emit('upgrade', { method: 'GET', url: '/api/remote.mux', headers, rawHeaders: Object.entries(headers).flat() }, socket, head)
+      await new Promise(resolve => setImmediate(resolve))
+      return socket
+    },
+  }
+}
+
+test('the gate refuses a fifth pending member upgrade across two families before probing', async t => {
+  const f = pendingMemberUpgrades(t)
+  const first = f.issue('member'), second = f.issue('member')
+  assert.notEqual(first.family.id, second.family.id)
+  const held = await Promise.all([first, second, first, second].map(family => f.upgrade(family)))
+  assert.ok(held.every(socket => socket.resumed && !socket.destroyed))
+  assert.equal(f.probes.length, 4)
+  const fifth = await f.upgrade(second)
+  assert.equal(fifth.status, 429)
+  assert.equal(fifth.resumed, undefined)
+  assert.equal(f.probes.length, 4)
+  held[0].destroy()
+  assert.equal(f.probes[0].aborted, true)
+  assert.equal((await f.upgrade(second)).resumed, true)
+  assert.equal(f.probes.length, 5)
+  assert.equal(f.sign.mock.callCount(), 0)
+})
+
+test('the gate caps pending upgrades across people and returns a slot on close', async t => {
+  const f = pendingMemberUpgrades(t)
+  const held = await Promise.all(Array.from({ length: 64 }, (_, i) => f.upgrade(f.issue(`member-${i}`))))
+  assert.ok(held.every(socket => socket.resumed && !socket.destroyed))
+  assert.equal(f.probes.length, 64)
+  const next = f.issue('extra')
+  assert.equal((await f.upgrade(next)).status, 503)
+  assert.equal(f.probes.length, 64)
+  held[0].destroy()
+  assert.equal((await f.upgrade(next)).resumed, true)
+  assert.equal(f.probes.length, 65)
+})
+
+test('a pending member upgrade counts head toward its early byte allowance', async t => {
+  const f = pendingMemberUpgrades(t)
+  const member = f.issue('member')
+  const limit = 1_048_576 + 1024 * 14
+  const oversized = await f.upgrade(member, { head: Buffer.alloc(limit + 1) })
+  assert.equal(oversized.destroyed, true)
+  assert.equal(oversized.resumed, undefined)
+  assert.equal(f.probes.length, 0)
+  const held = await f.upgrade(member, { head: Buffer.alloc(1) })
+  held.emit('data', Buffer.alloc(limit - 1))
+  assert.equal(held.destroyed, undefined)
+  held.emit('data', Buffer.alloc(1))
+  assert.equal(held.destroyed, true)
+  assert.equal(f.probes[0].aborted, true)
+  assert.equal(f.sign.mock.callCount(), 0)
+})
+
+test('the gate refuses a noncanonical WebSocket version before probing', async t => {
+  const f = pendingMemberUpgrades(t)
+  const malformed = await f.upgrade(f.issue('member'), { version: '13.0' })
+  assert.equal(malformed.status, 400)
+  assert.equal(malformed.resumed, undefined)
+  assert.deepEqual(f.probes, [])
+  assert.equal(f.sign.mock.callCount(), 0)
+})
+
+test('member upgrades preserve head and later bytes while the readiness probe is pending', { timeout: 5000 }, async t => {
+  const held = Promise.withResolvers()
+  const browserBytes = Promise.withResolvers()
+  let received = Buffer.alloc(0)
+  const f = await callerFixture(t, {
+    probe(res) { held.resolve(() => res.writeHead(204, { 'x-automagik-ready': '1' }).end()) },
+    handleUpgrade(_req, socket, head) {
+      const add = chunk => {
+        received = Buffer.concat([received, chunk])
+        if (received.length >= 'head-during'.length) browserBytes.resolve(received.toString())
+      }
+      socket.once('end', () => socket.end())
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+      add(head)
+      socket.on('data', add)
+      return true
+    },
+  })
+  const upgradeSocket = Promise.withResolvers()
+  f.gate.on('upgrade', (_req, socket) => upgradeSocket.resolve(socket))
+  const { headers } = f.issue('member')
+  const raw = net.connect({ host: DSH_HOST, port: f.gatePort })
+  t.after(() => raw.destroy())
+  raw.resume()
+  const fields = Object.entries({ ...websocketHeaders, ...headers, host: HOST }).map(([name, value]) => `${name}: ${value}`)
+  raw.write(['GET /api/remote.mux HTTP/1.1', ...fields, '', 'head-'].join('\r\n'))
+  const ready = await held.promise
+  const browser = await upgradeSocket.promise
+  const during = once(browser, 'data')
+  raw.write('during')
+  assert.equal((await during)[0].toString(), 'during')
+  assert.equal(f.signs.length, 0)
+  ready()
+  assert.equal(await browserBytes.promise, 'head-during')
+  assert.equal(f.signs.length, 1)
+})
+
+test('a restart after the probe reaches nobody', async t => {
+  for (const transport of ['HTTP', 'upgrade']) {
+    await t.test(transport, async t => {
+      const restarted = []
+      let next
+      const f = await callerFixture(t, {
+        async connectDsh(options) {
+          const old = await probeDsh({ ...options, authority: f.credentials.authority })
+          const closed = once(old, 'close')
+          await Promise.all([closed, f.stopUpstream()])
+          next = http.createServer((request, response) => { restarted.push(request.headers); response.writeHead(200).end() })
+          next.on('upgrade', (request, socket) => { restarted.push(request.headers); socket.destroy() })
+          next.listen(f.port, DSH_HOST)
+          await once(next, 'listening')
+          t.after(() => { next.closeAllConnections(); return new Promise(resolve => next.close(resolve)) })
+          return old
+        },
+      })
+      const member = f.issue('member')
+      const reply = transport === 'HTTP'
+        ? await request(f.gatePort, '/api/x', { method: 'POST', body: 'x', headers: member.headers })
+        : await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })
+      assert.equal(reply.status, 503)
+      assert.ok(next.listening)
+      assert.equal(f.probes.length, 1)
+      assert.equal(f.signs.length, 1)
+      assert.deepEqual(restarted.filter(headers => headers['x-automagik-caller'] !== undefined), [])
+      assert.deepEqual(restarted, [])
+      assert.deepEqual(f.seen, [])
+    })
+  }
 })
