@@ -22,7 +22,7 @@ export const CIMD_CLIENT_ID = process.env.AUTOMAGIK_OAUTH_CLIENT_METADATA_URL?.t
 const timed = (request = fetch) => (url, init) => request(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(TIMEOUT_MS) })
 
 const https = (url, what) => {
-  if (!/^https:\/\//i.test(String(url))) throw new Error(`${what} addresses must start with https://`)
+  if (!/^https:\/\//i.test(String(url))) throw refusal(`${what} addresses must start with https://`)
 }
 
 // Probes the MCP server and resolves the authorization server and its metadata.

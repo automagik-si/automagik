@@ -879,6 +879,63 @@ test('connector-sign-in-code refuses a wrong state and accepts the pasted URL or
   assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), 'AT-9')
 })
 
+// A pasted answer the panel cannot use is a refusal (code bot/refused), so the card shows its
+// sentence instead of "Something went wrong" (#1322).
+test('connector-sign-in-code answers an unusable paste with a coded refusal', async (t) => {
+  const home = teamHome()
+  const ctx = fakeContext()
+  const rt = createRuntime(ctx, { home, github: false })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+  rt.connectorsInternals.pendings.set('notion', {
+    kind: 'browser', expectedState: 'STATE1', codeVerifier: 'v', redirectUri: 'http://127.0.0.1:9/callback',
+    discovery: { authorizationServerUrl: 'https://as.test', metadata: AS, resource: 'https://mcp.test/mcp' },
+    clientInformation: { client_id: 'c1' }, timer: setTimeout(() => {}, 60_000), listener: { close: cb => cb?.() },
+  })
+  for (const [input, message] of [
+    ['  ', 'Paste the address or the code'],
+    ['http://x/?code=C&state=WRONG', 'This address is not from this sign-in attempt (state mismatch). Copy the whole address again.'],
+    ['http://x/?state=STATE1', 'The address has no code'],
+  ]) {
+    await assert.rejects(rt.connectorEndpoint('connector-sign-in-code', { id: 'notion', input }), { code: 'bot/refused', message })
+  }
+  assert.ok(rt.connectorsInternals.pendings.has('notion'), 'a refused paste keeps the sign-in waiting')
+})
+
+test('mail-sign-in-code answers an unusable Google answer with a coded refusal', async (t) => {
+  const oldId = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID
+  const oldSecret = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET
+  process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID = 'google-test'
+  process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET = 'google-test-secret'
+  t.after(() => {
+    if (oldId === undefined) delete process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID
+    else process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID = oldId
+    if (oldSecret === undefined) delete process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET
+    else process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET = oldSecret
+  })
+  const home = teamHome()
+  const ctx = fakeContext()
+  const rt = createRuntime(ctx, { home, github: false, mail: { fetch: async url => {
+    const u = String(url)
+    if (u.includes('oauth-authorization-server')) return json(AS)
+    if (u === 'https://as.test/token') return json({ access_token: 'tok-cccc', expires_in: 3600, token_type: 'Bearer' })
+    if (u.includes('userinfo')) return json({})
+    return notFound()
+  } } })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+  await assert.rejects(rt.connectorEndpoint('mail-sign-in-code', { input: 'C' }), { code: 'bot/refused', message: 'No Google sign-in is waiting' })
+  const view = await rt.connectorEndpoint('mail-account-add', { google: true })
+  const state = new URL(view.pending[0].url).searchParams.get('state')
+  for (const [input, message] of [
+    ['http://x/?code=C&state=WRONG', 'The sign-in answer is not for this attempt'],
+    [`http://x/?state=${state}`, 'The address has no code'],
+    [`http://x/?code=C&state=${state}`, 'Google did not say which account this is'],
+  ]) {
+    await assert.rejects(rt.connectorEndpoint('mail-sign-in-code', { input }), { code: 'bot/refused', message })
+  }
+})
+
 test('OAuth loopback keeps an error listener after binding, including repeated errors', async (t) => {
   const real = globalThis.fetch
   globalThis.fetch = async (url, init) => {
