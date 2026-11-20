@@ -10,7 +10,7 @@ import * as Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
-import { apply } from '../index.js'
+import { apply, createRuntime } from '../index.js'
 import { install as installModels } from '../src/host/models.js'
 import { install as installParts } from '../src/host/parts.js'
 import { install as installModelState } from '../src/host/model-state.js'
@@ -324,9 +324,9 @@ test('R2: reinstall restore bootstraps a fresh plugin over the same JSONL store'
   assert.deepEqual(h.selected, [])
 })
 
-async function partsBench(t, { group = false, route = CARRIED } = {}) {
+async function partsBench(t, { group = false, route = CARRIED, full = false } = {}) {
   const sessions = new Map(), agents = new Map(), selected = [], archived = [], warnings = []
-  const state = { bots: bots(), rooms: {}, switching: {}, questions: {}, views: {}, prefs: {} }
+  let state = { bots: bots(), rooms: {}, switching: {}, questions: {}, views: {}, prefs: {} }
   if (group) state.rooms.room = {
     id: 'room', name: 'Sample room', members: ['b1', 'b2'],
     sessions: { b1: 'seat1', b2: 'seat2' }, segments: {},
@@ -347,7 +347,7 @@ async function partsBench(t, { group = false, route = CARRIED } = {}) {
     } },
     workspaceRegistry: { archiveSession: async id => { archived.push(id) } },
   })
-  const rt = {
+  let rt = {
     ctx, config: {}, state, botOf: id => state.bots[id], roomOf: id => state.rooms[id],
     chatOf: id => state.bots[id]?.sessionId, selfOf: id => rt.chatOwners.get(id),
     chatOwners: new Map(), groupOwners: new Map(), roomOwners: new Map(), pastOwners: new Map(),
@@ -393,23 +393,42 @@ async function partsBench(t, { group = false, route = CARRIED } = {}) {
   for (const id of ['b1', 'b2', ...(group ? ['seat1', 'seat2'] : [])]) {
     makeAgent(carriedSession(id, route))
   }
-  await rt.save()
-  installModels(rt)
-  // No route answers a handoff beside these chats, as in switchBench's agent-only rows.
+  if (full) {
+    const home = mkdtempSync(join(tmpdir(), 'ds-bot-refused-return-'))
+    writeFileSync(join(home, 'state.json'), JSON.stringify({ version: 1, mainBotIds: ['b1'], ...state }))
+    const services = rt
+    rt = createRuntime(ctx, { home })
+    t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+    // Keep the real store, indexing, and approval chain. The move uses the same Session
+    // services as the parts-only bench.
+    for (const key of ['warn', 'resolveAgent', 'createSession', 'eventsBackwards', 'ensureWorkspace',
+      'applyPermission', 'applyToolDeny', 'ensureCapabilities', 'moveSchedules', 'isFolder', 'tagUsage']) rt[key] = services[key]
+    await rt.load()
+    state = rt.state
+  } else {
+    await rt.save()
+    installModels(rt)
+    installParts(rt)
+    installModelState(rt)
+    t.after(() => ctx.dispose())
+  }
+  // No route answers a handoff beside these chats.
   rt.backgroundModel = async () => undefined
   rt.answersAside = () => false
-  installParts(rt)
-  installModelState(rt)
-  t.after(() => ctx.dispose())
   const current = bot => group ? state.rooms.room.sessions[bot.id] : bot.sessionId
-  const move = async bot => {
+  const move = async (bot, afterStep) => {
     const oldId = current(bot)
     const agent = agents.get(oldId)
-    const preStep = ctx.listeners.get('agent/pre-step')[0]
-    await preStep({ agent, turn: 2, step: 1, messages: [],
+    const chain = ctx.listeners.get('agent/pre-step')
+    const payload = { agent, turn: 2, step: 1, messages: [],
       signal: new AbortController().signal,
       modelSelection: { provider: 'hermes-remote', model: 'attach' },
-    }, () => { throw new Error('the long chat must move before the model call') })
+    }
+    const end = () => { throw new Error('the long chat must move before the model call') }
+    const step = at => at === chain.length ? end() : chain[at](payload, () => step(at + 1))
+    if (full) await step(0)
+    else await chain[0](payload, end)
+    if (afterStep !== undefined) await afterStep()
     try {
       await until(() => current(bot) !== oldId && rt.awaitingFirstAnswer(current(bot)),
         `${oldId} to open a watched fresh part`)
@@ -433,6 +452,114 @@ async function partsBench(t, { group = false, route = CARRIED } = {}) {
   }
   return { rt, ctx, agents, sessions, selected, archived, warnings, move, fail, current }
 }
+
+test('rfc0039 D3b [P] G25 a no-note seat move holds the gate, leaves a return, and its revert holds the gate', async t => {
+  const h = await partsBench(t, { group: true, full: true })
+  const { rt } = h
+  const quiet = () => until(() => (rt.ownershipBusy?.() ?? 0) === 0 && rt.teamCurrent(), 'current team with no ownership transition')
+  assert.equal(rt.holdsLock(), true)
+  await quiet()
+  const reports = []
+  rt.onApproval((kind, data) => { if (kind === 'settled') reports.push([data.id, data.decidedBy, data.why]) })
+  const askOn = (id, roomId) => {
+    const abort = new AbortController()
+    t.after(() => abort.abort())
+    const request = { agent: { session: { id } }, toolName: 'bash', reason: 'escalate sandbox', signal: abort.signal }
+    const chain = h.ctx.listeners.get('approval/request')
+    const fire = at => at === chain.length ? assert.fail('the ask must be admitted by the team') : chain[at](request, () => fire(at + 1))
+    const outcome = fire(0)
+    const ask = rt.approvalsView().find(entry => entry.sessionId === id)
+    assert.deepEqual([ask?.roomId, ask?.answerable], [roomId, true])
+    return { id: ask.id, outcome }
+  }
+  let peak = 0
+  const enter = rt.enterOwnership
+  if (enter !== undefined) rt.enterOwnership = () => {
+    const leave = enter()
+    peak = Math.max(peak, rt.ownershipBusy?.() ?? 0)
+    return leave
+  }
+  const bot = rt.state.bots.b1
+  rt.state.rooms.guard = { id: 'guard', name: 'Guard', members: ['b2'], sessions: { b2: 'guard-seat' }, log: [], seen: {} }
+  await rt.save({ required: true })
+  await quiet()
+  const duringMove = askOn('guard-seat', 'guard')
+  const oldAgent = h.agents.get(h.current(bot))
+  const whenIdle = oldAgent.whenIdle
+  const releaseMove = Promise.withResolvers()
+  let waitingForIdle = false
+  oldAgent.whenIdle = async () => {
+    waitingForIdle = true
+    await releaseMove.promise
+  }
+  const { oldId, freshId } = await h.move(bot, async () => {
+    try {
+      await until(() => waitingForIdle, 'the move to wait for its old agent')
+      // The pre-step has returned. Only startSwitch should still own the counter.
+      if (enter !== undefined) assert.equal(rt.ownershipBusy?.(), 1, 'D3B-G25-move')
+      rt.dropGroupSession(rt.roomOf('guard'), 'b2')
+      assert.equal(await duringMove.outcome, 'cancelled')
+      assert.deepEqual(reports, [[duringMove.id, 'system', undefined]])
+      assert.deepEqual(rt.withdrawnView?.() ?? [], [])
+      reports.length = 0
+    } finally {
+      oldAgent.whenIdle = whenIdle
+      releaseMove.resolve()
+    }
+  }).finally(() => {
+    oldAgent.whenIdle = whenIdle
+    releaseMove.resolve()
+  })
+  await quiet()
+  assert.equal(rt.awaitingFirstAnswer(freshId), true)
+  if (enter !== undefined) {
+    assert.ok(peak > 0)
+    assert.equal(rt.returnsTo?.(oldId), true)
+    assert.equal(rt.returnsTo?.(freshId), false)
+  }
+
+  // Admit another seat's ask on the old ID with no other raw evidence of its return.
+  const source = rt.roomOf('room')
+  const segments = source.segments.b1
+  delete source.segments.b1
+  rt.state.rooms.other = { id: 'other', name: 'Other', members: ['b1', 'b2'], sessions: { b1: oldId }, log: [], seen: {} }
+  await rt.save({ required: true })
+  await quiet()
+  const waiting = askOn(oldId, 'other')
+  rt.dropGroupSession(rt.roomOf('other'), 'b1')
+  assert.equal(await waiting.outcome, 'cancelled')
+  assert.deepEqual(reports, [[waiting.id, 'system', undefined]])
+  assert.deepEqual(rt.withdrawnView?.() ?? [], [])
+  assert.equal(rt.roomOf('other').sessions.b1, undefined)
+  assert.ok(h.archived.includes(oldId))
+  source.segments.b1 = segments
+  rt.indexSessions()
+
+  const load = rt.load
+  const entered = Promise.withResolvers()
+  const resume = Promise.withResolvers()
+  rt.load = async () => { entered.resolve(true); await resume.promise }
+  try {
+    const session = h.sessions.get(freshId)
+    emitSession(h.ctx, session, session.append('turn/start', { turn: 1 }))
+    emitSession(h.ctx, session, session.append('turn/end', { turn: 1, reason: {
+      kind: 'error', error: { code: 'REMOTE_HERMES', message: 'The first call failed.' },
+    } }))
+    await until(() => rt.awaitingFirstAnswer(freshId) === false, 'the revert to claim the pending return')
+    assert.equal(await Promise.race([entered.promise, Promise.resolve(false)]), true)
+    if (enter !== undefined) assert.ok(rt.ownershipBusy?.() > 0)
+  } finally { rt.load = load; resume.resolve() }
+  await until(() => h.current(bot) === oldId && h.archived.includes(freshId), 'the original part to be restored')
+  await quiet()
+  if (enter !== undefined) assert.equal(rt.returnsTo?.(oldId), false)
+
+  const eligible = askOn('seat2', 'room')
+  rt.dropGroupSession(source, 'b2')
+  assert.equal(await eligible.outcome, 'cancelled')
+  assert.ok(h.archived.includes('seat2'))
+  assert.deepEqual(reports.at(-1), [eligible.id, 'system', 'group'], 'D3B-G25')
+  assert.deepEqual(rt.withdrawnView?.().map(row => [row.id, row.why]), [[eligible.id, 'group']])
+})
 
 for (const group of [false, true]) {
   test(`R3: both carried ${group ? 'group seats' : 'Bot chats'} survive first-call rollback`,

@@ -57,7 +57,7 @@ object ChatSettings {
     private val revPattern = Regex("[0-9a-f]{16}")
     private const val MAX_MODELS = 200
 
-    fun isBot(terminal: String) = Chat.isDsh(terminal) && terminal.length > Chat.DSH_PREFIX.length
+    fun isBot(terminal: String) = Chat.isDsh(terminal) && !Chat.isGroup(terminal) && terminal.length > Chat.DSH_PREFIX.length
 
     private fun JSONObject.string(key: String) = opt(key) as? String
     private fun JSONObject.bool(key: String) = opt(key) as? Boolean

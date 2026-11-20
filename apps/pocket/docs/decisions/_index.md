@@ -30,5 +30,6 @@ Write one from [`_Templates/decision.md`](../_Templates/decision.md).
 | [Bot memory opens on its own connection](bot-memory.md) | Implemented | |
 | [Bot schedules open on their own connection](bot-schedules.md) | Implemented | |
 | [Bot settings open from the chat identity pill](bot-settings.md) | Implemented | |
+| [Groups have their own heading, outside Needs you](group-chats.md) | Implemented | |
 
 Back to the [docs home](../_index.md).

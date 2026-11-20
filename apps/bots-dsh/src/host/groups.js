@@ -462,84 +462,87 @@ export function install(rt) {
   // a fresh look at the log and a brief of the member's own chat; the brief is the
   // first message, so it stays fixed and the prefix stays cacheable.
   async function groupSessionFor(room, member) {
-    rt.assertShellChoice?.(undefined, member.id)
-    room.sessions ??= {}
-    const known = room.sessions[member.id]
-    if (known !== undefined) {
-      await rt.ensureCapabilities(known)
-      return { id: known, brief: undefined }
-    }
-    // A saved level DSH no longer offers refuses the member's first turn here before a
-    // Session is made for it.
-    rt.assertLevelOffered?.(room.permission ?? member.permission)
-    const id = await rt.createSession(`${member.name} · ${room.name}`, {
-      dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true, botId: member.id,
-      readScopeSource: rt.sessionOfRoom(room), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}),
-    })
-    // Its level first, before the Session is the member's: one whose level did not hold is
-    // not kept, so the member takes no turn on it and its next turn here makes another.
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      await rt.applyPermission(member, id, room, undefined, { start: true })
-    } catch (error) {
-      void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-        .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
-      throw error
-    }
-    // While the Session was made the member may have left or been deleted, the group been
-    // deleted, or another turn made the member's Session first: the new one is not kept.
-    // Undefined means the member is gone from the group.
-    const gone = rt.roomOf(room.id) !== room || !room.members.includes(member.id) || rt.botOf(member.id) === undefined
-    if (gone || room.sessions?.[member.id] !== undefined) {
-      void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-        .catch(error => rt.warn('omni-ui: unused group Session of %s in %s not archived: %s', member.name, room.name, error))
-      return gone ? undefined : groupSessionFor(room, member)
-    }
-    room.sessions[member.id] = id
-    rt.groupOwners.set(id, { botId: member.id, roomId: room.id })
-    // Once more now that a change of level reaches it: one picked while the first apply
-    // ran went only to the Sessions the group had then.
-    try {
-      await rt.applyPermission(member, id, room, undefined, { start: true })
-      // At Full access with the member's coding CLI not served: not started on another model.
-      await rt.assertNotOffCli(member, id)
-    } catch (error) {
-      if (room.sessions[member.id] === id) delete room.sessions[member.id]
-      rt.groupOwners.delete(id)
-      void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-        .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
-      throw error
-    }
-    // The Session is mapped to its member now, so its Bot is known: the deny list lands
-    // before the first turn here, not on the next resolve.
-    await rt.applyToolDeny(member, [id])
-      .catch(error => rt.warn('ds-bot: tool deny for %s in %s not applied: %s', member.name, room.name, error?.message ?? error))
-    delete room.seen[member.id]
-    const ref = await rt.desiredModel(member, { sessionId: id })
-    if (ref !== undefined) {
-      const effort = await rt.desiredEffort(member, ref)
+      rt.assertShellChoice?.(undefined, member.id)
+      room.sessions ??= {}
+      const known = room.sessions[member.id]
+      if (known !== undefined) {
+        await rt.ensureCapabilities(known)
+        return { id: known, brief: undefined }
+      }
+      // A saved level DSH no longer offers refuses the member's first turn here before a
+      // Session is made for it.
+      rt.assertLevelOffered?.(room.permission ?? member.permission)
+      const id = await rt.createSession(`${member.name} · ${room.name}`, {
+        dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true, botId: member.id,
+        readScopeSource: rt.sessionOfRoom(room), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}),
+      })
+      // Its level first, before the Session is the member's: one whose level did not hold is
+      // not kept, so the member takes no turn on it and its next turn here makes another.
       try {
-        await rt.selectSessionModel(id, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
+        await rt.applyPermission(member, id, room, undefined, { start: true })
       } catch (error) {
-        rt.warn('ds-bot: model for %s in %s not applied: %s', member.name, room.name, error)
-        // The Session is still on the model DSH made it with. At Full access with the member
-        // on a coding CLI it is not kept, as one whose level did not hold is not (above).
+        void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+          .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
+        throw error
+      }
+      // While the Session was made the member may have left or been deleted, the group been
+      // deleted, or another turn made the member's Session first: the new one is not kept.
+      // Undefined means the member is gone from the group.
+      const gone = rt.roomOf(room.id) !== room || !room.members.includes(member.id) || rt.botOf(member.id) === undefined
+      if (gone || room.sessions?.[member.id] !== undefined) {
+        void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+          .catch(error => rt.warn('omni-ui: unused group Session of %s in %s not archived: %s', member.name, room.name, error))
+        return gone ? undefined : await groupSessionFor(room, member)
+      }
+      room.sessions[member.id] = id
+      rt.groupOwners.set(id, { botId: member.id, roomId: room.id })
+      // Once more now that a change of level reaches it: one picked while the first apply
+      // ran went only to the Sessions the group had then.
+      try {
+        await rt.applyPermission(member, id, room, undefined, { start: true })
+        // At Full access with the member's coding CLI not served: not started on another model.
+        await rt.assertNotOffCli(member, id)
+      } catch (error) {
+        if (room.sessions[member.id] === id) delete room.sessions[member.id]
+        rt.groupOwners.delete(id)
+        void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+          .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
+        throw error
+      }
+      // The Session is mapped to its member now, so its Bot is known: the deny list lands
+      // before the first turn here, not on the next resolve.
+      await rt.applyToolDeny(member, [id])
+        .catch(error => rt.warn('ds-bot: tool deny for %s in %s not applied: %s', member.name, room.name, error?.message ?? error))
+      delete room.seen[member.id]
+      const ref = await rt.desiredModel(member, { sessionId: id })
+      if (ref !== undefined) {
+        const effort = await rt.desiredEffort(member, ref)
         try {
-          await rt.assertNotOffCli(member, id, undefined, { unselected: true })
-        } catch (refused) {
-          if (room.sessions[member.id] === id) delete room.sessions[member.id]
-          rt.groupOwners.delete(id)
-          void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-            .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
-          throw refused
+          await rt.selectSessionModel(id, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
+        } catch (error) {
+          rt.warn('ds-bot: model for %s in %s not applied: %s', member.name, room.name, error)
+          // The Session is still on the model DSH made it with. At Full access with the member
+          // on a coding CLI it is not kept, as one whose level did not hold is not (above).
+          try {
+            await rt.assertNotOffCli(member, id, undefined, { unselected: true })
+          } catch (refused) {
+            if (room.sessions[member.id] === id) delete room.sessions[member.id]
+            rt.groupOwners.delete(id)
+            void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+              .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
+            throw refused
+          }
         }
       }
-    }
-    await rt.save()
-    // The Session was resolved before the group owned it, so its scoped tools land now.
-    await rt.resolveAgent(id)
-      .catch(error => rt.warn('omni-ui: scoped tools for %s in %s not applied: %s', member.name, room.name, error))
-    await rt.ensureCapabilities(id)
-    return { id, brief: await rt.ownChatBrief(member) }
+      await rt.save()
+      // The Session was resolved before the group owned it, so its scoped tools land now.
+      await rt.resolveAgent(id)
+        .catch(error => rt.warn('omni-ui: scoped tools for %s in %s not applied: %s', member.name, room.name, error))
+      await rt.ensureCapabilities(id)
+      return { id, brief: await rt.ownChatBrief(member) }
+    } finally { leave() }
   }
 
   // Lines from before the round's opening message are kept apart from this round, so
@@ -882,7 +885,7 @@ export function install(rt) {
       // repair a lost Session, so the member's next turn in the group starts a new one.
       const lost = lostSession(error)
       if (lost && room.sessions?.[member.id] === sessionId) {
-        rt.retireGroupSession(room, member.id)
+        rt.retireGroupSession(room, member.id, { bot: member })
         void rt.save().catch(() => {})
       }
       rt.roomWaiters.get(exchangeId)?.fail({ code: lost ? 'SESSION_RESET' : 'SESSION', message: String(error?.message ?? error).slice(0, 300) })

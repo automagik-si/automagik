@@ -1795,6 +1795,7 @@ const pack = createPack({
     "Nothing running right now.": "Nada rodando agora.",
     "Just finished": "Recém-concluídos",
     "This step was withdrawn: its task ended": "Esta etapa foi retirada: a tarefa terminou",
+    "This step was withdrawn: its group Session ended": "Esta etapa foi retirada: a sessão do grupo terminou",
     "The task ended with an approval unanswered": "A tarefa terminou com uma aprovação sem resposta",
     "This approval is no longer open": "Esta aprovação não está mais aberta",
     "Automations": "Automações",

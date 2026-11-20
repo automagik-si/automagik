@@ -5,8 +5,11 @@ services:
     image: ${AUTOMAGIK_SERVER_IMAGE:?set a server image digest}
     environment:
       AUTOMAGIK_GATE_CLOUD_WORKSPACE: ${AUTOMAGIK_GATE_CLOUD_WORKSPACE:-}
+      AUTOMAGIK_MULTIUSER: ${AUTOMAGIK_MULTIUSER:-0}
+      AUTOMAGIK_CALLER_KEYS: /caller-keys/caller-keys.json
     volumes:
       - dsh-data:/data
+      - caller-keys:/caller-keys:ro
   gate:
     profiles: [gate]
     image: ${AUTOMAGIK_SERVER_IMAGE:?set a server image digest}
@@ -16,6 +19,8 @@ services:
         condition: service_healthy
     network_mode: service:dsh
     environment:
+      AUTOMAGIK_GATE_MULTIUSER: ${AUTOMAGIK_MULTIUSER:-0}
+      AUTOMAGIK_GATE_CALLER_PUBLIC: /caller-keys
       AUTOMAGIK_GATE_ENABLED: ${AUTOMAGIK_GATE_ENABLED:-0}
       AUTOMAGIK_GATE_ORIGIN: ${AUTOMAGIK_GATE_ORIGIN:?set the exact public origin}
       AUTOMAGIK_GATE_PORT: '3082'
@@ -34,6 +39,7 @@ services:
       AUTOMAGIK_GATE_CLOUD_REVOCATION_URL: ${AUTOMAGIK_GATE_CLOUD_REVOCATION_URL:-}
     volumes:
       - gate-data:/data
+      - caller-keys:/caller-keys
       # DSH creates this view on old volumes before its first healthy check. It contains only
       # the launch credential and the profile health report. DSH_HOME and the rest of the volume
       # stay private. volume.subpath needs Docker Engine 26 and Compose 2.26 or later.
@@ -49,3 +55,4 @@ services:
 volumes:
   dsh-data:
   gate-data:
+  caller-keys:

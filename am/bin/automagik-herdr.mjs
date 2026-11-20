@@ -36,7 +36,7 @@ import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrus
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
   GUARD_DIR, KILL_GUARD_DIR, KILL_GUARD_NAME, SESSION_LABEL, TRANSCRIPT_LABEL, baseCandidates, branchNamesTask, branchSlug, guardPathWith,
-  LEDGER_MODE, endRow, finishedEnds, launchKey, ledgerLine, ledgerPath, optionLike, paneArgs, readLedger, reapCandidates, reapPath, reapRow,
+  LEDGER_MODE, endRow, finishedEnds, launchKey, ledgerLine, ledgerPath, loginGeneration, optionLike, paneArgs, readLedger, reapCandidates, reapPath, reapRow,
   prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks, forgeHost, forgeOf, workerTaskText,
   sessionRow, stableGuardDir, stableKillDir, stableRootOf,
   parseWorktrees, runsTemplate, startRow, swapArm, swapByte,
@@ -3434,6 +3434,21 @@ async function relabelPane(terminal, words, prefix, warnedRelabels) {
 }
 
 /**
+ * The Bot login generation a launch of `vendor` records: `generation` and `sequence` from the
+ * generation record ACP writes beside its pointer (#1527). The pointer reaches an am process as
+ * `AUTOMAGIK_BOT_CLI_POINTER` (the entrypoint's export, #1531); without it, or with no readable
+ * version-1 record naming that vendor, both are null, never a guess. Reads one small file and
+ * never resolves, copies or exports a login.
+ */
+function launchLogin(vendor) {
+  const pointer = process.env.AUTOMAGIK_BOT_CLI_POINTER;
+  if (typeof pointer !== "string" || !pointer.startsWith("/")) return { generation: null, sequence: null };
+  try {
+    return loginGeneration(JSON.parse(readFileSync(join(dirname(pointer), "generation.json"), "utf8")), vendor);
+  } catch { return { generation: null, sequence: null }; }
+}
+
+/**
  * Appends one row to the workers ledger (workers.js) with a single O_APPEND write, the file the
  * owner's alone: made 0600, and narrowed to its owner's bits again before every append (a file
  * made under umask 002 is 0664, and usagemeter refuses a group- or world-writable one; RFC 0021
@@ -4692,6 +4707,8 @@ async function launchSeat(project, bot, over = {}) {
       + `Pick one with am edit ${bot.id} --model <model> (the error lists them), or clear it with --no-model.`);
   }
   const agent = startableAgent(bot, agentKey);
+  // The Bot login generation this launch starts on (#1532), read at the spawn and frozen in its row.
+  let ledgerLogin = { generation: null, sequence: null };
   // Antigravity always gets a mode (auto by default); every other agent's argv is unchanged.
   const agyMode = launchAgyMode(bot, agentKey);
   // Where the launch works: a restart's --cwd (its canonical path), else the project folder. The
@@ -4772,6 +4789,7 @@ async function launchSeat(project, bot, over = {}) {
     // #1262: hc waits 60 s for the new terminal's first status, so the run gets its own timeout
     // above that wait; a timeout after hc made the terminal is a start looked up by its name
     // (the attach row is still written), never a failed start.
+    ledgerLogin = launchLogin(agentKey);
     const { address, late } = await hcStartRun(hc, args, name);
     if (late) {
       const warning = `${name} started, but hc run didn't answer within ${HC_RUN_TIMEOUT_MS / 1000}s; its start is recorded.`;
@@ -4804,7 +4822,7 @@ async function launchSeat(project, bot, over = {}) {
   const logSeat = async (createdMs = started.created_ms) => {
     const unlogged = appendLedger(startRow({ kind: "seat", terminal, pid: started.pid ?? await pidOf(terminal), botId: bot.id, worktree: cwd,
       project: key, agent: agentKey, model, template: carry[WORKER_TEMPLATE_LABEL] ?? null,
-      ...tags, core: await rowCore(), createdMs, env: homeEnv, session: agentKey === "claude" ? session : null }));
+      ...tags, core: await rowCore(), createdMs, env: homeEnv, session: agentKey === "claude" ? session : null, ...ledgerLogin }));
     if (unlogged) { hook.warnings.push(unlogged); report([unlogged]); }
   };
   if (!over.replacing) await logSeat();
@@ -5514,7 +5532,7 @@ async function rerunHelpers(plans, parent, say) {
       const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
         project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
         template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
-        core, createdMs, squad, env: p.env, session: p.agent === "claude" ? p.session : null }));
+        core, createdMs, squad, env: p.env, session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent ?? w.agent) }));
       if (unlogged) say(unlogged);
     }
     if (p.binding) {
@@ -5537,7 +5555,8 @@ async function rerunHelpers(plans, parent, say) {
       let tags = seatTags(null, b.bot);
       try { tags = seatTags(loadProject(b.project).file, b.bot); } catch { /* its file can't be read now: no tags */ }
       const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: await pidOf(address), botId: b.bot, worktree: p.cwd, project: b.project,
-        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, env: p.env, session: p.agent === "claude" ? p.session : null }));
+        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, env: p.env,
+        session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent) }));
       if (unlogged) say(unlogged);
     }
     // A session id carried onto the new terminal, any harness (RFC 0021 (f) 5): a session row.
@@ -8002,7 +8021,7 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
     const seatHome = discoversSession(seatAgent) ? seatHomeOf(seatAgent, { argv: get.argv })?.env ?? null : null;
     const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: get.foreground?.pid ?? get.pid ?? null, botId: bot.id,
       worktree: sessionFolder, project: key, agent: seatAgent, model: detectModel(argv, seatAgent), template: paneTemplateName(get), ...seatTags(file, bot.id),
-      core: await rowCore(), createdMs: get.created_ms, env: seatHome }));
+      core: await rowCore(), createdMs: get.created_ms, env: seatHome, ...launchLogin(seatAgent) }));
     if (unlogged) hook.warnings.push(unlogged);
   }
   if (hook.written) hook.warnings.push(`${bot.name}'s briefing hook was added while its Claude session was running. If its next prompt brings no briefing, restart the bot: am restart ${bot.id} (or the bot row's Restart).`);
@@ -9694,6 +9713,8 @@ async function cmdWorker(opts, rest) {
     const list = plan.model ? modelList(plan.agent, plan.model) : [];
     if (list.length && !list.includes(plan.model)) warnings.push(`${plan.model} isn't on ${plan.agent}'s model list; started with it anyway.`);
   }
+  // The Bot login generation this launch starts on (#1532), read at the spawn and frozen in its row.
+  let ledgerLogin = { generation: null, sequence: null };
   // Where it works: --worktree's, the branch's worktree, or the folder a new one gets (made
   // below, once the check passes). Nothing is made yet.
   let place = opts.worktree !== undefined ? await givenWorktree(opts.worktree, project.key, bot)
@@ -9859,6 +9880,7 @@ async function cmdWorker(opts, rest) {
     // waiting 60 s for a program that never does; the run gets its own timeout above that wait.
     // One the timeout still ends after hc made the terminal is a start whose task didn't go in,
     // never a failed start: the row below is written from the terminal looked up by its name.
+    ledgerLogin = launchLogin(runs ?? plan.agent);
     const started = await hcStartRun(proxied ? hcReal : hc, args, name);
     const { address } = started;
     if (started.late) {
@@ -9882,7 +9904,7 @@ async function cmdWorker(opts, rest) {
   const unlogged = appendLedger(startRow({ kind: "worker", terminal, pid, botId: bot.id, task: taskId, branch: place.branch,
     project: project.key, lead, worktree, base, created: place.created, agent: plan.agent, model: plan.model, effort: plan.effort,
     template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, env: homeEnv, squad: squadOf(project.file, bot.id),
-    session }));
+    session, ...ledgerLogin }));
   if (unlogged) warnings.push(unlogged);
   // An agent that takes no first prompt on its command line (kimi, #1032) started bare: its task
   // goes in as its first message, through the hc that started it, outside the worktree's lock.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -36,7 +36,7 @@ const sets = [
 // As in upload-content.test.js, keep admission, the adapter and AgentRun dispatch real.
 // Substitute process startup and the bridge listener; no CLI or network service starts.
 function host(t, kind, level, image) {
-  const home = mkdtempSync(join(tmpdir(), 'acp-upload-matrix-'))
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'acp-upload-matrix-')))
   const cwd = join(home, 'workspace')
   mkdirSync(cwd)
   const session = Session.create('upload-matrix')

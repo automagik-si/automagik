@@ -25,6 +25,7 @@
 // that is neither a subagent child nor a task record, so no lineage would bind the
 // restriction to it (#584).
 import { isComputerTool } from './computer/catalog.js'
+import { changesWorkingFolder } from './folders.js'
 import { refusal } from './refusal.js'
 
 /** The most names one Bot may deny. */
@@ -487,7 +488,14 @@ export function install(rt) {
   // The last line: a call that reaches the executor for a name this Bot denies, or for any
   // tool that runs a command when the Bot has no shell, is refused whatever put it on the
   // surface.
-  ctx.on('tools/execute', async (exec, next) => {
+  ctx.on('tools/execute', (exec, next) => {
+    // A folder change can move a Session. Hold ownership through the permission retry
+    // and the downstream folder change, starting before the guard resolves the owner.
+    if (exec.agent === undefined || !changesWorkingFolder(exec)) return guardTool(exec, next)
+    const leave = rt.enterOwnership?.()
+    return guardTool(exec, next).finally(() => leave?.())
+  })
+  async function guardTool(exec, next) {
     // And none at all on a Session whose permission level was not set (permissions.js).
     try {
       rt.assertShellChoice?.(exec.agent?.session?.id ?? exec.agent?.id)
@@ -510,7 +518,7 @@ export function install(rt) {
       throw refusal(`${bot.name} has no shell, so it cannot use the ${name} tool`)
     }
     throw refusal(`${bot.name} does not have the ${name} tool`)
-  })
+  }
 
   // Retries stop on a Session that leaves the team, so a lift is not attempted on a gone agent.
   Object.assign(rt, { botOfSession, applyToolDeny, applyToolDenyToAgent: apply, cleanDenyTools, unknownDenyTools, assertDenyTools })

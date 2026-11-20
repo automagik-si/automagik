@@ -1,18 +1,60 @@
 // scripts/standalone-check.mjs: the scan finds what a mod reaches outside its folder, and the
-// script runs every am-* mod alone in a scratch app home ($HERDR_APP_HOME = a temp folder, never
-// the real one). Where herdr-app is not installed (CI), the check column says it was skipped.
+// script runs against a stand-in herdr-app of the test's own (in HERDR_APP_BIN and first on PATH).
+// The real one runs only with AUTOMAGIK_HERDR_APP_CHECK=1 and HERDR_APP_BIN naming it (CI's herdr
+// pack job, Node 24 leg), on a machine with no live Herdr.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 
 import { REVIEWED, scanMod, scratchBase, summarize, verdictOf } from "../scripts/standalone-check.mjs";
 
 const SCRIPT = new URL("../scripts/standalone-check.mjs", import.meta.url).pathname;
 const MODS = new URL("../mods/", import.meta.url).pathname;
 const AM = readdirSync(MODS).filter((n) => n.startsWith("am-") && statSync(join(MODS, n)).isDirectory()).sort();
+
+/** The opt-in: only then does a row here start a real herdr-app (CI's Node 24 leg sets it). */
+const REAL_APP = process.env.AUTOMAGIK_HERDR_APP_CHECK === "1";
+const REAL_APP_SKIP = REAL_APP ? false
+  : "runs the real herdr-app: set AUTOMAGIK_HERDR_APP_CHECK=1 and HERDR_APP_BIN, only on a machine with no live Herdr (CI's herdr pack job does on Node 24)";
+
+/**
+ * A stand-in herdr-app in `dir/bin`, logging each call to `dir/herdr-app.log` as `arg1<TAB>arg2<TAB>$HERDR_APP_HOME`.
+ * `version: null` makes `--version` exit 1. Otherwise it prints `herdr-app <version>`.
+ * Checks pass unless `crashMod` names the mod to kill. Anything else exits 64.
+ */
+function standInApp(dir, { version = null, crashMod = null } = {}) {
+  const binDir = join(dir, "bin");
+  const bin = join(binDir, "herdr-app");
+  const log = join(dir, "herdr-app.log");
+  mkdirSync(binDir);
+  writeFileSync(log, "");
+  const versionReply = version === null ? "exit 1" : `echo "herdr-app ${version}"; exit 0`;
+  const crash = crashMod === null ? "" :
+    `case "$2" in */${crashMod}) echo "check: loading ${crashMod}" >&2; kill -KILL $$ ;; esac`;
+  writeFileSync(bin, `#!/bin/sh
+printf '%s\\t%s\\t%s\\n' "$1" "$2" "$HERDR_APP_HOME" >> "${log}"
+case "$1" in
+  --version) ${versionReply} ;;
+  check)
+    ${crash}
+    echo "check passed: $2"
+    exit 0 ;;
+  *) exit 64 ;;
+esac
+`);
+  chmodSync(bin, 0o755);
+  const calls = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => line.split("\t"));
+  return { bin, binDir, calls };
+}
+
+function tempFolder(t, prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
 
 const deps = (self, text, reviewed, file = "main.js") => summarize(scanMod(self, { [file]: text }), reviewed);
 
@@ -158,35 +200,95 @@ test("scratch base: the home folder, the real app home and anything inside it ar
   assert.equal(scratchBase({ HERDR_APP_HOME: join(home, "scratch") }, home), join(home, "scratch"));
 });
 
-test("the script: one row per am-* mod, in a scratch app home it leaves empty", (t) => {
-  const scratch = mkdtempSync(join(tmpdir(), "standalone-check-"));
-  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+test("the script without herdr-app: one row per am-* mod, every check skipped, never plain standalone, scratch left empty", (t) => {
+  const scratch = tempFolder(t, "standalone-check-");
+  const s = standInApp(tempFolder(t, "standalone-app-"));
   const r = spawnSync(process.execPath, [SCRIPT, "--json"], {
     encoding: "utf8",
     timeout: 600000,
-    env: { ...process.env, HERDR_APP_HOME: scratch },
+    env: { ...process.env, HERDR_APP_HOME: scratch, HERDR_APP_BIN: s.bin, PATH: `${s.binDir}:${process.env.PATH}` },
   });
   assert.equal(r.status, 0, r.stderr);
   const { herdrApp, skipped, rows } = JSON.parse(r.stdout);
+  assert.equal(herdrApp, null);
+  assert.match(skipped, /herdr-app not installed/);
   assert.deepEqual(rows.map((row) => row.mod), AM);
-  if (herdrApp === null) {
-    t.diagnostic(`herdr-app is not installed: ${skipped}`);
-    for (const row of rows) assert.equal(row.check.status, "skipped");
-    for (const row of rows) assert.ok(row.verdict !== "standalone", `${row.mod}: unchecked is never plain standalone`);
-  } else {
-    for (const row of rows) assert.ok(["pass", "fail"].includes(row.check.status), row.mod);
+  for (const row of rows) {
+    assert.equal(row.check.status, "skipped");
+    assert.notEqual(row.verdict, "standalone", row.mod);
   }
+  const by = Object.fromEntries(rows.map((row) => [row.mod, row]));
+  assert.ok(by["am-tabs"].hard.some((d) => d.dep === "mod am-new-menu"));
+  assert.ok(by["am-footer"].hard.some((d) => d.dep === "mod am-mods"));
+  assert.deepEqual(readdirSync(scratch), [], "the run's homes are removed");
+  assert.deepEqual(s.calls().map((c) => c[0]), ["--version"]);
+});
+
+test("the script with a stand-in herdr-app: each am-* mod checked alone in its own scratch app home, removed after", (t) => {
+  const CRASH = AM.at(-1) === "am-tabs" ? AM.at(-2) : AM.at(-1);
+  const scratch = tempFolder(t, "standalone-check-");
+  const s = standInApp(tempFolder(t, "standalone-app-"), { version: "0.0.0-test", crashMod: CRASH });
+  const r = spawnSync(process.execPath, [SCRIPT, "--json"], {
+    encoding: "utf8",
+    timeout: 600000,
+    env: { ...process.env, HERDR_APP_HOME: scratch, HERDR_APP_BIN: s.bin, PATH: `${s.binDir}:${process.env.PATH}` },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const { herdrApp, rows } = JSON.parse(r.stdout);
+  assert.equal(herdrApp, "herdr-app 0.0.0-test");
+  assert.deepEqual(rows.map((row) => row.mod), AM);
+  const by = Object.fromEntries(rows.map((row) => [row.mod, row]));
+  assert.deepEqual(by[CRASH].check, { status: "fail", crashed: true, detail: "killed by SIGKILL" });
+  assert.match(by["am-tabs"].verdict, /^needs/);
+  for (const row of rows) {
+    if (row.mod !== CRASH) assert.deepEqual(row.check, { status: "pass", detail: "" }, row.mod);
+    assert.equal(row.verdict, verdictOf(row.check, row.hard), row.mod);
+  }
+  const [versionCall, ...checks] = s.calls();
+  assert.deepEqual(versionCall.slice(0, 2), ["--version", ""]);
+  assert.equal(checks.length, AM.length);
+  const base = realpathSync(scratch);
+  const homes = new Set();
+  for (const [i, [verb, folder, home]] of checks.entries()) {
+    assert.equal(verb, "check");
+    assert.equal(folder, join(home, "mods", AM[i]));
+    assert.ok(home.startsWith(base + sep), home);
+    homes.add(home);
+  }
+  assert.equal(homes.size, AM.length);
+  assert.deepEqual(readdirSync(scratch), [], "the run's homes are removed");
+});
+
+test("the script with the real herdr-app (AUTOMAGIK_HERDR_APP_CHECK=1): every am-* mod checked alone in a scratch home", { skip: REAL_APP_SKIP, timeout: 600000 }, (t) => {
+  const bin = process.env.HERDR_APP_BIN ?? "";
+  assert.ok(isAbsolute(bin), "AUTOMAGIK_HERDR_APP_CHECK=1 needs HERDR_APP_BIN: the absolute path of the herdr-app to run (CI's kept pinned build)");
+  assert.doesNotThrow(() => accessSync(bin, constants.X_OK), `HERDR_APP_BIN is not an executable: ${bin}`);
+  const scratch = tempFolder(t, "standalone-check-");
+  const r = spawnSync(process.execPath, [SCRIPT, "--json"], {
+    encoding: "utf8",
+    timeout: 600000,
+    env: { ...process.env, HERDR_APP_HOME: scratch, HERDR_APP_BIN: bin },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const { herdrApp, rows } = JSON.parse(r.stdout);
+  assert.ok(herdrApp, "no herdr-app answered --version at HERDR_APP_BIN");
+  assert.deepEqual(rows.map((row) => row.mod), AM);
+  for (const row of rows) assert.ok(["pass", "fail"].includes(row.check.status), row.mod);
+  assert.deepEqual(rows.filter((r) => r.check.crashed).map((r) => `${r.mod}: ${r.check.detail}`), [], "herdr-app could not run, timed out or was killed");
+  for (const row of rows) t.diagnostic(`${row.mod}: ${row.check.status} ${row.verdict}`);
   const by = Object.fromEntries(rows.map((row) => [row.mod, row]));
   assert.ok(by["am-tabs"].hard.some((d) => d.dep === "mod am-new-menu"));
   assert.ok(by["am-footer"].hard.some((d) => d.dep === "mod am-mods"));
   assert.deepEqual(readdirSync(scratch), [], "the run's homes are removed");
 });
 
-test("the script refuses the real app home before it copies anything", () => {
+test("the script refuses the real app home before it copies anything", (t) => {
+  const s = standInApp(tempFolder(t, "standalone-app-"), { version: "0.0.0-test" });
   const r = spawnSync(process.execPath, [SCRIPT], {
     encoding: "utf8",
-    env: { ...process.env, HERDR_APP_HOME: join(homedir(), ".config/herdr-app") },
+    env: { ...process.env, HERDR_APP_HOME: join(homedir(), ".config/herdr-app"), HERDR_APP_BIN: s.bin, PATH: `${s.binDir}:${process.env.PATH}` },
   });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /refusing/);
+  assert.deepEqual(s.calls(), [], "refused before herdr-app was asked anything");
 });

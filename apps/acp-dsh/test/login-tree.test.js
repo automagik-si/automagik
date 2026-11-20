@@ -71,7 +71,10 @@ for (const locked of [true, false]) {
       if (app.exitCode === null && app.signalCode === null) app.kill('SIGKILL')
       await exited
       if (existsSync(groupFile)) {
-        try { process.kill(-Number(readFileSync(groupFile, 'utf8')), 'SIGKILL') } catch {}
+        try {
+          const pid = Number(readFileSync(groupFile, 'utf8'))
+          if (Number.isSafeInteger(pid) && pid > 1) process.kill(-pid, 'SIGKILL')
+        } catch {}
       }
       homes.dispose()
       rmSync(root, { recursive: true, force: true })

@@ -9,7 +9,7 @@ const root = join(import.meta.dir, '..');
 
 describe("a release's plugins.json", () => {
   test('lists this repository\'s plugins, and none of Unfold\'s', () => {
-    expect(pluginNames()).toEqual(['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/locale-pt-br-dsh', '@automagik/vault-dsh', '@automagik/welcome-dsh']);
+    expect(pluginNames()).toEqual(['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/locale-pt-br-dsh', '@automagik/multiuser-dsh', '@automagik/vault-dsh', '@automagik/welcome-dsh']);
     // No Unfold folder is left here (RFC 0020): Unfold's own release ships them, and this
     // repository's releases never attach one.
     expect(pluginNames().filter(unshipped)).toEqual([]);

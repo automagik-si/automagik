@@ -235,7 +235,7 @@ describe('the repository contract', () => {
   const manifest = loadManifest();
   const ci = readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8');
   const jobNames = [...ci.matchAll(/^ {4}name: (.+)$/gm)].map((m) => m[1].trim());
-  const pluginApps = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'];
+  const pluginApps = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'multiuser-dsh', 'vault-dsh', 'welcome-dsh'];
   const known = new Set(jobNames.flatMap((n) => n === '${{ matrix.app }} (plugin tests)' ? pluginApps.map((a) => `${a} (plugin tests)`) : [n]));
 
   test('every group names a job ci.yml has, and files that exist', () => {

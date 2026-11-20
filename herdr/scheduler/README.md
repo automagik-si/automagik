@@ -506,7 +506,7 @@ An automation is one piece of work on a clock: a prompt, or a plain command. Tha
 ```bash
 go build -o bin/herdr-automations . && go test ./...
 herdr plugin link .        # use your checkout as the installed plugin
-go test -tags hc ./internal/host/ -run Live   # against the real herdr-core, Herdr app open
+AUTOMAGIK_HERDR_APP_CHECK=1 go test -tags hc ./internal/host/ -run Live   # against the real herdr-core, Herdr app open
 scripts/dev-app.sh         # copy the panel into the app (a symlink is not reloaded)
 ```
 

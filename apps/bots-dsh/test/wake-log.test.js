@@ -1225,6 +1225,44 @@ for (const scenario of ['resume', 'resolve', 'idle', 'flush']) {
   })
 }
 
+test('rfc0039 D3b [C] G45 a malformed switch marker does not block an unrelated startup wake', async t => {
+  startup(t)
+  const state = seed()
+  state.rooms.r2.sessionId = 'r2'
+  state.switching = { b: { botId: 'b' }, broken: null, r2: { roomId: 'r2' } }
+  const home = homeFor(t, state)
+  writeLines(home, [intent()])
+  const dsh = newDsh()
+  const message = dsh.queue('a', 'report')
+  dsh.persist('a')
+
+  const release = Promise.withResolvers()
+  const resolveAgent = dsh.ctx.sessionController.resolveAgent
+  const resolving = t.mock.method(dsh.ctx.sessionController, 'resolveAgent', async id => {
+    if (id === 'b') await release.promise
+    return resolveAgent(id)
+  })
+  const host = await start(t, { home, dsh })
+  try {
+    t.mock.timers.tick(RESUME_DELAY_MS)
+    await settle(() => resolving.mock.calls.some(call => call.arguments[0] === 'b'))
+    await until(() => dsh.sends.some(send => send.id === message.id && send.wake), {
+      poll: immediate, ms: 5000, label: 'D3B-G45 unrelated startup wake',
+    })
+    assert.deepEqual(dsh.sends.map(send => send.sessionId), ['a'])
+    assert.deepEqual(host.rt.state.switching.b, { botId: 'b' })
+    if (typeof host.rt.ownershipBusy === 'function') {
+      await until(() => host.rt.state.switching.r2 === undefined, {
+        poll: immediate, ms: 5000, label: 'D3B-G45 room-only marker recovered',
+      })
+    }
+  } finally {
+    release.resolve()
+    await settle(() => host.rt.state.switching.b === undefined)
+  }
+  assert.equal(dsh.resolutions.includes('broken'), false)
+})
+
 test('a failed moved append still forwards and replay finds the receipt in the current part', async (t) => {
   startup(t)
   const state = seed()

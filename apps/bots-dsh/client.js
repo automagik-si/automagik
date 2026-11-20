@@ -3010,6 +3010,7 @@ var ZH = {
   "Nothing running right now.": "现在没有在运行的任务。",
   "Just finished": "刚刚完成",
   "This step was withdrawn: its task ended": "这一步已撤回：它的任务结束了",
+  "This step was withdrawn: its group Session ended": "这一步已撤回：它的群会话结束了",
   "The task ended with an approval unanswered": "任务结束时还有一个审批没有回答",
   "Automations": "自动化",
   "What runs on a schedule or a trigger": "按计划或触发运行的任务",
@@ -4205,6 +4206,7 @@ var botChannelSource = (bot) => {
 var headerButtons = registry();
 var sidebarTools = registry();
 var botSettings = registry();
+var officialInstall = registry();
 var chatSuggestions = registry();
 var composerPacks = registry();
 var registerComposerPack = (pack2) => composerPacks.register(pack2);
@@ -9363,6 +9365,8 @@ function withdrawnText(why) {
   switch (why) {
     case "task":
       return t("This step was withdrawn: its task ended");
+    case "group":
+      return t("This step was withdrawn: its group Session ended");
     default:
       return "";
   }
@@ -33437,6 +33441,9 @@ function RoleShopCard({ row, roster, actions, operation }) {
 
 // src/client/connectors-page.js
 var import_react84 = require("react");
+var NO_SUBSCRIBE3 = () => () => {
+};
+var NO_VERSION = () => 0;
 var CATEGORIES = [["dev", "Developer"], ["docs", "Docs & files"], ["work", "Work"], ["design", "Design"], ["data", "Data"], ["commerce", "Commerce"], ["search", "Search"]];
 var PREVIEW = 6;
 var matches = (query, ...texts2) => query === "" || texts2.join(" ").toLowerCase().includes(query.toLowerCase());
@@ -33566,12 +33573,12 @@ function ConnectedSummary({ apps, count, onClick }) {
   );
 }
 var ACP_ROUTE = Object.freeze({ claude: "acp-claude", codex: "acp-codex" });
-function officialBot(app, roster) {
+function officialBot(app, roster, installer) {
   const bots = roster?.bots;
   if (!Array.isArray(bots)) return void 0;
   const own2 = bots.find((bot) => bot.kind === app.id);
   if (own2 !== void 0) return own2;
-  return app.id === "omni" ? roster?.byId?.[roster.mainBotId] : void 0;
+  if (app.id === "omni" && !installer?.pending?.("omni")) return roster?.byId?.[roster.mainBotId];
 }
 function officialAcp(app, roster) {
   const provider = ACP_ROUTE[app.id];
@@ -33579,11 +33586,11 @@ function officialAcp(app, roster) {
   if (provider === void 0 || !Array.isArray(models)) return void 0;
   return models.filter((model) => (model.provider ?? String(model.ref ?? "").split("/")[0]) === provider);
 }
-function officialState(app, roster) {
+function officialState(app, roster, installer) {
   if (roster?.ready === false) return { state: "unknown" };
   if (app.kind === "agent") {
     if (!Array.isArray(roster?.bots)) return { state: "unknown" };
-    const bot = officialBot(app, roster);
+    const bot = officialBot(app, roster, installer);
     return bot === void 0 ? { state: "missing" } : { state: "installed", bot };
   }
   if (app.kind === "acp") {
@@ -33600,7 +33607,7 @@ function officialStateText(state2) {
   if (state2 === "missing") return t("Not installed");
   return t("Unknown");
 }
-function officialAction(app, resolved, roster, actions) {
+function officialAction(app, resolved, roster, actions, installer, info) {
   if (resolved.state === "unknown") return null;
   if (app.kind === "agent") {
     if (resolved.state === "installed") {
@@ -33615,6 +33622,11 @@ function officialAction(app, resolved, roster, actions) {
           else actions.openSettings?.("bots", bot.id);
         }
       };
+    }
+    if (info !== null) {
+      const label = info.action === "install" ? t("Install") : info.label;
+      if (label === null) return null;
+      return { label, done: false, run: () => installer.act(app.id, { roster, actions }) };
     }
     if (typeof actions.openHarnessOnboarding !== "function") return null;
     return {
@@ -33671,10 +33683,15 @@ function OfficialButton({ action }) {
     onClick: action.run
   }, action.done ? (0, import_react84.createElement)(CheckIcon) : null, action.label);
 }
-function OfficialTile({ app, resolved, action, expanded, onToggle }) {
+function OfficialTile({ app, resolved, info, action, expanded, onToggle }) {
+  const text2 = info?.text ?? officialStateText(resolved.state);
   return (0, import_react84.createElement)(
     "div",
-    { className: "bt-app", "data-state": resolved.state === "installed" ? "ready" : "off" },
+    {
+      className: "bt-app",
+      "data-state": resolved.state === "installed" ? "ready" : "off",
+      "data-error": info?.alert ? "" : void 0
+    },
     (0, import_react84.createElement)(
       "button",
       { type: "button", className: "bt-app-main", "aria-expanded": expanded, onClick: onToggle },
@@ -33683,13 +33700,14 @@ function OfficialTile({ app, resolved, action, expanded, onToggle }) {
         "span",
         { className: "bt-app-text" },
         (0, import_react84.createElement)("span", { className: "bt-app-name" }, app.name, (0, import_react84.createElement)("span", { className: "bt-tag" }, t("Official"))),
-        (0, import_react84.createElement)("span", { className: "bt-app-status" }, officialStateText(resolved.state))
+        (0, import_react84.createElement)("span", { className: "bt-app-status" }, text2)
       )
     ),
     (0, import_react84.createElement)(OfficialButton, { action })
   );
 }
-function OfficialDetail({ app, resolved, action }) {
+function OfficialDetail({ app, resolved, info, action }) {
+  const text2 = info?.text ?? officialStateText(resolved.state);
   return (0, import_react84.createElement)(
     "div",
     { className: "bt-set-card bt-connectors-card bt-app-detail bt-app-expanded" },
@@ -33715,17 +33733,27 @@ function OfficialDetail({ app, resolved, action }) {
           "span",
           { className: "bt-set-copy" },
           (0, import_react84.createElement)("span", { className: "bt-bs-label" }, t("State")),
-          (0, import_react84.createElement)("span", { className: "bt-set-hint" }, officialStateText(resolved.state))
+          (0, import_react84.createElement)("span", { className: "bt-set-hint" }, text2)
         )
-      )
+      ),
+      info?.alert ? (0, import_react84.createElement)("div", { className: "bt-connector-error", role: "alert" }, info.alert) : null
     )
   );
 }
 function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
+  const installer = useEntries(officialInstall).findLast((e) => typeof e.row === "function") ?? null;
+  const version = installer?.version ?? NO_VERSION;
+  (0, import_react84.useSyncExternalStore)(installer?.subscribe ?? NO_SUBSCRIBE3, version, version);
+  (0, import_react84.useEffect)(() => {
+    if (installer) void installer.refresh?.()?.catch?.(() => {
+    });
+  }, [installer]);
   if (apps.length === 0) return null;
   const rows2 = apps.map((app) => {
-    const resolved = officialState(app, roster);
-    return { app, resolved, action: officialAction(app, resolved, roster, actions) };
+    const resolved = officialState(app, roster, installer);
+    const info = app.kind === "agent" && resolved.state === "missing" && installer?.kinds?.includes(app.id) ? installer.row(app.id, { roster, actions }) : null;
+    const action = officialAction(app, resolved, roster, actions, installer, info);
+    return { app, resolved, info, action };
   });
   const open = rows2.find((row) => row.app.id === expanded);
   return (0, import_react84.createElement)(
@@ -33741,11 +33769,12 @@ function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
       key: row.app.id,
       app: row.app,
       resolved: row.resolved,
+      info: row.info,
       action: row.action,
       expanded: row.app.id === expanded,
       onToggle: () => onToggle(row.app.id)
     }))),
-    open === void 0 ? null : (0, import_react84.createElement)(OfficialDetail, { app: open.app, resolved: open.resolved, action: open.action })
+    open === void 0 ? null : (0, import_react84.createElement)(OfficialDetail, open)
   );
 }
 function AppsPage({ roster, actions }) {
@@ -42849,6 +42878,7 @@ var omni = Object.freeze({
   headerButtons,
   sidebarTools,
   botSettings,
+  officialInstall,
   chatSuggestions,
   registerComposerPack,
   setCanvasRenderer,

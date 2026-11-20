@@ -3,6 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { judgeOf, OWN_MODE_MARKS } from '../shared/permission-levels.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
+import { changesWorkingFolder } from './folders.js'
 import { splitRef, textOf } from './text.js'
 
 export const REFUSALS_IN_ROW = 3
@@ -408,7 +409,14 @@ export function install(rt) {
   }
   const valid = owner => { try { return rt.botOf(owner.bot.id) === owner.bot && owner.bot.permissionAuto === owner.mark && (owner.bot.permissionRev ?? 0) === owner.rev && rt.autoWhy(owner.bot, owner.args) === undefined } catch { return false } }
   const note = (owner, step, reason, agent) => rt.noteStop?.(owner.args.sessionId, { why: 'review', tool: step.tool, callId: step.callId, text: `Auto's judge refused: ${reason}` }, agent)
+  const folderCalls = new WeakMap()
   ctx.on('tools/pre-execute', async (exec, next) => {
+    // DSH services a pre-execute approval after the waterfall returns. Keep the
+    // count until the final result, including calls denied before dispatch.
+    if (exec.agent !== undefined && changesWorkingFolder(exec) && !folderCalls.has(exec)) {
+      const leave = rt.enterOwnership?.()
+      if (leave !== undefined) folderCalls.set(exec, leave)
+    }
     grants.delete(keyOf(exec.agent?.session?.id, exec.callId))
     let owner
     try {
@@ -472,7 +480,11 @@ export function install(rt) {
       return undefined
     })
   }
-  ctx.on('tools/result', exec => { grants.delete(keyOf(exec.agent?.session?.id ?? exec.agent?.id, exec.callId)) })
+  ctx.on('tools/result', exec => {
+    folderCalls.get(exec)?.()
+    folderCalls.delete(exec)
+    grants.delete(keyOf(exec.agent?.session?.id ?? exec.agent?.id, exec.callId))
+  })
   ctx.on('session/event', (session, event) => {
     if (['turn/start', 'turn/end'].includes(event.type)) dropAutoGrants([session.id])
     const source = event.data?.source

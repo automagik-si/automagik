@@ -16,6 +16,11 @@ const folderAsks = new WeakSet()
 
 export const within = (inner, outer) => inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : outer + sep)
 
+// DSH receives the folder argument untrimmed.
+export const workingDirectoryCd = exec => exec?.name === 'working_directory' && typeof exec.arguments?.cd === 'string' ? exec.arguments.cd : ''
+export const changesWorkingFolder = exec => workingDirectoryCd(exec) !== ''
+  || ((exec?.name === 'update_bot' || exec?.name === 'update_group') && typeof exec.arguments?.work_dir === 'string')
+
 const expandHome = text => (text === '~' ? homedir() : /^~[\\/]/.test(text) ? join(homedir(), text.slice(2)) : text)
 
 // Read as DSH reads it, so the team's data and the guarded folder are where DSH keeps
