@@ -67,14 +67,16 @@ export function install(rt) {
   }
 
   // A group Session renders exactly its Bot's text, so both share one cached prefix.
-  const promptFor = (id) => {
+  const promptFor = (id, agent) => {
     const self = rt.selfOf(id)
     const bot = rt.botOf(self)
     if (bot !== undefined) {
+      const role = rt.roleRuntime?.prompt?.(id, agent)
       return [
         '# Your identity',
         `You are ${bot.name}, a Bot on the user's team in Omni.${bot.role ? ` Your role: ${bot.role}.` : ''}`,
         bot.instructions ? `\n${bot.instructions}` : '',
+        ...(role ? ['', role] : []),
         '',
         // Other Omni plugins add their parts between these (extend.js), such as operating Omni.
         // The Omni Bot operates Omni without being a Main Bot, so it gets those parts too.
@@ -97,6 +99,6 @@ export function install(rt) {
     name: 'bot-identity',
     order: 640,
     interpolate: false,
-    text: context => promptFor(context?.agent?.id),
+    text: context => promptFor(context?.agent?.id, context?.agent),
   }), 'omni-ui: identity section')
 }

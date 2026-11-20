@@ -15,13 +15,14 @@ import { avatarImage } from './avatar-library.js'
 import { botSettings, useEntries } from './extend.js'
 import { useMemoryCount } from './memory-panel.js'
 import { SPRING_SHAPE, SPRING_TAP, Segmented, spring } from './motion.js'
-import { t } from './i18n.js'
+import { hostText, t } from './i18n.js'
+import { useVoices } from './voice-settings.js'
 import { cliProviderOf } from './cli-login-model.js'
 import { CliAccounts } from './cli-accounts.js'
 import { AdvancedSettings, ADVANCED_SETTINGS_CSS } from './advanced-settings.js'
 import {
   attachedRoleIds, attachmentStatus, BUILTIN_ROLES, CHOOSE_NONE_FIRST, effectiveRoleIds, GENIE_ATTACH_REFUSAL,
-  isPackageRoleId, packageAttachment, packageDeclarations, packageRecoveryId, ROLE_SOURCE_UNCONFIRMED, roleTagOf, rolesOn,
+  isPackageRoleId, packageAttachment, packageDeclarations, packageRecoveryId, ROLE_SOURCE_UNCONFIRMED, roleTagOf, rolesOn, sameRolePin,
 } from '../shared/roles.js'
 
 const capitalize = word => word[0].toUpperCase() + word.slice(1)
@@ -177,21 +178,72 @@ const roleHealthLabels = { broken: 'Broken', damaged: 'Damaged', missing: 'Missi
 export const roleHealth = status => t(roleHealthLabels[status] ?? 'Details unavailable')
 export const roleReadOnly = roster => Boolean(roster.readOnly) || roster.roleCatalog?.reason === 'read-only'
 
-function PackageAttachmentCard({ roster, pin, recoveryId, onDetach }) {
+function RoleControls({ bot, runtime, actions, run, readOnly }) {
+  const { pin } = runtime
+  const voices = useVoices()
+  const [values, setValues] = useState()
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (readOnly || !runtime.settings.length) return
+    let live = true
+    void run(actions.roleSettings(bot.id, pin).then(value => { if (live) setValues(value) }))
+    return () => { live = false }
+  }, [bot.id, pin.id, pin.version, pin.attachedAt, readOnly])
+  const change = (key, value) => {
+    setValues(before => ({ ...before, [key]: value }))
+    setDirty(true)
+  }
+  const save = () => {
+    setSaving(true)
+    void run(actions.setRoleSettings(bot.id, pin, values).then(value => {
+      setValues(value)
+      setDirty(false)
+    }).finally(() => setSaving(false)))
+  }
+  const granted = bot.roles[0].grants.includes('audio-out')
+  return h(Fragment, null,
+    runtime.capabilities.includes('audio-out') ? h(SwitchRow, { label: t('Allow speech'), on: granted, disabled: readOnly,
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'audio-out', on)) }) : null,
+    values ? runtime.settings.map(({ key, kind, label }) => {
+      const name = label === 'Voice' ? t('Voice') : label === 'Speed' ? t('Speed') : label
+      const value = values[key]
+      return h(Row, { key, label: name },
+        kind === 'voice'
+          ? h('span', { className: 'bt-voice-set' },
+            h('select', { className: 'bt-input', 'aria-label': name, value, disabled: readOnly || saving,
+              onChange: event => change(key, event.target.value) },
+            h('option', { value: '' }, t('Automatic, by language')),
+            value && !voices.some(voice => voice.voiceURI === value) ? h('option', { value }, t('Saved voice unavailable')) : null,
+            voices.map(voice => h('option', { key: voice.voiceURI, value: voice.voiceURI }, `${voice.name} (${voice.lang})`))))
+          : h('span', { className: 'bt-voice-set' },
+            h('input', { type: 'range', min: 0.5, max: 2, step: 0.1, value, 'aria-label': name, disabled: readOnly || saving,
+              onChange: event => change(key, Number(event.target.value)) }),
+            h('span', { className: 'bt-set-hint' }, `${Number(value.toFixed(2))}×`)))
+    }) : null,
+    dirty ? h(Row, null, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: readOnly || saving, onClick: save }, t('Save'))) : null)
+}
+
+function PackageAttachmentCard({ roster, bot, pin, recoveryId, onDetach, actions, run }) {
   const declarations = pin && packageDeclarations(pin, roster)
   const health = pin && attachmentStatus(pin, roster.roles)
   const recover = !pin || health !== 'ok'
+  const candidate = Object.hasOwn(roster.roleRuntime ?? {}, bot.id) ? roster.roleRuntime[bot.id] : undefined
+  const runtime = !recover && rolesOn(roster.prefs) && sameRolePin(pin, candidate?.pin) ? candidate : undefined
+  const healthReason = pin && Object.hasOwn(roster.roles ?? {}, pin.id) ? roster.roles[pin.id].reason : undefined
   return h(Card, { title: t('Role') },
     h(Row, {
       label: declarations?.name ?? (pin ? `${pin.id}@${pin.version}` : recoveryId),
       hint: [declarations?.name && `${pin.id}@${pin.version}`, recover && roleHealth(health ?? 'damaged')].filter(Boolean).join(' · '),
     }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: roleReadOnly(roster), onClick: onDetach }, t('Detach'))),
-    h(Row, { label: t('Declared tools'), hint: t('Declared, not active yet'), stack: true },
-      declarations?.tools ? declarations.tools.join(', ') || t('None') : t('Details unavailable')),
-    h(Row, { label: t('Grants requested'), hint: declarations ? declarations.capabilities.join(', ') || t('None') : t('Details unavailable') }),
-    declarations?.fromCatalog ? h(Row, { label: t('From the catalog') }) : null,
-    h(Row, { label: t('Its tools arrive with the role runtime.'),
-      hint: recover ? t('Detach it from every Bot, uninstall, then install again.') : undefined }))
+    h(Row, { label: runtime ? t('Active tools') : t('Declared tools'), hint: runtime ? undefined : t('Declared, not active yet'), stack: true },
+      (runtime?.tools ?? declarations?.tools)?.join(', ') || (runtime || declarations?.tools ? t('None') : t('Details unavailable'))),
+    runtime ? h(RoleControls, { key: `${bot.id}:${pin.attachedAt}`, bot, runtime, actions, run, readOnly: roleReadOnly(roster) })
+      : h(Row, { label: t('Grants requested'), hint: declarations ? declarations.capabilities.join(', ') || t('None') : t('Details unavailable') }),
+    !runtime && declarations?.fromCatalog ? h(Row, { label: t('From the catalog') }) : null,
+    runtime?.acp ? h(Row, { label: t('ACP coding agents do not receive this role’s prompt.') }) : null,
+    !runtime ? h(Row, { label: healthReason ? hostText(healthReason) : t('Its tools arrive with the role runtime.'),
+      hint: recover ? t('Detach it from every Bot, uninstall, then install again.') : undefined }) : null)
 }
 
 // A Bot's settings as grouped cards: who it is (avatar, name, description, role), what it runs on
@@ -306,8 +358,8 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
               onClick: () => { if (!pressed && !reason && !readOnly) void run(actions.attachRole(bot.id, id)) } },
             installed?.verified && installed.version === version ? installed.name : id)
           }))) : null),
-    (showingRoles ? pin || recoveryId : recoveryId) ? h(PackageAttachmentCard, { roster, pin, recoveryId, onDetach: detach }) : null,
-    showingRoles ? h(RolePackagesCard, { key: bot.id, roster, actions, run }) : null,
+    (showingRoles ? pin || recoveryId : recoveryId) ? h(PackageAttachmentCard, { roster, bot, pin, recoveryId, onDetach: detach, actions, run }) : null,
+    showingRoles ? h(RolePackagesCard, { key: `role-packages:${bot.id}`, roster, actions, run }) : null,
     h(Card, { title: t('Model') },
       h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Model')), h('span', { className: 'bt-set-hint', role: modelState?.lastFailure?.kept ? 'status' : undefined }, modelHint(bot, roster, modelState))),

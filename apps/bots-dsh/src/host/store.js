@@ -764,6 +764,7 @@ export function install(rt) {
     // the scoped tools with this ownership (drops Sessions that left, scopes
     // live Agents that joined); both install after this.
     rt.indexAgents?.()
+    rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
     restoreCurrent()
   }
@@ -829,6 +830,7 @@ export function install(rt) {
   // or was saved since: false before the first load, and after a file that could not be
   // read or was set aside as corrupt. It reads memory only.
   const teamLoaded = () => teamRead
+  const teamCurrent = () => adopting === undefined && stamp() === seen
 
   const savedListeners = new Set()
   const onSaved = (listener) => {
@@ -847,7 +849,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, teamLoaded, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
+    state, load, save, refresh, readOnly, teamLoaded, teamCurrent, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,

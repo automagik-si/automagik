@@ -75,13 +75,15 @@ export function install(rt) {
     rt.dropAutoGrants?.(ids)
     for (const id of ids) { try { acp()?.endSession?.(id) } catch {} }
   }
-  async function clearAuto(bot) {
+  async function clearAuto(bot, admit, advanceEmpty = true) {
     await inflight.get(bot.id)?.catch(() => {})
-    movePermissionRev(bot)
-    if (!bot.permissionAuto) return
+    admit?.()
+    if (advanceEmpty || bot.permissionAuto) movePermissionRev(bot)
+    if (!bot.permissionAuto) return advanceEmpty
     delete bot.permissionAuto
     endAuto(bot)
     await rt.save({ required: true })
+    return true
   }
   function sweepAuto() {
     for (const bot of Object.values(state.bots)) {

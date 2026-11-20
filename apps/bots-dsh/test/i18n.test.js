@@ -131,3 +131,13 @@ test('package role refusals localize the template and preserve the supplied name
     assert.ok(DICTIONARY.zh[key] && pt[key])
   }
 })
+
+test('Voice / Mouth card and recovery copy has Chinese and Brazilian Portuguese entries', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const key of ['Active tools', 'Allow speech', 'Saved voice unavailable', 'ACP coding agents do not receive this role’s prompt.',
+    'The signed role install evidence is missing or unreadable.', 'The installed role files differ from the signed package.']) {
+    assert.ok(DICTIONARY.zh[key] && pt[key], key)
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+  }
+})

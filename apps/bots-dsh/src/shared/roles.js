@@ -22,20 +22,20 @@ export function attachedRoleIds(bot) {
 }
 
 const ownPackageId = entry => Object.hasOwn(entry ?? {}, 'id') && isPackageRoleId(entry.id)
+const singlePackageRole = bot => Object.hasOwn(bot ?? {}, 'roles') && Array.isArray(bot.roles)
+  && bot.roles.length === 1 && ownPackageId(bot.roles[0]) ? bot.roles[0] : undefined
 
 export function packageAttachment(bot) {
-  if (!Object.hasOwn(bot ?? {}, 'roles') || !Array.isArray(bot.roles)) return undefined
-  const entry = bot.roles.find(entry => ownPackageId(entry)
-    && ['version', 'attachedAt', 'grants'].every(key => Object.hasOwn(entry, key))
-    && isRoleVersion(entry.version) && typeof entry.attachedAt === 'string' && Array.isArray(entry.grants))
-  if (entry) return { id: entry.id, version: entry.version, attachedAt: entry.attachedAt }
+  const entry = singlePackageRole(bot)
+  if (entry && ['version', 'attachedAt', 'grants'].every(key => Object.hasOwn(entry, key))
+    && isRoleVersion(entry.version) && typeof entry.attachedAt === 'string' && Array.isArray(entry.grants)) {
+    return { id: entry.id, version: entry.version, attachedAt: entry.attachedAt }
+  }
 }
 
-export function packageRecoveryId(bot) {
-  if (!Object.hasOwn(bot ?? {}, 'roles') || !Array.isArray(bot.roles) || bot.roles.length !== 1) return undefined
-  const [entry] = bot.roles
-  if (ownPackageId(entry)) return entry.id
-}
+export const sameRolePin = (a, b) => Boolean(a && b && a.id === b.id && a.version === b.version && a.attachedAt === b.attachedAt)
+
+export const packageRecoveryId = bot => singlePackageRole(bot)?.id
 
 export function attachmentStatus(attachment, records) {
   if (!Object.hasOwn(records ?? {}, attachment.id)) return 'missing'

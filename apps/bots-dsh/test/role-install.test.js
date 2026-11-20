@@ -498,6 +498,33 @@ test('MCP neither lists nor calls package actions', async t => {
   assert.deepEqual(f.fsCalls, [])
 })
 
+test('MCP and agent tools cannot grant a role or write its settings', async t => {
+  const f = await fixture(t)
+  await f.rt.agentAccess.owner('view')
+  const token = 'role-runtime-mcp-fixture'
+  await fs.writeFile(join(f.home, 'agent-tokens.json'), JSON.stringify([
+    { id: 'fixture', name: 'MCP fixture', hash: SHA256(token) },
+  ]), { mode: 0o600 })
+  const rpc = (method, params) => f.post(MCP_PATH, { jsonrpc: '2.0', id: 1, method, params }, {
+    authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream',
+  })
+  const listed = (await rpc('tools/list')).result.tools
+  for (const endpoint of ['role-grant', 'role-settings', 'role-settings-set']) {
+    for (const name of [endpoint, endpoint.replaceAll('-', '_')]) {
+      assert.equal(listed.some(tool => tool.name === name), false)
+      assert.equal(f.ctx.registeredTools.has(name), false)
+      const reply = await rpc('tools/call', { name, arguments: { id: BOT.id } })
+      assert.ok(reply.error || reply.result?.isError)
+    }
+  }
+  const update = listed.find(tool => tool.name === 'update_bot')
+  assert.equal(Object.hasOwn(update.inputSchema.properties, 'grants'), false)
+  assert.equal(Object.hasOwn(update.inputSchema.properties, 'roles'), false)
+  const proposal = f.ctx.registeredTools.get('propose_bot_change')
+  assert.equal(Object.hasOwn(proposal.parameters.properties, 'grants'), false)
+  assert.equal(Object.hasOwn(proposal.parameters.properties, 'roles'), false)
+})
+
 async function loadSettings() {
   const { outputFiles } = await build({
     entryPoints: [fileURLToPath(new URL('../src/client/bot-settings.js', import.meta.url))],

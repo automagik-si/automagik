@@ -242,6 +242,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: genui feed nudge',
     'effect omni-ui: genui media route',
     'route GET /api/omni-ui/genui-media',
+    'effect omni-ui: role runtime',
+    'on session/event',
     'effect ds-bot: agent access',
     'effect ds-bot: pet route',
     'route GET /api/omni-ui/pet',
