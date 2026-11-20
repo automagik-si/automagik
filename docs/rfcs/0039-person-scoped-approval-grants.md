@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (approved by the owner's delegate on 2026-11-20, #1718; questions 1-5 answered with this RFC's own recommendations, see Answers; no delivery merged) |
+| Status | In delivery (approved by the owner's delegate on 2026-11-20, #1718; questions 1-5 answered with this RFC's own recommendations, see Answers; merged: delivery 2 (#1815), delivery 3's task end (#1859); the 2026-11-20 amendment narrows delivery 3 for part moves and a Bot's deletion; owed: delivery 3's group Sessions and delivery 4) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-19 |
@@ -84,6 +84,10 @@ by "This step was withdrawn: its task ended", and a task card in the parent's ch
 ended with an approval unanswered. An answer that arrives afterwards gets "This approval is no
 longer open" (`bot/stale`) and grants nothing.
 
+A chat that moves to a new part and a deleted Bot are the exception (Amendment, 2026-11-20): their
+pending asks are cancelled by DSH when it archives the ended Session, as today, and a late answer
+gets `bot/stale`, but they are not relabelled `system` and get no withdrawn line.
+
 ### The dsh bridge's `allow_always` fallback
 
 `apps/acp-dsh/src/host/acp.js` answers the ACP agent's own question for a bridged `mcp__dsh__*`
@@ -134,10 +138,14 @@ recorded before #1740 live in that agent's own settings and are not touched.
    are named in the PR: `test/codex-mcp-permission.test.js:120-128` and
    `test/session-state-bounded.test.js:79`. Rollback: an older acp-dsh answers `allow_always`
    again; rules an agent recorded meanwhile stay in its settings.
-3. **A pending approval ends with its session.** bots-dsh, plugin lane. Acceptance: tests where
-   a task ends, a chat moves to a new part, a group Session leaves and a Bot is deleted with an
-   ask pending: each is `cancelled` by `system`, the person sees the withdrawn line, the parent's
-   task card says so, and a late answer gets `bot/stale`. Rollback: the older per-owner behaviour.
+3. **A pending approval ends with its session.** bots-dsh, plugin lane. Acceptance (as amended on
+   2026-11-20): tests where a task ends and where a group Session leaves (a member removed, the group
+   deleted, a deleted Bot's seats, a seat DSH can no longer open) with an ask pending: each is
+   `cancelled` by `system`, the person sees the withdrawn line, the parent's task card says so for a
+   task, and a late answer gets `bot/stale`; where a chat moves to a new part and where a Bot is
+   deleted, the ask is cancelled by DSH's archive (decision `dsh`) and a late answer gets
+   `bot/stale`, with no withdrawn line. Delivered in two parts: the task end (#1859) and the group
+   Sessions. Rollback: the older per-owner behaviour.
 4. **Grants for one task or chat part.** bots-dsh, plugin lane. The endpoint, the button, the
    host check, the end rules, the audit row and the revoke list. Acceptance, each a test: a
    granted step asked again in the same task runs with no card and DSH sees one `allowed-once`
@@ -201,6 +209,32 @@ questions above stay as they were asked.
    for every owner kind, and the person is told; a grant whose owner ended is dropped with it.
 5. **The bridge's `allow_always` fallback:** (a). The bridge answers the agent's question with
    `allow_once`, else `cancelled`, never `allow_always` (delivery 2).
+
+## Amendment (2026-11-20, #1718): part moves and a Bot's deletion in delivery 3
+
+Approved by the coordinator on 2026-11-20 for #1718. Delivery 3 keeps `cancelled` by `system`, the
+withdrawn line and `bot/stale` for a task's end and for a group Session that leaves. For a chat that
+moves to a new part and for a deleted Bot it keeps today's cancellation: DSH answers the pending ask
+`cancelled` when the team archives the ended Session (decision `dsh`), and a late answer already gets
+`bot/stale`. Only the `system` decision, the reason and the withdrawn line are missing there.
+
+Why: five reviewed designs could not prove, for these two ends, that a row names an owner that really
+ended, without new cancellations:
+- withdrawing before the team's archive cancels asks DSH's archive would leave pending (an archived or
+  unknown Session id, a failed durable write, a descendant DSH does not reach);
+- labelling inside a window the team holds cannot tell DSH's archive stop from a person's Stop, a
+  timeout or another queued archive;
+- reading the team's state at DSH's own stop cannot tell a durable end from one an in-flight
+  transition will undo (a Session adoption awaiting its save, a shell-hold leave, a recovery pass);
+- marking the end at the committed sites leaves a mark that can describe an earlier opening of a
+  Session reopened since, and three of those sites archive after a failed save.
+
+Group Sessions are different: the team cancels their asks itself, synchronously, when it drops the
+seat, so the reason and the line can be added there. Grants (delivery 4) are unaffected: they are held
+in memory and dropped on any doubt about their owner, which needs no such proof.
+
+A later RFC may bring the line to part moves and Bot deletion once the move, adoption and reopen paths
+record their end durably.
 
 ## Links
 
