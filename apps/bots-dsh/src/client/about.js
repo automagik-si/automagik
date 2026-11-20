@@ -168,6 +168,7 @@ function selfUpdateReason(reason) {
     case 'engines-dsh': return t('the published release needs a different DeepSeek Harness version.')
     case 'hash-mismatch': return t('a downloaded plugin package did not match the signed release.')
     case 'registry-unreachable': return t('the package registry could not be reached.')
+    case 'profile-npmrc': return t('the profile .npmrc contains settings besides the registry.')
     case 'bot/read-only': return t('this window does not hold the team lock.')
     case 'check-timeout': return t('the update check is taking too long. Try again.')
     default: return t('the update check could not be completed.')

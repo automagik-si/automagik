@@ -203,6 +203,85 @@ CLI cannot authenticate, and the script does not mint a login URL.
   kills its whole cgroup, and `setsid` does not escape it. If you must drive it from a script,
   run that script from a transient unit outside `automagik-web.service`.
 
+## In-app updates: the supervisor
+
+The supervisor starts the web profile as its child. On an update request it verifies the signed
+plugin lane, stages the installed Automagik plugin set through DSH, and switches the profile's
+installer files with the child stopped. It then starts the child with the same DSH command.
+Delivery 5a provides the supervisor. The setting and the “Update now” action arrive in 5b.
+
+### One-time host setup
+
+As the service user, run `install-copy` with the unit's Node executable and DSH home. For example,
+on a host whose service user is `automagik`:
+
+```sh
+/usr/bin/node /home/automagik/.automagik/web/dsh/profiles/web/node_modules/@automagik/bots-dsh/src/host/supervisor/main.js \
+  install-copy --dsh-home /home/automagik/.automagik/web/dsh --profile web
+```
+
+Use the launcher path printed by `install-copy`. With your usual host administration tools, edit
+the unit's `ExecStart` to run the launcher with the same DSH home and profile. Put the unit's
+existing DSH command and every argument after `--`. Keep the unit's existing environment, user,
+working directory and stop timeout. Apply the unit edit and restart it with your usual tools.
+
+```ini
+ExecStart=/home/automagik/.automagik/web/dsh/update/web/supervisor/launcher.sh --dsh-home /home/automagik/.automagik/web/dsh --profile web -- /usr/bin/node /home/automagik/prod/automagik/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open --host 127.0.0.1 --port 8080
+```
+
+The launcher loads and self-checks `current` and then tries `kept` if the check fails. If both
+copies fail, it runs the original DSH command directly and the update capability is unavailable.
+
+### Store and state
+
+The store is `$DSH_HOME/update/web/`, beside the live profile at `$DSH_HOME/profiles/web/`.
+Both directories need to be on the same filesystem. A profile `.npmrc` can name the package
+registry with `registry=`. Additional settings in that file make the update check refuse the
+profile.
+
+| Path in the store | Contents |
+|---|---|
+| `supervisor/launcher.sh`, `supervisor/current/`, `supervisor/kept/` | The fixed launcher and the two self-checked code copies |
+| `update.lock`, `supervisor.json` | Supervisor ownership, the current boot ID and the current or most recent run ID |
+| `request.json`, `check.json` | A pending one-use request and the most recent Settings check |
+| `state.json`, `current.json` | Update progress and verdict, and the live version, kept version and last accepted lane sequence |
+| `stage-<runId>/`, `versions/<version>/` | Temporary install and source files, and the previous installer files and data snapshot |
+
+Read `state.json` with `jq . "$DSH_HOME/update/web/state.json"` or a text viewer. Its
+`phase`, `reason`, `from`, `to` and `updatedAt` show the last step and verdict.
+`requestId` identifies the request, and `runId` and `bootId` link the verdict to
+`supervisor.json`. During a switch, `journal.keep` identifies the recovery directory,
+`journal.done` lists completed steps and `journal.pending` names the step that may have been
+interrupted. `healthy` means the new child's HTTP port responded and the installed versions
+matched. `notUpdated` means the previous installation is serving or was left running.
+
+### Rename back after `manualRecovery`
+
+Delivery 6 will automate rollback. Until then, stop the unit with your usual host tools and
+confirm the supervisor and DSH have exited. Read `state.json` and use the directory named by
+`journal.keep`. If the journal is incomplete, use `done`, `pending` and the files on disk to
+locate each original before moving anything. Use the previous host backup if the kept originals
+are missing.
+
+1. Set aside the trial's `node_modules/` and `pnpm-lock.yaml` in a new directory beside the
+   profile. Rename the kept `node_modules/` and `pnpm-lock.yaml` back into the profile.
+2. Rename the kept `vendor/*.tgz` back into the live profile's `vendor/automagik-update/`.
+   The old lockfile may also refer to archives that are already in place. Leave those in place.
+3. In the live `package.json`, replace only the dependency keys listed in the kept
+   `entries.json` under `dependencies`. Write the merged file through a temporary sibling,
+   then rename it over the live file.
+4. Read the kept `data.json`. If the trial wrote a higher format number at the Bots state
+   path recorded there, set that trial file aside and restore a copy of `data/bots-state.json`
+   at that path. This can undo a team change made during the trial. A file without a format
+   field is format 0.
+5. Set `state.json` aside with the trial files so the supervisor can boot again. If
+   `current.json` lists the trial as live, set its `live` and `kept` fields to `null` while
+   retaining `lastSequence`. Start the unit with your usual host tools and verify that the web
+   profile and the previous plugin versions are serving.
+
+A rename-back uses the saved module tree and tarballs, so it needs no dependency install. The
+runtime, profile settings, sessions and model credentials stay in their existing locations.
+
 ## Rollback
 
 Rollback is automatic. On any failure after the service was stopped the script:
