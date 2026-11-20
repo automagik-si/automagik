@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-10, by the owner; council review 2026-11-09: proceed with conditions, folded in; owner's answers: identity and billing, 2026-11-09; isolation, identity stand-up, hosting, the goal and Q18, 2026-11-10; Chat: Decided 19-25, 2026-11-09; amends RFC 0008; amended 2026-11-09 by [RFC 0025][25]; (f)'s machine-link rule: amendment proposed by [RFC 0022][22]'s (l), Q17, 2026-11-10; Invitations by project accepted by the owner, 2026-11-12, Decided 27; instance id, account evidence and reservations (#1426): amendment proposed 2026-11-19, awaiting the owner) |
+| Status | Accepted (2026-11-10, by the owner; council review 2026-11-09: proceed with conditions, folded in; owner's answers: identity and billing, 2026-11-09; isolation, identity stand-up, hosting, the goal and Q18, 2026-11-10; Chat: Decided 19-25, 2026-11-09; amends RFC 0008; amended 2026-11-09 by [RFC 0025][25]; (f)'s machine-link rule: amendment proposed by [RFC 0022][22]'s (l), Q17, 2026-11-10; Invitations by project accepted by the owner, 2026-11-12, Decided 27; instance id, account evidence and reservations (#1426): amendment approved by the owner's delegate on 2026-11-20, questions 1-5 answered with its recommendations) |
 | Goal | First goal (owner, 2026-11-10): by 23 Nov, the owner signs in and opens one hosted workspace in test mode, with no real charges: RFC 0024 deliveries 0-4 and RFC 0025 phase A. |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); desktop (3.N) for secure storage, sign-in and the rail; the server image and plugin (3.N.P) for the self-hosted gate and the web rail; the Cloud service in its own private repository in the owner's organisation (its contracts stay public here) |
@@ -1152,10 +1152,10 @@ once, and no member or guest before the three safeguards of (f) hold.
 as its own project's decision: a new client and groups there, and its people re-bound, since
 principals are keyed by `(issuer, sub)`. Arca keeps its own sign-in (its own passkey approvals).
 
-## Proposed amendment (2026-11-19), awaiting the owner: instance id, account evidence and reservations
+## Amendment (2026-11-20): instance id, account evidence and reservations
 
-*Status: proposed, not in force. Nothing below changes an accepted line of this RFC until the
-owner approves it. Issue #1426 (Refs, not Closes).*
+*Status: accepted, approved by the owner's delegate on 2026-11-20 (proposed 2026-11-19), with
+every recommended option; its questions are answered below. Issue #1426 (Refs, not Closes).*
 
 **Why it is here.** #1426 asks for a record of which subscription account (per vendor) belongs to
 which instance or project. The owner's policy (2026-11-16, on #1426): accounts are a **shared
@@ -1329,7 +1329,7 @@ can name; a group member can squat a reservation on an account it can name, whic
 administrator removes (the file's OS owner shows who). The same account on two machines is not
 seen until the Cloud registry (delivery R5). A copied home shares its id ((l)).
 
-### Contracts this amendment would introduce
+### Contracts this amendment introduces
 
 All new and additive; nothing existing is renamed or moved.
 
@@ -1346,7 +1346,7 @@ All new and additive; nothing existing is renamed or moved.
 
 ### Deliveries for this amendment, in order
 
-Each is one PR per lane. None starts before the owner approves this amendment.
+Each is one PR per lane, in this order.
 
 - **R0. This amendment and its evidence** (docs). Answer before R2: whether the current Claude Code
   prints `orgId` for a personal (Pro, Max) and a Team or Enterprise sign-in; Codex's `account/read`
@@ -1384,15 +1384,17 @@ Each is one PR per lane. None starts before the owner approves this amendment.
 
 ### Questions for the owner
 
+Answered by the owner's delegate on 2026-11-20, each with the recommended option.
+
 1. **The instance id**: L-A, the owner record's `instance_id`, minted by the desktop first, handed
-   to DSH as `AUTOMAGIK_INSTANCE_ID`? (Recommended.)
-2. **Ambiguous reads**: refuse (M-A, recommended) or only warn (M-C)?
+   to DSH as `AUTOMAGIK_INSTANCE_ID`? *Answered: yes, L-A.*
+2. **Ambiguous reads**: refuse (M-A) or only warn (M-C)? *Answered: refuse, M-A.*
 3. **Codex workspaces**: accept that a workspace reservation covers every workspace of one email
-   until Codex names the workspace? (Recommended: yes.)
-4. **The record's home**: the machine directory with group `automagik` now and Cloud later (N-A,
-   recommended), or wait for Cloud (N-B)?
-5. **A refused isolated Bot home**: sign that vendor out of the Bot's home (recommended), or keep it
-   signed in and unusable?
+   until Codex names the workspace? *Answered: yes.*
+4. **The record's home**: the machine directory with group `automagik` now and Cloud later (N-A),
+   or wait for Cloud (N-B)? *Answered: N-A, the machine directory now, Cloud later (R5).*
+5. **A refused isolated Bot home**: sign that vendor out of the Bot's home, or keep it signed in
+   and unusable? *Answered: sign that vendor out of the Bot's home (never the terminal's).*
 
 ## Open questions
 
@@ -1443,8 +1445,8 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 - Contracts: [docs/cloud/contracts-v1.md](../cloud/contracts-v1.md), version 1 (issue #904),
   frozen at merge; later changes are additive only.
 - Open issues: #902, #903, #904, #905, #906, #907, #908, #909, #910, #911, #912.
-- Proposed amendment (2026-11-19, awaiting the owner): #1426, instance id, account evidence and
-  reservations.
+- Amendment approved by the owner's delegate 2026-11-20: #1426, instance id, account evidence and
+  reservations (deliveries R0-R5).
 - Merged changes that cite this RFC: #866, #888, #913 (last merged 2026-11-10).
 
 ## Links
