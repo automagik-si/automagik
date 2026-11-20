@@ -175,6 +175,21 @@ describe('the changes job', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test('a schema-only pull request checks Pocket and usagemeter', () => {
+    const { dir, commits: [base, head] } = scratchRepo([
+      { 'README.md': 'first\n' },
+      { 'meter/schema/fixtures/full.json': '{}\n' },
+    ]);
+    try {
+      const { outputs } = decide({ base, head, cwd: dir });
+      expect(outputs.pocket).toBe('true');
+      expect(outputs.usagemeter).toBe('true');
+      expect(outputs.meter).toBe('false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /** Evaluates a job-level `if` for the expression subset this workflow uses. */
