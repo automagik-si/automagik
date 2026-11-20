@@ -17,8 +17,9 @@
 // chat.interrupt and chat.answer on it reach the bots-dsh socket only when that socket answered
 // `write: 1`, and the hello answer then says `dshWrite: true`; otherwise they are refused
 // `read-only`, and a phone that sees no `dshWrite` keeps the DSH chat read-only.
-// RFC 0036 adds memory.read, memory.edit and memory.add on channel 0. They need a grant
-// opened at hello for this connection's opted-in methods. Their replies are live-only.
+// RFC 0036 adds memory.read, memory.edit, memory.add, schedule.list, schedule.pause,
+// schedule.resume and schedule.rename on channel 0. They need a grant opened at hello
+// for this connection's opted-in methods. Their replies are live-only.
 
 /** Frame kinds, as herdr-core's. */
 export const DATA = 0
@@ -47,6 +48,8 @@ export const MAX_ENGINES = 8
 
 export const METHODS = ['chat.list', 'chat.subscribe', 'chat.backfill', 'chat.send', 'chat.sendHeld', 'chat.cancelHeld', 'chat.answer', 'chat.interrupt']
 export const MEMORY_METHODS = ['memory.read', 'memory.edit', 'memory.add']
+export const SCHEDULE_METHODS = ['schedule.list', 'schedule.pause', 'schedule.resume', 'schedule.rename']
+export const MANAGE_METHODS = [...MEMORY_METHODS, ...SCHEDULE_METHODS]
 export const memoryRefused = (reason) => ({ ok: false, state: 'refused', reason })
 
 /** Queue writes in wire order, checking whether a chunk can still go when its turn comes. */
@@ -198,7 +201,7 @@ export class ChatConnection {
       this.write(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n'))
       this.framed = true
     }
-    const requested = Array.isArray(m.params.manage) ? MEMORY_METHODS.filter((method) => m.params.manage.includes(method)) : []
+    const requested = Array.isArray(m.params.manage) ? MANAGE_METHODS.filter((method) => m.params.manage.includes(method)) : []
     if (!requested.length) return answer()
     this.negotiating = true
     let opening
@@ -221,13 +224,17 @@ export class ChatConnection {
       if (kind !== DATA) return
       let m
       try { m = JSON.parse(payload.toString('utf8')) } catch { return this.close('bad request') }
-      const liveOnly = typeof m?.method === 'string' && m.method.startsWith('memory.')
+      const memory = typeof m?.method === 'string' && m.method.startsWith('memory.')
+      const schedule = typeof m?.method === 'string' && m.method.startsWith('schedule.')
+      const liveOnly = memory || schedule
       const opts = liveOnly ? { liveOnly: true } : undefined
       if (this.inFlight >= MAX_IN_FLIGHT) { this.reply(errorOf(m?.id ?? null, 'busy', `at most ${MAX_IN_FLIGHT} requests at once`), opts); return }
       this.inFlight += 1
       this.request(m)
         .then((answer) => this.reply(answer, opts), (e) => {
-          this.log(liveOnly ? 'chat: memory request failed' : `chat: ${e.message}`)
+          if (memory) this.log('chat: memory request failed')
+          else if (schedule) this.log('chat: schedule request failed')
+          else this.log(`chat: ${e.message}`)
           this.reply(errorOf(m?.id ?? null, 'failed'), opts)
         })
         .finally(() => { this.inFlight -= 1 })
@@ -291,6 +298,11 @@ export class ChatConnection {
       case 'memory.edit':
       case 'memory.add':
         return ok(this.engine.memory ? await this.engine.memory(this.client, m.method, p) : memoryRefused('read-only'))
+      case 'schedule.list':
+      case 'schedule.pause':
+      case 'schedule.resume':
+      case 'schedule.rename':
+        return ok(this.engine.schedule ? await this.engine.schedule(this.client, m.method, p) : memoryRefused('read-only'))
       default:
         return errorOf(id, 'unknown_method', String(m?.method ?? ''))
     }

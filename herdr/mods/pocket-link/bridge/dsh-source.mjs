@@ -18,7 +18,7 @@
 // interrupt per chat every INTERRUPT_MS (`rate`). A closed subscription (the phone hung up, or was
 // removed and revoke ended it) writes nothing. Plain Node only (no dependency, the bridge's Node floor).
 //
-// A writable socket gets a second hello asking for memory management (RFC 0036). A phone
+// A writable socket gets a second hello asking for memory and schedules (RFC 0036). A phone
 // opts in at chat hello and gets one grant, tied to its connection and team home. Closing
 // the grant needs an ack in 500 ms; otherwise the socket is dropped.
 //
@@ -38,7 +38,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { cutRow, MEMORY_METHODS, memoryRefused, page } from './chat.mjs'
+import { cutRow, MANAGE_METHODS, memoryRefused, page } from './chat.mjs'
 
 export const PREFIX = 'dsh:'
 export const ANSWER_ON_COMPUTER = 'Answer on the computer'
@@ -54,16 +54,19 @@ export const INTERRUPT_MS = 5000
 const WRITE_METHODS = { send: 'send', interrupt: 'interrupt', answer: 'answer' }
 const CLOSE_MS = 500
 const READS_PER_MINUTE = 60
-const MEMORY_TEXT_MAX = 4096
+const MANAGE_TEXT_MAX = 4096
 const MEMORY_ID = /^[A-Za-z0-9_-]{1,32}$/
-const MEMORY_REV = /^[0-9a-f]{16}$/
+const MANAGE_REV = /^[0-9a-f]{16}$/
+const SCHEDULE_ID = /^schedule-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const SCHEDULE_ALIAS = /^x[0-9a-f]{16}$/
 const socketMethod = (method) => method.replace('.', '-')
 const writableHello = (hello) => hello?.readOnly === false && hello?.write === 1
 const validHello = (hello) => hello?.protocol === 1 && (hello.readOnly === true || writableHello(hello))
 const socketError = (kind, written = false) => Object.assign(new Error(kind), { kind, written })
-const memoryOffline = (reading, written) => (!reading && written ? { ok: false, state: 'unknown', reason: 'offline' } : memoryRefused('offline'))
+const manageOffline = (reading, written) => (!reading && written ? { ok: false, state: 'unknown', reason: 'offline' } : memoryRefused('offline'))
 
 export const isDsh = (terminal) => typeof terminal === 'string' && terminal.startsWith(PREFIX)
+const manageTerminal = (terminal) => isDsh(terminal) && terminal.length > PREFIX.length && terminal.length <= 128
 
 const expand = (text, home) => (text === '~' ? home : /^~[\\/]/.test(text) ? join(home, text.slice(2)) : text)
 
@@ -123,10 +126,10 @@ const rowsCut = (e) => (Array.isArray(e?.rows) ? { ...e, rows: e.rows.map(cutRow
 export class DshSource {
   /**
    * `paths` are tried in order (socketPaths); `path` is one place only.
-   * @param {{ path?: string, paths?: string[], connect?: typeof createConnection, check?: (path: string) => boolean, log?: (...a: any[]) => void, requestMs?: number, now?: () => number }} [options]
+   * @param {{ path?: string, paths?: string[], connect?: typeof createConnection, check?: (path: string) => boolean, realpath?: typeof realpathSync, log?: (...a: any[]) => void, requestMs?: number, now?: () => number }} [options]
    */
-  constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, log = () => {}, requestMs = REQUEST_MS, now = Date.now } = {}) {
-    Object.assign(this, { paths, connect, check, log, requestMs, now })
+  constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, realpath = realpathSync, log = () => {}, requestMs = REQUEST_MS, now = Date.now } = {}) {
+    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now })
     /** The socket in use: the first of `paths` that passed the check. */
     this.path = null
     this.absent = false
@@ -163,7 +166,11 @@ export class DshSource {
       return Promise.resolve(null)
     }
     this.absent = false
+    const realFolder = () => {
+      try { return this.realpath(dirname(path)) } catch { return null }
+    }
     this.opening = new Promise((done) => {
+      const real = realFolder()
       const socket = this.connect(path)
       this.openingSocket = socket
       let buffer = ''
@@ -194,12 +201,13 @@ export class DshSource {
             return
           }
           if (this.stopped || socket.destroyed) return
+          if (realFolder() !== real) { socket.destroy(); return }
           const methods = Array.isArray(hello.methods) ? hello.methods : []
           const manageMethods = Array.isArray(hello.manageMethods) ? hello.manageMethods : []
           this.writes = new Set(writableHello(hello) ? Object.values(WRITE_METHODS).filter((m) => methods.includes(m)) : [])
-          this.manages = new Set(writableHello(hello) && hello.manage === 1 ? MEMORY_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : [])
+          this.manages = new Set(writableHello(hello) && hello.manage === 1 ? MANAGE_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : [])
           this.path = path
-          if (this.team?.path !== path) this.team = { path }
+          if (this.team?.path !== path || this.team.real !== real) this.team = { path, real }
           this.socket = socket
           done(socket)
         } catch {
@@ -328,41 +336,67 @@ export class DshSource {
     if (grant) this.releaseGrant(grant)
   }
 
-  async memory(client, method, params) {
+  async #manageGrant(client, method) {
     const agreed = this.negotiated.get(client)
-    if (client.closed || !agreed?.methods.has(method) || agreed.team !== this.team) return memoryRefused('read-only')
+    if (client.closed || !agreed?.methods.has(method) || agreed.team !== this.team) return null
     const socket = await this.open().catch(() => null)
-    if (!this.liveClient(client, socket) || agreed.team !== this.team || !this.manages.has(method)) return memoryRefused('read-only')
+    if (!this.liveClient(client, socket) || agreed.team !== this.team || !this.manages.has(method)) return null
     const grant = await this.openGrant(client, socket)
-    if (!this.liveClient(client, socket) || grant?.state !== 'open') return memoryRefused('read-only')
+    return this.liveClient(client, socket) && grant?.state === 'open' ? grant : null
+  }
 
+  async memory(client, method, params) {
+    const grant = await this.#manageGrant(client, method)
+    if (!grant) return memoryRefused('read-only')
     const { terminal, id, rev, text } = params
     const reading = method === 'memory.read'
     const editing = method === 'memory.edit'
-    if (!isDsh(terminal) || terminal.length <= PREFIX.length || terminal.length > 128 ||
-      (!reading && (typeof text !== 'string' || Buffer.byteLength(text) > MEMORY_TEXT_MAX)) ||
-      (editing && (typeof id !== 'string' || !MEMORY_ID.test(id) || typeof rev !== 'string' || !MEMORY_REV.test(rev)))) {
+    if (!manageTerminal(terminal) ||
+      (!reading && (typeof text !== 'string' || Buffer.byteLength(text) > MANAGE_TEXT_MAX)) ||
+      (editing && (typeof id !== 'string' || !MEMORY_ID.test(id) || typeof rev !== 'string' || !MANAGE_REV.test(rev)))) {
       return memoryRefused('invalid')
     }
+    return this.#manageRequest(grant, method, reading, terminal, { ...(reading ? {} : { text }), ...(editing ? { id, rev } : {}) })
+  }
+
+  async schedule(client, method, params) {
+    const grant = await this.#manageGrant(client, method)
+    if (!grant) return memoryRefused('read-only')
+    const { terminal, id, rev, title } = params
+    const reading = method === 'schedule.list'
+    const renaming = method === 'schedule.rename'
+    if (!manageTerminal(terminal) ||
+      ((!reading || id !== undefined) && (typeof id !== 'string' || (!SCHEDULE_ID.test(id) && !SCHEDULE_ALIAS.test(id)))) ||
+      (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev))) ||
+      (renaming && (typeof title !== 'string' || Buffer.byteLength(title) > MANAGE_TEXT_MAX))) {
+      return memoryRefused('invalid')
+    }
+    return this.#manageRequest(grant, method, reading, terminal, {
+      ...(id === undefined ? {} : { id }), ...(reading ? {} : { rev }), ...(renaming ? { title } : {}),
+    })
+  }
+
+  async #manageRequest(grant, method, reading, terminal, fields) {
+    const { client, socket } = grant
     const key = client.device
     const now = this.now()
     const phone = this.phoneState(key, now)
     const times = reading ? phone.reads : phone.times
-    if (phone.memoryBusy.has(terminal)) return memoryRefused('busy')
+    if (phone.manageBusy.has(terminal)) return memoryRefused('busy')
     if (times.length >= (reading ? READS_PER_MINUTE : WRITES_PER_MINUTE)) return memoryRefused('rate')
     if (!this.liveClient(client, socket) || grant.state !== 'open') return memoryRefused('read-only')
     times.push(now)
-    phone.memoryBusy.add(terminal)
+    phone.manageBusy.add(terminal)
     try {
-      const result = await this.ask(socket, socketMethod(method), { grant: grant.id, terminal, ...(reading ? {} : { text }), ...(editing ? { id, rev } : {}) })
+      const result = await this.ask(socket, socketMethod(method), { grant: grant.id, terminal, ...fields })
       if (client.closed) return memoryRefused('read-only')
-      return this.liveClient(client, socket) ? result : memoryOffline(reading, true)
+      return this.liveClient(client, socket) ? result : manageOffline(reading, true)
     } catch (error) {
       if (client.closed) return memoryRefused('read-only')
       if (error.detail) return memoryRefused(typeof error.kind === 'string' && error.kind ? error.kind : 'failed')
-      return memoryOffline(reading, error.written)
+      return manageOffline(reading, error.written)
     } finally {
-      phone.memoryBusy.delete(terminal)
+      phone.manageBusy.delete(terminal)
       this.trimPhone(key, phone, this.now())
     }
   }
@@ -371,11 +405,11 @@ export class DshSource {
     phone.times = phone.times.filter((t) => now - t < 60_000)
     phone.reads = phone.reads.filter((t) => now - t < 60_000)
     for (const [terminal, at] of phone.interrupts) if (now - at >= INTERRUPT_MS) phone.interrupts.delete(terminal)
-    if (!phone.times.length && !phone.reads.length && !phone.interrupts.size && !phone.busy.size && !phone.memoryBusy.size) this.phones.delete(key)
+    if (!phone.times.length && !phone.reads.length && !phone.interrupts.size && !phone.busy.size && !phone.manageBusy.size) this.phones.delete(key)
   }
 
   phoneState(key, now) {
-    const phone = this.phones.get(key) ?? { times: [], reads: [], interrupts: new Map(), busy: new Set(), memoryBusy: new Set() }
+    const phone = this.phones.get(key) ?? { times: [], reads: [], interrupts: new Map(), busy: new Set(), manageBusy: new Set() }
     this.trimPhone(key, phone, now)
     this.phones.set(key, phone)
     return phone
@@ -487,6 +521,7 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
     dshWrite: () => dsh.writable(),
     openManage: (client, methods) => dsh.openManage(client, methods),
     memory: (client, method, params) => dsh.memory(client, method, params),
+    schedule: (client, method, params) => dsh.schedule(client, method, params),
     closeClient: (client) => {
       try { dsh.closeClient(client) } finally { engine.closeClient?.(client) }
     },
