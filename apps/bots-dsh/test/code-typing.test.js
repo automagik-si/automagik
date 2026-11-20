@@ -13,6 +13,7 @@ import { createTypingService, typingRoutes } from '../src/host/code-typing.js'
 import { verifiedWindow } from '../src/host/desktop-window.js'
 import { connectCore } from '../src/host/code-core.js'
 import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
+import { connectFakeCore } from './fixtures/fake-core-connection.mjs'
 
 const WINDOW = 'ab'.repeat(32)
 const DIGEST = createHash('sha256').update(WINDOW, 'ascii').digest('hex')
@@ -27,7 +28,7 @@ const TERMINALS = [
   { address: 't8', created_ms: 800, state: 'live', cols: 100, rows: 30, status: 'working' },
 ]
 
-function fixture(t) {
+function fixture(t, { probe = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'automagik-code-typing-'))
   // A plugin's own writes can still be in flight when the test ends: retry the tree removal.
   t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
@@ -57,7 +58,7 @@ function fixture(t) {
   writeFileSync(terminalsFile, JSON.stringify(TERMINALS))
   const log = join(root, 'core.log')
   const recordPath = join(root, 'typing.jsonl')
-  const probeEnv = coreProbeFixture(t, root)
+  const probeEnv = probe ? coreProbeFixture(t, root) : {}
   const env = {
     ...process.env,
     ...probeEnv,
@@ -329,4 +330,99 @@ test('after the idle lease ends typing, the same viewer takes it again in place'
   const answer = await typing.input({ request: request(), session: again.body.session, data: Buffer.from('hello', 'utf8').toString('base64') })
   assert.equal(answer.status, 204)
   assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 0 && Buffer.from(row.payload, 'base64').toString() === 'hello')), 'the next key lands in the new attach')
+})
+
+function addTypingWorkers(f, terminals) {
+  const ledger = join(f.env.HERDR_APP_HOME, 'automagik-herdr', 'workers.jsonl')
+  const rows = terminals.map(({ address, created_ms }) => ({
+    event: 'start', kind: 'worker', terminal: address, created_ms, botId: DEV, lead: LEAD, role: 'dev',
+    project: f.project, worktree: f.project, core: CORE, at: '2026-11-15T00:00:00.000Z',
+  }))
+  writeFileSync(ledger, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+  writeFileSync(f.env.FAKE_CORE_TERMINALS, JSON.stringify([...TERMINALS, ...terminals]))
+}
+
+test('concurrent seat and worker takes reserve their shared physical terminal', async (t) => {
+  const f = fixture(t, { probe: false })
+  addTypingWorkers(f, [TERMINALS[1]])
+  const typing = service(f, { connect: connectFakeCore })
+  t.after(() => typing.dispose())
+  const attempts = [
+    { request: request(), bot: DEV, viewer: 'viewer-seat' },
+    { request: request(), bot: DEV, worker: 't8', viewer: 'viewer-worker' },
+  ]
+  const answers = await Promise.all(attempts.map(values => typing.take(values)))
+  assert.deepEqual(answers.map(answer => answer.status).sort(), [200, 409])
+  const refused = answers.findIndex(answer => answer.status === 409)
+  assert.deepEqual(answers[refused].body, { error: 'typing-elsewhere' })
+  assert.equal(typing.sessions().length, 1)
+  await typing.releaseViewer(attempts[1 - refused].viewer)
+  assert.equal((await typing.take(attempts[refused])).status, 200)
+})
+
+test('pending takes count towards four sessions, with room for a held viewer to move', async (t) => {
+  const f = fixture(t, { probe: false })
+  const workers = [10, 11, 12].map(n => ({ address: `t${n}`, created_ms: n * 100, state: 'live', cols: 80, rows: 24 }))
+  addTypingWorkers(f, workers)
+  const typing = service(f, { connect: connectFakeCore })
+  t.after(() => typing.dispose())
+  const attempts = [
+    { bot: LEAD }, { bot: DEV }, ...workers.map(row => ({ bot: DEV, worker: row.address })),
+  ].map((target, index) => ({ ...target, viewer: `viewer-${index}`, request: request() }))
+
+  const answers = await Promise.all(attempts.map(values => typing.take(values)))
+  assert.deepEqual(answers.map(answer => answer.status), [200, 200, 200, 200, 429])
+  assert.equal(typing.sessions().length, 4)
+  const replacement = await typing.take({ ...attempts[4], viewer: attempts[0].viewer })
+  assert.equal(replacement.status, 200)
+  assert.equal(typing.sessions().length, 4)
+  assert.equal(typing.sessions().find(session => session.viewer === attempts[0].viewer)?.terminal, 't12')
+})
+
+for (const stop of ['releaseViewer', 'dispose']) {
+  test(`${stop} cancels a typing take during attach and closes its core`, { timeout: 5000 }, async (t) => {
+    const f = fixture(t, { probe: false })
+    const started = Promise.withResolvers()
+    const finish = Promise.withResolvers()
+    let closed = false
+    let connections = 0
+    const typing = service(f, {
+      async connect(options) {
+        const core = await connectFakeCore(options)
+        if (++connections === 1) return core
+        const attach = core.attach.bind(core)
+        const close = core.close.bind(core)
+        core.attach = async (params) => {
+          const attached = await attach(params)
+          started.resolve()
+          await finish.promise
+          return attached
+        }
+        core.close = () => { closed = true; close() }
+        return core
+      },
+    })
+    t.after(() => { finish.resolve(); return typing.dispose() })
+    const taking = typing.take({ request: request(), bot: LEAD, viewer: 'viewer-cancelled' })
+    await Promise.race([started.promise, taking.then(() => assert.fail('the take ended before attaching'))])
+    await typing[stop]('viewer-cancelled')
+    finish.resolve()
+    assert.deepEqual(await taking, { status: 409, body: { error: 'not-typing' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.equal(closed, true)
+  })
+}
+
+test('releasing one pane viewer leaves a sibling pane typing', async (t) => {
+  const f = fixture(t, { probe: false })
+  const typing = service(f, { connect: connectFakeCore })
+  t.after(() => typing.dispose())
+  const first = await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-first' })
+  const second = await typing.take({ request: request(), bot: DEV, viewer: 'viewer-second' })
+  assert.equal(first.status, 200)
+  assert.equal(second.status, 200)
+  assert.deepEqual(await typing.releaseViewer('viewer-first'), { released: true })
+  assert.deepEqual(typing.sessions().map(session => session.id), [second.body.session])
+  const input = await typing.input({ request: request(), session: second.body.session, data: Buffer.from('still here').toString('base64') })
+  assert.equal(input.status, 204)
 })

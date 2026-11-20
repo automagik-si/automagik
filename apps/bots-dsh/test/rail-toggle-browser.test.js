@@ -329,3 +329,83 @@ test('the 390px drawer keeps Code across a terminal pick, and Team or Back resto
   await page.evaluate(() => { window.codeTraffic.finishTake() })
   await page.waitForFunction(() => window.codeTraffic.calls.filter(call => call.url.endsWith('/release')).length === 2)
 })
+
+test('the Code bar toggles beside panes and clears them on Team and Back', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.mountCodeDrawer({ multi: true }))
+  const panel = page.locator('[data-code-panel]')
+  const row = name => page.locator('.cs-row', { hasText: name })
+  const beside = name => row(name).click({ modifiers: ['Control'] })
+  const switchTo = side => page.locator(`[data-face=${side}]`).click()
+  await switchTo('code')
+  await row('Atlas').click()
+  for (const name of ['Reviewer', 'Builder', 'Tester']) await beside(name)
+  await page.waitForFunction(() => window.codeTraffic.streams.length === 4)
+  assert.equal(await page.locator('.cs-row[aria-current=true]').count(), 4)
+  assert.match(await row('Reviewer').getAttribute('title'), /^Reviewer · feature\n(?:Ctrl|⌘)-click to show beside$/)
+  await beside('Runner')
+  const refusal = panel.locator('.cs-pane-head .cs-paste-note[data-wrap]')
+  assert.match(await refusal.textContent(), /Atlas, Atlas · Reviewer, Atlas · Builder, Atlas · Tester/)
+  assert.equal(await page.evaluate(() => window.codeTraffic.streams.length), 4)
+  await beside('Atlas')
+  await panel.locator('.cs-panes[data-count="3"]').waitFor()
+  assert.equal(await refusal.count(), 0)
+
+  await row('Builder').click()
+  await panel.locator('.cs-panes[data-count="1"]').waitFor()
+  await row('Runner').focus()
+  await page.keyboard.press('Control+Enter')
+  await panel.locator('.cs-panes[data-count="2"]').waitFor()
+  await page.evaluate(async () => {
+    const [bot] = window.codeTraffic.tree.projects[0].bots
+    bot.workers = bot.workers.filter(worker => worker.role !== 'Runner')
+    await window.codeTraffic.refresh()
+  })
+  await panel.locator('.cs-panes[data-count="1"]').waitFor()
+  assert.equal(await row('Runner').count(), 0)
+
+  const selection = () => page.evaluate(() => {
+    const state = window.codeTraffic.snapshot()
+    return [state.barSelected, state.barBeside, state.barRefused]
+  })
+  await beside('Reviewer')
+  await page.waitForFunction(() => document.querySelectorAll('.cs-screen[aria-label="View only · click to type"]').length === 2)
+  await switchTo('team')
+  await page.locator('[data-fixture-seat]').waitFor()
+  assert.deepEqual(await selection(), [null, [], null])
+  await page.waitForFunction(() => window.codeTraffic.closed.length === window.codeTraffic.streams.length)
+
+  await switchTo('code')
+  await row('Reviewer').click()
+  await beside('Tester')
+  await page.waitForFunction(() => document.querySelectorAll('.cs-screen[aria-label="View only · click to type"]').length === 2)
+  await panel.getByRole('button', { name: 'Back' }).click()
+  await page.locator('[data-fixture-seat]').waitFor()
+  assert.deepEqual(await selection(), [null, [], null])
+  await page.waitForFunction(() => window.codeTraffic.closed.length === window.codeTraffic.streams.length)
+})
+
+test('the Code bar keeps one live EventSource from one pane through four', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.mountCodeDrawer({ multi: true }))
+  await page.locator('[data-face=code]').click()
+  const row = name => page.locator('.cs-row', { hasText: name })
+  const readStreams = () => page.evaluate(() => {
+    const { streams, closed } = window.codeTraffic
+    return { count: streams.length, live: streams.length - closed.length, url: streams.at(-1) }
+  })
+  await row('Atlas').click()
+  await page.locator('.cs-panes[data-count="1"] .cs-screen[aria-label="View only · click to type"]').waitFor()
+  assert.equal((await readStreams()).live, 1)
+  for (const [index, role] of ['Reviewer', 'Builder', 'Tester'].entries()) {
+    const count = index + 2
+    await row(role).click({ modifiers: ['Control'] })
+    await page.waitForFunction(n => document.querySelectorAll('.cs-screen[aria-label="View only · click to type"]').length === n, count)
+    const streams = await readStreams()
+    assert.equal(streams.count, count)
+    assert.equal(streams.live, 1)
+    assert.deepEqual(new URLSearchParams(streams.url.split('?')[1]).getAll('worker'), ['', 't8', 't9', 't10'].slice(0, count))
+  }
+})

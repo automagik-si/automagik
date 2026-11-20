@@ -672,8 +672,8 @@ export function apply(ctx) {
       seatChatView.set({ seat })
       try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
     },
-    openCodePane: (selected) => {
-      try { codePanel.open(selected) } catch (error) { noteClientError('code-side', error) }
+    openCodePane: (selected, options) => {
+      try { codePanel.open(selected, options) } catch (error) { noteClientError('code-side', error) }
     },
     closeCodePane: codePanel.close,
     seatList: () => call('seat-chat-list'),

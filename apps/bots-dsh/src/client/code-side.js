@@ -10,12 +10,15 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 import { call } from './api.js'
 import { t } from './i18n.js'
 import { FaceSwitch, TwoPartSwitch } from './left-bar-faces.js'
-import { botRowOf, codeHasPane, paneFor, statusKey, stillThere } from './code-side-model.js'
+import { botRowOf, codeHasPane, paneFor, prunePanes, statusKey, stillThere, togglePane } from './code-side-model.js'
 import { PANE_CHUNK, loadPane } from './code-side-lazy.js'
 
 export const CODE_PANEL = 'automagik-code'
 
-const NO_STATE = { side: 'team', barSelected: null, face: 'chat', botId: null, seat: false, tree: null, loading: false, error: null, selected: null, loadedAt: 0 }
+const NO_STATE = {
+  side: 'team', face: 'chat', botId: null, seat: false, tree: null, loading: false, error: null, loadedAt: 0,
+  selected: null, beside: [], refused: null, barSelected: null, barBeside: [], barRefused: null,
+}
 
 // One store for the window, as the rest of the team's client uses.
 const listeners = new Set()
@@ -31,6 +34,18 @@ const storeSubscribe = (listener) => { listeners.add(listener); return () => lis
 export const TREE_FRESH_MS = 20_000
 let reading = null
 
+const panesOf = (selected, beside) => [selected, ...beside].filter(Boolean)
+const seatPanes = (list, refused = null) => ({ selected: list[0] ?? null, beside: list.slice(1), refused })
+const barPanes = (list, refused = null) => ({ barSelected: list[0] ?? null, barBeside: list.slice(1), barRefused: refused })
+const prune = (tree) => {
+  const seat = prunePanes(panesOf(state.selected, state.beside), tree)
+  const bar = prunePanes(panesOf(state.barSelected, state.barBeside), tree)
+  return {
+    ...seatPanes(seat, seat.length === 1 + state.beside.length ? state.refused : null),
+    ...barPanes(bar, bar.length === 1 + state.barBeside.length ? state.barRefused : null),
+  }
+}
+
 /** Re-read the team tree; one read at a time. Resolves the store's tree (or null). */
 export async function loadTree({ fresh = false } = {}) {
   if (!fresh && state.tree && Date.now() - state.loadedAt < TREE_FRESH_MS) return state.tree
@@ -39,10 +54,10 @@ export async function loadTree({ fresh = false } = {}) {
   reading = Promise.resolve()
     .then(() => call('code-tree'))
     .then((tree) => {
-      set({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), selected: stillThere(state.selected, tree) })
+      set({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), ...prune(tree) })
       return tree
     }, (error) => {
-      set({ loading: false, error: error?.code ?? 'unavailable', tree: null, loadedAt: Date.now() })
+      set({ loading: false, error: error?.code ?? 'unavailable', tree: null, loadedAt: Date.now(), ...prune(null) })
       return null
     })
     .finally(() => { reading = null })
@@ -57,20 +72,25 @@ export async function loadTree({ fresh = false } = {}) {
  * registered underneath it.
  */
 export async function openTerminal(botId, { seat = false } = {}) {
-  set({ face: 'terminal', botId, seat, selected: state.selected?.botId === botId ? state.selected : null })
+  set({ face: 'terminal', botId, seat, ...(state.selected?.botId === botId ? {} : seatPanes([])) })
   const tree = await loadTree({ fresh: true })
   if (!tree || state.botId !== botId || state.face !== 'terminal' || state.seat !== seat) return
   const pane = paneFor(tree, botId)
-  if (pane) set({ selected: pane })
+  if (pane) selectPane(pane)
 }
 
 /** Flip the view back to the chat; the terminal stream closes with the pane. */
 export function closeTerminal() {
-  set({ face: 'chat', botId: null, seat: false, selected: null })
+  set({ face: 'chat', botId: null, seat: false, ...seatPanes([]) })
 }
 
 /** Choose one tree row's pane (or clear it), without leaving the Code face. */
-export function selectPane(selected) { set({ selected }) }
+export function selectPane(selected, { beside = false } = {}) {
+  if (!beside) { set(seatPanes([selected])); return }
+  const previous = panesOf(state.selected, state.beside)
+  const { list, refused } = togglePane(previous, selected, state.tree)
+  if (list !== previous || refused) set(seatPanes(list, refused))
+}
 
 /** The flip's state for one Bot, as the chat header's or the seat's Chat / Terminal switch takes it. */
 export function useCodeFace(botId, { seat = false } = {}) {
@@ -94,7 +114,7 @@ export function useCodeSide() {
 }
 
 export function setCodeSide(side) {
-  set({ side })
+  set({ side, ...(side === 'team' ? barPanes([]) : {}) })
   if (side === 'code') void loadTree({ fresh: true })
 }
 
@@ -114,17 +134,25 @@ export function codePanelNavigation(layout) {
   let previous = null
   const active = () => layout.panelInfo.getSnapshot().activePanelId
   return {
-    open(selected) {
+    open(selected, { beside = false } = {}) {
+      let next = barPanes([selected])
+      if (beside) {
+        const previous = panesOf(state.barSelected, state.barBeside)
+        const { list, refused } = togglePane(previous, selected, state.tree)
+        if (list === previous && !refused) return
+        next = barPanes(list, refused)
+      }
       if (active() !== CODE_PANEL) {
         previous = active()
         layout.selectPanel(CODE_PANEL)
       }
-      set({ barSelected: selected })
+      set(next)
     },
     close() {
-      if (active() !== CODE_PANEL) return
-      try { layout.selectPanel(previous) } catch { layout.selectPanel(null) }
-      set({ barSelected: null })
+      if (active() === CODE_PANEL) {
+        try { layout.selectPanel(previous) } catch { layout.selectPanel(null) }
+      }
+      set(barPanes([]))
     },
   }
 }
@@ -142,7 +170,7 @@ export function CodeBody() {
 export function CodeBarList({ current, onSelect }) {
   return h(CodeRenderer, {
     current, showLoading: true,
-    render: pane => h(pane.CodeTree, { current: { ...current, selected: current.barSelected }, onSelect, sidebar: true }),
+    render: pane => h(pane.CodeTree, { current: { ...current, selected: current.barSelected, beside: current.barBeside }, onSelect, sidebar: true }),
   })
 }
 
@@ -153,7 +181,7 @@ export function CodeMainPanel({ onBack }) {
       h('button', { type: 'button', className: 'bt-seat-back', 'aria-label': t('Back'), title: t('Back'), onClick: onBack }, '←')),
     h('div', { className: 'bt-seat-body' },
       h(CodeRenderer, { current, render: pane => h('section', { className: 'cs-host' },
-        h(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, loading: current.loading })) })))
+        h(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, beside: current.barBeside, refused: current.barRefused, loading: current.loading })) })))
 }
 
 function CodeRenderer({ current, render, showLoading }) {
@@ -220,7 +248,7 @@ export function installCodeSide(ctx) {
     listOff = null
     off?.()
     off = null
-    if (state.face === 'terminal') set({ face: 'chat', botId: null, seat: false, selected: null })
+    if (state.face === 'terminal') closeTerminal()
   }
 }
 
