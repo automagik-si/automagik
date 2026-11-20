@@ -267,6 +267,7 @@ export class AgentRun {
         throw error
       }
       const identity = this.spec.botIdentity?.()
+      this.spec.botIdentity = undefined
       this.identityDelivery = identity
         ? this.init.agentCapabilities?.sessionCapabilities?.systemPrompt != null
           ? 'systemPrompt' : 'preamble'
@@ -459,18 +460,29 @@ export class AgentRun {
       this.tools.delete(id)
     }
     this.holdOn()
-    if (this.identityPreamble !== undefined) {
+    const carried = this.identityPreamble !== undefined
+    if (carried) {
       prompt = [{ type: 'text', text: this.identityPreamble }, ...prompt]
       this.identityPreamble = undefined
     }
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
-      result => this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' }),
-      error => this.endPrompt({
-        type: 'error', message: error?.message ?? String(error),
-        ...(error?.code === undefined ? {} : { code: error.code }),
-        ...(this.exited === undefined && usageLimitOf(this.spec.provider, error) ? { usageLimit: true } : {}),
-      }),
+      result => {
+        if (carried) {
+          this.preambleOutcome = result?.stopReason !== 'cancelled' && !this.cancelled
+            ? 'delivered' : 'unsure'
+        }
+        return this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' })
+      },
+      error => {
+        if (carried) this.preambleOutcome = 'unsure'
+        return this.endPrompt({
+          type: 'error', message: error?.message ?? String(error),
+          ...(error?.code === undefined ? {} : { code: error.code }),
+          ...(this.exited === undefined && usageLimitOf(this.spec.provider, error)
+            ? { usageLimit: true } : {}),
+        })
+      },
     )
     return this.prompting
   }

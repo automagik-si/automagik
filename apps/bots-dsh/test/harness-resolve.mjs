@@ -60,10 +60,14 @@ if (existsSync(base)) {
 }
 const packageNameOf = specifier => specifier.split('/').slice(0, 2).join('/')
 const pluginUrl = `${pathToFileURL(plugin).href}/`
+// role-runtime.test.js loads acp-dsh's adapter (RFC 0037 P4). Its DSH peers come from
+// this same pinned harness; that test checks both plugins pin one release.
+const parents = [pluginUrl, `${pathToFileURL(resolve(plugin, '../acp-dsh')).href}/`]
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith('@deepseek-ai/') && context.parentURL?.startsWith(pluginUrl)) {
+    if (specifier.startsWith('@deepseek-ai/')
+      && parents.some(prefix => context.parentURL?.startsWith(prefix))) {
       const parentURL = workspacePackages.get(packageNameOf(specifier)) ?? anchor
       return nextResolve(specifier, { ...context, parentURL })
     }
