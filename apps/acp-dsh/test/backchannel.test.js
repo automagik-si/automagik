@@ -20,7 +20,7 @@ const TOOLS = [
   { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: { file_path: { type: 'string' } } } },
 ]
 
-function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = false, answer = 'allowed-once', tools = TOOLS, preset = 'standard', definitions = tools, turn = 3, fail, content, attachments } = {}) {
+function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = false, answer = 'allowed-once', tools = TOOLS, preset = 'standard', level, definitions = tools, turn = 3, fail, content, attachments } = {}) {
   const session = Session.create('s1')
   session.append('turn/start', { turn })
   session.append('step/start', { turn, step: 1 })
@@ -58,6 +58,7 @@ function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = fals
         }
       }
       if (name === 'sandboxPolicy') return { resolve: () => ({ mode: sandbox }) }
+      if (name === 'permissionPresets') return level === undefined ? undefined : { current: () => level }
       if (name === 'attachments') return attachments
       if (name === 'agentPresets') return { presetForSession: () => preset }
       return undefined
@@ -74,10 +75,14 @@ async function serve() {
   const record = bc.mint({ sessionId: 's1', agent: host_.agent, name: 'Fake agent' })
   // As after `session/new` in a real turn: the bridge may announce from now on.
   bc.announce(record)
-  const post = async (op, body = {}, credential = record.credential, url = bc.urlFor(record)) => {
+  const post = async (op, body = {}, credential = record.credential, url = bc.urlFor(record), attachment) => {
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(credential === null ? {} : { authorization: `Bearer ${credential}` }) },
+      headers: {
+        'content-type': 'application/json',
+        ...(credential === null ? {} : { authorization: `Bearer ${credential}` }),
+        ...(attachment === undefined ? {} : { 'x-dsh-bridge-attachment': attachment }),
+      },
       body: JSON.stringify({ op, ...body }),
     })
     return { status: response.status, body: await response.json() }
@@ -300,6 +305,33 @@ test('a request without a credential, with another Session\'s, or after revocati
     h.bc.revoke(h.record)
     assert.equal((await h.post('list')).status, 401)
     assert.equal((await h.post('call', { name: 'bash' })).status, 401)
+  } finally {
+    h.bc.dispose()
+  }
+})
+
+// A process ending leaves the Session credential for its replacement. The host revokes it.
+test('#969 8b: a bridge that says bye detaches, and its respawn re-attaches with the same credential', async () => {
+  const h = await serve()
+  try {
+    const bye = await h.post('bye')
+    assert.equal(bye.status, 200)
+    assert.deepEqual(bye.body, { ok: true })
+    assert.equal(h.record.closed, false)
+    assert.equal(h.record.disconnected, true)
+    assert.equal((await h.post('hello')).status, 200)
+    assert.equal((await h.post('list')).status, 200)
+    const a = op => h.post(op, {}, undefined, undefined, 'a'.repeat(32))
+    const b = op => h.post(op, {}, undefined, undefined, 'b'.repeat(32))
+    assert.equal((await a('list')).status, 200)
+    assert.equal(h.record.disconnected, false)
+    assert.equal((await a('bye')).status, 200)
+    assert.equal(h.record.disconnected, true)
+    assert.equal((await b('list')).status, 200)
+    assert.equal(h.record.disconnected, false)
+    assert.equal((await a('list')).status, 401)
+    h.bc.revoke(h.record)
+    assert.equal((await h.post('hello')).status, 401)
   } finally {
     h.bc.dispose()
   }
@@ -656,6 +688,70 @@ test('a bridge call with no open step is refused, not written into a closed step
     assert.equal(body.error.code, 'BRIDGE_NO_STEP')
     assert.equal(h.executed.length, 0, 'the body did not run')
     assert.equal(h.session.snapshotEvents().filter(event => event.type === 'tool/call').length, 0, 'no card row')
+  } finally {
+    h.backchannel.dispose()
+  }
+})
+
+// --- a turn the agent opened itself -----------------------------------------------------------
+// A native background task finishes after its DSH turn ended and wakes Claude Code on its own.
+// There is no open DSH step, and none can be opened out of band: the agent loop's own turn
+// numbering is private. Manual and Full still run the extra, without a card; Auto refuses,
+// because Auto review reads a call from its step.
+
+const agentOpened = (h, turn = 3) => {
+  h.session.append('step/end', { turn, step: 1 })
+  h.session.append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+const outsideStepCall = async (h, callId) => {
+  await h.backchannel.listen()
+  const record = h.backchannel.mint({ sessionId: 's1', agent: h.agent, name: 'Fake agent' })
+  h.backchannel.announce(record)
+  const response = await fetch(h.backchannel.urlFor(record), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${record.credential}` },
+    body: JSON.stringify({ op: 'call', name: 'bash', arguments: {}, callId }),
+  })
+  return { record, body: await response.json() }
+}
+
+test('a bridge call in a turn the agent opened itself runs at Manual without step rows', async () => {
+  const h = host({ turn: 1 })
+  agentOpened(h, 1)
+  try {
+    const { body } = await outsideStepCall(h, 'bridge-own-turn')
+    assert.equal(body.isError, false, 'the extra ran')
+    assert.deepEqual(h.executed.map(entry => entry.name), ['bash'])
+    assert.equal(h.asked.length, 1, 'Manual still asks the person once')
+    const events = h.session.snapshotEvents()
+    assert.equal(events.filter(event => event.type === 'tool/call').length, 0, 'no card row outside a step')
+    assert.equal(events.filter(event => event.type === 'tool/result').length, 0, 'no result row outside a step')
+    const record = events.find(event => event.type === 'plugin:acp-dsh/bridge-outside-step')
+    assert.ok(record, 'the call is recorded against the Session without a step')
+    assert.deepEqual(record.data, { callId: 'bridge-own-turn', name: 'bash', outcome: 'ran' })
+    assert.doesNotThrow(() => assertLoadable(h.session), 'the finished Session still loads')
+  } finally {
+    h.backchannel.dispose()
+  }
+})
+
+test('a bridge call in a turn the agent opened itself is refused clearly at Auto', async () => {
+  const h = host({ level: 'auto', turn: 1 })
+  agentOpened(h, 1)
+  try {
+    const { body } = await outsideStepCall(h, 'bridge-own-turn-auto')
+    assert.equal(body.isError, true)
+    assert.equal(body.error.code, 'BRIDGE_OUTSIDE_STEP')
+    const text = body.content.map(block => block.text ?? '').join('\n')
+    assert.match(text, /Claude Code opened this turn itself/)
+    assert.match(text, /send a message/)
+    assert.doesNotMatch(text, /no open step/)
+    assert.equal(h.executed.length, 0, 'the extra did not run unreviewed')
+    assert.equal(h.asked.length, 0, 'and the person was not asked in its place')
+    assert.equal(h.session.snapshotEvents().filter(event => event.type === 'tool/call').length, 0)
+    const record = h.session.snapshotEvents().find(event => event.type === 'plugin:acp-dsh/bridge-outside-step')
+    assert.equal(record.data.outcome, 'refused')
   } finally {
     h.backchannel.dispose()
   }

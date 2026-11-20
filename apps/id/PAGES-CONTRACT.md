@@ -6,6 +6,26 @@ and `/consent`. An absent page returns plain text `501 page not built yet`.
 Scripts and styles are served from the same origin. No third-party scripts,
 analytics, external fonts, or tokens in browser storage are needed.
 
+## Security headers
+
+Every response the Worker returns carries these, whatever produced it: the pages,
+their files, the API, the well-known metadata, redirects and errors.
+
+| Header | Value |
+| --- | --- |
+| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (no preload) |
+| `Referrer-Policy` | `no-referrer` |
+| `X-Frame-Options` | `DENY` |
+
+The pages also answer with `Cache-Control: no-store`. Status, body, `Location`
+and every `Set-Cookie` pass through unchanged. The policy has no `unsafe-inline`
+or `unsafe-eval`: the pages keep every script and style in their own files under
+`pages/`, never inline, and their own `<meta>` policy may be stricter but never
+looser. A page is served only at its own address: `/sign-in.html`,
+`/consent.html` and any other direct `.html` path answer 404.
+
 ## HTTP conventions
 
 All paths below are relative to the identity service's origin. Use same-origin
@@ -217,6 +237,34 @@ passkey unavailable, passkey failed with retry, account created, signed in,
 continuing to product, WhatsApp offered only when enabled, waiting for a message,
 expired proof, restart wait, rate limited, service/network error,
 invalid or expired provider request. No email field or social/password buttons.
+
+## Session management
+
+A signed-in person can see their own sessions and sign out of one or all of them.
+All three routes need the session cookie; without one they return 401. A page
+never receives a session token here: sessions are named by `id`.
+
+`GET /api/auth/list-sessions` returns the caller's active sessions only:
+`[{id, userId, expiresAt, createdAt, updatedAt, ipAddress?, userAgent?}, ...]`.
+There is no `token` field. Compare `id` with `session.id` from
+`GET /api/auth/get-session` to mark the current one. Listing needs a recent
+sign-in: a session older than a day returns 403 with code `SESSION_NOT_FRESH`;
+ask the person to sign in again.
+
+`POST /api/auth/revoke-session` with `{id: string}` signs out that one session.
+Success is `{status: true}`. A body without a string `id` returns 400 with code
+`INVALID_SESSION_ID`; any other field, a `token` included, is ignored. The caller
+is authenticated before the id is looked up, and the lookup is scoped to the
+caller's sessions, so a signed-out request reads no session row. A session of
+another person, or an unknown id, is left untouched and still answers
+`{status: true}`, so the answer reveals nothing about other sessions.
+
+`POST /api/auth/revoke-sessions` with `{}` signs out every session of the caller,
+the current one included. Success is `{status: true}`; the page then shows the
+signed-out state.
+
+Signing out of other sessions while keeping the current one is not offered as a
+separate route: revoke each listed session that is not the current one.
 
 ## Consent page
 

@@ -8,8 +8,7 @@ import { word } from './left-bar-status.js'
 // the terminal it runs in. It says Terminal, so the word Code is on the screen once, as the
 // bar's other side.
 //
-// The chat's header draws it for every Bot (header.js). Until the Code side lands, no Bot has a
-// terminal of its own to show, so Terminal is there and says so, and opens nothing.
+// The seat panel keeps this switch separate from the bar's Team / Code switch.
 
 export const FACES = Object.freeze(['chat', 'terminal'])
 export const faceOr = face => (FACES.includes(face) ? face : 'chat')
@@ -32,14 +31,20 @@ const Glyph = ({ face }) => h('svg', { className: 'lb-face-glyph', viewBox: '0 0
  * as its title and description, and a press on it does nothing.
  */
 export function FaceSwitch({ face, onFace, label, unavailable = {} }) {
-  const open = faceOr(face)
-  return h('div', { className: 'lb-face', role: 'group', 'aria-label': label ?? word('faces') },
-    ...FACES.map((name) => {
-      const why = name === open ? undefined : unavailable[name]
+  return TwoPartSwitch({
+    current: faceOr(face), onSelect: onFace, label: label ?? word('faces'), unavailable,
+    parts: FACES.map(name => ({ name, content: [h(Glyph, { face: name }), faceWord(name)] })),
+  })
+}
+
+export function TwoPartSwitch({ current, onSelect, label, parts, unavailable = {} }) {
+  return h('div', { className: 'lb-face', role: 'group', 'aria-label': label },
+    ...parts.map(({ name, content }) => {
+      const why = name === current ? undefined : unavailable[name]
       return h('button', {
-        key: name, type: 'button', className: 'lb-face-part', 'data-face': name, 'aria-pressed': name === open,
+        key: name, type: 'button', className: 'lb-face-part', 'data-face': name, 'aria-pressed': name === current,
         'aria-disabled': why ? 'true' : undefined, title: why, 'aria-description': why,
-        onClick: onFace && name !== open && !why ? () => onFace(name) : undefined,
-      }, h(Glyph, { face: name }), faceWord(name))
+        onClick: onSelect && name !== current && !why ? () => onSelect(name) : undefined,
+      }, ...content)
     }))
 }

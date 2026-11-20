@@ -27,7 +27,7 @@ const seed = (room = {}, extraRooms = {}) => ({
 })
 
 async function start(t, room, services, extraRooms) {
-  const home = mkdtempSync(join(tmpdir(), 'ds-bot-goal-'))
+  const home = mkdtempSync(join(tmpdir(), 'automagik-bots-goal-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(seed(room, extraRooms)))
   const ctx = fakeContext({ services })
   const agents = new Map()

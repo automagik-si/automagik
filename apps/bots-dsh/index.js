@@ -29,10 +29,12 @@ import * as handoffs from './src/host/handoffs.js'
 import * as requests from './src/host/requests.js'
 import * as delivery from './src/host/delivery.js'
 import * as roster from './src/host/roster.js'
+import * as installed from './src/host/installed.js'
 import * as folders from './src/host/folders.js'
 import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
 import * as toolDeny from './src/host/tool-deny.js'
+import * as readScope from './src/host/read-scope.js'
 import * as prompt from './src/host/prompt.js'
 import * as timeContext from './src/host/time-context.js'
 import * as tools from './src/host/tools.js'
@@ -55,6 +57,7 @@ import * as sharedUploads from './src/host/shared-uploads.js'
 import * as browserPlugins from './src/host/browser-plugins.js'
 import * as computer from './src/host/computer/index.js'
 import * as secrets from './src/host/secrets.js'
+import { dropUnlockVariables } from './src/host/unlock-env.js'
 import * as connectors from './src/host/connectors/index.js'
 import * as capabilities from './src/host/capabilities.js'
 import * as learning from './src/host/learning.js'
@@ -66,8 +69,10 @@ import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
 import * as channel from './src/host/channel.js'
 import * as codeSide from './src/host/code-side.js'
+import * as automations from './src/host/automations.js'
 import * as agentSpace from './src/host/agent-space.js'
 import * as feed from './src/host/feed.js'
+import * as genui from './src/host/genui.js'
 import * as appManifest from './src/host/app-manifest.js'
 import * as pocketChat from './src/host/pocket-chat.js'
 import * as seatChat from './src/host/seat-chat.js'
@@ -88,17 +93,20 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, steer, handoffs, requests, delivery, roster, folders, agents, toolDeny, privateBots, prompt, timeContext,
+  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, dshUpdate, thinking, agentSpace, feed, codeSide, channel, appManifest, pocketChat, seatChat, hermesRemote, officeSkills, goalSkills,
+  update, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
+  officeSkills, goalSkills,
 ]
 
 // Other Omni plugins inject the runtime as `omniTeam` and add to it through rt.hooks
 // (src/host/extend.js): Omni's channels and automations (@automagik/omni-channels-dsh),
 // its canvases (@automagik/omni-canvas-dsh).
 export function apply(ctx, config = {}) {
+  const dropped = dropUnlockVariables()
   const rt = createRuntime(ctx, config)
+  if (dropped > 0) rt.warn('ds-bot: removed %d password-manager unlock variable(s) from the Bot environment', dropped)
   ctx.provide('omniTeam', rt)
   // The plugin's own scope owns the team's end: when this plugin stops (a reload, the app
   // closing, the host unloading), every module lets go — the Code side's streams send their

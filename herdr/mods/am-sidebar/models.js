@@ -171,14 +171,19 @@ export function detectModel(argv, agentKey) {
   return model;
 }
 
-// Top-level `model = "…"` of a TOML text: before the first [section] (profiles carry their own).
-function tomlTopModel(text) {
+// Top-level `key = "…"` of a TOML text: before the first [section] (profiles carry their own).
+function tomlTopValue(text, key) {
   for (const line of String(text).split("\n")) {
     if (/^\s*\[/.test(line)) break;
-    const m = /^\s*model\s*=\s*(["'])(.*?)\1\s*(#.*)?$/.exec(line);
-    if (m) return m[2];
+    const m = /^\s*([A-Za-z0-9_-]+)\s*=\s*(["'])(.*?)\2\s*(#.*)?$/.exec(line);
+    if (m && m[1] === key) return m[3];
   }
   return null;
+}
+
+// Top-level `model = "…"` (defaultModelFrom).
+function tomlTopModel(text) {
+  return tomlTopValue(text, "model");
 }
 
 /**
@@ -197,7 +202,7 @@ export function configPaths(home) {
 }
 
 // Every config text (null when missing) through a synchronous `read(path)`.
-function textsOf(home, read) {
+export function configTexts(home, read) {
   const out = {};
   for (const [name, path] of Object.entries(configPaths(home))) {
     try { out[name] = read(path) ?? null; } catch { out[name] = null; }
@@ -229,7 +234,7 @@ export function defaultModelFrom(agentKey, texts = {}) {
 
 /** defaultModelFrom over a synchronous `read(path) => string | null` under `home` (the CLI). */
 export function defaultModel(agentKey, { home, read }) {
-  return defaultModelFrom(agentKey, textsOf(home, read));
+  return defaultModelFrom(agentKey, configTexts(home, read));
 }
 
 // Claude Code's current menu (offered): aliases and model ids. Older ids live in
@@ -328,7 +333,7 @@ export function offeredModelsFrom(agentKey, texts = {}) {
  * model cache under `appHome`. No reader: the static list (Claude's), and no Antigravity list.
  */
 export function knownModels(agentKey, { home, read, appHome } = {}) {
-  const texts = read && home ? textsOf(home, read) : {};
+  const texts = read && home ? configTexts(home, read) : {};
   if (read && appHome) {
     try { texts.antigravityModels = read(agModelsPath(appHome)) ?? null; } catch { texts.antigravityModels = null; }
   }
@@ -394,6 +399,148 @@ export function effortArgs(agentKey, effort) {
   return EFFORT[agentKey](effort);
 }
 
+// ---- A bot's own reasoning effort and service tier (#1411) ----
+//
+// Codex reads both from its own config (`model_reasoning_effort` and `service_tier`) and from
+// `-c key=value` on its command line, the later word winning. A bot's record therefore stores
+// the two and the pack passes them on every launch as per-launch overrides, never in the
+// person's global config, so two bots on one host can differ. The catalog of the Codex CLI this
+// pack starts names the tier `priority` as Fast and the plain one `default` (Standard); the
+// roster stores the menu's words.
+
+/** The service tiers a bot may store: the Fast one and Standard. */
+export const TIERS = Object.freeze(["fast", "standard"]);
+
+/** The reasoning efforts the Codex CLI's catalog lists for its seat models (codex-cli 0.167.0). */
+export const CODEX_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
+
+/** Why `effort` can't be stored for a Codex bot, or null (absent or one of CODEX_EFFORTS: fine). */
+export const codexEffortProblem = (effort) => (effort === undefined || effort === null ? null
+  : CODEX_EFFORTS.includes(effort) ? null : `reasoning effort ${JSON.stringify(effort)} isn't one of ${CODEX_EFFORTS.join(", ")}`);
+
+/** Codex's own name for a stored tier: Fast is `priority`, Standard `default`. */
+export const serviceTierId = (tier) => (tier === "fast" ? "priority" : tier === "standard" ? "default" : null);
+
+/** The stored tier for a Codex service-tier id; an id this pack has no word for is itself. */
+export const tierName = (id) => (id === "priority" ? "fast" : id === "default" ? "standard" : id ?? null);
+
+/** Why `tier` can't be stored, or null (absent or one of TIERS: fine). One line. */
+export const tierProblem = (tier) => (tier === undefined || tier === null
+  ? null : TIERS.includes(tier) ? null : `service tier ${JSON.stringify(tier)} isn't fast or standard`);
+
+/** The arguments that start `agentKey` on service tier `tier`, [] when none is given or not Codex. */
+export function tierArgs(agentKey, tier) {
+  const id = serviceTierId(tier);
+  return agentKey === "codex" && id ? ["-c", `service_tier=${id}`] : [];
+}
+
+/**
+ * The words a bot's own reasoning effort and service tier add to a Codex launch (#1411):
+ * effortArgs then tierArgs, [] for every other agent and for a Codex bot with neither stored.
+ * They go after the agent's own words, so they win over its profile and global config, and
+ * after a template's own words, so the roster wins there too. Workers never take them: their
+ * agent, model and effort come from the worker defaults or a template.
+ */
+export function seatSettingsArgs(agentKey, bot) {
+  if (agentKey !== "codex" || !bot) return [];
+  return [...effortArgs("codex", bot.effort), ...tierArgs("codex", bot.tier)];
+}
+
+/**
+ * The value a Codex argv gives config key `key` in its own `-c key=value` words (the last one
+ * wins), or null. Any word form Codex takes: `-c k=v`, `-ck=v`, `-c=k=v`, `--config k=v`,
+ * `--config=k=v`; nothing after `--` is read, and only the exact key counts.
+ */
+export function codexConfigValue(argv, key) {
+  const words = Array.isArray(argv) ? argv : [];
+  let value = null;
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === "--") break;
+    let text = null;
+    if (w === "-c" || w === "--config") text = words[i + 1] ?? null;
+    else if (w.startsWith("--config=")) text = w.slice("--config=".length);
+    else if (w.startsWith("-c") && w.length > 2) text = w.slice(w[2] === "=" ? 3 : 2);
+    if (text === null) continue;
+    const eq = text.indexOf("=");
+    if (eq < 0 || text.slice(0, eq).trim() !== key) continue;
+    value = text.slice(eq + 1).trim().replace(/^(["'])(.*)\1$/, "$2");
+  }
+  return value;
+}
+
+/**
+ * The reasoning effort and service tier one Codex config text's top level names
+ * (`model_reasoning_effort` and `service_tier`), as { effort, tier }, each null when its key is
+ * absent or the text isn't one. The tier is Codex's id (`priority`, `fast`, `default`, `flex`),
+ * as written: Codex takes both `fast` and `priority` for the Fast tier.
+ */
+export function codexSettingsFrom(text) {
+  if (typeof text !== "string") return { effort: null, tier: null };
+  return { effort: tomlTopValue(text, "model_reasoning_effort"), tier: tomlTopValue(text, "service_tier") };
+}
+
+/**
+ * The pair a Codex launch inherits under its roster and the profile it names: the global
+ * `~/.codex/config.toml` top level (`texts`: configPaths' names). Nulls for every other agent,
+ * for no file and for a key the file doesn't name. A `[profiles.…]` section is not read: `-p`
+ * layers a whole file (codexProfileFrom), which is the profile this pack reports.
+ */
+export function codexDefaultsFrom(agentKey, texts = {}) {
+  return agentKey === "codex" ? codexSettingsFrom(texts.codexConfig) : { effort: null, tier: null };
+}
+
+/** codexDefaultsFrom over a synchronous `read(path)` under `home` (the CLI). */
+export function codexDefaults(agentKey, { home, read }) {
+  return codexDefaultsFrom(agentKey, configTexts(home, read));
+}
+
+// A profile file's name beside the global config: letters, digits, "." "_" and "-", never a
+// path, never a leading dash (`-p ../x` reads nothing).
+const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The Codex profile a launch argv names: `-p <name>`, `-p<name>`, `-p=<name>`, `--profile
+ * <name>` or `--profile=<name>`, the last one winning, nothing after `--` read. Null when the
+ * argv names none, or names something that can't be one file beside the config.
+ */
+export function codexProfileName(argv) {
+  const words = Array.isArray(argv) ? argv : [];
+  let name = null;
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === "--") break;
+    let text = null;
+    if (w === "-p" || w === "--profile") text = words[i + 1] ?? null;
+    else if (w.startsWith("--profile=")) text = w.slice("--profile=".length);
+    else if (w.startsWith("-p") && w.length > 2) text = w.slice(w[2] === "=" ? 3 : 2);
+    if (text !== null) name = text.trim();
+  }
+  return name !== null && PROFILE_NAME.test(name) ? name : null;
+}
+
+/**
+ * The file a Codex profile is: `~/.codex/<name>.config.toml` beside the global config, which
+ * `-p <name>` layers on top of it. Null for a name that can't be one. The pack only reads it.
+ */
+export function codexProfilePath(home, name) {
+  return typeof home === "string" && typeof name === "string" && PROFILE_NAME.test(name)
+    ? `${home}/.codex/${name}.config.toml` : null;
+}
+
+/**
+ * What the Codex profile `name` names at its top level, as codexSettingsFrom reads it, or null
+ * when the name can't be a profile's or its file is missing or unreadable. `home` and `read`
+ * are modelIo's (a synchronous reader).
+ */
+export function codexProfileFrom(name, { home, read } = {}) {
+  const path = codexProfilePath(home, name);
+  if (!path || typeof read !== "function") return null;
+  let text = null;
+  try { text = read(path); } catch { text = null; }
+  return typeof text === "string" ? codexSettingsFrom(text) : null;
+}
+
 // agy 1.5.3's execution mode (`--mode accept-edits|auto|plan`): the pack names one on every
 // Antigravity launch, auto unless the roster's agyMode says otherwise, so a bot doesn't stop at
 // its first command. Where agy can't run that mode it continues in manual mode, so the launch
@@ -435,17 +582,26 @@ export const CODEX_AUTO_ARGS = Object.freeze(["--approve-for-me", "--disable", "
 
 // One Codex launch mode on every machine (#1125, the owner's ruling of 10 and 12 Nov): every
 // Codex seat and every worker the pack starts with --agent codex runs the auto mode above with
-// the workspace-write sandbox on, never --dangerously-bypass-approvals-and-sandbox. Two more
+// the workspace-write sandbox on, never --dangerously-bypass-approvals-and-sandbox. Three more
 // words make it usable there. `--no-daemon`: hc --skill says Codex must run with it (templates
 // included), or its commands run in Codex's shared background server, outside hc and with the
 // environment of whichever pane started that server (HC_TERMINAL_ID included). The sandbox's
-// own `network_access`: on, so hc's socket and GitHub (gh, git's transport) answer. The folders
+// own `network_access`: on, so hc's socket and GitHub (gh, git's transport) answer. And the
+// non-login shell below (`allow_login_shell` false, #1133). The folders
 // it may write besides its working folder are derived per launch (codexGrants, withCodexGrants).
 // A bot's `codexAuto: false` no longer opts out (model.js warns), and the source's own approval
 // and sandbox words are left out by name (codexClean). An hc worker template owns its command,
 // bypass included: the owner's exception for template workers (#1125), never a seat's.
 export const CODEX_NETWORK = "sandbox_workspace_write.network_access=true";
-export const CODEX_MODE_ARGS = Object.freeze([...CODEX_AUTO_ARGS, "--no-daemon", "-c", CODEX_NETWORK]);
+// Codex runs every shell command through the account's login shell unless this is off (codex-cli
+// 0.167 `allow_login_shell`, default true): a login startup that prepends a directory would put
+// another `hc` (or a wrapper of it) ahead of the pane PATH and its hc kill shim (#1133). The
+// pack adds the pane PATH's guard first and needs that ordering at command time, so every launch
+// it builds runs Codex's commands in a non-login shell (`-c`): the shell's own non-login startup
+// still runs and every tool the pane PATH holds still resolves; only the login-only files (a
+// profile that rebuilds PATH) do not, and no startup file is edited.
+export const CODEX_LOGIN_SHELL = "allow_login_shell=false";
+export const CODEX_MODE_ARGS = Object.freeze([...CODEX_AUTO_ARGS, "--no-daemon", "-c", CODEX_NETWORK, "-c", CODEX_LOGIN_SHELL]);
 
 /** Whether a launch of `agentKey` passes Codex's launch mode: every Codex seat and worker the pack builds (#1125: no opt-out). */
 export const codexAutoOn = (agentKey) => agentKey === "codex";
@@ -461,7 +617,7 @@ const CODEX_PACK_WORDS = new Set(["--approve-for-me", "--no-daemon"]);
 const CODEX_BYPASS = new Set(["--dangerously-bypass-approvals-and-sandbox", "--yolo"]);
 const CODEX_VALUED = [["-a", "--ask-for-approval"], ["-s", "--sandbox"], [null, "--remote"], [null, "--remote-auth-token-env"]];
 const CODEX_CONFIG_KEYS = ["sandbox_mode", "approval_policy", "approvals_reviewer", "sandbox_workspace_write",
-  "default_permissions", "permission_profile", "permissions"];
+  "default_permissions", "permission_profile", "permissions", "allow_login_shell"];
 // Codex's other flags that take a value: the word after one is never read as a flag here.
 const CODEX_TAKES_VALUE = new Set(["-m", "--model", "-p", "--profile", "-C", "--cd", "-i", "--image", "--enable", "--disable",
   "--local-provider", "--add-dir"]);
@@ -811,8 +967,8 @@ export function codexDirsExact(args, where) {
  * parent or symlink alias of the home folder or the app home goes too, as does a relative one:
  * its narrowness can't be proved, #1142); one it allows is passed as that canonical value, the
  * one checked. `where` may also be a home folder, compared as written.
- * The pack's own --approve-for-me, --no-daemon and network word go quietly (launchRun puts them
- * back once). Every other word stays as it is, after a `--` too.
+ * The pack's own --approve-for-me, --no-daemon, network and login-shell words go quietly
+ * (launchRun puts them back once). Every other word stays as it is, after a `--` too.
  * Returns { argv, dropped, unproved } (`dropped`: the flags left out, by name, `-c sandbox_mode`,
  * `-c profiles.*.sandbox_mode` or `-c profiles` style: never a value or a profile's name;
  * `unproved`: the --add-dir folders withheld because an observation they
@@ -832,8 +988,9 @@ export function codexClean(run, where = null) {
     if (valued) { drop(valued.flag); if (valued.next) i += 1; continue; }
     const config = codexConfigAt(words, i);
     if (config) {
-      // The pack's own network word goes quietly, as --approve-for-me does: launchRun adds it once.
-      if (config.text.trim() === CODEX_NETWORK) { i += config.span - 1; continue; }
+      // The pack's own network and login-shell words go quietly, as --approve-for-me does:
+      // launchRun adds them once.
+      if (config.text.trim() === CODEX_NETWORK || config.text.trim() === CODEX_LOGIN_SHELL) { i += config.span - 1; continue; }
       // Any other spelling of that word is a config key like the rest: dropped and named (launchRun
       // still adds the exact one).
       if (config.name) drop(`-c ${config.name}`);
@@ -862,7 +1019,7 @@ export function codexClean(run, where = null) {
 export function codexCleanNote(run, where = null, source = "programs.json's Codex command") {
   const { dropped } = codexClean(run, whereOf(where));
   return dropped.length ? `${source} names ${dropped.join(", ")}: left out. Every Codex seat and worker runs in auto mode `
-    + "(--approve-for-me) with its sandbox on (#1125)." : null;
+    + "(--approve-for-me) with its sandbox on and a non-login shell (#1125, #1133)." : null;
 }
 
 /**
@@ -871,8 +1028,12 @@ export function codexCleanNote(run, where = null, source = "programs.json's Code
  * { candidates, general }. `candidates`, in order: `gitDir`, the launch checkout's own git dir (a
  * linked worktree's `.git/worktrees/<name>`, which Codex keeps read-only even beside its common
  * dir), and `gitCommonDir`, its git common dir (its own .git, or the main checkout's); then
- * herdr-core's state and data folders (XDG_STATE_HOME, XDG_DATA_HOME, else under `home`), which hc
- * needs to reach its core; then the tool caches a build writes: Go's module and build caches
+ * herdr-core's state and data folders (XDG_STATE_HOME, XDG_DATA_HOME, else under `home`). They
+ * are kept as a narrow defence for the one case #1125 did not test: the core is not running and
+ * the hc client must start it or take its lock. While the core runs neither is needed (N4: with
+ * both left out, `hc ls`, `hc get self` and `am brief` exited 0); the network word is always
+ * needed (N3). No isolated check has shown the core-not-running case works without them, so they
+ * stay until one does (#1261); then the tool caches a build writes: Go's module and build caches
  * (GOMODCACHE, GOCACHE, else GOPATH's), npm's (npm_config_cache), pnpm's store and cache, and Bun's
  * install cache (BUN_INSTALL_CACHE_DIR, BUN_INSTALL). `general`: the folders never granted whole
  * (each XDG folder, ~/.local, GOPATH and Bun's own). `env` is the launch's environment.
@@ -1156,7 +1317,7 @@ export const AUTO_MODE = Object.freeze({
   codex: Object.freeze({ args: CODEX_MODE_ARGS,
     own: Object.freeze(["--approve-for-me", "-a", "--ask-for-approval", "--yolo", "--dangerously-bypass-approvals-and-sandbox"]),
     what: "Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox with network on, "
-      + "outside Codex's shared server (--no-daemon), with hooks off" }),
+      + "outside Codex's shared server (--no-daemon), with hooks off and commands in a non-login shell (#1133)" }),
   antigravity: Object.freeze({ args: Object.freeze([AGY_SKIP_PERMISSIONS]),
     own: Object.freeze([AGY_SKIP_PERMISSIONS]),
     what: "no permission prompts; the launch's deny list still refuses what it names" }),
@@ -1193,23 +1354,157 @@ function runNames(run, flags) {
   return false;
 }
 
+// ---- A bot's own permission mode (Claude Code, #1413) ----
+//
+// Claude Code's --permission-mode names what a session may run without asking. The pack starts
+// every Claude launch in its auto mode (AUTO_MODE); a bot's record may name another of Claude
+// Code's own modes instead, and the launch passes that one from the definition on every path
+// (start, restart, revive, linked start, worker and a worker's tree helper). It is independent
+// of the model, reasoning effort and service tier. The names are Claude Code 2.1.328's `--help`
+// list; herdr/test/permission-mode.test.mjs reads the `--help` of the Claude Code on the PATH of
+// the gate and fails when the two lists differ, so a CLI upgrade is seen before a mode the newer
+// CLI accepts is refused. Update this list and the README's table together when it fails.
+export const CLAUDE_PERMISSION_MODES = Object.freeze(["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]);
+
+/** What a Claude launch runs without a stored permission mode. */
+export const PERMISSION_MODE_DEFAULT = "auto";
+
+/** One line for each mode: what it runs without asking (Claude Code's own meanings). */
+export const PERMISSION_MODE_WHAT = Object.freeze({
+  acceptEdits: "Claude Code's acceptEdits mode: reads and file edits run without a prompt",
+  auto: "Claude Code's auto mode: its classifier answers permission requests",
+  bypassPermissions: "Claude Code's bypassPermissions mode: every tool call runs without a prompt",
+  manual: "Claude Code's manual mode: it asks before anything but reads",
+  dontAsk: "Claude Code's dontAsk mode: anything not already allowed is refused instead of asked",
+  plan: "Claude Code's plan mode: it reads and plans; edits wait for a person's approval",
+});
+
+/** The agents with a per-bot permission mode, and the names each accepts; null for the others. */
+export const PERMISSION_MODES = Object.freeze({ claude: CLAUDE_PERMISSION_MODES });
+
+/** The permission mode names `agentKey` takes, or null. */
+export function permissionModesOf(agentKey) {
+  return PERMISSION_MODES[agentKey] ?? null;
+}
+
+/** Why `mode` can't be stored for `agentKey`, or null (absent or one of its names: fine). One line. */
+export function permissionModeProblem(agentKey, mode) {
+  if (mode === undefined || mode === null || mode === "") return null;
+  if (typeof mode !== "string") return `permission mode ${JSON.stringify(mode)} isn't text`;
+  const modes = permissionModesOf(agentKey);
+  if (!modes) {
+    if (!agentKey) return "permission mode is Claude Code's (--permission-mode); this bot has no coding agent";
+    const name = AGENTS[agentKey]?.name ?? agentKey;
+    // F2: say what to use instead, so a refusal names the control that does exist.
+    const instead = agentKey === "codex" ? "use its fixed launch mode (#1125) instead"
+      : agentKey === "antigravity" ? "use its execution mode (agyMode) instead" : null;
+    return `permission mode is Claude Code's (--permission-mode); ${name} has none${instead ? `: ${instead}` : ""}`;
+  }
+  return modes.includes(mode) ? null : `permission mode ${JSON.stringify(mode)} isn't one of ${modes.join(", ")}`;
+}
+
+/**
+ * The words that start `agentKey` on permission mode `mode`: Claude Code's own flag, [] for an
+ * agent with no per-bot mode. No mode names the pack's default, auto.
+ */
+export function permissionModeArgs(agentKey, mode = null) {
+  if (!permissionModesOf(agentKey)) return [];
+  return ["--permission-mode", typeof mode === "string" && mode ? mode : PERMISSION_MODE_DEFAULT];
+}
+
+/**
+ * The permission mode a launch's own command line names, or null: the last --permission-mode
+ * before any `--` (Claude Code reads the last one), or bypassPermissions for its older
+ * --dangerously-skip-permissions spelling. Used by `show` to report what a live pane runs.
+ */
+export function permissionModeFrom(argv) {
+  const { args } = agentArgv(argv);
+  let found = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const w = args[i];
+    if (w === "--") break;
+    if (w === "--dangerously-skip-permissions") found = "bypassPermissions";
+    else if (w === "--permission-mode") found = args[i + 1] ?? null;
+    else if (w.startsWith("--permission-mode=")) found = w.slice("--permission-mode=".length);
+  }
+  return found;
+}
+
 /**
  * The words `agentKey`'s automatic mode adds to `run` for `bot`: AUTO_MODE's, [] for an agent
- * with none and for a run that already picks its own approvals (a programs.json override).
- * Codex always gets its launch mode (#1125): launchRun leaves the source's own approval and
- * sandbox words out instead.
+ * with none and for a run that already picks its own approvals (a programs.json override). A
+ * Claude bot whose record names a permission mode (#1413) gets that mode instead of auto, even
+ * when its run names one: the record is the later word and wins. Codex always gets its launch
+ * mode (#1125): launchRun leaves the source's own approval and sandbox words out instead.
  */
 export function autoModeArgs(agentKey, bot = null, run = []) {
-  const mode = AUTO_MODE[agentKey];
   if (agentKey === "codex") return codexAutoArgs(agentKey);
-  if (!mode || runNames(run, mode.own)) return [];
+  const mode = AUTO_MODE[agentKey];
+  if (!mode) return [];
+  if (agentKey === "claude" && typeof bot?.permissionMode === "string" && CLAUDE_PERMISSION_MODES.includes(bot.permissionMode)) {
+    return permissionModeArgs("claude", bot.permissionMode);
+  }
+  if (runNames(run, mode.own)) return [];
   return [...mode.args];
+}
+
+// Claude Code 2.1.327's person-at-the-keyboard features (#1558): a suggested next prompt after
+// every turn, a recap when a person returns, and progress summaries of running subagents. On a
+// bot seat nobody reads them, and each call carries the seat's whole context. The launch turns
+// them off, never the host's settings file (a person also works there): the two settings keys go
+// as inline JSON through the launch's own `--settings`, and the subagent variable through that
+// settings object's `env`, which Claude Code applies to every session. A bot with
+// `personFeatures: true` keeps them for a seat a person talks to all day.
+export const CLAUDE_PERSON_FEATURES = Object.freeze({
+  promptSuggestionEnabled: false,
+  awaySummaryEnabled: false,
+  env: Object.freeze({ CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES: "1" }),
+});
+export const CLAUDE_PERSON_SETTINGS = JSON.stringify(CLAUDE_PERSON_FEATURES);
+
+/** Whether `bot` keeps Claude Code's person-at-the-keyboard features (the opt-out, #1558). */
+export const keepsPersonFeatures = (bot) => bot?.personFeatures === true;
+
+/** An inline `--settings` value with #1558's keys merged in, or null for one that isn't a JSON object. */
+function withPersonSettingsValue(value) {
+  let parsed = null;
+  try { parsed = JSON.parse(value); } catch { return null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const env = parsed.env && typeof parsed.env === "object" && !Array.isArray(parsed.env) ? parsed.env : {};
+  return JSON.stringify({ ...parsed, ...CLAUDE_PERSON_FEATURES, env: { ...env, ...CLAUDE_PERSON_FEATURES.env } });
+}
+
+/**
+ * `argv` with Claude Code's person-feature settings off (#1558), for the launch's own
+ * `--settings` word: any other agent, and a bot whose `personFeatures` is true, unchanged. A run
+ * that already carries an inline `--settings` JSON has the two keys and the `env` merged into it
+ * (the pack's keys win); one that names a settings file is left as it is, because that file is
+ * the person's own and a linked machine's file can't be read here.
+ */
+export function withPersonFeatures(agentKey, argv, bot = null) {
+  const words = Array.isArray(argv) ? argv.map(String) : [];
+  if (agentKey !== "claude" || keepsPersonFeatures(bot)) return words;
+  const cut = words.indexOf("--");
+  const head = cut < 0 ? words : words.slice(0, cut);
+  for (let i = 0; i < head.length; i += 1) {
+    const w = head[i];
+    const inline = w.startsWith("--settings=");
+    if (w !== "--settings" && !inline) continue;
+    const value = inline ? w.slice("--settings=".length) : head[i + 1];
+    const merged = value === undefined ? null : withPersonSettingsValue(value);
+    if (merged === null) return words; // a file (or no value): the person's own settings stay
+    return inline ? [...words.slice(0, i), `--settings=${merged}`, ...words.slice(i + 1)]
+      : [...words.slice(0, i + 1), merged, ...words.slice(i + 2)];
+  }
+  const settings = ["--settings", CLAUDE_PERSON_SETTINGS];
+  return cut < 0 ? [...words, ...settings] : [...words.slice(0, cut), ...settings, ...words.slice(cut)];
 }
 
 /**
  * The words `agentKey` starts with: the given run (Herdr's table, programs.json applied) and the
  * flags this pack adds for that agent's automatic mode. They are added here, so a bot's start,
  * its restart and its workers all take them from the definition, never from an old pane's command.
+ * A Claude run also gets the person-feature settings off, unless the bot keeps them (#1558).
  * A Codex run loses its own approval and sandbox words first (codexClean, #1125; `where`, the
  * launch's codexWhere when the caller knows it, also stops an --add-dir of the home folder or an
  * app home, by any alias); the mode words go before a `--` in it, so they stay options.
@@ -1217,7 +1512,7 @@ export function autoModeArgs(agentKey, bot = null, run = []) {
 export function launchRun(agentKey, run, bot, where = null) {
   if (agentKey !== "codex") {
     const words = agentKey === "hermes" ? hermesPairRun(run, bot) : run;
-    return [...words, ...autoModeArgs(agentKey, bot, run)];
+    return [...withPersonFeatures(agentKey, words, bot), ...autoModeArgs(agentKey, bot, run)];
   }
   const { argv } = codexClean(run, where);
   const cut = argv.indexOf("--");

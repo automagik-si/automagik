@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 
@@ -51,6 +52,8 @@ object ChatStyle {
     val COMPOSER_RADIUS = 28.dp
     val COMPOSER_HEIGHT = 56.dp
     val COMPOSER_TEXT = 17.sp
+    /** The Question/Approval switch: a tap target at the 48dp minimum (#1040). */
+    val SWITCH_HEIGHT = 48.dp
 }
 
 /** What the chat bar says the bot is: its name, the pet to draw (null reads as Genie) and the pose for the open state. */
@@ -141,6 +144,9 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     DisposableEffect(ref) { vm.openChat(ref); onDispose { vm.closeChat(ref) } }
     val s = vm.chat.collectAsStateWithLifecycle().value?.takeIf { it.terminal == ref.address } ?: Chat.State(ref.address)
     val app by vm.state.collectAsStateWithLifecycle()
+    val memory = vm.memory.collectAsStateWithLifecycle().value
+    val botManage = vm.botManage.collectAsStateWithLifecycle().value[ref.hostId]
+    val botWrites = vm.botWrites.collectAsStateWithLifecycle().value[ref.hostId]
     val chat = vm.botChats.collectAsStateWithLifecycle().value[ref.hostId]?.getOrNull()?.find { it.terminal == ref.address }
     val terminal = app.machines[ref.hostId]?.terminals?.find { it.address == ref.address }
     val members = remember(app.machines[ref.hostId]?.members) {
@@ -149,6 +155,10 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     val pose = chatPose(s, terminal)
     val identity = remember(chat, terminal, members, pose) { chatIdentity(chat, terminal, members, pose) }
     val openLink = rememberLinkOpener()
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    // Dictation's messages belong to the app, above the composer, not to a system toast over the keys (#1068).
+    val say: (String) -> Unit = { text -> scope.launch { snackbar.showSnackbar(text) } }
     val list = rememberLazyListState()
     var draft by remember(ref) { mutableStateOf("") }
     var confirmDraft by remember(ref) { mutableStateOf<Chat.Message?>(null) }
@@ -171,7 +181,9 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     BoxWithConstraints(modifier.fillMaxSize().background(Canvas)) {
         val cardMax = (maxHeight - 200.dp).coerceIn(240.dp, ChatStyle.PENDING_MAX_HEIGHT)
         Column(Modifier.fillMaxSize()) {
-            ChatBar(s, identity, pinned, onBack, onShowTerminal?.takeIf { ChatActions.canShowTerminal(s) }, vm::chatInterrupt, vm::reconnectChat)
+            val showMemory = s.dsh && !app.demo && botManage != false && (s.dshWrite || botWrites == true)
+            ChatBar(s, identity, pinned, onBack, onShowTerminal?.takeIf { ChatActions.canShowTerminal(s) }, vm::chatInterrupt, vm::reconnectChat,
+                onMemory = if (showMemory) ({ vm.openMemory(ref) }) else null)
             Box(Modifier.fillMaxWidth().weight(1f)) {
                 LazyColumn(Modifier.fillMaxSize().alpha(if (s.offline || s.gone) .55f else 1f), state = list,
                     contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -188,20 +200,15 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                 }
                 s.notice?.let { notice -> ChatNotice(notice, vm::dismissChatNotice, Modifier.align(Alignment.TopCenter).padding(8.dp)) }
             }
+            SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp))
             val why = ChatActions.whyNoSend(s)
             Column(Modifier.fillMaxWidth().background(Chrome).navigationBarsPadding()) {
                 if (pinned != null) {
                     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp)) {
                         // Both cards can be open at once. The approval wins at open; the question stays one tap away.
-                        if (pending.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            for (card in pending.sortedBy { if (it.kind == "approval") 0 else 1 }) {
-                                val active = card.id == pinned.id
-                                TextButton(onClick = { pinnedId = card.id }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)) {
-                                    Text(if (card.kind == "question") "Question" else "Approval", fontSize = 12.sp,
-                                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (active) Accent else Muted)
-                                }
-                            }
+                        if (pending.size > 1) {
+                            val ordered = pending.sortedBy { if (it.kind == "approval") 0 else 1 }
+                            ChatCardSwitch(ordered, pinned.id) { pinnedId = it }
                         }
                         key(pinned.id) {
                             Column(Modifier.fillMaxWidth().heightIn(max = cardMax).verticalScroll(rememberScrollState())) {
@@ -212,7 +219,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                 }
                 if (why != null) Text(why, fontSize = 12.sp, color = Muted,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp))
-                else if (ChatActions.canSend(s)) ChatComposer(draft, { draft = it }, { vm.chatSend(draft); draft = "" }, draft.isNotBlank(), identity.name)
+                else if (ChatActions.canSend(s)) ChatComposer(draft, { draft = it }, { vm.chatSend(draft); draft = "" }, draft.isNotBlank(), identity.name, onSay = say)
             }
         }
     }
@@ -222,9 +229,11 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
             confirmButton = { TextButton(onClick = { vm.chatSendHeld(m); confirmDraft = null }) { Text("Send now") } },
             dismissButton = { TextButton(onClick = { confirmDraft = null }) { Text("Cancel") } })
     }
+    if (memory != null && memory.hostId == ref.hostId && memory.terminal == ref.address) ChatMemoryDialog(vm, memory)
 }
 
-@Composable private fun ChatBar(s: Chat.State, identity: ChatIdentity, card: Chat.Row?, onBack: () -> Unit, onShowTerminal: (() -> Unit)?, onInterrupt: () -> Unit, onReconnect: () -> Unit) {
+@Composable private fun ChatBar(s: Chat.State, identity: ChatIdentity, card: Chat.Row?, onBack: () -> Unit, onShowTerminal: (() -> Unit)?,
+                               onInterrupt: () -> Unit, onReconnect: () -> Unit, onMemory: (() -> Unit)?) {
     Column(Modifier.fillMaxWidth().background(Chrome)) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to agents") }
@@ -244,6 +253,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                     }
                 }
             }
+            if (onMemory != null) IconButton(onClick = onMemory) { Icon(Icons.Outlined.Psychology, "Bot memory", tint = Ink) }
             if (ChatActions.canInterrupt(s)) IconButton(onClick = onInterrupt) { Icon(Icons.Outlined.StopCircle, "Interrupt", tint = Blocked) }
             if (onShowTerminal != null) IconButton(onClick = onShowTerminal) { Icon(Icons.Outlined.Terminal, "Show terminal", tint = Ink) }
         }
@@ -259,7 +269,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
 
 /** The composer at the mock's size: a 56 dp pill with a 17 px field, the mic and Send (attach comes later). */
 @Composable internal fun ChatComposer(draft: String, onDraft: (String) -> Unit, onSend: () -> Unit, enabled: Boolean, name: String,
-                                      engine: DictateEngine? = rememberPhoneEngine()) {
+                                      engine: DictateEngine? = rememberPhoneEngine(), onSay: ((String) -> Unit)? = null) {
     Surface(color = Surface, shape = RoundedCornerShape(ChatStyle.COMPOSER_RADIUS), border = BorderStroke(1.dp, Border),
         modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp).heightIn(min = ChatStyle.COMPOSER_HEIGHT)) {
         Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -274,7 +284,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                         field()
                     }
                 })
-            Dictate(engine = engine) { heard -> onDraft(dictated(draft, heard)) }
+            Dictate(engine = engine, onHeard = { heard -> onDraft(dictated(draft, heard)) }, onSay = onSay)
             IconButton(onClick = onSend, enabled = enabled, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.AutoMirrored.Outlined.Send, "Send message", tint = if (enabled) Accent else Muted)
             }
@@ -331,7 +341,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     }
 }
 
-@Composable private fun ChatRowView(row: Chat.Row, s: Chat.State, vm: PocketViewModel, openLink: (String, Boolean) -> Unit,
+@Composable internal fun ChatRowView(row: Chat.Row, s: Chat.State, vm: PocketViewModel, openLink: (String, Boolean) -> Unit,
                                     expanded: MutableMap<String, Boolean>) {
     when (row.kind) {
         "text" -> {
@@ -353,6 +363,26 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
         "tokens" -> {}
         "approval", "question" -> PendingCard(row, s, vm)
         else -> if (row.text.isNotBlank()) ChatTextView(row.text, openLink, Muted)
+    }
+}
+
+/**
+ * The Question/Approval switch shown while both cards are open. Each label is its own 48 dp tap
+ * target (#1040); the size lives here, so a render test can measure the target the issue measured.
+ */
+@Composable
+internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (card in cards) {
+            val active = card.id == pinnedId
+            val size = Modifier.heightIn(min = ChatStyle.SWITCH_HEIGHT)
+            TextButton(onClick = { onPick(card.id) }, modifier = size,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)) {
+                Text(if (card.kind == "question") "Question" else "Approval", fontSize = 12.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                    color = if (active) Accent else Muted)
+            }
+        }
     }
 }
 
@@ -451,7 +481,7 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
 }
 
 /** A message this phone wrote, until the transcript shows it. */
-@Composable private fun MessageView(m: Chat.Message, s: Chat.State, onSendNow: (Chat.Message) -> Unit, onCancel: (Chat.Message) -> Unit, onRetry: (Chat.Message) -> Unit) {
+@Composable internal fun MessageView(m: Chat.Message, s: Chat.State, onSendNow: (Chat.Message) -> Unit, onCancel: (Chat.Message) -> Unit, onRetry: (Chat.Message) -> Unit) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Surface(color = Accent.copy(alpha = .08f), shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Accent.copy(alpha = .3f)), modifier = Modifier.widthIn(max = 560.dp)) {
             Column(Modifier.padding(10.dp, 8.dp)) {

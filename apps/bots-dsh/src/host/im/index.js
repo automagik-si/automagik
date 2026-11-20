@@ -427,7 +427,7 @@ export function install(rt) {
     const held = openCard(conn, chat.key, cardKey)
     if (held === undefined) return false
     try {
-      rt.answerApproval(held.cardKey.slice(2), choice)
+      rt.answerApproval(held.cardKey.slice(2), choice, 'im')
       await settleCard(conn.id, held.cardKey, choice === 'allow' ? text('allow') : text('reject'))
       await settledEdits(conn)
     } catch (error) {

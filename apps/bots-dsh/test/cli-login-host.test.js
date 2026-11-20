@@ -102,6 +102,60 @@ test('isolated account controls use owner actions, sanitize identities and valid
     assert.deepEqual(h.updates, [])
   })
 
+test('the account view names this installation, so a person can tell whose Bot sign-in it is', async () => {
+  const h = fixture()
+  h.acp.authScope = 'isolated'
+  h.acp.account = async () => ({ signedIn: true, account: { email: 'bot@example.test' } })
+  h.acp.terminalAccount = async () => undefined
+  const read = () => h.actions['cli-login-accounts']({})
+  // A host that does not say which installation it is keeps the old answer.
+  assert.equal(Object.hasOwn(await read(), 'installation'), false)
+  const get = h.rt.ctx.get
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: ' desktop ' } : get(name))
+  assert.equal((await read()).installation, 'desktop')
+  // A name is a name: control characters go, an empty one is not shown at all.
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: '\u0000 private\n' } : get(name))
+  assert.equal((await read()).installation, 'private')
+  h.rt.ctx.get = name => (name === 'profileContext' ? { name: ' \u0000 ' } : get(name))
+  assert.equal((await read()).installation, undefined)
+  // Asking the host for its profile must never fail the account read or echo why.
+  h.rt.ctx.get = name => {
+    if (name === 'profileContext') throw new Error('private-profile-path')
+    return get(name)
+  }
+  const unnamed = await read()
+  assert.equal(unnamed.installation, undefined)
+  assert.doesNotMatch(JSON.stringify(unnamed), /private-profile-path/)
+})
+
+test('a refused account change says which refusal it was, never the CLI text', async () => {
+  const h = fixture()
+  h.acp.authScope = 'isolated'
+  // acp-dsh's own fixed sentence is the more precise one: another live session holds it.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('Close other Automagik sessions before changing the Bot account.'), { code: 'acp-account/busy' })
+  }
+  await assert.rejects(h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }), {
+    code: 'bot/refused',
+    message: 'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.',
+  })
+  // A host that carries only the code still names the reason, and the CLI's text never fits.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('private-cli-output token-secret'), { code: 'acp-account/busy' })
+  }
+  const error = await h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }).catch(failure => failure)
+  assert.equal(error.message, 'The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.')
+  assert.doesNotMatch(JSON.stringify({ message: error.message, code: error.code }), /private-cli-output|token-secret/)
+  // A refusal this side has no sentence for keeps the card's own line.
+  h.acp.accountSignOut = async () => {
+    throw Object.assign(new Error('private-cli-output'), { code: 'acp-account/not-a-known-refusal' })
+  }
+  await assert.rejects(h.actions['cli-login-signout']({ botId: 'a', provider: 'acp-codex' }), {
+    code: 'bot/refused',
+    message: 'Account change failed. Close other app windows and try again.',
+  })
+})
+
 test('any Bot view gets the live attempt back; the opener is only its label, and no owner capability exists', async () => {
   const h = fixture()
   const first = await h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex' })
@@ -118,6 +172,93 @@ test('any Bot view gets the live attempt back; the opener is only its label, and
   // The experiment's per-tab owner capability is gone: the key is refused, not honoured.
   await assert.rejects(h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex', owner: randomUUID() }), { code: 'bot/invalid' })
   assert.equal(h.calls.some(call => call[0] === 'cancel'), false, 'reading never cancels')
+})
+
+test('ready start and status name the account from one extra read without changing current', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  h.acp.loginCurrent = async () => ready
+  const reads = []
+  h.acp.account = async id => {
+    reads.push(id)
+    return {
+      id, signedIn: true, consent: 'given', authScope: 'isolated', ref: 'ref-work', token: 'private',
+      account: { email: ' dev@example.test\n', org: 'Example', plan: 'team', token: 'private' },
+    }
+  }
+  const result = {
+    ...ready,
+    signedInAs: { ref: 'ref-work', kind: 'account', email: 'dev@example.test', org: 'Example', plan: 'team' },
+  }
+  assert.deepEqual(await h.actions['cli-login-start'](body), result)
+  assert.deepEqual(reads.splice(0), [provider, provider], 'the pre-start consent check and the ready read')
+  assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), result)
+  assert.deepEqual(reads.splice(0), [provider])
+  assert.deepEqual(await h.actions['cli-login-current'](body), { id: provider, attempt: ready })
+  assert.deepEqual(reads, [])
+})
+
+test('the extra ready read uses the confirm shape when the account has pending consent', async () => {
+  const h = fixture()
+  const provider = 'acp-claude'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  h.acp.loginCurrent = async () => ready
+  const confirm = {
+    id: provider, status: 'confirm',
+    account: { authScope: 'isolated', ref: 'ref-work', kind: 'account', email: 'dev@example.test' },
+  }
+  let consent = 'given'
+  h.acp.account = async id => {
+    const seen = { id, signedIn: true, authScope: 'isolated', consent, ref: 'ref-work', account: { email: 'dev@example.test' } }
+    consent = 'needed'
+    return seen
+  }
+  assert.deepEqual(await h.actions['cli-login-start'](body), confirm)
+  assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), confirm)
+  h.acp.status = async () => ({ agents: [{ id: provider, signedIn: true, consent }] })
+  assert.deepEqual(await h.actions['cli-login-current'](body), { id: provider, attempt: null, account: confirm.account })
+})
+
+test('a failed, mismatched or signed-out account read keeps the original ready view', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  for (const read of [
+    async () => { throw new Error('private account error') },
+    async () => ({ id: 'acp-claude', signedIn: true, consent: 'needed' }),
+    async () => ({ id: 'acp-claude', signedIn: true, consent: 'given' }),
+    async () => ({ id: provider, signedIn: false }),
+  ]) {
+    h.acp.account = read
+    assert.deepEqual(await h.actions['cli-login-start'](body), ready)
+    assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), ready)
+  }
+  assert.deepEqual(h.warnings, [])
+})
+
+test('starting, waiting and failed status polls never read the account', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider, attemptId: ATTEMPT }
+  let reads = 0
+  h.acp.account = async () => { reads++ }
+  for (const status of ['starting', 'waiting', 'waiting', 'failed']) {
+    h.acp.loginStatus = async () => ({ id: provider, attemptId: ATTEMPT, status })
+    const view = await h.actions['cli-login-status'](body)
+    assert.equal(view.status, status)
+    assert.equal(Object.hasOwn(view, 'signedInAs'), false)
+  }
+  assert.equal(reads, 0)
 })
 
 test('the model chosen in Bot A is applied to A alone when the sign-in completes, even from B’s view', async () => {
@@ -225,6 +366,40 @@ test('public views keep the official links only, a fixed code label, and an opti
   assert.equal(cliLoginUrl('https://claude.com/cai/oauth/authorize?state=x', 'acp-claude'), undefined, 'no manual code, no link')
   assert.equal(cliLoginUrl(CODEX_URL, 'acp-codex'), CODEX_URL)
   assert.equal(cliLoginView({ id: 'acp-codex', attemptId: ATTEMPT, status: 'failed', message: 'Install the CLI before signing in. private-token' }, 'acp-codex').message, 'Sign-in did not finish. Try again.')
+})
+
+test('a failed attempt says why, from acp-dsh’s fixed cause, and never from CLI text', () => {
+  const failed = (extra, provider = 'acp-claude') => ({ id: provider, attemptId: ATTEMPT, status: 'failed', message: 'private-cli-output', ...extra })
+  const message = (value, provider = 'acp-claude') => cliLoginView(value, provider).message
+  // Every cause acp-dsh’s closed set can carry, one case each.
+  const CODEX_ONLY = 'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.'
+  const CODEX_START = 'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.'
+  const byCause = new Map([
+    ['no CLI found', 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'],
+    ['no sign-in link in time', 'The CLI did not offer a sign-in link in time. Try again.'],
+    ['the CLI could not be started', 'The CLI could not be started. Run it once in a terminal, then try again.'],
+    ['unsupported sign-in link', 'The CLI returned an old sign-in link. Update it, then try again.'],
+    ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
+    ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
+    ['unknown', 'Sign-in did not finish. Try again.'],
+  ])
+  for (const [cause, sentence] of byCause) {
+    assert.equal(message(failed({ cause })), sentence, cause)
+    // The same sentence on the other agent: the closed set is not the provider's.
+    assert.equal(message(failed({ cause }, 'acp-codex'), 'acp-codex'), sentence, cause)
+  }
+  // The two device causes belong to Codex, and only Codex gets their sentences.
+  assert.equal(message(failed({ cause: 'device-code login is not enabled' }, 'acp-codex'), 'acp-codex'), CODEX_ONLY)
+  assert.equal(message(failed({ cause: 'device sign-in did not start' }, 'acp-codex'), 'acp-codex'), CODEX_START)
+  for (const device of ['device-code login is not enabled', 'device sign-in did not start']) {
+    assert.equal(message(failed({ cause: device })), 'Sign-in did not finish. Try again.', device)
+  }
+  // A host from before the cause existed still gets the two it already knew; anything else keeps
+  // the one line, and an unknown cause never becomes a message.
+  assert.equal(message(failed({ message: 'Install the CLI before signing in.' })), 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.')
+  assert.equal(message(failed({ message: CODEX_ONLY }, 'acp-codex'), 'acp-codex'), CODEX_ONLY)
+  assert.equal(message(failed({ cause: 'private-cli-output says no' })), 'Sign-in did not finish. Try again.')
+  assert.doesNotMatch(message(failed({ cause: 'private-cli-output says no' })), /private-cli-output/)
 })
 
 test('connections read each CLI’s sign-in through inspect only', async () => {

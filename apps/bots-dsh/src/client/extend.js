@@ -48,6 +48,19 @@ export const badges = registry()
 // state, and `actions.openSession` folds the sidebar below 1024 px. The Omni channels plugin
 // hangs the Omni Bot's channels and their chats there.
 export const botChildren = registry()
+// A Bot's channels as the new left bar draws them, one source per Bot:
+// `{ id, order?, botId? or owns?(bot), useChannels(botId, { open }), open(chatId) }`.
+// `useChannels` is a hook returning the channels (their chats only while `open`, i.e. the Bot's
+// Session is shown or a channel of it is unfolded); `open` opens one of its chats. While a
+// source serves a Bot its rows take the place of the team's own botChildren rows for it, never
+// both, so a team with no source keeps today's rows. The bar only reads what the source returns.
+export const botChannels = registry()
+/** The one source serving a Bot: one naming its id wins over one that owns it. */
+export const botChannelSource = (bot) => {
+  if (!bot) return undefined
+  const entries = botChannels.entries()
+  return entries.findLast(entry => entry.botId === bot.id) ?? entries.findLast(entry => entry.owns?.(bot) === true)
+}
 // Header buttons: drawn in a Bot's chat header, `Component({ bot, roster, actions, useWork })`.
 export const headerButtons = registry()
 // Sidebar tools: buttons in the sidebar's top row, between the update cloud and Search, and in

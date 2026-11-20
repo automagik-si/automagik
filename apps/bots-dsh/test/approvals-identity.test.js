@@ -66,6 +66,43 @@ test('a group approval is still answered once, from the team surface', async () 
   assert.deepEqual(rt.approvalsView(), [])
 })
 
+test('a settled approval names the kind of client that decided it and when', async () => {
+  const { rt, handlers } = bench({ groups: [['room-session', { botId: 'writer', roomId: 'room1' }]] })
+  const settled = []
+  rt.onApproval((kind, data) => { if (kind === 'settled') settled.push(data) })
+  const answer = handlers[0].handler(request('room-session'), () => Promise.resolve('delegated'))
+  const [entry] = rt.approvalsView()
+  const before = Date.now()
+  rt.answerApproval(entry.id, 'allow', 'im')
+  assert.equal(await answer, 'allowed-once')
+  assert.equal(settled.length, 1)
+  assert.equal(settled[0].id, entry.id)
+  assert.equal(settled[0].outcome, 'allowed-once')
+  assert.equal(settled[0].decidedBy, 'im')
+  assert.ok(Number.isInteger(settled[0].at) && settled[0].at >= before && settled[0].at <= Date.now())
+  // A client kind the team does not know is recorded as the ordinary web answer, never
+  // as whatever string a request carried.
+  const other = bench({ groups: [['room-session', { botId: 'writer', roomId: 'room1' }]] })
+  const seen = []
+  other.rt.onApproval((kind, data) => { if (kind === 'settled') seen.push(data) })
+  const pending = other.handlers[0].handler(request('room-session'), () => Promise.resolve('delegated'))
+  const [ask] = other.rt.approvalsView()
+  other.rt.answerApproval(ask.id, 'reject', 'carrier-pigeon')
+  await pending
+  assert.equal(seen[0].decidedBy, 'web')
+})
+
+test('an approval DSH\'s own card decides is recorded as the DSH client', async () => {
+  const { rt, handlers } = bench({ chats: [['bot-session', 'genie']] })
+  const settled = []
+  rt.onApproval((kind, data) => { if (kind === 'settled') settled.push(data) })
+  await handlers[0].handler(request('bot-session'), () => Promise.resolve('allowed-once'))
+  assert.equal(settled.length, 1)
+  assert.equal(settled[0].outcome, 'allowed-once')
+  assert.equal(settled[0].decidedBy, 'dsh')
+  assert.ok(Number.isInteger(settled[0].at))
+})
+
 test('a Bot\'s own approval keeps DSH\'s card, noted only', async () => {
   const { rt, handlers } = bench({ chats: [['bot-session', 'genie']] })
   const outcome = await handlers[0].handler(request('bot-session'), () => Promise.resolve('allowed-once'))

@@ -10,16 +10,18 @@ const isRecord = (value) => Boolean(value) && typeof value === "object" && !Arra
 
 /**
  * Start the fake. `terminals` are hc Public-like rows (address, name, labels, cwd, parent,
- * state); a row with `huge: true` answers terminal.read with `hugeBytes` of text. `afterGet`
+ * state); a row with `huge: true` answers terminal.read with `hugeBytes` of text. `machines`
+ * is the `terminal.list` inventory (`{ name, target, state }` per connected machine), and a
+ * machine's terminal rows join `terminals` under a `machine/tN` address. `afterGet`
  * runs after a terminal.get reply, so a row can rename a target between the check and the call.
  */
-export async function startFakeCore({ socket, version = "0.1.14", terminals = [], hugeBytes = 3 * 1024 * 1024 } = {}) {
+export async function startFakeCore({ socket, version = "0.1.14", terminals = [], machines = [], hugeBytes = 3 * 1024 * 1024 } = {}) {
   if (!socket) throw new Error("startFakeCore needs a socket path");
   try { unlinkSync(socket); } catch { /* first run */ }
   const log = [];
   const sockets = new Set();
   let connections = 0;
-  const state = { version, terminals, hugeBytes, afterGet: null, waitMs: 0, hang: null, templates: [] };
+  const state = { version, terminals, machines, hugeBytes, afterGet: null, waitMs: 0, hang: null, templates: [], listError: null };
   const send = (sock, message) => sock.write(`${JSON.stringify(message)}\n`);
   const ok = (sock, id, result) => send(sock, { jsonrpc: "2.0", id, result });
   const fail = (sock, id, kind, message) => send(sock, {
@@ -50,7 +52,14 @@ export async function startFakeCore({ socket, version = "0.1.14", terminals = []
         return;
       case "terminal.list":
         if (state.hang === "terminal.list") return;
-        ok(sock, id, { terminals: state.terminals, hidden_finished: 0 });
+        // `state.listError` is an error reply that (malformed) also carries rows, so a row can
+        // prove an error is never a way to pass the unfiltered list through.
+        if (state.listError) {
+          send(sock, { jsonrpc: "2.0", id, error: state.listError,
+            result: { terminals: state.terminals, machines: state.machines, hidden_finished: 0 } });
+          return;
+        }
+        ok(sock, id, { terminals: state.terminals, machines: state.machines, hidden_finished: 0 });
         return;
       case "terminal.get": {
         const found = record(params.terminal);

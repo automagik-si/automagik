@@ -6,8 +6,14 @@ import { parseAdmissionIssuer, parseAdmissionKeys } from '../src/admission';
 // a subdomain of it: a workers.dev address can never carry it.
 const origin = new URL(process.env.ID_WORKER_ORIGIN ?? '');
 if (origin.protocol !== 'https:' || !hostUnderSiteName(origin.hostname, PASSKEY_SITE_NAME) ||
-    origin.pathname !== '/' || origin.search || origin.hash || origin.username || origin.password) {
+    origin.pathname !== '/' || origin.search || origin.hash || origin.username || origin.password ||
+    origin.port) {
   throw new Error(`ID_WORKER_ORIGIN must be an HTTPS origin on ${PASSKEY_SITE_NAME} or a subdomain of it`);
+}
+// URL also accepts wildcards and other labels that cannot name a public HTTPS host.
+const dnsLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+if (origin.hostname.length > 253 || !origin.hostname.split('.').every(label => dnsLabel.test(label))) {
+  throw new Error('ID_WORKER_ORIGIN must name a concrete DNS hostname for the Custom Domain');
 }
 const databaseId = process.env.ID_DATABASE_ID ?? '';
 if (!/^[0-9a-f-]{36}$/i.test(databaseId)) throw new Error('Set ID_DATABASE_ID');
@@ -33,4 +39,7 @@ await writeFile('wrangler.local.toml', template + '\n[vars]\n' +
   (admissionKeys ? `ADMISSION_KEYS = ${JSON.stringify(JSON.stringify({ keys: admissionKeys }))}\n` +
     `ADMISSION_ISSUER = ${JSON.stringify(admissionIssuer)}\n` : '') +
   '\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "automagik-id"\n' +
-  `database_id = ${JSON.stringify(databaseId)}\nmigrations_dir = "migrations"\n`, { mode: 0o600 });
+  `database_id = ${JSON.stringify(databaseId)}\nmigrations_dir = "migrations"\n` +
+  // The service's only address: Wrangler attaches it as a Custom Domain on the zone that holds
+  // it, creating its DNS record and certificate. No zone or account ID is needed here.
+  `\n[[routes]]\npattern = ${JSON.stringify(origin.hostname)}\ncustom_domain = true\n`, { mode: 0o600 });

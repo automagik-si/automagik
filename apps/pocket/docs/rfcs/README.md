@@ -30,6 +30,8 @@ Proposals for changes that others rely on. How to write one: [RFC 0000](0000-rfc
 | [0005](0005-usage-meter.md) | Usage meter: token usage per machine as ae/1 rows, a summary doc in herdr-core | Draft | — |
 | [0007](0007-watch-after-reboot.md) | Watch in background comes back after a phone restart (RECEIVE_BOOT_COMPLETED) | Accepted | automagik-dev/automagik-pocket#38 |
 | [0008](0008-drop-ssh.md) | Drop SSH: Pocket Link (QR pairing) is the only way to connect | Accepted | automagik-dev/automagik-pocket#46 |
+| [0009](0009-keystore-phone-key.md) | The phone's Pocket Link key wrapped by Android Keystore | Draft | — |
+| [0010](0010-app-lock.md) | Optional app lock | Draft | — |
 
 Monorepo RFCs that change Pocket's contract, privacy or permissions (they live in the monorepo's
 [docs/rfcs](../../../../docs/rfcs/)):

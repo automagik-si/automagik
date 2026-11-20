@@ -12,6 +12,9 @@
 //                                  the bot-identity section (prompt.js)
 //   botModels(kind, source)        the model menu of the Bots of one kind, owned by the
 //                                  plugin that hosts them (host-models.js has the shape)
+//   genui.publish(batchId, row)    one row of a live kit card, merged into the slice every
+//                                  state answer carries (genui.js has the shape and the cap)
+//   media.register(name, fn)       bytes a kit card shows, served by the kit's media route
 //
 // Each returns its disposer, so a plugin that stops takes what it added with it. Hooks
 // are read at run time, never during install.

@@ -1,11 +1,12 @@
-// Refs #631: real bwrap, fixture roots only. No host core, credentials or runtime sockets.
+// Refs #631, #700, #743: real bwrap, fixture roots only. No host core, credentials or runtime
+// sockets. The pane is started through the pack's wrapper itself, so the test covers the mask
+// mounts, the pane's own network namespace and its egress relay, not just the mount plan.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { approveProject, readApprovedRecord } from "../mods/am-sidebar/approved.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
@@ -13,9 +14,8 @@ const wrapper = fileURLToPath(new URL("../mods/am-sidebar/bin/hc-socket-mask.mjs
 
 test("approved snapshot write and rename are refused inside the sandbox wrapper", (t) => {
   if (process.platform !== "linux") return t.skip("the sandbox wrapper uses Linux bwrap");
-  const capability = spawnSync("bwrap", ["--unshare-all", "--ro-bind", "/usr", "/usr",
-    "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--", "/usr/bin/true"],
-  { encoding: "utf8", timeout: 5000 });
+  const capability = spawnSync("bwrap", ["--unshare-net", "--ro-bind", "/", "/",
+    process.execPath, "-e", ""], { encoding: "utf8", timeout: 5000 });
   if (capability.error?.code === "ENOENT") return t.skip("bwrap is not installed");
   if (capability.status !== 0) {
     return t.skip(`bwrap namespaces unavailable: ${(capability.stderr || capability.error?.message)
@@ -49,25 +49,20 @@ for (const [name, action] of [["write", () => writeFileSync(target, "changed")],
 }
 console.log(JSON.stringify(results));
 `);
-  const harness = join(root, "wrapper-harness.mjs");
-  writeFileSync(harness, `
-import { maskArgs, runBwrap } from ${JSON.stringify(pathToFileURL(wrapper).href)};
-const result = maskArgs(process.argv.slice(2), process.env, {
-  packRoot: ${JSON.stringify(packRoot)}, containerSockets: []
-});
-if (result.fatal) throw new Error(result.fatal);
-runBwrap(result.args);
-`);
-  const args = ["--unshare-all", "--new-session", "--die-with-parent",
-    "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin",
-    "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
-    "--ro-bind", process.execPath, "/fixture-node",
-    "--proc", "/proc", "--dev", "/dev", "--bind", root, root, "--chdir", root,
-    "--", "/fixture-node", probe, approved.path, incoming, join(root, "writable")];
+  // The wrapper's own profile: a minimal read-only /, the shell's tools, this node and the
+  // fixture root. `--unshare-all` already makes the network namespace, so the wrapper adds no
+  // second switch; the egress relay still runs, because the pane command is always wrapped.
+  const profile = ["--unshare-all", "--new-session", "--die-with-parent",
+    "--ro-bind", "/", "/",
+    "--ro-bind", process.execPath, process.execPath,
+    "--proc", "/proc", "--dev", "/dev", "--bind", root, root, "--chdir", root];
   const run = (mask) => {
     writeFileSync(incoming, "replacement", { mode: 0o600 });
-    return spawnSync(process.execPath, [harness, ...args], { encoding: "utf8", timeout: 15000,
-      env: { ...env, DSH_SANDBOX_MASK: mask, AM_HC_REAL_SOCKET: real, AM_HC_PROXY_SOCKET: proxy } });
+    return spawnSync(process.execPath, [wrapper, "--pack-root", packRoot, ...profile, "--",
+      process.execPath, probe, approved.path, incoming, join(root, "writable")], {
+      encoding: "utf8", timeout: 30000,
+      env: { ...env, DSH_SANDBOX_MASK: mask, AM_HC_REAL_SOCKET: real, AM_HC_PROXY_SOCKET: proxy },
+    });
   };
   const control = run("0");
   assert.equal(control.status, 0, `unmasked fixture control: ${control.stderr}`);

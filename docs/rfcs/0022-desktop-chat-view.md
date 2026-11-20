@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Draft): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l), Proposed (owner not yet read), Q9-Q17 open for the owner; amends RFC 0024 (f)) |
+| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); amends RFC 0024 (f)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) for the shell; herdr (3.N.P) for the chat engine |
 | Created | 2026-11-09 |
@@ -22,7 +22,7 @@ and how the desktop lists them; what the Bot team's own DSH Bots keep; whom the 
 how it reaches the Linux box, and the risk that machine link brings; which desktop P0s block
 which phase; and the rollout.
 
-The 2026-11-10 revision (Proposed, for the owner to approve before anything is built) splits the
+The 2026-11-10 revision (approved by the owner's delegate on 2026-11-19) splits the
 product into **Team**, the people-facing chat, and **Code**, the Herdr side ((h)); describes the
 new left bar as a model ((i)); gives each project one humanized bot, starting with the General
 Orchestrator ((j)); states what can ship before #631 and why ((k)); and settles how the owner's
@@ -132,7 +132,7 @@ Decided by Chat after review, 2026-11-09:
 9. **Delivery H comes before phase 1.** The link scoping to the shown seat, a mask on macOS
    (only Linux has one today, bwrap) and ssh coverage land before the view does. The owner is not
    asked to sign off the link's reach as a phase-0 risk ((f), "The link's reach"; Deliveries).
-   Narrowed by (k) if the owner confirms it (2026-11-10, Proposed): H then comes before a view
+   Narrowed by (k), confirmed with the revision on 2026-11-19: H then comes before a view
    of a seat on another computer, and a seat on the desktop's own computer ships first (1L).
 
 Rejected, recorded so it is not proposed again:
@@ -478,7 +478,7 @@ or remove the machine link. Nothing is stored that needs cleaning.
 2026-11-10: #842 to #846 are all closed, #843 and #845 included, so phase 1 waits on none of
 them.
 
-### (h) Team and Code (Proposed, 2026-11-10)
+### (h) Team and Code (2026-11-10, approved 2026-11-19)
 
 The owner's words: "first separating the concepts of team and code". One product, two sides, by
 whom each is for:
@@ -511,7 +511,7 @@ What this changes:
   "Code" and its line on worker rows, in that RFC, and its code workers are Code rows here ((i),
   delivery B). If he declines either, RFC 0028 stands on that point and this revision changes.
 
-### (i) The left bar (Proposed)
+### (i) The left bar (approved 2026-11-19)
 
 Described as a model, not a drawing: the owner is still shaping how it looks, and the drawing is
 his to approve. This section fixes only what the bar holds, what each part lists and what a
@@ -544,7 +544,7 @@ The bar's side switch and the view's Code mode switch (Decided, 2) do different 
 picks a list, the second picks a pane's face. Opening a row from Code opens Code mode; from Team,
 the rendered face (Q10).
 
-### (j) One humanized bot per project, starting with the General Orchestrator (Proposed)
+### (j) One humanized bot per project, starting with the General Orchestrator (approved 2026-11-19)
 
 The owner's words: "assigning one humanized bot for each project", starting with the General
 Orchestrator.
@@ -570,7 +570,7 @@ Orchestrator.
   Moving one bot to a DSH Bot is a later step for that bot, once those gaps close, each an
   acceptance item then (Q13). Decided 4 (Chat stays a seat) is unchanged.
 
-### (k) What can ship before #631 (Proposed)
+### (k) What can ship before #631 (approved 2026-11-19)
 
 The owner asked whether an owner-only desktop view of Herdr bots can safely ship before #631.
 
@@ -615,7 +615,7 @@ the link to the terminals of the projects shown on that machine (read, status, a
 view's send and interrupt on them), still with `exec`, `run`, file writes and every other
 terminal refused (Q16).
 
-### (l) The owner's own instance, linked to his machines (Proposed; amends RFC 0024 (f))
+### (l) The owner's own instance, linked to his machines (approved 2026-11-19; amends RFC 0024 (f))
 
 The owner asked for "a dedicated automagik instance linked to this herdr enviroment, every
 machine connected". RFC 0024 (f) said: "A workspace never holds hc machine links to a member's
@@ -803,7 +803,7 @@ H. **The scoped link** (before phase 1, Decided 9; (f) "The link's reach"). The 
 The render cases fixture lands with phase 1 (herdr side) and Pocket reads its copy in its next
 pocket patch.
 
-Proposed with the 2026-11-10 revision, for the owner to approve before any is built. The order
+Added with the 2026-11-10 revision, approved by the owner's delegate on 2026-11-19. The order
 becomes 0, 1L, 2L, B, then H, 1, 2, 3, 4 as decided, and I after H and RFC 0024 delivery 2:
 
 1L. **The view of a seat on this computer** (plugin; before H and before #631, (k)). Phase 1's
@@ -831,13 +831,44 @@ I. **The owner's instance holds his links** (server image and plugin; after H an
    credential, `hc exec` through a link is refused, and a linked machine's shown seats open.
    *Rollback:* remove the links (`hc machine`); the instance shows its own DSH Bots as today.
 
+## Answers (2026-11-19)
+
+The owner's delegate approved the 2026-11-10 revision ((h) to (l)) on 2026-11-19 and answered Q9-Q17
+with this RFC's own recommendation for each; every question had one, so none fell back to the most
+conservative choice. Each answer restates the recommendation; the questions below stay as asked.
+
+9. **Q9:** yes. Team and Code replace RFC 0013's Work and Code segments, and herdr-app stays one
+   click away from a Code row ((h)). Owed: RFC 0028's Words row for "Code" (#1008), together with
+   the wording RFC 0030's Q9 asks of both RFCs ("Code" and "Code mode" are the app's Code side; one
+   pane's xterm face is the terminal face).
+10. **Q10:** yes. The view keeps its own switch (Decided 2) beside the bar's side switch: one picks a
+    list, the other a pane's face ((i)).
+11. **Q11:** both. Team lists the humanized bots first, then the team's DSH Bots and group chats, as
+    (i) lists them.
+12. **Q12:** its registry main bot, so no second agent stands between the owner and the bot that runs
+    the project ((j)). RFC 0030's Q1 answer keeps this for the team's own seats and lets its Decided 3
+    govern the Genie product.
+13. **Q13:** view first. Humanized bots start as views of their seats and move to DSH Bots one by one
+    once the gaps (j) lists close.
+14. **Q14:** the owner sets the main bot in settings; this RFC does not fix it ((j)).
+15. **Q15:** yes. Code lists every worker, as read-only rows that open Code mode ((h), (i)). Owed: RFC
+    0028's line that workers get no rows of their own (#1008) is amended to match.
+16. **Q16:** yes. H widens from the one shown seat to the terminals of shown projects on a linked
+    machine, still with no `exec`, `run` or file writes ((k)).
+17. **Q17:** yes. (l)'s four conditions let the owner's own instance hold links to every one of his
+    machines; RFC 0024 (f) names Cloud workspaces only, as already amended.
+
+(k)'s point for the owner to confirm is confirmed with the revision: an owner-only view of seats on
+the desktop's own computer ships before #631 (1L, 2L); seats on another computer wait for H.
+
 ## Open questions
 
 The eight questions this RFC first asked were decided on 2026-11-09 (Decided, 1 to 8): Q2 by the
 owner, the rest by Chat as recommended, Q6 re-decided after review. Decided 9 (H before phase
 1) came from review the same day.
 
-Open for the owner, from the 2026-11-10 revision ((h) to (l)); each has a recommendation:
+Asked by the 2026-11-10 revision ((h) to (l)), each with a recommendation; answered on 2026-11-19
+(Answers, above), kept as asked:
 
 9. **Team replaces Work.** Does the bar's Team and Code switch replace RFC 0013's Work and Code
    segments, with herdr-app one click away from a Code row? Recommended: yes ((h)). A yes
@@ -880,6 +911,8 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
   left bar as a model, one humanized bot per project starting with the General Orchestrator,
   what ships before #631, and the owner's own instance with his machine links ((h) to (l),
   Proposed, Q9-Q17); RFC 0024 (f) amended to match.
+- 2026-11-19: the 2026-11-10 revision approved by the owner's delegate; Q9-Q17 answered with this
+  RFC's recommendations (Answers); RFC 0030's delivery 0 is met.
 
 ## Links
 

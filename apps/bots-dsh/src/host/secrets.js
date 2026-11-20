@@ -2,12 +2,12 @@
 // secrets.json (mode 600) and in this process; Bots use it as $DSH_SECRET_<NAME> in
 // their shell, tool results lose it before they are saved, and every model request
 // has it replaced by [secret:<NAME>] before it leaves.
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import { refusal } from './refusal.js'
-import { chmodSync, copyFileSync, readFileSync } from 'node:fs'
-import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { chmodSync, constants, copyFileSync, lstatSync, readFileSync, statSync } from 'node:fs'
+import { chmod, lstat, mkdir, open, unlink, writeFile } from 'node:fs/promises'
+import { isAbsolute, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { GITHUB_TOKEN_DAYS, GITHUB_WORK, cleanGitHubWork, githubPermissions, isGitHubTokenName } from '../shared/github-token.js'
@@ -33,6 +33,9 @@ const TRUNCATED = '\n[output truncated'
 export const MAX_VALUE = 16384
 const MAX_REQUESTS = 20
 const USED_SAVE_MS = 5000
+const VAULT_STATUS_MS = 5000
+const GRANT_MS = 10 * 60_000
+const AUDIT_LIMIT = 1024 * 1024
 
 export const envName = name => `${ENV_PREFIX}${name}`
 // A secret scoped to one Session (`session`, set by a Session mount, capabilities.js
@@ -52,6 +55,43 @@ const forNoBot = secret => Array.isArray(secret?.scope) && secret.scope.length =
 // write path, which stores the trimmed value.
 const held = secret => secret !== undefined && typeof secret.value === 'string' && secret.value.trim().length < MIN_VALUE
 const heldReason = name => `Secret ${name} is held: its saved value is shorter than ${MIN_VALUE} characters, so it is never used. Save a new value with at least ${MIN_VALUE} characters.`
+const brokenSources = 'The vault mapping file could not be read; no secret can be used until it is fixed.'
+const dualSource = name => `${name} is defined both in secrets.json and in vault-sources.json, so it cannot be used. The user must delete one of them in Settings › Secrets.`
+const mappedWrite = name => `The name ${name} is mapped to a vault item. A typed value cannot share it; delete the mapping first or use another name.`
+const secondConnection = 'The first cut supports one Bitwarden connection.'
+const validReference = value => typeof value === 'string' && value.length > 0 && value.length <= 512
+const validScope = scope => scope === 'all' || (Array.isArray(scope) && scope.every(id => typeof id === 'string'))
+const plainObject = value => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+const purposeOf = purpose => typeof purpose === 'string' ? purpose.trim().slice(0, 300) : ''
+const vaultUnavailable = 'The vault did not answer; nothing was read. Ask again when it is available.'
+const vaultLocked = 'The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.'
+const earlierChat = 'This card belongs to an earlier chat; ask again.'
+const approvalFailed = 'The approval could not be recorded; nothing was granted. Ask again.'
+const groupCard = 'Secret cards only work in your own chat. Tell the group you will ask the user in your own chat, and call request_secret there.'
+const ownChatCard = 'Secret cards only work in your current own chat.'
+const changedMapping = name => `The vault mapping for ${name} changed; ask again.`
+const outsideScope = name => `You may not ask for ${name}; the user did not let you ask for it.`
+const hash = data => createHash('sha256').update(JSON.stringify(data), 'utf8').digest('hex')
+const commandDigestOf = (tool, workdir, command) => hash({ v: 1, tool, workdir, command })
+const fingerprintOf = ({ provider, connection, item, field, scope }) => hash({ provider, connection, item, field, scope })
+const shellTool = name => name === 'bash' || name === 'pwsh'
+const grantKey = (botId, sessionId) => JSON.stringify([botId, sessionId])
+
+async function vaultStatus(service) {
+  let timer
+  try {
+    const answer = await Promise.race([
+      new Promise(resolve => { timer = setTimeout(resolve, VAULT_STATUS_MS) }),
+      service.status(),
+    ])
+    if (!plainObject(answer) || Object.keys(answer).some(key => key !== 'state' && key !== 'lastSync')) return undefined
+    const { state, lastSync } = answer
+    if (lastSync !== undefined && !Number.isFinite(lastSync)) return undefined
+    if (state === 'unlocked' || state === 'locked' || state === 'unauthenticated') return state
+  } catch {
+    // The adapter's error may name its account or a vault reference.
+  } finally { clearTimeout(timer) }
+}
 
 export function normalizeName(raw) {
   return String(raw ?? '').trim().replace(/^\$(env:)?/i, '').replace(/^DSH_SECRET_/i, '').replace(/[\s-]+/g, '_').toUpperCase()
@@ -607,20 +647,44 @@ export function freezeLoopRequest(request) {
 export function install(rt) {
   const { ctx, home, state } = rt
   const path = join(home, 'secrets.json')
+  const sourcesPath = join(home, 'vault-sources.json')
+  const auditPath = join(home, 'vault-audit.jsonl')
 
   // `session` is kept beside an empty Bot list, never in `scope`: a version without it reads
   // an unknown scope as every Bot, but reads this entry as no Bot's.
   /** @type {Map<string, {name:string, value:string, purpose:string, scope:'all'|string[], session?:string, requestedBy:string|null, createdAt:number, updatedAt:number, lastUsedAt?:number}>} */
-  const secrets = new Map()
+  let secrets = new Map()
+  let sources = new Map()
+  let sourcesBroken = false
+  let sourcesPresent = false
+  let secretSources
+  let vaultExecutionInstalled = false
+  const vaultRequests = new Map()
+  const snapshots = new Map()
+  const approving = new Set()
+  const grants = new Map()
+  let sourcesSnapshot
+  let typedStamp
+  // A value from a dual name may already have reached a consumer. Keep masking it
+  // for this process even after either stored definition is removed.
+  const dualValues = new Map()
   let loaded = null
   let writing = Promise.resolve()
+  let mutations
   let redact = text => text
   let redactAnywhere = text => text
   let refreshEnv = () => {}
   let stopped = false
 
   const changed = () => {
+    for (const name of sources.keys()) {
+      const entry = secrets.get(name)
+      if (entry !== undefined && !dualValues.has(entry.value)) dualValues.set(entry.value, name)
+    }
     const entries = [...secrets.values()]
+    for (const [value, name] of dualValues) {
+      if (secrets.get(name)?.value !== value) entries.push({ name, value })
+    }
     redact = redactor(entries)
     redactAnywhere = redactor(entries, { wholeWords: false })
     refreshEnv()
@@ -629,6 +693,41 @@ export function install(rt) {
 
   // Error messages from JSON.parse quote the file, so only the code or name is logged.
   const reason = error => error?.code ?? error?.name ?? 'error'
+  const unavailable = name => sourcesBroken || sources.has(name)
+  const sourceReason = (name) => {
+    if (sourcesBroken) return brokenSources
+    if (!sources.has(name)) return undefined
+    if (secrets.has(name)) return dualSource(name)
+    return sourcesPresent
+      ? `${name} comes from a vault, and this version of the Bot team cannot use vault secrets yet.`
+      : `${name} is unavailable because the vault plugin is off.`
+  }
+  const secretHeldReason = name => sourceReason(name) ?? (held(secrets.get(name)) ? heldReason(name) : undefined)
+  const refuseTypedWrite = (name) => {
+    if (unavailable(name)) throw refusal(sourcesBroken ? brokenSources : mappedWrite(name))
+  }
+  function attachVault(service) {
+    if (service === undefined) return
+    secretSources = service
+    sourcesPresent = true
+    // Keep the handoff on the host once a grant can be issued, even if the adapter
+    // later goes away. An existing grant still consumes and refuses the next attempt.
+    if (!vaultExecutionInstalled) {
+      ctx.on('tools/execute', refuseVaultExecution, { prepend: true })
+      vaultExecutionInstalled = true
+    }
+  }
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['secretSources'], sub => {
+      const service = sub.secretSources
+      attachVault(service)
+      sub.effect(() => () => {
+        if (secretSources !== service) return
+        secretSources = undefined
+        sourcesPresent = false
+      })
+    })
+  } else attachVault(ctx.get?.('secretSources'))
 
   // While another dsh holds the team, that host writes secrets.json, so a reading host
   // reads it again each time; a copy read then is also read again after taking over,
@@ -641,28 +740,79 @@ export function install(rt) {
   // A reading host reloads on every request, so a held value is reported once per change,
   // not once per read.
   let heldWarned = ''
-  const loadSecrets = () => {
-    if (loaded !== null && (loadedReadOnly || rt.readOnly() !== undefined || blocked !== undefined)) loaded = null
-    return loaded ??= readSecrets()
+  const blockedWrite = code => refusal(`The secrets file could not be read (${code}). Omni does not change it; fix or move it and reload.`)
+
+  function readSourceFile() {
+    let entry
+    try { entry = lstatSync(sourcesPath) } catch (error) {
+      return error?.code === 'ENOENT' ? {} : { error: reason(error) }
+    }
+    try {
+      if (!(entry.isSymbolicLink() ? statSync(sourcesPath) : entry).isFile()) return { error: 'NOT_FILE' }
+      return { bytes: readFileSync(sourcesPath) }
+    } catch (error) {
+      return { error: reason(error) }
+    }
   }
-  // Synchronous on purpose: a shell resolves its environment without an await, so the
-  // map must be full before the first resolve after a start reads it.
-  const readSecrets = async () => {
-    loadedReadOnly = rt.readOnly() !== undefined
+
+  const sameSourceFile = (a, b) => a !== undefined && a.error === b.error
+    && (a.bytes === undefined ? b.bytes === undefined : b.bytes !== undefined && a.bytes.equals(b.bytes))
+
+  function parseSources(file) {
+    if (file.error !== undefined) return { error: file.error }
+    if (file.bytes === undefined) return { rows: new Map() }
+    let parsed
+    try { parsed = JSON.parse(file.bytes.toString('utf8')) } catch { return { error: 'INVALID_JSON' } }
+    if (parsed?.version !== 1 || !plainObject(parsed.sources)) return { error: 'INVALID_FORMAT' }
+    const rows = new Map()
+    let connection
+    for (const [name, row] of Object.entries(parsed.sources)) {
+      if (!SECRET_NAME.test(name) || !plainObject(row) || row.provider !== 'bitwarden'
+        || !validReference(row.connection) || !validReference(row.item) || !validReference(row.field)
+        || !validScope(row.scope) || Object.hasOwn(row, 'value')) return { error: 'INVALID_ROW' }
+      if (connection !== undefined && connection !== row.connection) return { error: 'MULTIPLE_CONNECTIONS' }
+      connection = row.connection
+      rows.set(name, {
+        provider: row.provider,
+        connection,
+        item: row.item,
+        field: row.field,
+        scope: row.scope,
+        purpose: purposeOf(row.purpose),
+        requestedBy: typeof row.requestedBy === 'string' ? row.requestedBy : null,
+        createdAt: Number.isFinite(row.createdAt) ? row.createdAt : 0,
+        updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : 0,
+      })
+    }
+    return { rows }
+  }
+
+  // With mappings, an edited typed file can introduce a collision even when the
+  // mapping bytes and the team's revision stay the same.
+  function typedFileStamp() {
+    try {
+      const { dev, ino, size, mtimeNs } = statSync(path, { bigint: true })
+      return `${dev}:${ino}:${size}:${mtimeNs}`
+    } catch (error) { return reason(error) }
+  }
+
+  const loadSecrets = () => {
+    const first = readSourceFile()
+    if (loaded === null || loadedReadOnly || rt.readOnly() !== undefined || blocked !== undefined
+      || sourcesBroken || !sameSourceFile(sourcesSnapshot, first)
+      || (sources.size > 0 && typedStamp !== typedFileStamp())) loaded = readSecrets(first)
+    return loaded
+  }
+
+  function readTypedFile() {
     let contents
     try {
       contents = readFileSync(path, 'utf8')
     } catch (error) {
-      if (error?.code === 'ENOENT') {
-        blocked = undefined
-        secrets.clear()
-        heldWarned = ''
-      } else {
-        blocked = reason(error)
-        rt.warn('ds-bot: unreadable secrets file %s (%s)', path, blocked)
-      }
-      changed()
-      return
+      if (error?.code === 'ENOENT') return { entries: [] }
+      const code = reason(error)
+      rt.warn('ds-bot: unreadable secrets file %s (%s)', path, code)
+      return { error: code }
     }
     let parsed
     try {
@@ -676,26 +826,25 @@ export function install(rt) {
       const backup = `${path}.broken-${Date.now()}`
       try {
         copyFileSync(path, backup)
-        blocked = undefined
-        secrets.clear()
-        heldWarned = ''
         rt.warn('ds-bot: unreadable secrets file %s; backed up as %s', path, backup)
+        return { entries: [] }
       } catch (error) {
-        blocked = reason(error)
         rt.warn('ds-bot: unreadable secrets file %s; backup failed: %s', path, error)
+        return { error: reason(error) }
       }
-      changed()
-      return
     }
-    blocked = undefined
-    secrets.clear()
+    return { entries: parsed.secrets, valid: true }
+  }
+
+  function collectTyped(entries) {
+    const rows = new Map()
     const heldNames = []
-    for (const entry of parsed.secrets) {
+    for (const entry of entries) {
       if (!SECRET_NAME.test(entry?.name ?? '') || typeof entry.value !== 'string') continue
       // Named, not silently dropped: the entry stays in the map (and the file) but is used
       // nowhere until a value of at least MIN_VALUE characters is saved.
       if (held(entry)) heldNames.push(entry.name)
-      secrets.set(entry.name, {
+      rows.set(entry.name, {
         name: entry.name,
         value: entry.value,
         purpose: typeof entry.purpose === 'string' ? entry.purpose : '',
@@ -707,28 +856,60 @@ export function install(rt) {
         ...(Number.isFinite(entry.lastUsedAt) ? { lastUsedAt: entry.lastUsedAt } : {}),
       })
     }
-    if (!loadedReadOnly) try { chmodSync(path, 0o600) } catch {}
+    return { rows, heldNames }
+  }
+
+  // A shell resolves synchronously. Read around the typed file and retry once if
+  // another host changes the mapping, before publishing either store.
+  const readSecrets = async (first) => {
+    const readOnly = rt.readOnly() !== undefined
+    let stamp = typedFileStamp()
+    let typed = readTypedFile()
+    let last = readSourceFile()
+    if (!sameSourceFile(first, last)) {
+      first = readSourceFile()
+      stamp = typedFileStamp()
+      typed = readTypedFile()
+      last = readSourceFile()
+    }
+    const mapping = sameSourceFile(first, last) ? parseSources(last) : { error: 'CHANGED_DURING_READ' }
+    const next = typed.error === undefined ? collectTyped(typed.entries) : undefined
+    if (mapping.error !== undefined && (sourcesBroken !== mapping.error || !sameSourceFile(sourcesSnapshot, last))) {
+      rt.warn('ds-bot: unreadable vault mapping file (%s)', mapping.error)
+    }
+    if (typed.valid && !readOnly) try { chmodSync(path, 0o600) } catch {}
+    loadedReadOnly = readOnly
+    typedStamp = stamp
+    blocked = typed.error
+    sourcesSnapshot = last
+    sourcesBroken = mapping.error ?? false
+    sources = mapping.rows ?? new Map()
+    if (next !== undefined) {
+      secrets = next.rows
+      reportHeld(next.heldNames)
+    }
+    changed()
+  }
+
+  function reportHeld(heldNames) {
     const heldNotice = heldNames.join(',')
     if (heldNotice !== heldWarned) {
       heldWarned = heldNotice
       for (const name of heldNames) rt.warn('ds-bot: secret %s in %s is held: its saved value is shorter than the %d-character minimum; nothing uses it until a longer value is saved', name, path, MIN_VALUE)
     }
-    changed()
   }
 
-  // Resolves once secrets.json holds the current map; rejects when the write failed.
-  const persist = () => {
-    if (blocked !== undefined) return Promise.reject(refusal(`The secrets file could not be read (${blocked}). Omni does not change it; fix or move it and reload.`))
+  function writeStore(file, snapshot, onWritten) {
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) return Promise.reject(refusal(readOnly))
-    const snapshot = JSON.stringify({ version: 1, secrets: [...secrets.values()] }, null, 2)
     const job = writing.then(async () => {
       await mkdir(home, { recursive: true })
-      const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
+      const temp = `${file}.${process.pid}.${randomUUID()}.tmp`
       try {
         await writeFile(temp, snapshot, { encoding: 'utf8', mode: 0o600 })
         await chmod(temp, 0o600)
-        await replaceFile(temp, path)
+        await replaceFile(temp, file)
+        onWritten()
       } catch (error) {
         await unlink(temp).catch(() => {})
         throw error
@@ -737,6 +918,55 @@ export function install(rt) {
     writing = job.catch(error => rt.warn('ds-bot: secrets write failed (%s)', reason(error)))
     return job
   }
+  // Resolves once secrets.json holds the current map; rejects when the write failed.
+  const persist = () => blocked !== undefined ? Promise.reject(blockedWrite(blocked))
+    : writeStore(path, JSON.stringify({ version: 1, secrets: [...secrets.values()] }, null, 2), () => { typedStamp = typedFileStamp() })
+  const persistSources = rows => {
+    const bytes = Buffer.from(JSON.stringify({ version: 1, sources: Object.fromEntries(rows) }, null, 2))
+    return writeStore(sourcesPath, bytes, () => { sourcesSnapshot = { bytes } })
+  }
+
+  function appendVaultAudit({ name, botId, commandDigest }, decision, result) {
+    if (typeof name !== 'string' || !SECRET_NAME.test(name)) return Promise.reject(new Error('Invalid vault audit name.'))
+    const line = JSON.stringify({
+      time: Date.now(), name, botId, consumer: 'shell',
+      ...(typeof commandDigest === 'string' && /^[0-9a-f]{64}$/.test(commandDigest) ? { commandDigest } : {}),
+      decision, result,
+    }) + '\n'
+    const check = () => {
+      if (!rt.holdsLock()) throw refusal(rt.readOnly() ?? 'This host cannot record vault activity.')
+    }
+    const flags = constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0)
+    const job = writing.then(async () => {
+      check()
+      await mkdir(home, { recursive: true })
+      const entry = await lstat(auditPath).catch(error => {
+        if (error.code !== 'ENOENT') throw error
+      })
+      if (entry !== undefined && !entry.isFile()) throw new Error('The vault audit path is not a file.')
+      if (entry?.size && entry.size + Buffer.byteLength(line) > AUDIT_LIMIT) {
+        check()
+        await chmod(auditPath, 0o600)
+        check()
+        await replaceFile(auditPath, `${auditPath}.1`, check)
+      }
+      check()
+      const file = await open(auditPath, flags, 0o600)
+      try {
+        check()
+        await file.chmod(0o600)
+        check()
+        await file.appendFile(line, 'utf8')
+      } finally { await file.close() }
+    })
+    writing = job.catch(() => {
+      if (rt.holdsLock()) rt.warn('ds-bot: vault audit write failed')
+    })
+    return job
+  }
+  const auditVault = (entry, decision, result) => rt.holdsLock()
+    ? appendVaultAudit(entry, decision, result).catch(() => {})
+    : Promise.resolve()
 
   let usedTimer = null
   const noteUsed = () => {
@@ -766,9 +996,22 @@ export function install(rt) {
   }
   const trimRequests = (list) => {
     while (list.length > MAX_REQUESTS) {
-      const settled = list.findIndex(entry => entry.status !== 'pending')
-      list.splice(settled === -1 ? 0 : settled, 1)
+      const settled = list.findIndex(entry => entry.status !== 'pending' && !approving.has(entry))
+      const [removed] = list.splice(settled === -1 ? 0 : settled, 1)
+      forgetVaultRequest(removed)
     }
+  }
+  function forgetVaultRequest(request) {
+    const binding = vaultRequests.get(request.id)
+    if (binding?.snapshot !== undefined) snapshots.delete(binding.snapshot)
+    vaultRequests.delete(request.id)
+  }
+  const stillListed = (botId, request) => state.secretRequests?.[botId]?.includes(request) === true
+  const vaultAuditOf = (botId, request) => vaultRequests.get(request.id) ?? { botId, name: request.name }
+  const mappingFor = name => sourcesBroken || secrets.has(name) ? undefined : sources.get(name)
+  const sessionFolder = (session) => {
+    const folder = session && (ctx.get?.('workingDirectory')?.get?.(session) ?? session.header?.cwd)
+    return typeof folder === 'string' && isAbsolute(folder) ? folder : undefined
   }
 
   const scopeText = (scope) => {
@@ -795,13 +1038,42 @@ export function install(rt) {
     if (status === 'saved' || status === 'allowed') request.scope = secrets.get(request.name)?.scope ?? 'all'
   }
 
+  function cancelVaultRequest(request, reason) {
+    request.status = 'canceled'
+    request.settledAt = Date.now()
+    if (reason !== undefined) request.reason = reason
+    forgetVaultRequest(request)
+  }
+
+  async function revokeVault(name) {
+    const notes = []
+    const audits = []
+    for (const [botId, list] of Object.entries(state.secretRequests ?? {})) {
+      for (const request of list) {
+        if (request.name !== name || request.source !== 'vault' || request.status !== 'pending') continue
+        const entry = vaultAuditOf(botId, request)
+        cancelVaultRequest(request)
+        audits.push(auditVault(entry, 'canceled', 'revoked'))
+        notes.push(botId)
+      }
+    }
+    for (const [key, grant] of grants) {
+      if (grant.name !== name) continue
+      grants.delete(key)
+      audits.push(auditVault(grant, 'canceled', 'revoked'))
+    }
+    if (notes.length > 0) await rt.save({ required: true })
+    await Promise.all(audits)
+    for (const botId of notes) await tell(botId, `The user changed the vault mapping for ${name}; ask again if you still need it.`)
+  }
+
   // After any change to `name`, every pending card for it either resolves (its Bot can
   // use the key now) or shows the form that still applies.
   function reconcile(name, notes, except) {
-    const secret = secrets.get(name)
+    const secret = unavailable(name) ? undefined : secrets.get(name)
     for (const [botId, list] of Object.entries(state.secretRequests ?? {})) {
       for (const request of list) {
-        if (request.status !== 'pending' || request.name !== name || request === except) continue
+        if (request.status !== 'pending' || request.source === 'vault' || request.name !== name || request === except) continue
         if (canUse(secret, botId) && !held(secret)) {
           settle(botId, request, 'saved')
           notes.push([botId, savedNote(name, `The user saved ${name}, and you may use it now.`)])
@@ -850,15 +1122,128 @@ export function install(rt) {
     ...(held(secret) ? { held: true } : {}),
   })
   const secretsView = () => [...secrets.values()].sort((a, b) => a.name.localeCompare(b.name)).map(secretView)
+  const sourceView = (name, row) => ({
+    name, purpose: row.purpose, scope: row.scope, requestedBy: row.requestedBy,
+    createdAt: row.createdAt, updatedAt: row.updatedAt, definedTwice: secrets.has(name),
+  })
+  const secretSourcesView = () => ({
+    broken: Boolean(sourcesBroken),
+    rows: [...sources.keys()].sort().map(name => sourceView(name, sources.get(name))),
+  })
+  const exactName = (name) => {
+    if (typeof name !== 'string' || !SECRET_NAME.test(name)) throw refusal('A name uses capitals, digits, and underscores, and starts with a letter')
+    return name
+  }
+  const checkSourceWrite = () => {
+    const readOnly = rt.readOnly()
+    if (readOnly !== undefined) throw refusal(readOnly)
+    if (sourcesBroken) throw refusal(brokenSources)
+  }
+
+  function checkVaultBinding(botId, request, status) {
+    // The loader reads both files synchronously, even though its callers can await it.
+    void loadSecrets()
+    const { id, sessionId, name, kind, source, command, shell, workdir, commandDigest } = request
+    const binding = vaultRequests.get(id)
+    const mapping = mappingFor(name)
+    if (!stillListed(botId, request) || request.status !== status || kind !== 'allow' || source !== 'vault'
+      || typeof command !== 'string' || !shellTool(shell) || typeof workdir !== 'string' || !isAbsolute(workdir)
+      || binding === undefined || binding.botId !== botId || binding.sessionId !== sessionId || binding.name !== name
+      || commandDigest !== binding.commandDigest || commandDigestOf(shell, workdir, command) !== binding.commandDigest
+      || mapping === undefined || fingerprintOf(mapping) !== binding.fingerprint) throw refusal(changedMapping(name))
+    return { binding, mapping }
+  }
+
+  async function allowVault(botId, request, body) {
+    const { name, sessionId } = request
+    const entry = vaultAuditOf(botId, request)
+    const service = secretSources
+    const check = (status) => {
+      const { binding, mapping } = checkVaultBinding(botId, request, status)
+      if (binding.commandDigest !== body.commandDigest || snapshots.get(body.snapshot) !== binding) {
+        throw refusal(changedMapping(name))
+      }
+      if (service === undefined || service !== secretSources) throw refusal(`${name} is unavailable because the vault plugin is off.`)
+      if (!canUse(mapping, botId)) throw refusal(outsideScope(name))
+      if (!rt.holdsLock()) throw refusal(rt.readOnly() ?? 'This host cannot approve vault requests.')
+      if (blocked !== undefined) throw blockedWrite(blocked)
+      if (rt.botOf(botId) === undefined || rt.chatOf(botId) !== sessionId) throw refusal(earlierChat)
+      return binding
+    }
+    let recorded = false
+    try {
+      if (typeof body.commandDigest !== 'string' || typeof body.snapshot !== 'string') {
+        throw refusal('Update the app to approve this request; the card must show the command and the vault item.')
+      }
+      check('pending')
+      const status = await vaultStatus(service)
+      check('pending')
+      if (status === undefined) throw refusal(vaultUnavailable)
+      if (status !== 'unlocked') throw refusal(vaultLocked)
+
+      approving.add(request)
+      request.status = 'allowed'
+      request.settledAt = Date.now()
+      try {
+        await rt.save({ required: true })
+      } catch {
+        if (stillListed(botId, request) && request.status === 'allowed') {
+          request.status = 'pending'
+          delete request.settledAt
+        }
+        throw refusal(approvalFailed)
+      }
+      recorded = true
+      const binding = check('allowed')
+      const key = grantKey(botId, sessionId)
+      try {
+        await appendVaultAudit(binding, 'allowed', 'ok')
+      } catch {
+        throw refusal(approvalFailed)
+      }
+      check('allowed')
+      const previous = grants.get(key)
+      if (previous !== undefined) {
+        grants.delete(key)
+        try {
+          await appendVaultAudit(previous, 'canceled', 'revoked')
+        } catch {
+          throw refusal(approvalFailed)
+        }
+        check('allowed')
+      }
+      const issuedAt = Date.now()
+      grants.set(key, {
+        name, botId, sessionId, commandDigest: binding.commandDigest, shell: request.shell, workdir: request.workdir,
+        fingerprint: binding.fingerprint, issuedAt, expiresAt: issuedAt + GRANT_MS,
+      })
+      forgetVaultRequest(request)
+    } catch (error) {
+      if (stillListed(botId, request) && ((recorded && request.status === 'allowed')
+        || (error.message === earlierChat && request.status === 'pending'))) {
+        cancelVaultRequest(request, error.message === approvalFailed ? 'audit' : undefined)
+        if (rt.holdsLock()) await rt.save({ required: true }).catch(() => {})
+      }
+      const locked = error.message === vaultLocked
+      await auditVault(entry, locked ? 'locked' : 'refused', locked ? 'locked' : 'refused')
+      if (locked) await tell(botId, vaultLocked)
+      throw error
+    } finally { approving.delete(request) }
+    await tell(botId, 'The user approved this exact command once. Vault values cannot reach a shell on this version yet, so running it will be refused; tell the user.')
+    return true
+  }
 
   const endpoints = {
     // From a card (requestId) or from the settings page (name).
     async 'secret-set'(body) {
-      const value = cleanValue(body.value)
       const now = Date.now()
       const notes = []
+      if (sourcesBroken) throw refusal(brokenSources)
       if (body.requestId !== undefined) {
+        if (findRequest(String(body.requestId))?.request.source === 'vault') throw refusal('A vault request cannot take a typed value.')
         const { botId, request } = pendingRequest(body.requestId)
+        refuseTypedWrite(request.name)
+        const value = cleanValue(body.value)
         const existing = secrets.get(request.name)
         if (existing?.session !== undefined) throw refusal(sessionOnly(request.name))
         let scope
@@ -881,6 +1266,8 @@ export function install(rt) {
         return secretView(secrets.get(request.name))
       }
       const name = normalizeName(body.name)
+      refuseTypedWrite(name)
+      const value = cleanValue(body.value)
       if (!SECRET_NAME.test(name)) throw refusal('A name uses capitals, digits, and underscores, and starts with a letter')
       const existing = secrets.get(name)
       const scope = body.scope !== undefined ? cleanScope(body.scope) : existing?.scope ?? 'all'
@@ -903,6 +1290,9 @@ export function install(rt) {
     },
     async 'secret-allow'(body) {
       const { botId, request } = pendingRequest(body.requestId)
+      if (request.source === 'vault') return allowVault(botId, request, body)
+      const unavailableReason = sourceReason(request.name)
+      if (unavailableReason !== undefined) throw refusal(unavailableReason)
       const secret = secrets.get(request.name)
       if (secret === undefined) throw refusal(`${request.name} is not saved yet`)
       if (held(secret)) throw refusal(heldReason(request.name))
@@ -917,13 +1307,19 @@ export function install(rt) {
     },
     async 'secret-cancel'(body) {
       const { botId, request } = pendingRequest(body.requestId)
-      settle(botId, request, 'canceled')
+      const entry = request.source === 'vault' ? vaultAuditOf(botId, request) : undefined
+      if (entry !== undefined) cancelVaultRequest(request)
+      else settle(botId, request, 'canceled')
       await rt.save()
+      if (entry !== undefined) await auditVault(entry, 'denied', 'refused')
       await tell(botId, `The user canceled your request for ${request.name}. Do not ask for it again unless the user brings it up; carry on without it, or tell the user what you cannot do without it.`)
       return true
     },
     async 'secret-update'(body) {
-      const secret = secrets.get(normalizeName(body.name))
+      const name = normalizeName(body.name)
+      const unavailableReason = sourceReason(name)
+      if (unavailableReason !== undefined) throw refusal(unavailableReason)
+      const secret = secrets.get(name)
       if (secret === undefined) throw refusal('No such key')
       if (body.scope !== undefined) secret.scope = cleanScope(body.scope)
       // The person who gives the key to Bots ends its Session scope.
@@ -943,12 +1339,82 @@ export function install(rt) {
       await commit(notes)
       return true
     },
+    async 'secret-source-set'(body) {
+      checkSourceWrite()
+      if (!sourcesPresent) throw refusal('The vault plugin is not on.')
+      const name = exactName(body.name)
+      if (blocked !== undefined) throw blockedWrite(blocked)
+      // A failed typed write can leave the in-memory store different from disk.
+      const typed = readTypedFile()
+      if (typed.error !== undefined) throw blockedWrite(typed.error)
+      if (typed.entries.some(entry => entry?.name === name)) {
+        throw refusal(`The name ${name} is already a typed secret. Delete it in Settings › Secrets first, or map the vault item under another name.`)
+      }
+      const { connection, item, field } = body
+      if (![connection, item, field].every(validReference)) throw refusal('Choose a valid vault reference.')
+      for (const [other, row] of sources) {
+        if (other !== name && row.connection !== connection) throw refusal(secondConnection)
+      }
+      const previous = sources.get(name)
+      const now = Date.now()
+      const row = {
+        provider: 'bitwarden', connection, item, field, scope: cleanScope(body.scope),
+        purpose: purposeOf(body.purpose), requestedBy: previous?.requestedBy ?? null,
+        createdAt: previous?.createdAt ?? now, updatedAt: now,
+      }
+      sources.set(name, row)
+      changed()
+      try {
+        await persistSources(sources)
+      } catch (error) {
+        if (sources.get(name) === row) {
+          if (previous === undefined) sources.delete(name)
+          else sources.set(name, previous)
+          changed()
+        }
+        throw error
+      }
+      await revokeVault(name)
+      return sourceView(name, row)
+    },
+    async 'secret-source-clear'(body) {
+      checkSourceWrite()
+      const name = exactName(body.name)
+      if (!sources.has(name)) throw refusal('No such vault mapping')
+      const next = new Map(sources)
+      next.delete(name)
+      await persistSources(next)
+      sources.delete(name)
+      changed()
+      await revokeVault(name)
+      return true
+    },
+    'secret-source-detail'(body) {
+      const found = findRequest(String(body.requestId ?? ''))
+      if (found === undefined) throw refusal('This request is gone')
+      const { request, botId } = found
+      const { binding, mapping: { provider, item, field } } = checkVaultBinding(botId, request, 'pending')
+      if (binding.snapshot === undefined) {
+        binding.snapshot = randomUUID()
+        snapshots.set(binding.snapshot, binding)
+      }
+      return { provider, item, field, snapshot: binding.snapshot, commandDigest: binding.commandDigest }
+    },
   }
 
-  async function secretEndpoint(endpoint, body) {
+  function mutate(task) {
+    // An idle endpoint reaches its load await immediately, as conditional cleanup
+    // relies on when it compares a value against a concurrent replacement.
+    const job = mutations === undefined ? task() : mutations.then(task)
+    const clear = () => { if (mutations === settled) mutations = undefined }
+    const settled = job.then(clear, clear)
+    mutations = settled
+    return job
+  }
+  const secretEndpoint = (endpoint, body) => mutate(async () => {
     await loadSecrets()
     return endpoints[endpoint](body ?? {})
-  }
+  })
 
   // Internal cleanup only: the comparison and existing endpoint's map.delete run
   // in one synchronous segment after loading, so a newer value cannot be deleted
@@ -973,9 +1439,10 @@ export function install(rt) {
     await loadSecrets()
     const bind = []
     for (const name of new Set(names)) {
+      const unavailableReason = secretHeldReason(name)
+      if (unavailableReason !== undefined) throw refusal(unavailableReason)
       const secret = secrets.get(name)
       if (secret === undefined) throw refusal(`No secret named ${name}. Save it in Settings → Secrets for no Bot first.`)
-      if (held(secret)) throw refusal(heldReason(name))
       if (secret.session === sessionId) continue
       if (secret.session !== undefined) throw refusal(`${name} is scoped to another Session.`)
       if (!forNoBot(secret)) throw refusal(`${name} is for ${scopeText(secret.scope)}. A Session's secret is one no Bot may use: in Settings → Secrets, choose Chosen Bots with none picked.`)
@@ -994,9 +1461,10 @@ export function install(rt) {
       throw error
     }
   }
-  async function sessionSecretNames(sessionId) {
+  async function sessionSecretNames(sessionId, { stored = false } = {}) {
     await loadSecrets()
-    return [...secrets.values()].filter(secret => canUseInSession(secret, sessionId)).map(secret => secret.name)
+    return [...secrets.values()].filter(secret => canUseInSession(secret, sessionId)
+      && (stored || !unavailable(secret.name))).map(secret => secret.name)
   }
   // Ends the Session scope of each named secret still scoped to that Session: it is no Bot's
   // and no Session's again until a mount scopes it anew.
@@ -1022,9 +1490,11 @@ export function install(rt) {
   }
 
   // A deleted Bot leaves every list it was on, and its cards go with it.
-  async function forgetBotSecrets(botId) {
+  const forgetBotSecrets = botId => mutate(async () => {
     await loadSecrets()
+    for (const request of state.secretRequests?.[botId] ?? []) forgetVaultRequest(request)
     if (state.secretRequests !== undefined) delete state.secretRequests[botId]
+    for (const [key, grant] of grants) if (grant.botId === botId) grants.delete(key)
     let touched = false
     for (const secret of secrets.values()) {
       if (Array.isArray(secret.scope) && secret.scope.includes(botId)) {
@@ -1036,7 +1506,19 @@ export function install(rt) {
       changed()
       await persist().catch(() => {})
     }
-  }
+    const next = new Map(sources)
+    for (const [name, row] of sources) {
+      if (Array.isArray(row.scope) && row.scope.includes(botId)) {
+        next.set(name, { ...row, scope: row.scope.filter(id => id !== botId) })
+      }
+    }
+    if ([...next].some(([name, row]) => sources.get(name) !== row)) {
+      await persistSources(next).then(() => {
+        sources = next
+        changed()
+      }).catch(() => {})
+    }
+  })
 
   // What the card asks GitHub for, so the Bot words the same ask and never a broader one.
   const githubAsk = work => work.length === 0 ? ''
@@ -1044,12 +1526,94 @@ export function install(rt) {
 
   const callerOf = exec => rt.selfOf(exec.agent?.session?.header?.id ?? exec.agent?.id)
 
+  async function requestVault(name, botId, args, exec) {
+    const entry = { name, botId }
+    const refuse = async message => {
+      await auditVault(entry, 'refused', 'refused')
+      return message
+    }
+    const service = secretSources
+    const session = exec.agent?.session
+    const sessionId = session?.header?.id ?? exec.agent?.id
+    const check = () => {
+      if (sourcesBroken || secrets.has(name)) return sourceReason(name)
+      if (service === undefined || secretSources !== service) return `${name} is unavailable because the vault plugin is off.`
+      if (!canUse(mappingFor(name), botId)) return outsideScope(name)
+      if (rt.groupOwners.has(sessionId)) return groupCard
+      if (rt.botOf(botId) === undefined || rt.chatOf(botId) !== sessionId) return ownChatCard
+      const readOnly = rt.readOnly()
+      if (readOnly !== undefined || !rt.holdsLock()) return `No card can be shown now. ${readOnly ?? 'This host cannot save the Bot team.'}`
+    }
+    let message = check()
+    if (message !== undefined) return refuse(message)
+    const { command, shell } = args
+    if (typeof command !== 'string' || command.trim() === '' || typeof shell !== 'string' || shell.trim() === '') {
+      return refuse(`Name the exact command and shell you will run: ${name} comes from a vault and is approved per command.`)
+    }
+    if (!shellTool(shell)) return refuse('Name the shell as bash or pwsh.')
+    if (command.length > 4000) return refuse('The command is longer than 4,000 characters; shorten it and ask again.')
+    const workdir = sessionFolder(session)
+    if (workdir === undefined) return refuse('No working folder is set for this chat; nothing was asked.')
+    const purpose = String(args.purpose ?? '')
+    const hasSecretMaterial = (row) => [command, purpose, workdir].some(text => redactAnywhere(text) !== text
+      || text.includes(row.item))
+    const unsafe = 'That request cannot be shown on a card; ask again without secret material in it.'
+    const mapping = sources.get(name)
+    if (hasSecretMaterial(mapping)) return refuse(unsafe)
+    const fingerprint = fingerprintOf(mapping)
+    entry.commandDigest = commandDigestOf(shell, workdir, command)
+    const status = await vaultStatus(service)
+    void loadSecrets()
+    message = check()
+    if (message !== undefined) return refuse(message)
+    if (fingerprintOf(sources.get(name)) !== fingerprint) return refuse(changedMapping(name))
+    if (sessionFolder(session) !== workdir) return refuse('No working folder is set for this chat; nothing was asked.')
+    if (hasSecretMaterial(sources.get(name))) return refuse(unsafe)
+    if (status === undefined) return refuse(vaultUnavailable)
+
+    const now = Date.now()
+    const pending = status === 'unlocked'
+    const list = requestsOf(botId)
+    const audits = []
+    for (const previous of list) {
+      const active = previous.status === 'pending' || (previous.status === 'allowed' && approving.has(previous))
+      if (previous.name !== name || !active) continue
+      if (previous.source === 'vault') {
+        const entry = vaultAuditOf(botId, previous)
+        cancelVaultRequest(previous)
+        audits.push(auditVault(entry, 'canceled', 'revoked'))
+      } else settle(botId, previous, 'canceled')
+    }
+    const request = {
+      id: randomUUID(),
+      ...(exec.callId ? { callId: exec.callId } : {}),
+      sessionId, name, purpose: purposeOf(purpose), kind: 'allow', source: 'vault',
+      command, shell, workdir, commandDigest: entry.commandDigest,
+      status: pending ? 'pending' : 'locked',
+      askedAt: now, ...(!pending ? { settledAt: now } : {}),
+    }
+    list.push(request)
+    if (pending) vaultRequests.set(request.id, { botId, sessionId, name, fingerprint, commandDigest: entry.commandDigest })
+    trimRequests(list)
+    audits.push(auditVault(entry, pending ? 'asked' : 'locked', pending ? 'ok' : 'locked'))
+    await rt.save()
+    await Promise.all(audits)
+    if (!pending) {
+      await tell(botId, vaultLocked)
+      return vaultLocked
+    }
+    exec.concludeTurn?.()
+    return `The card asking the user to approve the exact command for ${name} is on screen. A note arrives when the user answers.`
+  }
+
   rt.teamTools.push(defineTool({
     name: 'request_secret',
     description: 'Ask the user for a key, token, or password through a secure card in your own chat. The user types it into the card; you never see the value. It reaches your shell as an environment variable. When the key is already saved for you, this only tells you its variable. Showing a card ends your turn; a note arrives when the user saves or cancels.',
     parameters: {
       name: { type: 'string', required: true, description: 'Key name in capitals, digits, and underscores, e.g. GITHUB_TOKEN' },
       purpose: { type: 'string', required: true, description: 'One short line for the user: what you need it for. For GitHub, leave the permissions out: the card lists them' },
+      command: { type: 'string', description: 'For a vault key, the exact command to approve' },
+      shell: { type: 'string', description: 'For a vault key, the shell that will run the command: bash or pwsh' },
       github: { type: 'array', items: { type: 'string', enum: Object.keys(GITHUB_WORK) }, description: 'For a GitHub token (GITHUB_TOKEN, GH_TOKEN), required: the work you will do with it. edit_code to push commits, open_prs to open or update pull requests, read_code, read_prs, read_issues, edit_issues. The card shows the user how to make a fine-grained token with only the permissions this work needs' },
     },
     output,
@@ -1061,6 +1625,7 @@ export function install(rt) {
       if (bot === undefined) return 'Only Bots on the team can use request_secret.'
       const name = normalizeName(args.name)
       if (!SECRET_NAME.test(name)) return 'Name the key with capitals, digits, and underscores, starting with a letter (for example GITHUB_TOKEN).'
+      if (sourcesBroken || sources.has(name)) return requestVault(name, bot.id, args, exec)
       const { work, unknown } = cleanGitHubWork(args.github)
       if (unknown.length > 0) return `Unknown GitHub work: ${unknown.join(', ')}. Pass github with ${Object.keys(GITHUB_WORK).join(', ')}.`
       const stored = secrets.get(name)
@@ -1073,8 +1638,8 @@ export function install(rt) {
       // A new GitHub token is made for declared work only (#316), so the card never asks for a
       // broader one; a saved key is only allowed or replaced.
       if (secret === undefined && work.length === 0 && isGitHubTokenName(name)) return `Say what you will do with ${name}: pass github with ${Object.keys(GITHUB_WORK).join(', ')} (edit_code and open_prs to push commits and open pull requests). The card then asks for only the permissions that work needs.`
-      if (rt.groupOwners.has(id)) return 'Secret cards only work in your own chat. Tell the group you will ask the user in your own chat, and call request_secret there.'
-      if (!rt.chatOwners.has(id)) return 'Secret cards only work in your current own chat.'
+      if (rt.groupOwners.has(id)) return groupCard
+      if (!rt.chatOwners.has(id)) return ownChatCard
       const readOnly = rt.readOnly()
       if (readOnly !== undefined) return `No card can be shown now. ${readOnly}`
       const list = requestsOf(bot.id)
@@ -1115,15 +1680,27 @@ export function install(rt) {
       await loadSecrets()
       const self = callerOf(exec)
       if (rt.botOf(self) === undefined) return 'Only Bots on the team can use list_secrets.'
+      if (sourcesBroken) return brokenSources
       // A Session's secret is never offered to a Bot: not listed here, and a Bot that names it
-      // in request_secret is only told it cannot have it.
-      const listed = secretsView().filter(secret => secret.session === undefined)
+      // in request_secret is only told it cannot have it. A collision is still reported.
+      const listed = secretsView().filter(secret => secret.session === undefined || sources.has(secret.name))
+      for (const [name, row] of sources) if (!secrets.has(name)) listed.push(sourceView(name, row))
       if (listed.length === 0) return 'No keys are saved yet. Ask for one with request_secret.'
+      const service = secretSources
+      const status = service !== undefined && [...sources.keys()].some(name => !secrets.has(name))
+        ? await vaultStatus(service) : undefined
+      const vaultUse = secretSources === undefined ? 'unavailable: it comes from a vault, and the vault plugin is off'
+        : secretSources !== service || status === undefined ? 'unavailable: the vault did not answer'
+          : status === 'unlocked' ? 'available: ask with request_secret, naming the exact command and shell'
+            : 'locked: the user must unlock the vault'
       return [
         'Saved keys (values are never shown):',
-        ...listed.map((secret) => {
+        ...listed.sort((a, b) => a.name.localeCompare(b.name)).map((secret) => {
           const stored = secrets.get(secret.name)
-          const use = held(stored)
+          const use = sources.has(secret.name)
+            ? stored !== undefined ? 'unavailable: this name is defined both in secrets.json and in vault-sources.json'
+              : vaultUse
+            : held(stored)
             ? `held: its saved value is shorter than ${MIN_VALUE} characters, so nothing uses it; save a new value`
             : canUse(stored, self) ? `you may use it as $${envName(secret.name)}` : 'you may not use it; ask with request_secret'
           return `- ${secret.name}${secret.purpose ? ` — ${secret.purpose}` : ''} — for ${scopeText(secret.scope)} — ${use}`
@@ -1132,13 +1709,33 @@ export function install(rt) {
     },
   }))
 
+  // The next shell attempt that reaches execute uses up the approval. Part 2a
+  // always refuses that attempt before either the tool body or an adapter read.
+  async function refuseVaultExecution(exec, next) {
+    if (!shellTool(exec.name)) return next()
+    const session = exec.agent?.session
+    const key = grantKey(callerOf(exec), session?.header?.id ?? exec.agent?.id)
+    const grant = grants.get(key)
+    if (grant === undefined) return next()
+    grants.delete(key)
+    const args = exec.arguments ?? {}
+    let message
+    if (Date.now() >= grant.expiresAt) message = `The approval for ${grant.name} expired; ask again.`
+    else if (exec.parent !== undefined || Object.hasOwn(args, 'workdir')
+      || commandDigestOf(exec.name, sessionFolder(session), args.command) !== grant.commandDigest) {
+      message = 'The approved command, shell or folder was different; ask again.'
+    } else message = 'Vault values cannot reach a shell on this version; nothing was read.'
+    await auditVault(grant, 'refused', 'refused')
+    return { isError: true, error: { message }, content: [{ type: 'text', text: 'Error: ' + message }] }
+  }
+
   // Tool results lose the values before the registry renders and saves them. Every
   // field is redacted — a wrapper further out in the pipeline still sees a whole
   // result (its `content`, `meta`, and `additionalContexts` too), and the registry
   // re-renders a changed success result from its redacted value.
   ctx.on('tools/execute', async function redactToolResult(exec, next) {
     const result = await next()
-    if (secrets.size === 0 || result === null || typeof result !== 'object') return result
+    if ((secrets.size === 0 && dualValues.size === 0) || result === null || typeof result !== 'object') return result
     return redactDeep(result, redact)
   })
 
@@ -1151,7 +1748,7 @@ export function install(rt) {
   // to keep agent routes accepting the redacted request.
   const rewritten = new WeakSet()
   ctx.on('llm/stream', (options, next) => {
-    if (secrets.size === 0 || rewritten.has(options.messages)) return next()
+    if ((secrets.size === 0 && dualValues.size === 0) || rewritten.has(options.messages)) return next()
     const messages = redactDeep(options.messages, redact)
     const system = redactDeep(options.system, redact)
     if (messages === options.messages && system === options.system) return next()
@@ -1164,13 +1761,16 @@ export function install(rt) {
   })
 
   function resolveEnv(execution) {
+    // loadSecrets reads synchronously, including on a host that follows another writer.
+    void loadSecrets()
+    if (sourcesBroken) return {}
     const botId = rt.selfOf(execution?.agent?.session?.header?.id ?? execution?.agent?.id)
     if (rt.botOf(botId) === undefined) return {}
     const command = typeof execution.arguments?.command === 'string' ? execution.arguments.command : ''
     const values = {}
     let used = false
     for (const secret of secrets.values()) {
-      if (held(secret) || !canUse(secret, botId)) continue
+      if (unavailable(secret.name) || held(secret) || !canUse(secret, botId)) continue
       values[envName(secret.name)] = secret.value
       if (command.includes(envName(secret.name))) {
         secret.lastUsedAt = Date.now()
@@ -1188,7 +1788,7 @@ export function install(rt) {
     let declared = ''
     refreshEnv = () => {
       // A Session's secret reaches no shell, so it is not declared to any.
-      const list = [...secrets.values()].filter(secret => !held(secret) && secret.session === undefined).sort((a, b) => a.name.localeCompare(b.name))
+      const list = [...secrets.values()].filter(secret => !unavailable(secret.name) && !held(secret) && secret.session === undefined).sort((a, b) => a.name.localeCompare(b.name))
       const key = list.map(secret => `${secret.name}\u0000${secret.purpose}`).join('\n')
       if (key === declared) return
       unregister?.()
@@ -1222,18 +1822,28 @@ export function install(rt) {
 
   ctx.effect(() => {
     void loadSecrets()
-    return () => { stopped = true; if (usedTimer !== null) clearTimeout(usedTimer) }
+    return () => {
+      stopped = true
+      grants.clear()
+      vaultRequests.clear()
+      snapshots.clear()
+      if (usedTimer !== null) clearTimeout(usedTimer)
+    }
   }, 'ds-bot: load secrets')
 
   Object.assign(rt, {
     secretsView,
-    secretValue: name => (held(secrets.get(name)) ? undefined : secrets.get(name)?.value),
-    canUseSecret: (name, botId) => !held(secrets.get(name)) && canUse(secrets.get(name), botId),
-    canUseSecretInSession: (name, sessionId) => !held(secrets.get(name)) && canUseInSession(secrets.get(name), sessionId),
+    secretSourcesView,
+    secretSourcesPresent: () => sourcesPresent,
+    secretStored: name => secrets.has(name) && !held(secrets.get(name)),
+    secretValue: name => (unavailable(name) || held(secrets.get(name)) ? undefined : secrets.get(name)?.value),
+    canUseSecret: (name, botId) => !unavailable(name) && !held(secrets.get(name)) && canUse(secrets.get(name), botId),
+    canUseSecretInSession: (name, sessionId) => !unavailable(name) && !held(secrets.get(name)) && canUseInSession(secrets.get(name), sessionId),
     bindSessionSecrets,
     releaseSessionSecrets,
     sessionSecretNames,
-    secretHeldReason: name => (held(secrets.get(name)) ? heldReason(name) : undefined),
+    secretHeldReason,
+    secretSourceReason: sourceReason,
     secretEndpoint,
     deleteSecretIfUnchanged,
     forgetBotSecrets,

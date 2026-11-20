@@ -92,6 +92,17 @@ async function start({ services = {}, privateBot = true, archives, memberPick = 
     sessionTitle: { rename: async () => {} },
     sessions: { flush: async () => {} },
   })
+  // The privacy listener is the tools/execute middleware private-bots.js registers; note the
+  // module that registers each one, so the guard below does not depend on install order.
+  let guard
+  const on = ctx.on
+  ctx.on = (name, listener, options) => {
+    if (name === 'tools/execute' && /[\\/]src[\\/]host[\\/]private-bots\.js:/.test(new Error().stack)) {
+      assert.equal(guard, undefined, 'private-bots.js registers one tools/execute listener')
+      guard = listener
+    }
+    return on(name, listener, options)
+  }
   let route
   const register = ctx.connection.fetch.register
   ctx.connection.fetch.register = (options) => {
@@ -104,9 +115,8 @@ async function start({ services = {}, privateBot = true, archives, memberPick = 
   }))).json()
   const state = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
   const tool = (name, args, sessionId) => rt.teamTools.find(d => d.name === name).execute(args, { agent: agentOf(sessionId), name, callId: 'c1' })
-  // The privacy listener alone, which runs right after the tool-deny gate (the first one);
-  // the last step stands for the tool.
-  const guard = ctx.listeners.get('tools/execute')[1]
+  // The privacy listener alone; the last step stands for the tool.
+  assert.equal(typeof guard, 'function', 'private-bots.js registered its tools/execute listener')
   const run = async (name, args, sessionId, agent = agentOf(sessionId)) => {
     let ran = false
     const exec = { name, arguments: args, agent, callId: 'c1', signal: AbortSignal.timeout(60_000) }

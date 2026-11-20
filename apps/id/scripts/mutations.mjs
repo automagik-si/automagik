@@ -1,5 +1,13 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+
+// node_modules files may be hard links into the package manager's cache: replace, never rewrite.
+const PLUGIN = 'node_modules/@better-auth/oauth-provider/dist/authorize-PV1rSogq.mjs';
+async function replaceFile(file, text) {
+  const temporary = `${file}.mutation-tmp`;
+  await writeFile(temporary, text);
+  await rename(temporary, file);
+}
 
 const mutations = [
   {
@@ -96,75 +104,129 @@ const mutations = [
     edits: [['scripts/configure.ts', '!hostUnderSiteName(origin.hostname, PASSKEY_SITE_NAME)', 'false']],
   },
   {
+    name: 'drop the Custom Domain from the generated config',
+    test: 'the origin host is the one Custom Domain',
+    edits: [['scripts/configure.ts', '\\ncustom_domain = true\\n', '\\ncustom_domain = false\\n']],
+  },
+  {
+    name: 'let configure accept an origin with a port',
+    test: 'an invalid origin writes no route',
+    edits: [['scripts/configure.ts', '    origin.port) {', '    false) {']],
+  },
+  {
+    name: 'let cleanup ignore the passkey condition',
+    test: 'cleanup keeps young passkeyless users',
+    edits: [['src/cleanup.ts', 'AND NOT EXISTS (SELECT 1 FROM passkey p WHERE p.userId = u.id)', '']],
+  },
+  {
+    name: 'let cleanup ignore the age cutoff',
+    test: 'cleanup keeps young passkeyless users',
+    edits: [['src/cleanup.ts', 'WHERE u.createdAt < ?1', 'WHERE ?1 IS NOT NULL']],
+  },
+  {
+    name: 'let cleanup remove phone accounts',
+    test: 'cleanup keeps young passkeyless users',
+    edits: [['src/cleanup.ts', 'AND u.phoneNumber IS NULL', '']],
+  },
+  {
+    name: 'let cleanup remove a user with a live session',
+    test: 'cleanup keeps an old user that still has a live session',
+    edits: [['src/cleanup.ts',
+      'AND NOT EXISTS (SELECT 1 FROM session s WHERE s.userId = u.id AND s.expiresAt > ?2)',
+      'AND ?2 IS NOT NULL']],
+  },
+  {
+    name: 'let cleanup ignore the batch limit',
+    test: 'cleanup is bounded per run',
+    edits: [['src/cleanup.ts', 'LIMIT ?3', 'LIMIT -1 + 0 * ?3']],
+  },
+  {
+    name: 'return session tokens in the session list',
+    test: 'list sessions shows only',
+    edits: [['src/index.ts', "['email', 'emailVerified', 'token']", 'undefined']],
+  },
+  {
     name: 'let CI skip the page browser tests',
     test: 'the CI job runs the browser tests',
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],
   },
-  // The invite gate (RFC 0032, Decided 9).
   {
-    name: 'invite gate removed',
-    test: 'sign-up without a ticket is refused before any row',
-    edits: [['src/auth.ts', 'const id = await admitSignup(env, endpoint.headers?.get(ADMISSION_HEADER));',
-      "const id = crypto.randomUUID().replace(/-/g, '');"]],
+    name: 'drop the Content-Security-Policy',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', "'content-security-policy': \"default-src", "'x-csp-dropped': \"default-src"]],
   },
   {
-    name: 'admission signature not checked',
-    test: 'refused with no row: wrong signature',
-    edits: [['src/admission.ts', "const verified = await compactVerify(token, key, { algorithms: ['EdDSA'] });",
-      "const verified = { payload: Buffer.from(token.split('.')[1], 'base64url') };"]],
+    name: 'let inline script run',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', "script-src 'self'; style", "script-src 'self' 'unsafe-inline'; style"]],
   },
   {
-    name: 'admission aud not checked',
-    test: 'refused with no row: wrong aud',
-    edits: [['src/admission.ts', 'if (!audienceMatches(payload.aud, new URL(env.BETTER_AUTH_URL).origin))', 'if (false)']],
+    name: 'drop nosniff',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', "  'x-content-type-options': 'nosniff',\n", '']],
   },
   {
-    name: 'admission exp not checked',
-    test: 'refused with no row: expired',
-    edits: [['src/admission.ts', 'if ((exp as number) <= seconds - ADMISSION_SKEW)', 'if (false)']],
+    name: 'send static files and API answers without the headers',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', 'return withSecurityHeaders(await router.route(request, env, ctx));',
+      'return router.route(request, env, ctx);']],
   },
   {
-    name: 'admission jti reuse allowed',
-    test: 'a used ticket is refused',
-    edits: [['src/admission.ts', "WHERE admission_ticket.state = 'pending' AND admission_ticket.ceremonies",
-      'WHERE admission_ticket.ceremonies']],
+    name: 'let a direct .html path bypass the page',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', 'if (directPage(url.pathname)) return', 'if (false) return']],
   },
   {
-    name: 'missing admission keys allow sign-up',
-    test: 'no ADMISSION_KEYS: sign-up is refused',
-    edits: [['src/admission.ts', 'if (!keys || !issuer) throw invalid();',
-      'if (!keys || !issuer) return { jti: crypto.randomUUID(), expiresAt: now + 60_000 };']],
+    name: 'rebuild the headers and lose the cookies',
+    test: 'security headers keep Better Auth redirects',
+    edits: [['src/index.ts', '  const headers = new Headers(response.headers);\n  for (const [name',
+      '  const headers = new Headers();\n  for (const [name']],
   },
   {
-    name: 'phone path ungated',
-    test: 'unknown number without a ticket creates no account',
-    edits: [['src/whatsapp.ts', 'if (!admittedId) {', 'if (false) {']],
+    name: 'lengthen the access token lifetime',
+    test: 'token lifetimes are 15 minutes',
+    edits: [['src/auth.ts', 'ACCESS_TOKEN_TTL = 15 * 60;', 'ACCESS_TOKEN_TTL = 60 * 60;']],
   },
   {
-    name: "a ticket's second ceremony completes",
-    test: 'second ceremony cannot finish after its first',
-    edits: [['src/gate.ts', "if (!(await claimSignup(env.DB, userId))) throw refusal('INVITATION_USED');",
-      'await claimSignup(env.DB, userId);']],
+    name: 'lengthen the ID token lifetime',
+    test: 'token lifetimes are 15 minutes',
+    edits: [['src/auth.ts', 'ID_TOKEN_TTL = 15 * 60;', 'ID_TOKEN_TTL = 10 * 60 * 60;']],
   },
   {
-    name: 'admission iss not checked',
-    test: 'refused with no row: wrong iss',
-    edits: [['src/admission.ts', 'if (payload.iss !== issuer)', 'if (false)']],
+    name: 'lengthen the refresh token lifetime',
+    test: 'token lifetimes are 15 minutes',
+    edits: [['src/auth.ts', 'REFRESH_TOKEN_TTL = 30 * 24', 'REFRESH_TOKEN_TTL = 90 * 24']],
   },
   {
-    name: 'admission use not checked',
-    test: 'refused with no row: use not signup',
-    edits: [['src/admission.ts', 'if (payload.use !== use)', 'if (false)']],
+    name: 'let a rotated refresh token be replayed for an hour',
+    test: 'refreshing rotates',
+    edits: [['src/auth.ts', 'REFRESH_TOKEN_REUSE_INTERVAL = 0;', 'REFRESH_TOKEN_REUSE_INTERVAL = 3600;']],
+  },
+  // The pinned plugin's own refresh checks: a version bump that drops one must fail a test.
+  {
+    name: 'issue a refresh token without offline_access',
+    test: 'issued only with offline_access',
+    edits: [[PLUGIN, '(existingRefreshToken?.scopes?.includes("offline_access") || scopes.includes("offline_access"))', 'true']],
   },
   {
-    name: 'admission life not capped at 15 minutes',
-    test: 'refused with no row: life over 15 minutes',
-    edits: [['src/admission.ts', ' || (exp as number) - (iat as number) > ADMISSION_MAX_LIFE', '']],
+    name: 'stop retiring a rotated refresh token',
+    test: 'refreshing rotates',
+    edits: [[PLUGIN, 'revoked: rotatedAt,', 'revoked: null,']],
   },
   {
-    name: 'accept a private key in ADMISSION_KEYS',
-    test: 'admission settings are validated',
-    edits: [['src/admission.ts', "if ('d' in key || key.kty", 'if (key.kty']],
+    name: 'accept an expired refresh token',
+    test: 'an expired refresh token fails',
+    edits: [[PLUGIN, 'if (refreshToken.expiresAt < /* @__PURE__ */ new Date())', 'if (false)']],
+  },
+  {
+    name: 'drop the refresh token client binding',
+    test: 'a refresh token is bound to its client',
+    edits: [[PLUGIN, 'if (refreshToken.clientId !== client_id)', 'if (false)']],
+  },
+  {
+    name: 'ignore refresh token revocation',
+    test: 'revoking a refresh token makes it fail',
+    edits: [[PLUGIN, 'set: { revoked: /* @__PURE__ */ new Date(iat * 1e3) }', 'set: {}']],
   },
 ];
 
@@ -183,7 +245,7 @@ for (const [index, mutation] of mutations.entries()) {
       const current = await readFile(file, 'utf8');
       if (!originals.has(file)) originals.set(file, current);
       if (current.split(before).length !== 2) throw new Error(`Ambiguous mutation in ${file}`);
-      await writeFile(file, current.replace(before, after));
+      await replaceFile(file, current.replace(before, after));
     }
     const result = spawnSync('bun', ['run', 'test', '--', '-t', mutation.test], {
       encoding: 'utf8', timeout: 60000,
@@ -195,6 +257,6 @@ for (const [index, mutation] of mutations.entries()) {
     }
     process.stdout.write(`${mutation.name}: KILLED (assertion failed)\n`);
   } finally {
-    for (const [file, original] of originals) await writeFile(file, original);
+    for (const [file, original] of originals) await replaceFile(file, original);
   }
 }

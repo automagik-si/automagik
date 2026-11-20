@@ -2,21 +2,27 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { apply, SERVICE } from '../index.js'
+import { accountEvidenceOf } from '../src/host/account.js'
+import { GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
 import { CliHomes, HOME_ENV, trackRun } from '../src/host/cli-homes.js'
+import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
 import { recordLogin } from '../src/host/login-ownership.js'
 import { MODEL_ACCESS_REQUIRED } from '../src/host/names.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const who = email => ({ kind: 'account', id: email, facets: { kind: 'account', email }, email })
 
-function fixture(t, { cold } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'isolated-accounts-'))
+function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
+  const root = sharedRoot ?? mkdtempSync(join(tmpdir(), 'isolated-accounts-'))
   const terminalHomes = { claude: join(root, 'terminal', '.claude'),
     codex: join(root, 'terminal', '.codex') }
   const auth = {
@@ -30,6 +36,7 @@ function fixture(t, { cold } = {}) {
   }
   for (const [vendor, name] of [['claude', 'CLAUDE_CONFIG_DIR'], ['codex', 'CODEX_HOME']]) {
     auth.set(terminalHomes[vendor], 'terminal-work@example.test')
+    if (sharedRoot) continue
     const previous = process.env[name]
     process.env[name] = terminalHomes[vendor]
     t.after(() => {
@@ -43,10 +50,11 @@ function fixture(t, { cold } = {}) {
   )
   const calls = []
   const events = []
+  const logs = []
   const cleanups = []
   let service, adapter
   const ctx = {
-    logger: { info() {}, warn() {} },
+    logger: { info: line => logs.push(line), warn() {} },
     agents: { list: () => [], get: () => ({ status: 'idle',
       ctx: { tools: { register: () => () => {} } }, session: { header: {} } }) },
     llm: { registerAdapter(ids, value) { adapter = value; return () => {} },
@@ -140,22 +148,27 @@ function fixture(t, { cold } = {}) {
       done(failLogout ? new Error('invented-private-output') : null)
     },
     imageSetup: (...args) => imageCheck(...args),
+    installation,
+    ...deps,
   })
-  t.after(async () => {
+  let stopped
+  const stopService = async () => {
     for (const child of loginChildren) { child.stuck = false; child.kill() }
     for (const cleanup of cleanups) cleanup()
     await tick()
-    rmSync(root, { recursive: true, force: true })
-  })
-  const login = async id => {
-    const attempt = await service.loginStart(id)
+    if (!sharedRoot) rmSync(root, { recursive: true, force: true })
+  }
+  const stop = () => (stopped ??= stopService())
+  t.after(stop)
+  const waitForLogin = async (id, attempt) => {
     for (let i = 0; i < 30; i++) {
       await tick()
       if (service.loginStatus(id, attempt.attemptId).status === 'ready') return
     }
     assert.fail('fake sign-in did not finish')
   }
-  return { service, adapter, auth, calls, events, root, terminal, login,
+  const login = async id => waitForLogin(id, await service.loginStart(id))
+  return { service, adapter, auth, calls, events, root, terminal, login, logs, stop, waitForLogin,
     next: email => { nextAccount = email }, fail: value => { failLogout = value },
     stallLogin: value => { stuckLogin = value },
     imageCheck: check => { imageCheck = check } }
@@ -464,4 +477,357 @@ test('a stale sign-in completion cannot refresh the catalog after an account res
   assert.equal(probes, 0)
   assert.equal(h.events.length, before)
   assert.notEqual((await h.service.inspect(id)).signedIn, true)
+})
+
+const botIds = ['acp-claude', 'acp-codex']
+const cliRoot = (host, id) => dirname(dirname(host.adapter.agents.get(id).spawn().env[POINTER_ENV]))
+const freshAccount = (host, id) => host.service.account(id, { fresh: true })
+const otherSession = {
+  code: 'acp-account/busy', message: /Close other Automagik sessions/,
+}
+
+function sharedFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'shared-acp-'))
+  const legacy = join(root, 'cli-homes')
+  const hosts = []
+  t.after(async () => {
+    await Promise.all(hosts.map(host => host.stop()))
+    rmSync(root, { recursive: true, force: true })
+  })
+  const start = (installation, deps) => {
+    const host = fixture(t, { root, installation, deps })
+    hosts.push(host)
+    return host
+  }
+  return { root, legacy, start }
+}
+
+async function expectAccount(host, id, email) {
+  const state = await freshAccount(host, id)
+  assert.equal(state.signedIn, email !== undefined)
+  assert.equal(state.account?.email, email)
+  assert.equal(state.consent, email === undefined ? undefined : 'given')
+}
+
+test('two live installations can change both Bot sign-ins independently', async t => {
+  const { root, legacy, start } = sharedFixture(t)
+  const a = start(join(root, 'dsh-a'))
+  const b = start(join(root, 'dsh-b'))
+  for (const id of botIds) {
+    assert.equal(cliRoot(a, id), legacy)
+    assert.notEqual(cliRoot(b, id), legacy)
+    const expected = new Map()
+    for (const action of ['login', 'switch', 'sign-out']) {
+      for (const [side, host, peer] of [['a', a, b], ['b', b, a]]) {
+        const email = action === 'sign-out' ? undefined : `${side}-${id}-${action}@example.test`
+        host.next(email)
+        if (action === 'login') await host.login(id)
+        if (action === 'switch') await host.waitForLogin(id, await host.service.accountSwitch(id))
+        if (action === 'sign-out') await host.service.accountSignOut(id)
+        await expectAccount(peer, id, expected.get(peer))
+        await expectAccount(host, id, email)
+        expected.set(host, email)
+      }
+    }
+  }
+})
+
+for (const [kind, dshPath] of [
+  ['desktop', ['desktop', 'dsh']], ['standalone', ['home', '.dsh']], ['server', ['data', 'dsh']],
+]) {
+  for (const layout of ['pre-generation', 'selected generation']) {
+    test(`${kind} upgrade keeps both ${layout} sign-ins and consent across two restarts`, async t => {
+      const { root, legacy, start } = sharedFixture(t)
+      const installation = join(root, ...dshPath)
+      mkdirSync(installation, { recursive: true })
+      const previous = new Map()
+      const file = join(legacy, CONSENT_FILE)
+      const email = id => `${layout === 'pre-generation' ? 'legacy' : 'selected'}-${id}@example.test`
+      if (layout === 'pre-generation') {
+        const consent = new ConsentStore({ file, ids: botIds })
+        for (const id of botIds) {
+          const vendor = id.slice(4)
+          const home = join(legacy, vendor)
+          const config = join(home, `.${vendor}`)
+          mkdirSync(config, { recursive: true })
+          writeFileSync(join(config, 'account'), email(id))
+          consent.confirm(id, who(email(id)))
+          previous.set(id, { [HOME_ENV]: home, [GENERATION_ENV]: 'legacy' })
+        }
+        assert.equal(existsSync(join(legacy, 'current')), false)
+      } else {
+        // An explicit root reproduces dev's layout without claiming it.
+        const old = start(installation, { cliHome: legacy })
+        for (const id of botIds) {
+          await old.service.accountReset(id)
+          old.next(email(id))
+          await old.login(id)
+          await expectAccount(old, id, email(id))
+          const env = old.adapter.agents.get(id).spawn().env
+          assert.notEqual(env[GENERATION_ENV], 'legacy')
+          previous.set(id, env)
+        }
+        assert.deepEqual(old.logs.filter(line => line.includes('Bot sign-ins:')), [])
+        await old.stop()
+      }
+      const consent = readFileSync(file, 'utf8')
+      assert.equal(existsSync(join(legacy, 'installation.json')), false)
+      for (let restart = 0; restart <= 2; restart++) {
+        const upgraded = start(installation)
+        for (const id of botIds) {
+          await expectAccount(upgraded, id, email(id))
+          const env = upgraded.adapter.agents.get(id).spawn().env
+          assert.equal(env[HOME_ENV], previous.get(id)[HOME_ENV])
+          assert.equal(env[GENERATION_ENV], previous.get(id)[GENERATION_ENV])
+        }
+        assert.equal(readFileSync(file, 'utf8'), consent)
+        await upgraded.stop()
+      }
+    })
+  }
+}
+
+test('when B upgrades first, A starts separately without touching B’s legacy sign-ins', async t => {
+  const { root, legacy, start } = sharedFixture(t)
+  const b = start(join(root, 'dsh-b'))
+  for (const id of botIds) await b.login(id)
+  const claim = join(legacy, 'installation.json')
+  const owner = readFileSync(claim, 'utf8')
+  const consent = readFileSync(join(legacy, CONSENT_FILE), 'utf8')
+  const a = start(join(root, 'dsh-a'))
+  for (const id of botIds) {
+    assert.equal(cliRoot(b, id), legacy)
+    assert.notEqual(cliRoot(a, id), legacy)
+    await expectAccount(a, id, undefined)
+    await expectAccount(b, id, 'personal@example.test')
+  }
+  assert.equal(readFileSync(claim, 'utf8'), owner)
+  assert.equal(readFileSync(join(legacy, CONSENT_FILE), 'utf8'), consent)
+  assert.deepEqual(b.logs.filter(line => line.includes('Bot sign-ins:')), [
+    'acp-dsh: Bot sign-ins: this installation keeps the existing Bot sign-in home',
+  ])
+  assert.deepEqual(a.logs.filter(line => line.includes('Bot sign-ins:')), [
+    'acp-dsh: Bot sign-ins: this installation has its own Bot sign-in home',
+  ])
+})
+
+test('an older plugin and a new non-owner are independent, while the new owner still shares', async t => {
+  const { root, legacy, start } = sharedFixture(t)
+  const installation = join(root, 'dsh-owner')
+  await start(installation).stop()
+  const older = start(join(root, 'dsh-older'), { cliHome: legacy })
+  const peer = start(join(root, 'dsh-peer'))
+  for (const id of botIds) {
+    await older.login(id)
+    await expectAccount(peer, id, undefined)
+    peer.next('peer@example.test')
+    await peer.login(id)
+    await expectAccount(older, id, 'personal@example.test')
+  }
+  const owner = start(installation)
+  for (const id of botIds) {
+    assert.equal(cliRoot(owner, id), cliRoot(older, id))
+    await assert.rejects(owner.service.accountSignOut(id), otherSession)
+    await assert.rejects(older.service.accountSwitch(id), otherSession)
+    await expectAccount(owner, id, 'personal@example.test')
+    await expectAccount(peer, id, 'peer@example.test')
+  }
+})
+
+test('profiles "orchard" and "meadow" of one DSH home still refuse account changes', async t => {
+  const { root, start } = sharedFixture(t)
+  const installation = join(root, 'one-dsh-home')
+  const orchard = start(installation)
+  const meadow = start(installation)
+  for (const id of botIds) {
+    assert.equal(cliRoot(orchard, id), cliRoot(meadow, id))
+    await assert.rejects(meadow.service.loginStart(id), otherSession)
+  }
+})
+
+test('accountEvidence binds a private fresh read to the Bot sign-in without opening credentials', async t => {
+  const claudeId = 'acp-claude'
+  const codexId = 'acp-codex'
+  const email = 'email-SENTINEL@example.test'
+  const key = Buffer.from('key-SENTINEL'.padEnd(32, '.'))
+  const claudeStatus = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty',
+    email, orgId: 'org-SENTINEL', orgName: 'display-org-SENTINEL', subscriptionType: 'plan-SENTINEL' }
+  const codexResult = { account: { type: 'chatgpt', email, planType: 'plus', workspaceName: 'ws-SENTINEL' },
+    requiresOpenaiAuth: true, userId: 'user-SENTINEL' }
+  let deferClaude, overrideClaude, codexSilent
+  const fakeRun = (file, args, options, done, overrides) => {
+    assert.equal(file, '/fake/claude')
+    assert.deepEqual(args, ['auth', 'status', '--json'])
+    done(null, JSON.stringify({ ...claudeStatus, ...overrides }))
+  }
+  const fakeSpawn = (file, args, options, silent = false) => {
+    assert.equal(file, '/fake/codex')
+    assert.deepEqual(args, ['app-server', '--listen', 'stdio://'])
+    const child = new EventEmitter()
+    child.stdin = new PassThrough()
+    child.stdout = new PassThrough()
+    child.kill = () => true
+    child.stdin.on('data', line => {
+      const request = JSON.parse(String(line))
+      if (request.method === 'initialize') child.stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`)
+      if (request.method === 'account/read') {
+        assert.deepEqual(request.params, { refreshToken: false })
+        if (!silent) child.stdout.write(`${JSON.stringify({ id: request.id, result: codexResult })}\n`)
+      }
+    })
+    return child
+  }
+  const directReads = []
+  const consentReads = []
+  const h = fixture(t, { deps: {
+    async account(spec, cli, options) {
+      consentReads.push({ vendor: spec.key, env: options.env })
+      return (await accountEvidenceOf(spec, cli, { ...options, run: fakeRun, spawn: fakeSpawn })).account
+    },
+    evidenceOf(spec, cli, options) {
+      directReads.push({ vendor: spec.key, env: options.env })
+      const run = (file, args, opts, done) => {
+        const reply = () => fakeRun(file, args, opts, done, overrideClaude)
+        if (deferClaude) deferClaude(reply)
+        else reply()
+      }
+      if (!codexSilent) return accountEvidenceOf(spec, cli, { ...options, run, spawn: fakeSpawn })
+      // Keep the fake timeout's event loop alive alongside the reader's unref'ed deadline.
+      const keepAlive = setTimeout(() => {}, 1000)
+      return accountEvidenceOf(spec, cli, { ...options, run, timeoutMs: 5,
+        spawn: (file, args, opts) => fakeSpawn(file, args, opts, true) })
+        .finally(() => clearTimeout(keepAlive))
+    },
+  } })
+  const emitted = []
+  const warnings = []
+  const ctx = h.adapter.ctx
+  const emit = ctx.emit
+  t.mock.method(ctx, 'emit', (name, ...args) => { emitted.push([name, ...args]); emit(name, ...args) })
+  t.mock.method(ctx.logger, 'warn', line => warnings.push(line))
+  h.next(email)
+  for (const id of botIds) await h.login(id)
+  const launches = Object.fromEntries(botIds.map(id => [id, h.adapter.agents.get(id).catalog.spec.spawn().env]))
+  const dirs = [launches[claudeId].CLAUDE_CONFIG_DIR, launches[codexId].CODEX_HOME]
+  const consentFile = join(dirname(dirname(launches[claudeId][POINTER_ENV])), CONSENT_FILE)
+  const savedConsent = readFileSync(consentFile, 'utf8')
+  const accesses = []
+  const answers = []
+  const read = async (id, keys) => {
+    const mocks = [
+      [fs, 'openSync'], [fs, 'readFileSync'], [fs.promises, 'open'], [fs, 'createReadStream'],
+    ].map(([owner, method]) => {
+      const original = owner[method]
+      return t.mock.method(owner, method, function (file, ...args) {
+        const path = file instanceof URL ? fileURLToPath(file) : Buffer.isBuffer(file) ? file.toString() : file
+        if (typeof path === 'string' && dirs.some(dir => resolve(path) === dir || resolve(path).startsWith(`${dir}${sep}`))) {
+          accesses.push({ method, path })
+        }
+        return original.call(this, file, ...args)
+      })
+    })
+    syncBuiltinESMExports()
+    try {
+      const answer = await h.service.accountEvidence(id, { key })
+      assert.deepEqual(Object.keys(answer), keys)
+      answers.push(answer)
+      return answer
+    } finally {
+      for (const mock of mocks) mock.mock.restore()
+      syncBuiltinESMExports()
+    }
+  }
+  const base = ['id', 'authScope', 'signedIn', 'vendor', 'ref', 'outcome', 'reservable']
+  const claude = await read(claudeId, [...base, 'exact', 'loose'])
+  const codex = await read(codexId, [...base, 'class', 'exact', 'loose'])
+  for (const [id, vendor, answer] of [[claudeId, 'claude', claude], [codexId, 'codex', codex]]) {
+    assert.equal(answer.vendor, vendor)
+    assert.equal(answer.authScope, 'isolated')
+    assert.equal(answer.signedIn, true)
+    assert.equal(answer.outcome, 'complete')
+    assert.equal(answer.reservable, true)
+    assert.match(answer.exact, /^[A-Za-z0-9_-]{43}$/)
+    assert.match(answer.loose, /^[A-Za-z0-9_-]{43}$/)
+    assert.equal(answer.ref, (await h.service.account(id)).ref)
+  }
+  assert.equal(codex.class, 'personal')
+  codexResult.account.planType = 'team'
+  const workspace = await read(codexId, [...base, 'class', 'exact', 'loose'])
+  assert.equal(workspace.class, 'workspace')
+  assert.equal(workspace.ref, codex.ref)
+  assert.equal((await h.service.account(codexId)).consent, 'given')
+  assert.equal(workspace.loose, codex.loose)
+  assert.notEqual(workspace.exact, codex.exact)
+
+  overrideClaude = { orgId: null }
+  const ambiguousClaude = await read(claudeId, [...base, 'why', 'loose'])
+  overrideClaude = undefined
+  assert.equal(ambiguousClaude.why, 'no-organisation')
+  assert.equal(ambiguousClaude.loose, claude.loose)
+  assert.notEqual(ambiguousClaude.ref, claude.ref)
+  assert.equal((await h.service.account(claudeId)).ref, claude.ref)
+  codexResult.account.planType = 'unknown-plan-SENTINEL'
+  const ambiguousCodex = await read(codexId, [...base, 'why', 'class', 'loose'])
+  assert.deepEqual([ambiguousCodex.outcome, ambiguousCodex.reservable, ambiguousCodex.why, ambiguousCodex.class, ambiguousCodex.loose],
+    ['ambiguous', false, 'unknown-plan', 'unknown', codex.loose])
+  codexResult.account = { type: 'chatgpt', email: null, planType: 'plus' }
+  const noEmail = await read(codexId, [...base, 'why', 'class'])
+  assert.deepEqual([noEmail.outcome, noEmail.reservable, noEmail.why, noEmail.class, noEmail.ref],
+    ['none', false, 'no-email', 'personal', 'unknown'])
+  codexResult.account = { type: 'amazonBedrock' }
+  const bedrock = await read(codexId, [...base, 'why'])
+  assert.deepEqual([bedrock.outcome, bedrock.reservable, bedrock.why], ['none', false, 'not-a-subscription'])
+
+  const started = Promise.withResolvers()
+  deferClaude = started.resolve
+  const pending = read(claudeId, ['id', 'signedIn', 'outcome'])
+  const release = await started.promise
+  const pause = join(launches[claudeId][HOME_ENV], 'paused')
+  writeFileSync(pause, '')
+  release()
+  assert.deepEqual(await pending, { id: claudeId, signedIn: true, outcome: 'changed' })
+  deferClaude = undefined
+  rmSync(pause)
+
+  codexSilent = true
+  // Leave only the direct read silent. The existing consent probe still gets an answer.
+  const unread = await read(codexId, [...base, 'why'])
+  assert.deepEqual([unread.outcome, unread.reservable, unread.why, unread.ref], ['unread', false, 'unknown', 'unknown'])
+  assert.equal(readFileSync(consentFile, 'utf8'), savedConsent)
+  assert.equal(directReads.length, 9)
+  for (const { vendor, env } of [...directReads, ...consentReads]) {
+    const field = vendor === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'
+    assert.equal(env[field], launches[`acp-${vendor}`][field])
+  }
+  await h.service.accountSignOut(claudeId)
+  assert.deepEqual(await read(claudeId, ['id', 'signedIn']), { id: claudeId, signedIn: false })
+  assert.deepEqual(accesses, [])
+  assert.equal(directReads.length, 9)
+  assert.equal(await h.service.accountEvidence('unknown-id', { key }), undefined)
+  assert.deepEqual(await h.service.accountEvidence('acp-hermes', { key }), { id: 'acp-hermes', supported: false })
+  const errors = []
+  await assert.rejects(h.service.accountEvidence('unknown-id', { key: key.toString() }), error => {
+    errors.push(error.stack)
+    return error.code === 'acp-account/invalid' && error.message === 'A reservation key must be 32 bytes.'
+  })
+  const status = await h.service.status()
+  const inspections = await Promise.all(botIds.map(id => h.service.inspect(id)))
+  assert.ok(emitted.some(([name, payload]) => name === 'acp-dsh/login-ready' && payload.id === claudeId))
+  const publicText = JSON.stringify({ answers, status, inspections, emitted, logs: h.logs, warnings, errors,
+    consent: readFileSync(consentFile, 'utf8') }).toLowerCase()
+  for (const privateValue of [email, 'org-SENTINEL', 'display-org-SENTINEL', 'plan-SENTINEL', 'ws-SENTINEL',
+    'user-SENTINEL', 'unknown-plan-SENTINEL', ...['utf8', 'hex', 'base64', 'base64url'].map(encoding => key.toString(encoding)),
+    JSON.stringify([...key])]) assert.equal(publicText.includes(privateValue.toLowerCase()), false)
+})
+
+test('accountEvidence omits an unknown sign-in and skips reads without a consent store', async t => {
+  const evidenceOf = () => assert.fail('unexpected direct account read')
+  const key = Buffer.alloc(32)
+  const unknown = fixture(t, { deps: { signedIn: async () => undefined, evidenceOf } })
+  assert.deepEqual(await unknown.service.accountEvidence('acp-codex', { key }), { id: 'acp-codex' })
+  await unknown.stop()
+
+  const noConsent = fixture(t, { deps: { store: { binOf: () => undefined }, evidenceOf } })
+  assert.deepEqual(await noConsent.service.accountEvidence('acp-codex', { key }), { id: 'acp-codex', supported: false })
+  assert.deepEqual(noConsent.calls, [])
 })

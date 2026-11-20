@@ -1,16 +1,30 @@
 // The new left bar's Team rows (left-bar-team.js): the front Bot first, then the Bots no section
-// holds, then each section under a quiet label, then the group chats; channels and chats under
-// their Bot; one line per row with one status; a status said once, where the owner goes.
+// holds, then each section under a quiet label, then the group chats; a Bot's channels and chats
+// under its row, from the one source that serves it; one line per row with one status; a status
+// said once, where the owner goes; and a channel or a Bot that disappears while its row is open.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { findAll, hasClass, parts, render, textOf } from './left-bar-load.js'
 
-const { TeamRows, bakedFit, botRowStatus, teamRows } = parts
+const { TeamRows, bakedFit, botChannels, botRowStatus, channelRows, channelStatusOf, chatStatusOf, teamOf, teamRows } = parts
 
-const chat = (id, status = 'idle') => ({ id, name: `Chat ${id}`, status })
+const person = (name, more = {}) => ({ name, photo: null, self: false, ...more })
+const chat = (id, status = 'idle', more = {}) => ({ id, name: `Chat ${id}`, status, who: person(`Person ${id}`), ...more })
 const bot = (id, more = {}) => ({ id, name: `Bot ${id}`, status: 'idle', ...more })
-const HELP = { id: 'help', kind: 'whatsapp', name: 'Help desk', chats: [chat('a', 'working'), chat('b', 'needs')] }
-const STORE = { id: 'store', kind: 'telegram', name: 'Storefront', folded: true, chats: [chat('c'), chat('d', 'error')] }
+const MIKA = person('Mika', { photo: 'https://example.test/mika.png' })
+const ME = person('Me (notes)', { self: true })
+const HELP = {
+  id: 'help', kind: 'whatsapp', name: 'Help desk', status: 'connected',
+  chats: [
+    chat('a', 'answering', { lastAt: 2, who: MIKA }),
+    chat('b', 'needs-someone', { lastAt: 3, unread: 2, who: person('Tess Alves') }),
+    chat('s', 'idle', { lastAt: 1, who: ME }),
+  ],
+}
+const STORE = {
+  id: 'store', kind: 'telegram', name: 'Storefront', status: 'error',
+  chats: [chat('c', 'idle', { lastAt: 1, who: person('Order 1042') }), chat('d', 'paused', { lastAt: 4, who: person('Ana') })],
+}
 const TEAM = {
   frontId: 'front',
   bots: [
@@ -25,7 +39,7 @@ const keys = rows => rows.map(row => row.key)
 test('the rows run front Bot, loose Bots, sections, groups', () => {
   assert.deepEqual(keys(teamRows(TEAM)), [
     'bot:front', 'bot:loose',
-    'section:0', 'bot:pip', 'channel:pip/help', 'chat:pip/help/a', 'chat:pip/help/b', 'channel:pip/store', 'bot:kit',
+    'section:0', 'bot:pip', 'bot:kit',
     // A section with no Bot left on the team draws no label.
     'section:1', 'bot:off', 'bot:new',
     'group:crew', 'group:solo',
@@ -47,23 +61,68 @@ test('a team with no sections and no front Bot keeps its order', () => {
 })
 
 test('a status is said once: by the chat, or by the folded channel that holds it', () => {
-  const rows = new Map(teamRows(TEAM).map(row => [row.key, row]))
-  assert.equal(rows.get('bot:pip').status, 'idle', 'its chat already says needs you')
-  assert.equal(rows.get('chat:pip/help/b').status, 'needs')
+  const rows = new Map(channelRows({ id: 'pip', channelSource: undefined }, [HELP, STORE], new Set(['pip/store'])).map(row => [row.key, row]))
+  assert.equal(rows.get('chat:pip/help/b').status, 'needs', 'Omni says "needs-someone", the bar says needs')
+  assert.equal(rows.get('chat:pip/help/a').status, 'working', 'Omni says "answering", the bar says working')
+  assert.equal(rows.get('chat:pip/help/s').status, 'idle')
   assert.equal(rows.get('channel:pip/help').status, 'idle', 'an open channel leaves it to its chats')
-  assert.equal(rows.get('channel:pip/store').status, 'error', 'a folded channel speaks for its chats')
+  assert.equal(rows.get('channel:pip/store').status, 'error', 'a folded channel speaks for its chats and its own state')
   assert.equal(rows.has('chat:pip/store/c'), false, 'a folded channel hides its chats')
   assert.equal(botRowStatus(bot('x', { status: 'needs' })), 'needs', 'a Bot with no chat asking says it itself')
   assert.equal(botRowStatus(bot('x', { status: 'working', channels: [HELP] })), 'working', 'only needs you moves to the chat')
+  assert.equal(botRowStatus(bot('x', { status: 'needs', channels: [HELP] })), 'idle', 'its chat already asks')
+})
+
+test('Omni\'s channel and chat words, and a channel that is not running', () => {
+  assert.deepEqual(['connected', 'needs-pairing', 'disconnected', 'error'].map(status => channelStatusOf({ status })), ['idle', 'needs', 'off', 'error'])
+  assert.deepEqual(['answering', 'paused', 'needs-someone', 'idle'].map(status => chatStatusOf({ status })), ['working', 'idle', 'needs', 'idle'])
+  const off = { id: 'off', kind: 'slack', name: 'Off', status: 'disconnected', chats: [chat('z')] }
+  const pairing = { id: 'pair', kind: 'telegram', name: 'Pair', status: 'needs-pairing', chats: [chat('y')] }
+  const rows = new Map(channelRows({ id: 'b' }, [off, pairing], new Set(['b/off', 'b/pair'])).map(row => [row.id, row]))
+  assert.equal(rows.get('off').status, 'off', 'a channel that is not running keeps its off')
+  assert.equal(rows.get('pair').status, 'needs')
+})
+
+test('a closed Bot carries a channel that needs the person up to its own row', () => {
+  const closed = { ...HELP, status: 'needs-pairing', chats: undefined }
+  assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [closed] })), 'needs', 'the row he sees all day says so')
+  assert.equal(botRowStatus(bot('x', { status: 'working', channels: [closed] })), 'needs', 'needs asks first')
+  assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [HELP] })), 'idle', 'an open Bot leaves it to the chat rows')
+  assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [{ ...closed, status: 'connected' }] })), 'idle')
+})
+
+test('a channel that needs its pairing again or fails says so on its row', () => {
+  const pair = { id: 'pair', kind: 'whatsapp', name: 'WhatsApp', status: 'needs-pairing' }
+  const failed = { id: 'fail', kind: 'slack', name: 'Slack', status: 'error' }
+  const tree = render(TeamRows({
+    team: { bots: [{ ...bot('pip'), channels: [pair, failed] }] }, folded: new Set(),
+    renderArt: () => ({ type: 'i', props: {}, children: [] }),
+    renderGlyph: channel => ({ type: 'i', props: { 'data-glyph': channel.kind }, children: [] }),
+  }))
+  const row = key => findAll(tree, node => node.type === 'button' && node.props['data-id'] === key)[0]
+  assert.ok(findAll(row('pair'), hasClass('lb-st-needs')).length === 1, 'needs-pairing says needs you')
+  assert.equal(textOf(row('pair')), 'WhatsAppNeeds you')
+  assert.equal(findAll(row('fail'), node => node.props?.role === 'img')[0].props['aria-label'], 'Error', 'error shows its own mark')
+})
+
+test('a channel stays folded until a source read its chats; its own state speaks meanwhile', () => {
+  const unread = { ...HELP, chats: undefined }
+  const rows = channelRows({ id: 'pip' }, [unread], new Set())
+  assert.equal(rows[0].folded, true, 'chats unknown: folded')
+  assert.equal(rows[0].status, 'idle')
+  assert.equal(rows.length, 1)
+  const loaded = channelRows({ id: 'pip' }, [{ ...HELP, chats: [] }], new Set())
+  assert.equal(loaded[0].folded, false, 'chats known, even empty: open')
 })
 
 const draw = (props = {}) => render(TeamRows({
-  team: TEAM, current: 'bot:front',
+  team: TEAM, current: 'bot:front', folded: new Set(['pip/store']),
   renderArt: (who, size, state) => ({ type: 'i', props: { 'data-art': who.id, 'data-size': size, 'data-state': state }, children: [] }),
   renderGlyph: channel => ({ type: 'i', props: { 'data-glyph': channel.kind }, children: [] }),
   ...props,
 }))
 const row = (tree, key) => findAll(tree, node => node.type === 'button' && node.props['data-id'] === key)[0]
+const rowsOf = tree => findAll(tree, node => node.type === 'button' && node.props['data-kind']).map(node => node.props['data-id'])
 
 test('each row is one button on one line: art, name, one status', () => {
   const tree = draw()
@@ -71,8 +130,8 @@ test('each row is one button on one line: art, name, one status', () => {
   const list = tree.children[0]
   assert.equal(list.props.role, 'group')
   assert.equal(list.props['aria-label'], 'Team')
+  assert.deepEqual(rowsOf(tree), ['front', 'loose', 'pip', 'help', 'b', 'a', 's', 'store', 'kit', 'off', 'new', 'crew', 'solo'])
   const buttons = findAll(tree, node => node.type === 'button')
-  assert.equal(buttons.length, keys(teamRows(TEAM)).filter(key => !key.startsWith('section:')).length)
   for (const button of buttons) {
     assert.equal(button.props.type, 'button')
     assert.ok(findAll(button, node => node.props?.role === 'img').length <= 1, `${button.props['data-id']}: at most one mark`)
@@ -86,29 +145,70 @@ test('each row is one button on one line: art, name, one status', () => {
   assert.equal(findAll(row(tree, 'loose'), node => node.props?.role === 'img').length, 0, 'an idle Bot shows no mark')
 })
 
-test('the rows wear what they are: unread, not running, channel, chat, group', () => {
+test('a Bot\'s channels run newest chat first, each with its own mark', () => {
+  const tree = draw()
+  const help = row(tree, 'help')
+  assert.ok(hasClass('lb-row-channel')(help))
+  assert.equal(help.props['aria-expanded'], true)
+  assert.equal(findAll(help, node => node.props?.['data-glyph'])[0].props['data-glyph'], 'whatsapp')
+  assert.equal(findAll(help, hasClass('lb-chev')).length, 1, 'an open channel still says it can fold')
+  assert.ok(hasClass('lb-chev-open')(findAll(help, hasClass('lb-chev'))[0]), 'open: the chevron points down')
+  const store = row(tree, 'store')
+  assert.equal(store.props['aria-expanded'], false)
+  assert.equal(findAll(store, hasClass('lb-chev')).length, 1)
+  assert.equal(hasClass('lb-chev-open')(findAll(store, hasClass('lb-chev'))[0]), false, 'folded: the chevron points right')
+  assert.equal(findAll(store, node => node.props?.role === 'img')[0].props['aria-label'], 'Error')
+  const asking = row(tree, 'b')
+  assert.ok(hasClass('lb-row-chat')(asking) && hasClass('lb-row-hot')(asking), 'a chat with a status is in ink')
+  assert.equal(textOf(asking), 'TAChat bUnread activity2Needs you')
+  assert.equal(hasClass('lb-row-hot')(row(tree, 'a')), true, 'answering is work, in ink')
+  assert.equal(hasClass('lb-row-hot')(row(tree, 's')), false, 'an idle chat stays quiet')
+  // A paused chat draws no mark of its own.
+  assert.equal(findAll(row(tree, 's'), node => node.props?.role === 'img').length, 0)
+})
+
+test('a chat row shows its person: the photo, initials when there is none, and the owner\'s own tone', () => {
+  const tree = draw()
+  const face = key => findAll(row(tree, key), hasClass('lb-chat-face'))[0]
+  const mika = face('a')
+  assert.equal(findAll(mika, node => node.type === 'img')[0].props.src, 'https://example.test/mika.png')
+  assert.equal(mika.props['data-self'], undefined)
+  const tess = face('b')
+  assert.equal(findAll(tess, node => node.type === 'img').length, 0, 'no photo: initials')
+  assert.equal(textOf(findAll(tess, hasClass('lb-chat-face-initials'))[0]), 'TA')
+  assert.equal(tess.props['data-self'], undefined, 'another person wears the incoming tone')
+  const mine = face('s')
+  assert.equal(mine.props['data-self'], '', 'the owner\'s own chat wears the outgoing tone')
+  assert.equal(textOf(findAll(mine, hasClass('lb-chat-face-initials'))[0]), 'MN')
+})
+
+test('a chat\'s unread is said, counted and weighs its name; a folded channel wears it', () => {
+  const tree = draw()
+  const unread = row(tree, 'b')
+  assert.ok(hasClass('lb-row-unread')(unread))
+  assert.equal(textOf(findAll(unread, hasClass('lb-sr'))[0]), 'Unread activity', 'unread is said, not only shown in weight')
+  assert.equal(textOf(findAll(unread, hasClass('lb-count'))[0]), '2', 'its count is drawn')
+  assert.equal(hasClass('lb-row-unread')(row(tree, 'a')), false)
+  assert.ok(hasClass('lb-row-unread')(row(tree, 'help')), 'a channel says one of its chats is unread')
+  assert.equal(hasClass('lb-row-unread')(row(tree, 'store')), false)
+  const many = channelRows({ id: 'b' }, [{ ...HELP, chats: [chat('m', 'idle', { unread: 150 })] }], new Set())
+  assert.equal(many[1].unreadCount, 150)
+  const capped = render(TeamRows({
+    team: { bots: [{ ...bot('c'), channels: [{ ...HELP, chats: [chat('m', 'idle', { unread: 150 })] }] }] },
+    renderArt: () => ({ type: 'i', props: {}, children: [] }),
+  }))
+  assert.equal(textOf(findAll(capped, hasClass('lb-count'))[0]), '99+', 'past 99 it counts no further')
+})
+
+test('the rows wear what they are: unread, not running, groups and labels', () => {
   const tree = draw()
   const unread = row(tree, 'new')
   assert.ok(hasClass('lb-row-unread')(unread))
-  assert.equal(textOf(findAll(unread, hasClass('lb-sr'))[0]), 'Unread activity', 'unread is said, not only shown in weight')
   const off = row(tree, 'off')
   assert.ok(hasClass('lb-row-off')(off))
   assert.match(textOf(off), /Not running/, 'not running is said in words, never a bare hollow ring')
   // A Bot whose chat asks still plays "alert": the row is quiet, the character is not.
   assert.equal(findAll(row(tree, 'pip'), node => node.props?.['data-art'])[0].props['data-state'], 'alert')
-  const help = row(tree, 'help')
-  assert.ok(hasClass('lb-row-channel')(help))
-  assert.equal(help.props['aria-expanded'], true)
-  assert.equal(findAll(help, node => node.props?.['data-glyph'])[0].props['data-glyph'], 'whatsapp')
-  assert.equal(findAll(help, hasClass('lb-chev')).length, 0, 'an open channel has no chevron')
-  const store = row(tree, 'store')
-  assert.equal(store.props['aria-expanded'], false)
-  assert.equal(findAll(store, hasClass('lb-chev')).length, 1)
-  assert.equal(findAll(store, node => node.props?.role === 'img')[0].props['aria-label'], 'Error')
-  const asking = row(tree, 'b')
-  assert.ok(hasClass('lb-row-chat')(asking) && hasClass('lb-row-hot')(asking), 'a chat with a status is in ink')
-  assert.equal(textOf(asking), 'Chat bNeeds you')
-  assert.equal(hasClass('lb-row-hot')(row(tree, 'a')), true)
   const crew = row(tree, 'crew')
   assert.ok(hasClass('lb-row-lead')(crew))
   assert.deepEqual(findAll(crew, node => node.props?.['data-art']).map(art => [art.props['data-art'], art.props['data-size']]), [['kit', 19], ['new', 19]], 'two members, at 19 each')
@@ -132,6 +232,107 @@ test('the statuses that show a word are the caller\'s to choose', () => {
   const tree = draw({ worded: ['needs', 'working'] })
   assert.equal(textOf(row(tree, 'front')), 'Bot frontWorking')
   assert.equal(draw({ label: 'Studio' }).children[0].props['aria-label'], 'Studio')
+})
+
+test('the registry picks the one source that serves a Bot, by its id or its ownership', () => {
+  const before = botChannels.entries().length
+  const pip = bot('pip', { kind: 'omni' })
+  const byOwns = { id: 'by-owns', owns: candidate => candidate.kind === 'omni', useChannels: () => [], open: () => {} }
+  const offOwns = botChannels.register(byOwns)
+  assert.equal(teamOf({ roster: rosterOf([pip]), order: [], status: emptyStatus(), marked: {} }).bots[0].channelSource, byOwns)
+  assert.equal(teamOf({ roster: rosterOf([bot('kit')]), order: [], status: emptyStatus(), marked: {} }).bots[0].channelSource, undefined)
+  const byId = { id: 'by-id', botId: 'pip', useChannels: () => [], open: () => {} }
+  const offId = botChannels.register(byId)
+  assert.equal(teamOf({ roster: rosterOf([pip]), order: [], status: emptyStatus(), marked: {} }).bots[0].channelSource, byId, 'the one naming the id wins')
+  offId()
+  assert.equal(teamOf({ roster: rosterOf([pip]), order: [], status: emptyStatus(), marked: {} }).bots[0].channelSource, byOwns)
+  offOwns()
+  assert.equal(botChannels.entries().length, before, 'the disposer takes it off')
+})
+
+// The row that loses its channel or its Bot while open (#1402 review, MEDIUM evidence gap):
+// the source serves fewer channels on the next read, or the roster drops the Bot while a
+// section and a group still name it. The row goes away through the bar's own re-render, with
+// no thrown error, no row left claiming to be open and no stale chat rows.
+const artProps = {
+  renderArt: (who, size, state) => ({ type: 'i', props: { 'data-art': who.id, 'data-size': size, 'data-state': state }, children: [] }),
+  renderGlyph: channel => ({ type: 'i', props: { 'data-glyph': channel.kind }, children: [] }),
+}
+
+test('a channel removed while its Bot is open leaves no channel row, no chats and no thrown error', () => {
+  let channels = [{ ...HELP }, { ...STORE }]
+  const source = { id: 'removal-source', botId: 'pip', useChannels: () => channels, open: () => {} }
+  const off = botChannels.register(source)
+  try {
+    const shown = () => render(TeamRows({ team: { frontId: 'pip', bots: [bot('pip')] }, current: 'bot:pip', folded: new Set(), loads: () => true, ...artProps }))
+    const before = shown()
+    assert.equal(row(before, 'help').props['aria-expanded'], true, 'the channel is open before the removal')
+    // The source stops returning the channel while its Bot's row is open.
+    channels = channels.slice(1)
+    const after = shown()
+    assert.deepEqual(rowsOf(after), ['pip', 'store', 'd', 'c'], 'only the channel still served stays, with its chats')
+    assert.equal(rowsOf(after).includes('help'), false, 'the removed channel row is gone')
+    assert.deepEqual(rowsOf(after).filter(id => ['a', 'b', 's'].includes(id)), [], 'no chat of the removed channel stays rendered')
+    assert.deepEqual(findAll(after, node => node.props?.['aria-expanded'] !== undefined).map(node => node.props['data-id']), ['store'], 'no stale open channel state')
+    assert.equal(findAll(after, node => node.props?.['aria-current'] === 'page')[0].props['data-id'], 'pip', 'the Bot row still owns the open state')
+  } finally { off() }
+})
+
+test('a Bot removed from the roster while its row is open drops its row, its empty section and its group seat', () => {
+  const team = {
+    frontId: 'pip',
+    bots: [bot('pip', { channels: [HELP] }), bot('kit'), bot('wren')],
+    sections: [{ label: 'Desk', bots: ['pip', 'kit'] }, { label: 'Solo', bots: ['pip'] }],
+    groups: [{ id: 'crew', name: 'Crew', members: ['pip', 'wren'] }],
+  }
+  const before = render(TeamRows({ team, current: 'bot:pip', folded: new Set(), ...artProps }))
+  assert.ok(rowsOf(before).includes('pip'))
+  // The roster drops the Bot; the section and the group still name it.
+  const after = render(TeamRows({ team: { ...team, bots: team.bots.filter(candidate => candidate.id !== 'pip') }, current: 'bot:pip', folded: new Set(), ...artProps }))
+  assert.deepEqual(new Set(rowsOf(after)), new Set(['kit', 'wren', 'crew']), 'the Bot and its channels are gone; the rest of the rows are intact')
+  const labels = findAll(after, hasClass('lb-sec'))
+  assert.deepEqual(labels.map(textOf), ['Desk'], 'the section that held only the removed Bot draws no label')
+  assert.deepEqual(findAll(row(after, 'crew'), node => node.props?.['data-art']).map(node => node.props['data-art']), ['wren'], 'a group loses the removed member and keeps the others')
+  assert.equal(findAll(after, node => node.props?.['aria-current'] === 'page').length, 0, 'no row claims to be open')
+  const buttons = findAll(after, node => node.type === 'button')
+  assert.ok(buttons.length > 0 && buttons.every(button => button.props.type === 'button'), 'every remaining row is still a focusable button')
+})
+
+test('a channel removed while one of its chats is selected leaves no stale open row and does not throw', () => {
+  let channels = [{ ...HELP }, { ...STORE }]
+  const source = { id: 'removal-chat-source', botId: 'pip', useChannels: () => channels, open: () => {} }
+  const off = botChannels.register(source)
+  try {
+    const shown = () => render(TeamRows({ team: { frontId: 'pip', bots: [bot('pip')] }, current: 'chat:pip/help/b', folded: new Set(), loads: () => true, ...artProps }))
+    const before = shown()
+    assert.equal(findAll(before, node => node.props?.['aria-current'] === 'page')[0].props['data-id'], 'b', 'the chat is the open row')
+    channels = channels.slice(1)
+    const after = shown()
+    assert.equal(rowsOf(after).includes('b'), false, 'the selected chat is gone with its channel')
+    assert.equal(findAll(after, node => node.props?.['aria-current'] === 'page').length, 0, 'no disappeared row is left marked open')
+    assert.deepEqual(new Set(rowsOf(after)), new Set(['pip', 'store', 'd', 'c']), 'the bar keeps its other rows')
+  } finally { off() }
+})
+
+function rosterOf (bots) {
+  return { bots, rooms: [], agents: [], mainBotId: bots[0]?.id, mainBotIds: [bots[0]?.id], byId: Object.fromEntries(bots.map(bot => [bot.id, bot])), questions: {} }
+}
+const emptyStatus = () => ({ bots: new Map(), dsh: new Map(), groups: new Map() })
+
+test('a source is asked for a Bot\'s channels only while that Bot\'s Session is shown or one of its channels was unfolded', () => {
+  const calls = []
+  const source = { id: 'fake', botId: 'pip', useChannels: (botId, options) => { calls.push([botId, options.open]); return [HELP] }, open: () => {} }
+  const off = botChannels.register(source)
+  try {
+    render(TeamRows({
+      team: { bots: [bot('pip'), bot('kit')] }, current: 'bot:pip', folded: new Set(), loads: id => id === 'pip',
+      renderArt: who => ({ type: 'i', props: { 'data-art': who.id }, children: [] }),
+    }))
+    assert.deepEqual(calls, [['pip', true]], 'the open Bot only')
+    calls.length = 0
+    render(TeamRows({ team: { bots: [bot('pip'), bot('kit')] }, folded: new Set(), loads: () => false, renderArt: () => ({ type: 'i', props: {}, children: [] }) }))
+    assert.deepEqual(calls, [['pip', false]], 'a closed Bot is asked with open false, and its source reads no chats')
+  } finally { off() }
 })
 
 test('a baked character is fitted by its own box, drawn a twentieth larger, as the design trims it close; Omni\'s by one a twelfth larger', () => {

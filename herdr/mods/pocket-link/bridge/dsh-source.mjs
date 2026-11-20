@@ -18,6 +18,10 @@
 // interrupt per chat every INTERRUPT_MS (`rate`). A closed subscription (the phone hung up, or was
 // removed and revoke ended it) writes nothing. Plain Node only (no dependency, the bridge's Node floor).
 //
+// A writable socket gets a second hello asking for memory and schedules (RFC 0036). A phone
+// opts in at chat hello and gets one grant, tied to its connection and team home. Closing
+// the grant needs an ack in 500 ms; otherwise the socket is dropped.
+//
 // Absent is empty: no socket, a socket another account could reach, or one that answers neither
 // `readOnly: true` nor `readOnly: false, write: 1`, and the source lists nothing and opens nothing.
 //
@@ -34,7 +38,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { cutRow, page } from './chat.mjs'
+import { cutRow, MANAGE_METHODS, memoryRefused, page } from './chat.mjs'
 
 export const PREFIX = 'dsh:'
 export const ANSWER_ON_COMPUTER = 'Answer on the computer'
@@ -48,8 +52,21 @@ export const WRITES_PER_MINUTE = 20
 export const INTERRUPT_MS = 5000
 /** The socket's write methods, by chat.* method. */
 const WRITE_METHODS = { send: 'send', interrupt: 'interrupt', answer: 'answer' }
+const CLOSE_MS = 500
+const READS_PER_MINUTE = 60
+const MANAGE_TEXT_MAX = 4096
+const MEMORY_ID = /^[A-Za-z0-9_-]{1,32}$/
+const MANAGE_REV = /^[0-9a-f]{16}$/
+const SCHEDULE_ID = /^schedule-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const SCHEDULE_ALIAS = /^x[0-9a-f]{16}$/
+const socketMethod = (method) => method.replace('.', '-')
+const writableHello = (hello) => hello?.readOnly === false && hello?.write === 1
+const validHello = (hello) => hello?.protocol === 1 && (hello.readOnly === true || writableHello(hello))
+const socketError = (kind, written = false) => Object.assign(new Error(kind), { kind, written })
+const manageOffline = (reading, written) => (!reading && written ? { ok: false, state: 'unknown', reason: 'offline' } : memoryRefused('offline'))
 
 export const isDsh = (terminal) => typeof terminal === 'string' && terminal.startsWith(PREFIX)
+const manageTerminal = (terminal) => isDsh(terminal) && terminal.length > PREFIX.length && terminal.length <= 128
 
 const expand = (text, home) => (text === '~' ? home : /^~[\\/]/.test(text) ? join(home, text.slice(2)) : text)
 
@@ -109,21 +126,29 @@ const rowsCut = (e) => (Array.isArray(e?.rows) ? { ...e, rows: e.rows.map(cutRow
 export class DshSource {
   /**
    * `paths` are tried in order (socketPaths); `path` is one place only.
-   * @param {{ path?: string, paths?: string[], connect?: typeof createConnection, check?: (path: string) => boolean, log?: (...a: any[]) => void, requestMs?: number }} [options]
+   * @param {{ path?: string, paths?: string[], connect?: typeof createConnection, check?: (path: string) => boolean, realpath?: typeof realpathSync, log?: (...a: any[]) => void, requestMs?: number, now?: () => number }} [options]
    */
-  constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, log = () => {}, requestMs = REQUEST_MS, now = Date.now } = {}) {
-    Object.assign(this, { paths, connect, check, log, requestMs, now })
+  constructor({ path, paths = path === undefined ? socketPaths() : [path], connect = createConnection, check = ownerOnly, realpath = realpathSync, log = () => {}, requestMs = REQUEST_MS, now = Date.now } = {}) {
+    Object.assign(this, { paths, connect, check, realpath, log, requestMs, now })
     /** The socket in use: the first of `paths` that passed the check. */
     this.path = null
     this.absent = false
     this.socket = null
     this.opening = null
+    this.openingSocket = null
+    this.stopped = false
     this.pending = new Map()
     /** The socket's write methods, from its hello: empty for a read-only socket. */
     this.writes = new Set()
-    /** channel -> { listener, status, approval, client, terminal } */
+    this.manages = new Set()
+    // Keep the team across reconnects. Switching homes invalidates the old phone hellos.
+    this.team = null
+    this.negotiated = new WeakMap()
+    this.grants = new Map()
+    this.nextGrant = 1
+    /** channel -> { socket, listener, status, approval, client, terminal } */
     this.subs = new Map()
-    /** paired key (client.device) -> { times: number[], interrupts: Map<terminal, number>, busy: Set<terminal> } */
+    /** Paired key -> write and read windows, interrupt windows and separate busy sets. */
     this.phones = new Map()
     this.nextId = 1
     this.nextChannel = 1
@@ -131,6 +156,7 @@ export class DshSource {
 
   /** The socket, connected and greeted, or null when the source is absent. */
   open() {
+    if (this.stopped) return Promise.resolve(null)
     if (this.socket && !this.socket.destroyed) return Promise.resolve(this.socket)
     if (this.opening) return this.opening
     const path = this.paths.find((candidate) => this.check(candidate))
@@ -140,13 +166,16 @@ export class DshSource {
       return Promise.resolve(null)
     }
     this.absent = false
-    this.path = path
+    const realFolder = () => {
+      try { return this.realpath(dirname(path)) } catch { return null }
+    }
     this.opening = new Promise((done) => {
-      const socket = this.connect(this.path)
+      const real = realFolder()
+      const socket = this.connect(path)
+      this.openingSocket = socket
       let buffer = ''
-      const fail = () => { socket.destroy(); done(null) }
       socket.setEncoding('utf8')
-      socket.once('error', fail)
+      socket.on('error', () => socket.destroy())
       socket.on('data', (chunk) => {
         buffer += chunk
         if (buffer.length > MAX_LINE && !buffer.includes('\n')) { socket.destroy(); return }
@@ -156,46 +185,70 @@ export class DshSource {
           buffer = buffer.slice(at + 1)
           let m
           try { m = JSON.parse(line) } catch { socket.destroy(); return }
-          this.onMessage(m)
+          this.onMessage(socket, m)
         }
       })
-      socket.on('close', () => this.onClose(socket))
-      socket.once('connect', () => {
-        this.socket = socket
-        this.ask('hello', { write: 1 }).then((hello) => {
-          const writable = hello?.readOnly === false && hello?.write === 1
-          if (hello?.protocol !== 1 || !(hello?.readOnly === true || writable)) { this.log('chat: the DSH socket answers neither read-only nor write: 1; not used'); fail(); return }
+      socket.on('close', () => { this.onClose(socket); done(null) })
+      socket.once('connect', async () => {
+        try {
+          let hello = await this.ask(socket, 'hello', { write: 1 })
+          if (validHello(hello) && writableHello(hello) && !this.stopped && !socket.destroyed) {
+            hello = await this.ask(socket, 'hello', { write: 1, manage: 1 })
+          }
+          if (!validHello(hello)) {
+            this.log('chat: the DSH socket answers neither read-only nor write: 1; not used')
+            socket.destroy()
+            return
+          }
+          if (this.stopped || socket.destroyed) return
+          if (realFolder() !== real) { socket.destroy(); return }
           const methods = Array.isArray(hello.methods) ? hello.methods : []
-          this.writes = new Set(writable ? Object.values(WRITE_METHODS).filter((m) => methods.includes(m)) : [])
-          socket.off('error', fail)
-          socket.on('error', () => {})
+          const manageMethods = Array.isArray(hello.manageMethods) ? hello.manageMethods : []
+          this.writes = new Set(writableHello(hello) ? Object.values(WRITE_METHODS).filter((m) => methods.includes(m)) : [])
+          this.manages = new Set(writableHello(hello) && hello.manage === 1 ? MANAGE_METHODS.filter((m) => manageMethods.includes(socketMethod(m))) : [])
+          this.path = path
+          if (this.team?.path !== path || this.team.real !== real) this.team = { path, real }
+          this.socket = socket
           done(socket)
-        }, fail)
+        } catch {
+          socket.destroy()
+        }
       })
-    }).finally(() => { this.opening = null })
+    }).finally(() => { this.opening = null; this.openingSocket = null })
     return this.opening
   }
 
-  ask(method, params) {
-    const socket = this.socket
-    if (!socket || socket.destroyed) return Promise.reject(Object.assign(new Error('closed'), { kind: 'unavailable' }))
+  ask(socket, method, params, { timeout = this.requestMs, accept } = {}) {
+    if (!socket || socket.destroyed) return Promise.reject(socketError('unavailable'))
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(Object.assign(new Error('timeout'), { kind: 'timeout' })) }, this.requestMs)
-      timer.unref?.()
-      this.pending.set(id, { resolve, reject, timer })
-      socket.write(`${JSON.stringify({ id, method, params })}\n`)
+      const p = { socket, resolve, reject, accept, written: false }
+      p.fail = (kind) => {
+        if (!this.pending.delete(id)) return
+        clearTimeout(p.timer)
+        reject(socketError(kind, p.written))
+      }
+      p.timer = setTimeout(() => p.fail('timeout'), timeout)
+      p.timer.unref?.()
+      this.pending.set(id, p)
+      try {
+        socket.write(`${JSON.stringify({ id, method, params })}\n`, (error) => { if (error) p.fail('unavailable') })
+        p.written = true
+      } catch {
+        p.fail('unavailable')
+      }
     })
   }
 
   async request(method, params) {
-    if (!(await this.open())) throw Object.assign(new Error('absent'), { kind: 'unavailable' })
-    return this.ask(method, params)
+    const socket = await this.open()
+    return this.ask(socket, method, params)
   }
 
-  onMessage(m) {
-    if (m && Object.hasOwn(m, 'id') && this.pending.has(m.id)) {
-      const p = this.pending.get(m.id)
+  onMessage(socket, m) {
+    const p = this.pending.get(m?.id)
+    if (p?.socket === socket) {
+      if (p.accept && (m.error || !p.accept(m.result))) return
       this.pending.delete(m.id)
       clearTimeout(p.timer)
       if (m.error) p.reject(Object.assign(new Error(String(m.error.message ?? m.error.kind)), { kind: m.error.kind, detail: m.error }))
@@ -203,7 +256,7 @@ export class DshSource {
       return
     }
     const sub = Number.isSafeInteger(m?.channel) ? this.subs.get(m.channel) : null
-    if (!sub || !m.event || typeof m.event.type !== 'string') return
+    if (sub?.socket !== socket || !m.event || typeof m.event.type !== 'string') return
     const e = rowsCut(m.event)
     if (e.type === 'snapshot' || e.type === 'status') sub.status = e.status ?? sub.status
     if (e.type === 'snapshot' || e.type === 'approval') sub.approval = e.type === 'snapshot' ? e.approval : (e.row?.open === false ? null : e.row)
@@ -211,11 +264,155 @@ export class DshSource {
   }
 
   onClose(socket) {
-    if (this.socket === socket) { this.socket = null; this.writes = new Set() }
-    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(Object.assign(new Error('closed'), { kind: 'unavailable' })) }
-    this.pending.clear()
-    for (const sub of this.subs.values()) { try { sub.listener({ type: 'gone', reason: 'unavailable' }) } catch {} }
-    this.subs.clear()
+    if (this.socket === socket) { this.socket = null; this.writes.clear(); this.manages.clear() }
+    for (const p of this.pending.values()) if (p.socket === socket) p.fail('unavailable')
+    for (const [client, grant] of this.grants) {
+      if (grant.socket !== socket) continue
+      grant.state = 'closed'
+      this.grants.delete(client)
+    }
+    for (const [channel, sub] of this.subs) {
+      if (sub.socket !== socket) continue
+      this.subs.delete(channel)
+      try { sub.listener({ type: 'gone', reason: 'unavailable' }) } catch {}
+    }
+  }
+
+  liveClient(client, socket) {
+    return !client.closed && !this.stopped && socket === this.socket && Boolean(socket && !socket.destroyed)
+  }
+
+  /** Open a grant before answering the phone's hello, when there is a method to negotiate. */
+  openManage(client, requested) {
+    const { socket, team } = this
+    if (typeof client.device !== 'string' || !client.device || !this.liveClient(client, socket)) return null
+    const methods = requested.filter((method) => this.manages.has(method))
+    if (!methods.length) return null
+    return this.openGrant(client, socket).then((grant) => {
+      if (grant?.state !== 'open' || !this.liveClient(client, socket)) return
+      this.negotiated.set(client, { team, methods: new Set(methods) })
+      return methods
+    })
+  }
+
+  async openGrant(client, socket) {
+    if (!this.liveClient(client, socket)) return null
+    const old = this.grants.get(client)
+    if (old?.socket === socket) return old.ready
+    if (old) this.releaseGrant(old)
+    const grant = { id: `g${this.nextGrant++}`, socket, client, state: 'opening' }
+    this.grants.set(client, grant)
+    grant.ready = this.confirmGrant(grant)
+    return grant.ready
+  }
+
+  async confirmGrant(grant) {
+    const { id, client, socket } = grant
+    try {
+      const result = await this.ask(socket, 'manage-open', { grant: id, phone: client.device })
+      if (result?.grant === id && grant.state === 'opening' && this.liveClient(client, socket)) {
+        grant.state = 'open'
+        return grant
+      }
+    } catch {}
+    this.releaseGrant(grant)
+    return null
+  }
+
+  releaseGrant(grant) {
+    if (grant.state === 'closed') return
+    grant.state = 'closed'
+    const { id, socket, client } = grant
+    if (this.grants.get(client) === grant) this.grants.delete(client)
+    if (!socket.destroyed) {
+      const accept = (result) => result && typeof result === 'object' && !Array.isArray(result) && Object.keys(result).length === 0
+      this.ask(socket, 'manage-close', { grant: id }, { timeout: CLOSE_MS, accept }).catch(() => socket.destroy())
+    }
+  }
+
+  closeClient(client) {
+    this.negotiated.delete(client)
+    const grant = this.grants.get(client)
+    if (grant) this.releaseGrant(grant)
+  }
+
+  async #manageGrant(client, method) {
+    const agreed = this.negotiated.get(client)
+    if (client.closed || !agreed?.methods.has(method) || agreed.team !== this.team) return null
+    const socket = await this.open().catch(() => null)
+    if (!this.liveClient(client, socket) || agreed.team !== this.team || !this.manages.has(method)) return null
+    const grant = await this.openGrant(client, socket)
+    return this.liveClient(client, socket) && grant?.state === 'open' ? grant : null
+  }
+
+  async memory(client, method, params) {
+    const grant = await this.#manageGrant(client, method)
+    if (!grant) return memoryRefused('read-only')
+    const { terminal, id, rev, text } = params
+    const reading = method === 'memory.read'
+    const editing = method === 'memory.edit'
+    if (!manageTerminal(terminal) ||
+      (!reading && (typeof text !== 'string' || Buffer.byteLength(text) > MANAGE_TEXT_MAX)) ||
+      (editing && (typeof id !== 'string' || !MEMORY_ID.test(id) || typeof rev !== 'string' || !MANAGE_REV.test(rev)))) {
+      return memoryRefused('invalid')
+    }
+    return this.#manageRequest(grant, method, reading, terminal, { ...(reading ? {} : { text }), ...(editing ? { id, rev } : {}) })
+  }
+
+  async schedule(client, method, params) {
+    const grant = await this.#manageGrant(client, method)
+    if (!grant) return memoryRefused('read-only')
+    const { terminal, id, rev, title } = params
+    const reading = method === 'schedule.list'
+    const renaming = method === 'schedule.rename'
+    if (!manageTerminal(terminal) ||
+      ((!reading || id !== undefined) && (typeof id !== 'string' || (!SCHEDULE_ID.test(id) && !SCHEDULE_ALIAS.test(id)))) ||
+      (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev))) ||
+      (renaming && (typeof title !== 'string' || Buffer.byteLength(title) > MANAGE_TEXT_MAX))) {
+      return memoryRefused('invalid')
+    }
+    return this.#manageRequest(grant, method, reading, terminal, {
+      ...(id === undefined ? {} : { id }), ...(reading ? {} : { rev }), ...(renaming ? { title } : {}),
+    })
+  }
+
+  async #manageRequest(grant, method, reading, terminal, fields) {
+    const { client, socket } = grant
+    const key = client.device
+    const now = this.now()
+    const phone = this.phoneState(key, now)
+    const times = reading ? phone.reads : phone.times
+    if (phone.manageBusy.has(terminal)) return memoryRefused('busy')
+    if (times.length >= (reading ? READS_PER_MINUTE : WRITES_PER_MINUTE)) return memoryRefused('rate')
+    if (!this.liveClient(client, socket) || grant.state !== 'open') return memoryRefused('read-only')
+    times.push(now)
+    phone.manageBusy.add(terminal)
+    try {
+      const result = await this.ask(socket, socketMethod(method), { grant: grant.id, terminal, ...fields })
+      if (client.closed) return memoryRefused('read-only')
+      return this.liveClient(client, socket) ? result : manageOffline(reading, true)
+    } catch (error) {
+      if (client.closed) return memoryRefused('read-only')
+      if (error.detail) return memoryRefused(typeof error.kind === 'string' && error.kind ? error.kind : 'failed')
+      return manageOffline(reading, error.written)
+    } finally {
+      phone.manageBusy.delete(terminal)
+      this.trimPhone(key, phone, this.now())
+    }
+  }
+
+  trimPhone(key, phone, now) {
+    phone.times = phone.times.filter((t) => now - t < 60_000)
+    phone.reads = phone.reads.filter((t) => now - t < 60_000)
+    for (const [terminal, at] of phone.interrupts) if (now - at >= INTERRUPT_MS) phone.interrupts.delete(terminal)
+    if (!phone.times.length && !phone.reads.length && !phone.interrupts.size && !phone.busy.size && !phone.manageBusy.size) this.phones.delete(key)
+  }
+
+  phoneState(key, now) {
+    const phone = this.phones.get(key) ?? { times: [], reads: [], interrupts: new Map(), busy: new Set(), manageBusy: new Set() }
+    this.trimPhone(key, phone, now)
+    this.phones.set(key, phone)
+    return phone
   }
 
   /** The DSH chats, as chat.list rows; [] when the source is absent. */
@@ -234,15 +431,20 @@ export class DshSource {
    */
   watch(terminal, client, listener) {
     const channel = this.nextChannel++
-    const sub = { listener, status: null, approval: null, client, terminal }
+    const sub = { socket: null, listener, status: null, approval: null, client, terminal }
     return {
       streamsSnapshot: true,
-      start: (after) => {
+      start: async (after) => {
         this.subs.set(channel, sub)
-        this.request('subscribe', { terminal, channel, ...(typeof after === 'string' ? { after } : {}) }).catch((error) => {
+        try {
+          const socket = await this.open()
+          if (this.subs.get(channel) !== sub) return
+          sub.socket = socket
+          await this.ask(socket, 'subscribe', { terminal, channel, ...(typeof after === 'string' ? { after } : {}) })
+        } catch (error) {
           if (!this.subs.delete(channel)) return
           try { listener({ type: 'gone', reason: error.kind ?? 'unavailable' }) } catch {}
-        })
+        }
       },
       rows: () => null,
       screen: () => [],
@@ -250,11 +452,11 @@ export class DshSource {
       approval: () => sub.approval,
       held: () => [],
       backfill: async (before, limit) => {
-        const result = await this.request('backfill', { channel, before, limit })
+        const result = await this.ask(sub.socket, 'backfill', { channel, before, limit })
         return page(Array.isArray(result?.rows) ? result.rows : [])
       },
       close: () => {
-        if (this.subs.delete(channel)) this.ask('unsubscribe', { channel }).catch(() => {})
+        if (this.subs.delete(channel) && sub.socket) this.ask(sub.socket, 'unsubscribe', { channel }).catch(() => {})
       },
     }
   }
@@ -272,15 +474,14 @@ export class DshSource {
    */
   async write(client, terminal, method, params = {}, { by = 'Phone' } = {}) {
     const id = method === 'send' ? params.id : undefined
-    if (!this.socket || this.socket.destroyed || !this.writes.has(method)) return refusedDsh(id)
+    const socket = this.socket
+    if (!socket || socket.destroyed || !this.writes.has(method)) return refusedDsh(id)
     const key = client?.device
     if (typeof key !== 'string' || !key) return refusedDsh(id)
-    const channel = [...this.subs.entries()].find(([, s]) => s.client === client && s.terminal === terminal)?.[0]
+    const channel = [...this.subs.entries()].find(([, s]) => s.socket === socket && s.client === client && s.terminal === terminal)?.[0]
     if (channel === undefined) return refused('not-watching', id)
-    const phone = this.phones.get(key) ?? { times: [], interrupts: new Map(), busy: new Set() }
-    this.phones.set(key, phone)
     const now = this.now()
-    phone.times = phone.times.filter((t) => now - t < 60_000)
+    const phone = this.phoneState(key, now)
     if (phone.busy.has(terminal)) return refused('busy', id)
     if (phone.times.length >= WRITES_PER_MINUTE) return refused('rate', id)
     if (method === 'interrupt' && now - (phone.interrupts.get(terminal) ?? -Infinity) < INTERRUPT_MS) return refused('rate', id)
@@ -288,7 +489,7 @@ export class DshSource {
     if (method === 'interrupt') phone.interrupts.set(terminal, now)
     phone.busy.add(terminal)
     try {
-      const result = await this.ask(method, { channel, ...params, by, phone: key })
+      const result = await this.ask(socket, method, { channel, ...params, by, phone: key })
       if (!result || typeof result !== 'object' || Array.isArray(result)) return refused('failed', id)
       return id === undefined || Object.hasOwn(result, 'id') ? result : { ...result, id }
     } catch (error) {
@@ -298,11 +499,15 @@ export class DshSource {
       return refused(typeof kind === 'string' && kind ? kind : 'failed', id, { ...rest, ...(typeof message === 'string' ? { message } : {}) })
     } finally {
       phone.busy.delete(terminal)
-      if (!phone.busy.size && !phone.times.some((t) => this.now() - t < 60_000) && ![...phone.interrupts.values()].some((t) => this.now() - t < INTERRUPT_MS)) this.phones.delete(key)
+      this.trimPhone(key, phone, this.now())
     }
   }
 
-  close() { this.socket?.destroy() }
+  close() {
+    this.stopped = true
+    this.openingSocket?.destroy()
+    this.socket?.destroy()
+  }
 }
 
 /**
@@ -314,6 +519,12 @@ export function withDsh(engine, dsh, { by = 'Phone' } = {}) {
   if (!dsh) return engine
   return {
     dshWrite: () => dsh.writable(),
+    openManage: (client, methods) => dsh.openManage(client, methods),
+    memory: (client, method, params) => dsh.memory(client, method, params),
+    schedule: (client, method, params) => dsh.schedule(client, method, params),
+    closeClient: (client) => {
+      try { dsh.closeClient(client) } finally { engine.closeClient?.(client) }
+    },
     ready: () => engine.ready(),
     async list() {
       const [terminals, bots] = await Promise.all([engine.list(), dsh.list().catch(() => [])])

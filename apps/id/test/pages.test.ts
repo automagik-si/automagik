@@ -479,6 +479,95 @@ describe('pages: the real Worker and its static files', () => {
   });
 });
 
+// The exact policy PAGES-CONTRACT.md names; every answer carries it and the others.
+const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+  "font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; " +
+  "base-uri 'none'; object-src 'none'";
+function secured(response: Response, label: string) {
+  expect(response.headers.get('x-content-type-options'), label).toBe('nosniff');
+  expect(response.headers.get('strict-transport-security'), label).toBe('max-age=31536000; includeSubDomains');
+  expect(response.headers.get('referrer-policy'), label).toBe('no-referrer');
+  expect(response.headers.get('x-frame-options'), label).toBe('DENY');
+  const csp = response.headers.get('content-security-policy');
+  expect(csp, label).toBe(CSP);
+  expect(/unsafe-/i.test(csp ?? ''), label).toBe(false);
+}
+
+describe('security headers', () => {
+  test('security headers on every answer: pages, files, .html, API, well-known, unknown', async () => {
+    const { origin } = await world();
+    const routes: [string, RequestInit, number][] = [
+      ['/sign-in?state=opaque', {}, 200], ['/consent', {}, 200],
+      ['/id.css', {}, 200], ['/id.js', {}, 200], ['/assets/genie-faces.webp', {}, 200],
+      ['/assets/manrope-latin.woff2', {}, 200], ['/assets/automagik-lockup-three-colours-ink-header.svg', {}, 200],
+      ['/sign-in.html', {}, 404], ['/consent.html', {}, 404], ['/assets/missing.png', {}, 404],
+      ['/api/auth/get-session', {}, 200], ['/api/auth/jwks', {}, 200], ['/api/id/config', {}, 200],
+      ['/api/auth/list-sessions', {}, 401],
+      ['/api/auth/revoke-session', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'unknown' }) }, 401],
+      ['/api/auth/revoke-sessions', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: '{}' }, 401],
+      ['/api/auth/oauth2/register', { method: 'POST' }, 404],
+      ['/.well-known/openid-configuration', {}, 200],
+      ['/.well-known/oauth-authorization-server/api/auth', {}, 200],
+      ['/no-such-page', {}, 404], ['/api/no-such-route', {}, 404],
+    ];
+    for (const [path, init, status] of routes) {
+      // HEAD as well where the static files answer it; Better Auth answers HEAD with 404.
+      const head = !init.method && !path.startsWith('/api/') && !path.startsWith('/.well-known/');
+      for (const method of [init.method ?? 'GET', ...(head ? ['HEAD'] : [])]) {
+        const response = await fetch(`${origin}${path}`, { ...init, method, redirect: 'manual' });
+        await response.arrayBuffer();
+        expect(response.status, `${method} ${path}`).toBe(status);
+        secured(response, `${method} ${path}`);
+      }
+    }
+    // The pages keep their own no-store and their HTML type.
+    for (const page of PAGES) {
+      const response = await fetch(`${origin}/${page}`);
+      expect(response.headers.get('content-type'), page).toMatch(/^text\/html/);
+      expect(response.headers.get('cache-control'), page).toBe('no-store');
+      expect(await response.text(), page).toBe(await read(`${page}.html`));
+    }
+  });
+
+  test('security headers keep Better Auth redirects and cookies as they were', async () => {
+    const { origin } = await world();
+    const query = new URLSearchParams({
+      client_id: 'automagik-desktop', redirect_uri: 'http://127.0.0.1:53001/callback', response_type: 'code',
+      scope: 'openid profile', state: 'test-state', nonce: 'test-nonce',
+      code_challenge: digest('a'.repeat(64)), code_challenge_method: 'S256',
+    });
+    const response = await fetch(`${origin}/api/auth/oauth2/authorize?${query}`, { redirect: 'manual' });
+    // Better Auth answers with a Location or with {redirect, url}; either still points at the page.
+    const body = await response.text();
+    const target = response.headers.get('location') ?? JSON.parse(body).url;
+    expect([200, 302]).toContain(response.status);
+    expect(new URL(target, origin).pathname).toBe('/sign-in');
+    expect(new URL(target, origin).searchParams.get('state')).toBe('test-state');
+    secured(response, 'authorize');
+    // A passkey ceremony sets its challenge cookie; it arrives intact beside the headers.
+    const options = await fetch(`${origin}/api/auth/passkey/generate-authenticate-options`, {
+      headers: { origin },
+    });
+    expect(options.status).toBe(200);
+    expect(options.headers.getSetCookie().length).toBeGreaterThan(0);
+    expect(options.headers.getSetCookie().join('\n')).toMatch(/HttpOnly/i);
+    secured(options, 'passkey options');
+  });
+
+  test('the pages\' own meta policy is no looser than the header policy', async () => {
+    for (const page of PAGES) {
+      const html = await read(`${page}.html`);
+      const meta = html.match(/Content-Security-Policy" content="([^"]+)"/)?.[1] ?? '';
+      expect(/unsafe-/i.test(meta), page).toBe(false);
+      for (const directive of ["script-src 'self'", "style-src 'self'", "default-src 'none'"]) {
+        expect(meta, page).toContain(directive);
+      }
+    }
+  });
+});
+
 describe('pages: a real browser on the real Worker', () => {
   const authorize = (origin: string, overrides: Record<string, string> = {}) => `${origin}/api/auth/oauth2/authorize?` +
     new URLSearchParams({

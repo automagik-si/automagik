@@ -9120,21 +9120,14 @@ var PT_BR = {
   "link": "conexão",
   "team": "equipe",
   "The Omni plugins": "Os plugins do Omni",
+  "Power": "Energia",
   "Power {name} off": "Desligar {name}",
   "Power {name} on": "Ligar {name}",
-  // The power shortcut in the Bot team's sidebar (power-shortcut.js)
-  "Omni and Genie": "Omni e Genie",
-  "Omni, Genie and Unfold": "Omni, Genie e Unfold",
+  // The power card in each built-in Bot's settings (power-shortcut.js)
   "Try again": "Tentar de novo",
   "Choose where Omni lives": "Escolher onde o Omni fica",
   "Add Omni": "Adicionar o Omni",
   "Open Plugins": "Abrir Plugins",
-  "Open team setup": "Abrir configuração da equipe",
-  "{name} on": "{name}: energia ligada",
-  "{name} off": "{name}: energia desligada",
-  "{name} working": "{name}: trabalhando",
-  "{name} needs you": "{name}: precisa de você",
-  "{a}, {b}": "{a}, {b}",
   "On · {status}": "Ligado · {status}",
   "{name} stays on once it joins your team.": "O {name} fica ligado depois que entra na sua equipe.",
   "Adds the Omni plugins to this DSH, then looks for your Omni.": "Adiciona os plugins do Omni a este DSH e depois procura o seu Omni.",
@@ -9199,8 +9192,8 @@ var PT_BR = {
   "Continue with just {name}": "Continuar só com {name}",
   "Continue with {who}": "Continuar com {who}",
   " and ": " e ",
-  // Claude Code and Codex (acp-agents.js), in Connect AI and in Settings
-  "Claude Code and Codex": "Claude Code e Codex",
+  // Coding agents (acp-agents.js), in Connect AI and in Settings
+  "Coding agents": "Agentes de código",
   "Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.": "Use os agentes de código que você já tem como modelos no DSH. Cada um roda a sua própria CLI, com o seu login e as suas configurações.",
   "Looking at what this computer has…": "Vendo o que este computador tem…",
   "The ACP agents plugin is not running in this DSH.": "O plugin de agentes ACP não está rodando neste DSH.",
@@ -9226,19 +9219,27 @@ var PT_BR = {
   "The {name} installation or update failed: {error}": "A instalação ou atualização do {name} falhou: {error}",
   "The {name} installation or update failed.": "A instalação ou atualização do {name} falhou.",
   "Signed in to {name}.": "Login feito no {name}.",
+  "Signed in to {name} as {account}.": "Login feito no {name} como {account}.",
+  "Switch account": "Trocar de conta",
+  "Bots in this installation share this account. Your terminal sign-in stays as it is.": "Os Bots desta instalação compartilham esta conta. O login no terminal continua como está.",
+  "This stops running Bot work for this account. Continue?": "Isso interrompe o trabalho dos Bots nesta conta. Continuar?",
   "Not signed in to {name}. Sign in from a Bot's chat.": "Sem login no {name}. Entre pelo chat de um Bot.",
   "Or run {command} in a terminal, then check again.": "Ou rode {command} em um terminal e verifique de novo.",
   "Not signed in to {name}. Run {command} in a terminal, then check again.": "Sem login no {name}. Rode {command} em um terminal e verifique de novo.",
   "Turning it on lets Automagik use the sign-in {name} already has on this computer.": "Ao ligar, o Automagik passa a usar o login que o {name} já tem neste computador.",
   "The sign-in to {name} has not been checked yet.": "O login no {name} ainda não foi verificado.",
+  "Could not check the sign-in to {name}: {cli} took too long to answer.": "Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.",
+  "Could not tell whether you are signed in to {name}.": "Não foi possível saber se há login no {name}.",
   "Sign in": "Entrar",
   "No Bot chat to sign in from here. Run {command} in a terminal instead.": "Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.",
+  "Sign-in needs a Bot chat. If you have no Bot yet, set one up first.": "Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.",
   "Sign in from the Bot's chat, then come back to finish setting up.": "Entre pelo chat do Bot e volte para terminar a configuração.",
   "Back to setup": "Voltar à configuração",
   "Off. Turn it on to use {name} as a model in DSH.": "Desligado. Ligue para usar o {name} como modelo no DSH.",
   "Installing its connector in the background. This takes a minute or two.": "Instalando o conector em segundo plano. Leva um ou dois minutos.",
   "The connector did not install: {error}": "O conector não foi instalado: {error}",
   "The connector did not install.": "O conector não foi instalado.",
+  "Could not reach the connector registry. Automagik tries again by itself, or press Retry.": "Não foi possível acessar o registro de conectores. O Automagik tenta de novo automaticamente. Para tentar agora, clique em Tentar de novo.",
   "The connector did not start: {error}": "O conector não iniciou: {error}",
   "Install details": "Detalhes da instalação",
   "Log: {path}": "Registro: {path}",
@@ -9356,6 +9357,11 @@ var PT_BR = {
   "Omni has the channel. Its next update adds your Bot as the one who answers.": "O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.",
   "Hermes: Telegram off": "Hermes: Telegram desligado",
   "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key.": "O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.",
+  "Turn Hermes's Telegram back on": "Religar o Telegram do Hermes",
+  "Hermes's Telegram is back on": "O Telegram do Hermes está de volta",
+  "That is your way back. Hermes has its Telegram again.": "Esse é o caminho de volta. O Hermes está com o Telegram de novo.",
+  "Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.": "Nada mais mudou. Se o Omni ficou com um canal desta mudança, verifique nos Canais do Omni antes de mover de novo.",
+  "No Bot answers in these chats yet. Pick one in Omni's Channels.": "Nenhum Bot responde nesses chats ainda. Escolha um nos Canais do Omni.",
   "Hermes was not running. Its Telegram stays off until you start Hermes again.": "O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.",
   "Hermes: Telegram was already off": "Hermes: o Telegram já estava desligado",
   "Omni: listening": "Omni: escutando",
@@ -9769,7 +9775,7 @@ body[data-ds-dark-theme] .oai-overlay::before{background:radial-gradient(1100px 
 .oai-clay-omni{--oai-clay-atlas:var(--oai-omni)}
 .oai-clay-genie{--oai-clay-atlas:var(--oai-genie)}
 .oai-clay-unfold{--oai-clay-atlas:var(--oai-unfold)}
-.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
+path.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
 .oai-octo:hover .oai-cyan,.oai-glitch .oai-cyan{opacity:.55;transform:translate(-2.5px,0);animation:oai-glitch 2.4s steps(1) infinite}
 .oai-octo:hover .oai-magenta,.oai-glitch .oai-magenta{opacity:.55;transform:translate(2.5px,0);animation:oai-glitch 2.4s steps(1) infinite reverse}
 .oai-eyes{transform-origin:50px 36px;animation:oai-blink 5s infinite}
@@ -10079,7 +10085,7 @@ function Stage({ title, speech, at: at2, glitching, hero, mark = "AUTOMAGIK", wi
 // src/client/companion.js
 var import_react3 = require("react");
 var IDEAS = ["a sleepy cyan fox with a lantern tail", "a tiny robot made of moonlight", "a round jellyfish that wears headphones"];
-var NAMES = ["Pirlim", "Nova", "Mochi", "Echo", "Biscuit"];
+var NAMES = ["Pirlim", "Mestrik", "Maguito", "Guizo", "Trunfo"];
 var NAME_RULE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
 var AVATAR_SIZE = 256;
 var MAX_AVATAR = 16e4;
@@ -10673,32 +10679,10 @@ var startPower = (kind, run) => WORKING.has(powerOf(kind).phase) ? null : runPow
 function stopPower(kind) {
   runs.get(kind)?.abort();
 }
-var INTENT_KEY = "automagik.welcome.team-intent";
-var INTENT_MS = 6e4;
-var intent = null;
-function setTeamIntent(power = null, now = Date.now()) {
-  intent = { power, at: now };
-  try {
-    globalThis.sessionStorage?.setItem(INTENT_KEY, JSON.stringify(intent));
-  } catch {
-  }
-}
-function takeTeamIntent(now = Date.now()) {
-  let value = intent;
-  intent = null;
-  try {
-    const stored = globalThis.sessionStorage?.getItem(INTENT_KEY);
-    globalThis.sessionStorage?.removeItem(INTENT_KEY);
-    if (value === null && stored) value = JSON.parse(stored);
-  } catch {
-  }
-  return value !== null && typeof value?.at === "number" && now - value.at >= 0 && now - value.at < INTENT_MS ? value : null;
-}
 function resetPower() {
   for (const controller of runs.values()) controller.abort();
   runs.clear();
   states.clear();
-  intent = null;
   for (const listener of Array.from(listeners)) listener();
 }
 
@@ -11594,10 +11578,9 @@ var TeamLede = ({ name }) => (0, import_react7.createElement)(
   (0, import_react7.createElement)("br"),
   (0, import_react7.createElement)("span", { className: "oai-lede-rule" }, t("Code work goes to a Bot with Computer."))
 );
-var explicitOf = (props, intent2) => props?.explicit === true || intent2 !== null;
+var explicitOf = (props) => props?.explicit === true;
 function TeamStep(props) {
-  const [intent2] = (0, import_react7.useState)(() => takeTeamIntent());
-  const explicit = explicitOf(props, intent2);
+  const explicit = explicitOf(props);
   const state = useGate(explicit ? { ...props, explicit: true } : props);
   const finish2 = useFinish(props);
   const [glitching, glitch] = useGlitch();
@@ -11631,8 +11614,7 @@ function TeamStep(props) {
     if (state) glitch();
   }, [state, glitch]);
   (0, import_react7.useEffect)(() => {
-    const asked = intent2?.power === "omni" && !autoPowered.current && power.phase === "asleep";
-    if (!state || !(asked || powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current))) return;
+    if (!state || !powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return;
     autoPowered.current = true;
     power.toggle();
   }, [state]);
@@ -12061,7 +12043,23 @@ var CREDENTIALS = Object.freeze([
   [/\bAIza[A-Za-z0-9_-]{20,}/g, CREDENTIAL_MARK],
   [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, CREDENTIAL_MARK],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
-  [/([?&#](?:token|access_token|api_key|apikey|key|secret|password)=)[^&\s"']+/gi, `$1${CREDENTIAL_MARK}`],
+  // Provider and code-host keys whose own prefix the rules above do not cover. Each needs a
+  // long enough body that ordinary words cannot match it.
+  [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g, CREDENTIAL_MARK],
+  [/\bwhsec_[A-Za-z0-9+/=]{12,}/g, CREDENTIAL_MARK],
+  [/\bhf_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bgl(?:pat|oas|rt)-[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bgsk_[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\br8_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bdop_v1_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bshp(?:at|ca|pa|ss)_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bSG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bya29\.[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\bnfp_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bvercel_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bsbp_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bATBB[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/([?&#](?:token|access[_-]?token|api[_-]?key|apikey|key|secret|password|passwd|auth|authorization|client[_-]?secret|x-api-key|signature|sig|code|ticket)=)[^&#\s"']+/gi, `$1${CREDENTIAL_MARK}`],
   // npm registry credentials: an access token (8+ chars; shorter is indistinguishable from a
   // package name), the .npmrc keys as JSON (quoted key or value), their npm_config_* env
   // spelling, NPM_TOKEN, and any userinfo in an http(s) URL. The userinfo rule is greedy to
@@ -12074,7 +12072,7 @@ var CREDENTIALS = Object.freeze([
   // as a key with = or :, JSON-quoted keys included.
   [/(\b[A-Z0-9_]*(?:NPM_TOKEN|AUTH_TOKEN)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',}]+)/gi, `$1${CREDENTIAL_MARK}`],
   [/(\bhttps?:\/\/)[^/\s]+@/gi, `$1${CREDENTIAL_MARK}@`],
-  [/(["']?(?:api[_-]?key|authorization|x-api-key|password|secret)["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
+  [/(["']?(?:(?:[a-z0-9]+[-_.])*(?:api[_-]?key|authorization|x-api-key|x-auth-token|x-amz-security-token|proxy-authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret))["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
 ]);
 function redactText(text) {
   let out = String(text ?? "");
@@ -12110,6 +12108,7 @@ var import_react9 = require("react");
 var CLI_OF = { "acp-claude": "claude", "acp-codex": "codex", "acp-hermes": "hermes", "acp-antigravity": "agy", "acp-omp": "omp" };
 var LOGO_OF = { "acp-claude": "CC", "acp-codex": "CX", "acp-hermes": "HM", "acp-antigravity": "AG", "acp-omp": "OM" };
 var isNative = (agent) => agent?.connector?.native === true;
+var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agent);
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
 var CHAT_LOGIN = /* @__PURE__ */ Symbol.for("automagik.cli-login");
@@ -12122,6 +12121,7 @@ function openChatLogin(provider, scope = globalThis) {
   }
 }
 var POLL_MS2 = 2e3;
+var UNREACHABLE_POLL_MS = 15e3;
 var SETTINGS_SECTION = "acp-agents";
 var cliBusy = (agent) => agent.cli.state === "installing" || agent.cli.updating === true;
 function stateOf(agent) {
@@ -12151,7 +12151,7 @@ function badgeOf(agent) {
   if (state === "ready") return t("Ready");
   return null;
 }
-function agentLines(agent) {
+function agentLines(agent, entry) {
   const name = agent.name;
   const cli = CLI_OF[agent.id] ?? agent.key;
   const lines = [];
@@ -12170,25 +12170,37 @@ function agentLines(agent) {
     return lines;
   }
   lines.push({ tone: "ok", text: agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli }) });
-  if (agent.signedIn === true && agent.consent !== "needed") lines.push({ tone: "ok", text: t("Signed in to {name}.", { name }) });
+  if (agent.signedIn === true && agent.consent !== "needed") {
+    const canSwitch = isolatedSignIn(agent) && entry?.authScope === "isolated" && entry.signedIn === true;
+    const account = canSwitch && entry.account?.kind === "account" ? entry.account.email ?? entry.account.org : void 0;
+    lines.push({
+      tone: "ok",
+      text: account ? t("Signed in to {name} as {account}.", { name, account }) : t("Signed in to {name}.", { name }),
+      ...canSwitch ? { action: "switch" } : {}
+    });
+    if (canSwitch) lines.push({ tone: "muted", text: t("Bots in this installation share this account. Your terminal sign-in stays as it is.") });
+  }
   if (agent.signedIn === true && agent.consent === "needed" && !cliBusy(agent)) lines.push({ tone: "bad", text: t("{name} is signed in on this computer. Confirm its account in a Bot's chat before Bots use it.", { name }), action: "login", label: t("Confirm account") });
   if (agent.signedIn === false && isNative(agent)) lines.push({ tone: "bad", text: t("Not signed in to {name}. Run {command} in a terminal, then check again.", { name, command: signInCommand(agent) }), action: "check" });
   if (agent.signedIn === false && !isNative(agent) && !cliBusy(agent)) {
     lines.push({ tone: "bad", text: t("Not signed in to {name}. Sign in from a Bot's chat.", { name }), action: "login" });
-    lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
+    if (!isolatedSignIn(agent)) lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
   }
-  if (agent.signedIn === void 0 && !cliBusy(agent) && (agent.on || !isNative(agent))) lines.push({ tone: "muted", text: t("The sign-in to {name} has not been checked yet.", { name }), action: "check" });
+  if (agent.signedIn === void 0 && !cliBusy(agent) && (agent.on || !isNative(agent))) {
+    const text = agent.signInCheck === "timeout" ? t("Could not check the sign-in to {name}: {cli} took too long to answer.", { name, cli }) : agent.signInCheck === "unreadable" ? t("Could not tell whether you are signed in to {name}.", { name }) : t("The sign-in to {name} has not been checked yet.", { name });
+    lines.push({ tone: "muted", text, action: "check" });
+  }
   if (!agent.on) {
     lines.push({ tone: "muted", text: t("Off. Turn it on to use {name} as a model in DSH.", { name }) });
     if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
     return lines;
   }
-  const { state, version, error, diagnostic, logPath } = agent.connector;
+  const { state, version, error, diagnostic, logPath, unreachable } = agent.connector;
   if (state === "installing") lines.push({ tone: "wait", text: t("Installing its connector in the background. This takes a minute or two.") });
   if (state === "failed") {
     lines.push({
       tone: "bad",
-      text: error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
+      text: unreachable === true ? t("Could not reach the connector registry. Automagik tries again by itself, or press Retry.") : error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
       action: "retry",
       // What DSH 0.2.2 shows for a failed plugin install: the full diagnostic and its log file.
       // The panel and its expander read this one value, so the shared table runs here too: a
@@ -12232,13 +12244,15 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     void load(true);
   }, [load]);
   const settling = view?.agents?.some((agent) => cliBusy(agent) || agent.on && agent.cli.found && agent.connector.state === "installing" || wanted[agent.id] !== void 0 && wanted[agent.id] !== agent.on) === true;
+  const unreachable = view?.agents?.some((agent) => agent.on && agent.cli.found && agent.connector.state === "failed" && agent.connector.unreachable === true) === true;
+  const pollMs = settling ? POLL_MS2 : unreachable ? UNREACHABLE_POLL_MS : void 0;
   (0, import_react9.useEffect)(() => {
-    if (!settling) return void 0;
+    if (pollMs === void 0) return void 0;
     const timer = setInterval(() => {
       void load(false);
-    }, POLL_MS2);
+    }, pollMs);
     return () => clearInterval(timer);
-  }, [settling, load]);
+  }, [pollMs, load]);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
   const act = async (id, endpoint, payload) => {
     say(id, null);
@@ -12257,6 +12271,7 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     view,
     busy,
     problems,
+    setProblem: say,
     isOn: (agent) => wanted[agent.id] ?? agent.on,
     flip: async (agent) => {
       const on2 = !(wanted[agent.id] ?? agent.on);
@@ -12270,12 +12285,11 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
-    // Opens the sign-in row in a Bot's chat; nothing is asked of the host here. Without the Bot
-    // team (or a Bot), the row says to use the terminal.
+    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat.
     login: (agent) => {
       say(agent.id, null);
       if (!open(agent.id)) {
-        say(agent.id, t("No Bot chat to sign in from here. Run {command} in a terminal instead.", { command: signInCommand(agent) }));
+        say(agent.id, isolatedSignIn(agent) ? t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first.") : t("No Bot chat to sign in from here. Run {command} in a terminal instead.", { command: signInCommand(agent) }));
         return false;
       }
       onLoginOpen?.(agent);
@@ -12283,18 +12297,24 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }
   };
 }
-function AcpLine({ line, agent, acp, busy }) {
+function AcpLine({ line, agent, acp, busy, accountControls }) {
+  const canSwitch = line.action === "switch" && accountControls !== void 0;
+  const confirming = canSwitch && accountControls.pending === agent.id;
+  const accountButton = (label, onClick) => (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick }, label);
   return (0, import_react9.createElement)(
     "div",
     { className: "oai-acp-line-block" },
     (0, import_react9.createElement)(
       "p",
       { className: `oai-acp-line oai-acp-${line.tone}${line.tone === "wait" ? " oai-waiting" : ""}`, ...line.tone === "bad" ? { role: "status" } : {} },
-      line.text,
+      confirming ? t("This stops running Bot work for this account. Continue?") : line.text,
       line.link ? [" ", (0, import_react9.createElement)("a", { key: "link", className: "oai-link", href: line.link.href, target: "_blank", rel: "noreferrer" }, line.link.text)] : null,
       line.action === "retry" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.retry(agent) }, t("Retry")) : null,
       line.action === "login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t("Sign in")) : null,
-      line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null
+      line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null,
+      canSwitch && !confirming ? accountButton(t("Switch account"), () => accountControls.ask(agent)) : null,
+      confirming ? accountButton(t("Continue"), () => accountControls.confirm(agent)) : null,
+      confirming ? accountButton(t("Cancel"), accountControls.cancel) : null
     ),
     line.details ? (0, import_react9.createElement)(
       "details",
@@ -12305,11 +12325,11 @@ function AcpLine({ line, agent, acp, busy }) {
     ) : null
   );
 }
-function AcpAgentRow({ agent, acp }) {
+function AcpAgentRow({ agent, acp, accountControls }) {
   const on2 = acp.isOn(agent);
-  const busy = acp.busy !== null;
+  const busy = acp.busy !== null || accountControls?.busy === true;
   const badge = badgeOf({ ...agent, on: on2 });
-  const lines = agentLines(agent);
+  const lines = agentLines(agent, accountControls?.accounts[agent.id]);
   return (0, import_react9.createElement)(
     "div",
     { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },
@@ -12326,29 +12346,91 @@ function AcpAgentRow({ agent, acp }) {
       badge ? (0, import_react9.createElement)("em", { className: "oai-found" }, badge) : null,
       (0, import_react9.createElement)("button", { type: "button", role: "switch", className: "oai-switch", "aria-checked": on2 ? "true" : "false", "aria-label": agent.name, disabled: busy, onClick: () => acp.flip(agent) })
     ),
-    (0, import_react9.createElement)("div", { className: "oai-acp-lines" }, lines.map((line, i) => (0, import_react9.createElement)(AcpLine, { key: i, line, agent, acp, busy }))),
+    (0, import_react9.createElement)("div", { className: "oai-acp-lines" }, lines.map((line, i) => (0, import_react9.createElement)(AcpLine, { key: i, line, agent, acp, busy, accountControls }))),
     acp.problems[agent.id] ? (0, import_react9.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, acp.problems[agent.id]) : null
   );
 }
-function AcpAgents({ acp }) {
+function AcpAgents({ acp, accountControls }) {
   if (acp.view?.available !== true || acp.view.agents.length === 0) return null;
   return (0, import_react9.createElement)(
     "section",
-    { className: "oai-group oai-acp-group", "aria-label": t("Claude Code and Codex") },
-    (0, import_react9.createElement)("div", { className: "oai-list" }, acp.view.agents.map((agent) => (0, import_react9.createElement)(AcpAgentRow, { key: agent.id, agent, acp })))
+    { className: "oai-group oai-acp-group", "aria-label": t("Coding agents") },
+    (0, import_react9.createElement)("div", { className: "oai-list" }, acp.view.agents.map((agent) => (0, import_react9.createElement)(AcpAgentRow, { key: agent.id, agent, acp, accountControls })))
   );
 }
-function AcpSettingsSection({ close } = {}) {
+var BOTS_CLIENT = "@automagik/bots-dsh/client";
+var loadBots = () => require(BOTS_CLIENT);
+async function readAccounts(load) {
+  try {
+    const omni = load()?.omni;
+    const face = omni?.face?.();
+    if (typeof face?.actions?.cliLoginAccounts !== "function" || typeof face.actions.cliLoginSwitch !== "function") return null;
+    const result = await face.actions.cliLoginAccounts();
+    return { face, hostText: face.hostText ?? omni.hostText, accounts: result?.accounts ?? {} };
+  } catch {
+    return null;
+  }
+}
+function AcpSettingsSection({ close, load = loadBots } = {}) {
   const acp = useAcp(void 0, { onLoginOpen: () => close?.() });
+  const [accountView, setAccountView] = (0, import_react9.useState)(null);
+  const [pending, setPending] = (0, import_react9.useState)(null);
+  const [busy, setBusy] = (0, import_react9.useState)(false);
+  const switchBusy = (0, import_react9.useRef)(false);
+  (0, import_react9.useEffect)(() => {
+    let live = true;
+    void readAccounts(load).then((view) => {
+      if (live) setAccountView(view);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const confirm2 = async (agent) => {
+    if (switchBusy.current) return;
+    switchBusy.current = true;
+    setBusy(true);
+    acp.setProblem(agent.id, null);
+    try {
+      const { face } = accountView;
+      const snapshot = face.hooks?.roster?.getSnapshot?.();
+      const main = [...snapshot?.mainBotIds ?? [], snapshot?.mainBotId].find((id) => id && snapshot.byId?.[id]);
+      if (!main) {
+        acp.setProblem(agent.id, t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first."));
+        return;
+      }
+      await face.actions.cliLoginSwitch(main, agent.id);
+      await face.actions.refreshModels?.();
+      acp.login(agent);
+    } catch (error) {
+      const message = error?.message ?? String(error);
+      acp.setProblem(agent.id, accountView.hostText?.(message) ?? message);
+    } finally {
+      setPending(null);
+      setBusy(false);
+      switchBusy.current = false;
+    }
+  };
+  const accountControls = accountView === null ? void 0 : {
+    accounts: accountView.accounts,
+    pending,
+    busy,
+    confirm: confirm2,
+    ask: (agent) => {
+      acp.setProblem(agent.id, null);
+      setPending(agent.id);
+    },
+    cancel: () => setPending(null)
+  };
   return (0, import_react9.createElement)(
     "div",
     { className: "oai-acp-page" },
     (0, import_react9.createElement)(
       "div",
       { className: "oai-card" },
-      (0, import_react9.createElement)("h1", null, t("Claude Code and Codex")),
+      (0, import_react9.createElement)("h1", null, t("Coding agents")),
       (0, import_react9.createElement)("p", null, t("Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.")),
-      acp.view === null ? (0, import_react9.createElement)("p", { className: "oai-muted oai-waiting" }, t("Looking at what this computer has…")) : acp.view.available ? (0, import_react9.createElement)(AcpAgents, { acp }) : (0, import_react9.createElement)("p", { className: "oai-muted" }, t("The ACP agents plugin is not running in this DSH."))
+      acp.view === null ? (0, import_react9.createElement)("p", { className: "oai-muted oai-waiting" }, t("Looking at what this computer has…")) : acp.view.available ? (0, import_react9.createElement)(AcpAgents, { acp, accountControls }) : (0, import_react9.createElement)("p", { className: "oai-muted" }, t("The ACP agents plugin is not running in this DSH."))
     )
   );
 }
@@ -12371,7 +12453,7 @@ function AcpSectionIcon({ size = 16 }) {
   );
 }
 function installAcpSection(ctx) {
-  const section = ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: SETTINGS_SECTION, order: 30, label: () => t("Claude Code and Codex") }, AcpSettingsSection)) ?? (() => {
+  const section = ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: SETTINGS_SECTION, order: 30, label: () => t("Coding agents") }, AcpSettingsSection)) ?? (() => {
   });
   const icon = ctx.slots.inject("settings.section.icon", () => ctx.slots.register({ name: "settings.section.icon", id: SETTINGS_SECTION, order: 30 }, AcpSectionIcon)) ?? (() => {
   });
@@ -13102,6 +13184,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     "div",
     { className: "oai-mig-doneview" },
     (0, import_react11.createElement)(BotPanel, { result }),
+    result.recovered === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("No Bot answers in these chats yet. Pick one in Omni's Channels.")) : null,
     result.connected !== true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Omni has the channel. It is bringing the bot up now.")) : null,
     result.chatUrl ? (0, import_react11.createElement)("a", { className: "oai-pill oai-mig-sayhi", href: result.chatUrl, target: "_blank", rel: "noreferrer" }, t("Say hi to your bot"), Arrow()) : null,
     result.answering === true && result.answerBot ? (0, import_react11.createElement)("p", { className: "oai-mig-answer" }, Check2(), t("Replies through {name}.", { name: result.answerBot.name })) : null,
@@ -13129,19 +13212,34 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     )
   );
 }
-function ProblemCard({ error, onRetry, onHandoff }) {
+function ProblemCard({ error, note, restoring, onRetry, onHandoff, onRestoreHermes }) {
   const changed = error?.changed ?? {};
   const lines = error?.code === "hermes-still-on" ? "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back." : error?.code === "refused" ? "Hermes would not restart. It may still have a chat open; finish it and try again." : changed.omniUnknown === true ? "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key." : changed.hermesOff === true && changed.omniCreated !== true ? "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key." : "Nothing was changed. Hermes is exactly as it was.";
+  const canRestore = changed.omniUnknown === true && error?.canRestoreHermes === true;
   return (0, import_react11.createElement)(
     "div",
     { className: "oai-mig-problem" },
     (0, import_react11.createElement)("p", { className: "oai-mig-error", role: "alert" }, t(lines)),
     error?.message && !["hermes-still-on", "refused", "omni", "failed"].includes(error.code) ? (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, hidden(error.message)) : null,
+    note ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t(note)) : null,
     (0, import_react11.createElement)(
       "div",
       { className: "oai-actions" },
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onHandoff }, t("Set up Omni's Telegram instead")),
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onRetry }, t("Try again"))
+      canRestore ? (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onRestoreHermes }, t("Turn Hermes's Telegram back on")) : null,
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onHandoff }, t("Set up Omni's Telegram instead")),
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", disabled: restoring === true, onClick: onRetry }, t("Try again"))
+    )
+  );
+}
+function RestoredCard({ onDone }) {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-handoff" },
+    (0, import_react11.createElement)("p", { className: "oai-mig-lede" }, t("Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.")),
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onDone }, t("Done"))
     )
   );
 }
@@ -13152,6 +13250,7 @@ var TITLES = {
   moving: "Moving your bot…",
   done: "Omni has your bot",
   problem: "That did not finish",
+  restored: "Hermes's Telegram is back on",
   handoff: "Set up Omni's Telegram"
 };
 var SPEECH = {
@@ -13161,6 +13260,7 @@ var SPEECH = {
   moving: "Moving your bot. The key stays with me the whole time.",
   done: "There it is. Your bot answers on Omni now.",
   problem: "That did not finish. I'll tell you exactly where it stopped.",
+  restored: "That is your way back. Hermes has its Telegram again.",
   handoff: "We will do this Omni's own way."
 };
 function MigrateView({
@@ -13201,7 +13301,10 @@ function MigrateView({
   },
   onCheckStatus = null,
   gatewayStopped = false,
-  aside = null
+  aside = null,
+  onRestoreHermes = () => {
+  },
+  restoring = false
 }) {
   if (aside !== null) {
     return (0, import_react11.createElement)(StepAside, {
@@ -13231,7 +13334,8 @@ function MigrateView({
     phase === "confirm" && probe !== null ? (0, import_react11.createElement)(ConfirmCard, { probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) : null,
     phase === "moving" ? (0, import_react11.createElement)(MovingCard, { steps }) : null,
     phase === "done" && result !== null ? (0, import_react11.createElement)(DoneCard, { result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) : null,
-    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, onRetry, onHandoff }) : null,
+    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, note, restoring, onRetry, onHandoff, onRestoreHermes }) : null,
+    phase === "restored" ? (0, import_react11.createElement)(RestoredCard, { onDone }) : null,
     phase === "handoff" ? (0, import_react11.createElement)(HandoffCard, { handoff, note, onOpenChannels, onCheckAgain, onSkip }) : null
   );
 }
@@ -13280,6 +13384,7 @@ function MigrateStep(props) {
   const [note, setNote] = (0, import_react11.useState)(null);
   const [aside, setAside] = (0, import_react11.useState)(null);
   const [busy, setBusy] = (0, import_react11.useState)(false);
+  const [restoring, setRestoring] = (0, import_react11.useState)(false);
   const alive = (0, import_react11.useRef)(true);
   (0, import_react11.useEffect)(() => () => {
     alive.current = false;
@@ -13414,6 +13519,19 @@ function MigrateStep(props) {
       if (alive.current) setNote(problem.message);
     }
   };
+  const restoreHermes = async () => {
+    if (restoring) return;
+    setRestoring(true);
+    setNote(null);
+    try {
+      await call("migrate-restore-hermes");
+      if (alive.current) setPhase("restored");
+    } catch (problem) {
+      if (alive.current) setNote(problem.message);
+    } finally {
+      if (alive.current) setRestoring(false);
+    }
+  };
   return (0, import_react11.createElement)(MigrateView, {
     phase,
     probe,
@@ -13459,6 +13577,10 @@ function MigrateStep(props) {
     },
     onOpenSettings: openSettingsHere,
     onCheckStatus: checkStatus,
+    onRestoreHermes: () => {
+      void restoreHermes();
+    },
+    restoring,
     gatewayStopped: result?.gatewayStopped === true
   });
 }
@@ -13548,6 +13670,7 @@ var MIGRATE_CSS = `
 .oai-card button.oai-mig-soft{justify-self:start;width:auto;min-height:34px;margin:2px 0 0;padding:7px 14px;font-size:12.5px;${raised("var(--oai-card)", 2)};color:var(--oai-ink)}
 .oai-mig-summary{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--oai-ink2);margin:0 0 14px}
 .oai-mig-problem{display:grid;gap:10px}
+.oai-mig-problem .oai-actions{flex-wrap:wrap}
 .oai-mig-error{margin:0;color:var(--oai-bad);font-size:13.5px;line-height:1.5}
 .oai-mig-handoff{display:grid;gap:12px}
 .oai-card .oai-mig-handoff h2{margin:0;font:var(--bt-weight-title,800) 19px/1.25 var(--oai-head);letter-spacing:-.016em}
@@ -13597,16 +13720,8 @@ function installVeil({ doc = globalThis.document, scope = globalThis, request: r
 
 // src/client/power-shortcut.js
 var import_react12 = require("react");
-var import_react_dom2 = require("react-dom");
 var NAMES2 = { omni: "Omni", genie: "Genie", unfold: "Unfold" };
 var CHOOSE = /* @__PURE__ */ new Set(["found", "none"]);
-var FOCUSABLE = 'button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-var LOOKS = {
-  omni: { id: "omni", kind: "omni", color: "deepseek", avatar: { shape: "octopus" } },
-  genie: { id: "genie", kind: "genie" },
-  unfold: { id: "unfold", kind: "unfold" }
-};
-var MARK_SIZE = 28;
 var statusText = (kind, phase, detail) => kind === "omni" ? statusOf(phase, detail) : kind === "unfold" ? unfoldStatusOf(phase, detail) : genieStatusOf(phase, detail);
 var GENIE_STEPS = { git: () => t("Checking git"), team: () => t("Bot team"), genie: () => t("Genie plugin") };
 function installStepOf(kind, detail) {
@@ -13677,9 +13792,6 @@ function powerRow(kind, power, { roster = {}, status = null } = {}) {
   if (notInstalled(kind, status)) return row("off", t("Not installed"), "install", { note: INSTALL_NOTE[kind]() });
   return row("off", asleep, "power");
 }
-function cardRows(kinds, powers, { roster = {}, read = {}, problems = {}, teamSetup = true } = {}) {
-  return kinds.map((kind) => powerRow(kind, powers[kind], { roster, status: read[kind] ?? null })).map((row) => (row.action === "power" || row.action === "install") && read.checked !== true ? { ...row, action: null, note: null } : row).map((row) => row.action === "choose" && !teamSetup ? { ...row, action: null } : row).map((row) => problems[row.kind] ? { ...row, alert: problems[row.kind] } : row);
-}
 var ACTION_LABEL = {
   power: (name) => t("Power {name} on", { name }),
   off: (name) => t("Power {name} off", { name }),
@@ -13691,239 +13803,46 @@ var ACTION_LABEL = {
 };
 var actionLabel = (row) => row.action ? ACTION_LABEL[row.action](row.name) : null;
 var secondaryLabel = (row) => row.secondary ? ACTION_LABEL[row.secondary](row.name) : null;
-var STATE_LABEL = {
-  on: (name) => t("{name} on", { name }),
-  off: (name) => t("{name} off", { name }),
-  working: (name) => t("{name} working", { name }),
-  attention: (name) => t("{name} needs you", { name })
-};
-var buttonLabel = (rows) => rows.map((row) => STATE_LABEL[row.state](row.name)).reduce((a, b2) => t("{a}, {b}", { a, b: b2 }));
-function badgeOf2(phases) {
-  if (phases.some((phase) => WORKING.has(phase))) return "working";
-  if (phases.some((phase) => phase === "failed" || phase === "restart")) return "error";
-  return null;
+var POWER_KINDS = /* @__PURE__ */ new Set(["omni", "genie", "unfold"]);
+var POWER_ON = { omni: powerOn, genie: geniePowerOn, unfold: unfoldPowerOn };
+function togglePowerSettings(kind, next, { start = startPower, stop = powerOff } = {}) {
+  if (next) start(kind, POWER_ON[kind]);
+  else stop(kind);
 }
-var kindsOf = ({ host = null, preload = null } = {}) => teamOrder(host === "unfold" ? "unfold" : preload).filter((kind) => kind !== "unfold" || host === "unfold");
-function focusAfter(trigger) {
-  const all = [...document.querySelectorAll(FOCUSABLE)].filter((node) => node === trigger || node.getClientRects().length > 0);
-  const next = all[all.indexOf(trigger) + 1];
-  if (next) next.focus();
-  else trigger?.focus();
-}
-var canOpenTeamSetup = (actions) => typeof actions?.openHarnessOnboarding === "function";
-function openTeamSetup({ actions, close }, power = null) {
-  close();
-  if (!canOpenTeamSetup(actions)) return;
-  setTeamIntent(power);
-  actions.openHarnessOnboarding("omni-team");
-}
-function actOn(row, { actions, close, onProblem, start = startPower, stop = powerOff }, action = row.action) {
-  onProblem(row.kind, null);
-  if (action === "power" || action === "install" || action === "retry") {
-    start(row.kind, row.kind === "omni" ? powerOn : geniePowerOn);
-  } else if (action === "off") {
-    if (!row.locked) stop(row.kind);
-  } else if (action === "choose") {
-    openTeamSetup({ actions, close }, "omni");
-  } else if (action === "add") {
-    return Promise.resolve(actions.addOmni?.()).then((bot) => {
-      if (!bot?.id) return;
-      close();
-      actions.openSession(bot.id);
-    }, (error) => onProblem(row.kind, error?.message ?? String(error)));
-  } else if (action === "plugins") {
-    close();
-    actions.selectPanel?.("plugins");
-  }
-  return void 0;
-}
-var installRunning = (status) => status?.install?.phase === "installing";
-function resumeInstall(kind, status, start = startPower) {
-  if (!installRunning(status) || kind !== "omni" && kind !== "genie") return null;
-  const on2 = kind === "omni" ? powerOn : geniePowerOn;
-  return start(kind, (options) => on2({ ...options, resume: status }));
-}
-var readPlugins = (ask = call) => Promise.all([ask("omni-plugins"), ask("genie-plugin")].map((request2) => Promise.resolve(request2).catch(() => null)));
-function RowMark({ Mark, row }) {
-  if (typeof Mark !== "function") return null;
-  return (0, import_react12.createElement)(Mark, { bot: row.bot ?? LOOKS[row.kind], size: MARK_SIZE, live: false });
-}
-function PowerShortcut({ roster, actions, Mark = null }) {
-  const omni = usePowerState("omni");
-  const genie = usePowerState("genie");
-  const unfold = usePowerState("unfold");
-  const [open, setOpen] = (0, import_react12.useState)(false);
-  const [box, setBox] = (0, import_react12.useState)(null);
-  const [read, setRead] = (0, import_react12.useState)({ host: null, preload: null, omni: null, genie: null, checked: false });
-  const [problems, setProblems] = (0, import_react12.useState)({});
-  const button = (0, import_react12.useRef)(null);
-  const card = (0, import_react12.useRef)(null);
-  const title = (0, import_react12.useRef)(null);
-  const id = (0, import_react12.useId)();
-  const powers = { omni, genie, unfold };
-  (0, import_react12.useEffect)(() => {
-    let alive = true;
-    void call("state").catch(() => null).then((state) => {
-      if (alive) setRead((current) => ({ ...current, host: state?.host ?? null, preload: state?.preload ?? null }));
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
-  const mounted = (0, import_react12.useRef)(false);
-  (0, import_react12.useEffect)(() => {
-    if (!open && mounted.current) return void 0;
-    mounted.current = true;
-    let alive = true;
-    void readPlugins().then(([omniStatus, genieStatus]) => {
-      if (!alive) return;
-      setRead((current) => ({ ...current, omni: omniStatus, genie: genieStatus, checked: true }));
-      resumeInstall("omni", omniStatus);
-      resumeInstall("genie", genieStatus);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [open]);
-  (0, import_react12.useEffect)(() => {
-    if (!open) return void 0;
-    const onDown = (event) => {
-      if (event.target instanceof Node && (card.current?.contains(event.target) || button.current?.contains(event.target))) return;
-      setOpen(false);
-    };
-    const onKey = (event) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setOpen(false);
-      button.current?.focus();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [open]);
-  (0, import_react12.useLayoutEffect)(() => {
-    if (!open) return void 0;
-    const place = () => {
-      const rect = button.current?.getBoundingClientRect();
-      if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 });
-    };
-    place();
-    window.addEventListener("resize", place);
-    return () => window.removeEventListener("resize", place);
-  }, [open]);
-  const placed = open && box !== null;
-  (0, import_react12.useEffect)(() => {
-    if (!placed) return;
-    const at2 = document.activeElement;
-    if (card.current?.contains(at2) && at2 !== title.current) return;
-    const first = card.current?.querySelector(".bt-update-dsh button:not(:disabled)");
-    (first ?? title.current)?.focus();
-  }, [placed, read.checked]);
-  (0, import_react12.useEffect)(() => {
-    if (placed && card.current && !card.current.contains(document.activeElement) && document.activeElement === document.body) title.current?.focus();
-  });
-  const kinds = kindsOf(read);
-  const teamSetup = canOpenTeamSetup(actions);
-  const rows = cardRows(kinds, powers, { roster, read, problems, teamSetup });
-  const badge = badgeOf2(kinds.map((kind) => powers[kind].phase));
-  const label = buttonLabel(rows);
+function PowerSettingsCard({ bot, roster, Card, Row: Row2, SwitchRow, start = startPower, stop = powerOff }) {
+  const kind = POWER_KINDS.has(bot?.kind) ? bot.kind : null;
+  const power = usePowerState(kind ?? "omni");
+  if (kind === null || typeof Card !== "function" || typeof Row2 !== "function" || typeof SwitchRow !== "function") return null;
+  const row = powerRow(kind, power, { roster });
   const readOnly = Boolean(roster?.readOnly);
-  const close = () => setOpen(false);
-  const onProblem = (kind, message) => setProblems((current) => ({ ...current, [kind]: message }));
-  const run = (row, action) => actOn(row, { actions, close, onProblem }, action);
-  const onKeyDown = (event) => {
-    if (event.key.length === 1 && event.key !== " " && !event.metaKey && !event.ctrlKey && !event.altKey) event.preventDefault();
-    if (event.key !== "Tab") return;
-    const items = [...card.current.querySelectorAll(FOCUSABLE)];
-    const at2 = document.activeElement;
-    if (!event.shiftKey && (items.length === 0 || at2 === items[items.length - 1])) {
-      event.preventDefault();
-      close();
-      focusAfter(button.current);
-    } else if (event.shiftKey && (at2 === items[0] || at2 === title.current)) {
-      event.preventDefault();
-      close();
-      button.current?.focus();
-    }
-  };
-  const heading = kinds.includes("unfold") ? t("Omni, Genie and Unfold") : t("Omni and Genie");
+  const stays = kind !== "omni" && row.bot !== null && row.state === "on";
+  const on2 = row.state === "on" || row.pressed === true;
+  const note = row.note ?? (stays && kind === "genie" ? t("{name} stays on once it joins your team.", { name: row.name }) : null);
   return (0, import_react12.createElement)(
-    import_react12.Fragment,
-    null,
-    (0, import_react12.createElement)(
-      "button",
-      {
-        ref: button,
-        type: "button",
-        className: "bt-round bt-side-tool bt-power",
-        "aria-label": label,
-        title: label,
-        "aria-haspopup": "dialog",
-        "aria-expanded": open,
-        "aria-controls": open ? id : void 0,
-        onClick: () => setOpen((value) => !value)
-      },
-      badge === "working" ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : (0, import_react12.createElement)(PowerIcon, { size: 16, stroke: 2 }),
-      badge === "error" ? (0, import_react12.createElement)("span", { className: "bt-update-dot", "aria-hidden": true }) : null
-    ),
-    placed ? (0, import_react_dom2.createPortal)((0, import_react12.createElement)(
-      "div",
-      { ref: card, id, className: "bt-update-pop bt-power-pop", role: "dialog", "aria-label": heading, style: box, onKeyDown },
-      (0, import_react12.createElement)("div", { ref: title, className: "bt-update-title", tabIndex: -1 }, heading),
-      rows.map((row) => (0, import_react12.createElement)(
-        "div",
-        { key: row.kind, className: "bt-update-dsh", "data-power": row.kind, "data-state": row.state },
-        (0, import_react12.createElement)(
-          "div",
-          { className: "bt-power-who" },
-          (0, import_react12.createElement)(RowMark, { Mark, row }),
-          (0, import_react12.createElement)(
-            "div",
-            { className: "bt-power-what" },
-            (0, import_react12.createElement)("div", { className: "bt-update-title" }, row.name),
-            (0, import_react12.createElement)("div", { className: "bt-update-text", role: "status", "aria-live": "polite" }, row.text)
-          )
-        ),
-        row.note ? (0, import_react12.createElement)("div", { className: "bt-update-text" }, row.note) : null,
-        row.alert ? (0, import_react12.createElement)("div", { className: "bt-update-error", role: "alert" }, row.alert) : null,
-        row.working || row.action || row.secondary ? (0, import_react12.createElement)(
-          "div",
-          { className: "bt-update-actions" },
-          row.secondary ? (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => run(row, row.secondary) }, secondaryLabel(row)) : null,
-          row.working ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : null,
-          row.action ? (0, import_react12.createElement)("button", {
-            type: "button",
-            className: "bt-update-go",
-            disabled: row.locked,
-            onClick: () => run(row, row.action),
-            ...row.action === "off" || row.action === "power" ? { "aria-pressed": row.action === "off" } : {}
-          }, actionLabel(row)) : null
-        ) : null
-      )),
-      readOnly || !teamSetup ? null : (0, import_react12.createElement)(
-        "div",
-        { className: "bt-update-actions" },
-        (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => openTeamSetup({ actions, close }) }, t("Open team setup"))
-      )
-    ), document.body) : null
+    Card,
+    { title: t("Power") },
+    readOnly ? (0, import_react12.createElement)(Row2, { label: t("Power"), hint: row.text }, null) : (0, import_react12.createElement)(SwitchRow, {
+      label: t("Power"),
+      hint: row.text,
+      on: on2,
+      disabled: row.working === true || row.locked === true || stays,
+      onChange: (value) => togglePowerSettings(kind, value, { start, stop })
+    }),
+    note ? (0, import_react12.createElement)("div", { className: "bt-bs-shell-note" }, note) : null,
+    row.alert ? (0, import_react12.createElement)("div", { className: "bt-bs-shell-note", role: "alert", style: { color: "var(--st-bad-strong,var(--bt-danger))" } }, row.alert) : null
   );
 }
-function installPowerShortcut(load = () => require("@automagik/bots-dsh/client")) {
-  let tools = null;
+function installPowerSettings(load = () => require("@automagik/bots-dsh/client")) {
   let bots = null;
   try {
     bots = load();
-    tools = bots?.omni?.sidebarTools ?? null;
   } catch {
-    tools = null;
+    bots = null;
   }
-  if (typeof tools?.register !== "function") return () => {
+  const settings = bots?.omni?.botSettings ?? null;
+  if (typeof settings?.register !== "function") return () => {
   };
-  const Mark = typeof bots?.omni?.ui?.BotMark === "function" ? bots.omni.ui.BotMark : null;
-  return tools.register({ id: "welcome-power", order: 0, Component: (props) => (0, import_react12.createElement)(PowerShortcut, { ...props, Mark }) });
+  return settings.register({ id: "welcome-power", order: 0, Component: PowerSettingsCard });
 }
 
 // src/client/index.js
@@ -13950,7 +13869,7 @@ function apply(ctx) {
     ctx.slots.inject("settings.onboarding", () => ctx.slots.register({ name: "settings.onboarding", id: step.id, order: step.order }, step.component));
   }
   ctx.effect(() => installAcpSection(ctx), "omni-ai: Claude Code and Codex in Settings");
-  ctx.effect(() => installPowerShortcut(), "omni-ai: power shortcut in the Bot team sidebar");
+  ctx.effect(() => installPowerSettings(), "omni-ai: power in each Bot's settings");
 }
 /*! Bundled license information:
 

@@ -27,6 +27,7 @@ type hcOps interface {
 	Get(address string) (hc.Terminal, error)
 	Terminals(labels map[string]string) ([]string, error)
 	Read(address string) (string, error)
+	Send(address, text string) error
 	Kill(address string) error
 	Rm(address string) error
 	// MainCheckout is the repo's main working tree, whatever checkout repo is.
@@ -51,6 +52,10 @@ type hcHost struct {
 	// notes belong to runs on different panes, which can finish together.
 	notesMu sync.Mutex
 	notes   map[string]string
+	// roster and amFn are a target run's seams. nil is the project's real
+	// .herdr/bots.json and the pack's real `am`.
+	roster func(path string) ([]byte, error)
+	amFn   func(args, extraEnv []string) (string, error)
 }
 
 // Note returns the run's note and forgets it.
@@ -75,6 +80,9 @@ func (h *hcHost) now() time.Time {
 // in the run's history as soon as it is running. hc takes the prompt with the
 // launch, so there is no separate submit step to keep apart.
 func (h *hcHost) Provision(a config.Automation) (Session, error) {
+	if a.Target != "" {
+		return h.targetProvision(a)
+	}
 	argv, err := hcArgv(a)
 	if err != nil {
 		return Session{}, err
@@ -125,8 +133,18 @@ func (h *hcHost) worktree(a config.Automation) (string, error) {
 	return path, nil
 }
 
-// Do waits for the agent to finish its turn.
+// Do carries out the run: a bot target hands the prompt over (or skips a busy
+// bot), a worker target waits for its turn and ends it, and every other run
+// waits for its agent as before.
 func (h *hcHost) Do(s Session, a config.Automation, timeout time.Duration) error {
+	if s.Target != "" {
+		return h.targetDo(s, a, timeout)
+	}
+	return h.waitTurn(s, a, timeout)
+}
+
+// waitTurn waits for the agent in s to finish its turn.
+func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration) error {
 	h.Note(s)
 	started := time.Now()
 	deadline := started.Add(timeout)
@@ -270,6 +288,11 @@ func (h *hcHost) blockedOutcome(s Session) error {
 // closing the other tabs in between can still leave it last; the scheduler
 // itself asks for no space close in this mode.
 func (h *hcHost) Close(s Session, a config.Automation) error {
+	if s.Target != "" {
+		// A target run opened no workspace to close; a worker target ended its
+		// worker with the run.
+		return nil
+	}
 	if a.Workspace == config.WorkspaceExisting {
 		if s.TabID == "" {
 			log.Printf("%s: done, but its tab stays open: the run has no tab id", a.Name)

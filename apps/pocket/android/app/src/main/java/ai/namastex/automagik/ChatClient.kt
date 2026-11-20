@@ -13,6 +13,7 @@ class ChatUnsupported : IllegalStateException(Chat.UPDATE_LINK)
  */
 internal interface ChatLink : Closeable {
     val dshWrite: Boolean
+    val manage: Set<String> get() = emptySet()
     suspend fun list(): List<Chat.Terminal>
     suspend fun subscribe(terminal: String, after: String?, event: (JSONObject) -> Unit, closed: (String) -> Unit): Int
     suspend fun backfill(terminal: String, before: String, limit: Int = 50): JSONArray
@@ -21,11 +22,15 @@ internal interface ChatLink : Closeable {
     suspend fun cancelHeld(terminal: String, id: String): JSONObject
     suspend fun answer(terminal: String, row: String, choice: String, text: String? = null): JSONObject
     suspend fun interrupt(terminal: String): JSONObject
+    suspend fun memoryRead(terminal: String) = ChatClient.refusedMemory()
+    suspend fun memoryEdit(terminal: String, id: String, rev: String, text: String) = ChatClient.refusedMemory()
+    suspend fun memoryAdd(terminal: String, text: String) = ChatClient.refusedMemory()
 }
 
 /** The production [ChatLink]: [ChatClient] over Pocket Link's chat route, straight through. */
 internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
     override val dshWrite get() = client.dshWrite
+    override val manage get() = client.manage
     override suspend fun list() = client.list()
     override suspend fun subscribe(terminal: String, after: String?, event: (JSONObject) -> Unit, closed: (String) -> Unit) =
         client.subscribe(terminal, after, event, closed)
@@ -35,6 +40,9 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
     override suspend fun cancelHeld(terminal: String, id: String) = client.cancelHeld(terminal, id)
     override suspend fun answer(terminal: String, row: String, choice: String, text: String?) = client.answer(terminal, row, choice, text)
     override suspend fun interrupt(terminal: String) = client.interrupt(terminal)
+    override suspend fun memoryRead(terminal: String) = client.memoryRead(terminal)
+    override suspend fun memoryEdit(terminal: String, id: String, rev: String, text: String) = client.memoryEdit(terminal, id, rev, text)
+    override suspend fun memoryAdd(terminal: String, text: String) = client.memoryAdd(terminal, text)
     override fun close() = client.close()
 }
 
@@ -45,17 +53,24 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
  * With it, send, answer and interrupt go to the bridge as on a terminal: the bridge adds the phone's name and key,
  * which the phone never sets. Held messages never exist on a DSH chat, so sendHeld and cancelHeld stay refused.
  */
-class ChatClient(private val core: CoreClient, val dshWrite: Boolean = false) : Closeable {
+class ChatClient(private val core: CoreClient, val dshWrite: Boolean = false, val manage: Set<String> = emptySet()) : Closeable {
     companion object {
+        val MEMORY = listOf("memory.read", "memory.edit", "memory.add")
+
         /** The bridge's answer to a write the phone never sends: the same shape dsh-source.mjs `refusedDsh` gives. */
         fun refusedReadOnly(id: String? = null): JSONObject = JSONObject().put("state", "refused").put("ok", false)
             .put("reason", "read-only").put("message", Chat.ANSWER_ON_COMPUTER).apply { if (id != null) put("id", id) }
 
-        /** Starts [core] and checks the bridge serves chat version 1; DSH writes only for a hello with `dshWrite: true`. */
-        suspend fun start(core: CoreClient): ChatClient {
-            val hello = core.start()
+        internal fun refusedMemory() = JSONObject().put("ok", false).put("state", "refused").put("reason", "read-only")
+
+        /** Memory is opt-in per connection and is usable only when the bridge grants at least its read method. */
+        suspend fun start(core: CoreClient, manage: List<String> = emptyList()): ChatClient {
+            val requested = MEMORY.filter { it in manage }
+            val hello = core.start(requested.takeIf { it.isNotEmpty() }?.let { JSONArray(it) })
             if (hello.optInt("chat") != 1) { core.close(); throw ChatUnsupported() }
-            return ChatClient(core, dshWrite = hello.opt("dshWrite") == true)
+            val answered = hello.optJSONArray("manage")?.let { a -> (0 until a.length()).map { a.opt(it) } }.orEmpty()
+            val granted = if (answered.all { it is String }) requested.filter { it in answered }.toSet() else emptySet()
+            return ChatClient(core, dshWrite = hello.opt("dshWrite") == true, manage = granted.takeIf { "memory.read" in it }.orEmpty())
         }
 
         /** A connect that failed because the bridge does not offer the chat route (an older Pocket Link). */
@@ -117,6 +132,14 @@ class ChatClient(private val core: CoreClient, val dshWrite: Boolean = false) : 
 
     suspend fun interrupt(terminal: String): JSONObject =
         if (readOnly(terminal)) refusedReadOnly() else core.call("chat.interrupt", params(terminal))
+
+    private suspend fun memory(method: String, terminal: String, fields: JSONObject.() -> Unit): JSONObject =
+        if (method !in manage || !Chat.isDsh(terminal)) refusedMemory() else core.call(method, params(terminal).apply(fields))
+
+    suspend fun memoryRead(terminal: String) = memory("memory.read", terminal) { }
+    suspend fun memoryEdit(terminal: String, id: String, rev: String, text: String) =
+        memory("memory.edit", terminal) { put("id", id).put("rev", rev).put("text", text) }
+    suspend fun memoryAdd(terminal: String, text: String) = memory("memory.add", terminal) { put("text", text) }
 
     override fun close() = core.close()
 }

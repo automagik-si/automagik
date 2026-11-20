@@ -5,7 +5,7 @@
 // Pure: no `herdr`, `gpui-kit`, `gpui-base` or `fs`, so briefing.mjs runs it under plain
 // node and `node --test` runs it too. Apache-2.0.
 
-import { cleanProjectPath, effectiveLead, inferProjectOf, MAX_INSTRUCTIONS, projectEntriesOf } from "./model.js";
+import { cleanProjectPath, effectiveLead, inferProjectOf, MAX_INSTRUCTIONS, projectEntriesOf, restartAtOf } from "./model.js";
 import { BRIEFING_MARK, BRIEFINGS_DIR } from "./models.js";
 import { OLD_PACK_NAME, PACK_NAME } from "./release.js";
 
@@ -14,22 +14,59 @@ export const WORKER_LINE = "You write no code yourself: for each task start one 
   + "`am worker \"<task>\" --branch <branch>` (it runs in the task's worktree, under your pane), "
   + "check its result, and end it with `am worker kill <terminal>` once the task merges.";
 
+const PLAIN_RUN_START = "A plain `hc run` starts an ordinary terminal.";
+const PLAIN_RUN_CLEANUP = "Only the project's main bot can end it, including after a handoff or restart.";
+
+export const PLAIN_RUN_LINE = `${PLAIN_RUN_START} \`am worker kill\` refuses it. ${PLAIN_RUN_CLEANUP} `
+  + "Start with `am worker` when you need to end the worker yourself.";
+
+/** How every bot messages (fleet telemetry, 2026-11-18): no acknowledgements, state is read, not asked. */
+export const MESSAGE_LINE = "Messages: send a task, a result or a blocker. Never send or answer an "
+  + "acknowledgement, a \"holding\" or a status-only note. Read another bot's state with `am brief` or "
+  + "`hc get` instead of asking it.";
+
+const NEEDS_OWNER_KEY = "automagik-herdr.needs-owner";
+const OWNER_QUESTION_AGENTS = ["claude", "codex", "omp", "pi", "grok"];
+
+export const OWNER_QUESTION_LINE = "Waiting on the person: when you end your turn because only the person can unblock you "
+  + "(a question or a choice, not a permission prompt), ask it in your reply and also mark your own pane so the Herdr "
+  + "sidebar shows a Question, with a short paraphrase in single quotes and no apostrophe, e.g. "
+  + `\`hc label "$HC_TERMINAL_ID" '${NEEDS_OWNER_KEY}=Which release should ship?'\`. Clear it `
+  + `with \`hc label "$HC_TERMINAL_ID" ${NEEDS_OWNER_KEY}=\` as soon as you work again or the `
+  + "question is withdrawn. If HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+
+/** #1556: what a seat with a context threshold does when `am restart --due` asks for its handoff. */
+export const HANDOFF_LINE = "When `am` asks for your handoff, write it to the path its message names "
+  + "(what is in flight, what waits on whom, and your next three actions) and end your turn; you will be "
+  + "restarted from that file.";
+
+/** The handoff line only for a seat that has a context threshold (#1556). */
+const handoffLines = (self) => (restartAtOf(self) === null ? [] : [HANDOFF_LINE]);
+
 // The caller checks git; an omitted flag keeps the existing pure-text default.
-const workerLines = (self, isGit) => (isGit && self.code !== false ? [WORKER_LINE] : []);
+const workerLines = (self, isGit) => {
+  const showWorkerGuidance = isGit && self.code !== false;
+  const lines = showWorkerGuidance ? [WORKER_LINE] : [];
+  if (self.kind !== "main") {
+    lines.push(showWorkerGuidance ? PLAIN_RUN_LINE : `${PLAIN_RUN_START} ${PLAIN_RUN_CLEANUP}`);
+  }
+  return lines;
+};
 
 /**
  * The hc guard the pack puts first on a dsh-tui pane's PATH (#624, stopgap C). A GUARDRAIL,
  * not a boundary: an absolute hc path, a raw socket or `hc connect` skips it; #631 is the
- * hard boundary, and #628 is the full send/keys/attach scope. The pack's CLI still runs its
- * own trusted hc calls.
+ * hard boundary, and #628 scopes send/keys/attach and the rest of the team boundary. The
+ * pack's CLI still runs its own trusted hc calls.
  */
 export const GUARD_LINE = "The pack puts a deny-by-default hc guard first on a dsh-tui pane's PATH: "
-  + "it allows send, read, ls, get, wait, put, label (own workers only), kill, rm, events, schema, templates "
-  + "and the worker start, and refuses exec, other runs, file writes/reads, machine, server, update, connect, "
+  + "it allows send, read, get and wait (the caller's own pane, its own workers and its team), ls, "
+  + "label (own workers, and the needs-owner marker on the caller's own pane), kill, rm on its own workers, events, schema, templates "
+  + "and the worker start, and refuses put, exec, other runs, file writes/reads, machine, server, update, connect, "
   + "keys, attach, machine-target addresses on every verb but send, and --on outside an allowed send. "
   + "It is a GUARDRAIL, not a boundary: an absolute hc path, a raw socket or `hc connect` bypasses it. "
-  + "The full send/keys/attach scope is #628; the real fix is the socket mask plus the per-pane proxy wish "
-  + "(#624); #631 is the hard boundary.";
+  + "The send/keys/attach scope and the rest of the team boundary are #628; the real fix is the socket mask "
+  + "plus the per-pane proxy wish (#624); #631 is the hard boundary.";
 
 /**
  * The guard paragraph only in a briefing whose pane gets the guard: a dsh-tui bot (#624).
@@ -39,6 +76,24 @@ const guardLines = (self, guard = null) => (self?.agent === "dsh-tui" && guard !
 
 /** The block stays under Claude Code's 10,000-character cap on a hook's output. */
 export const BRIEFING_LIMIT = 9900;
+
+/** Keep the paired owner question commands together when a briefing exceeds the limit. */
+function cutBriefing(lines, ownerQuestionIndex = -1) {
+  let text = lines.join("\n");
+  if (text.length <= BRIEFING_LIMIT) return text;
+
+  const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
+  const end = BRIEFING_LIMIT - mark.length;
+  if (ownerQuestionIndex !== -1) {
+    const prefix = lines.slice(0, ownerQuestionIndex + 1).join("\n");
+    if (prefix.length > end) {
+      lines.splice(ownerQuestionIndex, 1);
+      text = lines.join("\n");
+    }
+  }
+  return text.length > BRIEFING_LIMIT ? text.slice(0, end) + mark : text;
+}
+
 /** The longest latest report shown for one member. */
 const REPORT_MAX = 600;
 const REPORT_MIN = 80;
@@ -126,7 +181,7 @@ const indent = (text, pad) => text.split("\n").map((l) => pad + l).join("\n");
  * core status says blocked with kind permission. Reports are other agents' text: each sits in its own
  * <untrusted-report> element with its angle brackets neutralised.
  */
-export function briefingText({ self, file, members = [], lead, helpers = [], guard = null, isGit = true }) {
+export function briefingText({ self, file, members = [], lead, helpers = [], guard = null, isGit = true, ownPane = false }) {
   const kind = self.kind === "main" ? "this project's main bot" : "a team member";
   const instructions = String(self.instructions ?? "");
   const shown = instructions.length > MAX_INSTRUCTIONS ? `${instructions.slice(0, MAX_INSTRUCTIONS)}… [cut at ${MAX_INSTRUCTIONS} characters]` : instructions;
@@ -137,7 +192,10 @@ export function briefingText({ self, file, members = [], lead, helpers = [], gua
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) head.push("Instructions:", shown.trim());
-  head.push(...workerLines(self, isGit), ...guardLines(self, guard), liveLine(self.id));
+  head.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE);
+  const ownerQuestionIndex = ownPane ? head.length : -1;
+  if (ownPane) head.push(OWNER_QUESTION_LINE);
+  head.push(liveLine(self.id), ...handoffLines(self));
   const tail = [];
 
   if (lead) {
@@ -176,12 +234,7 @@ export function briefingText({ self, file, members = [], lead, helpers = [], gua
     }
   }
 
-  let text = [...head, ...memberLines, ...tail, "</herdr-bot>"].join("\n");
-  if (text.length > BRIEFING_LIMIT) {
-    const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
-    text = text.slice(0, BRIEFING_LIMIT - mark.length) + mark;
-  }
-  return text;
+  return cutBriefing([...head, ...memberLines, ...tail, "</herdr-bot>"], ownerQuestionIndex);
 }
 
 /** Where a bot finds its team's live state: the briefing at launch is a snapshot. */
@@ -211,7 +264,7 @@ export const restartLine = (botId) => `To restart you, the person runs \`am rest
  * `am brief`. The hook's once-only print compares this text, so it changes only
  * when the file does.
  */
-export function launchBriefingText({ self, file, guard = null, isGit = true, project = null, projects = null, lead: givenLead = null }) {
+export function launchBriefingText({ self, file, agent = self?.agent ?? null, guard = null, isGit = true, project = null, projects = null, lead: givenLead = null }) {
   const kind = self.kind === "main" ? "this project's main bot" : "a team member";
   const instructions = String(self.instructions ?? "");
   const shown = instructions.length > MAX_INSTRUCTIONS ? `${instructions.slice(0, MAX_INSTRUCTIONS)}… [cut at ${MAX_INSTRUCTIONS} characters]` : instructions;
@@ -222,7 +275,11 @@ export function launchBriefingText({ self, file, guard = null, isGit = true, pro
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) lines.push("Instructions:", shown.trim());
-  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), liveLine(self.id), restartLine(self.id));
+  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE);
+  const showOwnerQuestion = OWNER_QUESTION_AGENTS.includes(agent) || (agent === "dsh-tui" && guard === true);
+  const ownerQuestionIndex = showOwnerQuestion ? lines.length : -1;
+  if (showOwnerQuestion) lines.push(OWNER_QUESTION_LINE);
+  lines.push(liveLine(self.id), restartLine(self.id), ...handoffLines(self));
   const eff = self.kind === "member" || self.leadProject
     ? effectiveLead(file, self.id, { project, projects })
     : { lead: "", leadProject: null, leadBot: null, warning: null };
@@ -236,12 +293,8 @@ export function launchBriefingText({ self, file, guard = null, isGit = true, pro
     lines.push("", "Your team (bots that report to you, from .herdr/bots.json):");
     for (const m of team) lines.push(`- ${m.name} (bot ${m.id}${m.role ? `, ${m.role}` : ""})`);
   }
-  let text = [...lines, "</herdr-bot>"].join("\n");
-  if (text.length > BRIEFING_LIMIT) {
-    const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
-    text = text.slice(0, BRIEFING_LIMIT - mark.length) + mark;
-  }
-  return text;
+  lines.push("</herdr-bot>");
+  return cutBriefing(lines, ownerQuestionIndex);
 }
 
 /** A short, stable hash of a text (53-bit cyrb53, hex): no `node:crypto` in a Herdr mod. */

@@ -313,3 +313,66 @@ for (const runtime of RUNTIMES) {
     }
   })
 }
+
+test('a host timer that fires before its deadline waits out the rest, in both phases', { timeout: 30_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000_000
+  t.mock.method(performance, 'now', () => now)
+  const children = observeChildren(t)
+  const settle = (run) => {
+    let state
+    run.then(answer => { state = { answer } }, error => { state = { error: error.message } })
+    return () => state
+  }
+  const turn = () => new Promise(r => setImmediate(r))
+  const error = 'Script ran longer than 0.5 seconds.'
+
+  const neverReady = entryFile(t, 'process.stdin.on("data", () => {})\nsetInterval(() => {}, 1_000)\n')
+  const t0 = now
+  const start = settle(runIsolatedScript('return 1', {}, { timeout: 500, entry: neverReady }))
+  now = t0 + 999.8
+  t.mock.timers.tick(1_000)
+  await turn()
+  assert.equal(start(), undefined)
+  t.mock.timers.tick(1)
+  await turn()
+  assert.equal(start(), undefined)
+  now = t0 + 1_000
+  t.mock.timers.tick(1)
+  await turn()
+  assert.deepEqual(start(), { error })
+  const child = children[0]
+  if (child.exitCode === null && child.signalCode === null) await new Promise(done => child.once('exit', done))
+  if (process.platform !== 'win32') assert.equal(child.signalCode, 'SIGKILL')
+
+  const entry = entryFile(t, SCRIPTED)
+  const { promise: began, resolve: begin } = Promise.withResolvers()
+  const goto = () => {
+    begin()
+    return new Promise(() => {})
+  }
+  const t1 = now
+  const run = settle(runIsolatedScript(JSON.stringify({ steps: [{ text: READY + CALL }] }), { goto }, { timeout: 500, entry }))
+  // The early start timer re-arms before the child can say ready.
+  now = t1 + 999.8
+  t.mock.timers.tick(1_000)
+  await began
+  const runDeadline = now + 500
+  // Ready clears the re-armed start timer before its deadline passes.
+  now = t1 + 1_000
+  t.mock.timers.tick(1)
+  await turn()
+  assert.equal(run(), undefined)
+
+  now = runDeadline - 0.2
+  t.mock.timers.tick(499)
+  await turn()
+  assert.equal(run(), undefined)
+  t.mock.timers.tick(1)
+  await turn()
+  assert.equal(run(), undefined)
+  now = runDeadline
+  t.mock.timers.tick(1)
+  await turn()
+  assert.deepEqual(run(), { error })
+})

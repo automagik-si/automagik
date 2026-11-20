@@ -10,9 +10,38 @@ import { absoluteLinks } from './links.js'
 import { NAME_MAX } from './requests.js'
 import { unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
+import { BUILTIN_ROLES, genieDetached } from '../shared/roles.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
+import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
+import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
+import { ROLE_MAX } from '../shared/bot-profile.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
+// A message_bot call that sent nothing answers with this object rather than a string, so
+// the chat can tell a refusal from a delivery without reading the words. `text` is what
+// the Bot reads; `sent` and `reason` are the presentation signal. A delivery keeps its
+// string, and its text is unchanged.
+const messageOutput = {
+  schema: {
+    oneOf: [
+      { type: 'string' },
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', required: true },
+          sent: { type: 'boolean', required: true },
+          reason: { type: 'string', required: true },
+        },
+      },
+    ],
+  },
+  render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : value.text }],
+  presentationMeta: (_args, value) => (typeof value === 'string'
+    ? { sent: true }
+    : { sent: value.sent === true, reason: value.reason }),
+}
+const refusedMessage = reason => ({ text: reason, sent: false, reason })
 export const GROUP_REF = { type: 'string', required: true, description: 'Exact group chat name from list_bots' }
 const BLOCKING_QUESTION_TOOL = 'ask_user_question'
 // A Bot's own chat runs DSH's goal: the loop the team asked for is this one, and
@@ -74,6 +103,10 @@ export function install(rt) {
   const { ctx, state } = rt
 
   const callerBot = (exec) => rt.botOf(rt.selfOf(exec.agent?.id))
+  // Only the Bot's own chat and its group Sessions take the role mask and guard.
+  // Genie itself refuses calls from task runs, subagents and fresh schedule Sessions.
+  const roleBotOf = id => (rt.chatOwners?.has(id) || rt.groupOwners?.has(id) ? rt.botOf(rt.selfOf(id)) : undefined)
+  const withheldRoleTools = bot => (genieDetached(bot, state.prefs) ? BUILTIN_ROLES.genie.tools : [])
   const callerRoom = (exec) => {
     const roomId = rt.groupOwners.get(exec.agent?.id)?.roomId
     return roomId ? { fromRoomId: roomId } : {}
@@ -106,6 +139,7 @@ export function install(rt) {
     output,
     async execute(_args, exec) {
       await rt.load()
+      await rt.refreshInstallation?.({ force: true })
       const self = rt.selfOf(exec.agent?.id)
       const lines = Object.values(state.bots).map(bot => {
         // A private Bot is only named to the others: not what it does, where, or what now.
@@ -192,15 +226,15 @@ export function install(rt) {
 
   rt.teamTools.push(defineTool({
     name: 'message_bot',
-    description: 'Send a message to another Bot on the team. If that Bot is working, it reads your message at its next step and can change course, then answers once that work is done; if it is idle, it starts on it right away. Its reply arrives later as a new message to you; with reply_to "user" it answers the user in its own chat instead. In a group chat it reaches only members of that group, as writing "@Name" there does. With request_id you name the request yourself: a repeat of that name with the same message is not sent again, but gives the receipt of the first call back.',
+    description: 'Send a message to another Bot on the team. If that Bot is working, it reads your message at its next step and can change course, then answers once that work is done; if it is idle, it starts on it right away. Its reply arrives later as a new message to you; with reply_to "user" it answers the user in its own chat instead, and with reply_to "none" nothing comes back at all. In a group chat it reaches only members of that group, as writing "@Name" there does. With request_id you name the request yourself: a repeat of that name with the same message is not sent again, but gives the receipt of the first call back.',
     parameters: {
       to: { type: 'string', required: true, description: 'Exact Bot name from list_bots' },
       message: { type: 'string', required: true, description: 'Self-contained message; the other Bot cannot see this conversation' },
       images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along, each by its name, sha256 or saved path as your own chat shows it; the other Bot gets its own copy. Only pictures you were given.' },
       reply_to: {
         type: 'string',
-        enum: ['me', 'user'],
-        description: '"me" (default): the reply comes back to you and the user does not see it. "user": the Bot answers the user in its own chat, where the user reads it, and nothing comes back to you. Use "user" whenever the user wants to hear from that Bot directly or asks Bots to say something in their own chats.',
+        enum: ['me', 'user', 'none'],
+        description: '"me" (default): the reply comes back to you and the user does not see it. "user": the Bot answers the user in its own chat, where the user reads it, and nothing comes back to you. "none": the Bot reads your message and nothing comes back to you; use it for a thank-you, a hold, a warning or a fact, never for work you need an answer to. Use "user" whenever the user wants to hear from that Bot directly or asks Bots to say something in their own chats.',
       },
       when: {
         type: 'string',
@@ -212,27 +246,34 @@ export function install(rt) {
         description: `Your own name for this request, up to ${NAME_MAX} characters, so that a repeat of it is not sent twice. Send the same request_id with the same message when you repeat a call: the receipt of the first call comes back and nothing is sent again. A request_id names one request: with other content it is refused.`,
       },
     },
-    output,
+    output: messageOutput,
     async execute(args, exec) {
       await rt.load()
-      if (Array.isArray(args.images) && args.images.length > 4) return 'Not sent: send at most 4 pictures in one message_bot call.'
+      if (Array.isArray(args.images) && args.images.length > 4) return refusedMessage('Not sent: send at most 4 pictures in one message_bot call.')
       const sender = callerBot(exec)
-      if (sender === undefined) return 'Only Bots on the team can use message_bot.'
+      if (sender === undefined) return refusedMessage('Only Bots on the team can use message_bot.')
       const target = rt.findBot(args.to)
-      if (target === undefined) return `No Bot named ${args.to}. Team: ${Object.values(state.bots).map(bot => bot.name).join(', ')}`
-      if (target.id === sender.id) return 'You cannot message yourself.'
-      if (String(args.message ?? '').trim() === '') return 'Write a message to send.'
+      if (target === undefined) return refusedMessage(`No Bot named ${args.to}. Team: ${Object.values(state.bots).map(bot => bot.name).join(', ')}`)
+      if (target.id === sender.id) return refusedMessage('You cannot message yourself.')
+      if (String(args.message ?? '').trim() === '') return refusedMessage('Write a message to send.')
+      // Work never goes to a Bot whose plugin is not installed: it cannot run it (installed.js).
+      await rt.refreshInstallation?.()
+      const installation = rt.installationOf?.(target)
+      if (installation?.installed === false) return refusedMessage(`Not sent: ${target.name} is not installed in this DSH (${installation.reason}). Ask the user to install it before giving it work.`)
       const toUser = rt.isPrivate(target.id) || args.reply_to === 'user'
+      // No reply is owed to the sender: the message is read where it lands, and no
+      // answer is routed back or handed on. A private Bot still answers the user.
+      const noReply = args.reply_to === 'none'
       const name = typeof args.request_id === 'string' ? args.request_id.trim() : ''
-      if (name.length > NAME_MAX) return `The request_id is ${name.length} characters long; a request name is at most ${NAME_MAX}.`
+      if (name.length > NAME_MAX) return refusedMessage(`The request_id is ${name.length} characters long; a request name is at most ${NAME_MAX}.`)
       const text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
       const room = rt.roomOf(rt.groupOwners.get(exec.agent?.id)?.roomId)
       const images = []
       if (Array.isArray(args.images) && args.images.length > 0) {
-        if (room !== undefined || rt.groupOwners.has(exec.agent?.session?.id ?? exec.agent?.id)) return 'Not sent: forward pictures from your own chat.'
+        if (room !== undefined || rt.groupOwners.has(exec.agent?.session?.id ?? exec.agent?.id)) return refusedMessage('Not sent: forward pictures from your own chat.')
         for (const selector of args.images) {
           try { images.push(await createEditInput({ rt, ctx }).findPicture(exec, selector, exec.signal)) } catch (error) {
-            return `${JSON.stringify(selector)}: ${error.message}`
+            return refusedMessage(`${JSON.stringify(selector)}: ${error.message}`)
           }
         }
       }
@@ -244,7 +285,7 @@ export function install(rt) {
         payload: {
           to: target.id,
           message: String(args.message ?? '').replace(/\r\n?/g, '\n').trim(),
-          reply_to: toUser ? 'user' : 'me',
+          reply_to: toUser ? 'user' : noReply ? 'none' : 'me',
           when: args.when === 'queue' ? 'queue' : 'now',
           ...(images.length > 0 ? { images: images.map(ref => ref.attachmentId).sort() } : {}),
         },
@@ -254,7 +295,7 @@ export function install(rt) {
         if (outcome.status === 'replay') return outcome.receipt
         if (outcome.status === 'conflict') refuse(`Not sent: request_id "${name}" was already used for a different request. A request_id names one request; send this one under a new name.`)
         if (outcome.status === 'uncertain') refuse(`Not sent again: the outcome of request_id "${name}" is not known (the delivery failed, or Omni restarted while it was in flight), so it was not sent again. Check whether ${target.name} got it before sending it under a new name.`)
-        if (outcome.status === 'expired') return `Nothing was sent again: request_id "${name}" was admitted before, but its receipt is no longer kept, so only the fact that it was sent is left. Send the work under a new request_id if it must be done again.`
+        if (outcome.status === 'expired') return refusedMessage(`Nothing was sent again: request_id "${name}" was admitted before, but its receipt is no longer kept, so only the fact that it was sent is left. Send the work under a new request_id if it must be done again.`)
         if (outcome.status === 'readonly') refuse(`Not sent: this window cannot save the Bot team, so it cannot record the request_id "${name}". Send it from the window that owns the team, or leave the request_id out.`)
         return outcome.receipt
       }
@@ -263,8 +304,8 @@ export function install(rt) {
         if (seen !== undefined) return answer(seen)
       }
       if (room !== undefined) {
-        const refusal = groupRefusal(room, sender, target)
-        if (refusal !== undefined) refuse(refusal)
+        const problem = groupRefusal(room, sender, target)
+        if (problem !== undefined) refuse(problem)
         const send = () => callInGroup(exec, room, sender, target, text.trim())
         return request === undefined ? await send() : answer(await rt.admitRequest(request, send))
       }
@@ -277,14 +318,14 @@ export function install(rt) {
       // bare error the Bot cannot act on.
       const works = worksOf(exec)
       if (rt.upstreamOf(works).has(target.id)) {
-        return `Not sent: ${target.name} is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back. Finish the work and end your turn; to ask ${target.name} something, end your turn with the question.`
+        return refusedMessage(`Not sent: ${target.name} is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back. Finish the work and end your turn; to ask ${target.name} something, end your turn with the question.`)
       }
       const send = async () => {
         if (images.length > 0 && rt.isPrivate(sender.id)) {
           await rt.approvePictureForward(exec, { sender, target, images })
           exec.signal?.throwIfAborted()
         }
-        const work = toUser ? undefined : works[0]
+        const work = toUser || noReply ? undefined : works[0]
         const chat = rt.chatOf(target.id)
         const agent = await rt.resolveAgent(chat)
         const status = rt.statusOf(target.id)
@@ -296,16 +337,21 @@ export function install(rt) {
         let long = await rt.attachLong(before ? `${before.text}\n\n${text}` : text, `Message from ${sender.name}.txt`)
         // Nothing went out, so a named request must not take this as a delivered
         // receipt: admitRequest drops the pending record instead, and a retry can send.
-        if (long === undefined) { if (request !== undefined) request.unsent = true; return tooLong(text) }
+        if (long === undefined) { if (request !== undefined) request.unsent = true; return refusedMessage(tooLong(text)) }
         const joins = before !== undefined && agent.inbox?.remove?.(earlier.message.id) === true
         if (before !== undefined && !joins) long = await rt.attachLong(text, `Message from ${sender.name}.txt`) ?? long
         const working = rt.live.get(chat)?.turn !== undefined
         const steer = (args.when !== 'queue' && !toUser) || (joins && earlier.steered)
         const exchangeId = joins ? earlier.message.source.exchangeId : randomUUID()
+        // The merged message owes nothing only when neither message it took in does.
+        const earlierNoReply = earlier !== undefined && earlier.message.source.noReply === true
+        const mergedNoReply = noReply && (joins ? earlierNoReply : true)
         if (joins) rt.forgetDelivery?.(exchangeId)
-        else if (!toUser) rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work })
+        // A request that owes a reply needs its work, also when it grew out of an
+        // earlier no-reply message that had none.
+        if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work })
         try {
-          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
+          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
         } catch (error) {
           // The delivery stays noted for the next start while its Bot exists
           // (resume.js), and the resent request still answers up the tree, so the
@@ -315,14 +361,20 @@ export function install(rt) {
         }
         const sent = toUser
           ? `Delivered to ${target.name}. It will answer the user in its own chat; nothing comes back to you, so point the user to ${target.name}'s chat instead of relaying.`
-          : working && steer
-            ? `Delivered to ${target.name} while it is working: it reads your message at its next step and answers once that work is done. Its reply will arrive later as a new message; do not wait for it.`
-            : working
-              ? `Queued for ${target.name}: it reads your message after its current work. Its reply will arrive later as a new message; do not wait for it.`
-              : `Delivered to ${target.name}. Its reply will arrive later as a new message; do not wait for it.`
-        const asker = rt.ownsWork(sender.id, work) ? rt.botOf(state.works[work].from)?.name : undefined
+          : noReply || mergedNoReply
+            ? working && steer
+              ? `Delivered to ${target.name} while it is working: it reads your message at its next step. No reply comes back to you.`
+              : working
+                ? `Queued for ${target.name}: it reads your message after its current work. No reply comes back to you.`
+                : `Delivered to ${target.name}. It reads your message; no reply comes back to you.`
+            : working && steer
+              ? `Delivered to ${target.name} while it is working: it reads your message at its next step and answers once that work is done. Its reply will arrive later as a new message; do not wait for it.`
+              : working
+                ? `Queued for ${target.name}: it reads your message after its current work. Its reply will arrive later as a new message; do not wait for it.`
+                : `Delivered to ${target.name}. Its reply will arrive later as a new message; do not wait for it.`
+        const asker = work !== undefined && rt.ownsWork(sender.id, work) ? rt.botOf(state.works[work].from)?.name : undefined
         const notes = [
-          joins ? `${target.name} had not read your earlier message yet, so this one was added to it, and it answers both at once.` : '',
+          joins ? `${target.name} had not read your earlier message yet, so this one was added to it, ${mergedNoReply ? 'and it reads them together.' : 'and it answers both at once.'}` : '',
           status === 'idle' ? '' : `${target.name} now: ${status}.`,
           asker ? `When you have handed on everything, end your turn: each reply brings you back to this work, and your answer goes to ${asker} once all of it is back.` : '',
         ].filter(Boolean)
@@ -399,7 +451,8 @@ export function install(rt) {
         const model = args.model || fallback
         const denyTools = args.deny_tools ?? args.denyTools
         const inheritAuto = rt.autoOpener?.()
-        // Only the parameters declared above reach createBot. Its other options (an
+        const readScopeSource = exec.agent?.session?.id ?? rt.callerSessionId?.() ?? exec.agent?.id
+        // Only the parameters declared above can come from the model. Other options (an
         // existing Session to adopt, a Main Bot, a copy, a held model, a kind) are the
         // host's and the user's to give, never a model's: an undeclared argument is dropped.
         const bot = await rt.createBot({
@@ -416,7 +469,7 @@ export function install(rt) {
           ...(inheritAuto === undefined ? {} : { inheritAuto }),
           // Only when asked: an older call keeps the exact payload it had.
           ...(denyTools === undefined ? {} : { denyTools }),
-        })
+        }, { readScopeSource })
         // A level taken from the creator is said, so the creator knows what the Bot may do.
         const inherited = creator && rt.permissionCatalog() && bot.permission
           ? ` Permission inherited from ${creator.name} (${bot.permissionAuto ? 'Auto' : bot.permission})${bot.permission === (creator.permission ?? rt.permissionCatalog()?.defaultPreset) ? '.' : ', no wider than this conversation.'}` : ''
@@ -471,7 +524,18 @@ export function install(rt) {
         const avatar = image === undefined ? undefined : { ...rt.botOf(bot.id)?.avatar, image }
         // `denyTools` needs no other field, so a list-only change is a patch of its own.
         const denyTools = args.deny_tools ?? args.denyTools
-        const next = await rt.updateBot(bot.id, { name: newName, role, instructions, color, ...(avatar !== undefined ? { avatar } : {}), ...(model ? { model } : {}), ...(effort === undefined ? {} : { effort }), ...(section === undefined ? {} : { section }), ...(moving ? { workDir: workDir ?? '' } : {}), ...(denyTools === undefined ? {} : { denyTools }) }, self, exec.agent?.id)
+        const next = await rt.updateBot(bot.id, {
+          ...(newName === undefined ? {} : { name: newName }),
+          ...(role === undefined ? {} : { role }),
+          ...(instructions === undefined ? {} : { instructions }),
+          ...(color === undefined ? {} : { color }),
+          ...(avatar === undefined ? {} : { avatar }),
+          ...(model ? { model } : {}),
+          ...(effort === undefined ? {} : { effort }),
+          ...(section === undefined ? {} : { section }),
+          ...(moving ? { workDir: workDir ?? '' } : {}),
+          ...(denyTools === undefined ? {} : { denyTools }),
+        }, self, exec.agent?.id)
         if (!moving) return `Updated ${next.name}.`
         const folder = workDir ?? 'the team workspace'
         return bot.id === caller.id ? `Updated ${next.name}. From your next step on, you work in ${folder}.` : `Updated ${next.name}. It now works in ${folder}.`
@@ -857,6 +921,123 @@ export function install(rt) {
     },
   }))
 
+  // A page of the team's Settings as a card in the Bot's own chat (settings-card.js): the
+  // same page the Settings dialog draws, live, saving through the same actions. It changes
+  // nothing itself, and every change on it is the user's click: a Bot can show a setting
+  // only the user may change, such as the tools it is denied, but never change it.
+  rt.teamTools.push(defineTool({
+    name: 'show_settings',
+    description: 'Show the user a page of the team\'s Settings as a card in your own chat, so they can see and change it without leaving the chat. The card is the real Settings page, live: what they change there is saved as in Settings, and only their own clicks change it. Use it when the user wants to see or change something set up in Automagik, and for what only the user may change (the tools a Bot is denied, who may send, keys, permissions). Name a Bot to open its own settings (page bots), its scheduled tasks (schedules) or its usage (usage); name a group to open its settings (page groups). A page another plugin adds is plugin:<id>. It does not end your turn.',
+    parameters: {
+      page: { type: 'string', required: true, description: `Which page: ${SHOWABLE_PAGES.join(', ')}, or plugin:<id> for a page another plugin adds` },
+      bot: { type: 'string', description: 'Exact Bot name from list_bots, for page bots, schedules or usage' },
+      group: { type: 'string', description: 'Exact group chat name, for page groups' },
+      note: { type: 'string', description: 'One short line shown on the card: what to look at or change there' },
+    },
+    output,
+    async execute(args, exec) {
+      await rt.load()
+      const id = exec.agent?.id
+      if (rt.groupOwners.has(id)) return 'Settings cards only work in your own chat. In a group, say where the setting is instead.'
+      if (!rt.chatOwners.has(id)) return 'Only Bots on the team can use show_settings.'
+      const page = String(args.page ?? '').trim()
+      if (!isShowablePage(page)) return `No Settings page named ${JSON.stringify(page)}. Pick one of ${SHOWABLE_PAGES.join(', ')}, or plugin:<id>.`
+      const named = []
+      if (args.bot !== undefined && String(args.bot).trim() !== '') {
+        if (!['bots', 'schedules', 'usage'].includes(page)) return 'Name a Bot only with page bots, schedules or usage.'
+        const bot = rt.findBot(String(args.bot))
+        if (bot === undefined) return `No Bot named ${args.bot}.`
+        named.push(bot.name)
+      }
+      if (args.group !== undefined && String(args.group).trim() !== '') {
+        if (page !== 'groups') return 'Name a group only with page groups.'
+        const rooms = rt.findRooms(String(args.group))
+        if (rooms.length === 0) return `No group chat named ${args.group}.`
+        if (rooms.length > 1) return `More than one group chat is named ${args.group}; ask the user which one.`
+        named.push(rooms[0].name)
+      }
+      const note = String(args.note ?? '').trim()
+      if (note.length > 200) return 'Keep the note to one short line (200 characters at most).'
+      return `Showing Settings → ${page}${named.length ? ` (${named.join(', ')})` : ''} in the chat. The user changes it there; nothing has changed yet.`
+    },
+  }))
+
+  // A change to a Bot's setup, proposed as a card that shows each field as it is and as it
+  // would be (settings-card.js). Nothing changes until the user presses Apply there, which
+  // saves through the same path as the Bot's settings form, as the user. What only the user
+  // may set (the tools a Bot is denied, private, browser grants) is never in a proposal.
+  rt.teamTools.push(defineTool({
+    name: 'propose_bot_change',
+    description: 'Propose a change to a Bot\'s setup as a card in your own chat: each field as it is now and as it would be, with Apply and Dismiss. Nothing changes until the user presses Apply, so use it instead of update_bot when the user should see and approve the change first, or when several fields change together. Leave out bot to propose a change to yourself; only a Main Bot proposes changes to other Bots. It does not end your turn.',
+    parameters: {
+      bot: { type: 'string', description: 'Exact Bot name from list_bots; leave out for yourself' },
+      name: { type: 'string', description: 'New name' },
+      role: { type: 'string', description: `New role label, ${ROLE_MAX} characters at most` },
+      instructions: { type: 'string', description: 'Replacement instructions' },
+      work_dir: { type: 'string', description: 'Full path of the new working folder; an empty string returns it to the team workspace' },
+      model: { type: 'string', description: 'New model, as provider/model or a model id from list_bot_models' },
+      effort: { type: 'string', description: 'New thinking level, as list_bot_models shows; an empty string returns to the model\'s default' },
+      note: { type: 'string', description: 'One short line shown on the card: why this change' },
+    },
+    output,
+    async execute(args, exec) {
+      await rt.load()
+      const id = exec.agent?.id
+      if (rt.groupOwners.has(id)) return 'Proposal cards only work in your own chat. In a group, describe the change instead.'
+      if (!rt.chatOwners.has(id)) return 'Only Bots on the team can use propose_bot_change.'
+      const self = rt.selfOf(id)
+      const caller = rt.botOf(self)
+      if (caller === undefined) return 'Only Bots on the team can use propose_bot_change.'
+      const bot = args.bot ? rt.findBot(String(args.bot)) : caller
+      if (bot === undefined) return `No Bot named ${args.bot}.`
+      if (bot.id !== caller.id && !rt.isMain(self)) return 'Only a Main Bot can propose changes to another Bot. Leave out bot to propose a change to yourself.'
+      const note = String(args.note ?? '').trim()
+      if (note.length > 200) return 'Keep the note to one short line (200 characters at most).'
+      const asked = {}
+      for (const [key, arg] of PROPOSAL_FIELDS) {
+        if (args[arg] === undefined || args[arg] === null) continue
+        asked[key] = String(args[arg])
+      }
+      if (Object.keys(asked).length === 0) return 'Propose at least one change: name, role, instructions, work_dir, model or effort.'
+      const proposal = {}
+      try {
+        if (asked.name !== undefined) {
+          const name = asked.name.trim()
+          if (name === '' || name.length > 40) return 'A name has 1 to 40 characters.'
+          proposal.name = name
+        }
+        if (asked.role !== undefined) {
+          const role = asked.role.trim()
+          if (role.length > ROLE_MAX) return `A role label has ${ROLE_MAX} characters at most.`
+          proposal.role = role
+        }
+        if (asked.instructions !== undefined) proposal.instructions = asked.instructions.trim()
+        if (asked.workDir !== undefined) proposal.workDir = asked.workDir.trim() === '' ? '' : await rt.cleanWorkDir(asked.workDir.trim())
+        if (asked.model !== undefined) {
+          if (asked.model.trim() === '') return 'Name the model to move to; list_bot_models shows them.'
+          proposal.model = await rt.resolveModel(asked.model.trim(), { checkAccess: true, remember: false, keep: bot.model })
+        }
+        if (asked.effort !== undefined) {
+          const ref = proposal.model ?? bot.model ?? bot.appliedModel
+          if (asked.effort.trim() === '') proposal.effort = ''
+          else if (ref === undefined) return 'Propose a model first: this Bot has none to set a thinking level on.'
+          else {
+            const effort = await rt.resolveEffort(ref, asked.effort.trim())
+            if (effort === undefined) return `${asked.effort} is not a thinking level of ${ref}; list_bot_models shows them.`
+            proposal.effort = effort
+          }
+        }
+      } catch (error) {
+        return error?.message ?? String(error)
+      }
+      const current = { name: bot.name, role: bot.role ?? '', instructions: bot.instructions ?? '', workDir: bot.workDir ?? '', model: bot.model ?? bot.appliedModel ?? '', effort: bot.effort ?? '' }
+      for (const key of Object.keys(proposal)) if (proposal[key] === current[key]) delete proposal[key]
+      if (Object.keys(proposal).length === 0) return `Nothing to propose: ${bot.name} already has these settings.`
+      const fields = Object.keys(proposal).join(', ')
+      return `Proposed for ${bot.name}: ${fields}. The card is on screen; nothing changes until the user presses Apply.\n${proposalLine({ bot: bot.id, ...(note ? { note } : {}), change: proposal })}`
+    },
+  }))
+
   // The team tools live in each Session's own scope, never in the global layer:
   // a Bot's chat and a member's group Session get all of them, a group's own
   // Session gets only its relay, and a Session ds-bot does not own gets none —
@@ -876,7 +1057,7 @@ export function install(rt) {
     const held = scoped.get(id)
     if (held === undefined) return
     scoped.delete(id)
-    for (const dispose of held.disposers) {
+    for (const dispose of [...held.disposers, ...(held.roleLifts ?? [])]) {
       try {
         dispose()
       } catch (error) {
@@ -1063,10 +1244,33 @@ export function install(rt) {
       } catch { /* a scoped name cannot be restricted; connectors are global */ }
     }
   }
+  const maskRoleTools = (agent, held) => {
+    if (typeof agent.ctx?.tools?.restrict !== 'function' || typeof ctx.tools?.schemas !== 'function') return
+    const wanted = withheldRoleTools(roleBotOf(agent.session?.id))
+    const before = held.roleDenied ?? new Set()
+    if (wanted.length === 0 && before.size === 0) return
+    // Visible schemas omit the names we already masked. Prefer the registry's
+    // pre-restriction view so our mask stays in place when other masks lift.
+    const served = ctx.tools.view?.(agent)?.restrictableNames
+      ?? new Set([...before, ...ctx.tools.schemas(agent).map(schema => schema.name)])
+    const deny = wanted.filter(name => served.has(name))
+    if (deny.length === before.size && deny.every(name => before.has(name))) return
+    // Update the held names before restrict/lift, which can emit tools/change.
+    held.roleDenied = new Set(deny)
+    for (const lift of held.roleLifts ?? []) { try { lift() } catch { /* already lifted */ } }
+    held.roleLifts = []
+    for (const name of deny) {
+      try {
+        const lift = agent.ctx.tools.restrict({ deny: [name] })
+        if (typeof lift === 'function') held.roleLifts.push(lift)
+      } catch { /* the executor guard still refuses the call */ }
+    }
+  }
   const reapplyToolMasks = () => {
     for (const held of scoped.values()) {
       if (held.agent === undefined) continue
       try { maskConnectorTools(held.agent, held) } catch (error) { rt.warn('omni-ui: connector mask failed: %s', error) }
+      try { maskRoleTools(held.agent, held) } catch (error) { rt.warn('omni-ui: role mask failed: %s', error) }
     }
   }
 
@@ -1126,6 +1330,7 @@ export function install(rt) {
       maskHiddenTools(agent, held, new Set(ctx.tools.schemas(agent).map(schema => schema.name)))
     }
     maskConnectorTools(agent, held)
+    maskRoleTools(agent, held)
   }
   ctx.on('tools/change', () => reapplyToolMasks())
   // A new Bot, part, or group Session gets its Agent before ds-bot records it, so the
@@ -1135,6 +1340,8 @@ export function install(rt) {
   ctx.tools.guard((exec) => {
     if (!rt.isBotSession(exec.agent?.id) || nativeDshSession(exec.agent?.id)) return undefined
     if (exec.name === BLOCKING_QUESTION_TOOL) return `Bots cannot use ${BLOCKING_QUESTION_TOOL}. Ask with ask_user in your own chat, or ask in your reply.`
+    const bot = roleBotOf(exec.agent?.id)
+    if (withheldRoleTools(bot).includes(exec.name)) return `${bot.name} does not have the ${exec.name} tool: its Genie role is off.`
     const target = exec.arguments?.target
     return SCHEDULE_TARGET_TOOLS.includes(exec.name) && target !== undefined && target !== 'this_session' ? SCHEDULE_TARGET_REFUSAL : undefined
   })
