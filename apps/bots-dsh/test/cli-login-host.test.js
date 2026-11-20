@@ -174,6 +174,93 @@ test('any Bot view gets the live attempt back; the opener is only its label, and
   assert.equal(h.calls.some(call => call[0] === 'cancel'), false, 'reading never cancels')
 })
 
+test('ready start and status name the account from one extra read without changing current', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  h.acp.loginCurrent = async () => ready
+  const reads = []
+  h.acp.account = async id => {
+    reads.push(id)
+    return {
+      id, signedIn: true, consent: 'given', authScope: 'isolated', ref: 'ref-work', token: 'private',
+      account: { email: ' dev@example.test\n', org: 'Example', plan: 'team', token: 'private' },
+    }
+  }
+  const result = {
+    ...ready,
+    signedInAs: { ref: 'ref-work', kind: 'account', email: 'dev@example.test', org: 'Example', plan: 'team' },
+  }
+  assert.deepEqual(await h.actions['cli-login-start'](body), result)
+  assert.deepEqual(reads.splice(0), [provider, provider], 'the pre-start consent check and the ready read')
+  assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), result)
+  assert.deepEqual(reads.splice(0), [provider])
+  assert.deepEqual(await h.actions['cli-login-current'](body), { id: provider, attempt: ready })
+  assert.deepEqual(reads, [])
+})
+
+test('the extra ready read uses the confirm shape when the account has pending consent', async () => {
+  const h = fixture()
+  const provider = 'acp-claude'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  h.acp.loginCurrent = async () => ready
+  const confirm = {
+    id: provider, status: 'confirm',
+    account: { authScope: 'isolated', ref: 'ref-work', kind: 'account', email: 'dev@example.test' },
+  }
+  let consent = 'given'
+  h.acp.account = async id => {
+    const seen = { id, signedIn: true, authScope: 'isolated', consent, ref: 'ref-work', account: { email: 'dev@example.test' } }
+    consent = 'needed'
+    return seen
+  }
+  assert.deepEqual(await h.actions['cli-login-start'](body), confirm)
+  assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), confirm)
+  h.acp.status = async () => ({ agents: [{ id: provider, signedIn: true, consent }] })
+  assert.deepEqual(await h.actions['cli-login-current'](body), { id: provider, attempt: null, account: confirm.account })
+})
+
+test('a failed, mismatched or signed-out account read keeps the original ready view', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider }
+  const ready = { id: provider, attemptId: ATTEMPT, status: 'ready' }
+  h.acp.loginStart = async () => ready
+  h.acp.loginStatus = async () => ready
+  for (const read of [
+    async () => { throw new Error('private account error') },
+    async () => ({ id: 'acp-claude', signedIn: true, consent: 'needed' }),
+    async () => ({ id: 'acp-claude', signedIn: true, consent: 'given' }),
+    async () => ({ id: provider, signedIn: false }),
+  ]) {
+    h.acp.account = read
+    assert.deepEqual(await h.actions['cli-login-start'](body), ready)
+    assert.deepEqual(await h.actions['cli-login-status']({ ...body, attemptId: ATTEMPT }), ready)
+  }
+  assert.deepEqual(h.warnings, [])
+})
+
+test('starting, waiting and failed status polls never read the account', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  const body = { botId: 'a', provider, attemptId: ATTEMPT }
+  let reads = 0
+  h.acp.account = async () => { reads++ }
+  for (const status of ['starting', 'waiting', 'waiting', 'failed']) {
+    h.acp.loginStatus = async () => ({ id: provider, attemptId: ATTEMPT, status })
+    const view = await h.actions['cli-login-status'](body)
+    assert.equal(view.status, status)
+    assert.equal(Object.hasOwn(view, 'signedInAs'), false)
+  }
+  assert.equal(reads, 0)
+})
+
 test('the model chosen in Bot A is applied to A alone when the sign-in completes, even from B’s view', async () => {
   const h = fixture()
   await h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex', model: 'acp-codex/default' })

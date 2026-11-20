@@ -589,8 +589,16 @@ var ZH = {
   "Cancel sign-in": "取消登录",
   "To use {name} in this Bot, sign in to your account.": "要在此 Bot 中使用 {name}，请登录你的账号。",
   "Sign in": "登录",
+  "Sign in to this chat's AI provider": "登录此聊天的 AI 提供商",
+  "Sign-in from the chat is for Claude Code and Codex. Set up {provider} in Settings.": "聊天内登录仅支持 Claude Code 和 Codex。请在设置中配置 {provider}。",
+  "Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.": "聊天内登录仅支持 Claude Code 和 Codex。请在设置中配置此 AI。",
+  "Choose an AI for this Bot first.": "请先为此 Bot 选择一个 AI。",
+  "Sign-in runs in a Bot's chat. Open the Bot whose AI you want to sign in.": "请在 Bot 的聊天中登录。打开要登录其 AI 提供商的 Bot 聊天。",
+  "Your team is still loading. Try /login again in a moment.": "团队仍在加载。请稍后重试 /login。",
   "Not now": "暂不",
   "Done: signed in to {name}.": "完成：已登录 {name}。",
+  "Done: signed in to {name} as {account}.": "完成：已使用 {account} 登录 {name}。",
+  "Done: {name} uses an API key.": "完成：{name} 使用 API 密钥。",
   "Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.": "已登录，但无法使用 {model}：{reason} 此 Bot 仍使用 {kept}。",
   "its model": "原来的模型",
   "The sign-in was interrupted by a restart. Get a new link.": "登录因重启而中断，请获取新链接。",
@@ -37776,8 +37784,12 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
         );
       case "attempt":
         return (0, import_react98.createElement)(Attempt, { bot, row, roster, manager, secretPending, fieldRef });
-      case "done":
-        return (0, import_react98.createElement)("p", null, row.taken ? t("Done: Bots will use this {name} account.", { name }) : t("Done: signed in to {name}.", { name }));
+      case "done": {
+        if (row.taken) return (0, import_react98.createElement)("p", null, t("Done: Bots will use this {name} account.", { name }));
+        if (row.signedInAs?.kind === "key") return (0, import_react98.createElement)("p", null, t("Done: {name} uses an API key.", { name }));
+        const account = accountLabel(row.signedInAs);
+        return (0, import_react98.createElement)("p", null, account ? t("Done: signed in to {name} as {account}.", { name, account }) : t("Done: signed in to {name}.", { name }));
+      }
       case "applyFailed":
         return (0, import_react98.createElement)("p", null, t("Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.", {
           model: modelName(roster, row.outcome?.ref) || name,
@@ -37986,10 +37998,12 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
   }
   function applyView(provider, view) {
     if (disposed || view === null || view === void 0) return;
-    attempts[provider] = view;
+    const attempt = { ...view };
+    delete attempt.signedInAs;
+    attempts[provider] = attempt;
     if (provider === "acp-claude" && typeof view.url === "string") rememberLinkState(view.url);
     if (ACTIVE.has(view.status)) {
-      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt: view });
+      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt });
       armPoll(provider);
     } else if (view.status === "ready") succeed(provider, view);
     else if (view.status === "confirm") askAccount(provider, view.account);
@@ -38031,8 +38045,17 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     stopPoll(provider);
     void Promise.resolve().then(() => actions.refreshModels?.()).catch(() => {
     });
+    const signedInAs = view?.signedInAs;
     for (const row of attemptRows(provider)) {
-      setRow(row.botId, { ...row, stage: "done", attempt: null, busy: false, confirm: false, error: null });
+      setRow(row.botId, {
+        ...row,
+        stage: "done",
+        attempt: null,
+        busy: false,
+        confirm: false,
+        error: null,
+        ...signedInAs ? { signedInAs: Object.freeze({ ...signedInAs }) } : {}
+      });
       leaveAfter(row.botId, row.seq, DONE_MS);
       if (view?.choice?.state === "failed") applyFailed(row.botId, row.seq, view.choice);
       else if (view?.choice?.state === "pending" || view?.choice === void 0) void followChoice(row.botId, provider, row.seq);
@@ -38389,6 +38412,59 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     }
   };
   return api;
+}
+
+// src/client/login-command.js
+var LOADING_NOTICE = "Your team is still loading. Try /login again in a moment.";
+var GROUP_NOTICE = "Sign-in runs in a Bot's chat. Open the Bot whose AI you want to sign in.";
+var NO_MODEL_NOTICE = "Choose an AI for this Bot first.";
+var SETUP_AI_NOTICE = "Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.";
+var SETUP_PROVIDER_NOTICE = "Sign-in from the chat is for Claude Code and Codex. Set up {provider} in Settings.";
+var loginNotice = (key, params) => ({ kind: "notice", key, params });
+var isBotChat = (roster, sessionId) => {
+  const bot = roster.byId?.[sessionId];
+  return Boolean(bot) && bot.kind !== "dsh";
+};
+function loginRoute({ roster, sessionId, actions }) {
+  if (!roster?.ready) return loginNotice(LOADING_NOTICE);
+  if (roster.roomsById?.[sessionId]) return loginNotice(GROUP_NOTICE);
+  if (!isBotChat(roster, sessionId)) return void 0;
+  const target = targetOf(roster, sessionId);
+  if (!target) return loginNotice(NO_MODEL_NOTICE);
+  if (target.host !== void 0) return loginNotice(SETUP_AI_NOTICE);
+  const { bot, provider } = target;
+  if (Object.hasOwn(CLI_NAMES, provider)) {
+    return typeof actions?.openCliLogin === "function" ? { kind: "cli", botId: bot.id, provider } : loginNotice(SETUP_AI_NOTICE);
+  }
+  const model = roster.models?.find((model2) => (model2.provider ?? providerOfRef(model2.ref)) === provider && model2.providerName);
+  return loginNotice(SETUP_PROVIDER_NOTICE, { provider: model?.providerName ?? provider });
+}
+function loginCommand({ roster, actions, t: t2 }) {
+  return {
+    name: "login",
+    label: () => t2("Sign in"),
+    description: () => t2("Sign in to this chat's AI provider"),
+    available({ sessionId }) {
+      const view = roster.getSnapshot();
+      return !view.ready || isBotChat(view, sessionId) || Boolean(view.roomsById?.[sessionId]);
+    },
+    ui: {
+      kind: "action",
+      run({ sessionId }) {
+        const route = loginRoute({ roster: roster.getSnapshot(), sessionId, actions });
+        if (route?.kind === "notice") actions.showNotice(t2(route.key, route.params));
+        else if (route?.kind === "cli" && actions.openCliLogin(route.botId, route.provider) === false) {
+          actions.showNotice(t2(SETUP_AI_NOTICE));
+        }
+      }
+    }
+  };
+}
+function installLoginCommand(ctx, options) {
+  const fiber = ctx.inject(["commandUi"], (scope) => {
+    scope.effect(() => scope.commandUi.register(loginCommand(options)), "ds-bot: /login command");
+  });
+  return () => fiber.dispose();
 }
 
 // src/client/learning-card-model.js
@@ -41274,6 +41350,7 @@ function apply(ctx) {
     () => installCompiledStyles(QUEUE_CSS, "queue"),
     () => installMentions(),
     () => installAtMenu(),
+    () => installLoginCommand(ctx, { roster, actions, t }),
     () => installAdvancedStyle(),
     installHeader,
     installNativeBotHeader,

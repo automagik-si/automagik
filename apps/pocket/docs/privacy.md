@@ -63,7 +63,7 @@ Nothing else is collected. We, the developers, receive none of this data.
 
 ## What is stored on the phone
 
-- Your saved machines and settings.
+- Your saved machines and settings, including the `app_lock` preference.
 - The phone's Pocket Link (iroh) key stays in app storage that Android never backs up.
   The app encrypts it with an AES key held in Android Keystore that cannot be exported.
   The app decrypts the Pocket Link key into memory to connect. On the first start after
@@ -109,10 +109,17 @@ phone. No picture is stored or sent.
 
 ## Notifications and the lock screen
 
-- Notifications show what an agent asks or finished, so their text comes from your machines.
+- With **Lock Automagik** off, notifications show what an agent asks or finished, so their text comes from your machines.
 - **Answer from the lock screen** is off by default. While it's off, notifications are marked
   private, so Android hides their text on a secure lock screen, and replying or using the side-button panel asks you to unlock first. If you
   turn it on, anyone holding your locked phone can read and answer agents.
+- Turn on **Settings → Alerts → Lock Automagik** to authenticate when the app starts and after
+  60 seconds off screen. Alerts then show generic text. Open Automagik to answer, including
+  through the side-button panel after unlocking the phone. Android hides app thumbnails in
+  Recents, and on API 26–32 it also blocks screenshots and screen sharing. Android handles
+  your fingerprint, face and screen lock. If you remove your screen lock, set one again to
+  unlock Automagik. If you cannot set one, clear Automagik's storage and pair again. Clearing
+  storage removes the app's local data. [RFC 0010](rfcs/0010-app-lock.md)
 
 ## Permissions
 
@@ -120,6 +127,7 @@ phone. No picture is stored or sent.
 |---|---|
 | Internet | Connect to your machines, n0's Pocket Link relays and address lookup, and GitHub for updates |
 | Notifications | Alert you when an agent needs you or finishes |
+| Biometric (use fingerprint or face) | Ask Android to authenticate when you use the optional app lock |
 | Foreground service (special use) | **Watch in background**: keep connections open while you're away, with a "Watching" notification you can stop |
 | Run at startup | **Watch in background**: after the phone restarts and you unlock it, reconnect the machines it was watching, only if watching was on ([RFC 0007](rfcs/0007-watch-after-reboot.md)) |
 | Microphone | Speak a message in the chat or terminal composer, or in the side-button panel |
