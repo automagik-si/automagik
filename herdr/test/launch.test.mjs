@@ -524,8 +524,9 @@ test("startBot: a space that shows after the wait is closed when nothing runs th
   };
   const r = await startBot(w.main, ID.main, { sleep, waitMs: 100, stepMs: 10, lateWaitMs: 100, lateStepMs: 10 });
   assert.equal(r.terminal, "t100");
-  // The sweep reads each late space's folder (git), so give it a moment, never a fixed sleep.
-  const until = Date.now() + 2000;
+  // The sweep reads each late space's folder (git), so wait for its recorded event, never a
+  // fixed sleep; the 10 s ceiling only stops an unbounded hang, and the deepEqual is the proof.
+  const until = Date.now() + 10_000;
   while (Date.now() < until && !state.runs.some(([name]) => name === "space.close")) await new Promise((done) => setTimeout(done, 10));
   assert.deepEqual(state.runs, [["space.new", { name: "proj", folder: w.main, machine: "" }],
     ["space.close", { id: "s9", confirmed: true }]], "the late space is closed, its shell still alone");

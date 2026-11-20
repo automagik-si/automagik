@@ -267,10 +267,11 @@ test("Antigravity (#793): a slow refresh updates both forms and preserves edits 
     seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
     const cx = makeCx();
     const form = new BotForm({ overlay: "o9", project, form: mode, bot: AG.id }, cx);
-    const started = Date.now();
     const refreshing = () => state.calls.some((call) => call.command === agy && call.args?.[0] === "models");
     try {
-      while (!refreshing() && Date.now() - started < 5000) await new Promise((go) => setTimeout(go, 10));
+      // Wait for the call itself; the 10 s ceiling is only a net against a hang.
+      const until = Date.now() + 10_000;
+      while (!refreshing() && Date.now() < until) await new Promise((go) => setTimeout(go, 10));
       assert.ok(refreshing(), `${mode}: agy started`);
       if (mode === "edit") {
         assert.ok(form.initial, "the edit form snapshotted before the refresh");

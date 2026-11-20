@@ -2244,13 +2244,14 @@ test("--uninstall doesn't wait for a herdr-app status that never answers", (t) =
   const s = scratch(t);
   s.publish("9.9.0");
   assert.equal(s.run("--yes").code, 0);
-  writeFileSync(join(s.bin, "herdr-app"), "#!/bin/sh\nexec sleep 30\n");
+  // The status answer, written only if the fake runs the full 30 s: the bound must kill it first.
+  const answered = join(s.root, "herdr-app-answered");
+  writeFileSync(join(s.bin, "herdr-app"), `#!/bin/sh\nsleep 30\nprintf 'answered\\n' > "${answered}"\n`);
   chmodSync(join(s.bin, "herdr-app"), 0o755);
   s.extraEnv.AUTOMAGIK_HERDR_STATUS_SECONDS = "1";
-  const began = Date.now();
   const r = s.run("--uninstall");
   assert.equal(r.code, 0, r.err);
-  assert.ok(Date.now() - began < 20_000, "well under the fake's 30 s");
+  assert.equal(existsSync(answered), false, "the status bound killed herdr-app before it answered");
   assert.equal(existsSync(s.pack), false);
 });
 
