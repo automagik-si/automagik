@@ -1232,7 +1232,7 @@ the reservation wins.
 | Claude, a person's sign-in with an email and an `orgId` | `claude`, the `orgId`, the email lowercased | yes |
 | Claude, an email with no `orgId` | none | no; the card says why (an older CLI, update it) |
 | Claude, an API key, a subscription token in the environment, Bedrock or Vertex | none | no; no subscription person is named. Never refused |
-| Codex, a ChatGPT sign-in | `codex`, the email lowercased, the plan class: `personal` (free, plus, pro) or `workspace` (team, business, enterprise, edu) | yes |
+| Codex, a ChatGPT sign-in | `codex`, the email lowercased, the plan class: `personal` (free, plus, pro and the other personal plans) or `workspace` (team, business, enterprise, edu and their variants); the full lists are in [R0's record](../cloud/0024-reservations-evidence.md), section 2 | yes |
 | Codex, a ChatGPT sign-in whose `planType` is absent or unknown | none | no; at the check it matches either class |
 | Codex, an API key | none | no; never refused |
 
@@ -1300,10 +1300,15 @@ machines.**
   exists.
 - **The check**: in bots-dsh's host, after acp-dsh reports a signed-in read of a Bot's vendor, and
   at every fresh read after it (a start, the card, a new Bot session), never mid-turn:
-  1. evidence not reservable: allowed;
+  1. a read that names no subscription person (a key, a token, another provider, an unreadable
+     account): allowed. A subscription read that is only *not reservable* (Claude without `orgId`,
+     Codex of an unknown class) is not allowed here: it is ambiguous and goes to step 2 (clarified
+     2026-11-20 with R0, to match (m));
   2. the `exact` file, else any `<vendor>-*.json` whose `loose` matches and whose evidence is
-     ambiguous against this read: found for another instance means **refused**; for this
-     instance, allowed and shown as "reserved for this instance";
+     ambiguous against this read: found for another instance means **refused**, even when the same
+     email also has a reservation for this instance; for this instance only, allowed and shown as
+     "reserved for this instance". A complete read whose `exact` differs (another `orgId` or class)
+     is another account, allowed even when `loose` matches;
   3. refused, in an isolated Bot home: the app signs that vendor out of the Bot's own home (never
      the terminal's sign-in) and the card shows "Reserved for {label} on another instance. Sign in
      with another account, or ask its owner to make it shared." In consent mode (the Bot uses the
@@ -1352,6 +1357,11 @@ Each is one PR per lane, in this order.
   prints `orgId` for a personal (Pro, Max) and a Team or Enterprise sign-in; Codex's `account/read`
   fields and its `planType` values, and whether it names a workspace; set-group-id and sticky
   semantics for the directory on Linux and macOS. *Check:* a written record. *Rollback:* none.
+  *Record:* [the R0 evidence record](../cloud/0024-reservations-evidence.md) (2026-11-20; no real
+  sign-in and no credential store read): Claude Code prints `orgId` beside the email for every
+  `claude.ai` sign-in that has one; Codex names a workspace only by display name, so (m) stands, with
+  the full `planType` lists; `mkdir -m 3770` drops set-group-id, so R4's setup sets the mode after
+  creating the folder, and writers set each file's mode on its descriptor.
 - **R1. The desktop instance id** (desktop lane). *Acceptance:* the first run writes the owner
   record version 1 with random `local_id` and `instance_id`, `0600`, exclusively; a restart keeps
   both; two Automagik homes on one machine and one OS user get different ids; a record with a higher
