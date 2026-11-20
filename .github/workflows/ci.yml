@@ -437,17 +437,26 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.caches.outputs.playwright }}-${{ steps.caches.outputs.image }}-v1
 
+      # The apt phase below runs on a disposable runner whose own sources can point at a
+      # regional mirror that is down (run 44534018166). Rewrite the host to the canonical
+      # archive first: Playwright runs `apt-get update` inside `--with-deps`/`install-deps`,
+      # so the rewrite has to happen before the step below calls it.
+      - name: Point apt at the canonical Ubuntu archive
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/apt-canonical-sources.sh"
+
       - name: Chromium for the page tests
         run: |
           set -euo pipefail
 
-          # Hard wall-clock bound around Playwright's whole Chromium phase: it downloads the
-          # browser and runs its own apt-get for the system libraries. 420s (7 min) is generous
-          # for a cold install on the hosted image (the job ran 9m9s end to end, browser
-          # included), while a stalled mirror or CDN is killed instead of holding the 15-minute
-          # job open. A browser-cache hit skips this phase entirely.
-          readonly PLAYWRIGHT_LIMIT=420
-          readonly KILL_AFTER=15
+          # Hard wall-clock bounds, in seconds, around every phase. An install gets 240s
+          # (4 min) and `update` 120s (2 min), as in the herdr step: generous for a slow but
+          # working mirror, while a stalled one is killed at the bound. Each sends TERM, then
+          # KILL 15s later. The browser download is not apt and gets its own 120s bound, so
+          # even the full 240+120+240+120 path plus four 15s graces stays under the job's cap.
+          readonly APT_INSTALL_LIMIT=240
+          readonly APT_UPDATE_LIMIT=120
+          readonly APT_KILL_AFTER=15
+          readonly BROWSER_LIMIT=120
 
           log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
@@ -468,22 +477,116 @@ jobs:
           hand_back() { sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives; }
           trap hand_back EXIT
 
-          # The archive cache is already restored; apt uses its .debs and only a miss fetches
-          # the rest. This is the one install attempt, and its whole phase is bounded.
-          started=$SECONDS
-          log "Chromium and its system dependencies started (bound ${PLAYWRIGHT_LIMIT}s, kill-after ${KILL_AFTER}s)"
+          # Keep apt's own acquire timeouts as a second, finer bound; -q (not -qq) keeps a
+          # stall visible in the log while apt still prints no secrets.
+          apt_opts=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+
+          # run_apt <limit-seconds> <phase> <apt-get arguments...>: one apt call under `timeout`.
+          # Returns 0 on success, 124/137 when the bound killed it, else apt-get's own status.
+          # Every call logs a timestamped start and finish, so a future stall is diagnosable.
+          run_apt() {
+            local limit="$1" phase="$2"
+            shift 2
+            local started="$SECONDS" status=0
+            log "apt phase '${phase}' started (bound ${limit}s, kill-after ${APT_KILL_AFTER}s)"
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${limit}" \
+              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" -q "$@" || status=$?
+            local elapsed=$((SECONDS - started))
+            case "${status}" in
+              0)
+                log "apt phase '${phase}' finished in ${elapsed}s"
+                return 0
+                ;;
+              124|137)
+                log "apt phase '${phase}' TIMED OUT after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+              *)
+                log "apt phase '${phase}' failed after ${elapsed}s (exit ${status})"
+                return "${status}"
+                ;;
+            esac
+          }
+
+          # fail_phase <phase> <status>: end the step naming the phase; when the phase was a
+          # fetch, say the mirror did not answer so a red job points at it, not at this change.
+          fail_phase() {
+            local phase="$1" status="$2"
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              echo "::error::the Chromium dependency phase '${phase}' was killed at its wall-clock bound (exit ${status}); the apt mirror or browser CDN, not the code under test, did not answer"
+            else
+              echo "::error::the Chromium dependency phase '${phase}' failed (exit ${status}); the apt mirror or browser CDN is the likely cause, not the code under test"
+            fi
+            exit 1
+          }
+
+          # The pinned Playwright knows the system libraries Chromium needs. `--dry-run` prints
+          # its apt plan without touching the network, so the restored .deb cache can be tried
+          # before any `apt-get update`; a cache that covers them needs no mirror at all.
+          plan="$(node node_modules/playwright-core/cli.js install-deps --dry-run chromium 2>/dev/null || true)"
+          packages=()
+          if [[ "${plan}" == *--no-install-recommends* ]]; then
+            packages_line="${plan#*--no-install-recommends }"
+            packages_line="${packages_line%\"}"
+            read -r -a packages <<< "${packages_line}"
+          fi
+          if [ "${#packages[@]}" -eq 0 ]; then
+            # The plan format belongs to Playwright; if it moves, fall back to its own bounded
+            # --with-deps rather than guessing the package list.
+            log "::warning::could not read Playwright's dependency plan; falling back to install --with-deps under one bound"
+            status=0
+            timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" 420 \
+              node node_modules/playwright-core/cli.js install --with-deps chromium || status=$?
+            if [ "${status}" -ne 0 ]; then
+              fail_phase "browser and system dependencies" "${status}"
+            fi
+            exit 0
+          fi
+
+          # Cache first: --no-download makes apt use /var/cache/apt/archives or fail, so a hit
+          # installs without a mirror and without an update.
           status=0
-          timeout --signal=TERM --kill-after="${KILL_AFTER}" "${PLAYWRIGHT_LIMIT}" \
-            node node_modules/playwright-core/cli.js install --with-deps chromium || status=$?
+          run_apt "${APT_INSTALL_LIMIT}" "cache install (--no-download)" \
+            install -y --no-install-recommends --no-download "${packages[@]}" || status=$?
+          if [ "${status}" -ne 0 ]; then
+            if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+              # A local install should not hit the bound; if it did, apt is wedged.
+              fail_phase "cache install (--no-download)" "${status}"
+            fi
+            log "apt: the package cache does not cover this image; refreshing indexes once from the canonical archive"
+            update_status=0
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || update_status=$?
+            if [ "${update_status}" -ne 0 ]; then
+              # The host was rewritten before this step; if update still fails, try the cache
+              # once more before giving up, so a stale index cannot red the job either.
+              log "apt: update failed (exit ${update_status}); trying the package cache once before giving up"
+              if ! run_apt "${APT_INSTALL_LIMIT}" "cache install after update failure (--no-download)" \
+                install -y --no-install-recommends --no-download "${packages[@]}"; then
+                echo "::error::the Chromium dependency phase 'update' failed (exit ${update_status}) and the package cache could not cover it; the Ubuntu mirror, not the code under test, is the cause"
+                exit 1
+              fi
+            else
+              run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+                install -y --no-install-recommends "${packages[@]}" \
+                || fail_phase "install (after update)" "$?"
+            fi
+          fi
+
+          # apt is done; fetch the browser itself under its own bound.
+          started=$SECONDS
+          status=0
+          log "Playwright's Chromium download started (bound ${BROWSER_LIMIT}s, kill-after ${APT_KILL_AFTER}s)"
+          timeout --signal=TERM --kill-after="${APT_KILL_AFTER}" "${BROWSER_LIMIT}" \
+            node node_modules/playwright-core/cli.js install chromium || status=$?
           elapsed=$((SECONDS - started))
           if [ "${status}" -eq 0 ]; then
-            log "Chromium and its system dependencies finished in ${elapsed}s"
-          elif [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
-            echo "::error::the Chromium phase 'browser and system dependencies' was killed at its ${PLAYWRIGHT_LIMIT}s bound (exit ${status}); it must not hang the id job"
-            exit 1
+            log "Playwright's Chromium finished in ${elapsed}s"
           else
-            echo "::error::the Chromium phase 'browser and system dependencies' failed (exit ${status}); the step fails instead of retrying forever"
-            exit 1
+            fail_phase "browser download" "${status}"
           fi
       - run: bun run test
       - run: node scripts/mutations.mjs
@@ -569,6 +672,13 @@ jobs:
         with:
           path: /var/cache/apt/archives
           key: apt-herdr-app-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-v1
+
+      # The apt step below runs on a disposable runner whose own sources can point at a
+      # regional mirror that is down (run 44534018166). Rewrite the host to the canonical
+      # archive before `apt-get update` so a dead mirror cannot red this job.
+      - name: Point apt at the canonical Ubuntu archive
+        if: matrix.node == '24'
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/apt-canonical-sources.sh"
 
       # The app's own mod loader, not a stand-in: every PACK_MODS mod of the pack built from this
       # commit must load in the pinned Linux herdr-app. #624's node:url import passed the pack's
@@ -657,9 +767,21 @@ jobs:
             # A miss or an incomplete cache falls through to one bounded update + install; that
             # is the single retry, and both of its phases stay bounded too.
             log "apt: the package cache does not cover this image; refreshing indexes once, then installing"
-            run_apt "${APT_UPDATE_LIMIT}" "update" update || fail_phase "update" "$?"
-            run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
-              install -y --no-install-recommends "${packages[@]}" || fail_phase "install (after update)" "$?"
+            update_status=0
+            run_apt "${APT_UPDATE_LIMIT}" "update" update || update_status=$?
+            if [ "${update_status}" -ne 0 ]; then
+              # The sources were rewritten to the canonical archive before this step; if the
+              # update still fails, try the cache once more before giving up.
+              log "apt: update failed (exit ${update_status}); trying the package cache once before giving up"
+              if ! run_apt "${APT_INSTALL_LIMIT}" "cache install after update failure (--no-download)" \
+                install -y --no-install-recommends --no-download "${packages[@]}"; then
+                echo "::error::the herdr-app system-libraries phase 'update' failed (exit ${update_status}) and the package cache could not cover it; the Ubuntu mirror, not the code under test, is the cause"
+                exit 1
+              fi
+            else
+              run_apt "${APT_INSTALL_LIMIT}" "install (after update)" \
+                install -y --no-install-recommends "${packages[@]}" || fail_phase "install (after update)" "$?"
+            fi
           fi
 
           # Hand the downloaded debs back to the runner user so actions/cache can save them.
