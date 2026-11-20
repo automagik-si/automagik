@@ -64,7 +64,7 @@ data class PocketState(
     /** The legacy SSH machine ([LegacySsh]) whose "Pair with QR" started the scan: the next pairing replaces it. */
     val repairing: String? = null,
     /** A pairing link that arrived from outside the app, waiting for the person to confirm it. */
-    val offeredPairing: PairingLink? = null,
+    val offeredPairing: PairingOffer? = null,
     /** Folded drawer machine groups, as "hostId|machine". */
     val folded: Set<String> = emptySet(),
     /** Finished turns the person looked at on the phone ([Cockpit.seenKey]); they leave the cockpit's Done. */
@@ -103,6 +103,10 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         lockAnswers = prefs.getBoolean("lock_answers", false), watch = prefs.getBoolean(WatchResume.PREF_WATCH, true),
         seen = runCatching { JSONArray(prefs.getString("seen_done", "[]")).let { a -> (0 until a.length()).map(a::getString) }.toSet() }.getOrDefault(emptySet()), hosts = savedHosts.orEmpty()))
     val state = _state.asStateFlow()
+    internal var pocketLink: PocketLinkBackend = IrohBackend
+    internal var linkDispatcher: CoroutineDispatcher = Dispatchers.IO
+    /** The latest external offer or pairing action, changed on Main. */
+    private var offerGen = 0L
     /** Herdr desktop's program table, for the drawer's names and icons. */
     val programs: Programs by lazy { Programs(JSONObject(application.assets.open("programs.json").bufferedReader().use { it.readText() })) }
     private val colorsRead = ConcurrentHashMap<String, Long>()
@@ -281,12 +285,12 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         LegacySsh.refusal(profile)?.let { reason -> _state.update { it.copy(message = reason) }; return }
         disconnect(profile.id, deliberate = retry == 0)
         if (state.value.demo) leaveDemo()
-        jobs[profile.id] = viewModelScope.launch(Dispatchers.IO) {
+        jobs[profile.id] = viewModelScope.launch(linkDispatcher) {
             updateMachine(profile.id) { it.copy(connecting = true, connected = false, error = null) }
             var client: CoreClient? = null
             try {
                 val connectionScope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
-                val t = IrohLink.open(getApplication(), profile.ticket, profile.session, connectionScope)
+                val t = pocketLink.open(getApplication(), profile.ticket, profile.session, connectionScope)
                 ensureActive()
                 lateinit var c: CoreClient
                 c = CoreClient(t.input, t.output, t, connectionScope) { reason -> lost(profile, c, reason) }
@@ -337,13 +341,28 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     fun offerPairing(text: String) {
-        val link = PairingLink.parse(text) ?: run { _state.update { it.copy(message = "That isn’t a Pocket Link pairing link.") }; return }
-        _state.update { it.copy(offeredPairing = link) }
+        val gen = ++offerGen
+        _state.update { it.copy(offeredPairing = null) }
+        val link = PairingLink.parse(text) ?: run { _state.update { it.copy(message = LegacySsh.NOT_A_LINK) }; return }
+        viewModelScope.launch(linkDispatcher) {
+            val desktop = runCatching { pocketLink.desktopId(link.ticket) }.getOrNull()
+            val offer = desktop?.let { PairingOffer.of(gen, link, it, state.value.hosts, pocketLink::desktopId) }
+            withContext(Dispatchers.Main) {
+                if (gen == offerGen) _state.update { if (offer == null) it.copy(message = LegacySsh.NOT_A_LINK) else it.copy(offeredPairing = offer) }
+            }
+        }
     }
-    fun dismissOfferedPairing() { _state.update { it.copy(offeredPairing = null) } }
+    fun dismissOfferedPairing(id: Long) {
+        if (state.value.offeredPairing?.id != id) return
+        ++offerGen
+        _state.update { it.copy(offeredPairing = null) }
+    }
+    fun confirmOfferedPairing(id: Long) {
+        val offer = state.value.offeredPairing?.takeIf { it.id == id } ?: return
+        pair(offer.link, connectNow = false)
+    }
 
-    /** Pairs with the desktop that showed [text] (a Pocket Link QR or pasted link), saves it and connects. */
-    /** A pasted link: it replaces no legacy card. */
+    /** Pairs, saves and connects from a pasted link, without replacing a legacy card. */
     fun pair(text: String) {
         pair(PairingLink.parse(text) ?: run { _state.update { it.copy(message = LegacySsh.NOT_A_LINK) }; return })
     }
@@ -357,17 +376,18 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     fun repairWithQr(hostId: String) { _state.update { LegacySsh.start(it, hostId) } }
     /** The scan was cancelled: the legacy card stays as it was. */
     fun cancelRepair() { _state.update(LegacySsh::cancel) }
-    /** [replacing]: the legacy SSH card this pairing replaces once it succeeds ([scanned]); none for a pasted or external link. */
-    fun pair(link: PairingLink, replacing: String? = null) {
+    /** [replacing] is the legacy SSH card to replace on success. [connectNow] opens a session after saving. */
+    fun pair(link: PairingLink, replacing: String? = null, connectNow: Boolean = true) {
+        ++offerGen
         if (state.value.demo) leaveDemo()
         _state.update { it.copy(pairing = true, offeredPairing = null) }
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(linkDispatcher) {
             try {
                 val device = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL).distinct().joinToString(" ").trim().ifBlank { "Android phone" }
-                val name = IrohLink.pair(getApplication(), link, device)
-                val desktop = IrohLink.desktopId(link.ticket)
+                val name = displayName(pocketLink.pair(getApplication(), link, device)).ifBlank { displayName(link.name).ifBlank { "Herdr desktop" } }
+                val desktop = pocketLink.desktopId(link.ticket)
                 // Pairing the same desktop again keeps its card and history, with the new ticket.
-                val previous = state.value.hosts.find { it.paired && runCatching { IrohLink.desktopId(it.ticket) }.getOrNull() == desktop }
+                val previous = state.value.hosts.find { it.paired && runCatching { pocketLink.desktopId(it.ticket) }.getOrNull() == desktop }
                 val profile = (previous ?: HostProfile(UUID.randomUUID().toString(), name, desktop.take(12), "", 0, transport = "iroh"))
                     .copy(ticket = link.ticket, transport = "iroh")
                 withContext(Dispatchers.Main) {
@@ -376,9 +396,13 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
                     val replaced = state.value.hosts.filter { h -> hosts.none { it.id == h.id } }.map { it.id }
                     replaced.forEach { disconnect(it) }
                     saveHosts(hosts)
-                    _state.update { it.copy(pairing = false, repairing = null, machines = it.machines - replaced.toSet(), message = "Paired with $name") }
+                    val saved = hosts.first { it.id == profile.id }
+                    val savedName = displayName(saved.name)
+                    val message = if (previous != null) "Paired $savedName again." else if (connectNow) "Paired with $savedName"
+                        else "Paired with $savedName. Connect it in Settings when you’re ready."
+                    _state.update { it.copy(pairing = false, repairing = null, machines = it.machines - replaced.toSet(), message = message) }
                     dropSshKeyIfUnused()
-                    hosts.find { it.id == profile.id }?.let { connect(it) }
+                    if (connectNow) connect(saved)
                 }
             } catch (e: Throwable) {
                 if (e is CancellationException) throw e

@@ -2,7 +2,7 @@
 title: "Using Automagik Pocket"
 type: guide
 created: 2026-11-01
-updated: 2026-11-07
+updated: 2026-11-19
 tags: [guide, users]
 ---
 # Using Automagik Pocket
@@ -12,7 +12,10 @@ Everything the [README](../../README.md) keeps short. Install and first connecti
 ## Machines
 
 - Pair several machines, rename them later, and connect with one tap from the start screen.
-  Pairing a machine saves it and connects straight away.
+  Scan a QR code or paste a link in the app to pair and connect straight away. Open a pairing
+  link from outside the app to see the computer’s key fingerprint and whether its key is
+  already saved. Only tap **Pair** if the code is on your own computer’s screen. For a new
+  computer, open **Settings → Machines** and tap **Connect** when you’re ready.
 - **Pocket Link:** the phone dials the desktop by its public key over iroh. The connection is
   direct on the same network or through hole punching, and otherwise through n0's public relays.
   It is end-to-end encrypted either way. No port is opened on the computer. Removing the phone in

@@ -25,6 +25,19 @@ import java.io.OutputStream
 import java.net.URI
 import java.net.URLDecoder
 
+/** The desktop’s key fingerprint, in the same groups of four Pocket Link shows. */
+fun keyFingerprint(id: String): String = id.take(12).chunked(4).joinToString(" ")
+
+/** A bounded, single-line label for a computer. */
+fun displayName(raw: String): String = buildString {
+    var offset = 0
+    while (offset < raw.length) {
+        val c = Character.codePointAt(raw, offset)
+        offset += Character.charCount(c)
+        if (!Character.isISOControl(c) && Character.getType(c) != Character.FORMAT.toInt() && c != 0x2028 && c != 0x2029) appendCodePoint(c)
+    }
+}.trim().take(60)
+
 /** A link from Herdr desktop's Pocket Link mod: `herdr-pocket://pair?v=1&n=<desktop>&c=<one-time code>&t=<iroh ticket>`. */
 data class PairingLink(val name: String, val code: String, val ticket: String) {
     companion object {
@@ -40,10 +53,33 @@ data class PairingLink(val name: String, val code: String, val ticket: String) {
             if (query["v"] != "1") return null
             val ticket = query["t"]?.takeIf { TICKET.matches(it) } ?: return null
             val code = query["c"]?.takeIf { CODE.matches(it) } ?: return null
-            val name = query["n"].orEmpty().filterNot { it.isISOControl() }.take(60).ifBlank { "Herdr desktop" }
+            val name = displayName(query["n"].orEmpty()).ifBlank { "Herdr desktop" }
             return PairingLink(name, code, ticket)
         }
     }
+}
+
+/** An external pairing link and the saved machine, if any, with the same full key. */
+data class PairingOffer(val id: Long, val link: PairingLink, val desktop: String, val known: HostProfile?) {
+    val fingerprint get() = keyFingerprint(desktop)
+
+    companion object {
+        fun of(id: Long, link: PairingLink, desktop: String, hosts: List<HostProfile>, idOf: (String) -> String): PairingOffer =
+            PairingOffer(id, link, desktop, hosts.firstOrNull { it.paired && runCatching { idOf(it.ticket) }.getOrNull() == desktop })
+    }
+}
+
+/** The pairing and session routes used by the view model. */
+internal interface PocketLinkBackend {
+    fun desktopId(ticket: String): String
+    suspend fun pair(context: Context, link: PairingLink, device: String): String
+    suspend fun open(context: Context, ticket: String, session: String, scope: CoroutineScope): IrohTransport
+}
+
+internal object IrohBackend : PocketLinkBackend {
+    override fun desktopId(ticket: String) = IrohLink.desktopId(ticket)
+    override suspend fun pair(context: Context, link: PairingLink, device: String) = IrohLink.pair(context, link, device)
+    override suspend fun open(context: Context, ticket: String, session: String, scope: CoroutineScope) = IrohLink.open(context, ticket, session, scope)
 }
 
 /** A session to a paired desktop's herdr-core, as the byte streams CoreClient reads and writes. */
