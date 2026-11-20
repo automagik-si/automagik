@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import {
+import fs, {
   accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
   rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -11,7 +12,7 @@ import { createRuntime } from '../index.js'
 import { AGENT_TOOLS } from '../src/host/agent-access.js'
 import { ROUTE } from '../src/host/constants.js'
 import {
-  install, readSelfUpdate, selfUpdateStatus, storeDirOf, supervisorOf, usableStore, writeJsonAtomic,
+  REASON_CODES, install, readSelfUpdate, selfUpdateStatus, storeDirOf, supervisorOf, usableStore, writeJsonAtomic,
 } from '../src/host/self-update.js'
 import { fakeContext } from './fake-ctx.js'
 
@@ -23,22 +24,28 @@ const run = {
   version: 1, runId: 'run-0001', bootId, phase: 'switching', from: '1.2.3', to: '1.2.4', reason: null,
   startedAt: '2026-11-20T12:00:00.000Z', updatedAt: '2026-11-20T12:00:01.000Z',
 }
+const requiresStore = { skip: constants.O_NOFOLLOW === undefined && 'O_NOFOLLOW is unavailable' }
 const empty = { current: null, run: null, staleRun: null, problem: null }
 const supervisor = { version: 1, bootId, runId: run.runId }
+const available = { available: true, reason: null, supervisor: { version: 'v1.2.3' }, ...empty }
+const refused = {
+  ok: false,
+  error: { code: 'bot/read-only', message: 'This window does not hold the team, so it cannot report updates.', details: {} },
+}
 
 function fixture(t) {
   const home = mkdtempSync(join(tmpdir(), 'bots-self-update-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
   const profileDir = join(home, 'profiles', 'web')
   mkdirSync(profileDir, { recursive: true })
-  const storeDir = usableStore(profileDir)
+  const storeDir = storeDirOf(profileDir)
   return {
     home, profileDir, storeDir, currentPath: join(storeDir, 'current.json'),
     statePath: join(storeDir, 'state.json'), supervisorPath: join(storeDir, 'supervisor.json'),
   }
 }
 
-test('the update store is beside the profiles tree', t => {
+test('the update store is beside the profiles tree', requiresStore, t => {
   const { home, profileDir, storeDir } = fixture(t)
   assert.equal(storeDirOf(profileDir), storeDir)
   assert.equal(usableStore(profileDir), join(home, 'update', 'web'))
@@ -49,27 +56,41 @@ test('the update store is beside the profiles tree', t => {
   for (const value of [undefined, null, 42, {}]) assert.equal(storeDirOf(value), undefined)
 })
 
-test('missing update files leave an empty status', t => {
-  const { storeDir, currentPath } = fixture(t)
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), empty)
+test('missing update files leave an empty status', requiresStore, t => {
+  const { profileDir, currentPath } = fixture(t)
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), empty)
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), available)
   const initial = { version: 1, live: null, kept: null, lastSequence: null }
-  writeJsonAtomic(currentPath, initial)
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, current: initial })
+  writeJsonAtomic(currentPath, initial, { profileDir })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, current: initial })
 })
 
-test('corrupt, unreadable and wrong-shaped files report only their file names', t => {
-  const { storeDir, currentPath, statePath } = fixture(t)
+test('an existing invalid or unreadable current record makes the store unavailable', requiresStore, t => {
+  const { profileDir, storeDir, currentPath } = fixture(t)
+  mkdirSync(storeDir, { recursive: true })
+  const invalid = { ...available, available: false, reason: 'store-invalid', problem: 'Invalid current.json' }
+  writeFileSync(currentPath, '{')
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
+  writeJsonAtomic(currentPath, null, { profileDir })
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
+  rmSync(currentPath)
+  mkdirSync(currentPath)
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), invalid)
+})
+
+test('corrupt, unreadable and wrong-shaped files report only their file names', requiresStore, t => {
+  const { profileDir, storeDir, currentPath, statePath } = fixture(t)
   const privateText = 'private fixture content'
-  writeJsonAtomic(currentPath, current)
+  writeJsonAtomic(currentPath, current, { profileDir })
   writeFileSync(statePath, `{ ${privateText}\n`, 'utf8')
-  const corrupt = readSelfUpdate({ storeDir, bootId })
+  const corrupt = readSelfUpdate({ profileDir, bootId })
   assert.deepEqual(corrupt.current, current)
   assert.equal(corrupt.run, null)
   assert.match(corrupt.problem, /state\.json/)
 
-  writeJsonAtomic(currentPath, { ...current, lastSequence: privateText })
-  writeJsonAtomic(statePath, { ...run, updatedAt: '2026-02-30T12:00:00.000Z' })
-  const invalid = readSelfUpdate({ storeDir, bootId })
+  writeJsonAtomic(currentPath, { ...current, lastSequence: privateText }, { profileDir })
+  writeJsonAtomic(statePath, { ...run, updatedAt: '2026-02-30T12:00:00.000Z' }, { profileDir })
+  const invalid = readSelfUpdate({ profileDir, bootId })
   assert.equal(invalid.current, null)
   assert.equal(invalid.run, null)
   assert.match(invalid.problem, /current\.json/)
@@ -77,7 +98,7 @@ test('corrupt, unreadable and wrong-shaped files report only their file names', 
 
   rmSync(statePath)
   mkdirSync(statePath)
-  const unreadable = readSelfUpdate({ storeDir, bootId })
+  const unreadable = readSelfUpdate({ profileDir, bootId })
   assert.equal(unreadable.run, null)
   assert.equal(unreadable.problem, 'Invalid current.json. Invalid state.json')
   for (const { problem } of [corrupt, invalid, unreadable]) {
@@ -87,38 +108,38 @@ test('corrupt, unreadable and wrong-shaped files report only their file names', 
   }
 })
 
-test('only the run and boot named by the live supervisor are reported as the run', t => {
-  const { storeDir, statePath, supervisorPath } = fixture(t)
-  writeJsonAtomic(supervisorPath, supervisor)
-  writeJsonAtomic(statePath, { ...run, bootId: formerBootId })
+test('only the run and boot named by the live supervisor are reported as the run', requiresStore, t => {
+  const { profileDir, statePath, supervisorPath } = fixture(t)
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  writeJsonAtomic(statePath, { ...run, bootId: formerBootId }, { profileDir })
   const staleRun = { runId: run.runId, phase: run.phase }
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, staleRun })
-  assert.deepEqual(readSelfUpdate({ storeDir }), { ...empty, staleRun })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, staleRun })
+  assert.deepEqual(readSelfUpdate({ profileDir }), { ...empty, staleRun })
 
-  writeJsonAtomic(statePath, run)
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, run })
+  writeJsonAtomic(statePath, run, { profileDir })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, run })
 
   for (const mismatch of [{ runId: 'run-0002' }, { runId: null }, { bootId: formerBootId }]) {
-    writeJsonAtomic(supervisorPath, { ...supervisor, ...mismatch })
-    assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, staleRun })
+    writeJsonAtomic(supervisorPath, { ...supervisor, ...mismatch }, { profileDir })
+    assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, staleRun })
   }
-  writeJsonAtomic(supervisorPath, { ...supervisor, runId: 'short' })
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, staleRun, problem: 'Invalid supervisor.json' })
+  writeJsonAtomic(supervisorPath, { ...supervisor, runId: 'short' }, { profileDir })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, staleRun, problem: 'Invalid supervisor.json' })
   rmSync(supervisorPath)
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, staleRun })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, staleRun })
 
-  writeJsonAtomic(supervisorPath, supervisor)
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
   for (const phase of ['healthy', 'rolledBack', 'notUpdated', 'manualRecovery']) {
     const terminal = { ...run, phase, reason: 'health-check-finished' }
-    writeJsonAtomic(statePath, terminal)
-    assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, run: terminal })
-    writeJsonAtomic(statePath, { ...terminal, bootId: formerBootId })
-    assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, staleRun: { ...staleRun, phase } })
+    writeJsonAtomic(statePath, terminal, { profileDir })
+    assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, run: terminal })
+    writeJsonAtomic(statePath, { ...terminal, bootId: formerBootId }, { profileDir })
+    assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, staleRun: { ...staleRun, phase } })
   }
 })
 
-test('the reader refuses a symlinked state file', t => {
-  const { storeDir, statePath, home } = fixture(t)
+test('the reader refuses a symlinked state file', requiresStore, t => {
+  const { profileDir, storeDir, statePath, home } = fixture(t)
   const target = join(home, 'private-state')
   writeFileSync(target, JSON.stringify(run))
   mkdirSync(storeDir, { recursive: true })
@@ -128,11 +149,11 @@ test('the reader refuses a symlinked state file', t => {
     if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('File symlinks require permission')
     throw error
   }
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, problem: 'Invalid state.json' })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, problem: 'Invalid state.json' })
 })
 
-test('the reader refuses a FIFO without opening it for reading', t => {
-  const { storeDir, statePath } = fixture(t)
+test('the reader refuses a FIFO without opening it for reading', requiresStore, t => {
+  const { profileDir, storeDir, statePath } = fixture(t)
   mkdirSync(storeDir, { recursive: true })
   try {
     execFileSync('mkfifo', [statePath])
@@ -140,25 +161,86 @@ test('the reader refuses a FIFO without opening it for reading', t => {
     if (error.code === 'ENOENT') return t.skip('mkfifo is unavailable')
     throw error
   }
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, problem: 'Invalid state.json' })
+  const openSync = t.mock.fn(() => { throw new Error('FIFO reached openSync') })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }, { ...fs, openSync }), {
+    ...empty, problem: 'Invalid state.json',
+  })
+  assert.equal(openSync.mock.callCount(), 0)
 })
 
-test('the reader accepts 64 KiB and refuses larger records', t => {
-  const { storeDir, currentPath, statePath, supervisorPath } = fixture(t)
+test('the reader accepts 64 KiB and refuses larger records', requiresStore, t => {
+  const { profileDir, currentPath, statePath, supervisorPath } = fixture(t)
   const limit = 64 * 1024
-  writeJsonAtomic(supervisorPath, supervisor)
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
   const stateJson = JSON.stringify(run)
   writeFileSync(statePath, stateJson.padEnd(limit))
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, run })
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, run })
   writeFileSync(statePath, stateJson.padEnd(limit + 1))
   writeFileSync(currentPath, JSON.stringify(current).padEnd(limit + 1))
   writeFileSync(supervisorPath, JSON.stringify(supervisor).padEnd(limit + 1))
-  assert.deepEqual(readSelfUpdate({ storeDir, bootId }), {
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }), {
     ...empty, problem: 'Invalid current.json. Invalid state.json. Invalid supervisor.json',
   })
 })
 
-test('a non-directory update or profile store makes status unavailable', t => {
+test('the reader refuses more bytes than the limit even when fstat reports a smaller file', requiresStore, t => {
+  const { profileDir, currentPath } = fixture(t)
+  writeJsonAtomic(currentPath, current, { profileDir })
+  const limit = 64 * 1024
+  const json = JSON.stringify(current)
+  writeFileSync(currentPath, json.padEnd(limit + 1024))
+  const fstatSync = t.mock.fn((...args) => Object.assign(fs.fstatSync(...args), { size: BigInt(json.length) }))
+  let bytesRead = 0
+  const readSync = (...args) => {
+    const count = fs.readSync(...args)
+    bytesRead += count
+    return count
+  }
+  assert.deepEqual(readSelfUpdate({ profileDir, bootId }, { ...fs, fstatSync, readSync }), {
+    ...empty, problem: 'Invalid current.json',
+  })
+  assert.equal(fstatSync.mock.callCount(), 1)
+  assert.equal(bytesRead, limit + 1)
+})
+
+test('the reader refuses a file whose device or inode changes between lstat and open', requiresStore, t => {
+  const { profileDir, currentPath } = fixture(t)
+  writeJsonAtomic(currentPath, current, { profileDir })
+  for (const field of ['dev', 'ino']) {
+    const fstatSync = (...args) => {
+      const stat = fs.fstatSync(...args)
+      stat[field] += 1n
+      return stat
+    }
+    const readSync = t.mock.fn(fs.readSync)
+    const closeSync = t.mock.fn(fs.closeSync)
+    assert.deepEqual(readSelfUpdate({ profileDir, bootId }, { ...fs, fstatSync, readSync, closeSync }), {
+      ...empty, problem: 'Invalid current.json',
+    })
+    assert.equal(readSync.mock.callCount(), 0)
+    assert.equal(closeSync.mock.callCount(), 1)
+  }
+})
+
+test('the reader checks containment again after opening a file', requiresStore, t => {
+  const { profileDir, home, storeDir, currentPath } = fixture(t)
+  writeJsonAtomic(currentPath, current, { profileDir })
+  const updateDir = dirname(storeDir)
+  const openSync = (...args) => {
+    const fd = fs.openSync(...args)
+    fs.renameSync(updateDir, join(home, 'former-update'))
+    symlinkSync(profileDir, updateDir, 'junction')
+    return fd
+  }
+  const readSync = t.mock.fn(fs.readSync)
+  const status = readSelfUpdate({ profileDir, bootId }, { ...fs, openSync, readSync })
+  assert.equal(status.current, null)
+  assert.match(status.problem, /Invalid current\.json/)
+  assert.equal(status.problem.includes(home), false)
+  assert.equal(readSync.mock.callCount(), 0)
+})
+
+test('a non-directory update or profile store makes status unavailable', requiresStore, t => {
   const { profileDir, storeDir } = fixture(t)
   const updateDir = dirname(storeDir)
   const unavailable = { available: false, reason: 'no-store', supervisor: { version: 'v1.2.3' }, ...empty }
@@ -172,7 +254,7 @@ test('a non-directory update or profile store makes status unavailable', t => {
   assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), unavailable)
 })
 
-test('symlinked store directories and stores inside a resolved profile are refused', t => {
+test('symlinked store directories and stores inside a resolved profile are refused', requiresStore, t => {
   const { home, profileDir, storeDir, statePath } = fixture(t)
   const updateDir = dirname(storeDir)
   const linkedHome = join(home, 'alias')
@@ -185,7 +267,7 @@ test('symlinked store directories and stores inside a resolved profile are refus
   mkdirSync(updateDir)
   symlinkSync(profileDir, storeDir, 'junction')
   assert.equal(usableStore(profileDir), undefined)
-  assert.throws(() => writeJsonAtomic(statePath, run))
+  assert.throws(() => writeJsonAtomic(statePath, run, { profileDir }))
   assert.equal(existsSync(join(profileDir, 'state.json')), false)
   unlinkSync(storeDir)
   mkdirSync(storeDir)
@@ -194,27 +276,39 @@ test('symlinked store directories and stores inside a resolved profile are refus
   assert.equal(usableStore(profileDir), undefined)
 })
 
-test('the nearest existing store directory must be writable', { skip: process.platform === 'win32' }, t => {
+test('the nearest existing store directory needs write and search permission', requiresStore, t => {
   const { profileDir, storeDir } = fixture(t)
   const updateDir = dirname(storeDir)
   mkdirSync(updateDir)
-  chmodSync(updateDir, 0o500)
-  try {
-    try { accessSync(updateDir, constants.W_OK) } catch (error) {
-      assert.equal(error.code, 'EACCES')
-      assert.equal(usableStore(profileDir), undefined)
-      return
+  for (const [folder, mode] of [[updateDir, 0o500], [storeDir, 0o600]]) {
+    if (folder === storeDir) mkdirSync(storeDir)
+    chmodSync(folder, mode)
+    try {
+      try { accessSync(folder, constants.W_OK | constants.X_OK) } catch (error) {
+        assert.equal(error.code, 'EACCES')
+        assert.equal(usableStore(profileDir), undefined)
+        continue
+      }
+      return t.skip('The test process can access the directory despite its permissions')
+    } finally {
+      chmodSync(folder, 0o700)
     }
-    t.skip('The test process can write despite directory permissions')
-  } finally {
-    chmodSync(updateDir, 0o700)
   }
 })
 
-test('atomic writes create private files and directories and clean up the temp file', t => {
-  const { storeDir, currentPath, statePath } = fixture(t)
-  writeJsonAtomic(currentPath, { version: 1, live: null, kept: null, lastSequence: null })
-  writeJsonAtomic(currentPath, current)
+test('a platform without O_NOFOLLOW has no update store', { skip: constants.O_NOFOLLOW !== undefined }, t => {
+  const { profileDir, currentPath } = fixture(t)
+  assert.equal(usableStore(profileDir), undefined)
+  assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: false }), {
+    ...available, available: false, reason: 'no-store',
+  })
+  assert.throws(() => writeJsonAtomic(currentPath, current, { profileDir }), /Invalid update store directory/)
+})
+
+test('atomic writes create private files and directories and clean up the temp file', requiresStore, t => {
+  const { profileDir, storeDir, currentPath, statePath } = fixture(t)
+  writeJsonAtomic(currentPath, { version: 1, live: null, kept: null, lastSequence: null }, { profileDir })
+  writeJsonAtomic(currentPath, current, { profileDir })
   assert.deepEqual(JSON.parse(readFileSync(currentPath, 'utf8')), current)
   if (process.platform !== 'win32') {
     assert.equal(statSync(storeDir).mode & 0o777, 0o700)
@@ -222,8 +316,53 @@ test('atomic writes create private files and directories and clean up the temp f
   }
   assert.deepEqual(readdirSync(storeDir), ['current.json'])
   mkdirSync(statePath)
-  assert.throws(() => writeJsonAtomic(statePath, run))
+  assert.throws(() => writeJsonAtomic(statePath, run, { profileDir }))
   assert.deepEqual(readdirSync(storeDir).sort(), ['current.json', 'state.json'])
+})
+
+test('atomic writes require a profile and a destination in its resolved store', requiresStore, t => {
+  const { home, profileDir, storeDir, currentPath } = fixture(t)
+  const outside = join(profileDir, 'current.json')
+  assert.throws(() => writeJsonAtomic(outside, current, { profileDir }), /Invalid update store directory/)
+  assert.throws(() => writeJsonAtomic(currentPath, current), /Invalid update store directory/)
+  assert.equal(existsSync(outside), false)
+  assert.equal(existsSync(storeDir), false)
+
+  const alias = join(home, 'update-alias')
+  symlinkSync(home, alias, 'junction')
+  writeJsonAtomic(join(alias, 'update', 'web', 'current.json'), current, { profileDir })
+  assert.deepEqual(JSON.parse(readFileSync(currentPath, 'utf8')), current)
+})
+
+test('atomic writes refuse a store swapped to a symlink before rename', requiresStore, t => {
+  const { home, profileDir, storeDir, currentPath } = fixture(t)
+  writeJsonAtomic(currentPath, current, { profileDir })
+  const updateDir = dirname(storeDir)
+  const outside = join(profileDir, 'web')
+  mkdirSync(outside)
+  const previous = join(home, 'former-update')
+  const rename = fs.renameSync
+  const close = fs.closeSync
+  const opened = t.mock.method(fs, 'openSync')
+  const closed = t.mock.method(fs, 'closeSync', fd => {
+    close(fd)
+    rename(updateDir, previous)
+    symlinkSync(profileDir, updateDir, 'junction')
+  })
+  const renamed = t.mock.method(fs, 'renameSync')
+  try {
+    assert.throws(() => writeJsonAtomic(currentPath, current, { profileDir }), /Invalid update store directory/)
+    assert.equal(renamed.mock.callCount(), 0)
+    assert.equal(opened.mock.callCount(), 1)
+    const flags = opened.mock.calls[0].arguments[1]
+    const required = constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
+    assert.equal(flags & required, required)
+  } finally {
+    renamed.mock.restore()
+    closed.mock.restore()
+    opened.mock.restore()
+  }
+  assert.deepEqual(readdirSync(outside), [])
 })
 
 test('the environment must announce a valid supervisor boot and version', () => {
@@ -237,7 +376,7 @@ test('the environment must announce a valid supervisor boot and version', () => 
   }
 })
 
-test('status explains availability and returns only the public state fields', t => {
+test('status explains availability and returns only the public state fields', requiresStore, t => {
   const { profileDir, storeDir, currentPath, statePath, supervisorPath } = fixture(t)
   assert.deepEqual(selfUpdateStatus({ profileDir, env, inDesktop: true }), {
     available: false, reason: 'desktop-app', supervisor: { version: 'v1.2.3' }, ...empty,
@@ -249,70 +388,94 @@ test('status explains availability and returns only the public state fields', t 
     available: false, reason: 'no-store', supervisor: { version: 'v1.2.3' }, ...empty,
   })
 
-  writeJsonAtomic(currentPath, { ...current, live: { ...current.live, path: profileDir }, storeDir })
-  writeJsonAtomic(supervisorPath, supervisor)
-  writeJsonAtomic(statePath, { ...run, path: profileDir })
-  const privateValue = 'private-boot-id'
-  const read = () => selfUpdateStatus({ profileDir, env: { ...env, PRIVATE_ENV: privateValue }, inDesktop: false })
+  writeJsonAtomic(currentPath, { ...current, live: { ...current.live, path: profileDir }, storeDir }, { profileDir })
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  writeJsonAtomic(statePath, { ...run, path: profileDir }, { profileDir })
+  const privateBoot = 'private_boot_id'
+  const privateToken = 'private-token'
+  const privateEnv = { ...env, AUTOMAGIK_SUPERVISOR_BOOT: privateBoot, PRIVATE_ENV: privateToken }
+  const read = (announcedEnv = { ...env, PRIVATE_ENV: privateToken }) =>
+    selfUpdateStatus({ profileDir, env: announcedEnv, inDesktop: false })
   const value = read()
   const { bootId: _bootId, ...visibleRun } = run
-  assert.deepEqual(value, {
-    available: true, reason: null, supervisor: { version: 'v1.2.3' }, ...empty, current, run: visibleRun,
-  })
-  for (const hidden of [profileDir, storeDir, bootId, 'bootId', privateValue]) {
+  assert.deepEqual(value, { ...available, current, run: visibleRun })
+  for (const hidden of [profileDir, storeDir, bootId, 'bootId', privateBoot, privateToken]) {
     assert.equal(JSON.stringify(value).includes(hidden), false)
   }
 
-  // A boot ID could otherwise pass both the run ID pattern and the reason code pattern.
-  const privateEnv = { ...env, AUTOMAGIK_SUPERVISOR_BOOT: privateValue, PRIVATE_ENV: privateValue }
-  writeJsonAtomic(supervisorPath, { ...supervisor, bootId: privateValue })
-  for (const fields of [{ runId: privateValue }, { reason: privateValue }, { runId: privateValue, reason: privateValue }]) {
-    writeJsonAtomic(statePath, { ...run, bootId: privateValue, ...fields })
-    const invalid = selfUpdateStatus({ profileDir, env: privateEnv, inDesktop: false })
-    assert.deepEqual(invalid, { ...value, run: null, problem: 'Invalid state.json' })
-    assert.equal(JSON.stringify(invalid).includes(privateValue), false)
+  writeJsonAtomic(supervisorPath, { ...supervisor, bootId: privateBoot }, { profileDir })
+  const privateVersion = '1.2.3-release.' + privateBoot + '.build'
+  for (const fields of [
+    { runId: privateBoot }, { runId: 'run-' + privateBoot + '-next' }, { reason: privateBoot }, { reason: privateToken },
+    { from: privateVersion }, { to: privateVersion },
+  ]) {
+    writeJsonAtomic(statePath, { ...run, bootId: privateBoot, ...fields }, { profileDir })
+    const invalid = read(privateEnv)
+    assert.deepEqual(invalid, { ...available, current, problem: 'Invalid state.json' })
+    for (const hidden of [privateBoot, privateToken]) assert.equal(JSON.stringify(invalid).includes(hidden), false)
   }
 
-  rmSync(supervisorPath)
-  writeJsonAtomic(statePath, { ...run, runId: privateValue })
-  const noVersion = selfUpdateStatus({
-    profileDir, env: { ...privateEnv, AUTOMAGIK_SUPERVISOR_VERSION: undefined }, inDesktop: false,
-  })
+  writeJsonAtomic(statePath, { ...run, bootId: privateBoot }, { profileDir })
+  const noVersion = read({ ...privateEnv, AUTOMAGIK_SUPERVISOR_VERSION: undefined })
   assert.deepEqual(noVersion, {
-    available: false, reason: 'no-supervisor', supervisor: null, ...empty, current, problem: 'Invalid state.json',
+    available: false, reason: 'no-supervisor', supervisor: null, ...empty, current,
+    staleRun: { runId: run.runId, phase: run.phase },
   })
-  assert.equal(JSON.stringify(noVersion).includes(privateValue), false)
+  assert.equal(JSON.stringify(noVersion).includes(privateBoot), false)
 
-  writeJsonAtomic(supervisorPath, supervisor)
-  writeJsonAtomic(statePath, { ...run, bootId: formerBootId, phase: 'healthy', reason: 'health-check-finished' })
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  writeJsonAtomic(statePath, { ...run, runId: 'run-' + privateBoot }, { profileDir })
+  const invalidWithoutVersion = read({ ...privateEnv, AUTOMAGIK_SUPERVISOR_VERSION: undefined })
+  assert.equal(invalidWithoutVersion.problem, 'Invalid state.json')
+  assert.equal(JSON.stringify(invalidWithoutVersion).includes(privateBoot), false)
+
+  writeJsonAtomic(statePath, { ...run, bootId: privateBoot }, { profileDir })
+  for (const key of ['live', 'kept']) {
+    for (const version of ['private version', privateVersion]) {
+      writeJsonAtomic(currentPath, { ...current, [key]: { ...current[key], version } }, { profileDir })
+      const invalid = read(privateEnv)
+      assert.equal(invalid.available, false)
+      assert.equal(invalid.reason, 'store-invalid')
+      assert.equal(invalid.current, null)
+      assert.equal(JSON.stringify(invalid).includes(version), false)
+    }
+  }
+  writeJsonAtomic(currentPath, current, { profileDir })
+
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  writeJsonAtomic(statePath, { ...run, bootId: formerBootId, phase: 'healthy', reason: 'health-check-finished' }, { profileDir })
   const stale = read()
   assert.equal(stale.run, null)
   assert.deepEqual(stale.staleRun, { runId: run.runId, phase: 'healthy' })
   assert.equal(JSON.stringify(stale).includes(formerBootId), false)
 })
 
-test('invalid public fields invalidate the entire state record', t => {
-  const { storeDir, statePath, supervisorPath } = fixture(t)
-  writeJsonAtomic(supervisorPath, { ...supervisor, bootId: formerBootId })
+test('invalid public fields invalidate the entire state record', requiresStore, t => {
+  const { profileDir, statePath, supervisorPath } = fixture(t)
+  writeJsonAtomic(supervisorPath, { ...supervisor, bootId: formerBootId }, { profileDir })
   for (const fields of [
     { runId: 'short' }, { runId: 'a'.repeat(65) }, { runId: 'run/0001' },
-    { runId: formerBootId }, { runId: bootId, bootId: 'boot_state-999' },
+    { runId: 'run-' + formerBootId }, { runId: 'run-' + bootId, bootId: 'boot_state-999' },
     { from: 'private-value' }, { to: ['1.2.4'] }, { to: '1.2.4\n' },
     { reason: 'private environment value' }, { reason: '1-code' }, { reason: 'a'.repeat(65) },
   ]) {
-    writeJsonAtomic(statePath, { ...run, ...fields })
-    assert.deepEqual(readSelfUpdate({ storeDir, bootId }), { ...empty, problem: 'Invalid state.json' }, JSON.stringify(fields))
+    writeJsonAtomic(statePath, { ...run, ...fields }, { profileDir })
+    assert.deepEqual(readSelfUpdate({ profileDir, bootId }), { ...empty, problem: 'Invalid state.json' }, JSON.stringify(fields))
   }
 })
 
-test('a run that does not know its versions yet is valid', t => {
-  const { storeDir, statePath, supervisorPath } = fixture(t)
-  writeJsonAtomic(supervisorPath, supervisor)
-  writeJsonAtomic(statePath, { ...run, phase: 'checking', from: null, to: null })
-  const read = readSelfUpdate({ storeDir, bootId })
+test('a run that does not know its versions yet is valid', requiresStore, t => {
+  const { profileDir, statePath, supervisorPath } = fixture(t)
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
+  writeJsonAtomic(statePath, { ...run, phase: 'checking', from: null, to: null }, { profileDir })
+  const read = readSelfUpdate({ profileDir, bootId })
   assert.equal(read.problem, null)
   assert.equal(read.run?.phase, 'checking')
   assert.equal(read.run?.to, null)
+  for (const reason of REASON_CODES) {
+    writeJsonAtomic(statePath, { ...run, reason }, { profileDir })
+    assert.equal(readSelfUpdate({ profileDir, bootId }).run?.reason, reason)
+  }
 })
 
 function announceSupervisor(t, extraEnv = {}) {
@@ -329,7 +492,7 @@ function announceSupervisor(t, extraEnv = {}) {
   delete process.env.DS_BOT_APP
 }
 
-test('runtime installation captures the supervisor and polls the configured profile store', t => {
+test('runtime installation captures the supervisor and polls the configured profile store', requiresStore, t => {
   const { profileDir, currentPath, statePath, supervisorPath } = fixture(t)
   announceSupervisor(t)
   const rt = { ctx: { get: name => name === 'profileContext' ? { dir: profileDir } : undefined } }
@@ -337,9 +500,9 @@ test('runtime installation captures the supervisor and polls the configured prof
   Object.assign(process.env, { AUTOMAGIK_SUPERVISOR_BOOT: formerBootId, AUTOMAGIK_SUPERVISOR_VERSION: '2.0.0', DS_BOT_APP: '1' })
   assert.equal(rt.selfUpdateStatus().available, true)
   assert.equal(rt.selfUpdateStatus().current, null)
-  writeJsonAtomic(currentPath, current)
-  writeJsonAtomic(statePath, run)
-  writeJsonAtomic(supervisorPath, supervisor)
+  writeJsonAtomic(currentPath, current, { profileDir })
+  writeJsonAtomic(statePath, run, { profileDir })
+  writeJsonAtomic(supervisorPath, supervisor, { profileDir })
   const status = rt.selfUpdateStatus()
   assert.deepEqual(status.supervisor, { version: 'v1.2.3' })
   assert.deepEqual(status.current, current)
@@ -347,11 +510,9 @@ test('runtime installation captures the supervisor and polls the configured prof
   assert.equal(status.staleRun, null)
 })
 
-test('the channel answers self-update-status only while the host holds the team lock', async t => {
-  const { home, profileDir, currentPath } = fixture(t)
-  announceSupervisor(t, { DSH_HOME: home })
-  writeJsonAtomic(currentPath, current)
-  const teamHome = join(home, 'team')
+const endpoint = 'self-update-status'
+
+function statusChannel(profileDir, teamHome) {
   const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
   const register = ctx.connection.fetch.register
   let route
@@ -360,27 +521,68 @@ test('the channel answers self-update-status only while the host holds the team 
     return register(options)
   }
   const rt = createRuntime(ctx, { home: teamHome, browser: false, memory: false, updateCheck: false })
-  const endpoint = 'self-update-status'
   const post = async () => (await route.fetch(new Request('http://fixture.invalid' + ROUTE, {
     method: 'POST', body: JSON.stringify({ endpoint }),
   }))).json()
+  const dispose = async () => {
+    try { await ctx.dispose() } finally { rt.dispose() }
+  }
+  return { rt, post, dispose }
+}
+
+test('the channel answers self-update-status only while the host holds the team lock', requiresStore, async t => {
+  const { home, profileDir, currentPath } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  writeJsonAtomic(currentPath, current, { profileDir })
+  const teamHome = join(home, 'team')
+  const { rt, post, dispose } = statusChannel(profileDir, teamHome)
+  const extension = t.mock.fn(() => ({ extension: true }))
+  rt.hooks.endpoint(endpoint, extension, { read: true })
   try {
-    assert.deepEqual(await post(), {
-      ok: true,
-      value: { available: true, reason: null, supervisor: { version: 'v1.2.3' }, ...empty, current },
-    })
+    assert.deepEqual(await post(), { ok: true, value: { ...available, current } })
+    assert.equal(rt.holdsLock(), true)
 
     // A live peer now owns the team. The next poll must refresh ownership first.
     const lockPath = join(teamHome, 'state.lock')
     assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).pid, process.pid)
     writeFileSync(lockPath, JSON.stringify({ pid: process.ppid, host: hostname(), token: 'other' }))
-    const refused = await post()
-    assert.equal(refused.ok, false)
-    assert.equal(refused.error.code, 'bot/read-only')
+    const reply = await post()
+    assert.deepEqual(reply, refused)
+    assert.equal(reply.error.message.includes(teamHome), false)
+    assert.equal(rt.holdsLock(), false)
+    assert.equal(extension.mock.callCount(), 0)
 
     assert.equal(AGENT_TOOLS.some(tool => tool.endpoint === endpoint || /^self[-_]update[-_]status$/.test(tool.name)), false)
   } finally {
-    await ctx.dispose()
-    rt.dispose()
+    await dispose()
+  }
+})
+
+test('the channel refuses self-update-status after lock acquisition throws', requiresStore, async t => {
+  const { home, profileDir } = fixture(t)
+  announceSupervisor(t, { DSH_HOME: home })
+  const teamHome = join(home, 'team')
+  const lockPath = join(teamHome, 'state.lock')
+  const original = fs.writeFileSync
+  let attempts = 0
+  const write = t.mock.method(fs, 'writeFileSync', (file, ...args) => {
+    if (file !== lockPath) return original(file, ...args)
+    attempts++
+    throw Object.assign(new Error('fixture lock cannot be created'), { code: 'EACCES' })
+  })
+  syncBuiltinESMExports()
+  try {
+    const { rt, post, dispose } = statusChannel(profileDir, teamHome)
+    try {
+      assert.deepEqual(await post(), refused)
+      assert.equal(attempts, 1)
+      assert.equal(rt.readOnly(), undefined)
+      assert.equal(rt.holdsLock(), false)
+    } finally {
+      await dispose()
+    }
+  } finally {
+    write.mock.restore()
+    syncBuiltinESMExports()
   }
 })
