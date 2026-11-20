@@ -10,7 +10,7 @@ export const Config = Schema.object({
 
 export function apply(ctx, config = {}) {
   const adapters = new Map([['bitwarden', createVault(config)], ['onepassword', createOnePassword(config)]])
-  let selected = 'bitwarden'
+  let selection = Object.freeze({ provider: 'bitwarden', generation: 0 })
   let generation = 0
   let retiring
   let disposed = false
@@ -26,16 +26,16 @@ export function apply(ctx, config = {}) {
       const adapter = adapters.get(provider)
       if (adapter === undefined || disposed) return refused()
       if (options.signal?.aborted) return { ok: false, code: 'locked' }
-      const switching = provider !== selected
+      const switching = provider !== selection.provider
       const current = switching || retiring !== undefined ? ++generation : generation
       if (switching) {
-        retiring ??= adapters.get(selected).retire().catch(() => false).finally(() => { retiring = undefined })
+        retiring ??= adapters.get(selection.provider).retire().catch(() => false).finally(() => { retiring = undefined })
       }
       const retired = await retiring
       if (disposed || current !== generation || options.signal?.aborted) return { ok: false, code: 'locked' }
       if (switching) {
         if (retired !== true) return { ok: false, code: 'unavailable' }
-        selected = provider
+        selection = Object.freeze({ provider, generation: current })
       }
       return adapter.unlock(options)
     },
@@ -60,9 +60,12 @@ export function apply(ctx, config = {}) {
   }
   // Capability metadata is discovered directly. Keep the enumerable v1 method surface.
   Object.defineProperty(service, 'providers', { value: Object.freeze([...adapters.keys()]) })
+  // Publish the selection only after the old adapter has been retired.
+  Object.defineProperty(service, 'providerSelection', { get: () => selection })
   Object.defineProperty(service, 'activeConnection', { value: () => {
-    const connection = adapters.get(selected).connection
-    return connection === undefined ? undefined : { provider: selected, connection }
+    const { provider } = selection
+    const connection = adapters.get(provider).connection
+    return connection === undefined ? undefined : { provider, connection }
   } })
   ctx.provide('secretSources', service)
   ctx.effect(() => service.prepareQuit)

@@ -46,6 +46,9 @@ async function team(t, { rows, legacy = false, readOnly = false, service, token 
       const { provider: selected = 'bitwarden', connection, token } = options
       calls.push(['unlock', selected, connection, typeof token === 'string' && digest(token) === tokenHash])
       if (cloudMode && selected === provider) return { ok: false, code: 'cloud' }
+      if (fake.providerSelection !== undefined && selected !== fake.providerSelection.provider) {
+        fake.providerSelection = { provider: selected, generation: fake.providerSelection.generation + 1 }
+      }
       states[selected] = 'unlocked'
       return { ok: true }
     },
@@ -60,7 +63,10 @@ async function team(t, { rows, legacy = false, readOnly = false, service, token 
     },
     read() { assert.fail('approval must not read the vault') },
   }
-  if (!legacy) fake.providers = ['bitwarden', provider]
+  if (!legacy) {
+    fake.providers = ['bitwarden', provider]
+    fake.providerSelection = { provider: 'bitwarden', generation: 0 }
+  }
   const ctx = fakeContext()
   let replace
   ctx.inject = (dependencies, attach) => {
@@ -379,6 +385,32 @@ test('token clear cancels a Bitwarden unlock already running and retires the att
   })
 })
 
+test('a D3 token clear refusal leaves an admitted Bitwarden unlock running', async t => {
+  const bw = fakeVault(t)
+  const h = await team(t, { service: bw.service })
+  bw.configure({ hold: ['unlock'] })
+  const pending = h.call('vault-unlock', { password: bw.password })
+  try {
+    await bw.waitFor('unlock')
+    assert.equal((await h.call('vault-token-clear', { provider })).error?.message, 'The vault did not answer.')
+  } finally { bw.release('unlock') }
+  assert.deepEqual(await pending, { ok: true, value: true })
+  assert.equal((await h.call('vault-status')).value.state, 'unlocked')
+  assert.equal(bw.commands().includes('lock'), false)
+})
+
+test('token clear reports a supported provider returning false from lock', async t => {
+  const calls = []
+  const service = {
+    providers: ['bitwarden', provider],
+    async lock(options) { calls.push(options); return false },
+  }
+  const h = await team(t, { service })
+  assert.equal((await h.call('vault-token-clear', { provider })).error?.message,
+    'The 1Password service account token could not be cleared.')
+  assert.deepEqual(calls, [{ provider }])
+})
+
 test('provider switch invalidates credential entry already queued for the former provider', async t => {
   const h = await team(t, { rows: { [name]: opMapping() } })
   const password = randomBytes(24).toString('hex')
@@ -399,6 +431,45 @@ test('provider switch invalidates credential entry already queued for the former
     assert.equal((await queued).error?.message, locked)
     assert.deepEqual(h.calls.filter(([op]) => op === 'unlock'), [['unlock', provider, provider, true]])
   } finally { hook.mock.restore() }
+})
+
+test('a switch retry after failed retirement refuses a Bitwarden entry queued behind it', async t => {
+  await withVault(t, async ({ service, op, bw }) => {
+    const h = await team(t, { service, token: op.credential })
+    assert.equal((await h.call('vault-unlock', { password: bw.password })).ok, true)
+    const initial = service.providerSelection
+    bw.configure({ lock: 'error' })
+    assert.equal((await h.set()).result.error?.message, 'The 1Password service account token could not be set.')
+    assert.equal(op.commands().length, 0)
+    assert.deepEqual(service.providerSelection, initial)
+
+    const unlocks = []
+    const unlock = service.unlock
+    t.mock.method(service, 'unlock', options => {
+      unlocks.push(options.provider)
+      return unlock(options)
+    })
+    const admitted = Promise.withResolvers()
+    const dispatch = h.rt.vaultEndpoint
+    t.mock.method(h.rt, 'vaultEndpoint', (...args) => {
+      const result = dispatch(...args)
+      if (args[0] === 'vault-unlock') admitted.resolve()
+      return result
+    })
+    bw.configure({ lock: 'ok', hold: ['lock'] })
+    const retry = h.set()
+    let queued
+    try {
+      await bw.waitFor('lock', 2)
+      queued = h.call('vault-unlock', { password: bw.password })
+      await admitted.promise
+    } finally { bw.release('lock') }
+    assert.equal((await retry).result.ok, true)
+    assert.equal((await queued).error?.message, locked)
+    assert.deepEqual(unlocks, [provider])
+    assert.equal(service.providerSelection.provider, provider)
+    assert.ok(service.providerSelection.generation > initial.generation)
+  })
 })
 
 test('credential-first and mapping-first enforce a single live connection for both providers', async t => {
@@ -434,6 +505,31 @@ test('credential-first and mapping-first enforce a single live connection for bo
   })
 })
 
+test('request, Allow and list report reloaded mappings that differ from the live pair as unavailable', async t => {
+  await withVault(t, async ({ service, op, bw }) => {
+    const rows = { [name]: { ...op.ref, scope: 'all' } }
+    const h = await team(t, { rows, service, token: op.credential })
+    assert.equal((await h.set()).result.ok, true)
+    assert.equal((await h.ask()).concluded, true)
+    assert.match(await h.list(), /available: ask with request_secret/)
+    const card = h.card()
+    const { value: detail } = await h.call('secret-source-detail', { requestId: card.id })
+
+    for (const enter of [
+      async () => (await h.set(undefined, 'other')).result,
+      () => h.call('vault-unlock', { password: bw.password }),
+    ]) {
+      h.sources({})
+      assert.equal((await enter()).ok, true)
+      h.sources(rows)
+      assert.deepEqual(await h.ask(), { text: unavailable, concluded: false })
+      assert.match(await h.list(), /unavailable: the vault did not answer/)
+      assert.equal((await h.call('secret-allow', { requestId: card.id, ...detail })).error?.message, unavailable)
+      assert.equal(card.status, 'pending')
+    }
+  })
+})
+
 test('built-in and sectioned 1Password picker selectors survive reload, fingerprint validation and read', async t => {
   await withVault(t, async ({ service, op }) => {
     const h = await team(t, { service, token: op.credential })
@@ -459,7 +555,7 @@ test('built-in and sectioned 1Password picker selectors survive reload, fingerpr
       assert.equal((await reloaded.call('secret-allow', { requestId, ...detail })).ok, true)
       const result = await service.read({ provider: detail.provider, item: detail.item,
         field: detail.field, connection: op.ref.connection })
-      equalPrivate(result, { ok: true, value: op.value('first') })
+      equalPrivate(result, { ok: true, value: op.value(field === 'password' ? 'first:password' : 'first') })
     }
     assert.equal(op.commands().filter(row => row.operation === 'read' && row.argsClean && row.envClean).length, 2)
   })

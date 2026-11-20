@@ -15,8 +15,9 @@ function classify(result) {
   if (result.failure === 'refused') return 'refused'
   if (result.failure !== undefined || result.code === 0) return 'unavailable'
   const message = result.stderr.replace(/^\[ERROR\] \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} /, '').trimEnd()
-  if (/\((?:429|5\d\d)\)/.test(message)) return 'unavailable'
-  if (/\(401\) Unauthorized\b|\b(?:invalid (?:service account )?token|authentication required)\b/i.test(message)) return 'auth'
+  const cause = message.replace(/"(?:[^"\\]|\\[\s\S])*"/g, ' ')
+  if (/\((?:429|5\d\d)\)/.test(cause)) return 'unavailable'
+  if (/\(401\) Unauthorized\b|\b(?:invalid (?:service account )?token|authentication required)\b/i.test(cause)) return 'auth'
   if (/^(?:item|vault) (?:not found|is not accessible)\.?$/.test(message)
     || /^"(?:[a-z0-9]{26})" isn't an item in the .+ vault\. Specify the item with its UUID, name, or domain\.$/.test(message)
     || /^"(?:[a-z0-9]{26})" isn't a vault in this account\. Specify the vault with its UUID or name\.$/.test(message)) return 'revoked'

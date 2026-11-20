@@ -31,13 +31,16 @@ const expected = {
 appendFileSync(join(dir, 'commands'), JSON.stringify({ operation, envClean, argsClean: expected[operation] === true }) + '\n')
 if (!envClean || !expected[operation]) process.exit(9)
 
-const value = '\ufeff  ' + derived(options.valueKey) + '\n'
+const valueFor = key => '\ufeff  ' + derived(key) + '\n'
+const value = valueFor(options.valueKey)
+const password = valueFor(options.valueKey + ':password')
 function diagnostic(message) {
   writeSync(2, '[ERROR] 2026/11/20 12:00:00 ' + message + '\n')
   process.exitCode = 1
 }
 // The 2.39.0 read diagnostic wraps HTTP status around the underlying client error.
-const wrapped = cause => 'error initializing client for reference op://fixture-vault/fixture-item/password: ' + cause
+const wrapped = (cause, uri = 'op://fixture-vault/fixture-item/password') =>
+  'error initializing client for reference ' + uri + ': ' + cause
 switch (operation) {
   case 'version':
     if (options.mode === 'version-auth') diagnostic(wrapped('(401) Unauthorized'))
@@ -56,13 +59,14 @@ switch (operation) {
       id: id('item'), vault: { id: id('vault') }, notes: value,
       sections: [{ id: id('section'), label: 'Fixture section' }],
       fields: [
-        { id: 'password', label: 'Password', value },
+        { id: 'password', label: 'Password', value: password },
         { id: id('field'), label: 'Password', value, section: { id: id('section') } },
         { id: 'bad/path', label: 'Skip', value },
       ],
     }))
     break
   case 'read': {
+    const selectedValue = rest[1] === itemURI + 'password' ? password : value
     const errors = {
       revoked: 'item not found', vault: 'vault is not accessible', field: 'field not found',
       auth: 'invalid service account token', offline: 'dial tcp: network is unreachable',
@@ -72,6 +76,9 @@ switch (operation) {
       'wrapped-auth-required': wrapped('request failed because authentication required for this account'),
       'wrapped-429': wrapped('(429) Too Many Requests: vault is not accessible'),
       'wrapped-503': wrapped('(503) Service Unavailable: item not found'),
+      'quoted-vault': '"' + id('item') + '" isn\'t an item in the "authentication required (401) Unauthorized" vault. Specify the item with its UUID, name, or domain.',
+      'quoted-reference': wrapped('(401) Unauthorized: service account is no longer valid', '"op://fixture (503)/item/password"'),
+      'outage-with-auth-text': wrapped('(503) Service Unavailable: authentication required for the upstream service'),
     }
     if (options.mode === 'hang') await delay(30_000)
     if (options.mode === 'overflow') {
@@ -85,15 +92,15 @@ switch (operation) {
       }
     } else if (options.mode === 'invalid-text') writeSync(1, Buffer.from([0xff]))
     else if (options.mode === 'warn') {
-      writeSync(1, value)
+      writeSync(1, selectedValue)
       writeSync(2, 'Unexpected warning')
     } else if (errors[options.mode] !== undefined) {
-      writeSync(1, value)
+      writeSync(1, selectedValue)
       diagnostic(errors[options.mode])
     } else {
-      writeSync(1, value.slice(0, 5))
+      writeSync(1, selectedValue.slice(0, 5))
       await delay(10)
-      writeSync(1, value.slice(5))
+      writeSync(1, selectedValue.slice(5))
     }
     break
   }

@@ -90,6 +90,25 @@ test('wrapped 429 and 503 diagnostics leave the token installed and return unava
   }
 })
 
+test('quoted vault names and references do not determine the diagnostic category', async t => {
+  const h = fixture(t)
+  equalPrivate(await h.unlock(), ok)
+  h.configure({ mode: 'quoted-vault' })
+  equalPrivate(await h.service.read(h.ref), { ok: false, code: 'revoked' })
+  equalPrivate(await h.service.status(), { state: 'unlocked' })
+  h.configure({ mode: 'quoted-reference' })
+  equalPrivate(await h.service.read(h.ref), { ok: false, code: 'auth' })
+  equalPrivate(await h.service.status(), { state: 'locked' })
+})
+
+test('an unquoted outage code takes precedence over auth text in the cause', async t => {
+  const h = fixture(t)
+  equalPrivate(await h.unlock(), ok)
+  h.configure({ mode: 'outage-with-auth-text' })
+  equalPrivate(await h.service.read(h.ref), { ok: false, code: 'unavailable' })
+  equalPrivate(await h.service.status(), { state: 'unlocked' })
+})
+
 test('the reads queue retains no value after a successful read and lock or a rejected job', async () => {
   const value = randomBytes(24).toString('hex')
   const lifetime = createLifecycle({ run: async () => ({ ok: true, value }), timeouts: {} })

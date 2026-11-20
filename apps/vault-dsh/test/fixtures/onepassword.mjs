@@ -47,7 +47,8 @@ export function fakeOnePassword(t, { timers, readTimeout, ...overrides } = {}) {
   const clean = output => {
     const bytes = String(output)
     assert.equal([seed, credential, replacement, ambient, id('vault'), id('item'), id('section'), id('field'),
-      digest(seed + 'first'), digest(seed + 'next')].some(canary => bytes.includes(canary)), false,
+      ...['first', 'next', 'first:password', 'next:password'].map(key => digest(seed + key))]
+      .some(canary => bytes.includes(canary)), false,
     'private data reached an unapproved output')
   }
   t.after(async () => {
