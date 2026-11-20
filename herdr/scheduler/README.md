@@ -333,6 +333,11 @@ automations:
   terminal labelled `bot=<id>`, else a terminal by that name. A bot that is
   blocked or not running gets nothing, and `history --json` says so in
   `notified`. The run's status never depends on it.
+- Both notify and bot-target prompts check `am delivery-status <terminal> --json`
+  immediately before sending. A parked terminal, a dialog waiting for a person,
+  or a pack unable to check the terminal holds the delivery. The check leaves
+  the automation's enabled setting as the person set it. The scheduler binary
+  containing this check requires a pack that provides the command.
 - A command entry takes no `repo`, `workspace`, `session`, `agent`, `model`,
   `template`, `agent_args`, `mcp_config`, `blocked_grace_minutes` or
   `close_workspace: on-success`: the loader refuses each by name.

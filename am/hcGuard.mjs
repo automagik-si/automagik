@@ -58,7 +58,7 @@ import { readApprovedRecord } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
 import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
 import { agentKeyOfArgv, resolveAgent } from "./models.js";
-import { pendingDialog } from "./dialog.js";
+import { pendingDialog, rateLimitDialog } from "./dialog.js";
 import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL,
   WORKER_OF_LABEL, isKillGuardWord, stableRootOf } from "./workers.js";
 
@@ -453,7 +453,7 @@ export function heldTarget(real, hit, env) {
   if (hit.get.status?.state === "working") return null;
   const read = hcJson(real, ["read", hit.address, "--lines", "40"], env);
   if (typeof read?.text !== "string") return null;
-  return pendingDialog(read.text) ? hit.address : null;
+  return pendingDialog(read.text) || rateLimitDialog(read.text) ? hit.address : null;
 }
 
 /**

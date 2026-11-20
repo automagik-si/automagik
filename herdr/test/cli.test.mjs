@@ -6394,7 +6394,7 @@ test("#1556 the direct pass records a pane that ends after the handoff", (t) => 
   // The ask writes the handoff as it lands; the seat then takes a turn, so the restart queues;
   // the cancel of that plain entry happens just as the pane ends.
   state.onSendWrite = { terminal: "t6", path, text: "Racing handoff: the pane ends after the ask.\n" };
-  state.onRead = { terminal: "t6", nth: 2, status: "working" };
+  state.onRead = { terminal: "t6", afterSend: true, nth: 1, status: "working" };
   state.afterKill = { terminal: "t6", patch: { state: "finished" } };
   writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
   const r = s.cli(["restart", "--due", "--json"]);
@@ -6691,6 +6691,20 @@ const seedTranscript = (dir, cwd, session) => {
   writeFileSync(file, `${JSON.stringify({ type: "assistant", message: { usage: { input_tokens: 1 } } })}\n`);
 };
 
+test("#1557 scheduled detection and automatic delivery share the evidence for an idle seat", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog());
+  const status = () => s.cli(["delivery-status", "t5", "--json"]);
+  const preview = s.cli(["restart", "--due", "--dry-run", "--json"]);
+  assert.equal(preview.code, 0, preview.err);
+  assert.ok(preview.json().rate_limited.some(seat => seat.terminal === "t5"));
+  assert.deepEqual(status().json(), { terminal: "t5", held: true });
+  assert.ok(!existsSync(queueFileOf(s)), "both reads leave the queue alone");
+  setScreen(s, "t5", "Ready for work");
+  assert.deepEqual(status().json(), { terminal: "t5", held: false });
+  assert.equal(s.cli(["delivery-status", "t999", "--json"]).code, 1);
+});
+
 test("#1557 a seat showing the rate-limit dialog reports rate-limited in ls and show, with its reset time", (t) => {
   const s = restartScene(t);
   setScreen(s, "t5", rateDialog());
@@ -6717,7 +6731,7 @@ test("#1557 a seat showing the rate-limit dialog reports rate-limited in ls and 
   assert.equal(s.calls().some((c) => ["send", "keys"].includes(c[0])), false);
 });
 
-test("#1557 park queues the seat one minute after its reset, tells once, and the queued wake restarts it", async (t) => {
+test("#1557 park queues the seat one minute after its reset, tells once, and the queued wake keeps the parent and late helper alive", async (t) => {
   const s = restartScene(t);
   s.seed(team({ onRateLimit: "park" }));
   setScreen(s, "t5", rateDialog("Your limit resets in 1 second."));
@@ -6746,40 +6760,47 @@ test("#1557 park queues the seat one minute after its reset, tells once, and the
   assert.equal(s.cli(["restart", "--queued", "--json"]).json().queued.length, 1, "no second entry");
   assert.equal(openItems(s).length, 1);
   assert.match(s.cli(["ls"]).out, /! Genie is rate-limited until .*; parked/);
-  // The wake replaces the dialog's pane, resuming the conversation; nothing was typed into it.
-  const entry = JSON.parse(readFileSync(queueFileOf(s), "utf8")).find((e) => e.options?.rateLimit === true);
+  // A helper was born after the sweep. A previously saved forced queue entry
+  // must still keep that helper and its parent at wake time.
+  const [entry] = JSON.parse(readFileSync(queueFileOf(s), "utf8"));
+  entry.wake_at = new Date(Date.now() - 301_000).toISOString();
+  entry.options.force = true;
+  writeFileSync(queueFileOf(s), JSON.stringify([entry]));
+  const state = s.hcState();
+  state.terminals.push({ ...term("t8", { parent: "t5", status: "working" }), die_with_parent: true });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
   const run = await s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"],
-    { env: { AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "100" } });
+    { env: { AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "40", AUTOMAGIK_HERDR_QUEUE_MAX_MS: "1000" } });
   assert.equal(run.code, 0, run.err);
-  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live");
-  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
-  const replacement = s.calls().find((c) => c[0] === "run" && !c.includes("--run-queued"));
-  assert.ok(agentWords(replacement).includes("--resume"), `the conversation resumes: ${JSON.stringify(agentWords(replacement))}`);
-  assert.equal(s.calls().some((c) => ["send", "keys"].includes(c[0])), false, "the dialog is never answered");
-  assert.deepEqual(JSON.parse(readFileSync(queueFileOf(s), "utf8")), [], "the entry fired");
+  for (const addr of ["t5", "t8"]) assert.equal(s.hcState().terminals.find(p => p.address === addr).state, "live");
+  assert.equal(s.calls().some(c => ["send", "keys", "kill"].includes(c[0])), false);
+  assert.equal(s.calls().some(c => c[0] === "run" && !c.includes("--run-queued")), false);
+  const episode = openItems(s)[0];
+  assert.equal(episode.terminal, "t5");
+  const next = s.cli(["rate-limit", "--json"]);
+  assert.equal(next.code, 0, next.err);
+  assert.deepEqual(next.json().attention, [], "a watcher expiring does not reopen the same episode");
+  assert.equal(openItems(s)[0].id, episode.id);
 });
 
-test("#1557 switch restarts on the second login with headroom and resumes its conversation", (t) => {
-  const s = restartScene(t);
+test("#1557 a proposed switch keeps the seat and workers even with a matching transcript on disk", (t) => {
+  const worker = { ...term("t8", { parent: "t5", status: "working" }), die_with_parent: true };
+  const s = restartScene(t, { extra: [worker] });
   s.seed(team({ onRateLimit: "switch" }));
-  const dir = secondLogin(s);
-  seedTranscript(dir, s.project, SID);
+  seedTranscript(secondLogin(s), s.project, SID);
   setScreen(s, "t5", rateDialog());
   const sweep = s.cli(["rate-limit", "--json"]);
   assert.equal(sweep.code, 0, sweep.err);
-  assert.equal(sweep.json().switched.length, 1);
-  assert.equal(sweep.json().switched[0].login, "l2");
-  const run = runCall(s.calls());
-  assert.ok(agentParts(run).env.includes(`CLAUDE_CONFIG_DIR=${dir}`), run.join(" "));
-  assert.ok(agentWords(run).includes("--resume"), "the conversation resumes on the other login");
-  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live");
-  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
-  assert.equal(openItems(s).length, 1);
-  assert.match(openItems(s)[0].text, /Genie is rate-limited until .*; switched to login l2/);
-  assert.equal(sweep.json().attention.length, 1);
+  assert.deepEqual(sweep.json().switched, []);
+  assert.equal(sweep.json().parked.length, 1);
+  assert.equal(s.calls().some(c => c[0] === "run" && !c.includes("--run-queued")), false);
+  assert.equal(s.calls().some(c => ["kill", "keys", "send"].includes(c[0])), false);
+  for (const addr of ["t5", "t8"]) assert.equal(s.hcState().terminals.find(p => p.address === addr).state, "live");
+  assert.equal(openItems(s)[0].terminal, "t5");
+  assert.match(openItems(s)[0].text, /parked; resume in t5 when the provider allows it/);
 });
 
-test("#1557 switch with no proven headroom parks instead, and says why; a recovered seat gets no item", (t) => {
+test("#1557 switch leaves the original pane for the person; a recovered seat gets no item", (t) => {
   const s = restartScene(t);
   s.seed(team({ onRateLimit: "switch" }));
   secondLogin(s, { used: 100 });
@@ -6788,8 +6809,7 @@ test("#1557 switch with no proven headroom parks instead, and says why; a recove
   assert.equal(sweep.code, 0, sweep.err);
   assert.deepEqual(sweep.json().switched, []);
   assert.equal(sweep.json().parked.length, 1);
-  assert.match(sweep.json().attention[0].text, /parked \(no second login with headroom\)/);
-  assert.match(sweep.json().notes.join("\n"), /no second signed-in login with headroom; parking/);
+  assert.match(sweep.json().attention[0].text, /resume in t5/);
   // A seat healthy at the sweep has no episode at all: none for a seat that recovers by itself.
   assert.equal(openItems(s).length, 1);
   setScreen(s, "t5", "❯ ");
@@ -6957,12 +6977,11 @@ test("#1557 switch without the conversation in the second login parks and says w
   assert.equal(sweep.code, 0, sweep.err);
   assert.deepEqual(sweep.json().switched, []);
   assert.equal(sweep.json().parked.length, 1);
-  assert.match(sweep.json().notes.join("\n"), /login l2 has headroom, but .*no conversation .*resume/);
-  assert.match(sweep.json().attention[0].text, /parked \(a login has headroom, but it cannot resume this conversation\)/);
+  assert.match(sweep.json().attention[0].text, /resume in t5/);
   assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing switched");
 });
 
-test("#1557 switch resumes the ledger's session when the pane label is gone", (t) => {
+test("#1557 a ledger id without a provider receipt cannot establish a switch", (t) => {
   const s = restartScene(t, { session: null });
   s.seed(team({ onRateLimit: "switch" }));
   const dir = secondLogin(s);
@@ -6973,11 +6992,9 @@ test("#1557 switch resumes the ledger's session when the pane label is gone", (t
   setScreen(s, "t5", rateDialog());
   const sweep = s.cli(["rate-limit", "--json"]);
   assert.equal(sweep.code, 0, sweep.err);
-  assert.equal(sweep.json().switched.length, 1);
-  assert.equal(sweep.json().switched[0].login, "l2");
-  const run = runCall(s.calls());
-  assert.ok(agentParts(run).env.includes(`CLAUDE_CONFIG_DIR=${dir}`), run.join(" "));
-  assert.ok(agentWords(run).includes("--resume"), "the ledger's conversation resumes on the other login");
+  assert.deepEqual(sweep.json().switched, []);
+  assert.equal(sweep.json().parked[0].terminal, "t5");
+  assert.equal(s.calls().some(c => c[0] === "run" && !c.includes("--run-queued")), false);
 });
 
 test("#1557 a stale meter reading does not prove headroom for switch", (t) => {
@@ -7017,4 +7034,160 @@ test("#1728 restart from a skewed member pane ends the member seat it replaces",
   assert.equal(r.json().replaced, "t6");
   assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "t6"]]);
   assert.equal(s.hcState().terminals.find((pane) => pane.address === "t6").state, "finished");
+});
+
+test("#1557 park adopts a subsequently announced reset without replacing its watcher or notifying twice", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog("Try again later."));
+  const first = s.cli(["rate-limit", "--json"]);
+  assert.equal(first.code, 0, first.err);
+  const [before] = JSON.parse(readFileSync(queueFileOf(s), "utf8"));
+  assert.equal(before.wake_at, undefined);
+  setScreen(s, "t5", rateDialog());
+  const later = s.cli(["rate-limit", "--json"]);
+  assert.equal(later.code, 0, later.err);
+  const [after] = JSON.parse(readFileSync(queueFileOf(s), "utf8"));
+  assert.equal(after.id, before.id);
+  assert.equal(after.watcher, before.watcher);
+  assert.equal(Date.parse(after.wake_at) - Date.parse(after.resets_at), 60_000);
+  assert.equal(after.episode, openItems(s)[0].id);
+  assert.equal(openItems(s)[0].resets_at, after.resets_at);
+  assert.deepEqual(later.json().attention, []);
+});
+
+test("#1557 a parked seat keeps a pending handoff and a clone's independent queue row", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog());
+  const file = queueFileOf(s);
+  mkdirSync(dirname(file), { recursive: true });
+  const handoff = { id: "original-handoff", project: s.project, botId: ID.main, botName: "Genie", terminal: "t5",
+    created_ms: 1, reason: "due", options: { handoff: true }, watcher: null };
+  const clone = { ...handoff, id: "clone-handoff", project: join(s.root, "clone") };
+  writeFileSync(file, JSON.stringify([clone, handoff]));
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), [clone, handoff]);
+  assert.match(sweep.json().notes.join(" "), /handoff/);
+  assert.equal(sweep.json().attention.length, 1);
+  assert.equal(s.calls().filter(words => words.includes("--run-queued")).length, 0);
+  setScreen(s, "t5", "Claude is ready");
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), [clone, handoff]);
+});
+
+test("#1557 a queue entry in a different clone cannot absorb this seat's park", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog());
+  const file = queueFileOf(s);
+  mkdirSync(dirname(file), { recursive: true });
+  const clone = { id: "another-park", project: join(s.root, "clone"), botId: ID.main, botName: "Genie",
+    terminal: "t19", created_ms: 20, options: { rateLimit: true }, watcher: null };
+  writeFileSync(file, JSON.stringify([clone]));
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  const rows = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], clone);
+  assert.equal(rows[1].project, s.project);
+  assert.equal(rows[1].terminal, "t5");
+});
+
+test("#1557 a recovered project park is listed and woken from the owning app home", async (t) => {
+  const s = scene(t);
+  s.seed(team());
+  const owner = join(s.project, ".herdr/app-home");
+  const context = { HERDR_APP_HOME: owner };
+  mkdirSync(join(owner, "mods/am-sidebar"), { recursive: true });
+  writeFileSync(join(owner, "mods/am-sidebar/briefing.mjs"), "// stand-in\n");
+  const launch = s.cli(["start", "Genie", "--json"], { env: context });
+  assert.equal(launch.code, 0, launch.err);
+  const pane = launch.json().terminal;
+  const state = s.hcState();
+  const live = state.terminals.find(row => row.address === pane);
+  live.status = { state: "idle" };
+  live.screen = rateDialog();
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const implicit = { HERDR_APP_HOME: "" };
+  const sweep = s.cli(["rate-limit", "--json"], { env: implicit });
+  assert.equal(sweep.code, 0, sweep.err);
+  const path = join(owner, "automagik-herdr/queued-restarts.json");
+  const [entry] = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(entry.ownerHome, owner);
+  assert.equal(entry.terminal, pane);
+  assert.ok(s.calls().find(words => words.includes("--run-queued") && words.includes(`HERDR_APP_HOME=${owner}`)));
+  const queued = s.cli(["restart", "--queued", "--json"], { env: implicit });
+  assert.equal(queued.code, 0, queued.err);
+  assert.deepEqual(queued.json().queued.map(row => row.id), [entry.id]);
+  assert.equal(s.cli(["show", "Genie", "--json"], { env: implicit }).json().attention[0].id, entry.episode);
+  entry.wake_at = new Date(Date.now() - 1000).toISOString();
+  writeFileSync(path, JSON.stringify([entry]));
+  setScreen(s, pane, "❯ ");
+  const fired = await s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"], { env: context });
+  assert.equal(fired.code, 0, fired.err);
+  assert.equal(s.hcState().terminals.find(row => row.address === pane).state, "live");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), []);
+  assert.equal(existsSync(join(s.home, ".config/herdr-app/automagik-herdr/queued-restarts.json"))
+    && JSON.parse(readFileSync(join(s.home, ".config/herdr-app/automagik-herdr/queued-restarts.json"), "utf8")).length > 0, false);
+});
+
+test("#1557 a persisted hold is read for the exact pane in its home, including legacy records", async (t) => {
+  const { hasRateLimitHold } = await import("../mods/am-sidebar/bin/automagik-herdr.mjs");
+  const dir = scratchRoot(t, "hb-hold-");
+  const store = join(dir, "automagik-herdr");
+  assert.equal(hasRateLimitHold(dir, "t5", 1), false);
+  assert.equal(existsSync(store), false);
+  mkdirSync(store);
+  const queue = join(store, "queued-restarts.json");
+  const row = { project: "/fixture", botId: "test", terminal: "t5", created_ms: 1, options: { rateLimit: true } };
+  const original = JSON.stringify([row]);
+  writeFileSync(queue, original);
+  assert.equal(hasRateLimitHold(dir, "t5", 1), true);
+  assert.equal(hasRateLimitHold(dir, "t5", 2), false);
+  assert.equal(readFileSync(queue, "utf8"), original);
+  writeFileSync(queue, "[]");
+  const attention = join(store, "attention.json");
+  writeFileSync(attention, JSON.stringify({ items: [{ ...row, kind: "rate-limit", open: true }] }));
+  assert.equal(hasRateLimitHold(dir, "t5", 1), true);
+  assert.equal(hasRateLimitHold(dir, "t5", 2), false);
+  writeFileSync(attention, "incomplete");
+  assert.throws(() => hasRateLimitHold(dir, "t5", 1), /invalid attention/);
+  writeFileSync(queue, "incomplete");
+  assert.throws(() => hasRateLimitHold(dir, "t5", 1), /invalid restart queue/);
+});
+
+test("#1557 concurrent park sweeps share one watcher and one attention episode", async (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog("Try again later."));
+  assert.equal(s.cli(["ls", "--json"]).code, 0);
+  const sweeps = await Promise.all([s.cliAsync(["rate-limit", "--json"]), s.cliAsync(["rate-limit", "--json"])]);
+  for (const sweep of sweeps) assert.equal(sweep.code, 0, sweep.err);
+  assert.equal(sweeps.flatMap((r) => JSON.parse(r.out).attention).length, 1);
+  const queue = JSON.parse(readFileSync(queueFileOf(s), "utf8"));
+  assert.equal(queue.length, 1);
+  assert.equal(openItems(s).length, 1);
+  assert.equal(openItems(s)[0].id, queue[0].episode);
+  assert.equal(s.calls().filter((call) => call.includes("--run-queued")).length, 1);
+});
+
+test("#1557 delivery checks a parked seat in its project home from a nested cwd", (t) => {
+  const s = restartScene(t);
+  const dir = join(s.project, ".herdr/app-home/automagik-herdr");
+  const nested = join(s.project, "nested");
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(nested);
+  const st = s.hcState();
+  const pane = st.terminals.find(row => row.address === "t5");
+  pane.cwd = pane.foreground.cwd = nested;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const item = { kind: "rate-limit", open: true, terminal: "t5", created_ms: pane.created_ms };
+  const record = join(dir, "attention.json");
+  const put = row => writeFileSync(record, JSON.stringify({ items: [row] }));
+  const status = () => s.cli(["delivery-status", "t5", "--json"], { env: { HERDR_APP_HOME: "" } });
+  put(item);
+  assert.deepEqual(status().json(), { terminal: "t5", held: true });
+  put({ ...item, open: false });
+  assert.deepEqual(status().json(), { terminal: "t5", held: false });
+  put({ ...item, created_ms: pane.created_ms - 1 });
+  assert.deepEqual(status().json(), { terminal: "t5", held: false });
+  assert.equal(s.calls().some(words => words[0] === "send"), false);
 });

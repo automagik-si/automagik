@@ -57,7 +57,7 @@ import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
-import { CONFIG_VAR, DEFAULT_LOGIN, chooseLogin, loginsPath, parseLogins } from "../logins.js";
+import { CONFIG_VAR, chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
@@ -1765,14 +1765,10 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 written and left for launchd to load at your next login).
                                 install.sh asks before it installs it.
   rate-limit [--all] [--dry-run] [--json]
-                                One sweep of #1557: a running Claude Code seat blocked on the
-                                rate-limit options dialog is parked or switched by the project's
-                                onRateLimit (park, the default, queues am restart <bot> for one
-                                minute after the reset it shows, or no wake when it shows none;
-                                switch restarts it on another signed-in login whose meter reading
-                                is fresh and which holds this conversation's transcript, else
-                                parks). One attention item per episode; am ls shows it. It never
-                                types into the dialog.
+                                Park seats waiting on the Claude Code rate-limit dialog. An
+                                attention item names the original pane for the person to resume.
+                                Both onRateLimit policies preserve its session and workers. The
+                                watcher checks for recovery and never answers the dialog.
   restart --queued [--project DIR] [--json]   List queued restarts (with a parked seat's wake time).
   restart --cancel <bot> [--project DIR] [--json]   Cancel a queued restart.
   restart --due [--all] [--dry-run] [--json]   Restart from a handoff the seats whose Claude Code
@@ -5676,18 +5672,18 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
 }
 
 // Queue mutations share a lock: cancel, replace and watcher consumption cannot lose rows.
-const queuePath = () => join(appHome(), "automagik-herdr", "queued-restarts.json");
-function readRestartQueue() {
-  const text = readText(queuePath());
+const queuePath = (dir = appHome()) => join(dir, "automagik-herdr", "queued-restarts.json");
+function readRestartQueue(dir = appHome()) {
+  const text = readText(queuePath(dir));
   if (text === null) return [];
   try { const rows = JSON.parse(text); if (Array.isArray(rows)) return rows; } catch {}
-  throw new CliError(`Can't read ${queuePath()}: invalid restart queue`);
+  throw new CliError(`Can't read ${queuePath(dir)}: invalid restart queue`);
 }
-async function editRestartQueue(edit) {
-  const file = queuePath();
+async function editRestartQueue(edit, dir = appHome()) {
+  const file = queuePath(dir);
   mkdirSync(dirname(file), { recursive: true });
   return withLockAsync(`${file}.lock`, async () => {
-    const rows = readRestartQueue();
+    const rows = readRestartQueue(dir);
     const result = await edit(rows);
     const tmp = `${file}.${process.pid}.${randomUUID()}`;
     try {
@@ -5727,10 +5723,22 @@ async function killQueuedWatcher(watcher) {
   if (state.state === "live" && state.get?.labels?.["herdr.queued-restart"]) await hcKill(watcher);
 }
 
+function queueHomes(projects) {
+  const dirs = [appHome()];
+  if (!process.env.HERDR_APP_HOME) for (const project of projects) {
+    if (!project || !isAbsolute(project)) continue;
+    const dir = projectAppHomeOf(project);
+    if (existsSync(join(dir, "automagik-herdr")) && !dirs.some((other) => sameHome(other, dir))) dirs.push(dir);
+  }
+  return dirs;
+}
+
 async function queuedRestarts(opts, ref) {
   const project = opts.project ? (await projectFor(opts)).key : null;
+  const dirs = queueHomes(project ? [project] : [await commandKeyOf(opts), ...rememberedKeys()]);
   if (opts.queued) {
-    const entries = await editRestartQueue(async (rows) => {
+    const entries = [];
+    for (const dir of dirs.filter((dir) => existsSync(queuePath(dir)))) entries.push(...await editRestartQueue(async (rows) => {
       for (let i = rows.length - 1; i >= 0; i -= 1) {
         const e = rows[i];
         const state = await hcState(e.terminal);
@@ -5746,7 +5754,7 @@ async function queuedRestarts(opts, ref) {
         }
       }
       return rows.filter((e) => !project || e.project === project);
-    });
+    }, dir));
     // #1556: a handoff that failed or was dropped is kept in the app home, so the reader that
     // already answers "what is queued" also answers "what didn't happen" after the watcher's pane went away.
     const record = readHandoffFailureRecord();
@@ -5768,17 +5776,19 @@ async function queuedRestarts(opts, ref) {
   }
   if (!ref) throw new CliError("restart --cancel needs a bot.", 2);
   let bot = null;
-  const matches = readRestartQueue().filter((e) => (!project || e.project === project) && [e.botId, e.botName].includes(ref));
+  const matches = dirs.flatMap((dir) => readRestartQueue(dir)
+    .filter((e) => (!project || e.project === project) && [e.botId, e.botName].includes(ref))
+    .map((e) => ({ ...e, dir })));
   if (matches.length > 1) throw new CliError(`More than one queued bot matches ${ref}; use --project.`, 2);
   if (!matches.length) bot = await botIn(await projectFor(opts), ref, opts);
   const id = matches[0]?.botId ?? bot.id, name = matches[0]?.botName ?? bot.name;
   const entry = await editRestartQueue(async (rows) => {
-    const i = rows.findIndex((e) => e.botId === id && (!project || e.project === project));
+    const i = rows.findIndex((e) => e.id === matches[0]?.id && e.botId === id && (!project || e.project === project));
     if (i < 0) return null;
     const [e] = rows.splice(i, 1);
     await killQueuedWatcher(e.watcher);
     return e;
-  });
+  }, matches[0]?.dir);
   return opts.json ? { id, canceled: Boolean(entry), terminal: entry?.terminal ?? null }
     : entry ? `${name}: canceled queued restart for ${entry.terminal}.` : `No restart is queued for ${name}.`;
 }
@@ -5898,7 +5908,7 @@ async function sendHandoffMessage(terminal, handoff, path) {
   let said;
   try {
     await hc(["wait", terminal, "--timeout", String(FIRST_TASK_WAIT_S), "--json"], { timeout: (FIRST_TASK_WAIT_S + 10) * 1000 });
-    const r = await hc(["send", terminal, handoff]);
+    const r = await sendAutomatically(terminal, handoff);
     if (r.code === 0) return null;
     said = hcSaid((r.stderr || r.stdout).trim()).split("\n")[0] || `exit ${r.code}`;
   } catch (e) { said = e?.message ?? String(e); }
@@ -6013,7 +6023,7 @@ async function reportToMainBot(projectKey, line) {
     if (state.state !== "live" || state.get?.created_ms !== held.binding.created_ms || !agentInForeground(state.get)) {
       return { sent: null, unsent: `${main.name}'s pane ${terminal} runs no agent` };
     }
-    const r = await hc(["send", terminal, line]);
+    const r = await sendAutomatically(terminal, line);
     if (r.code === 0) return { sent: terminal, unsent: null };
     return { sent: null, unsent: `hc send ${terminal} failed (${hcSaid((r.stderr || r.stdout).trim())})` };
   } catch (e) { return { sent: null, unsent: `the report to ${terminal} couldn't be sent (${e?.message ?? e})` }; }
@@ -6050,9 +6060,7 @@ async function runQueuedRestart(opts) {
   // A parked seat's wake is its reset plus the grace; the default cap must outlast a 7-day
   // window, so a wake beyond it is still honoured (a test can cap the run with the env var).
   const park = entry.options?.rateLimit === true;
-  const wake = park && entry.wake_at ? Date.parse(entry.wake_at) : NaN;
-  const maxMs = Math.max(1000, Number(process.env.AUTOMAGIK_HERDR_QUEUE_MAX_MS) || 86_400_000,
-    Number.isFinite(wake) ? wake - began + 300_000 : 0);
+  const maxMs = Math.max(1000, Number(process.env.AUTOMAGIK_HERDR_QUEUE_MAX_MS) || 86_400_000);
   const helperMaxMs = Math.max(50, Number(process.env.AUTOMAGIK_HERDR_QUEUE_HELPER_WAIT_MS) || 30_000);
   /** How long one parked wait may sleep before looking at the pane again (a cancel, a recovery). */
   const parkPollMs = Math.max(10, envMs("AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS", 60_000));
@@ -6066,7 +6074,9 @@ async function runQueuedRestart(opts) {
   const drop = () => editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === queueId); if (i >= 0) rows.splice(i, 1); });
   try {
     for (;;) {
-      if (Date.now() - began >= maxMs) {
+      const wake = park && entry.wake_at ? Date.parse(entry.wake_at) : NaN;
+      const deadline = Math.max(began + maxMs, Number.isFinite(wake) ? wake + 300_000 : 0);
+      if (Date.now() >= deadline) {
         if (handoff) {
           await noteHandoffFailure(entry, "dropped", `${entry.botName}: its queued handoff restart waited `
             + `${Math.round(maxMs / 1000)}s without the seat becoming idle, so it was dropped.`, handoffFile);
@@ -6097,42 +6107,21 @@ async function runQueuedRestart(opts) {
         const showing = capture.ok ? rateLimitDialog(capture.text) : null;
         if (capture.ok && !showing) {
           await drop();
+          if (entry.episode) await healRateLimitAttention(entry.project, entry.botId, "it recovered", appHome(), entry.episode);
           return PRINTED;
         }
-        // No reset in the dialog: no wake time was invented, so never restart on a timer. Keep
-        // watching only to cancel when the dialog clears.
-        if (!entry.wake_at) {
-          await sleep(parkPollMs);
-          entry = current();
-          if (!entry) return PRINTED;
-          continue;
-        }
-        const wakeMs = Date.parse(entry.wake_at);
-        if (!Number.isFinite(wakeMs)) {
-          // A malformed wake is not a due time: treat it as unknown, never as "now".
-          await sleep(parkPollMs);
-          entry = current();
-          if (!entry) return PRINTED;
-          continue;
-        }
-        const wait = Math.max(0, wakeMs - Date.now());
-        if (wait > 0 || !capture.ok) {
-          // A pane that can't be read is no evidence of the dialog, so a due wake waits too.
-          await sleep(Math.min(wait > 0 ? wait : parkPollMs, parkPollMs));
-          entry = current();
-          if (!entry) return PRINTED;
-          continue;
-        }
-        // Its wake is due and the dialog is still on the readable pane: replace it now, resuming
-        // the conversation. --force is internal (a blocked pane would otherwise queue again);
-        // the person asked for a restart. cmdRestart consumes the entry itself, so a cancel that
-        // lands first still wins.
-        const result = await cmdRestart({ project: entry.project, force: true, json: opts.json, _queuedTarget: entry }, [entry.botId]);
-        return result;
+        // hc can only kill unconditionally. A helper may start after any probe, and
+        // startup labels describe the requested session, not the provider's actual one.
+        // Even after reset, preserve the binding and wait for the person to resume.
+        const untilWake = Date.parse(entry.wake_at) - Date.now();
+        await sleep(untilWake > 0 ? Math.min(untilWake, parkPollMs) : parkPollMs);
+        entry = current();
+        if (!entry) return PRINTED;
+        continue;
       }
       // A blocked pane is never idle: skip the screen read (an hc RPC on every poll).
       const screen = state.get?.status?.state !== "blocked" && state.get ? await readScreenText(entry.terminal) : null;
-      const idle = isPaneIdle(state.get, screen);
+      const idle = isPaneIdle(state.get, screen) && !(handoff && rateLimitDialog(screen));
       // The watcher's own helper check: a live helper is waited out before cmdRestart is asked.
       const helpers = idle ? await helpersOf(entry.terminal, { strict: Boolean(entry.options?.tree) }) : [];
       let helperRefusal = idle
@@ -6140,6 +6129,11 @@ async function runQueuedRestart(opts) {
           force: false, tree: entry.options?.tree })
         : null;
       if (idle && !helperRefusal && handoff && askedAt === null) {
+        if (typeof screen === "string") {
+          const attention = readAttention().find(row => row.open && isEpisode(row, entry.project, entry.botId)
+            && row.terminal === entry.terminal && row.created_ms === entry.created_ms);
+          if (attention) await healRateLimitAttention(entry.project, entry.botId, "it recovered", appHome(), attention.id);
+        }
         // Emptied before the send: an agent that appends an answer to an earlier handoff, or
         // merely touches the file, can never have that text sent (#1556).
         const why = clearHandoff(handoffFile);
@@ -6151,7 +6145,14 @@ async function runQueuedRestart(opts) {
         // Stamped BEFORE the send: an agent that writes during the send's own round trip is
         // still answering this request, never a stale handoff from an earlier pass.
         askedAt = Date.now();
-        const r = await hc(["send", entry.terminal, handoffRequestText({ name: entry.botName, id: entry.botId }, handoffFile)]);
+        const r = await sendAutomatically(entry.terminal, handoffRequestText({ name: entry.botName, id: entry.botId }, handoffFile));
+        if (r.held) {
+          askedAt = null;
+          await sleep(parkPollMs);
+          entry = current();
+          if (!entry) return PRINTED;
+          continue;
+        }
         if (r.code !== 0) {
           await drop();
           throw new CliError(`${entry.botName}: couldn't be asked for its handoff in ${entry.terminal} (hc send: `
@@ -6228,7 +6229,7 @@ async function runQueuedRestart(opts) {
         if (Date.now() - helperBlockedSince >= helperMaxMs) {
           await drop(); // out of the queue before the person hears why
           if (isPaneIdle(state.get, screen)) {
-            try { await hc(["send", entry.terminal, `${entry.botName}: queued restart refused — ${helperRefusal}`]); } catch {}
+            try { await sendAutomatically(entry.terminal, `${entry.botName}: queued restart refused — ${helperRefusal}`); } catch {}
           }
           throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: entry.terminal, handoffKind: "helpers" });
         }
@@ -6264,16 +6265,32 @@ async function runQueuedRestart(opts) {
   }
 }
 
-async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered }) {
+async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered, dir = appHome() }) {
   const rateLimited = opts.rateLimit === true;
   const dialog = rateLimited ? null
     : pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
   const queueId = randomUUID();
   const entry = await editRestartQueue(async (rows) => {
-    const i = rows.findIndex((e) => e.botId === bot.id);
-    if (i >= 0) { const [prev] = rows.splice(i, 1); await killQueuedWatcher(prev.watcher); }
+    const i = rows.findIndex((row) => row.project === key && row.botId === bot.id);
+    const previous = rows[i];
+    if (previous && rateLimited) {
+      // Keep another queued operation and its watcher. A later observation of this park can
+      // supply a missing reset without changing the queue identity or starting a second watcher.
+      if (!previous.options?.rateLimit) return previous;
+      if (previous.terminal === old.address && previous.created_ms === old.created_ms) {
+        if (!previous.wake_at && opts.wakeAt) {
+          previous.resets_at = opts.resetsAt;
+          previous.wake_at = opts.wakeAt;
+        }
+        previous.episode ??= opts.episode;
+        return previous;
+      }
+    }
+    if (previous && opts.handoff && previous.options?.rateLimit) return previous;
+    if (previous) { rows.splice(i, 1); await killQueuedWatcher(previous.watcher); }
     const e = { id: queueId, botId: bot.id, botName: bot.name, project: key, terminal: old.address, created_ms: old.created_ms ?? null,
       reason: opts.handoff ? "due" : rateLimited ? "rate-limited" : dialog ? "blocked" : "working", dialog,
+      ...(rateLimited ? { episode: opts.episode, ownerHome: dir } : {}),
       ...(opts.wakeAt ? { wake_at: opts.wakeAt } : {}), ...(opts.resetsAt ? { resets_at: opts.resetsAt } : {}),
       options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
         model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
@@ -6282,7 +6299,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
         ...(opts.handoff ? { handoff: true, contextTokens: opts.contextTokens ?? null, restartAt: opts.restartAt ?? null } : {}),
         ...(recovered ? { recoveredHome: true } : {}) }, watcher: null, at: new Date().toISOString() };
     // Persist before starting: the detached process may read immediately, then takes this lock.
-    const file = queuePath(), tmp = `${file}.${process.pid}`;
+    const file = queuePath(dir), tmp = `${file}.${process.pid}`;
     writeFileSync(tmp, JSON.stringify([...rows, e]), { mode: 0o600 });
     chmodSync(tmp, 0o600); renameSync(tmp, file);
     // env -i: herdr-core's environment does not leak into the watcher. Only these explicit
@@ -6292,7 +6309,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
     // env -i adds the two hc gave the watcher's own run instead.
     const watcherEnv = [
       `HOME=${home()}`,
-      `HERDR_APP_HOME=${appHome()}`,
+      `HERDR_APP_HOME=${dir}`,
       `PATH=${launchPath(process.execPath, key).path}`,
       ...Object.entries(process.env)
         .filter(([k, v]) => v !== undefined && (
@@ -6319,8 +6336,9 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
     e.watcher = watcher;
     rows.push(e);
     return e;
-  });
+  }, dir);
   if (opts.json) return { id: bot.id, queued: true, terminal: old.address, reason: entry.reason, dialog,
+    ...(entry.episode ? { episode: entry.episode } : {}),
     ...(entry.wake_at ? { wake_at: entry.wake_at } : {}), ...(entry.resets_at ? { resets_at: entry.resets_at } : {}),
     watcher: entry.watcher, mode: plan.mode, agent: plan.agent, model: plan.model };
   if (rateLimited) {
@@ -6348,13 +6366,13 @@ async function paneNow(terminal) {
  * A handoff restart already queued for `botId` (#1556), which a periodic pass must leave alone.
  * A queue entry whose watcher is gone can never fire, so that entry is dropped here.
  */
-async function queuedHandoffFor(botId) {
-  const entry = readRestartQueue().find((e) => e.botId === botId && e.options?.handoff === true);
+async function queuedHandoffFor(project, botId, dir = appHome()) {
+  const entry = readRestartQueue(dir).find((e) => e.project === project && e.botId === botId && e.options?.handoff === true);
   if (!entry) return null;
   if (entry.watcher) {
     const state = await hcState(entry.watcher);
     if (["gone", "finished"].includes(state.state)) {
-      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); });
+      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); }, dir);
       return null;
     }
   }
@@ -6370,10 +6388,8 @@ function envMs(name, fallback) {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
-/** Park restarts a seat this long after the reset the dialog shows (one minute). */
+// Recheck the dialog one minute after its announced reset.
 const RATE_LIMIT_GRACE_MS = envMs("AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS", 60_000);
-/** A meter reading this old cannot prove headroom for a switch (the logger writes every 5 minutes). */
-const RATE_LIMIT_METER_FRESH_MS = envMs("AUTOMAGIK_HERDR_RATE_LIMIT_METER_FRESH_MS", 10 * 60_000);
 const RATE_LIMIT_KIND = "rate-limit";
 
 /**
@@ -6383,30 +6399,41 @@ const RATE_LIMIT_KIND = "rate-limit";
  */
 const rateLimitEpisodeKey = (project, botId) => `${RATE_LIMIT_KIND}:${project}:${botId}`;
 /** How a parked seat's wake is said: its own reset, or plainly that none was invented. */
-const parkedWakeText = (row) => (row.wake_at ? `its restart wakes at ${row.wake_at}` : "no reset time was shown, so it has no timed wake");
+const parkedWakeText = (row) => (row.wake_at ? `its watcher rechecks at ${row.wake_at}` : "no reset time was shown, so it has no timed wake");
 /** Whether `row` is this episode (the key, with project+bot as the fallback for older items). */
 const isEpisode = (row, project, botId) => row.kind === RATE_LIMIT_KIND
   && (row.episode ? row.episode === rateLimitEpisodeKey(project, botId) : row.project === project && row.botId === botId);
 
 /** The attention items file under the app home: one record per episode, never one per sweep. */
-const attentionPath = () => join(appHome(), "automagik-herdr", "attention.json");
-/** How many items are kept (open ones always included first in the file, oldest may go). */
+const attentionPath = (dir = appHome()) => join(dir, "automagik-herdr", "attention.json");
+/** Retain every open item and fill remaining space with the most recent closed items. */
 const ATTENTION_MAX = 200;
 
 /** The recorded attention items, oldest first. A malformed file throws (never read as "none"). */
-function readAttention() {
-  const text = readText(attentionPath());
+function readAttention(dir = appHome()) {
+  const text = readText(attentionPath(dir));
   if (text === null) return [];
   let data;
-  try { data = JSON.parse(text); } catch { throw new CliError(`Can't read ${attentionPath()}: invalid attention items`); }
-  if (!data || !Array.isArray(data.items)) throw new CliError(`Can't read ${attentionPath()}: invalid attention items`);
+  try { data = JSON.parse(text); } catch { throw new CliError(`Can't read ${attentionPath(dir)}: invalid attention items`); }
+  if (!data || !Array.isArray(data.items)) throw new CliError(`Can't read ${attentionPath(dir)}: invalid attention items`);
   return data.items.filter((row) => row && typeof row === "object");
+}
+
+/** A persisted hold for this particular live pane. A reused address alone is never a match.
+ * Legacy records already stored the terminal and creation time. Invalid stores propagate to
+ * the delivery caller, which can decline to send until the hold can be checked. */
+export function hasRateLimitHold(homeDir, terminal, createdMs) {
+  if (!terminal || createdMs == null) throw new CliError("Cannot check a delivery hold without the pane identity.");
+  const same = (row) => row?.terminal === terminal && row.created_ms === createdMs;
+  return readRestartQueue(homeDir).some((row) => same(row) && row.options?.rateLimit === true)
+    || readAttention(homeDir).some((row) => same(row) && row.kind === RATE_LIMIT_KIND && row.open === true);
 }
 
 /** Open items in a read that must not fail the command that shows them: a broken record is a note. */
 function openAttention(project = null) {
   try {
-    return readAttention().filter((row) => row.open === true && row.kind === RATE_LIMIT_KIND && (!project || row.project === project));
+    return queueHomes(project ? [project] : []).flatMap((dir) => readAttention(dir))
+      .filter((row) => row.open === true && row.kind === RATE_LIMIT_KIND && (!project || row.project === project));
   } catch (e) {
     report([`${e?.message ?? e}; no attention items are shown.`]);
     return [];
@@ -6414,13 +6441,15 @@ function openAttention(project = null) {
 }
 
 /** Mutates the attention items under one lock and writes them 0600, atomically; returns `edit`'s answer. */
-async function editAttention(edit) {
-  const file = attentionPath();
+async function editAttention(edit, dir = appHome()) {
+  const file = attentionPath(dir);
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   return withLockAsync(`${file}.lock`, async () => {
-    const items = readAttention();
+    const items = readAttention(dir);
     const result = await edit(items);
-    const kept = items.slice(-ATTENTION_MAX);
+    const open = items.filter((row) => row.open);
+    const closed = items.filter((row) => !row.open);
+    const kept = [...closed.slice(Math.max(0, closed.length + open.length - ATTENTION_MAX)), ...open];
     const tmp = `${file}.${process.pid}.${randomUUID()}`;
     try {
       writeFileSync(tmp, `${JSON.stringify({ version: 1, items: kept }, null, 2)}\n`, { mode: 0o600 });
@@ -6439,133 +6468,49 @@ async function editAttention(edit) {
  * seat that never recovers stays at one item until a *readable* sweep sees it healthy
  * (healRateLimitAttention) and a later dialog starts a new episode.
  */
-async function noteRateLimitAttention({ project, bot, terminal, created_ms = null, text, resetsAt = null }) {
+async function noteRateLimitAttention({ project, bot, terminal, created_ms = null, text, resetsAt = null, episodeId = null, dir = appHome() }) {
   return editAttention((items) => {
     const open = items.find((row) => row.open === true && isEpisode(row, project, bot.id));
-    if (open) return { row: open, created: false };
-    const row = { id: randomUUID(), kind: RATE_LIMIT_KIND, episode: rateLimitEpisodeKey(project, bot.id), project, botId: bot.id, botName: bot.name,
+    if (open && (!episodeId || open.id === episodeId)) {
+      if (resetsAt && !open.resets_at) { open.resets_at = resetsAt; open.text = text; }
+      return { row: open, created: false };
+    }
+    if (open) { open.open = false; open.closed_at = new Date().toISOString(); open.closed_because = "a new park started"; }
+    const row = { id: episodeId ?? randomUUID(), kind: RATE_LIMIT_KIND, episode: rateLimitEpisodeKey(project, bot.id), project, botId: bot.id, botName: bot.name,
       terminal, created_ms, at: new Date().toISOString(), ...(resetsAt ? { resets_at: resetsAt } : {}), text, open: true };
     items.push(row);
     return { row, created: true };
+  }, dir);
+}
+
+/** The watcher may have cleared or replaced this park since the screen was read. Hold the
+ * queue lock until its corresponding attention record is updated. */
+async function noteQueuedPark(details) {
+  const { dir, project, bot, terminal, created_ms, episodeId } = details;
+  return withLockAsync(`${queuePath(dir)}.lock`, async () => {
+    const queued = readRestartQueue(dir).some((row) => row.options?.rateLimit && row.episode === episodeId
+      && row.project === project && row.botId === bot.id && row.terminal === terminal && row.created_ms === created_ms);
+    return queued ? noteRateLimitAttention(details) : { row: null, created: false };
   });
 }
 
-/** Closes every open rate-limit item of `botId` (its seat is readably healthy again, or gone). */
-async function healRateLimitAttention(project, botId, why) {
+/** Closes the observed rate-limit item when its seat is readably healthy again, or gone. */
+async function healRateLimitAttention(project, botId, why, dir = appHome(), episodeId = null) {
   // A sweep over a healthy team must not rewrite the store: only an open episode is looked at.
-  if (!readAttention().some((row) => row.open === true && isEpisode(row, project, botId))) return 0;
+  const observed = readAttention(dir).find((row) => row.open === true && isEpisode(row, project, botId)
+    && (!episodeId || row.id === episodeId));
+  if (!observed) return 0;
   return editAttention((items) => {
     let closed = 0;
     for (const row of items) {
-      if (row.open !== true || !isEpisode(row, project, botId)) continue;
+      if (row.open !== true || row.id !== observed.id || !isEpisode(row, project, botId)) continue;
       row.open = false;
       row.closed_at = new Date().toISOString();
       row.closed_because = why;
       closed += 1;
     }
     return closed;
-  });
-}
-
-/** How a login is named in an item: "the default login", "login 2". */
-const loginNameOf = (id) => (id === DEFAULT_LOGIN ? "the default login" : `login ${id}`);
-
-/** The folder the meter's limits logger writes to (claude-limits.jsonl), as the logger resolves it. */
-const meterDir = () => (process.env.METER_STATE_DIR
-  || (process.env.AM_HOME && isAbsolute(process.env.AM_HOME) ? join(process.env.AM_HOME, "meter") : join(home(), ".automagik/meter")));
-
-/** A login's account fingerprint as the limits logger writes it (sha256 of its oauth account, 16 hex), or null. */
-function accountHashOf(login) {
-  const file = login.id === DEFAULT_LOGIN ? join(home(), ".claude.json") : join(login.dir, ".claude.json");
-  const text = readText(file);
-  if (text === null) return null;
-  try {
-    const uuid = JSON.parse(text)?.oauthAccount?.accountUuid;
-    return typeof uuid === "string" && uuid ? createHash("sha256").update(uuid).digest("hex").slice(0, 16) : null;
-  } catch { return null; }
-}
-
-/** The last limits reading for `account` in the meter's log, or null. */
-function lastLimitReading(account) {
-  try {
-    const text = tailTextOf(join(meterDir(), "claude-limits.jsonl"), 256 * 1024);
-    let found = null;
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      try { const row = JSON.parse(line); if (row && row.account === account) found = row; } catch { /* a cut line */ }
-    }
-    return found;
-  } catch { return null; }
-}
-
-/**
- * Whether a reading proves headroom now: an unexpired `ts` and a known window under 100%; null
- * when there is no fresh reading. The limits logger writes on a change or every 5 minutes, so a
- * reading older than 10 minutes is stale, not proof: a full window can be hit in between.
- */
-function headroomOf(row, now = Date.now()) {
-  const measured = Date.parse(row?.ts);
-  if (!Number.isFinite(measured) || measured > now + 60_000 || now - measured > RATE_LIMIT_METER_FRESH_MS) return null;
-  const windows = [row?.five_hour, row?.seven_day].filter((w) => w && typeof w.used_percentage === "number");
-  return windows.length ? windows.every((w) => w.used_percentage < 100) : null;
-}
-
-/** The transcript a login holds for `session` in `cwd`, as a non-empty file, or null. */
-function transcriptAt(login, cwd, session) {
-  const file = login.id === DEFAULT_LOGIN ? claudeTranscriptPath(home(), cwd, session)
-    : join(login.dir, "projects", claudeSlug(cwd), `${session}.jsonl`);
-  try { const st = statSync(file); return st.isFile() && st.size > 0 ? file : null; } catch { return null; }
-}
-
-/**
- * The switch a rate-limit dialog gets (#1557): `{ login, why }`, where `login` is a second
- * signed-in Claude login that can resume this seat's conversation now, or null with the
- * sentence to say instead. A login proves itself only through its own account's *fresh*
- * reading in the meter's `claude-limits.jsonl` (every window under 100%) AND the conversation's
- * transcript in that login's store: switching without it would start a fresh conversation (or
- * resume an unrelated one), so the caller parks instead. The login the pane runs is skipped.
- */
-function switchLoginFor(live) {
-  const currentDir = paneLaunchEnv(live)?.get(CONFIG_VAR);
-  const current = typeof currentDir === "string" && isAbsolute(currentDir) ? (realDir(currentDir) ?? currentDir) : null;
-  const defaultDir = join(home(), ".claude");
-  const defaultReal = realDir(defaultDir) ?? defaultDir;
-  let listed = [];
-  try {
-    const record = parseLogins(readText(loginsPath(appHome())) ?? "");
-    if (!record.problem) listed = record.logins;
-  } catch { /* no record: the default login alone */ }
-  const cwd = live?.foreground?.cwd ?? live?.cwd;
-  // The session the restart would resume: the pane's label, else the hook's ledger row (the
-  // same order cmdRestart uses), so a seat whose label is gone can still switch.
-  const session = sessionFor("claude", paneSession(live, "claude"))
-    ?? ledgerSession(workerLedgerRows(), live?.address, "claude", live?.created_ms)?.session ?? null;
-  const noHeadroom = { login: null, why: "no second signed-in login with headroom" };
-  const reasons = [];
-  const seen = new Set();
-  for (const login of [{ id: DEFAULT_LOGIN, dir: null }, ...listed]) {
-    if (login.id === DEFAULT_LOGIN) {
-      // Its seat already runs the default login (no CLAUDE_CONFIG_DIR, or ~/.claude explicitly).
-      if (!current || current === defaultReal) continue;
-    } else {
-      const real = realDir(login.dir) ?? login.dir;
-      if (seen.has(real) || (current && real === current)) continue;
-      seen.add(real);
-    }
-    const account = accountHashOf(login);
-    if (!account) continue; // not signed in here
-    if (headroomOf(lastLimitReading(account)) !== true) continue;
-    if (!session || typeof cwd !== "string" || !isAbsolute(cwd)) {
-      reasons.push(`${loginNameOf(login.id)} has headroom, but this seat has no Claude session id to resume`);
-      continue;
-    }
-    if (!transcriptAt(login, cwd, session)) {
-      reasons.push(`${loginNameOf(login.id)} has headroom, but it has no conversation for this seat to resume`);
-      continue;
-    }
-    return { login: { id: login.id, dir: login.dir, words: login.id === DEFAULT_LOGIN ? ["-u", CONFIG_VAR] : [`${CONFIG_VAR}=${login.dir}`] }, why: null };
-  }
-  return reasons.length ? { login: null, why: reasons[0] } : noHeadroom;
+  }, dir);
 }
 
 /** The rate-limit dialog a bot's live Claude Code pane is blocked on, or null. Read-only. */
@@ -6577,13 +6522,13 @@ async function seatRateLimit(project, bot, live) {
 }
 
 /** This bot's parked rate-limit restart, or null; a dead watcher's entry is dropped first. */
-async function queuedParkFor(botId) {
-  const entry = readRestartQueue().find((e) => e.botId === botId && e.options?.rateLimit === true);
+async function queuedParkFor(project, botId, dir = appHome()) {
+  const entry = readRestartQueue(dir).find((e) => e.project === project && e.botId === botId && e.options?.rateLimit === true);
   if (!entry) return null;
   if (entry.watcher) {
     const state = await hcState(entry.watcher);
     if (["gone", "finished"].includes(state.state)) {
-      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); });
+      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); }, dir);
       return null;
     }
   }
@@ -6593,16 +6538,12 @@ async function queuedParkFor(botId) {
 /**
  * The `am rate-limit` sweep (#1557), and the same pass a scheduled `am restart --due` runs
  * first: every live Claude Code seat whose pane tail shows the rate-limit dialog is reported,
- * then reacted to by the project's `onRateLimit`. `park` (the default) queues `am restart
- * <bot>` for one minute after the reset the dialog shows; when it shows none, no wake time is
- * invented and the watcher only cancels when the dialog clears. `switch` restarts it now on
- * another signed-in login with fresh headroom and this conversation's transcript, and parks
- * otherwise. One attention item per episode is written; a *readable* seat seen healthy closes
- * it, and an unreadable sweep leaves it open. `dry` only reports. Never types into the dialog.
+ * then parked for the person. A watcher checks for recovery without starting a replacement,
+ * changing accounts or retiring any pane. A readable healthy seat closes the attention item.
  */
-async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
+async function rateLimitPass(opts, keys, dry) {
   const out = { rate_limited: [], parked: [], switched: [], attention: [], notes: [] };
-  let { view, hcError } = await viewOrError();
+  const { view, hcError } = await viewOrError();
   if (hcError) {
     out.notes.push(`hc couldn't list this computer's panes, so no rate-limit dialog was read (${hcError}).`);
     return out;
@@ -6614,10 +6555,14 @@ async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
     const mode = rateLimitModeOf(project.file);
     for (const bot of project.file.bots) {
       if (bot.planned || resolveAgent(bot.agent) !== "claude") continue;
-      const held = await readHeld(project, bot, view);
+      // A first read in the default home can import a live pane that already has a
+      // project-local ledger. Resolve the owner before writing or launching its watcher.
+      const held = !process.env.HERDR_APP_HOME && existsSync(attachPath(projectAppHomeOf(key)))
+        ? await resolvedBinding(project, bot) : await readHeld(project, bot, view);
       const live = held?.get ?? null;
+      const dir = held?.home ?? appHome();
       if (!live || live.state !== "live") {
-        if (!dry) await healRateLimitAttention(key, bot.id, "its pane ended");
+        if (!dry) for (const homeDir of queueHomes([key])) await healRateLimitAttention(key, bot.id, "its pane ended", homeDir);
         continue;
       }
       // The sweep never acts on its own pane: a person running it inside a seat would end it.
@@ -6625,11 +6570,8 @@ async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
         out.notes.push(`${bot.name}: the sweep runs inside its own pane; run it from a timer or another pane.`);
         continue;
       }
-      // The scheduled pass looks only at a seat herdr-core reports blocked: that is the modal
-      // dialog waiting on a person. The explicit `am rate-limit` sweep reads every seat, but a
-      // working seat is taking a turn and its text is output, never the dialog.
-      if (blockedOnly && live.status?.state !== "blocked") continue;
       if (live.status?.state === "working") continue;
+      const observed = readAttention(dir).find((row) => row.open && isEpisode(row, key, bot.id));
       const capture = await readScreenCapture(live.address);
       if (!capture.ok) {
         // No evidence either way: the episode stays open (never healed by a blind sweep).
@@ -6638,57 +6580,81 @@ async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
       }
       const dialog = rateLimitDialog(capture.text);
       if (!dialog) {
-        if (!dry) await healRateLimitAttention(key, bot.id, "it recovered");
+        if (!dry && observed) await healRateLimitAttention(key, bot.id, "it recovered", dir, observed.id);
         continue;
       }
       const seen = { id: bot.id, name: bot.name, project: key, terminal: live.address, question: dialog.question,
         onRateLimit: mode, ...(dialog.resets_at ? { resets_at: dialog.resets_at } : {}) };
       out.rate_limited.push(seen);
-      if (dry) { out.notes.push(`${bot.name}: blocked on the rate-limit dialog; would be ${mode === "switch" ? "switched or parked" : "parked"}.`); continue; }
-      // `noLogin` is the switch that had no eligible login (the item says why); a switch that
-      // failed for another reason parks without that claim.
-      let noLogin = false;
-      let noLoginWhy = "";
-      if (mode === "switch") {
-        const choice = switchLoginFor(live);
-        if (choice.login) {
-          try {
-            const r = await cmdRestart({ project: key, force: true, json: true, _login: { words: choice.login.words, warnings: [] } }, [bot.id]);
-            const terminal = r && typeof r === "object" ? r.terminal : null;
-            const text = rateLimitLine(bot.name, { outcome: `switched to ${loginNameOf(choice.login.id)}`, resetsAt: dialog.resets_at ?? null });
-            const noted = await noteRateLimitAttention({ project: key, bot, terminal: terminal ?? live.address, created_ms: live.created_ms, text, resetsAt: dialog.resets_at });
-            out.switched.push({ ...seen, login: choice.login.id, terminal: terminal ?? live.address });
-            if (noted.created) out.attention.push(noted.row);
-            viewOnce = null;
-            ({ view } = await viewOrError());
-            continue;
-          } catch (e) {
-            out.notes.push(`${bot.name}: switching to ${loginNameOf(choice.login.id)} failed (${firstSentence(e?.message ?? String(e))}); parking instead.`);
-          }
-        } else {
-          noLogin = true;
-          noLoginWhy = choice.why === "no second signed-in login with headroom"
-            ? "no second login with headroom" : "a login has headroom, but it cannot resume this conversation";
-          out.notes.push(`${bot.name}: ${choice.why}; parking.`);
-        }
+      if (dry) { out.notes.push(`${bot.name}: blocked on the rate-limit dialog; would be parked for manual resume.`); continue; }
+      const handoff = await queuedHandoffFor(key, bot.id, dir);
+      if (handoff) {
+        const text = rateLimitLine(bot.name, { outcome: "pending handoff retained", resetsAt: dialog.resets_at ?? null });
+        const noted = await noteRateLimitAttention({ project: key, bot, terminal: live.address, created_ms: live.created_ms,
+          text, resetsAt: dialog.resets_at, dir });
+        if (noted.created) out.attention.push(noted.row);
+        out.notes.push(`${bot.name}: its handoff is already queued; the existing watcher will wait for the dialog to clear.`);
+        continue;
       }
-      const existing = await queuedParkFor(bot.id);
+      const existing = await queuedParkFor(key, bot.id, dir);
       // Never invent a wake: without the dialog's own reset there is no timed restart, only a
       // watcher that cancels when the dialog clears.
       const wakeAt = dialog.resets_at ? new Date(Date.parse(dialog.resets_at) + RATE_LIMIT_GRACE_MS).toISOString() : null;
       let entry = existing;
-      if (!entry) {
-        entry = await queueRestart({ bot, key, old: live, screen: capture.text,
-          opts: { json: true, force: true, rateLimit: true, ...(wakeAt ? { wakeAt } : {}), ...(dialog.resets_at ? { resetsAt: dialog.resets_at } : {}) },
+      if (!entry || !entry.episode || (!entry.wake_at && wakeAt)
+          || entry.terminal !== live.address || entry.created_ms !== live.created_ms) {
+        const episode = observed && observed.terminal === live.address && observed.created_ms === live.created_ms
+          ? observed.id : randomUUID();
+        entry = await queueRestart({ bot, key, old: live, screen: capture.text, dir,
+          opts: { json: true, rateLimit: true, episode, ...(wakeAt ? { wakeAt } : {}), ...(dialog.resets_at ? { resetsAt: dialog.resets_at } : {}) },
           wanted: null, plan: { mode: "resume", agent: "claude", model: null } });
       }
-      const text = rateLimitLine(bot.name, { outcome: noLogin ? `parked (${noLoginWhy})` : "parked", resetsAt: dialog.resets_at ?? null });
-      const noted = await noteRateLimitAttention({ project: key, bot, terminal: live.address, created_ms: live.created_ms, text, resetsAt: dialog.resets_at });
+      if (entry.reason !== "rate-limited" && !entry.options?.rateLimit) {
+        out.notes.push(`${bot.name}: its existing ${entry.reason} restart was kept.`);
+        continue;
+      }
+      const text = rateLimitLine(bot.name, { outcome: `parked; resume in ${live.address} when the provider allows it`, resetsAt: dialog.resets_at ?? null });
+      const noted = await noteQueuedPark({ project: key, bot, terminal: live.address, created_ms: live.created_ms,
+        text, resetsAt: entry.resets_at ?? dialog.resets_at, episodeId: entry.episode, dir });
+      if (!noted.row) continue;
       out.parked.push({ ...seen, ...(entry.wake_at ? { wake_at: entry.wake_at } : {}) });
       if (noted.created) out.attention.push(noted.row);
     }
   }
   return out;
+}
+
+async function deliveryStatus(terminal) {
+  const observed = await hcState(terminal);
+  const pane = observed.get;
+  if (observed.state !== "live" || !pane?.address || !Number.isSafeInteger(pane.created_ms)) {
+    throw new CliError("Could not identify the live terminal for automatic delivery.");
+  }
+  const address = pane.address;
+  const folders = [...new Set([pane.cwd, pane.foreground?.cwd].filter(dir => typeof dir === "string" && isAbsolute(dir)))];
+  const projects = process.env.HERDR_APP_HOME ? [] : await Promise.all(folders.map(keyOf));
+  const roots = queueHomes(projects);
+  if (roots.some(dir => hasRateLimitHold(dir, address, pane.created_ms)) || pane.status?.state === "blocked") {
+    return { terminal: address, held: true };
+  }
+  const capture = await readScreenCapture(address);
+  if (!capture.ok) throw new CliError("Could not read the terminal before automatic delivery.");
+  return { terminal: address, held: Boolean(pendingDialog(capture.text) || rateLimitDialog(capture.text)) };
+}
+
+async function cmdDeliveryStatus(opts, [terminal, ...other]) {
+  if (!opts.json || !terminal || other.length) throw new CliError("usage: am delivery-status <terminal> --json", 2);
+  return deliveryStatus(terminal);
+}
+
+async function sendAutomatically(terminal, text) {
+  try {
+    const status = await deliveryStatus(terminal);
+    if (!status.held) return hc(["send", status.terminal, text]);
+    return { code: 1, held: true, stdout: "", stderr: "The terminal is waiting for a person. Automatic delivery was held." };
+  } catch (error) {
+    return { code: 1, held: true, stdout: "", stderr: firstSentence(error.message) };
+  }
 }
 
 /** `am rate-limit [--all] [--dry-run] [--json]`: one sweep of the #1557 detection and reaction. */
@@ -6705,7 +6671,6 @@ async function cmdRateLimit(opts) {
       .map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog "${r.question}"`
         + `${r.resets_at ? `; resets ${r.resets_at}` : ""}${dry ? " (dry run: nothing was parked or switched)." : "."}`),
     ...result.parked.map((r) => `${r.name}: parked; ${parkedWakeText(r)} (am restart --queued lists it).`),
-    ...result.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)} in ${r.terminal}.`),
     ...result.notes,
   ];
   return lines.length ? lines.join("\n") : "No seat is blocked on the rate-limit dialog.";
@@ -6751,7 +6716,7 @@ async function cmdRestartDue(opts) {
 async function restartDuePass(opts, keys, dry) {
   // #1557 first: a seat parked on the rate-limit dialog must not be woken early by this pass,
   // and this is the scheduled sweep that parks or switches one in the first place.
-  const rate = await rateLimitPass(opts, keys, dry, { blockedOnly: true });
+  const rate = await rateLimitPass(opts, keys, dry);
   const { view, hcError } = await viewOrError();
   if (hcError) throw new CliError(`hc couldn't list this computer's panes, so no seat's context was read (${hcError}); nothing was asked or restarted.`);
   const ledger = workerLedgerRows();
@@ -6763,7 +6728,15 @@ async function restartDuePass(opts, keys, dry) {
     for (const bot of project.file.bots) {
       if (bot.planned) continue;
       // A parked seat has its own wake (its reset plus the grace): no scheduled wake-up before it.
-      const parked = await queuedParkFor(bot.id);
+      if (rate.rate_limited.some((seen) => seen.project === key && seen.id === bot.id)) {
+        notes.push(`${bot.name}: parked on the rate-limit dialog or handled by this sweep; this pass left it alone.`);
+        continue;
+      }
+      let parked;
+      for (const dir of queueHomes([key])) {
+        parked = await queuedParkFor(key, bot.id, dir);
+        if (parked) break;
+      }
       if (parked) {
         notes.push(`${bot.name}: parked on the rate-limit dialog; ${parkedWakeText(parked)}; this pass left it alone.`);
         continue;
@@ -6793,7 +6766,7 @@ async function restartDuePass(opts, keys, dry) {
       terminal: r.terminal, context_tokens: r.tokens, restart_at: r.threshold, handoff: r.path,
       refused: r.refusal ?? null })), rate_limited: rate.rate_limited, attention: rate.attention, notes: [...rate.notes, ...notes] };
     return [...plans.map((r) => `${line(r)}; ${r.refusal ? `would be refused: ${r.refusal}; it would not be asked and not restarted.`
-      : "would be asked for its handoff, then restarted from it."}`), ...rate.rate_limited.map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog; the sweep would ${r.onRateLimit === "switch" ? "switch or park" : "park"} it.`),
+      : "would be asked for its handoff, then restarted from it."}`), ...rate.rate_limited.map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog; the sweep would park it for manual resume.`),
     ...rate.notes, ...(plans.length || rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
   }
   if (!due.length) {
@@ -6801,7 +6774,6 @@ async function restartDuePass(opts, keys, dry) {
       parked: rate.parked, switched: rate.switched, attention: rate.attention, notes: [...rate.notes, ...notes] };
     return [...(rate.attention.length ? rate.attention.map((row) => `! ${row.text}`) : []),
       ...rate.parked.map((r) => `${r.name}: parked; ${parkedWakeText(r)}.`),
-      ...rate.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)}.`),
       ...rate.notes,
       ...(rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
   }
@@ -6817,7 +6789,7 @@ async function restartDuePass(opts, keys, dry) {
     };
     // A timer can tick again while this seat's handoff watcher still waits: replacing that
     // entry would kill the watcher every tick and the seat would never restart (#1556).
-    const already = await queuedHandoffFor(r.bot.id);
+    const already = await queuedHandoffFor(r.key, r.bot.id);
     if (already) {
       const left = `${r.bot.name}: already queued for a handoff restart on ${already.terminal}; this pass left that queue entry `
         + "and its watcher alone.";
@@ -6859,7 +6831,7 @@ async function restartDuePass(opts, keys, dry) {
       }
       // Ask now, then wait for a file written after the ask and an idle seat.
       const since = Date.now();
-      const sent = await hc(["send", r.terminal, handoffRequestText(r.bot, path)]);
+      const sent = await sendAutomatically(r.terminal, handoffRequestText(r.bot, path));
       if (sent.code !== 0) throw new CliError(`couldn't ask for its handoff (hc send: ${hcSaid((sent.stderr || sent.stdout).trim())})`);
       const ready = await waitForHandoff({ terminal: r.terminal, path, since });
       if (ready.timedOut) {
@@ -6925,7 +6897,7 @@ async function restartDuePass(opts, keys, dry) {
     context_tokens: r.tokens, restart_at: r.threshold })), restarted, queued, failed, rate_limited: rate.rate_limited,
     parked: rate.parked, switched: rate.switched, attention: rate.attention, notes: [...rate.notes, ...notes] };
   return [...rate.attention.map((row) => `! ${row.text}`), ...rate.parked.map((r) => `${r.name}: parked; ${parkedWakeText(r)}.`),
-    ...rate.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)}.`), ...say, ...rate.notes, ...notes].join("\n");
+    ...say, ...rate.notes, ...notes].join("\n");
 }
 
 // Read only env's launch prefix. A template command or foreground process cannot vouch for
@@ -7096,7 +7068,7 @@ async function projectHomeHeld(project, bot) {
   if (!existsSync(attachPath(projectAppHomeOf(project.key)))) return null;
   try {
     const resolved = await resolvedBinding(project, bot, { requestedHome: appHome() });
-    return resolved.get ? { binding: resolved.binding, get: resolved.get } : null;
+    return resolved.get ? { binding: resolved.binding, get: resolved.get, home: resolved.home } : null;
   } catch (e) {
     if (e?.detail?.refused === "app-home") return null;
     throw e;
@@ -7487,7 +7459,12 @@ async function cmdRestart(opts, [ref]) {
   }
   const explicit = process.env.HERDR_APP_HOME;
   const requested = appHome();
-  const target = await restartTarget(project, bot, requested, Boolean(explicit), !opts._queuedTarget);
+  // New park watchers run directly in their owning home. Legacy watchers can rediscover
+  // their seat's project-local binding; consume their row from the original queue below.
+  const queued = opts._queuedTarget;
+  const legacyPark = queued?.options?.rateLimit === true && !queued.ownerHome;
+  if (queued) opts._queueHome = requested;
+  const target = await restartTarget(project, bot, requested, Boolean(explicit) && !legacyPark, !queued);
   const recovered = opts._queuedTarget?.options?.recoveredHome === true || !sameHome(requested, target.dir);
   if (recovered) {
     process.env.HERDR_APP_HOME = target.dir;
@@ -7698,16 +7675,14 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}) };
   // The session the new pane runs, for its label and seat row: the id chosen for a new one, or the resumed one.
   const sessionOfPlan = (p, resumed) => p.sessionId ?? (p.mode === "resume" ? resumed : null);
-  // #1557: a switch restarts on another login this sweep chose; a person's restart keeps the
-  // selected login (`recheck`), as before.
-  const login = opts._login ?? await recheck(plan.argv);
+  const login = await recheck(plan.argv);
   // A queued restart claims its entry only once every check passed and the seat is about to
   // start: a cancel between the watcher's read and here wins, and nothing is launched.
   if (opts._queuedTarget) {
     const consumed = await editRestartQueue((rows) => {
       const i = rows.findIndex((e) => e.id === opts._queuedTarget.id);
       return i < 0 ? null : rows.splice(i, 1)[0];
-    });
+    }, opts._queueHome);
     if (!consumed) return PRINTED;
   }
   let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
@@ -7718,10 +7693,10 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   // start a second replacement while this one hands the bot over.
   if (!opts._queuedTarget) {
     let queued = false;
-    try { queued = readRestartQueue().some((e) => e.botId === bot.id); } catch {}
+    try { queued = readRestartQueue().some((e) => e.project === key && e.botId === bot.id); } catch {}
     if (queued) {
       await editRestartQueue(async (rows) => {
-        const i = rows.findIndex((e) => e.botId === bot.id);
+        const i = rows.findIndex((e) => e.project === key && e.botId === bot.id);
         if (i < 0) return null;
         const [e] = rows.splice(i, 1);
         await killQueuedWatcher(e.watcher);
@@ -10296,7 +10271,7 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
         const live = await hcState(binding.terminal);
         if (live.state !== "live" || live.get?.created_ms !== binding.created_ms || !agentInForeground(live.get)) unsent = `${main.name}'s pane ${binding.terminal} runs no agent`;
         else {
-          const r = await hc(["send", binding.terminal, line]);
+          const r = await sendAutomatically(binding.terminal, line);
           if (r.code === 0) sent = binding.terminal;
           else unsent = `hc send ${binding.terminal} failed (${(r.stderr || r.stdout).trim().split("\n")[0]})`;
         }
@@ -10983,7 +10958,7 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
-  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive, "rate-limit": cmdRateLimit };
+  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */

@@ -477,25 +477,19 @@ byte-for-byte the live modal, so the rule cannot tell them apart, and every mark
 quote, a fence, a patch) is refused. An ordinary report
 whose text says "rate limit" and lists findings is not the dialog, and an unreadable or empty tail
 is never a match. The detection reads the pane tail only: the dialog is never answered, and no key
-is sent. The reaction
-is the project file's top-level `onRateLimit` (`"park"` or `"switch"`, written in the project's
-`.herdr/bots.json` beside `version`): `park` (the default) records the reset and queues
-`am restart <bot>` for one minute after it, so `am restart --queued` lists the seat with its wake
-time; when the dialog names no reset, no wake time is invented and the watcher only cancels when
-the dialog clears. A past timestamp in the dialog is treated as unknown, and `tomorrow`/`today`
-choose the day a clock time lands on. `switch` restarts the seat now on another signed-in login
-whose account has a *fresh* meter reading (every window under 100%, at most 10 minutes old) and
-whose store already holds this session's transcript; when no login clears both, it parks and says
-which one it could not use. `am rate-limit [--all] [--dry-run]` runs one such sweep, and the
-scheduled `am restart --due` pass runs it first and then leaves a parked seat alone until its
-wake. Each episode (key `rate-limit:<project>:<bot id>`) writes one attention item
-(`"<bot> is rate-limited until <time>; parked"` or `"… switched to <login>"`) to
-`<app home>/automagik-herdr/attention.json`, shown once by `am ls` and `am show`; only a readable
-sweep that sees the seat healthy closes it (an unreadable sweep leaves the same item open), and a
-later dialog starts a new episode. The watcher drops a queued restart as soon as a readable pane
-no longer shows the dialog, whatever the pane's status. A setup with Herdr's automations scheduler
-should pause an automation that targets a parked bot until its wake: `am` cannot stop the
-scheduler's own sends.
+is sent. Both project settings for `onRateLimit` (`"park"` and `"switch"`) preserve the original
+pane and its workers. Resume in that pane when the provider allows it. Herdr cannot atomically
+retire a pane only if it has no dependent workers, and a session named in a launch command
+does not confirm which conversation the provider actually opened.
+
+`am rate-limit [--all] [--dry-run]` runs one sweep. The scheduled `am restart --due` checks
+the dialog first. Each episode writes one item in `<app home>/automagik-herdr/attention.json`
+for `am ls` and `am show`. If the dialog names a reset time, `am restart --queued` shows a
+recheck one minute later. An unknown reset has no timed recheck. The watcher observes the
+original pane until it recovers or the watch expires. An unreadable screen keeps its attention
+item open. The updated Herdr automations scheduler checks `am delivery-status` before sending
+to a target or a notification recipient and preserves each automation's `enabled` setting.
+The installed scheduler (0.12.1-am.2) needs a separate release to gain that check.
 
 **Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
 `am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
