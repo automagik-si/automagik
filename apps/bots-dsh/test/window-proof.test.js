@@ -37,17 +37,23 @@ function team(t) {
   return { rt, root, disposers }
 }
 
-test('only a verified request makes a proof, and only a made proof passes', () => {
+test('only a verified request makes a proof, and only a made proof passes', (t) => {
   const secret = 'ab'.repeat(32)
-  const env = { AUTOMAGIK_WINDOW_DIGEST: createHash('sha256').update(secret, 'ascii').digest('hex') }
+  const digest = createHash('sha256').update(secret, 'ascii').digest('hex')
   const request = headers => new Request('http://localhost/api/omni-ui', { headers })
-  assert.equal(windowProof(request({}), env), false)
-  assert.equal(windowProof(request({ 'x-automagik-window': 'cd'.repeat(32) }), env), false)
-  assert.equal(windowProof(request({ 'x-automagik-window': env.AUTOMAGIK_WINDOW_DIGEST }), env), false, 'the digest alone is not the secret')
-  assert.equal(windowProof(request({ 'x-automagik-window': secret }), {}), false, 'no digest, no window')
-  const proof = windowProof(request({ 'x-automagik-window': secret }), env)
+  const was = process.env.AUTOMAGIK_WINDOW_DIGEST
+  t.after(() => { if (was === undefined) delete process.env.AUTOMAGIK_WINDOW_DIGEST; else process.env.AUTOMAGIK_WINDOW_DIGEST = was })
+  // A caller's own environment is ignored: with none in the process, its digest makes no proof.
+  delete process.env.AUTOMAGIK_WINDOW_DIGEST
+  assert.equal(windowProof(request({ 'x-automagik-window': secret }), { AUTOMAGIK_WINDOW_DIGEST: digest }), false, 'no digest of its own, no window')
+  process.env.AUTOMAGIK_WINDOW_DIGEST = digest
+  assert.equal(windowProof(request({})), false)
+  assert.equal(windowProof(request({ 'x-automagik-window': 'cd'.repeat(32) })), false)
+  assert.equal(windowProof(request({ 'x-automagik-window': digest })), false, 'the digest alone is not the secret')
+  assert.equal(windowProof(request({ 'x-automagik-window': 'cd'.repeat(32) }), { AUTOMAGIK_WINDOW_DIGEST: createHash('sha256').update('cd'.repeat(32), 'ascii').digest('hex') }), false, "a caller's digest is not the process's")
+  const proof = windowProof(request({ 'x-automagik-window': secret }))
   assert.equal(fromWindow(proof), true)
-  assert.notEqual(windowProof(request({ 'x-automagik-window': secret }), env), proof, 'one proof per request')
+  assert.notEqual(windowProof(request({ 'x-automagik-window': secret })), proof, 'one proof per request')
   for (const value of [...FORGED, false, null, undefined]) assert.equal(fromWindow(value), false, String(value))
   revokeWindowProof(proof)
   assert.equal(fromWindow(proof), false, 'a revoked proof, kept after its request, opens nothing')

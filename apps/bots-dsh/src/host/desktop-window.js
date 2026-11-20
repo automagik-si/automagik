@@ -15,8 +15,9 @@ export function verifiedWindow(request, env = process.env) {
 // request; the route revokes it when the request ends, and hands it only to endpoints the team
 // registered as window-only (extend.js `windowEndpoint`), never to another plugin's endpoint.
 const proofs = new WeakSet()
-export function windowProof(request, env = process.env) {
-  if (!verifiedWindow(request, env)) return false
+// It reads the digest from this process's environment only: a caller cannot supply its own.
+export function windowProof(request) {
+  if (!verifiedWindow(request, process.env)) return false
   const proof = Object.freeze({})
   proofs.add(proof)
   return proof

@@ -6,8 +6,15 @@ import { windowProof } from '../../src/host/desktop-window.js'
 
 export function aWindowProof() {
   const secret = randomBytes(32).toString('hex')
-  const env = { AUTOMAGIK_WINDOW_DIGEST: createHash('sha256').update(secret, 'ascii').digest('hex') }
-  const proof = windowProof(new Request('http://localhost/api/omni-ui', { headers: { 'x-automagik-window': secret } }), env)
+  const was = process.env.AUTOMAGIK_WINDOW_DIGEST
+  process.env.AUTOMAGIK_WINDOW_DIGEST = createHash('sha256').update(secret, 'ascii').digest('hex')
+  let proof
+  try {
+    proof = windowProof(new Request('http://localhost/api/omni-ui', { headers: { 'x-automagik-window': secret } }))
+  } finally {
+    if (was === undefined) delete process.env.AUTOMAGIK_WINDOW_DIGEST
+    else process.env.AUTOMAGIK_WINDOW_DIGEST = was
+  }
   if (proof === false) throw new Error('fixture: the window proof was not made')
   return proof
 }
