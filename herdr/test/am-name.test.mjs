@@ -55,7 +55,7 @@ test("the help names am, never the old command", () => {
 // Every mod of the pack, its CLI and its launchers: no string a person or a bot reads names the
 // old command. Comments are skipped. KEPT lists the three places that keep it on purpose.
 const VERBS = ["ls", "show", "create", "edit", "rm", "category", "start", "restart", "attach", "detach", "import", "whois", "history", "brief",
-  "briefing", "update", "tidy", "forget", "worker", "reap", "meter", "machines", "dsh-tui", "doc", "proxy", "launch-path", "revive"];
+  "briefing", "update", "tidy", "forget", "worker", "reap", "meter", "machines", "dsh-tui", "doc", "proxy", "launch-path", "accounts", "revive"];
 const AS_COMMAND = new RegExp(`automagik-herdr(?:: | <| \\$\\{| --| (?:${VERBS.join("|")})(?![\\w/.-]))`);
 const KEPT = [
   // The Antigravity deny rules name both commands: the alias must stay refused too.

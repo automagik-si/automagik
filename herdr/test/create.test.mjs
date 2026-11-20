@@ -10,11 +10,13 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readJsonLines } from "./log-lines.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
 const here = (f) => new URL(f, import.meta.url).href;
 const stubs = { herdr: here("./form-herdr-stub.mjs"), "fs/promises": here("./fs-stub.mjs"), "gpui-kit": here("./gpui-stub.mjs"), "gpui-base": here("./gpui-stub.mjs") };
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
+const FAKE_APP = new URL("./fake-herdr-app.mjs", import.meta.url).pathname;
 const FAKE_AGY = new URL("./fake-agy.mjs", import.meta.url).pathname;
 const fromPack = (context) => context.parentURL?.includes("/mods/am-sidebar/");
 registerHooks({
@@ -509,6 +511,19 @@ test("Bot settings (pick) with bots: the bots with Edit / Start, no New bot line
 test("Start in Bot settings with no space on the project: one space opened, waited for on the form's timer, the bot sent there", async () => {
   // Start runs the CLI with the place the sidebar picked; this scratch app home has no CLI, so
   // only that call is checked (the CLI's own start is tested in cli.test.mjs).
+  // The stand-in answers "no window", so requestSpace falls back to run("space.new").
+  const appBin = join(root, "app-bin");
+  const appState = join(root, "herdr-app.json");
+  const appLog = join(root, "herdr-app.log");
+  mkdirSync(appBin);
+  writeFileSync(join(appBin, "herdr-app"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_APP}" "$@"\n`, { mode: 0o755 });
+  writeFileSync(appState, JSON.stringify({ down: true }));
+  writeFileSync(appLog, "");
+  const saved = {
+    PATH: process.env.PATH,
+    HERDR_APP_FAKE_STATE: process.env.HERDR_APP_FAKE_STATE,
+    HERDR_APP_FAKE_LOG: process.env.HERDR_APP_FAKE_LOG,
+  };
   state.calls = [];
   // Herdr shows the space a little after space.new.
   state.runFault = (name) => {
@@ -518,15 +533,26 @@ test("Start in Bot settings with no space on the project: one space opened, wait
   // Its space closed: the project is found as a remembered one.
   state.shared.set("am.sidebar.projects", [{ key: project, machine: null }]);
   try {
+    process.env.PATH = `${appBin}:${saved.PATH}`;
+    process.env.HERDR_APP_FAKE_STATE = appState;
+    process.env.HERDR_APP_FAKE_LOG = appLog;
     const { cx, draw, click } = await open({ form: "pick" });
     cx.timer = { after(ms, fn) { setTimeout(() => fn(cx), ms); } };
     draw();
     await click(`start-${MAIN.id}`);
-  } finally { state.runFault = null; state.shared.delete("am.sidebar.projects"); }
+  } finally {
+    state.runFault = null;
+    state.shared.delete("am.sidebar.projects");
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
   assert.equal(state.runs.filter(([name]) => name === "space.new").length, 1);
   const cli = state.calls.find((c) => c.kind === "exec" && c.args.includes("start")).args;
   assert.deepEqual(cli.slice(cli.indexOf("--space"), cli.indexOf("--space") + 2), ["--space", "s5"]);
   assert.equal(cli.includes("--tab"), false, "a tab of its own: no --tab");
+  assert.deepEqual(readJsonLines(appLog).map((c) => c.slice(0, 2)), [["do", "space.new"]], "the test's own herdr-app answered no window, not the host's");
 });
 
 test("Attach with no bot keeps its message (the New bot line is the pick list's alone)", async () => {

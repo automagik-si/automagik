@@ -1,6 +1,7 @@
 import { createElement as h } from 'react'
+import { call } from './api.js'
 import { t } from './i18n.js'
-import { WORKING, startPower, usePowerState } from './power-store.js'
+import { WORKING, powerOf, startPower, subscribePower, usePowerState } from './power-store.js'
 import { geniePowerOn, genieStatusOf, powerLocked, powerOff, powerOn, statusOf, unfoldPowerOn, unfoldStatusOf } from './team.js'
 
 // Omni's, Genie's and Unfold's power, as the welcome's team step and each built-in Bot's
@@ -116,6 +117,64 @@ export const secondaryLabel = row => (row.secondary ? ACTION_LABEL[row.secondary
 const POWER_KINDS = new Set(['omni', 'genie', 'unfold'])
 const POWER_ON = { omni: powerOn, genie: geniePowerOn, unfold: unfoldPowerOn }
 
+export const installRunning = status => status?.install?.phase === 'installing'
+
+/**
+ * Picks up an install the host is running that this window is not following (the window was
+ * reloaded, or the install was started in another one): the kind's power-on, resumed from that
+ * answer, so it draws the install's step and place and polls the host (team.js POLL_MS) until it
+ * is done or failed. It asks for no install of its own, and a kind already working starts nothing
+ * (startPower). Returns the run, or null.
+ */
+export function resumeInstall(kind, status, start = startPower) {
+  if (!installRunning(status) || (kind !== 'omni' && kind !== 'genie')) return null
+  const on = kind === 'omni' ? powerOn : geniePowerOn
+  return start(kind, options => on({ ...options, resume: status }))
+}
+
+// What this DSH's plugins have (omni-plugins, genie-plugin), each null when its read failed.
+export const readPlugins = (ask = call) => Promise.all(
+  [ask('omni-plugins'), ask('genie-plugin')]
+    .map(request => Promise.resolve(request).catch(() => null)),
+)
+
+export function officialRow(kind, power, { roster, read, actions }) {
+  const asleep = (power?.phase ?? 'asleep') === 'asleep'
+  if (!read.checked && asleep) {
+    return { text: null, label: null, alert: null, action: null }
+  }
+  const status = asleep ? read.status : null
+  const row = powerRow(kind, power, { roster, status })
+  if (row.state === 'on' && row.action === 'off' && notInstalled(kind, status)) {
+    const action = 'install'
+    const label = actionLabel({ ...row, action })
+    return { text: null, label, alert: null, action }
+  }
+  let action = null
+  if (row.action === 'install' || row.action === 'power' || row.action === 'retry') {
+    action = row.action
+  } else if (row.action === 'choose' && typeof actions?.openHarnessOnboarding === 'function') {
+    action = row.action
+  } else if (row.action === 'plugins' && actions?.hasPlugins?.() === true) {
+    action = row.action
+  }
+  const text = row.state === 'off' && action === 'install' ? null : row.text
+  return { text, label: actionLabel({ ...row, action }), alert: row.alert, action }
+}
+
+export function actOfficial(kind, row, { actions, start = startPower }) {
+  if (row.action === 'install' || row.action === 'power' || row.action === 'retry') {
+    return start(kind, POWER_ON[kind])
+  }
+  if (row.action === 'choose') {
+    actions.closeSettings?.()
+    actions.openHarnessOnboarding('omni-team')
+  } else if (row.action === 'plugins') {
+    actions.closeSettings?.()
+    actions.openPlugins?.()
+  }
+}
+
 // The card's one control, from the switch's next value: off, or the kind's own power-on, in the
 // shared store.
 export function togglePowerSettings(kind, next, { start = startPower, stop = powerOff } = {}) {
@@ -169,4 +228,67 @@ export function installPowerSettings(load = () => require('@automagik/bots-dsh/c
   const settings = bots?.omni?.botSettings ?? null
   if (typeof settings?.register !== 'function') return () => {}
   return settings.register({ id: 'welcome-power', order: 0, Component: PowerSettingsCard })
+}
+
+export function installOfficialInstall(
+  load = () => require('@automagik/bots-dsh/client'),
+  { ask = call, start = startPower } = {},
+) {
+  let bots = null
+  try {
+    bots = load()
+  } catch {
+    bots = null
+  }
+  const registry = bots?.omni?.officialInstall
+  if (typeof registry?.register !== 'function') return () => {}
+
+  const empty = { checked: false, status: null }
+  const reads = { omni: empty, genie: empty }
+  const listeners = new Set()
+  let version = 0
+  let inFlight = null
+  let disposed = false
+  const changed = () => {
+    version += 1
+    for (const listener of Array.from(listeners)) listener()
+  }
+  const unsubscribePower = subscribePower(changed)
+  const row = (kind, { roster, actions }) =>
+    officialRow(kind, powerOf(kind), { roster, read: reads[kind], actions })
+  const unregister = registry.register({
+    id: 'welcome-install',
+    order: 0,
+    kinds: ['omni', 'genie'],
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    version: () => version,
+    pending(kind) {
+      const { phase } = powerOf(kind)
+      const missing = phase === 'asleep' && notInstalled(kind, reads[kind].status)
+      const needsAttention = phase === 'failed' || phase === 'restart' || phase === 'pairing'
+      return missing || WORKING.has(phase) || needsAttention || CHOOSE.has(phase)
+    },
+    row,
+    act: (kind, ctx) => actOfficial(kind, row(kind, ctx), { actions: ctx.actions, start }),
+    refresh() {
+      if (inFlight !== null) return inFlight
+      inFlight = readPlugins(ask).then(([omni, genie]) => {
+        if (disposed) return
+        reads.omni = { checked: true, status: omni }
+        reads.genie = { checked: true, status: genie }
+        changed()
+        resumeInstall('omni', omni, start)
+        resumeInstall('genie', genie, start)
+      }).finally(() => { inFlight = null })
+      return inFlight
+    },
+  })
+  return () => {
+    disposed = true
+    unsubscribePower()
+    unregister()
+  }
 }

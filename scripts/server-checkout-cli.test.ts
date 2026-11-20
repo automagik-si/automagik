@@ -51,7 +51,7 @@ function verify(f: ReturnType<typeof fixture>) {
   expect(output).toBe(`manifest=${manifest}\nchild=${child}\nrevision=${f.revision}\n`);
   const result = verifyCheckoutDirectory(f.target, { kind: 'checkout', event: 'pull_request', revision: f.revision,
     version: '1.2.3', manifest, repository: CHECKOUT_REPOSITORY });
-  expect(result.assets.size).toBe(7);
+  expect(result.assets.size).toBe(8);
   const archive = join(f.target, 'automagik-bots-dsh-1.2.3.tgz');
   expect(execFileSync('tar', ['-xOzf', archive, 'package/src/host/browser/script-child.js'])
     .equals(readFileSync(join(f.root, CHILD)))).toBe(true);

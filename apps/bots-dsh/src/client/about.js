@@ -17,6 +17,9 @@ import { Switch } from './bot-settings.js'
 
 // The length of the mark's `done` hop (bt-done in styles.js).
 const CHEER_MS = 1800
+const CHECK_POLL_MS = 2000
+// Up to five tarballs can each take a minute to download.
+const MAX_CHECK_POLLS = 180
 
 const starCount = count => new Intl.NumberFormat(dateLocale(), { notation: 'compact', maximumFractionDigits: 1 }).format(count)
 
@@ -151,6 +154,82 @@ function pluginReason(versions) {
   }
 }
 
+function selfUpdateReason(reason) {
+  switch (reason) {
+    case 'desktop-app': return t('updates come with the desktop app.')
+    case 'no-store': return t('the update store is unavailable.')
+    case 'store-invalid': return t('the saved update state is invalid.')
+    case 'profile-invalid': return t('the installed plugin versions could not be read.')
+    case 'download-failed': return t('the update files could not be downloaded.')
+    case 'signature-invalid': return t('the signed release could not be verified.')
+    case 'lane-invalid': return t('the published release has invalid update information.')
+    case 'not-newer': return t('the published release would downgrade an installed plugin.')
+    case 'sequence-lower': return t('the published release is older than one already accepted.')
+    case 'engines-dsh': return t('the published release needs a different DeepSeek Harness version.')
+    case 'hash-mismatch': return t('a downloaded plugin package did not match the signed release.')
+    case 'registry-unreachable': return t('the package registry could not be reached.')
+    case 'bot/read-only': return t('this window does not hold the team lock.')
+    case 'check-timeout': return t('the update check is taking too long. Try again.')
+    default: return t('the update check could not be completed.')
+  }
+}
+
+const failedCheck = error => ({ reason: error?.code === 'bot/read-only' ? error.code : null })
+
+function SelfUpdateRow({ Row, check, readResult }) {
+  const [starting, setStarting] = useState(false)
+  const [result, setResult] = useState(null)
+  const runId = result?.state === 'checking' ? result.runId : undefined
+  const waiting = runId !== undefined
+  const checking = starting || waiting
+  useEffect(() => {
+    if (!waiting) return
+    let stopped = false
+    let timer
+    let polls = 0
+    const poll = async () => {
+      try {
+        const value = await readResult(runId)
+        if (stopped) return
+        if (value.state !== 'checking') {
+          setResult(value)
+          return
+        }
+      } catch (error) {
+        if (stopped) return
+        // A response interrupted during decoding can also fail without an error code.
+        const code = error?.code
+        if (code && code !== 'NETWORK' && !/^HTTP_5\d\d$/.test(code)) {
+          setResult(failedCheck(error))
+          return
+        }
+      }
+      if (++polls >= MAX_CHECK_POLLS) setResult({ reason: 'check-timeout' })
+      else timer = setTimeout(poll, CHECK_POLL_MS)
+    }
+    timer = setTimeout(poll, CHECK_POLL_MS)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [runId, readResult])
+  const onCheck = async () => {
+    setStarting(true)
+    setResult(null)
+    try { setResult(await check()) } catch (error) {
+      setResult(failedCheck(error))
+    } finally {
+      setStarting(false)
+    }
+  }
+  const message = result === null || waiting ? null
+    : result.state === 'available' ? t('Automagik {version} is available, signed and checked.', { version: result.laneVersion })
+    : result.state === 'current' ? t('Up to date.')
+    : result.state === 'interrupted' ? t('The check was interrupted. Check again.')
+    : result.state === 'checking' ? t('A check is already running. Try again shortly.')
+    : t('Cannot update: {reason}', { reason: selfUpdateReason(result.reason) })
+  return h(Row, { label: 'Automagik', hint: h('span', { role: 'status' }, message) },
+    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: checking, onClick: onCheck },
+      checking ? t('Checking…') : t('Check for updates')))
+}
+
 const linkProps = href => ({ className: 'bt-soft bt-soft-sm bt-about-link', href, target: '_blank', rel: 'noopener noreferrer' })
 
 export function AboutPage({ useUpdate, actions, run, Section, Row }) {
@@ -251,6 +330,8 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
       stars === null ? null : h('span', { className: 'bt-star-count' }, starCount(stars))) : null),
     repo ? h('p', { key: 'ask', className: 'bt-about-ask' }, t('If Omni helps you, a star on GitHub helps more people find it.')) : null,
     h(Section, { key: 'updates', title: t('Updates') },
+      !ours && update.hostAnswered
+        ? h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult }) : null,
       h(Row, { label: ours ? 'Automagik' : 'Omni', hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)
         // With the plugin's own check off, the app still knows the runtime it carries.

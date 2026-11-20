@@ -20,6 +20,7 @@ import { isWindowEndpoint } from './extend.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
+import { CHECK_READ_ONLY } from './self-update-check.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -186,7 +187,7 @@ export function install(rt) {
     // `sessionId` is the group's own Session's current part, `ownParts` its earlier
     // ones; `parts` the members' hidden group Sessions and their earlier segments,
     // for usage. `lateRounds` and `relays` are what an older team's rooms may still hold.
-    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, ...room }) => {
+    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, scoped: _scoped, legacySpeakers: _legacySpeakers, legacyUnproven: _legacyUnproven, ...room }) => {
       const parts = [...Object.values(sessions ?? {}), ...Object.values(segments ?? {}).flat().map(segment => segment.sessionId), ...(ownParts ?? []).map(segment => segment.sessionId)]
       const last = (log ?? []).filter(line => line.kind === undefined).at(-1)
       // The row's one line: the start of the last message, without its markdown marks (#1155).
@@ -484,16 +485,27 @@ export function install(rt) {
   }
   // Internal Bot tools call these same runtime mutators directly. They participate as
   // owners; nested calls from an already admitted handler reuse its admission.
+  const ownershipMutators = new Set(['createBot', 'updateBot', 'switchRoute', 'addAgent', 'removeAgent',
+    'adoptAgentSession', 'adoptBotSession', 'adoptAsBot', 'rollbackAdoption'])
   for (const name of ['createBot', 'duplicateBot', 'updateBot', 'deleteBot', 'setMain',
     'createRoom', 'updateRoom', 'deleteRoom', 'setFlags', 'bootstrap', 'switchRoute',
     'addAgent', 'removeAgent', 'adoptAgentSession', 'adoptBotSession', 'adoptAsBot',
     'rollbackAdoption']) {
     const original = rt[name]
     if (typeof original === 'function') {
-      rt[name] = (...args) => ownerTransaction(() => name === 'switchRoute'
+      const execute = (...args) => ownerTransaction(() => name === 'switchRoute'
         ? rt.withModelChange(args[0], () => original(...args)) : original(...args))
+      rt[name] = ownershipMutators.has(name) || name === 'updateRoom' ? async (...args) => {
+        const leave = name !== 'updateRoom' || args[1]?.workDir !== undefined ? rt.enterOwnership() : undefined
+        try { return await execute(...args) } finally { leave?.() }
+      } : execute
     }
   }
+  const ownershipEndpoints = new Set(['create-bot', 'update-bot', 'switch-route', 'add-agent', 'agent-session',
+    'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'agent-archive', 'remove-agent',
+    'bot-fresh', 'bot-new-part', 'bot-open-part'])
+  const enterRequestOwnership = (endpoint, payload) => ownershipEndpoints.has(endpoint)
+    || (endpoint === 'update-room' && payload?.workDir !== undefined) ? rt.enterOwnership() : undefined
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),
     'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach',
@@ -511,6 +523,16 @@ export function install(rt) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
       await rt.refresh()
+      if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result') {
+        if (rt.holdsLock() !== true) return fail(CHECK_READ_ONLY, 'bot/read-only')
+        if (endpoint === 'self-update-check-result' && (typeof body.runId !== 'string' || body.runId === '')) {
+          return fail('An update check run ID is required.', 'bot/invalid')
+        }
+        const generation = rt.teamGeneration()
+        const result = endpoint === 'self-update-status' ? rt.selfUpdateStatus()
+          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId) : await rt.selfUpdateCheck()
+        return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
+      }
       const readOnly = rt.readOnly()
       // An endpoint another Omni plugin serves (extend.js) says itself whether it only reads.
       const added = rt.extended.endpointOf(endpoint)
@@ -1283,7 +1305,7 @@ export function install(rt) {
     }
   }
 
-  const agentAccess = createAgentAccess(rt, handle, { transaction: adminTransaction })
+  const agentAccess = createAgentAccess(rt, handle, { transaction: adminTransaction, enterRequestOwnership })
   rt.agentAccess = agentAccess
   ctx.effect(() => {
     void agentAccess.resume().catch(() => rt.warn('Agent access could not start'))
@@ -1434,10 +1456,12 @@ export function install(rt) {
       }
       // Read before the dispatch, as #1845 does: the dispatch can settle the request it names.
       const keyringDetail = endpoint === 'secret-source-detail' && rt.secretServiceDetail?.(body?.payload?.requestId)
+      const leave = enterRequestOwnership(endpoint, body?.payload)
       let result
       try {
         result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
       } finally {
+        leave?.()
         revokeWindowProof(proof)
       }
       const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail

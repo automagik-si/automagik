@@ -72,6 +72,11 @@ export const sidebarTools = registry()
 // `Component({ bot, roster, actions, run, Card, Row, SwitchRow })`.
 export const botSettings = registry()
 
+// Official install: how the Apps page's Omni and Genie rows install in place. The welcome
+// registers { id, order, kinds, subscribe, version, pending, row, act, refresh }. The last
+// entry wins. With no entry, the rows open the team step as before.
+export const officialInstall = registry()
+
 // Chat suggestions: what an empty chat offers above its composer, chips that fill it with a
 // start the person finishes. `{ id, order, when?({ bot, roster }), items({ bot, roster }) }`:
 // `when` picks the Bots it is for (a kind, one Bot), `items` returns `{ id, label, text,

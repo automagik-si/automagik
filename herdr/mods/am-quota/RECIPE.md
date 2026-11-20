@@ -195,3 +195,11 @@ the sidebar's `bin/automagik-herdr` launcher, the file behind `am` (`automagik-h
 a Codex Switch rewrites its file with a backup and a 0600 permission, and the next `codex` run is
 on the chosen account; the Claude card lists this Mac's logins and its Use changes only `claude-logins.json`; the banner names the bots still on the old one and Restart moves them; no token
 appears in any log, notify or state.
+
+## Linked machines
+
+Open Accounts and choose Claude or Codex to see the last reading from each linked machine.
+The Claude rows show which login each launch route would use. The Codex rows compare account
+fingerprints and leave the grant's origin unknown. Press ↻ to read again. For a listed bot,
+press Restart twice to restart the pane the panel showed. A pane that has since changed is
+refused. Linked readings need an up-to-date sidebar mod on this computer.

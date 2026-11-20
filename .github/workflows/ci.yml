@@ -767,15 +767,25 @@ jobs:
           # Hand the downloaded debs back to the runner user so actions/cache can save them.
           sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
+      # Keep the verified pinned build for the Tests step's
+      # standalone check.
       - name: Every pack mod loads in herdr-app
+        id: app
         if: matrix.node == '24'
         working-directory: .
-        run: node .github/scripts/herdr-app-check.mjs
+        run: node .github/scripts/herdr-app-check.mjs --keep-app
 
       # am-quota's Keychain tests run against the stand-in in test/am-quota-keychain.mjs, first on
       # PATH; am-quota-keychain-guard.test.mjs fails any that could reach the real `security`.
       - name: Tests
         id: tests
+        env:
+          # test/standalone-check.test.mjs runs `herdr-app check` on every am-* mod for real only with
+          # AUTOMAGIK_HERDR_APP_CHECK=1 and HERDR_APP_BIN naming the app: the Node 24 leg, from the pinned
+          # build the step above verified and kept. A feed that could not be reached (outcome
+          # unverified, already a ::warning::) skips it; a missing handoff fails it. Other legs skip.
+          AUTOMAGIK_HERDR_APP_CHECK: ${{ matrix.node == '24' && steps.app.outputs.outcome != 'unverified' && '1' || '' }}
+          HERDR_APP_BIN: ${{ steps.app.outputs.bin }}
         run: node --test 'test/*.test.mjs'
 
       - name: Syntax
@@ -1587,7 +1597,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, vault-dsh, welcome-dsh]
+        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, multiuser-dsh, vault-dsh, welcome-dsh]
     defaults:
       run:
         working-directory: apps/${{ matrix.app }}

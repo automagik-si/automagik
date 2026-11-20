@@ -152,6 +152,10 @@ Out of scope, by design:
 - launches on linked machines (`--machine`) never get the login words: each host has one login;
 - per-bot pinning to a login (not asked for).
 
+The Accounts panel now shows what each route would start on a linked machine. A start or plain
+restart from here uses the target's inherited environment. A tree restart runs the target's
+own CLI and follows its login record. The read says when those two routes pick different emails.
+
 Not used:
 - `launchctl setenv`: it is machine-wide, reaches every app, and going back to A needs an unset
   that nothing guarantees;

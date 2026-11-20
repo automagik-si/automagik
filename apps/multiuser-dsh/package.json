@@ -1,0 +1,42 @@
+{
+  "name": "@automagik/multiuser-dsh",
+  "version": "3.160.7",
+  "description": "Admit and attribute Automagik workspace callers in DeepSeek Harness.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "index.js",
+  "types": "./types.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types.d.ts",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "types.d.ts",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "test": "node --import ./test/harness-resolve.mjs --test \"test/*.test.js\"",
+    "lint": "node scripts/lint.mjs",
+    "harness": "bun install --cwd dev/harness --no-save --no-summary"
+  },
+  "engines": {
+    "dsh": ">=0.2.2-rc.2 <0.3.0-0",
+    "node": ">=24.9"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-web-app": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-web-app": {
+      "optional": true
+    }
+  }
+}

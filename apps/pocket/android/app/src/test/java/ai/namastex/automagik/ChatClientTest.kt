@@ -20,10 +20,11 @@ class ChatClientTest {
      * The bridge's side: answers hello (with [dshWrite] as its `dshWrite` when set), records every frame the phone
      * sends, answers requests with [answer].
      */
-    private class FakeBridge(chat: Boolean, dshWrite: Any? = null, val answer: (JSONObject) -> JSONObject = { JSONObject() }) {
+    private class FakeBridge(chat: Boolean, dshWrite: Any? = null, groups: Any? = null, val answer: (JSONObject) -> JSONObject = { JSONObject() }) {
         val toPhone = Channel<ByteArray>(Channel.UNLIMITED)
         val fromPhone = Channel<ByteArray>(Channel.UNLIMITED)
         val requests = LinkedBlockingQueue<JSONObject>()
+        val hellos = LinkedBlockingQueue<JSONObject>()
         val credits = LinkedBlockingQueue<Pair<Int, Int>>()
         val closes = LinkedBlockingQueue<Int>()
         val phoneOut = object : OutputStream() {
@@ -41,7 +42,12 @@ class ChatClientTest {
                 val line = StringBuilder()
                 while (true) { val c = input.read(); if (c == -1) return@thread; if (c == 10) break; line.append(c.toChar()) }
                 val hello = JSONObject(line.toString())
-                val result = JSONObject().put("generation", 1).put("framed", true).apply { if (chat) put("chat", 1).put("credit", 256 * 1024); if (dshWrite != null) put("dshWrite", dshWrite) }
+                hellos.put(hello.getJSONObject("params"))
+                val result = JSONObject().put("generation", 1).put("framed", true).apply {
+                    if (chat) put("chat", 1).put("credit", 256 * 1024)
+                    if (dshWrite != null) put("dshWrite", dshWrite)
+                    if (groups != null) put("groups", groups)
+                }
                 send((JSONObject().put("jsonrpc", "2.0").put("id", hello.get("id")).put("result", result).toString() + "\n").toByteArray())
                 try {
                     while (true) {
@@ -64,10 +70,15 @@ class ChatClientTest {
         }
     }
 
-    private fun withChat(bridge: FakeBridge, test: suspend CoroutineScope.(ChatClient) -> Unit) = runBlocking {
+    private fun withChat(bridge: FakeBridge, test: suspend CoroutineScope.(ChatClient) -> Unit) =
+        withChat(bridge, groups = false, test = test)
+
+    private fun withChat(bridge: FakeBridge, groups: Boolean, test: suspend CoroutineScope.(ChatClient) -> Unit) = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val core = CoreClient(bridge.phoneIn, bridge.phoneOut, Closeable { bridge.toPhone.close() }, scope) { }
-        try { withTimeout(10_000) { test(ChatClient.start(core)) } } finally { core.close(); scope.cancel() }
+        val core = CoreClient(bridge.phoneIn, bridge.phoneOut, Closeable { bridge.toPhone.close(); bridge.fromPhone.close() }, scope) { }
+        try {
+            withTimeout(10_000) { test(if (groups) ChatClient.start(core, groups = true) else ChatClient.start(core)) }
+        } finally { core.close(); scope.cancel() }
     }
 
     private fun LinkedBlockingQueue<JSONObject>.next() = poll(5, TimeUnit.SECONDS) ?: error("no request")
@@ -264,6 +275,114 @@ class ChatClientTest {
             assertFalse(ChatActions.canRetry(sent, sent.messages.single()))
             assertEquals("Already answered on the computer: Allow.", Chat.answerNotice(chat.answer("dsh:b1", "r1", "allow"), dsh = true))
             assertEquals("Interrupt not sent: Too many taps. Wait a moment.", Chat.interruptNotice(chat.interrupt("dsh:b1"), dsh = true))
+        }
+    }
+    private val room = "dsh:room:r1"
+
+    @Test fun aPlainStartAsksNoGroups() {
+        val bridge = FakeBridge(chat = true, groups = true)
+        withChat(bridge) { chat ->
+            assertFalse(bridge.hellos.next().has("groups"))
+            assertFalse(chat.groups)
+        }
+    }
+
+    @Test fun onlyGroupsTrueGrantsGroups() {
+        for (flag in listOf(null, false, 1, "true", true)) {
+            val bridge = FakeBridge(chat = true, groups = flag)
+            withChat(bridge, groups = true) { chat ->
+                assertEquals(1, bridge.hellos.next().get("groups"))
+                assertEquals(flag == true, chat.groups)
+            }
+        }
+    }
+
+    @Test fun groupRowsListOnlyWithTheGrant() {
+        for (granted in listOf(false, true)) {
+            val bridge = FakeBridge(chat = true, groups = granted) { m ->
+                when (m.getString("method")) {
+                    "chat.subscribe" -> JSONObject().put("channel", 1)
+                    else -> JSONObject("""{"terminals":[{"terminal":"dsh:b1"},{"terminal":"$room","machine":null,"agent":"dsh",
+                        "chat":"group","title":"Launch","status":{"state":"blocked"},"approvals":2,"shown":true,
+                        "members":[{"name":" Ana ","registryId":"b-a"},{"name":"Ben","registryId":null},{"name":" "},null]}]}""")
+                }
+            }
+            withChat(bridge, groups = true) { chat ->
+                val rows = chat.list()
+                assertEquals(if (granted) listOf("dsh:b1", room) else listOf("dsh:b1"), rows.map { it.terminal })
+                assertEquals("chat.list", bridge.requests.next().getString("method"))
+                if (granted) {
+                    val group = rows.last()
+                    assertTrue(group.group)
+                    assertEquals(listOf("Ana", "Ben"), group.members)
+                    assertEquals(2, group.approvals)
+                    assertNull(group.registryId)
+                    assertEquals(1, chat.subscribe(room, null, {}, {}))
+                    assertEquals(room, bridge.requests.next().getJSONObject("params").getString("terminal"))
+                }
+            }
+        }
+    }
+
+    @Test fun withoutTheGrantAGroupSendsNothing() {
+        val bridge = FakeBridge(chat = true, dshWrite = true)
+        withChat(bridge, groups = true) { chat ->
+            for (a in listOf(chat.send(room, "hi", "m1"), chat.answer(room, "a1", "deny"), chat.interrupt(room))) {
+                assertEquals("read-only", a.getString("reason"))
+            }
+            assertTrue(runCatching { chat.subscribe(room, null, {}, {}) }.exceptionOrNull() is GroupsUnsupported)
+            assertTrue(bridge.requests.isEmpty())
+        }
+    }
+
+    @Test fun aRetryAddsRetryTrueAndAFirstSendDoesNot() {
+        val bridge = FakeBridge(chat = true, dshWrite = true, groups = true) {
+            if (it.getJSONObject("params").optBoolean("retry")) JSONObject("""{"ok":false,"state":"unknown","id":"m1"}""")
+            else JSONObject("""{"ok":true,"state":"sent"}""")
+        }
+        withChat(bridge, groups = true) { chat ->
+            val keys = setOf("terminal", "text", "id")
+            chat.send(room, "hi", "m1")
+            assertEquals(keys, bridge.requests.next().getJSONObject("params").keys().asSequence().toSet())
+
+            val answer = chat.send(room, "hi", "m1", retry = true)
+            val retry = bridge.requests.next().getJSONObject("params")
+            assertEquals(keys + "retry", retry.keys().asSequence().toSet())
+            assertEquals(true, retry.get("retry"))
+            assertEquals("m1", retry.getString("id"))
+            for (result in listOf(answer, JSONObject(answer.toString()).put("reason", "no-record"))) {
+                assertEquals("unknown", Chat.answered(Chat.State(room), "m1", "hi", result).messages.single().state)
+            }
+
+            chat.send("dsh:b1", "hi", "m2")
+            assertEquals(keys, bridge.requests.next().getJSONObject("params").keys().asSequence().toSet())
+        }
+    }
+
+    @Test fun aGroupAnswerIsAllowOrDenyWithoutText() {
+        val bridge = FakeBridge(chat = true, dshWrite = true, groups = true)
+        withChat(bridge, groups = true) { chat ->
+            assertEquals("invalid", chat.answer(room, "a1", "allow-always").getString("reason"))
+            assertEquals("invalid", chat.answer(room, "a1", "allow", "yes").getString("reason"))
+            assertTrue(bridge.requests.isEmpty())
+            chat.answer(room, "a1", "deny")
+            val answer = bridge.requests.next()
+            assertEquals("chat.answer", answer.getString("method"))
+            val p = answer.getJSONObject("params")
+            assertEquals(setOf("terminal", "row", "choice"), p.keys().asSequence().toSet())
+            assertEquals(listOf(room, "a1", "deny"), listOf("terminal", "row", "choice").map(p::getString))
+        }
+    }
+
+    @Test fun aGrantedGroupStopSendsInterruptForTheRoom() {
+        val bridge = FakeBridge(chat = true, dshWrite = true, groups = true) {
+            JSONObject("""{"ok":false,"state":"failed","reason":"x"}""")
+        }
+        withChat(bridge, groups = true) { chat ->
+            assertEquals(Chat.STOP_PARTLY, Chat.interruptNotice(chat.interrupt(room), dsh = true, group = true))
+            val interrupt = bridge.requests.next()
+            assertEquals("chat.interrupt", interrupt.getString("method"))
+            assertEquals(room, interrupt.getJSONObject("params").getString("terminal"))
         }
     }
 }

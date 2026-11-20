@@ -8,7 +8,7 @@ import test from 'node:test'
 import { healthReport } from '../healthcheck.mjs'
 import { FOLLOW_STATUS, markSeed, packageHash, SEED_MARKER } from '../profile-state.mjs'
 import { PLUGINS } from '../plugin-payload.mjs'
-import { profileDirOf } from '../lib.mjs'
+import { GATE_VIEW, profileDirOf } from '../lib.mjs'
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(),'automagik-report-')), home=join(root,'data','dsh'), source=join(root,'profile'), profile=profileDirOf(home)
@@ -20,7 +20,9 @@ function fixture(t) {
   cpSync(source,profile,{recursive:true});markSeed(profile,'3.93.0')
   writeFileSync(join(root,'versions.json'),JSON.stringify(build))
   t.after(()=>rmSync(root,{recursive:true,force:true}))
-  return {root,home,source,profile,build}
+  const viewDir = join(root, 'data', GATE_VIEW)
+  mkdirSync(viewDir, { mode: 0o700 })
+  return {root,home,source,profile,build,viewDir}
 }
 async function listener(t, initial=401) {
   let status=initial
@@ -29,7 +31,9 @@ async function listener(t, initial=401) {
   t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve))})
   return {server,port:server.address().port,set:value=>{status=value}}
 }
-const report=(f,port,env={})=>healthReport({root:f.root,dshHome:f.home,dshPort:port,env})
+const report = (f, port, env = {}) => healthReport({
+  root: f.root, dshHome: f.home, viewDir: f.viewDir, dshPort: port, env,
+})
 
 // HEALTH_FENCE_200: treating a successful HTTP response as a healthy authentication fence fails open.
 test('JSON health has a fixed non-secret shape and only a 401 fence is healthy',async t=>{
@@ -48,6 +52,7 @@ test('JSON health has a fixed non-secret shape and only a 401 fence is healthy',
 
 test('gate mode reports both listeners and cannot conceal a missing or open DSH fence',async t=>{
   const f=fixture(t),dsh=await listener(t),gate=await listener(t),env={AUTOMAGIK_GATE_ENABLED:'1',AUTOMAGIK_GATE_PORT:String(gate.port)}
+  await report(f, dsh.port)
   assert.equal((await report(f,dsh.port,env)).healthy,true)
   gate.set(200);assert.equal((await report(f,dsh.port,env)).healthy,false)
   gate.set(401);dsh.set(500)

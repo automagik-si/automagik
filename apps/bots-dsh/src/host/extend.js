@@ -22,6 +22,8 @@
 // The team's own window-only endpoints (the seat chat's reads, the Code tree, automations)
 // register through `windowEndpoint`, which is not on `rt`: only those get the route's proof of
 // the desktop window (desktop-window.js). An endpoint added through `rt.hooks` never does.
+import { isPromise } from 'node:util/types'
+
 const registrars = new WeakMap()
 const windowEntries = new WeakSet()
 export const isWindowEndpoint = entry => typeof entry === 'object' && entry !== null && windowEntries.has(entry)
@@ -36,6 +38,7 @@ export function install(rt) {
   const views = []
   const lives = []
   const sessionOwners = []
+  let sessionOwnersRevision = 0
   const senders = []
   const rules = []
   const botModels = new Map()
@@ -69,7 +72,11 @@ export function install(rt) {
   rt.hooks = {
     endpoint: (name, fn, { read = false } = {}) => register(name, fn, read, false),
     view: fn => add(views, fn),
-    sessionOwner: fn => add(sessionOwners, fn),
+    sessionOwner: fn => {
+      const dispose = add(sessionOwners, fn)
+      sessionOwnersRevision += 1
+      return () => { dispose(); sessionOwnersRevision += 1 }
+    },
     live: fn => add(lives, fn),
     mainRules(fn, { order = 0 } = {}) {
       const dispose = add(rules, { fn, order })
@@ -107,6 +114,26 @@ export function install(rt) {
         }
       }
       return undefined
+    },
+    // A drop can certify exclusivity only when the registered hooks read cleanly.
+    sessionOwnerRead(sessionId) {
+      const revision = sessionOwnersRevision
+      const snapshot = sessionOwners.slice()
+      let read = 'free'
+      for (const fn of snapshot) {
+        try {
+          const owner = fn(sessionId)
+          if (owner === undefined) continue
+          if (isPromise(owner)) {
+            void owner.catch(() => {})
+            return 'unreadable'
+          }
+          if (owner === null || typeof owner !== 'object' || Array.isArray(owner)
+            || typeof owner.botId !== 'string' || (owner.label !== undefined && typeof owner.label !== 'string')) return 'unreadable'
+          read = 'owned'
+        } catch { return 'unreadable' }
+      }
+      return sessionOwnersRevision === revision ? read : 'unreadable'
     },
     view: () => merged(views),
     live: () => merged(lives),

@@ -16,6 +16,7 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.CoroutineContext
 
 // session increases with each successful connection, so open terminal views know to attach again.
 data class MachineState(val connecting: Boolean = false, val connected: Boolean = false, val version: String = "",
@@ -1183,7 +1184,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     // never in preferences, Room or the log (docs/privacy.md). One chat open at a time, on its own connection.
     private val _chat = MutableStateFlow<Chat.State?>(null)
     val chat = _chat.asStateFlow()
-    /** Each machine's Automagik Bot chats (read only), as chat.list gave them; null while loading. */
+    /** Each machine's Automagik chat list, Bot chats and granted groups. Null while loading. */
     private val _botChats = MutableStateFlow<Map<String, Result<List<Chat.Terminal>>?>>(emptyMap())
     val botChats = _botChats.asStateFlow()
     /** What the phone saw of each Bot chat between readings ([ChatWatch]): Home's word for it and its receipt. */
@@ -1196,6 +1197,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     @Volatile private var chatRef: TerminalRef? = null
     @Volatile private var chatLink: ChatLink? = null
     @Volatile private var chatGen = 0
+    internal var chatIo: CoroutineContext = Dispatchers.IO
     /**
      * How [openChatLink] reaches a chat route. It is the production Pocket Link route by default; a unit test points
      * it at a fake bridge to drive the chat wiring without a device (#754). The app never sets it.
@@ -1228,7 +1230,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             catch (e: Exception) { if (e !is CancellationException && ChatClient.refusedRoute(e)) throw ChatUnsupported() else throw e }
         val core = CoreClient(t.input, t.output, t, scope, lost)
         // The transport scope owns the hello read so a timeout can close it while it is still blocked on input.
-        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage, attachments) }
+        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage, attachments, groups = true) }
         try { return withTimeout(20_000) { PocketLinkChat(hello.await()) } }
         catch (e: Exception) { core.close(); hello.cancel(); throw e }
     }
@@ -1269,23 +1271,32 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
             var link: ChatLink? = null
             try {
-                link = openChatLink(ref.hostId, scope, attachments = true) { reason ->
+                link = openChatLink(ref.hostId, scope, attachments = !Chat.isGroup(ref.address)) { reason ->
                     attachments.linkClosed(gen)
-                    chatUpdate(gen) { it.copy(connected = false, error = "Chat disconnected: $reason",
-                        messages = it.messages.map { m -> if (m.state == "sending") m.copy(state = "maybe") else m }) }
+                    chatUpdate(gen) {
+                        val error = "Chat disconnected: $reason"
+                        if (it.group) Chat.groupDisconnected(it, error)
+                        else it.copy(connected = false, error = error,
+                            messages = it.messages.map { m -> if (m.state == "sending") m.copy(state = "maybe") else m })
+                    }
                 }
                 if (gen != chatGen) return@launch
                 chatLink = link
-                attachments.linkOpened(gen, link.attach)
+                attachments.linkOpened(gen, if (Chat.isGroup(ref.address)) Attach.Peer.NotAsked else link.attach)
                 val dshWrite = link.dshWrite
-                chatUpdate(gen) { it.copy(dshWrite = dshWrite) }
+                val groups = link.groups
+                chatUpdate(gen) { it.copy(dshWrite = dshWrite, groups = groups) }
                 if (!Chat.isDsh(ref.address) && link.list().none { it.terminal == ref.address }) { chatUpdate(gen) { it.copy(error = Chat.NO_CHAT) }; return@launch }
+                if (Chat.isGroup(ref.address) && !groups) throw GroupsUnsupported()
                 chatSubscribe(link, ref.address, null, gen)
                 awaitCancellation()
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 // A DSH chat coming back keeps trying (within RESUME_DELAYS_MS); anything else waits for Reconnect.
-                if (resuming && e !is ChatUnsupported) { chatUpdate(gen) { it.copy(connected = false) }; viewModelScope.launch { resumeLater(ref, gen) } }
+                if (e is GroupsUnsupported) {
+                    chatUpdate(gen) { Chat.groupLost(it) }
+                    viewModelScope.launch { chatEvent(gen, "gone") }
+                } else if (resuming && e !is ChatUnsupported) { chatUpdate(gen) { it.copy(connected = false) }; viewModelScope.launch { resumeLater(ref, gen) } }
                 else chatUpdate(gen) { it.copy(connected = false, resuming = false, error = e.message ?: "Chat couldn’t connect") }
             }
             finally { attachments.linkClosed(gen); if (chatLink === link) chatLink = null; link?.close() }
@@ -1305,13 +1316,21 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             "snapshot" -> resumeAttempt = 0
             "gone" -> if (s.resuming) resumeLater(ref, gen)
         }
+        if (s.group && s.gone) {
+            _botChats.update { m ->
+                val list = m[ref.hostId]?.getOrNull() ?: return@update m
+                val now = ChatGroups.without(list, ref.address)
+                if (now === list) m else m + (ref.hostId to Result.success(now))
+            }
+        }
         if (s.dsh && s.connected) {
             _botChats.update { m ->
                 val list = m[ref.hostId]?.getOrNull() ?: return@update m
-                val now = Chat.withStatus(list, ref.address, s.status, Chat.asked(s))
+                val now = if (s.group) ChatGroups.withState(list, ref.address, s.title, s.status, s.answerable)
+                else Chat.withStatus(list, ref.address, s.status, Chat.asked(s))
                 if (now === list) m else m + (ref.hostId to Result.success(now))
             }
-            if (type == "snapshot" || type == "status") _chatWatch.update { ChatWatch.status(it, ChatWatch.key(ref.hostId, ref.address), s.status.state, System.currentTimeMillis()) }
+            if (!s.group && (type == "snapshot" || type == "status")) _chatWatch.update { ChatWatch.status(it, ChatWatch.key(ref.hostId, ref.address), s.status.state, System.currentTimeMillis()) }
         }
     }
 
@@ -1319,7 +1338,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private fun resumeLater(ref: TerminalRef, gen: Int) {
         if (gen != chatGen || chatRef != ref) return
         val wait = Chat.resumeDelayMs(resumeAttempt)
-            ?: return chatUpdate(gen) { it.copy(resuming = false, error = Chat.NOT_ANSWERING) }
+            ?: return chatUpdate(gen) {
+                it.copy(resuming = false, error = if (it.group) Chat.GROUP_UNAVAILABLE else Chat.NOT_ANSWERING)
+            }
         resumeAttempt++
         resumeJob?.cancel()
         resumeJob = viewModelScope.launch {
@@ -1337,7 +1358,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             val type = e.optString("type")
             // A closed card's receipt goes on the chat's Home row, for its Done line: one seen close, or the newest a
             // reconnect's snapshot found settled while the phone was away.
-            if (Chat.isDsh(terminal)) {
+            if (Chat.isDsh(terminal) && !Chat.isGroup(terminal)) {
                 val fresh = _chat.value?.takeIf { gen == chatGen }?.receipts.orEmpty().filter { r -> before.none { it.id == r.id } }
                 (Chat.receiptLine(e) ?: fresh.lastOrNull { it.settled }?.let(Chat::doneLine))
                     ?.let { line -> chatRef?.let { r -> _chatWatch.update { ChatWatch.receipt(it, ChatWatch.key(r.hostId, terminal), line) } } }
@@ -1348,8 +1369,14 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             // Too slow to keep up: the bridge closed the stream; come back from the cursor.
             if (reason == "slow" && gen == chatGen) viewModelScope.launch(Dispatchers.IO) {
                 runCatching { chatSubscribe(link, terminal, _chat.value?.cursor, gen) }
-                    .onFailure { e -> chatUpdate(gen) { it.copy(connected = false, error = e.message) } }
-            } else chatUpdate(gen) { it.copy(connected = false, error = if (reason.isBlank()) "The chat closed." else "The chat closed: $reason") }
+                    .onFailure { e -> chatUpdate(gen) {
+                        if (it.group) Chat.groupDisconnected(it, e.message ?: Chat.GROUP_UNAVAILABLE)
+                        else it.copy(connected = false, error = e.message)
+                    } }
+            } else chatUpdate(gen) {
+                val error = if (reason.isBlank()) "The chat closed." else "The chat closed: $reason"
+                if (it.group) Chat.groupDisconnected(it, error) else it.copy(connected = false, error = error)
+            }
         }
     }
 
@@ -1361,7 +1388,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         if (!keepManagement) { closeMemory(); closeSchedules(); closeSettings() }
         attachments.closed(keep = keepManagement, gen = chatGen)
         // bots-dsh stops following a Bot chat no phone watches: what it lists next is not a finish ([ChatWatch.left]).
-        chatRef?.takeIf { Chat.isDsh(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
+        chatRef?.takeIf { Chat.isDsh(it.address) && !Chat.isGroup(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
         ++chatGen
         chatRef = null
         chatJob?.cancel(); chatJob = null
@@ -1423,11 +1450,47 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         viewModelScope.launch(Dispatchers.IO) { block(link, s, gen) }
     }
 
+    /** Admits a group action against the current pane, keeping the identity of the state that admitted it. */
+    private fun chatClaim(admit: (Chat.State) -> Chat.State?): Pair<Int, Chat.State>? {
+        val gen = chatGen
+        var claimed: Chat.State? = null
+        _chat.update { s ->
+            // update may run again if a bridge event wins the race to commit.
+            claimed = null
+            if (s == null || gen != chatGen || !s.group) s else admit(s)?.also { claimed = it } ?: s
+        }
+        return claimed?.let { gen to it }
+    }
+
+    /** Drops a group action if the pane moved on before dispatch, and drops any completion after a gone. */
+    private fun groupAct(gen: Int, claim: Chat.State, block: suspend (ChatLink, (Chat.State.() -> Chat.State) -> Unit) -> Unit) {
+        val link = chatLink ?: return
+        viewModelScope.launch(chatIo) {
+            if (!sameGroup(gen, claim.wiped)) return@launch
+            block(link) { change -> chatUpdate(gen) { if (it.wiped != claim.wiped) it else it.change() } }
+        }
+    }
+
+    private fun sameGroup(gen: Int, wiped: Int) =
+        gen == chatGen && _chat.value?.let { it.wiped == wiped && it.connected } == true
+
     /** Sends [text] to the open chat; a chat that cannot send (read only, ended, reconnecting) says why instead. */
-    fun chatSend(text: String, id: String = UUID.randomUUID().toString()) {
+    fun chatSend(text: String, id: String = UUID.randomUUID().toString(), retry: Boolean = false) {
         val s = _chat.value ?: return
         if (text.isBlank()) return
         if (previewChat()) return
+        if (s.group) {
+            val (gen, st) = chatClaim { current ->
+                when {
+                    !ChatActions.canSend(current) -> current.copy(
+                        notice = ChatActions.whyNoSend(current) ?: "Not sent: the chat isn’t ready yet.")
+                    retry && current.messages.none { it.id == id && ChatActions.canRetry(current, it) } -> null
+                    else -> current.copy(messages = current.messages.filterNot { it.id == id } + Chat.Message(id, text, "sending"))
+                }
+            } ?: return
+            if (ChatActions.canSend(st)) groupSend(gen, st, text, id, retry)
+            return
+        }
         if (!ChatActions.canSend(s)) { chatUpdate(chatGen) { it.copy(notice = ChatActions.whyNoSend(it) ?: "Not sent: the chat isn’t ready yet.") }; return }
         chatUpdate(chatGen) { it.copy(messages = it.messages.filterNot { m -> m.id == id } + Chat.Message(id, text, "sending")) }
         chatAct { link, st, gen ->
@@ -1438,7 +1501,27 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     /** A message that may not have gone: sent again with the same id, so the bridge types it at most once. */
-    fun chatRetry(m: Chat.Message) { if (_chat.value?.let { ChatActions.canRetry(it, m) } == true) chatSend(m.text, m.id) }
+    fun chatRetry(m: Chat.Message) {
+        val s = _chat.value ?: return
+        if (ChatActions.canRetry(s, m)) chatSend(m.text, m.id, retry = s.group)
+    }
+
+    fun chatSendAsNew(m: Chat.Message) {
+        val fresh = UUID.randomUUID().toString()
+        val (gen, st) = chatClaim { s ->
+            val original = s.messages.find { it.id == m.id && ChatActions.canSendAsNew(s, it) }
+            original?.let { s.copy(messages = s.messages.filterNot { it.id == m.id } + Chat.Message(fresh, it.text, "sending")) }
+        } ?: return
+        groupSend(gen, st, st.messages.last().text, fresh, retry = false)
+    }
+
+    private fun groupSend(gen: Int, st: Chat.State, text: String, id: String, retry: Boolean) {
+        groupAct(gen, st) { link, done ->
+            runCatching { if (retry) link.send(st.terminal, text, id, true) else link.send(st.terminal, text, id) }
+                .onSuccess { a -> done { Chat.answered(this, id, text, a) } }
+                .onFailure { done { Chat.unanswered(this, id, text) } }
+        }
+    }
 
     fun chatSendHeld(m: Chat.Message) {
         val s = _chat.value ?: return
@@ -1461,6 +1544,17 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     fun chatAnswer(row: Chat.Row, choice: String) {
         val s = _chat.value ?: return
+        if (s.group) {
+            val (gen, st) = chatClaim { current ->
+                current.takeIf { choice in ChatActions.choices(it, it.approvals.find { card -> card.id == row.id }) }
+            } ?: return
+            groupAct(gen, st) { link, done ->
+                runCatching { link.answer(st.terminal, row.id, choice) }
+                    .onSuccess { a -> done { Chat.answerReply(this, row.id, a) } }
+                    .onFailure { done { copy(notice = Chat.ANSWER_MAYBE) } }
+            }
+            return
+        }
         if (choice !in ChatActions.choices(s, row)) return
         if (previewAnswer(row)) return
         chatAct { link, st, gen ->
@@ -1472,6 +1566,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     /** A question answered on the phone: the options picked (0-based) or a typed answer, only as [ChatActions] offers it. */
     fun chatAnswerQuestion(row: Chat.Row, picked: List<Int>, text: String? = null) {
         val s = _chat.value ?: return
+        if (s.group) return
         val (choice, typed) = ChatActions.questionAnswer(s, row, picked, text) ?: return
         if (previewAnswer(row)) return
         chatAct { link, st, gen ->
@@ -1482,6 +1577,14 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     fun chatInterrupt() {
         val s = _chat.value ?: return
+        if (s.group) {
+            val (gen, st) = chatClaim { it.takeIf(ChatActions::canInterrupt) } ?: return
+            groupAct(gen, st) { link, done ->
+                val notice = Chat.interruptNotice(runCatching { link.interrupt(st.terminal) }.getOrNull(), st.dsh, group = st.group)
+                done { copy(notice = notice) }
+            }
+            return
+        }
         if (!ChatActions.canInterrupt(s)) return
         if (previewChat()) return
         chatAct { link, st, gen ->
@@ -1497,7 +1600,17 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private fun unconfirmed(s: Chat.State) = if (s.dsh) Chat.ANSWER_MAYBE else "Not confirmed. Check the terminal."
 
     fun chatEarlier() {
-        val before = _chat.value?.oldest ?: return
+        val s = _chat.value ?: return
+        val before = s.oldest ?: return
+        if (s.group) {
+            val (gen, st) = chatClaim { current -> current.takeIf { it.oldest == before && it.connected } } ?: return
+            groupAct(gen, st) { link, done ->
+                runCatching { link.backfill(st.terminal, before) }
+                    .onSuccess { page -> done { Chat.earlier(this, page) } }
+                    .onFailure { e -> done { copy(notice = e.message) } }
+            }
+            return
+        }
         chatAct { link, st, gen ->
             runCatching { link.backfill(st.terminal, before) }
                 .onSuccess { page -> chatUpdate(gen) { Chat.earlier(it, page) } }
@@ -1509,7 +1622,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     /** Dismisses the receipt of a card that closed while the phone was away; it does not come back on the next reconnect. */
     fun dismissReceipt(id: String) { _chat.update { it?.let { s -> Chat.dismissReceipt(s, id) } } }
 
-    /** Reads machine [hostId]'s Automagik Bot chats (read only) for the Bot chats list, on a short-lived connection. */
+    /** Reads machine [hostId]'s Automagik chats on a short-lived connection. */
     fun loadBotChats(hostId: String) {
         if (state.value.demo) return
         _botChats.update { it + (hostId to null) }
@@ -1518,10 +1631,10 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
                 coroutineScope {
                     val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
                     val link = openChatLink(hostId, scope) { }
-                    try { link.list().filter { it.dsh }.also { _botWrites.update { w -> w + (hostId to link.dshWrite) } } } finally { link.close(); scope.cancel() }
+                    try { link.list().filter { it.dsh && (!it.group || link.groups) }.also { _botWrites.update { w -> w + (hostId to link.dshWrite) } } } finally { link.close(); scope.cancel() }
                 }
             }
-            result.getOrNull()?.let { rows -> _chatWatch.update { ChatWatch.read(it, hostId, rows, System.currentTimeMillis()) } }
+            result.getOrNull()?.let { rows -> _chatWatch.update { ChatWatch.read(it, hostId, rows.filterNot { r -> r.group }, System.currentTimeMillis()) } }
             _botChats.update { it + (hostId to result) }
         }
     }
@@ -1538,7 +1651,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     /** The dialog owns a connection even when the Bot chat could not subscribe. Its claims and completions run on Main. */
     fun openMemory(ref: TerminalRef) {
-        if (state.value.demo || !Chat.isDsh(ref.address)) return
+        if (state.value.demo || !Chat.isDsh(ref.address) || Chat.isGroup(ref.address)) return
         if (_memory.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
         closeMemory()
         val token = ++memoryToken
@@ -1680,7 +1793,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     /** The dialog owns its connection so its grant and task data end with it. */
     fun openSchedules(ref: TerminalRef) {
-        if (state.value.demo || !Chat.isDsh(ref.address)) return
+        if (state.value.demo || !Chat.isDsh(ref.address) || Chat.isGroup(ref.address)) return
         if (_schedules.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
         closeSchedules()
         val token = ++scheduleToken

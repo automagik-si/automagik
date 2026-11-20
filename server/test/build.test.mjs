@@ -41,6 +41,8 @@ if [ "$1 $2" = "image inspect" ]; then printf '123\\n'; fi
   assert.match(build, /--build-arg AUTOMAGIK_VERSION=3\.93\.0(?: |$)/)
   assert.match(build, /--build-arg IMAGE_VERSION=3\.93\.0(?: |$)/)
   assert.match(build, new RegExp(`--build-arg IMAGE_REVISION=${revision}(?: |$)`))
+  assert.match(build, /--build-arg HERDR_CORE_VERSION=0\.1\.18(?: |$)/)
+  assert.match(build, /--build-arg HERDR_CORE_SHA256=[0-9a-f]{64}(?: |$)/)
 
   const dockerfile = readFileSync(join(ROOT, 'server/Dockerfile'), 'utf8')
   assert.match(dockerfile, /^ARG IMAGE_VERSION=/m)

@@ -32,6 +32,13 @@ const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.ur
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
 const FAKE_APP = new URL("./fake-herdr-app.mjs", import.meta.url).pathname;
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", stray: "b-zzzzzzzzzz" };
+// Bot login generations as ACP writes them (#1527): v4 UUIDs, one per vendor generation.
+const GEN = {
+  claude1: "11111111-1111-4111-8111-111111111111",
+  codex1: "22222222-2222-4222-8222-222222222222",
+  claude2: "33333333-3333-4333-8333-333333333333",
+  codex2: "44444444-4444-4444-8444-444444444444",
+};
 
 const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
 const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
@@ -53,6 +60,23 @@ const team = (extra = {}) => ({
 });
 const term = (address, { bot: b, cwd }) => ({ address, name: address, cwd, state: "live", parent: null, created_ms: 1,
   labels: b ? { bot: b } : {}, foreground: { argv: ["claude"], cwd, pid: 4000 }, status: { app: "claude-code", state: "idle" } });
+
+/**
+ * ACP's generation record for a scratch scene (#1527): `generation.json` beside a pointer, with
+ * both vendors' generations and one sequence. The launch's pointer only needs its folder.
+ */
+function generationRecord(root, { sequence, claude = null, codex = null }) {
+  const current = join(root, "cli-homes", "current");
+  mkdirSync(current, { recursive: true });
+  const pointer = join(current, "claude");
+  writeFileSync(pointer, claude ?? codex ?? "");
+  const record = join(current, "generation.json");
+  writeFileSync(record, JSON.stringify({ version: 1, sequence,
+    claude: claude ? { generation: claude, configDir: join(root, "cli-homes", "homes", "claude", claude, ".claude") } : null,
+    codex: codex ? { generation: codex, home: join(root, "cli-homes", "homes", "codex", codex, ".codex") } : null,
+    updatedAt: "2026-11-19T00:00:00.000Z" }));
+  return { pointer, record };
+}
 
 /** A scratch world: a git project on main with its bots, a fake hc whose t1..t3 are panes in it. */
 function scene(t, { file = team(), branch = "main", briefing = true, templates = TEMPLATES } = {}) {
@@ -107,6 +131,8 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   delete env.HC_TERMINAL_ID;
   // #1420: a Codex worker reads $CODEX_HOME/config.toml; the scene's is under its own HOME, never the host's.
   delete env.CODEX_HOME;
+  // #1532: a generation pointer from the host must never leak into a scratch launch.
+  delete env.AUTOMAGIK_BOT_CLI_POINTER;
   // Every CLI call, including worker/reap, stays in this scratch world (#1135).
   const preflight = (extra = {}, cwd = project) => {
     const effective = { ...env, ...extra };
@@ -688,8 +714,69 @@ test("worker: hc run --bg as a child of the bot's pane, in the worktree, with th
     task: null, worktree: wt, agent: "codex", model: "gpt-5.5", effort: "medium", template: null, role: "dev",
     branch: "feat/login", project: s.project, lead: ID.dev, base: git(s.project, "rev-parse", "main").trim(), created: true,
     swap: false, override: false, override_requested: null,
-    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, at: undefined });
+    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev,
+    env: { HOME: s.env.HOME }, session: null, generation: null, sequence: null, at: undefined });
   assert.ok(!Number.isNaN(Date.parse(row.at)));
+});
+
+// ---- the Bot login generation in the start row (#1532) ----
+
+test("start rows record the Bot login generation and sequence a worker and a seat launch on (#1532)", (t) => {
+  const s = scene(t);
+  const { pointer } = generationRecord(s.root, { sequence: 7, claude: GEN.claude1, codex: GEN.codex1 });
+  const worker = s.cli(["worker", "fix it", "--branch", "feat/generation", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: pointer } });
+  assert.equal(worker.code, 0, worker.err);
+  const seat = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_BOT_CLI_POINTER: pointer } });
+  assert.equal(seat.code, 0, seat.err);
+  const starts = s.ledger().filter((row) => row.event === "start");
+  const workerRow = starts.find((row) => row.kind === "worker");
+  const seatRow = starts.find((row) => row.kind === "seat");
+  assert.deepEqual([workerRow.generation, workerRow.sequence], [GEN.codex1, 7], "the worker's vendor (Codex) generation");
+  assert.deepEqual([seatRow.generation, seatRow.sequence], [GEN.claude1, 7], "the seat's vendor (Claude) generation");
+});
+
+test("a generation switch is recorded by the next launch and leaves the old row alone (#1532)", (t) => {
+  const s = scene(t);
+  const first = generationRecord(s.root, { sequence: 1, claude: GEN.claude1, codex: GEN.codex1 });
+  const one = s.cli(["worker", "one", "--branch", "feat/gen-one", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: first.pointer } });
+  assert.equal(one.code, 0, one.err);
+  const second = generationRecord(s.root, { sequence: 2, claude: GEN.claude2, codex: GEN.codex2 });
+  const two = s.cli(["worker", "two", "--branch", "feat/gen-two", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: second.pointer } });
+  assert.equal(two.code, 0, two.err);
+  const rows = s.ledger().filter((row) => row.event === "start" && row.kind === "worker");
+  assert.deepEqual(rows.map((row) => [row.branch, row.generation, row.sequence]),
+    [["feat/gen-one", GEN.codex1, 1], ["feat/gen-two", GEN.codex2, 2]]);
+});
+
+test("a launch with no generation record writes null, never a guess, and the ledger still reads (#1532)", (t) => {
+  const s = scene(t);
+  const absent = s.cli(["worker", "no pointer", "--branch", "feat/no-pointer", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: "" } });
+  assert.equal(absent.code, 0, absent.err);
+  const pointer = join(s.root, "cli-homes", "current", "claude");
+  mkdirSync(dirname(pointer), { recursive: true });
+  writeFileSync(pointer, GEN.claude1); // a pointer with no record beside it
+  const missing = s.cli(["worker", "no record", "--branch", "feat/no-record", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: pointer } });
+  assert.equal(missing.code, 0, missing.err);
+  const rows = s.ledger().filter((row) => row.event === "start" && row.kind === "worker");
+  assert.deepEqual(rows.map((row) => [row.generation, row.sequence]), [[null, null], [null, null]]);
+  assert.equal(rows.length, 2, "both rows read back");
+});
+
+test("a start row written before generation and sequence still reads beside a new launch (#1532)", (t) => {
+  const s = scene(t);
+  const old = { event: "start", kind: "worker", terminal: "t7", botId: ID.dev, task: "old", branch: "fix/old", project: s.project,
+    worktree: join(s.root, "old"), created: false, at: "2026-01-01T00:00:00.000Z" };
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(s.app, "automagik-herdr", "workers.jsonl"), `${JSON.stringify(old)}\n`, { mode: LEDGER_MODE });
+  const { pointer } = generationRecord(s.root, { sequence: 3, claude: GEN.claude1, codex: GEN.codex1 });
+  const r = s.cli(["worker", "new", "--branch", "feat/new", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: pointer } });
+  assert.equal(r.code, 0, r.err);
+  const rows = s.ledger();
+  const oldRow = rows.find((row) => row.terminal === "t7");
+  const newRow = rows.find((row) => row.event === "start" && row.kind === "worker" && row.terminal !== "t7");
+  assert.equal("generation" in oldRow, false);
+  assert.equal("sequence" in oldRow, false);
+  assert.deepEqual([newRow.generation, newRow.sequence], [GEN.codex1, 3]);
 });
 
 test("mode #821: an empty worker mode launches auto without a mode label", (t) => {
@@ -1063,7 +1150,7 @@ test("worker --template: hc's template form, a child of the bot's pane in the wo
     task: null, worktree: wt, agent: null, model: null, effort: null, template: "dev-sol", role: "dev",
     branch: "feat/login", project: s.project, lead: ID.dev, base: git(s.project, "rev-parse", "main").trim(), created: true,
     swap: false, override: true, override_requested: null,
-    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, at: undefined });
+    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, generation: null, sequence: null, at: undefined });
   // A codex template: no Claude hook in the worktree, and no warning about one.
   assert.equal(existsSync(join(wt, ".claude/settings.local.json")), false);
   assert.doesNotMatch(r.err, /session hook/);
@@ -1840,7 +1927,8 @@ test("worker --task: the ledger row's task, project, lead, worktree, base, creat
   assert.deepEqual({ ...row, at: undefined, pid: undefined }, { event: "start", kind: "worker", terminal: "t100", pid: undefined,
     botId: ID.dev, task: "gl-231", worktree: realpathSync(wt), agent: "codex", model: "gpt-5.5", effort: "medium", template: null,
     role: "dev", branch: "fix/gl-231-login", project: s.project, lead: ID.cap, base, created: false, swap: false, override: false,
-    override_requested: null, core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, at: undefined });
+    override_requested: null, core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev,
+    env: { HOME: s.env.HOME }, session: null, generation: null, sequence: null, at: undefined });
   assert.notEqual(row.base, git(wt, "rev-parse", "HEAD").trim(), "the base the worktree started from, not its head");
   // --branch making the worktree: created, and the base ref as a SHA; a per-task model is an override.
   git(s.project, "commit", "-q", "--allow-empty", "-m", "later");

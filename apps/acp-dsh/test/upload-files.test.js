@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import fs, { link, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink,
+import fs, { link, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink,
   writeFile } from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -13,7 +13,7 @@ const reference = (data, name = 'x.txt') => ({
   bytes: data.length, name, mediaType: 'application/octet-stream',
 })
 async function fixture(t, data = Buffer.from('ada')) {
-  const cwd = await mkdtemp(join(tmpdir(), 'acp-upload-files-'))
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'acp-upload-files-')))
   t.after(() => rm(cwd, { recursive: true, force: true }))
   const ref = reference(data)
   const attachments = { async *readFileStream() { yield data } }
@@ -194,7 +194,7 @@ for (const bytes of ['ada', 'xxx']) {
 
 test('a matching hard link conflicts without changing the outside file mode', async t => {
   const f = await fixture(t)
-  const outside = await mkdtemp(join(tmpdir(), 'acp-upload-outside-'))
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'acp-upload-outside-')))
   t.after(() => rm(outside, { recursive: true, force: true }))
   const path = join(outside, 'x.txt')
   await mkdir(f.folder, { recursive: true })
@@ -225,7 +225,7 @@ test('existing copies use the opened file size instead of a stale lstat size', a
 for (const before of ['temp open', 'publication']) {
   test(`a parent directory swap before ${before} fails containment`, async t => {
     const f = await fixture(t)
-    const outside = await mkdtemp(join(tmpdir(), 'acp-upload-outside-'))
+    const outside = await realpath(await mkdtemp(join(tmpdir(), 'acp-upload-outside-')))
     t.after(() => rm(outside, { recursive: true, force: true }))
     const parent = join(f.cwd, '.automagik')
     const moved = before === 'temp open' ? join(f.cwd, 'moved') : join(outside, 'moved')
@@ -258,7 +258,7 @@ for (const before of ['temp open', 'publication']) {
 
 test('a temp file swapped for a symlink during the read is never published', async t => {
   const f = await fixture(t)
-  const outside = await mkdtemp(join(tmpdir(), 'acp-upload-outside-'))
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'acp-upload-outside-')))
   t.after(() => rm(outside, { recursive: true, force: true }))
   const secret = join(outside, 'secret.txt')
   await writeFile(secret, 'ada', { mode: 0o600 })

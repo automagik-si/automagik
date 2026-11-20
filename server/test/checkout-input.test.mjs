@@ -123,7 +123,7 @@ test('build rejects contradictory inputs before Docker; default release forwards
 test('checkout build carries all independently supplied bindings; release ignores present malformed local assets', async () => {
   const f = fixture(), root = temp(), server = join(root, 'server'), bin = join(root, 'bin'), log = join(root, 'docker.log')
   mkdirSync(server); mkdirSync(bin)
-  for (const file of ['build.mjs', 'fetch-plugins.mjs', 'checkout-input.mjs']) cpSync(join(ROOT, 'server', file), join(server, file))
+  for (const file of ['build.mjs', 'fetch-plugins.mjs', 'checkout-input.mjs', 'toolchain.mjs']) cpSync(join(ROOT, 'server', file), join(server, file))
   cpSync(f.dir, join(server, 'checkout-input'), { recursive: true })
   writeFileSync(join(bin, 'git'), `#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] || exit 2\necho ${f.options.revision}\n`)
   writeFileSync(join(bin, 'docker'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nif [ "$1 $2" = "image inspect" ]; then echo 123; fi\n')

@@ -142,6 +142,24 @@ export function install(rt) {
 
   const ledger = {
     open,
+    // A writer's copy can be older than the file after another host held the lock.
+    async refresh(book) {
+      for (let tries = 0; tries < 3; tries += 1) {
+        const queued = writing.get(book)
+        await queued
+        if (writing.get(book) !== queued) continue
+        const known = books.get(book)
+        let size
+        try { size = statSync(pathOf(book)).size } catch (error) {
+          if (error?.code !== 'ENOENT') return false
+          size = -1
+        }
+        // The importer may have numbered the room since this missing file was cached.
+        if (known !== undefined && (known.size === -1 || size !== known.size)) books.delete(book)
+        return true
+      }
+      return false
+    },
     append,
     flush,
     // Rejects when the last record of the book did not reach the disk.

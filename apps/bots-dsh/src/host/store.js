@@ -411,6 +411,13 @@ export function install(rt) {
       room.admin = admin
       migrated = true
     }
+    for (const room of Object.values(state.rooms)) {
+      if (room.scoped === true) continue
+      if (room.workDir !== undefined || Object.keys(room.memberDirs ?? {}).length > 0 || room.permission !== undefined) {
+        room.scoped = true
+        migrated = true
+      }
+    }
     // Teams from before #206 kept every long message whole in this file, written whole on
     // every save. A message between Bots is whole in its recipient's Session; a group
     // line's whole text moves to a file of its own, which only the writing host makes.
@@ -730,21 +737,22 @@ export function install(rt) {
   const restoreCurrent = () => {
     const registry = ctx.workspaceRegistry
     if (restoring !== undefined || readOnly() !== undefined || typeof registry?.unarchiveSession !== 'function') return
-    let archived
+    const leave = enterOwnership()
     try {
-      archived = new Set(registry.archivedSessionIds ?? [])
-    } catch {
-      return
+      let archived
+      try { archived = new Set(registry.archivedSessionIds ?? []) } catch { return }
+      const held = [...chatOwners.keys(), ...groupOwners.keys(), ...roomOwners.keys()].filter(id => archived.has(id) && botOf(selfOf(id))?.shellHeld === undefined)
+      if (held.length === 0) return
+      restoring = (async () => {
+        for (const sessionId of held) {
+          await registry.unarchiveSession(sessionId)
+            .then(() => warn('omni-ui: current Session %s was archived in DSH; taken back out', sessionId))
+            .catch(error => warn('omni-ui: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
+        }
+      })().finally(() => { restoring = undefined; leave() })
+    } finally {
+      if (restoring === undefined) leave()
     }
-    const held = [...chatOwners.keys(), ...groupOwners.keys(), ...roomOwners.keys()].filter(id => archived.has(id) && botOf(selfOf(id))?.shellHeld === undefined)
-    if (held.length === 0) return
-    restoring = (async () => {
-      for (const sessionId of held) {
-        await registry.unarchiveSession(sessionId)
-          .then(() => warn('omni-ui: current Session %s was archived in DSH; taken back out', sessionId))
-          .catch(error => warn('omni-ui: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
-      }
-    })().finally(() => { restoring = undefined })
   }
   const indexSessions = () => {
     chatOwners.clear()
@@ -791,28 +799,86 @@ export function install(rt) {
     }
   }
   const groupSessionsOf = botId => Object.values(state.rooms).map(room => room.sessions?.[botId]).filter(Boolean)
-  const dropGroupSession = (room, botId) => {
+  // Ownership changes are counted from their first read until the last write.
+  let ownershipRuns = 0
+  const enterOwnership = () => {
+    ownershipRuns += 1
+    let left = false
+    return () => { if (!left) { left = true; ownershipRuns -= 1 } }
+  }
+  const plain = value => {
+    if (value === null || typeof value !== 'object') return false
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  }
+  // Scan raw ownership: the indexes may still describe the team before the drop.
+  // Per-Session records such as questions and views describe a Session without owning it.
+  const sessionNamed = (sessionId, room, botId) => {
+    const optionalId = value => value !== undefined && (typeof value !== 'string' || value === sessionId)
+    const listNames = (list, item) => {
+      if (list === undefined) return false
+      if (!Array.isArray(list)) return true
+      for (let i = 0; i < list.length; i += 1) {
+        if (!Object.hasOwn(list, i) || item(list[i])) return true
+      }
+      return false
+    }
+    const idNames = id => typeof id !== 'string' || id === sessionId
+    const parts = list => listNames(list, part => !plain(part) || idNames(part.sessionId))
+    const table = (value, item) => value !== undefined && (!plain(value) || Object.entries(value).some(([key, entry]) => key === sessionId || item(entry, key)))
+    if (!plain(state.bots) || !plain(state.rooms)) return true
+    if (table(state.bots, (bot, key) => !plain(bot) || bot.id !== key || optionalId(bot.sessionId) || parts(bot.segments))) return true
+    if (table(state.rooms, (other, key) => !plain(other) || other.id !== key || optionalId(other.sessionId) || parts(other.parts)
+      || table(other.sessions, entry => typeof entry !== 'string' || entry === sessionId) || table(other.segments, entry => parts(entry ?? null)))) return true
+    if (table(state.switching, owner => !plain(owner) || (owner.botId === undefined && owner.roomId === undefined)
+      || (owner.botId !== undefined && typeof owner.botId !== 'string') || (owner.roomId !== undefined && typeof owner.roomId !== 'string')
+      || (owner.botId === botId && owner.roomId === room.id))) return true
+    if (table(state.tasks, task => !plain(task)) || taskOwners.has(sessionId)) return true
+    if (listNames(state.subscriptionRuns, run => !plain(run) || optionalId(run.sessionId))) return true
+    return table(state.agents, agent => !plain(agent) || listNames(agent.sessions, idNames))
+  }
+  const seatAuthority = room => ownershipRuns === 0 && teamCurrent() && own(state.rooms, room.id) === room
+    && rt.holdsLock() === true && readOnly() === undefined
+  const seatEnded = (room, botId, options, sessionId) => {
+    if (!seatAuthority(room) || sessionNamed(sessionId, room, botId)) return undefined
+    const explicit = options !== undefined && Object.hasOwn(options, 'bot')
+    const member = explicit ? options.bot : botOf(botId)
+    if (member === undefined) return undefined
+    // Hooks can change the team synchronously, so validate ownership and authority again.
+    return () => {
+      const returns = rt.returnsTo?.(sessionId)
+      if (returns !== undefined && returns !== false) return undefined
+      const hooks = rt.extended?.sessionOwnerRead
+      if (hooks !== undefined && (typeof hooks !== 'function' || hooks(sessionId) !== 'free')) return undefined
+      if ((!explicit && botOf(botId) !== member) || sessionNamed(sessionId, room, botId) || !seatAuthority(room)) return undefined
+      return (owner, entry) => owner?.kind === 'group' && owner.room === room && owner.bot === member
+        && (entry.ownerSessionId ?? entry.sessionId) === sessionId ? 'group' : undefined
+    }
+  }
+  const dropGroupSession = (room, botId, options) => {
     if (room.memberDirs !== undefined) delete room.memberDirs[botId]
     const sessionId = room.sessions?.[botId]
     if (sessionId === undefined) return
     delete room.sessions[botId]
+    const readLabels = rt.prepareGroupApprovalCancel?.(sessionId, () => seatEnded(room, botId, options, sessionId))
     for (const segment of room.segments?.[botId] ?? []) delete state.switching[segment.sessionId]
     if (room.segments !== undefined) delete room.segments[botId]
     delete state.switching[sessionId]
     groupOwners.delete(sessionId)
-    rt.cancelApprovals?.(sessionId)
+    rt.cancelApprovals?.(sessionId, readLabels)
     // A plain archive refuses a running Session, which would go on working for a group
     // that no longer has it.
     void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true }).catch(() => {})
   }
   // A group Session DSH can no longer open is set aside; the member's earlier parts in
   // the group stay, and its next turn there starts a new Session.
-  const retireGroupSession = (room, botId) => {
+  const retireGroupSession = (room, botId, options) => {
     const sessionId = room.sessions?.[botId]
     if (sessionId === undefined) return
     delete room.sessions[botId]
+    const readLabels = rt.prepareGroupApprovalCancel?.(sessionId, () => seatEnded(room, botId, options, sessionId))
     groupOwners.delete(sessionId)
-    rt.cancelApprovals?.(sessionId)
+    rt.cancelApprovals?.(sessionId, readLabels)
     void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true }).catch(() => {})
   }
   const findBot = (ref) => {
@@ -859,6 +925,7 @@ export function install(rt) {
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,
+    enterOwnership, ownershipBusy: () => ownershipRuns,
   })
 }
 

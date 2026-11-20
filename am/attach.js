@@ -41,7 +41,7 @@ export const attachPath = (appHome) => `${String(appHome).replace(/\/+$/, "")}/$
 export const ATTACH_EVENTS = ["attach", "detach", "end"];
 export const ATTACH_BY = ["start", "attach", "detach", "sweep", "import"];
 export const ATTACH_REASONS = ["finished", "moved", "replaced"];
-const BOT_SHAPE = /^(b-[a-z2-7]{10}|session-[A-Za-z0-9._-]+)$/;
+export const BOT_SHAPE = /^(b-[a-z2-7]{10}|session-[A-Za-z0-9._-]+)$/;
 // hc's addresses are `t7`, `t1b`; any one word without a slash (another machine's) is read.
 const TERMINAL_SHAPE = /^[A-Za-z0-9._-]+$/;
 

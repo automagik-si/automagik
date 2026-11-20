@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -10,12 +10,20 @@ import { publicUrlArgs } from '../lib.mjs'
 const ENTRY = fileURLToPath(new URL('../entrypoint.mjs', import.meta.url))
 const LIB = new URL('../lib.mjs', import.meta.url).href
 const FOLLOW = new URL('../profile-follow.mjs', import.meta.url).href
+const FIRST_BOOT = new URL('../first-boot.mjs', import.meta.url).href
 const BASE = ['--profile', 'automagik-web', '--no-open', '--host', '127.0.0.1', '--port', '3081']
 
-// Run the real entrypoint, replacing only data preparation and the DSH process. No service
-// or live data is touched; validation, argument wiring, logging and launch-file writes run.
+// Run the entrypoint with child process doubles and a fake profile preparation step.
 const harness = `
-  import { registerHooks } from 'node:module'
+  import { registerHooks, syncBuiltinESMExports } from 'node:module'
+  const fs = process.getBuiltinModule('node:fs')
+  const lstat = fs.lstatSync
+  fs.lstatSync = (path, options) => path === globalThis.testCoreSocket
+    ? { isSocket: () => true } : lstat(path, options)
+  // A host's own /data is never this test's: the view stays in the fixture's home.
+  const exists = fs.existsSync
+  fs.existsSync = (path) => path !== '/data' && exists(path)
+  syncBuiltinESMExports()
   const lib = await import(${JSON.stringify(`${LIB}?test-original`)})
   globalThis.serverTestLib = {
     ...lib,
@@ -27,6 +35,13 @@ const harness = `
       if (url === ${JSON.stringify(FOLLOW)}) return { format: 'module', shortCircuit: true,
         source: 'export async function followImage() { const result=process.env.TEST_FOLLOW_RESULT || "owner-managed"; return { seeded: false, target: "test-profile", result, reason: result } }',
       }
+      if (url === ${JSON.stringify(FIRST_BOOT)} && process.env.TEST_FIRST_BOOT_THROW) return {
+        format: 'module', shortCircuit: true,
+        source: [
+          'export function runFirstBoot() { throw new Error("am: briefing setup failed") }',
+          'export async function installVendorClis() { return { state: "ready" } }',
+        ].join(' '),
+      }
       if (url === ${JSON.stringify(LIB)}) return {
         format: 'module', shortCircuit: true,
         source: Object.keys(lib).map(key => 'export const ' + key + ' = globalThis.serverTestLib.' + key).join(';'),
@@ -36,8 +51,48 @@ const harness = `
         source: \`
           import { EventEmitter } from 'node:events'
           import { PassThrough } from 'node:stream'
+          import { mkdirSync, writeFileSync } from 'node:fs'
+          import { dirname } from 'node:path'
+          export function execFileSync(command, args, options) {
+            console.log('AM ' + JSON.stringify({ command, args, env: options.env }))
+            const appHome = options.env.HERDR_APP_HOME
+            const link = appHome + '/automagik-herdr/briefing.mjs'
+            mkdirSync(dirname(link), { recursive: true })
+            writeFileSync(link, '')
+            return ''
+          }
           export function spawn(command, args, options) {
-            console.log('SPAWN ' + JSON.stringify({ command, args, shell: options.shell ?? false }))
+            if (command === '/usr/local/bin/herdr-core' || args[0] === 'serve') {
+              console.log('CORE ' + JSON.stringify({ command, args, env: options.env }))
+              const core = new EventEmitter()
+              core.stdout = new PassThrough()
+              core.stderr = new PassThrough()
+              const socket = options.env?.HC_TERMINAL_SOCKET
+              if (process.env.TEST_CORE_FILE) writeFileSync(socket, '')
+              if (process.env.TEST_CORE_FAIL || process.env.TEST_CORE_FILE) {
+                setImmediate(() => {
+                  core.exitCode = 1
+                  core.signalCode = null
+                  if (process.env.TEST_CORE_NOISY) {
+                    const line = 'x'.repeat(1024) + '\\\\n'
+                    core.stderr.write('earliest diagnostic\\\\n' + line.repeat(24))
+                    core.stderr.write('overlong diagnostic ' + 'x'.repeat(20 * 1024) + '\\\\n')
+                  }
+                  core.stderr.write('core map failed')
+                  core.stderr.end()
+                  core.emit('exit', 1, null)
+                })
+                return core
+              }
+              globalThis.testCoreSocket = socket
+              return core
+            }
+            const env = options.env
+            console.log('SPAWN ' + JSON.stringify({
+              command, args, shell: options.shell ?? false, socket: env.HC_TERMINAL_SOCKET,
+              appHome: env.HERDR_APP_HOME, pnpm: env.AUTOMAGIK_PNPM,
+              modelKey: env.DEEPSEEK_API_KEY,
+            }))
             const child = new EventEmitter()
             child.stdout = new PassThrough()
             child.stderr = new PassThrough()
@@ -59,8 +114,15 @@ const harness = `
   await import(${JSON.stringify(new URL('../entrypoint.mjs', import.meta.url).href)})
 `
 
-function run(value, dir, followResult = 'owner-managed') {
-  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_WORKSPACE: dir, DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
+function run(value, dir, followResult = 'owner-managed', extra = {}) {
+  const env = {
+    PATH: process.env.PATH, HOME: dir, DSH_HOME: dir, AUTOMAGIK_HOME: dir,
+    AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'),
+    HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'),
+    XDG_RUNTIME_DIR: join(dir, 'run'), HC_RUNTIME: join(dir, 'unused-core-runtime'),
+    HC_SESSION: 'test-entrypoint', DEEPSEEK_API_KEY: 'test-only',
+    AUTOMAGIK_PNPM: '/usr/local/bin/pnpm', TEST_FOLLOW_RESULT: followResult, ...extra,
+  }
   delete env.AUTOMAGIK_PUBLIC_URL
   if (value !== undefined) env.AUTOMAGIK_PUBLIC_URL = value
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], {
@@ -71,6 +133,121 @@ function run(value, dir, followResult = 'owner-managed') {
 }
 
 // ENTRY_ABORT_ROLLBACK: a failed update must not prevent starting the coherent old profile.
+test('a non-default HC_SESSION derives <session>.sock and announces it after it exists', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-env-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir)
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /CORE /)
+  assert.match(result.stdout, /herdr-core: serving on .*test-entrypoint\.sock/)
+  const call = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('SPAWN ')).slice(6))
+  assert.equal(call.socket, join(dir, 'run', 'herdr-core', 'test-entrypoint.sock'))
+  assert.equal(call.appHome, join(dir, 'herdr-app'))
+})
+
+test('a core socket failure prints no serving line and logs stderr, exit code and the listing', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-fail-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_CORE_FAIL: '1' })
+  assert.equal(result.status, 1)
+  assert.doesNotMatch(result.stdout, /herdr-core: serving on /)
+  assert.match(result.stderr, /herdr-core exited before its socket .*test-entrypoint\.sock/)
+  assert.match(result.stderr, /core map failed/)
+  assert.match(result.stderr, /herdr-core exitCode=1 signal=none/)
+  assert.match(result.stderr, new RegExp(`${join(dir, 'run', 'herdr-core').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: \\(empty\\)`))
+})
+
+test('a regular file at the core socket path does not make the core ready', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-file-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_CORE_FILE: '1' })
+  assert.equal(result.status, 1)
+  assert.doesNotMatch(result.stdout, /serving on |SPAWN /)
+  assert.match(result.stderr, /herdr-core exited before its socket/)
+})
+
+test('a failed core reports a bounded stderr tail', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-stderr-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', {
+    TEST_CORE_FAIL: '1', TEST_CORE_NOISY: '1',
+  })
+  assert.equal(result.status, 1)
+  const tail = result.stderr.split('herdr-core stderr:\n')[1]
+  assert.match(tail, /core map failed/)
+  assert.match(tail, /overlong line omitted/)
+  assert.doesNotMatch(tail, /earliest diagnostic|overlong diagnostic/)
+  assert.ok(tail.length <= 16 * 1024 + 1)
+})
+
+test('the entrypoint rejects invalid sessions and a runtime on the DSH volume', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-path-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  for (const session of ['', '../ada', 'x'.repeat(65), 'ada\n']) {
+    const result = run(undefined, dir, 'owner-managed', { HC_SESSION: session })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /HC_SESSION must contain/)
+    assert.doesNotMatch(result.stdout, /CORE |SPAWN /)
+  }
+  const result = run(undefined, dir, 'owner-managed', { XDG_RUNTIME_DIR: '/data/run' })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /XDG_RUNTIME_DIR must be outside the shared \/data volume/)
+})
+
+const spawnRecord = (result, prefix) => {
+  const row = result.stdout.split('\n').find(line => line.startsWith(prefix))
+  assert.ok(row, result.stdout)
+  return JSON.parse(row.slice(prefix.length))
+}
+
+for (const source of ['environment', 'file']) {
+  test(`only DSH receives the model key from ${source}`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'automagik-core-key-'))
+    t.after(() => rmSync(dir, { recursive: true, force: true }))
+    const file = join(dir, 'deepseek-api-key')
+    writeFileSync(file, 'test-file-only\n', { mode: 0o600 })
+    const result = run(undefined, dir, 'owner-managed', {
+      DEEPSEEK_API_KEY: source === 'environment' ? 'test-env-only' : '',
+      DEEPSEEK_API_KEY_FILE: file,
+      LC_TIME: 'C', LC_TEST_SECRET: 'test-only', AUTOMAGIK_PNPM_TOKEN: 'test-only',
+      AUTOMAGIK_UNLISTED: 'test-only',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    for (const prefix of ['CORE ', 'AM ']) {
+      const { env } = spawnRecord(result, prefix)
+      assert.ok(Object.keys(env).every(name => !/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(name)))
+      assert.equal(env.AUTOMAGIK_UNLISTED, undefined)
+      assert.equal(env.AUTOMAGIK_PNPM, '/usr/local/bin/pnpm')
+      assert.equal(env.LC_TIME, 'C')
+      assert.equal(env.HOME, dir)
+      assert.equal(env.HC_SOCKET, join(dir, 'run', 'herdr-core', 'test-entrypoint.sock'))
+      assert.equal(env.HC_RUNTIME, join(dir, 'run', 'herdr-core'))
+      assert.equal(env.HC_SESSION, 'test-entrypoint')
+      assert.equal(env.AUTOMAGIK_NATIVE_WORKER_LOGIN, 'required')
+    }
+    const dsh = spawnRecord(result, 'SPAWN ')
+    assert.equal(dsh.modelKey, source === 'environment' ? 'test-env-only' : 'test-file-only')
+  })
+}
+
+test('turning CLI installation off withholds pnpm from DSH and skips the observer', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-cli-off-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { AUTOMAGIK_CLI_INSTALL: 'off' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(spawnRecord(result, 'SPAWN ').pnpm, undefined)
+  assert.doesNotMatch(result.stdout + result.stderr, /vendor CLIs:/)
+})
+
+test('mutant ENTRYPOINT_EXITS_ON_FIRST_BOOT_FAILURE is killed: a first-boot error does not stop DSH', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-first-boot-fail-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_FIRST_BOOT_THROW: '1' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /SPAWN /)
+  assert.match(result.stderr, /first boot: am: briefing setup failed; the server starts/)
+})
+
 test('the real entrypoint still starts DSH after the updater reports rollback', t => {
   const dir = mkdtempSync(join(tmpdir(), 'automagik-follow-entry-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))

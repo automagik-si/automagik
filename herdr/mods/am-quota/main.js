@@ -23,6 +23,9 @@ import { payloadDir, sweepScript } from "./write.js";
 import { TOOLS, instanceName, loginsView, offLogin, openUrl, runningBots, staleBots, toolView, who } from "./view.js";
 import { DEFAULT_LOGIN, PROBE_MS, bounded, loginName, matchReal, paneLogin, presentVars, probeLogin, readRecord, signedOut, typed, writeRecord } from "./logins.js";
 
+import { FLEET_FILE, parseFleet, accountFingerprint } from "./accountsRows.js";
+import { fleetRows, members, restartArgs, frozen, sameList, readFleetAnswer, restartWords } from "./fleet.js";
+
 const POLL = 60000;
 /** How often the installed credential's identity is re-read. It is a token-bearing item; the
  *  badge does not need it sixty times an hour. */
@@ -54,6 +57,9 @@ const RUN_HELPER_MS = 40_000;
 const RUN_PAUSE_MS = 5_000;
 /** The label of a restart's terminal: the bot's id, so a second press finds a run still going. */
 const RUN_LABEL = "am-quota.restart";
+const FLEET_LABEL = "am-quota.accounts";
+const FLEET_FOLLOW_MS = 120_000;
+const MACHINES_MS = 10_000;
 /** Where a restart's terminal leaves the CLI's stdout, stderr and exit code, under the app's data. */
 const RUNS = "data/am-quota/runs";
 // The restart terminal's program: `sh -c RUN_SCRIPT sh <out> <err> <code> <the CLI's argv…>`. The
@@ -68,6 +74,15 @@ const RUN_SCRIPT = [
   '"$@" >"$out" 2>"$err"; c=$?',
   'cat "$err" >&2',
   'printf "%s\\n" "$c" >"$code.tmp" && mv -f "$code.tmp" "$code"',
+].join("\n");
+// Keep the reply private, discard stderr and remove only files abandoned by older runs.
+const PRIVATE_RUN_SCRIPT = [
+  'umask 077',
+  'out=$1 code=$2; shift 2',
+  'find "${out%/*}" -maxdepth 1 -type f -name "fleet-*" -mmin +10 -exec rm -f -- {} + 2>/dev/null',
+  'unset HC_TERMINAL_ID',
+  '"$@" >"$out" 2>/dev/null; c=$?',
+  '[ -f "$out" ] && printf "%s\\n" "$c" >"$code.tmp" && mv -f "$code.tmp" "$code"',
 ].join("\n");
 // Run through exec before each restart, in Herdr's environment: `sh -c PREPARE_SCRIPT sh <runs
 // folder> <names…>` makes the folder (exit 3 when it can't) and prints NAME=value for each name set.
@@ -125,6 +140,14 @@ async function cliArgv(args, env = [], unset = []) {
   if (!there) return null;
   return ["env", ...unset.flatMap((n) => ["-u", n]), `HERDR_APP_HOME=${dir}`, ...env, "sh", runner, `${dir}/mods/${SIDEBAR}/bin/automagik-herdr.mjs`, ...args, "--json"];
 }
+async function accountsArgv(args) {
+  const dir = appHome().replace(/\/+$/, "");
+  const bin = `${dir}/mods/${SIDEBAR}/bin`;
+  const runner = `${bin}/run.sh`, program = `${bin}/accounts.mjs`;
+  const found = await Promise.all([runner, program].map((path) => readTextFile(path).catch(() => null)));
+  return found.every((text) => text != null) ? ["env", `HERDR_APP_HOME=${dir}`, "sh", runner, program, ...args] : null;
+}
+
 /** What hc said when it failed, in plain words: its JSON error's message, else its last line, never a flag. */
 function hcSaid(r) {
   const text = String(r?.stderr || r?.stdout || "").trim();
@@ -235,6 +258,8 @@ export default class AmQuota extends View {
     this.armed = null;      // "restart:<provider>" waiting for its second click
     this.restarting = {};   // provider → true while its bots restart (lock.claim reads it)
     this.logins = null;     // Claude's logins on this Mac: { record, probes, vars, at } (#453)
+    this.fleet = { record: null, bots: {}, members: null, at: 0, running: false, error: null, needsSidebar: false };
+    this.linked = {};
     this.loginNote = null;  // the last Add or Remove that worked
     this.seen = 0;          // last render; a hidden copy stops polling
     this.hidden = false;
@@ -289,12 +314,15 @@ export default class AmQuota extends View {
     const seq = (this.seq ?? 0) + 1;
     this.seq = seq;
     this.readLogins(cx, { force: !this.logins || this.forceLogins });
+    this.readFleet(cx, { force: !this.fleet.at || this.forceLogins });
     this.forceLogins = false;
     cx.spawn(async (cx) => {   // one read of the proxy; the newest wins
-      const { config, key, env } = await this.settings();
+      const { config, key, env, envKnown } = await this.settings();
       if (seq !== this.seq) return;
       this.env = env;
       this.config = config;
+      this.fleetEnvReady = envKnown;
+      if (envKnown && this.hasLinkedRows()) void this.codexRef(env).then(() => wake(cx));
       try {
         this.setup = !config ? "proxy" : !key ? "key" : null;
         if (this.setup) {
@@ -325,6 +353,172 @@ export default class AmQuota extends View {
         if (seq === this.seq) wake(cx);
       }
     });
+  }
+
+  hasLinkedRows() {
+    return Boolean(this.fleet.members?.length || Object.keys(this.fleet.record?.machines ?? {}).some((core) => core !== "local"));
+  }
+
+  readFleet(cx, { force = false } = {}) {
+    cx.spawn(async (cx) => {
+      const fleet = this.fleet;
+      const read = async () => parseFleet(await readTextFile(`${appHome()}/${FLEET_FILE}`).catch(() => null));
+      fleet.record = await read();
+      wake(cx);
+      const checkedCodex = this.fleetEnvReady && this.hasLinkedRows();
+      if (checkedCodex) void this.codexRef(this.env, { force }).then(() => wake(cx));
+      if (fleet.running || !force && Date.now() - fleet.at < IDENTITY_EVERY) return;
+
+      fleet.running = true;
+      try {
+        const listed = await bounded((_command, args) => hc(args), "hc", ["machine", "ls", "--json"], MACHINES_MS);
+        fleet.members = members(listed);
+        fleet.at = Date.now();
+        wake(cx);
+        if (!this.hasLinkedRows()) {
+          fleet.needsSidebar = false;
+          fleet.error = null;
+          fleet.answer = null;
+          return;
+        }
+        if (this.fleetEnvReady) void this.codexRef(this.env, { force: force && !checkedCodex }).then(() => wake(cx));
+        if (!await accountsArgv(["fleet"])) {
+          fleet.needsSidebar = true;
+          return;
+        }
+        fleet.needsSidebar = false;
+        const reply = await this.cliRun(["fleet"], { label: "fleet", runLabel: FLEET_LABEL,
+          followMs: FLEET_FOLLOW_MS, privateRun: true });
+        if (!reply) {
+          fleet.needsSidebar = true;
+          return;
+        }
+        const answer = reply.code === 0 ? readFleetAnswer(JSON.stringify(reply.out)) : null;
+        if (!answer) {
+          fleet.error = reply.out?.error === "busy" ? "busy" : "failed";
+          return;
+        }
+        fleet.record = await read();
+        fleet.answer = answer;
+        fleet.error = null;
+      } catch (error) {
+        fleet.error = error?.partway ? "timeout" : "failed";
+      } finally {
+        fleet.running = false;
+        wake(cx);
+      }
+    });
+  }
+
+  async codexRef(env, { force = false } = {}) {
+    const file = credentialTarget("codex", { home: home(), env }).file;
+    if (!force && this.fleetCodex?.file === file && Date.now() - this.fleetCodex.at < IDENTITY_EVERY) return this.fleetCodex.value;
+    const value = readTextFile(file).then(accountFingerprint, () => null);
+    const check = { file, value, fingerprint: null, at: Date.now() };
+    this.fleetCodex = check;
+    check.fingerprint = await value;
+    return check.fingerprint;
+  }
+
+  linkedRows(tool) {
+    const fleet = this.fleet;
+    const stored = fleet.record?.machines ?? {};
+    const known = new Map(Object.entries(stored));
+    for (const { id, name, connected } of fleet.members ?? []) {
+      if (!known.has(id)) known.set(id, { name, ...(connected ? {} : { state: "away", reason: null }) });
+    }
+    const fingerprint = this.fleetEnvReady ? this.fleetCodex?.fingerprint ?? null : null;
+    const active = this.active.codex;
+    const account = fingerprint && active?.fingerprint === fingerprint &&
+      this.accounts?.find((a) => a.provider === "codex" && a.name === active.name);
+    const local = stored.local?.claude;
+    const ref = tool === "codex" ? { fingerprint } : { email: local?.state === "eligible" ? local.email : null };
+    return fleetRows({ record: { at: fleet.record?.at, machines: Object.fromEntries(known) }, answer: fleet.error || fleet.needsSidebar ? null : fleet.answer,
+      tool, ref, refName: account ? who(account) : null, now: Date.now() });
+  }
+
+  restartLinked(tool, core, cx) {
+    const key = `restart:${tool}:${core}`;
+    const row = this.linkedRows(tool).find((r) => r.core === core);
+    const entry = this.linked[`${tool}:${core}`] ??= { restarting: false, result: null };
+    if (entry.restarting) return;
+    if (this.busy) {
+      this.armed = null;
+      this.switchError = "a switch is running: restart the bots once it is done";
+      wake(cx);
+      return;
+    }
+    if (this.armed !== key) {
+      if (!row?.bots.length) return;
+      this.armed = key;
+      entry.result = null;
+      const list = frozen(row.bots);
+      entry.list = list;
+      entry.names = row.bots.map((bot) => bot.name);
+      entry.name = row.name;
+      cx.timer.after(ARMED, (cx) => {
+        if (this.armed === key && this.linked[`${tool}:${core}`]?.list === list) {
+          this.armed = null;
+          wake(cx);
+        }
+      });
+      wake(cx);
+      return;
+    }
+    this.armed = null;
+    if (row?.name !== entry.name || !sameList(entry.list, row.bots)) {
+      entry.result = ["The list changed: press Restart again."];
+      wake(cx);
+      return;
+    }
+    entry.restarting = true;
+    cx.spawn(async (cx) => {
+      wake(cx);
+      const result = [];
+      for (const [i, bot] of entry.list.entries()) {
+        result.push(await this.restartOne({ ...bot, name: entry.names[i] }, { on: { name: entry.name } }));
+      }
+      entry.restarting = false;
+      entry.result = result;
+      wake(cx);
+      this.readFleet(cx, { force: true });
+    });
+  }
+
+  fleetBlock(t, tool) {
+    const rows = this.linkedRows(tool);
+    const fleet = this.fleet;
+    if (!rows.length && !fleet.needsSidebar && !fleet.error) return null;
+    const block = v_flex().mx(14).gap(6).child(div().font_semibold().child("On linked machines"));
+    const say = (parent, text) => parent.child(this.said(t, { text, tone: "none" }));
+    if (fleet.needsSidebar) say(block, "Reading linked machines needs the sidebar mod switched on and up to date.");
+    if (fleet.error) {
+      say(block, `The linked machines weren't read (${fleet.error}).`);
+      if (fleet.record?.at) say(block, `Last fleet read ${new Date(fleet.record.at).toLocaleString()}.`);
+    }
+    if (fleet.answer?.linked || fleet.record?.linked || fleet.members === null && fleet.at) {
+      const time = fleet.record?.linked?.at ?? (fleet.at ? new Date(fleet.at).toISOString() : fleet.record?.at);
+      say(block, `The list of linked machines couldn't be read${time ? ` ${new Date(time).toLocaleString()}` : ""}: rows show the last read.`);
+    }
+    for (const { core, name, words, tone, lines, bots, restart } of rows) {
+      const row = v_flex().gap(4);
+      row.child(h_flex().gap(6).items_center().child(div().font_semibold().child(name)).child(this.pill(t, { text: words, tone })));
+      for (const line of lines) say(row, line);
+      const state = this.linked[`${tool}:${core}`];
+      if (bots.length) {
+        const chips = h_flex().gap(4).flex_wrap();
+        for (const bot of bots) chips.child(div().px(6).h(18).flex().items_center().rounded(5).bg(t.raised)
+          .text_size(10.5).child(`${bot.name} · ${bot.on}`));
+        row.child(chips);
+        const prompt = `Restart ${bots.length} bot${bots.length === 1 ? "" : "s"} on ${name}`;
+        const armed = this.armed === `restart:${tool}:${core}`;
+        row.child(this.button(t, `restart-${tool}-${core}`, state?.restarting ? "Restarting…" : armed ? `${prompt}? Press again to confirm` : prompt,
+          (_e, cx) => this.restartLinked(tool, core, cx), { small: restart }));
+      }
+      for (const line of state?.result ?? []) say(row, line);
+      block.child(row);
+    }
+    return block;
   }
 
   /**
@@ -607,6 +801,7 @@ export default class AmQuota extends View {
    */
   async record(provider) {
     delete this.identities[provider];
+    if (provider === "codex") this.fleetCodex = null;
     // writeTextFile wants the snapshot it replaces: null only creates.
     const statePath = `${appHome()}/data/${STATE}`;
     const before = await readTextFile(statePath).catch(() => null);
@@ -640,42 +835,55 @@ export default class AmQuota extends View {
    * panel follows it. Throws a RunError when there is no answer: not started (nothing ran), its
    * terminal gone or ended with none (`partway`: it may have stopped part-way), or still running.
    */
-  async cliRun(args, { env = [], label, followMs }) {
-    if (!(await cliArgv(args))) return null;
+  async cliRun(args, { env = [], label, followMs, runLabel = RUN_LABEL, privateRun = false }) {
+    const privateArgv = privateRun ? await accountsArgv(args) : null;
+    if (privateRun ? !privateArgv : !(await cliArgv(args))) return null;
     const dir = appHome().replace(/\/+$/, "");
-    const mine = ["ls", "--label", `${RUN_LABEL}=${label}`, "--json"];
+    const mine = ["ls", "--label", `${runLabel}=${label}`, "--json"];
     const before = await hc(mine);
     if (before?.code !== 0) throw runError("hc can't list the restarts still running, so none was started");
     const going = liveRows(before.stdout)[0];
+    if (going && privateRun) throw runError("the fleet read is still running", { partway: true });
     if (going) throw runError(`its restart started earlier still runs in ${going.address}, so no second one was started`);
     // Its own names: never a file an earlier run left, even one started in the same millisecond.
     const base = `${dir}/${RUNS}/${slug(label)}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const files = { out: `${base}.out`, err: `${base}.err`, code: `${base}.code` };
-    const herdr = await this.prepare(`${dir}/${RUNS}`);
-    const argv = await cliArgv(args, [...CLI_ENV.filter((n) => n in herdr).map((n) => `${n}=${herdr[n]}`), ...env],
-      CLI_ENV.filter((n) => !(n in herdr)));
-    // --rm: hc removes it once it ends; its answer is in the files.
-    const r = await hc(["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", dir, "--label", `${RUN_LABEL}=${label}`,
-      "--", "sh", "-c", RUN_SCRIPT, "sh", files.out, files.err, files.code, ...argv]);
-    if (r?.code !== 0) {
-      const said = hcSaid(r);
-      throw runError(`hc couldn't start its restart in a terminal of its own${said ? ` (${said})` : ""}; nothing was restarted`);
-    }
-    let terminal = null;
+    const files = { out: `${base}.out`, err: privateRun ? null : `${base}.err`, code: `${base}.code` };
     try {
-      terminal = JSON.parse(r.stdout).address ?? null;
-    } catch {}
-    // It may run anyway: found by its label.
-    if (typeof terminal !== "string" || !terminal) {
-      const after = await hc(mine).catch(() => null);
-      terminal = after?.code === 0 ? liveRows(after.stdout)[0]?.address ?? null : null;
+      let argv = privateArgv;
+      if (privateRun) {
+        const made = await exec("sh", ["-c", 'umask 077; mkdir -p -- "$1"', "sh", `${dir}/${RUNS}`]);
+        if (made?.code !== 0) throw runError("the fleet read could not start");
+      } else {
+        const herdr = await this.prepare(`${dir}/${RUNS}`);
+        argv = await cliArgv(args, [...CLI_ENV.filter((n) => n in herdr).map((n) => `${n}=${herdr[n]}`), ...env],
+          CLI_ENV.filter((n) => !(n in herdr)));
+      }
+      // --rm: hc removes it once it ends; its answer is in the files.
+      const r = await hc(["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", dir, "--label", `${runLabel}=${label}`,
+        "--", "sh", "-c", ...(privateRun ? [PRIVATE_RUN_SCRIPT, "sh", files.out, files.code] : [RUN_SCRIPT, "sh", files.out, files.err, files.code]), ...argv]);
+      if (r?.code !== 0) {
+        if (privateRun) throw runError("the fleet read could not start");
+        const said = hcSaid(r);
+        throw runError(`hc couldn't start its restart in a terminal of its own${said ? ` (${said})` : ""}; nothing was restarted`);
+      }
+      let terminal = null;
+      try {
+        terminal = JSON.parse(r.stdout).address ?? null;
+      } catch {}
+      // It may run anyway: found by its label.
+      if (typeof terminal !== "string" || !terminal) {
+        const after = await hc(mine).catch(() => null);
+        terminal = after?.code === 0 ? liveRows(after.stdout)[0]?.address ?? null : null;
+      }
+      if (!terminal) {
+        const got = await this.runAnswer(files);
+        if (got) return got;
+        throw runError("hc started its restart without saying in which terminal, and none was found", { partway: true });
+      }
+      return await this.follow(terminal, files, followMs);
+    } finally {
+      if (privateRun) await exec("rm", ["-f", "--", files.out, files.code, `${files.code}.tmp`]).catch(() => {});
     }
-    if (!terminal) {
-      const got = await this.runAnswer(files);
-      if (got) return got;
-      throw runError("hc started its restart without saying in which terminal, and none was found", { partway: true });
-    }
-    return this.follow(terminal, files, followMs);
   }
 
   /**
@@ -706,7 +914,7 @@ export default class AmQuota extends View {
     const code = await read(files.code);
     if (code === null || code === undefined) return null;
     const n = Number.parseInt(String(code).trim(), 10);
-    return cliAnswer(Number.isSafeInteger(n) ? n : 1, await read(files.out), await read(files.err));
+    return cliAnswer(Number.isSafeInteger(n) ? n : 1, await read(files.out), files.err ? await read(files.err) : null);
   }
 
   /**
@@ -737,7 +945,7 @@ export default class AmQuota extends View {
       // Wall time, not waits: a wait that answers at once is followed by a pause, never counted.
       if (Date.now() - started >= followMs) {
         throw runError(`its restart ${unread ? `may still run in ${terminal} (hc can't say how it is)` : `still runs in ${terminal}`} after `
-          + `${waited(Date.now() - started)}; the panel stopped following it, so how it ends isn't shown here. Check whether the bot is back once ${terminal} is gone`);
+          + `${waited(Date.now() - started)}; the panel stopped following it, so how it ends isn't shown here. Check whether the bot is back once ${terminal} is gone`, files.err ? {} : { partway: true });
       }
       const asked = Date.now();
       try {
@@ -855,13 +1063,14 @@ export default class AmQuota extends View {
    * when a helper wasn't run again, though the bot did restart: its new `terminal` with no `error`
    * says so. A refusal can carry a `terminal` too (a new pane that exited, a turn started again).
    */
-  async restartOne(bot, { tree = false, helpers: count = 0 } = {}) {
+  async restartOne(bot, { tree = false, helpers: count = 0, on = null } = {}) {
     try {
-      const args = ["restart", bot.id, "--project", bot.project, ...(tree ? ["--tree"] : [])];
+      const args = on ? restartArgs(bot, on.name) : ["restart", bot.id, "--project", bot.project, ...(tree ? ["--tree"] : [])];
       // In a terminal of its own (#433): a restart waits up to 30 s for its new pane, twice when
       // codex can't resume (#413), and a --tree one 40 s more per helper, past exec's limit.
       const r = await this.cliRun(args, { label: bot.id, followMs: RUN_FOLLOW_MS + (tree ? count * RUN_HELPER_MS : 0),
         env: tree ? [`AUTOMAGIK_HERDR_TREE_TURN_WAIT_MS=${TREE_TURN_WAIT_MS}`] : [] });
+      if (on) return restartWords({ name: bot.name, code: r?.code, refused: r?.out?.refused, retired: r?.out?.retired });
       const helpers = (Array.isArray(r?.out?.helpers) ? r.out.helpers : []).filter((h) => h?.error)
         .map((h) => `${bot.name}'s helper ${h.name ?? h.replaced}: ${plain(h.error)}`);
       if (r?.code === 0 || (tree && typeof r?.out?.terminal === "string" && r.out.error === undefined)) {
@@ -873,6 +1082,7 @@ export default class AmQuota extends View {
         ? { bot, why, refused, terminal: r.out.terminal } : null;
       return { why, note: null, busy, helpers };
     } catch (err) {
+      if (on) return restartWords({ name: bot.name });
       // Its terminal ended with no answer: the restart may have stopped part-way.
       const back = tree ? `${bot.name} and its helpers are back` : `${bot.name} is back`;
       const why = err?.partway ? `${message(err)}. It may have stopped part-way: check whether ${back}, then restart what is missing from a terminal, not from here` : message(err);
@@ -1289,6 +1499,8 @@ export default class AmQuota extends View {
       for (const r of v.others) list.child(this.row(t, v, r));
       body.child(list);
     }
+    const fleet = this.fleetBlock(t, this.tool);
+    if (fleet) body.child(fleet);
     // Keep the scroll area in flow so its rows give the footer popup its body height.
     root.child(v_flex().relative().flex_1().min_h(0)
       .child(div().id("am-quota-body").flex_1().min_h(0).overflow_y_scroll().child(body))

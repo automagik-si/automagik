@@ -16,6 +16,14 @@ object Chat {
      * `dshWrite: true` (RFC 0015, Amendments 2026-11-07).
      */
     const val DSH_PREFIX = "dsh:"
+    const val ROOM_PREFIX = "dsh:room:"
+    const val GROUPS_UNAVAILABLE = "Pocket Link or Automagik on this computer doesn’t offer groups to the phone."
+    const val GROUP_UNAVAILABLE = "This group isn’t open to the phone right now. Reconnect later."
+    const val WAITING_ON_COMPUTER = "Waiting on the computer"
+    const val SEND_AS_NEW = "Send as new"
+    const val SEND_AS_NEW_WARNING = "The group may get this message twice."
+    const val UNKNOWN_SEND = "The computer has no record of this message"
+    const val STOP_PARTLY = "Stopped, but one step failed. Check the group on the computer."
     const val ANSWER_ON_COMPUTER = "Answer on the computer"
     const val ANSWER_IN_TERMINAL = "Answer in the terminal"
     /** A key sent, but the prompt was still there when read back: never shown as answered. */
@@ -31,6 +39,8 @@ object Chat {
     const val MAX_RECEIPTS = 16
     /** Request ids whose end the phone knows, kept so a reconnect never receipts one twice. */
     const val MAX_DONE = 64
+    /** Recently closed group ids. A card or receipt still in the pane keeps its own id. */
+    const val MAX_GROUP_DONE = 256
     /** A card that was open when the phone left and is neither open nor in `settled[]` on reconnect: no outcome is claimed. */
     const val CLOSED_AWAY = "Closed while you were away"
 
@@ -53,11 +63,14 @@ object Chat {
         }
     }
 
-    /** An Automagik Bot's chat: no terminal pane, approvals answered as DSH raised them. */
+    /** An Automagik chat: no terminal pane, approvals answered as DSH raised them. */
     fun isDsh(terminal: String) = terminal.startsWith(DSH_PREFIX)
 
-    /** Whether the phone refuses writes on [terminal]: a DSH chat, on a bridge that did not say `dshWrite: true`. */
-    fun readOnly(terminal: String, dshWrite: Boolean = false) = isDsh(terminal) && !dshWrite
+    fun isGroup(terminal: String) = terminal.startsWith(ROOM_PREFIX)
+
+    /** DSH writes need the bridge's write grant. A group also needs its own grant. */
+    fun readOnly(terminal: String, dshWrite: Boolean = false, groups: Boolean = false) =
+        isDsh(terminal) && (!dshWrite || (isGroup(terminal) && !groups))
 
     /** A terminal worth offering a Chat tab: the program the bridge decodes runs in it (find.js `agentOf`). */
     fun offered(t: CoreTerminal?): Boolean {
@@ -75,7 +88,7 @@ object Chat {
         val options: List<String> = emptyList(), val multi: Boolean = false,
         /** An assistant text row whose turn was interrupted (bots-dsh pocket-chat.js rowsOf): it reads [STOPPED]. */
         val interrupted: Boolean = false,
-        val blocks: List<Attach.Block>? = null
+        val blocks: List<Attach.Block>? = null, val name: String = "", val reason: String = ""
     ) {
         companion object {
             fun parse(j: JSONObject?): Row? {
@@ -86,7 +99,7 @@ object Chat {
                     s("input"), s("output"), j.optBoolean("ok", true), s("call"), j.optJSONArray("choices").strings(),
                     j.optBoolean("open", false), j.optBoolean("answerable", true), s("prompt"), j.optBoolean("cut", false),
                     s("why"), s("state"), s("msg"), j.optJSONArray("options").strings(), j.optBoolean("multi", false),
-                    j.opt("interrupted") == true, Attach.blocks(j.opt("blocks")))
+                    j.opt("interrupted") == true, Attach.blocks(j.opt("blocks")), s("name"), s("reason"))
             }
         }
     }
@@ -114,23 +127,30 @@ object Chat {
                         val shown: Boolean = true, val registryId: String? = null,
                         /** The rest of the row's status (bots-dsh pocket-chat.js `statusOf`): a blocked chat's kind (permission or
                          *  question), its line (what is asked, or where to answer), and the Session's turn as bots-dsh counts it. */
-                        val kind: String = "", val msg: String = "", val turn: Long = 0) {
-        /** An Automagik Bot's chat (listed by bots-dsh), not a terminal's. */
+                        val kind: String = "", val msg: String = "", val turn: Long = 0,
+                        val members: List<String> = emptyList(), val approvals: Int = 0) {
+        /** An Automagik chat listed by bots-dsh. */
         val dsh: Boolean get() = isDsh(terminal)
+        val group: Boolean get() = isGroup(terminal)
         companion object {
             fun parse(j: JSONObject): Terminal {
                 val status = j.optJSONObject("status")
+                val members = j.optJSONArray("members")?.let { a ->
+                    (0 until a.length()).asSequence().mapNotNull { a.optJSONObject(it) }
+                        .map { ChatText.clean(it.clean("name")).trim() }.filter { it.isNotBlank() }.take(50).toList()
+                }.orEmpty()
                 return Terminal(j.optString("terminal"), if (j.isNull("machine")) "" else j.optString("machine"),
                     j.optString("agent"), j.optString("title"), status?.optString("state").orEmpty(), j.optString("chat"),
                     j.opt("shown") != false,
                     (j.opt("registryId") as? String)?.takeIf { it.isNotBlank() },
-                    status?.clean("kind").orEmpty(), status?.clean("msg").orEmpty(), status?.optLong("turn", 0) ?: 0)
+                    status?.clean("kind").orEmpty(), status?.clean("msg").orEmpty(), status?.optLong("turn", 0) ?: 0,
+                    members, j.optInt("approvals", 0).coerceAtLeast(0))
             }
         }
     }
 
     /** An approval or question card the phone showed open and has not seen close: its kind and what it asked. */
-    data class Card(val id: String, val kind: String, val label: String)
+    data class Card(val id: String, val kind: String, val label: String, val who: String = "")
 
     /**
      * A card that closed while the phone was away (RFC 0015, "Settled requests on reconnect"; #733): bots-dsh's settled
@@ -139,7 +159,7 @@ object Chat {
      * what the card asked, when the phone saw it. [at] is bots-dsh's clock for a settled entry, the phone's otherwise.
      */
     data class Receipt(val id: String, val kind: String, val label: String = "", val by: String = "", val name: String = "",
-                       val outcome: String = "", val at: Long = 0) {
+                       val outcome: String = "", val at: Long = 0, val who: String = "", val live: Boolean = false) {
         /** bots-dsh said how it ended; false for a card that only vanished. */
         val settled: Boolean get() = outcome.isNotEmpty()
     }
@@ -163,15 +183,25 @@ object Chat {
         val resuming: Boolean = false,
         /** The cards this DSH chat showed open and has not seen close: what a reconnect's receipt names ([carry]). */
         val cards: List<Card> = emptyList(),
-        /** Receipts for cards that closed while the phone was away, oldest first, until dismissed ([MAX_RECEIPTS]). */
+        /** Receipts, oldest first, until dismissed. Only Bot chats use [MAX_RECEIPTS]. */
         val receipts: List<Receipt> = emptyList(),
         /** Request ids whose end the phone already knows (closed in view, receipted, or settled before the chat opened). */
         val done: List<String> = emptyList(),
         /** A snapshot has been folded in: the next one is a reconnect, and what settled since gets a receipt. */
-        val synced: Boolean = false
+        val synced: Boolean = false,
+        /** A group's open cards in arrival order. */
+        val approvals: List<Row> = emptyList(),
+        val groups: Boolean = false,
+        val title: String = "",
+        val answerable: Int = 0,
+        /** Each group gone clears the draft, even if a reconnect has already begun. */
+        val wiped: Int = 0,
+        /** After a group gone, what survives for reconciliation stays out of view until the next snapshot. */
+        val hidden: Boolean = false
     ) {
-        val readOnly: Boolean get() = Chat.readOnly(terminal, dshWrite)
+        val readOnly: Boolean get() = Chat.readOnly(terminal, dshWrite, groups)
         val dsh: Boolean get() = isDsh(terminal)
+        val group: Boolean get() = isGroup(terminal)
         /** Where a resubscribe resumes: the newest transcript row. */
         val cursor get() = rows.lastOrNull()?.id
         val oldest get() = rows.firstOrNull()?.id
@@ -185,11 +215,15 @@ object Chat {
         "snapshot" -> {
             val rows = e.optJSONArray("rows").rows()
             val kept = if (e.optBoolean("reset")) rows else merge(s.rows, rows)
-            val approval = Row.parse(e.optJSONObject("approval"))?.takeIf { it.open }
-            val question = Row.parse(e.optJSONObject("question"))?.takeIf { it.open }
-            reconnected(s, approval, question, e.optJSONArray("settled"), now).copy(rows = kept.takeLast(MAX_ROWS), screen = e.optJSONArray("screen").rows(),
+            val approval = if (s.group) null else Row.parse(e.optJSONObject("approval"))?.takeIf { it.open }
+            val question = if (s.group) null else Row.parse(e.optJSONObject("question"))?.takeIf { it.open }
+            val approvals = if (s.group) e.optJSONArray("approvals").rows()
+                .filter { it.open && it.kind == "approval" }.distinctBy { it.id } else emptyList()
+            val live = if (s.group) approvals else listOfNotNull(approval, question)
+            reconnected(s, live, e.optJSONArray("settled"), now).copy(rows = kept.takeLast(MAX_ROWS), screen = e.optJSONArray("screen").rows(),
                 status = Status.parse(e.optJSONObject("status")) ?: s.status,
-                approval = approval, question = question,
+                approval = approval, question = question, approvals = approvals, answerable = approvals.size,
+                title = if (s.group) e.clean("title").ifBlank { s.title } else s.title, hidden = false,
                 messages = held(s.messages, e.optJSONArray("held")), connected = true, gone = false, offline = false, error = null,
                 resuming = false, synced = true)
         }
@@ -198,19 +232,27 @@ object Chat {
         "status" -> {
             val js = e.optJSONObject("status")
             val blocked = js?.optString("state") == "blocked"
-            s.copy(status = Status.parse(js) ?: s.status, question = s.question.takeIf { blocked },
+            if (s.group) s.copy(status = Status.parse(js) ?: s.status,
+                answerable = if (e.has("approvals")) e.optInt("approvals", 0).coerceAtLeast(0) else s.answerable,
+                title = e.clean("title").ifBlank { s.title })
+            else s.copy(status = Status.parse(js) ?: s.status, question = s.question.takeIf { blocked },
                 cards = s.cards.filterNot { !blocked && it.kind == "question" })
         }
         "source" -> s.copy(screenOnly = e.optString("source") == "none")
-        "approval" -> Row.parse(e.optJSONObject("row")).let { r -> card(s.copy(approval = r?.takeIf { it.open }), r) }
-        "question" -> Row.parse(e.optJSONObject("row")).let { r -> card(s.copy(question = r), r) }
+        "approval" -> {
+            val row = e.optJSONObject("row")
+            val r = Row.parse(row)
+            if (s.group) groupCard(s, r, row?.optJSONObject("receipt"), now)
+            else card(s.copy(approval = r?.takeIf { it.open }), r)
+        }
+        "question" -> if (s.group) s else Row.parse(e.optJSONObject("row")).let { r -> card(s.copy(question = r), r) }
         "held" -> message(s, e.optString("id")) { it.copy(state = "held", why = e.optString("why")) }
         "sent" -> message(s, e.optString("id")) { it.copy(state = e.optString("state", "sent").ifBlank { "sent" }, why = "") }
         "sending" -> message(s, e.optString("id")) { it.copy(state = "sending", why = "") }
         "matched" -> s.copy(messages = s.messages.filterNot { it.id == e.optString("id") })
         "cancelled" -> s.copy(messages = s.messages.filterNot { it.id == e.optString("id") })
-        "gone" -> gone(s, e.optString("reason"))
-        "offline" -> s.copy(offline = true, approval = null, question = null)
+        "gone" -> if (s.group) goneGroup(s, e.optString("reason")) else gone(s, e.optString("reason"))
+        "offline" -> s.copy(offline = true, approval = null, question = null, approvals = emptyList())
         else -> s
     }
 
@@ -221,24 +263,31 @@ object Chat {
      * (nothing is receipted); every later one is a reconnect, and each entry the phone has not seen end gets one receipt.
      * A card that is neither open nor settled closes as [CLOSED_AWAY]. An id is receipted once, however many reconnects.
      */
-    private fun reconnected(s: State, approval: Row?, question: Row?, settled: JSONArray?, now: Long): State {
+    private fun reconnected(s: State, live: List<Row>, settled: JSONArray?, now: Long): State {
         if (!s.dsh) return s
-        val live = listOfNotNull(approval, question)
         val liveIds = live.map { it.id }.toSet()
         val done = s.done.toMutableList()
         val fresh = mutableListOf<Receipt>()
         for (i in 0 until (settled?.length() ?: 0)) {
             val r = settled?.optJSONObject(i) ?: continue
             val id = r.optString("id").takeIf { it.isNotEmpty() } ?: continue
-            if (id in done || id in liveIds) continue
+            if (id in done || id in liveIds || (s.group && known(s, id))) continue
             done += id
             if (!s.synced) continue
             val card = s.cards.find { it.id == id }
-            fresh += Receipt(id, card?.kind ?: kindOf(id), card?.label.orEmpty(), r.clean("by"), r.clean("name"), r.clean("outcome"),
-                r.optLong("at", 0).takeIf { it > 0 } ?: now)
+            val kind = card?.kind ?: if (s.group) "approval" else kindOf(id)
+            fresh += Receipt(id, kind, card?.label.orEmpty(), r.clean("by"), r.clean("name"), r.clean("outcome"),
+                r.optLong("at", 0).takeIf { it > 0 } ?: now, who = card?.who.orEmpty())
         }
-        for (card in s.cards) if (card.id !in liveIds && card.id !in done) { done += card.id; fresh += Receipt(card.id, card.kind, card.label, at = now) }
-        return s.copy(cards = live.map(::cardOf), done = done.takeLast(MAX_DONE), receipts = (s.receipts + fresh).takeLast(MAX_RECEIPTS))
+        for (card in s.cards) {
+            if (card.id in liveIds || card.id in done || (s.group && known(s, card.id))) continue
+            done += card.id
+            fresh += Receipt(card.id, card.kind, card.label, at = now, who = card.who)
+        }
+        val receipts = s.receipts + fresh
+        val doneCap = if (s.group) MAX_GROUP_DONE else MAX_DONE
+        return s.copy(cards = live.map(::cardOf), done = done.takeLast(doneCap),
+            receipts = if (s.group) receipts else receipts.takeLast(MAX_RECEIPTS))
     }
 
     /**
@@ -253,7 +302,38 @@ object Chat {
         else -> s.copy(cards = s.cards.filterNot { it.id == r.id }, done = (s.done.filterNot { it == r.id } + r.id).takeLast(MAX_DONE))
     }
 
-    private fun cardOf(r: Row) = Card(r.id, r.kind, labelOf(r))
+    private fun known(s: State, id: String) = id in s.done || s.receipts.any { it.id == id }
+
+    /** Each group event opens, updates or closes just the approval it names. */
+    private fun groupCard(s: State, r: Row?, receipt: JSONObject?, now: Long): State {
+        if (r == null || r.kind != "approval") return s
+        val shown = s.approvals.find { it.id == r.id }
+        val card = s.cards.find { it.id == r.id }
+        if (r.open) {
+            val next = cardOf(r)
+            return s.copy(
+                approvals = if (shown == null) s.approvals + r else s.approvals.map { if (it.id == r.id) r else it },
+                cards = if (card == null) s.cards + next else s.cards.map { if (it.id == r.id) next else it },
+                done = s.done.filterNot { it == r.id }, receipts = s.receipts.filterNot { it.id == r.id })
+        }
+        val outcome = receipt?.clean("outcome").orEmpty()
+        val by = receipt?.clean("by").orEmpty()
+        val name = receipt?.clean("name").orEmpty()
+        val at = receipt?.optLong("at", 0)?.takeIf { it > 0 } ?: now
+        val receipts = when {
+            !known(s, r.id) && (shown != null || card != null) -> s.receipts + Receipt(
+                r.id, "approval", label = card?.label ?: shown?.let(::labelOf).orEmpty(),
+                by = by, name = name, outcome = outcome, at = at, who = card?.who ?: shown?.name ?: r.name, live = true)
+            outcome.isNotEmpty() -> s.receipts.map {
+                if (it.id == r.id && !it.settled) it.copy(by = by, name = name, outcome = outcome, at = at) else it
+            }
+            else -> s.receipts
+        }
+        return s.copy(approvals = s.approvals.filterNot { it.id == r.id }, cards = s.cards.filterNot { it.id == r.id },
+            receipts = receipts, done = (s.done.filterNot { it == r.id } + r.id).takeLast(MAX_GROUP_DONE))
+    }
+
+    private fun cardOf(r: Row) = Card(r.id, r.kind, labelOf(r), r.name)
 
     /** What a card asks: the approval's tool and reason, or the question. */
     fun labelOf(r: Row): String = if (r.kind == "question") r.prompt else listOf(r.tool, r.summary).filter { it.isNotBlank() }.distinct().joinToString(": ")
@@ -261,21 +341,26 @@ object Chat {
     /** A request's kind from bots-dsh's row id (`…#approval-<call>`, `…#question-<call>`, pocket-chat.js `requestRowId`). */
     private fun kindOf(id: String) = when { "#question-" in id -> "question"; "#approval-" in id -> "approval"; else -> "request" }
 
-    /** The receipt [id] dismissed: gone for good, since its id stays known ([State.done]). */
-    fun dismissReceipt(s: State, id: String) = s.copy(receipts = s.receipts.filterNot { it.id == id })
+    /** Dismissing [id] keeps it among the ids already seen ([State.done]). */
+    fun dismissReceipt(s: State, id: String) = s.copy(receipts = s.receipts.filterNot { it.id == id },
+        done = if (s.group && s.receipts.any { it.id == id })
+            (s.done.filterNot { it == id } + id).takeLast(MAX_GROUP_DONE) else s.done)
 
     /**
      * What a reconnect of the same chat keeps of [s] beside [unknown]: the cards it showed (so a reconnect can say
      * what closed), its receipts, the request ids it knows ended, and that it had a snapshot (so the next is a reconnect).
      */
-    fun carry(s: State?, into: State): State = if (s == null) into else into.copy(cards = s.cards, receipts = s.receipts, done = s.done, synced = s.synced)
+    fun carry(s: State?, into: State): State = if (s == null) into else into.copy(
+        cards = s.cards, receipts = s.receipts, done = s.done, synced = s.synced,
+        title = s.title, wiped = s.wiped, hidden = s.hidden)
 
     /** A receipt's heading: the Bot, the kind of card and when it closed (as [time] renders [Receipt.at]). */
     fun receiptHeading(r: Receipt, bot: String, time: String): String =
-        listOf(bot, when (r.kind) { "approval" -> "Approval"; "question" -> "Question"; else -> "Request" }, time).filter { it.isNotBlank() }.joinToString(" · ")
+        listOf(r.who.ifBlank { bot }, when (r.kind) { "approval" -> "Approval"; "question" -> "Question"; else -> "Request" }, time).filter { it.isNotBlank() }.joinToString(" · ")
 
     /** What a receipt says happened while the phone was away; never more than bots-dsh's entry holds. */
     fun receiptText(r: Receipt): String = when {
+        r.live && r.settled -> doneLine(r) ?: CLOSED_AWAY
         !r.settled -> CLOSED_AWAY
         r.outcome == "withdrawn" -> "No longer needed"
         else -> "Answered${whereOf(r.by, r.name)} while you were away" + outcomeOf(r.outcome).let { if (it.isNotEmpty()) ": $it" else "" }
@@ -311,7 +396,8 @@ object Chat {
      * `dsh:` terminal names the Bot, so the next subscribe follows its current Session, or says why it can't.
      */
     val RESUMABLE = setOf("unavailable", "timeout", "closed", "moved", "ended")
-    fun resumable(s: State, reason: String) = s.dsh && reason in RESUMABLE
+    fun resumable(s: State, reason: String) = s.dsh && reason in RESUMABLE &&
+        (!s.group || reason == "unavailable" || reason == "timeout" || reason == "closed")
 
     /** The wait before automatic reconnect [attempt] (0 first), or null: no more, the person reconnects. */
     fun resumeDelayMs(attempt: Int): Long? = RESUME_DELAYS_MS.getOrNull(attempt)
@@ -326,6 +412,29 @@ object Chat {
             messages = s.messages.map { if (it.state == "sending") it.copy(state = "maybe") else it })
         else s.copy(gone = true, connected = false, resuming = false, approval = null, question = null,
             error = if (s.dsh) goneWhy(reason) ?: s.error else s.error)
+
+    /** A group needs a fresh grant before the pane can draw anything carried into its next snapshot. */
+    private fun goneGroup(s: State, reason: String): State {
+        val cleared = s.copy(rows = emptyList(), screen = emptyList(), approval = null, question = null,
+            approvals = emptyList(), notice = null, more = true, answerable = 0, connected = false, wiped = s.wiped + 1)
+        return if (resumable(s, reason)) cleared.copy(resuming = true, error = RESUMING, hidden = true, messages = unknown(s))
+        else cleared.copy(cards = emptyList(), receipts = emptyList(), messages = emptyList(), synced = false,
+            hidden = false, title = "", status = Status(), gone = true, resuming = false, error = groupGoneWhy(reason))
+    }
+
+    fun groupLost(s: State): State = goneGroup(s, "").copy(groups = false, error = GROUPS_UNAVAILABLE)
+
+    /** An ended transport can leave without a gone event. Keep the pane hidden until Reconnect. */
+    fun groupDisconnected(s: State, error: String): State =
+        if (s.gone || s.hidden) s else goneGroup(s, "closed").copy(resuming = false, error = error)
+
+    private fun groupGoneWhy(reason: String): String? = when (reason) {
+        "not-shown" -> "This group isn’t open to the phone now."
+        "deleted" -> "This group was deleted on the computer."
+        "not-found", "not_found" -> "This group isn’t on the computer anymore."
+        "" -> null
+        else -> "This group closed ($reason)."
+    }
 
     /** A DSH subscribe bots-dsh refused (pocket-socket.js `subscribe`), in words; null for an end with no reason. */
     private fun goneWhy(reason: String): String? = when (reason) {
@@ -348,11 +457,18 @@ object Chat {
      */
     fun answered(s: State, id: String, text: String, answer: JSONObject): State {
         val state = answer.optString("state")
+        if (s.group && state == "unknown") return s.copy(messages = upsert(s.messages, Message(id, text, "unknown")))
         if (state == "refused" && s.dsh && answer.optString("reason") == "offline") return unanswered(s, id, text)
         if (state == "refused") return s.copy(messages = upsert(s.messages, Message(id, text, "refused", reason = answer.optString("reason"))))
         return s.copy(messages = upsert(s.messages, (s.messages.find { it.id == id } ?: Message(id, text, state))
             .let { m -> if (m.state == "sending" && state == "sent" && !s.dsh) m else m.copy(state = state.ifBlank { "sent" }, why = answer.optString("why")) }))
     }
+
+    /** A group answer that lost the race closes the named card with the receipt still held by the computer. */
+    fun answerReply(s: State, rowId: String, a: JSONObject, now: Long = System.currentTimeMillis()): State =
+        if (s.group && a.optString("reason") == "settled")
+            groupCard(s, Row(rowId, "approval", open = false, answerable = false), a.optJSONObject("receipt"), now).copy(notice = null)
+        else s.copy(notice = answerNotice(a, s.dsh))
 
     /** An answer the phone sent and did not see answered: tapping again sends the same one, taken at most once. */
     const val ANSWER_MAYBE = "Maybe not sent. Tap it again: it is answered at most once."
@@ -391,7 +507,9 @@ object Chat {
      * What the chat says after an interrupt: sent, refused (a DSH chat passes the socket's reason through), or not
      * confirmed when no answer came or the socket did not answer in time (never repeated by itself).
      */
-    fun interruptNotice(a: JSONObject?, dsh: Boolean): String = when {
+    fun interruptNotice(a: JSONObject?, dsh: Boolean, group: Boolean = false): String = when {
+        group && a?.optString("state") == "failed" -> STOP_PARTLY
+        group && a?.optString("state") == "sent" -> "Interrupt sent."
         a?.optBoolean("ok") == true -> "Interrupt sent."
         a != null && dsh && a.optString("reason") !in setOf("", "offline") -> "Interrupt not sent: ${answerNotice(a, dsh = true)}"
         else -> "Interrupt not confirmed. Check the ${if (dsh) "computer" else "terminal"}."
@@ -439,7 +557,13 @@ object Chat {
     }
 
     /** What a reconnect keeps of [s]: messages whose outcome is unknown (still sending, or maybe), as maybe, with Retry. */
-    fun unknown(s: State): List<Message> = s.messages.filter { it.state == "maybe" || it.state == "sending" }.map { it.copy(state = "maybe") }
+    fun unknown(s: State): List<Message> = s.messages.mapNotNull { m ->
+        when {
+            m.state == "maybe" || m.state == "sending" -> m.copy(state = "maybe")
+            s.group && m.state == "unknown" -> m
+            else -> null
+        }
+    }
 
     private fun message(s: State, id: String, change: (Message) -> Message): State {
         val m = s.messages.find { it.id == id } ?: return s
@@ -485,6 +609,7 @@ object ChatActions {
     fun canShowTerminal(s: Chat.State) = !s.dsh
     fun canSendHeld(s: Chat.State, m: Chat.Message) = canSend(s) && m.state == "held"
     fun canRetry(s: Chat.State, m: Chat.Message) = canSend(s) && m.state == "maybe"
+    fun canSendAsNew(s: Chat.State, m: Chat.Message) = canSend(s) && s.group && m.state == "unknown"
 
     /** A DSH chat the bridge or bots-dsh takes no phone writes on (no `dshWrite` in the hello): why, and what to do. */
     const val READ_ONLY = "Read only on the phone: Pocket Link or Automagik on this computer takes no phone writes. " +
@@ -528,6 +653,7 @@ object ChatActions {
         s.offline -> "The machine is offline. Nothing is sent until it is back."
         s.resuming -> "Reconnecting. Nothing is sent until the chat is back."
         !s.connected -> if (s.error != null) "Not connected. Nothing is sent." else null
+        s.group && !s.groups -> Chat.GROUPS_UNAVAILABLE
         s.readOnly -> READ_ONLY
         else -> null
     }

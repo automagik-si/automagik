@@ -62,10 +62,12 @@ object ChatStyle {
 data class ChatIdentity(val name: String, val pet: String?, val pose: String)
 
 /** The bot's registry id: the chat's served id, else its `dsh:<id>`, else the pane's `bot` label. */
-private fun chatBotId(chat: Chat.Terminal?, terminal: CoreTerminal?): String? =
-    chat?.registryId?.takeIf { it.isNotBlank() }
+private fun chatBotId(chat: Chat.Terminal?, terminal: CoreTerminal?): String? {
+    if (chat?.group == true || terminal?.address?.let(Chat::isGroup) == true) return null
+    return chat?.registryId?.takeIf { it.isNotBlank() }
         ?: chat?.terminal?.takeIf { Chat.isDsh(it) }?.substringAfter(Chat.DSH_PREFIX)?.takeIf { it.isNotBlank() }
         ?: terminal?.labels?.get("bot")?.trim()?.takeIf { it.isNotBlank() }
+}
 
 /**
  * The chat bar's bot: the listing's title, the registry member's name, then the pane's title; a chat with none is
@@ -84,7 +86,7 @@ fun chatIdentity(chat: Chat.Terminal?, terminal: CoreTerminal?, members: Collect
  * [Teams.poseOf] (done and error are not sleep).
  */
 fun chatPose(s: Chat.State, terminal: CoreTerminal?, now: Long = System.currentTimeMillis()): String = when {
-    s.approval != null || s.question != null -> Teams.NEEDS_YOU
+    s.approval != null || s.question != null || s.approvals.isNotEmpty() -> Teams.NEEDS_YOU
     s.gone || s.offline -> Teams.ASLEEP
     s.dsh -> Teams.poseOfChat(s.status.state)
     terminal != null -> Teams.poseOf(terminal, now)
@@ -96,7 +98,7 @@ fun chatPose(s: Chat.State, terminal: CoreTerminal?, now: Long = System.currentT
  * without `open` (a read-only Bot chat's row never carries it; the reducer clears it when the status leaves blocked).
  */
 fun chatPending(s: Chat.State): List<Chat.Row> =
-    listOfNotNull(s.question, s.approval?.takeIf { it.open }).distinctBy { it.id }
+    (listOfNotNull(s.question, s.approval?.takeIf { it.open }) + s.approvals.filter { it.open }).distinctBy { it.id }
 
 /** The card the pinned area shows: the one picked, else the approval (the blocking action), else the only card. */
 fun chatPinned(s: Chat.State, selected: String?): Chat.Row? {
@@ -112,6 +114,7 @@ fun chatListRows(s: Chat.State): List<Chat.Row> {
 
 /** The bar's second line: the open card's own ask, else the chat's state word and the engine's message. */
 fun chatStateLine(s: Chat.State, card: Chat.Row? = null): String = when {
+    s.group && chatPending(s).size > 1 -> "${chatPending(s).size} approvals need you"
     card?.kind == "question" -> "Question · " + ChatText.clean(card.prompt).ifBlank { Chat.ANSWER_ON_COMPUTER }
     card?.kind == "approval" -> "Needs your approval" +
         ChatText.clean(Chat.labelOf(card)).takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
@@ -162,7 +165,11 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
         app.machines[ref.hostId]?.members?.values?.flatten().orEmpty()
     }
     val pose = chatPose(s, terminal)
-    val identity = remember(chat, terminal, members, pose) { chatIdentity(chat, terminal, members, pose) }
+    val identityRow = if (s.group) {
+        val title = s.title.ifBlank { if (s.gone) ChatGroups.AGENT else chat?.title.orEmpty().ifBlank { ChatGroups.AGENT } }
+        chat?.copy(title = title) ?: Chat.Terminal(ref.address, "", "dsh", title, s.status.state, "group")
+    } else chat
+    val identity = remember(identityRow, terminal, members, pose) { chatIdentity(identityRow, terminal, members, pose) }
     val openLink = rememberLinkOpener()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -173,12 +180,16 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     var confirmDraft by remember(ref) { mutableStateOf<Chat.Message?>(null) }
     var pinnedId by remember(ref) { mutableStateOf<String?>(null) }
     val expanded = remember(ref) { mutableStateMapOf<String, Boolean>() }
-    val rows = remember(s.rows, s.approval, s.question) { chatListRows(s) }
-    val pending = remember(s.question, s.approval) { chatPending(s) }
+    LaunchedEffect(s.wiped) { if (s.wiped > 0) { draft = ""; confirmDraft = null } }
+    val rows = remember(s.rows, s.approval, s.question, s.approvals) { chatListRows(s) }
+    val pending = remember(s.question, s.approval, s.approvals) { chatPending(s) }
     val pinned = chatPinned(s, pinnedId)
     // A card that closed falls back to the other one; the bar and the pinned area always describe the same card.
     LaunchedEffect(pending.map { it.id }) { if (pending.none { c -> c.id == pinnedId }) pinnedId = null }
-    val count = rows.size + s.screen.size + s.messages.size + s.receipts.size + att.messages.size
+    val shownReceipts = if (s.group && s.hidden) emptyList() else s.receipts
+    val shownMessages = if (s.group && s.hidden) emptyList() else s.messages
+    val uploadMessages = if (s.group) emptyList() else att.messages
+    val count = rows.size + s.screen.size + shownMessages.size + shownReceipts.size + uploadMessages.size
     LaunchedEffect(count) { val items = list.layoutInfo.totalItemsCount; if (count > 0 && items > 0) list.animateScrollToItem(items - 1) }
     // The keyboard shrinking the list keeps its top: bring the newest row back instead.
     LaunchedEffect(list) {
@@ -190,8 +201,8 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
     BoxWithConstraints(modifier.fillMaxSize().background(Canvas)) {
         val cardMax = (maxHeight - 200.dp).coerceIn(240.dp, ChatStyle.PENDING_MAX_HEIGHT)
         Column(Modifier.fillMaxSize()) {
-            val showMemory = s.dsh && !app.demo && botManage != false && (s.dshWrite || botWrites == true)
-            val showSchedules = s.dsh && !app.demo && botSchedules != false && (s.dshWrite || botWrites == true)
+            val showMemory = s.dsh && !s.group && !app.demo && botManage != false && (s.dshWrite || botWrites == true)
+            val showSchedules = s.dsh && !s.group && !app.demo && botSchedules != false && (s.dshWrite || botWrites == true)
             val showSettings = ChatSettings.isBot(s.terminal) && !app.demo && botSettings != false && (s.dshWrite || botWrites == true)
             ChatBar(s, identity, pinned, onBack, onShowTerminal?.takeIf { ChatActions.canShowTerminal(s) }, vm::chatInterrupt, vm::reconnectChat,
                 onMemory = if (showMemory) ({ vm.openMemory(ref) }) else null,
@@ -207,9 +218,12 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                     items(rows, key = { "r:" + it.id }) { ChatRowView(it, s, vm, openLink, expanded, att) }
                     if (s.screen.isNotEmpty()) item("live") { Hint("Live from the screen") }
                     items(s.screen, key = { "s:" + it.id }) { ChatRowView(it, s, vm, openLink, expanded) }
-                    items(s.receipts, key = { "x:" + it.id }) { ReceiptCard(it, identity.name, vm::dismissReceipt) }
-                    items(s.messages, key = { "m:" + it.id }) { m -> MessageView(m, s, onSendNow = { confirmDraft = it }, onCancel = vm::chatCancelHeld, onRetry = vm::chatRetry) }
-                    items(att.messages, key = { "u:" + it.id }) { m ->
+                    items(shownReceipts, key = { "x:" + it.id }) { ReceiptCard(it, identity.name, vm::dismissReceipt) }
+                    items(shownMessages, key = { "m:" + it.id }) { m ->
+                        MessageView(m, s, onSendNow = { confirmDraft = it }, onCancel = vm::chatCancelHeld,
+                            onRetry = vm::chatRetry, onSendAsNew = vm::chatSendAsNew)
+                    }
+                    items(uploadMessages, key = { "u:" + it.id }) { m ->
                         UploadMessageView(m, s, att, vm.attachments, onCancel = {
                             if (vm.attachments.cancel(m.id, restore = draft.isBlank())) draft = m.caption
                         }, restoreCaption = { if (draft.isBlank()) draft = it })
@@ -223,7 +237,12 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                 if (it == ChatActions.READ_ONLY && att.peer == Attach.Peer.App) Attach.READ_ONLY_APP else it
             }
             Column(Modifier.fillMaxWidth().background(Chrome).navigationBarsPadding()) {
-                if (pinned != null) {
+                if (s.group && pending.isNotEmpty()) {
+                    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp)
+                        .heightIn(max = cardMax).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (card in pending) key(card.id) { PendingCard(card, s, vm) }
+                    }
+                } else if (pinned != null) {
                     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp)) {
                         // Both cards can be open at once. The approval wins at open; the question stays one tap away.
                         if (pending.size > 1) {
@@ -239,6 +258,10 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                 }
                 if (why != null) Text(why, fontSize = 12.sp, color = Muted,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp))
+                else if (s.group && ChatActions.canSend(s)) ChatComposer(draft, { draft = it }, {
+                    vm.chatSend(draft)
+                    draft = ""
+                }, enabled = draft.isNotBlank(), name = identity.name, onSay = say)
                 else if (ChatActions.canSend(s)) ChatComposer(draft, { draft = it }, {
                     when (vm.attachments.submit(draft)) {
                         Submit.Accepted -> draft = ""
@@ -383,13 +406,16 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                                     expanded: MutableMap<String, Boolean>, att: AttachState = AttachState.EMPTY) {
     when (row.kind) {
         "text" -> {
-            if (row.blocks != null && Attach.renderable(row.blocks).isEmpty() && row.text.isBlank()) return
+            val blocks = row.blocks?.takeUnless { s.group }
+            if (blocks != null && Attach.renderable(blocks).isEmpty() && row.text.isBlank()) return
             val mine = row.role == "user"
             Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
                 Surface(color = if (mine) Accent.copy(alpha = .14f) else Surface, shape = RoundedCornerShape(12.dp), border = if (mine) null else BorderStroke(1.dp, Border),
-                    modifier = Modifier.widthIn(max = 560.dp).then(if (row.blocks == null) Modifier else Modifier.testTag("chat-attachment-row"))) {
+                    modifier = Modifier.widthIn(max = 560.dp).then(if (blocks == null) Modifier else Modifier.testTag("chat-attachment-row"))) {
                     Column(Modifier.padding(10.dp, 8.dp)) {
-                        if (row.blocks != null) AttachBlocks(row, s, att, vm.attachments, openLink)
+                        if (s.group && !mine && row.name.isNotBlank())
+                            Text(ChatText.clean(row.name), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Muted)
+                        if (blocks != null) AttachBlocks(row, s, att, vm.attachments, openLink)
                         else ChatTextView(row.text, openLink)
                         Chat.cutNote(row, s.dsh)?.let { Text(it, fontSize = 11.sp, color = Muted) }
                         if (row.interrupted) Text(Chat.STOPPED, fontSize = 11.sp, color = Muted)
@@ -432,10 +458,16 @@ internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (S
     Surface(color = Blocked.copy(alpha = .08f), shape = RoundedCornerShape(ChatStyle.CARD_RADIUS),
         border = BorderStroke(1.5.dp, Blocked.copy(alpha = .5f)), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
-            Text(if (row.kind == "approval") "Needs your approval" else "Question", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Blocked)
+            val heading = when {
+                s.group && row.name.isNotBlank() -> "${ChatText.clean(row.name)} needs your approval"
+                row.kind == "approval" -> "Needs your approval"
+                else -> "Question"
+            }
+            Text(heading, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Blocked)
             Spacer(Modifier.height(4.dp))
             val what = if (row.kind == "approval") listOf(row.tool, row.summary).filter { it.isNotBlank() }.distinct().joinToString(": ") else row.prompt
             if (what.isNotBlank() && what != Chat.ANSWER_ON_COMPUTER) Text(ChatText.clean(what), fontSize = 13.sp, color = Ink)
+            if (s.group && row.reason.isNotBlank()) Text(ChatText.clean(row.reason), fontSize = 12.sp, color = Muted)
             if (row.input.isNotBlank()) { Spacer(Modifier.height(6.dp)); Mono(row.input) }
             Spacer(Modifier.height(10.dp))
             val options = ChatActions.options(s, row)
@@ -451,7 +483,7 @@ internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (S
                         "deny" -> OutlinedButton(onClick = { vm.chatAnswer(row, c) }, modifier = button, shape = shape,
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink), border = BorderStroke(1.5.dp, Border),
                             contentPadding = PaddingValues(horizontal = 8.dp)) {
-                            Text("No", fontSize = ChatStyle.CARD_BUTTON_TEXT, fontWeight = FontWeight.SemiBold)
+                            Text(if (s.group) "Deny" else "No", fontSize = ChatStyle.CARD_BUTTON_TEXT, fontWeight = FontWeight.SemiBold)
                         }
                         "allow-always" -> OutlinedButton(onClick = { vm.chatAnswer(row, c) }, modifier = button, shape = shape,
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Accent), border = BorderStroke(1.5.dp, Accent),
@@ -461,7 +493,7 @@ internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (S
                         else -> Button(onClick = { vm.chatAnswer(row, c) }, modifier = button, shape = shape,
                             colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = OnAccent),
                             contentPadding = PaddingValues(horizontal = 8.dp)) {
-                            Text("Yes", fontSize = ChatStyle.CARD_CONFIRM_TEXT, fontWeight = FontWeight.Bold)
+                            Text(if (s.group) "Allow" else "Yes", fontSize = ChatStyle.CARD_CONFIRM_TEXT, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -521,7 +553,8 @@ internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (S
 }
 
 /** A message this phone wrote, until the transcript shows it. */
-@Composable internal fun MessageView(m: Chat.Message, s: Chat.State, onSendNow: (Chat.Message) -> Unit, onCancel: (Chat.Message) -> Unit, onRetry: (Chat.Message) -> Unit) {
+@Composable internal fun MessageView(m: Chat.Message, s: Chat.State, onSendNow: (Chat.Message) -> Unit, onCancel: (Chat.Message) -> Unit, onRetry: (Chat.Message) -> Unit,
+                                     onSendAsNew: (Chat.Message) -> Unit = {}) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Surface(color = Accent.copy(alpha = .08f), shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Accent.copy(alpha = .3f)), modifier = Modifier.widthIn(max = 560.dp)) {
             Column(Modifier.padding(10.dp, 8.dp)) {
@@ -536,13 +569,18 @@ internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (S
                         "working" -> "Waiting for the agent to finish"; else -> "Waiting to send" }
                     "refused" -> "Not sent" + m.reason.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
                     "maybe" -> "Maybe not sent"
+                    "unknown" -> if (s.group) Chat.UNKNOWN_SEND else m.state
                     else -> m.state
-                }, fontSize = 11.sp, color = if (m.state == "refused" || m.state == "maybe") Blocked else Muted)
+                }, fontSize = 11.sp, color = if (m.state == "refused" || m.state == "maybe" || (s.group && m.state == "unknown")) Blocked else Muted)
                 if (ChatActions.canSendHeld(s, m)) Row {
                     TextButton(onClick = { onSendNow(m) }) { Text("Send now", fontSize = 12.sp) }
                     TextButton(onClick = { onCancel(m) }) { Text("Cancel", fontSize = 12.sp) }
                 }
                 if (ChatActions.canRetry(s, m)) TextButton(onClick = { onRetry(m) }) { Text("Retry", fontSize = 12.sp) }
+                if (ChatActions.canSendAsNew(s, m)) Column {
+                    TextButton(onClick = { onSendAsNew(m) }) { Text(Chat.SEND_AS_NEW, fontSize = 12.sp) }
+                    Text(Chat.SEND_AS_NEW_WARNING, fontSize = 11.sp, color = Muted)
+                }
             }
         }
     }
@@ -552,6 +590,7 @@ internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (S
 @Composable fun BotChatsDialog(vm: PocketViewModel, hostId: String, onDismiss: () -> Unit) {
     LaunchedEffect(hostId) { vm.loadBotChats(hostId) }
     val result = vm.botChats.collectAsStateWithLifecycle().value[hostId]
+    val bots = result?.getOrNull().orEmpty().filterNot { it.group }
     val writable = ChatActions.botChatsWritable(result, vm.botWrites.collectAsStateWithLifecycle().value[hostId])
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Bot chats") },
         text = {
@@ -563,8 +602,8 @@ internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (S
                 when {
                     result == null -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                     result.isFailure -> Text(result.exceptionOrNull()?.message ?: "Couldn’t read the chats.", fontSize = 13.sp, color = Blocked)
-                    result.getOrNull().isNullOrEmpty() -> Text("No Automagik Bot chats on this computer.", fontSize = 13.sp, color = Muted)
-                    else -> for (t in result.getOrThrow()) Row(Modifier.fillMaxWidth().clickable { onDismiss(); vm.selectTerminal(TerminalRef(hostId, t.terminal)) }.padding(vertical = 10.dp),
+                    bots.isEmpty() -> Text("No Automagik Bot chats on this computer.", fontSize = 13.sp, color = Muted)
+                    else -> for (t in bots) Row(Modifier.fillMaxWidth().clickable { onDismiss(); vm.selectTerminal(TerminalRef(hostId, t.terminal)) }.padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Dot(stateColor(t.status))
                         Spacer(Modifier.width(10.dp))

@@ -9639,6 +9639,35 @@ var ZH = {
   "This coding agent is not signed in any more. Sign in to use it.": "此编程助手已不再登录。请登录后使用。",
   "The account could not be confirmed. Try again.": "无法确认账号，请重试。",
   "The model could not be selected.": "无法选择此模型。",
+  // The web self-update preview (#1540): nod, modal, steps, success and rollback.
+  "Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.": "点击“立即更新”时，正在进行的工作会停止，更新完成后会自动继续。不会丢失任何内容。",
+  "A Bot that moves to a new part of its chat keeps what it was doing.": "Bot 换到对话的新段落时会保留它正在做的事。",
+  "A new version is ready. From now on it updates itself from this menu.": "新版本已就绪。从现在起，它会从这个菜单自行更新。",
+  "Back to the previous version": "已回到上一个版本",
+  "Checking that it is healthy": "正在检查运行状态",
+  "Checking the signature": "正在校验签名",
+  "Done: you are on the new version.": "完成：你已在新版本上。",
+  "Downloading the new version": "正在下载新版本",
+  "Example data": "示例数据",
+  "Example data: nothing is downloaded in this preview.": "示例数据：此预览不下载任何内容。",
+  "In the real thing the instance restarts here, and the chat you had open comes back where it was.": "实际运行时会在这里重启，你打开的对话会回到原来的位置。",
+  "In this preview the steps are timers and nothing is downloaded.": "在此预览中这些步骤只是计时器，不会下载任何内容。",
+  "Installing beside the current version": "正在当前版本旁边安装",
+  "Keep working. Your chats, Bots and files are where they were.": "继续使用。你的对话、Bot 和文件都在原处。",
+  "Restarting": "正在重启",
+  "See the announcement again": "再看一次更新说明",
+  "Show the failure instead": "改为演示失败",
+  "Signing in to a coding agent is one click, and a failure says why.": "登录编程助手只需一次点击，失败时会说明原因。",
+  "The new version did not answer the health check.": "新版本没有通过运行状态检查。",
+  "The new version did not start well. Automagik went back to the one that worked. Nothing was lost: your chats, Bots and files are where they were.": "新版本启动不正常。Automagik 回到了原本可用的版本。什么都没有丢失：你的对话、Bot 和文件都在原处。",
+  "The previous version stays kept for the rollback.": "上一个版本会保留，用于回滚。",
+  "This menu gets the update button, so you stop updating by hand.": "这个菜单里会有更新按钮，你不用再手动更新。",
+  "Update Automagik": "更新 Automagik",
+  "Updating Automagik": "正在更新 Automagik",
+  "What changes": "有什么变化",
+  "You are on": "你当前在",
+  "You have": "你当前",
+  "Your previous version stays kept. If the new one does not start, Automagik goes back by itself.": "上一个版本会保留。如果新版本起不来，Automagik 会自行退回。",
   // A Bot's model: what it really did (model-state.js), and a model that cannot run now.
   "the new model": "新模型",
   "{model} could not take over this conversation. This Bot stays on {kept}.": "{model} 无法接手这段对话。此 Bot 仍使用 {kept}。",
@@ -11373,6 +11402,26 @@ var ZH = {
   "Check for updates": "检查更新",
   "Checking…": "正在检查…",
   "Up to date": "已是最新版本",
+  "Up to date.": "已是最新版本。",
+  "Automagik {version} is available, signed and checked.": "Automagik {version} 已发布，签名和安装包均已验证。",
+  "Cannot update: {reason}": "无法更新：{reason}",
+  "updates come with the desktop app.": "更新随桌面应用提供。",
+  "the update store is unavailable.": "更新存储不可用。",
+  "the saved update state is invalid.": "保存的更新状态无效。",
+  "the installed plugin versions could not be read.": "无法读取已安装插件的版本。",
+  "the update files could not be downloaded.": "无法下载更新文件。",
+  "the signed release could not be verified.": "无法验证已签名的发行版本。",
+  "the published release has invalid update information.": "已发布版本的更新信息无效。",
+  "the published release would downgrade an installed plugin.": "已发布版本会降级某个已安装的插件。",
+  "the published release is older than one already accepted.": "已发布版本早于已接受的版本。",
+  "the published release needs a different DeepSeek Harness version.": "已发布版本需要其他版本的 DeepSeek Harness。",
+  "a downloaded plugin package did not match the signed release.": "下载的插件包与已签名的发行版本不符。",
+  "the package registry could not be reached.": "无法连接软件包仓库。",
+  "this window does not hold the team lock.": "此窗口未持有团队锁。",
+  "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
+  "The check was interrupted. Check again.": "更新检查已中断。请重新检查。",
+  "A check is already running. Try again shortly.": "正在进行更新检查。请稍后重试。",
+  "the update check could not be completed.": "无法完成更新检查。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
   "Update checks are off.": "已关闭更新检查。",
@@ -11866,6 +11915,7 @@ var ZH = {
   "Nothing running right now.": "现在没有在运行的任务。",
   "Just finished": "刚刚完成",
   "This step was withdrawn: its task ended": "这一步已撤回：它的任务结束了",
+  "This step was withdrawn: its group Session ended": "这一步已撤回：它的群会话结束了",
   "The task ended with an approval unanswered": "任务结束时还有一个审批没有回答",
   "Automations": "自动化",
   "What runs on a schedule or a trigger": "按计划或触发运行的任务",
@@ -13296,13 +13346,13 @@ function stepMenuFocus(menu, event, trigger) {
 
 // src/client/styles.js
 var SHELL_CSS = `
-body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
+body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
 /* The --bt-glass-* tokens keep upstream's names, which its cards, menus and docks read, and
    hold solid surfaces here: this look is clay depth on a plain ground, not frosted glass. */
 /* iOS waits out a double-tap zoom on buttons; the plugin's own controls never zoom. */
 :is(.bt-tool,.bt-uaction,.bt-menu button,.bt-menu-item,.bt-icon-btn,.bt-round,.bt-pill,.bt-account,.bt-set-row,.bt-settings-item,.bt-react-strip button,.bt-palette-row,.bt-palette-clear,.bt-tab,.bt-ptab,.bt-ptab-x,.bt-bcard-x,.bt-plus,.bt-q-btn,.bt-q-x,.bt-x,.bt-nc-send,.bt-send,.bt-soft,.bt-mini,.bt-side-send,.bt-shape,.bt-swatch,.bt-color,.bt-newchat,.bt-task-day,.bt-task-remove,.bt-fb-btn){touch-action:manipulation}
 :is(.bt-round,.bt-you,.bt-account,.bt-color,.bt-color span,.bt-swatch,.bt-icon-btn,.bt-avatar-trigger,.bt-avatar-pencil,.bt-plus,.bt-mic,.bt-voice){corner-shape:round}
-body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent)}
+body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff}
 body{--bt-gold:#f2b84b;--bt-gold-edge:#c98a1a;--bt-gold-band:#e9a636;--bt-gold-shine:#fff3d4;--bt-gem:#8fdcec;--bt-gem-2:#f0bddf;--bt-role-bg:#fbe7bf;--bt-role-ink:#8a5a12;--bt-role-edge:#e7c88a;--bt-role-shine:#fff6e2;--bt-magic-cyan:#3ccbf4;--bt-magic-violet:#9a6cf6;--bt-magic-pink:#ff4fa0;--bt-arena:#120f24;--bt-arena-2:#231a44;--bt-arena-ink:#f4f1ff}
 body[data-ds-dark-theme]{--bt-role-bg:#4a3a1c;--bt-role-ink:#f6d48f;--bt-role-edge:#2a1f0c;--bt-role-shine:rgba(255,240,200,.12)}
 ${Object.entries(INKS).map(([name, [light]]) => `body{--bt-ink-${name}:${light}}`).join("")}

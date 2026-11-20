@@ -6,7 +6,14 @@
 // (the numbers https://releases.herdr.dev/app/latest.json published for 0.1.13 when the pin was
 // made): no "latest" tag, no secrets. A bump changes VERSION and SHA256 together.
 //
-//   node .github/scripts/herdr-app-check.mjs [--pack <file.tgz>] [--strict]
+//   node .github/scripts/herdr-app-check.mjs [--pack <file.tgz>] [--strict] [--keep-app]
+//
+// `--keep-app` (CI's herdr pack job): after a verified pass (sha256 matched, `--version` was
+// `herdr-app 0.1.13`, every PACK_MODS mod loaded), the pinned executable stays in this run's own temp
+// folder (`<tmp>/app/herdr-app/herdr-app`; everything else there is removed) and its absolute path is
+// printed and written to `$GITHUB_OUTPUT` as `outcome=verified` and `bin=<path>`, for the Tests step's
+// standalone check. A could-not-verify warning writes `outcome=unverified` and keeps nothing. A failure
+// writes nothing and keeps nothing. Only the folder this run made with mkdtemp is ever removed.
 //
 // Two outcomes, kept apart (#682). "Verified bad" is herdr-app running and a pack mod failing to
 // load: it always fails, in both modes, with herdr-app's own output. "Could not verify" is the
@@ -22,7 +29,7 @@
 // the run fails (exit 1, with herdr-app's own output for the mod) when a mod does not load. It
 // never skips. Apache-2.0.
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -45,13 +52,14 @@ const fail = (message) => { throw new Error(message); };
 const unverified = (message) => { throw new CouldNotVerify(message); };
 const output = (r) => `${r.stdout ?? ""}${r.stderr ?? ""}`.trimEnd();
 
-/** `{ pack, strict }` from argv, or the usage. */
+/** `{ pack, strict, keepApp }` from argv, or the usage. */
 function parseArgs(argv) {
-  const opts = { pack: null, strict: false };
+  const opts = { pack: null, strict: false, keepApp: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--pack" && argv[i + 1]) opts.pack = resolve(argv[++i]);
     else if (argv[i] === "--strict") opts.strict = true;
-    else throw new Error("usage: node .github/scripts/herdr-app-check.mjs [--pack <file.tgz>] [--strict]");
+    else if (argv[i] === "--keep-app") opts.keepApp = true;
+    else throw new Error("usage: node .github/scripts/herdr-app-check.mjs [--pack <file.tgz>] [--strict] [--keep-app]");
   }
   return opts;
 }
@@ -137,8 +145,8 @@ function checkMod(bin, dir, env) {
 
 /**
  * The whole check. Returns the step's exit code: 0 on success, and 0 for a could-not-verify
- * warning when --strict is absent. `deps` lets the rows swap fetch and the pin (no network);
- * the CLI fills none of it.
+ * warning when --strict is absent. `deps` lets the rows swap fetch, the pin, `GITHUB_OUTPUT` and
+ * the temp parent. The CLI fills none of it.
  */
 export async function run(argv = process.argv.slice(2), deps = {}) {
   const out = deps.out ?? ((text) => process.stdout.write(text));
@@ -146,8 +154,11 @@ export async function run(argv = process.argv.slice(2), deps = {}) {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const buildUrl = deps.buildUrl ?? BUILD;
   const sha256 = deps.sha256 ?? SHA256;
-  let opts = { pack: null, strict: false };
+  const githubOutput = deps.githubOutput ?? process.env.GITHUB_OUTPUT;
+  let opts = { pack: null, strict: false, keepApp: false };
   let tmp = null;
+  let kept = false;
+  const report = (lines) => { if (opts.keepApp && githubOutput) appendFileSync(githubOutput, lines); };
   try {
     opts = parseArgs(argv);
     const started = Date.now();
@@ -157,7 +168,7 @@ export async function run(argv = process.argv.slice(2), deps = {}) {
     const { PACK_MODS } = await import(pathToFileURL(join(REPO, "herdr", "mods", "am-sidebar", "release.js")).href);
     if (!Array.isArray(PACK_MODS) || PACK_MODS.length === 0) fail("PACK_MODS is empty: there is no pack to check");
 
-    tmp = mkdtempSync(join(tmpdir(), "herdr-app-check-"));
+    tmp = mkdtempSync(join(deps.tmpRoot ?? tmpdir(), "herdr-app-check-"));
     const pack = opts.pack ?? join(tmp, "automagik-herdr-pack.tgz");
     if (opts.pack) {
       if (!existsSync(pack)) fail(`there is no pack at ${pack}`);
@@ -189,17 +200,28 @@ export async function run(argv = process.argv.slice(2), deps = {}) {
     out(`herdr-app check: ${PACK_MODS.length} pack mods loaded in ${secs(Date.now() - checksStarted)};`
       + ` step wall time ${secs(total)} (budget under 2 minutes)\n`);
     if (total > BUDGET_MS) out(`::warning::the herdr-app check took ${secs(total)}, over its 2-minute budget\n`);
+    const kept_bin = resolve(bin);
+    report(`outcome=verified\nbin=${kept_bin}\n`);
+    if (opts.keepApp) {
+      kept = true;
+      out(`herdr-app kept for the tests: ${kept_bin}\n`);
+    }
     return 0;
   } catch (e) {
     if (e instanceof CouldNotVerify && !opts.strict) {
       out(`::warning::${e.message}\n`);
+      try { report("outcome=unverified\n"); } catch {}
       return 0;
     }
     err(`herdr-app check: ${e.message}\n`);
     err("::error::herdr-app check failed\n");
     return 1;
   } finally {
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp && kept) {
+      for (const name of readdirSync(tmp)) {
+        if (name !== "app") rmSync(join(tmp, name), { recursive: true, force: true });
+      }
+    } else if (tmp) rmSync(tmp, { recursive: true, force: true });
   }
 }
 

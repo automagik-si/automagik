@@ -3,7 +3,11 @@ import { call } from './api.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
-import { badges, botChannels, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons, mountShellInstallers, nav, onShell, registerComposerPack, sidebarTools, toolCards } from './extend.js'
+import {
+  badges, botChannels, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons,
+  mountShellInstallers, nav, officialInstall, onShell, registerComposerPack, sidebarTools,
+  toolCards,
+} from './extend.js'
 import { BUILTIN_PACKS, packCellSync, stepsAside } from './composer-packs.js'
 import { COMPOSER_PACK_CSS, packModelCell } from './composer-pack-cells.js'
 import { agentRowSessions, TASK_CSS } from './task-card.js'
@@ -13,6 +17,7 @@ import { LAMP_CSS } from './lamp.js'
 import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
+import { installSelfUpdateMock } from './self-update-mock.js'
 import { teamActions } from './team-actions.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
@@ -115,7 +120,8 @@ export const omni = Object.freeze({
   // Copy in this plugin's namespace; addStrings brings a plugin's Chinese copy.
   t, addStrings, hostText, language, dateLocale,
   // The Bot surface: what runs while it is up, and what draws in its places.
-  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
+  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools,
+  botSettings, officialInstall, chatSuggestions, registerComposerPack, setCanvasRenderer,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
   // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's
@@ -358,20 +364,26 @@ export function apply(ctx) {
     return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', wake) }
   }, 'ds-bot: roster poll')
 
-  // Plugin updates: every window that opens asks the host once (the host keeps its
-  // answer for a while), again each hour, and every two seconds while installing.
+  // Plugin updates: each window asks the host on open, retries early misses, then
+  // checks hourly and every two seconds while installing.
   const update = createSource({ available: false, phase: 'idle' })
+  const takeUpdateReply = value => update.set(previous => ({ ...value, app: previous.app, hostAnswered: true }))
   let wakeUpdate = () => {}
   ctx.effect(() => {
     let stopped = false
     let timer
+    const firstReplyBackoff = [5000, 15_000, 30_000]
+    let request = 0
     const loop = async () => {
       clearTimeout(timer)
       if (stopped) return
+      const current = ++request
       const value = await call('update-check', { fresh: false }).catch(() => null)
-      if (stopped) return
-      if (value) update.set(previous => ({ ...value, app: previous.app }))
-      timer = setTimeout(loop, value?.phase === 'installing' || value?.dsh?.phase === 'installing' ? 2000 : 60 * 60_000)
+      if (stopped || current !== request) return
+      if (value) takeUpdateReply(value)
+      const retry = update.getSnapshot().hostAnswered ? undefined : firstReplyBackoff.shift()
+      const installing = value?.phase === 'installing' || value?.dsh?.phase === 'installing'
+      timer = setTimeout(loop, installing ? 2000 : retry ?? 60 * 60_000)
     }
     wakeUpdate = loop
     void loop()
@@ -878,7 +890,7 @@ export function apply(ctx) {
   }
   actions.checkUpdate = async () => {
     const value = await call('update-check', { fresh: true })
-    update.set(previous => ({ ...value, app: previous.app }))
+    takeUpdateReply(value)
     wakeUpdate()
   }
   actions.freshConversation = botId => after(call('bot-fresh', { id: botId }))
@@ -1614,4 +1626,8 @@ export function apply(ctx) {
       groups.dispose()
     }
   }, 'ds-bot: surface')
+  // The web self-update preview (issue 1540, step 1): a clickable mock behind `?mock-1540`, so a normal
+  // start of the app is untouched and the owner can open it on a running instance without any
+  // updater code. It goes away with this plugin's context.
+  ctx.effect(() => installSelfUpdateMock(), 'ds-bot: self-update preview (issue 1540)')
 }
