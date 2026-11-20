@@ -1,4 +1,4 @@
-# RFC 0035: Web self-update in the app
+# RFC 0040: Web self-update in the app
 
 | Field | Value |
 |---|---|
@@ -6,6 +6,7 @@
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin only (3.N.P): `apps/bots-dsh` gains the UI and the host half; nothing here builds the desktop app |
 | Created | 2026-11-18 |
+| Renumbered | 2026-11-20: drafted as 0034 and then 0035 in #1546; 0034 went to the vault plugin, 0035 was the roles RFC's number in #1572 before it became 0037 (so "RFC 0035" is ambiguous in history), and 0038 is held by an open pull request, so this RFC takes 0040 |
 
 ## Summary
 
@@ -180,13 +181,13 @@ stopped work came back.
 ## What exists already, and what we reuse ("O que já existe e o que reutilizamos")
 
 There are already three update paths, and the owner wants one mechanism per problem, not two. Each
-one keeps its problem; 0035 reuses what it can and never adds a second copy.
+one keeps its problem; 0040 reuses what it can and never adds a second copy.
 
-| exists | what it does | 0035 reuses | 0035 replaces | 0035 retires |
+| exists | what it does | 0040 reuses | 0040 replaces | 0040 retires |
 |---|---|---|---|---|
-| `scripts/upgrade.ts` + `docs/upgrade.md` | upgrades an **installed host**: latest release or `--to`, verifies the signed lane and `PLUGINS.SHA256SUMS` (`scripts/upgrade.ts:516-540`, `verifyLane` from `scripts/lane.ts` at `:50`), backs up, stages `releases/<version>/` and swaps the `runtime` symlink atomically (`:9-17`), re-adds tarballs through `dsh plugin`, smoke-checks, rolls back on failure, prints one `RESULT:` (`docs/upgrade.md:28-46`) | the lane verifier (`verifyLane`, `plugin-lane/keys.json`), the integrity check of a tarball (`scripts/upgrade.ts:316`), the beside-the-running-version layout and the atomic switch, the automatic rollback and the one-line result | the manual "stop, backfill, re-add, restart, check" sequence **for plugins only**, from inside the app | nothing — it stays the way a host upgrades its runtime; 0035 never touches `runtime/` or the service unit |
-| `server/profile-follow.mjs` | a server image's profile follows the lane on start: offline install from materialized archives, under a volume lock (`:33-76`, entered at `server/entrypoint.mjs:21`), with `compareRelease`/`validBuild`/ownership state (`server/profile-state.mjs`) | `followImage`/`installOffline`/`reuseInstalledIndexes` as **the** installer when the instance runs from a server image (Arca), its volume lock, and its state checks | 0035's own install step on that kind of host — the plan now hands the payload to this path instead of keeping a second installer (delivery 5, delivery 8) | nothing — it keeps updating image-hosted instances on start; 0035 only adds the in-app trigger and the visible state |
-| the signed lane + `am` as loaders (`docs/rfcs/0011-*`, `0012-*`; `am/lib/lane.mjs`) | the lane is the signed pointer (`lane.json` + `lane.json.sig`, `plugin-lane/keys.json`); `am` is the one command that reads it and loads the parts | the lane as the only source of a version and its signature, and am's lane reader (`am/lib/lane.mjs`: `LANE_RELEASE`, the sequence and no-downgrade refusal) as the reference for the same rules | the manual download of release tarballs, checking them by hand against `PLUGINS.SHA256SUMS` | the instruction "update by hand" as the normal path on a web instance; am keeps loading a host, and 0035 adds the in-app trigger that uses the same lane |
+| `scripts/upgrade.ts` + `docs/upgrade.md` | upgrades an **installed host**: latest release or `--to`, verifies the signed lane and `PLUGINS.SHA256SUMS` (`scripts/upgrade.ts:516-540`, `verifyLane` from `scripts/lane.ts` at `:50`), backs up, stages `releases/<version>/` and swaps the `runtime` symlink atomically (`:9-17`), re-adds tarballs through `dsh plugin`, smoke-checks, rolls back on failure, prints one `RESULT:` (`docs/upgrade.md:28-46`) | the lane verifier (`verifyLane`, `plugin-lane/keys.json`), the integrity check of a tarball (`scripts/upgrade.ts:316`), the beside-the-running-version layout and the atomic switch, the automatic rollback and the one-line result | the manual "stop, backfill, re-add, restart, check" sequence **for plugins only**, from inside the app | nothing — it stays the way a host upgrades its runtime; 0040 never touches `runtime/` or the service unit |
+| `server/profile-follow.mjs` | a server image's profile follows the lane on start: offline install from materialized archives, under a volume lock (`:33-76`, entered at `server/entrypoint.mjs:21`), with `compareRelease`/`validBuild`/ownership state (`server/profile-state.mjs`) | `followImage`/`installOffline`/`reuseInstalledIndexes` as **the** installer when the instance runs from a server image (Arca), its volume lock, and its state checks | 0040's own install step on that kind of host — the plan now hands the payload to this path instead of keeping a second installer (delivery 5, delivery 8) | nothing — it keeps updating image-hosted instances on start; 0040 only adds the in-app trigger and the visible state |
+| the signed lane + `am` as loaders (`docs/rfcs/0011-*`, `0012-*`; `am/lib/lane.mjs`) | the lane is the signed pointer (`lane.json` + `lane.json.sig`, `plugin-lane/keys.json`); `am` is the one command that reads it and loads the parts | the lane as the only source of a version and its signature, and am's lane reader (`am/lib/lane.mjs`: `LANE_RELEASE`, the sequence and no-downgrade refusal) as the reference for the same rules | the manual download of release tarballs, checking them by hand against `PLUGINS.SHA256SUMS` | the instruction "update by hand" as the normal path on a web instance; am keeps loading a host, and 0040 adds the in-app trigger that uses the same lane |
 
 The plan changes that follow from this comparison, all inside the deliveries table below:
 

@@ -203,7 +203,7 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
     ]) list.append(el('li', null, line))
     body.append(list)
     body.append(el('p', 'su-note', t('Your previous version stays kept. If the new one does not start, Automagik goes back by itself.')))
-    // The owner decided (RFC 0035, Q6): the click is the permission, and running work stops.
+    // The owner decided (RFC 0040, Q6): the click is the permission, and running work stops.
     const caution = el('p', 'su-caution', t('Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.'))
     caution.setAttribute('role', 'note')
     body.append(caution)
