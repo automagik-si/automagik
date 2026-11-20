@@ -1265,8 +1265,8 @@ the reservation wins.
 **Recommended (N-A): a machine directory with group permissions now; Cloud later for several
 machines.**
 
-- **Where.** `/var/lib/automagik/reservations` on Linux, `/Users/Shared/Automagik/reservations` on
-  macOS; `AUTOMAGIK_RESERVATIONS_DIR` overrides it. Made once by the machine's administrator (a
+- **Where.** `/var/lib/automagik/reservations` on Linux, and on macOS `Automagik/reservations` in the
+  system's shared folder for all users; `AUTOMAGIK_RESERVATIONS_DIR` overrides it. Made once by the machine's administrator (a
   documented command; no Automagik process asks for root): group `automagik`, mode `3770`
   (set-group-id, so every file keeps the group; sticky, so only a file's owner or root removes or
   renames it). Each OS user that runs an instance joins the group. Windows: not offered until a
