@@ -299,6 +299,141 @@ A switch to another team home requires a fresh phone hello before any more memor
 The connection's 16-request transport limit returns a JSON-RPC `busy` error before the
 memory refusal checks.
 
+## Delivery 2: schedules contract
+
+The owner socket keeps protocol 1 and the same chat methods and grant rules as Delivery 1.
+A writable Session controller can negotiate management when hello asks for both `write: 1`
+and `manage: 1` and the host offers at least one management family. The reply lists
+`manage-open` and `manage-close`, the enabled memory methods, and the schedule methods the
+host can serve. A host-wide DSH schedule service adds `schedule-list`. Without that service
+the hello reply is unchanged. Each connection can call the methods in its own hello reply.
+An unlisted method returns the existing `read-only` error. Close always returns an empty result.
+
+On a host that can serve writable Pocket chat, each attached host-wide schedule service starts
+with reads only. The host sends a probe edit for a fresh `schedule-probe-` UUID with a signal
+already aborted. The service must reject with the exact abort reason before looking up the
+task. This writes no task and emits no change. When the probe passes, the next hello also
+offers `schedule-pause`, `schedule-resume` and `schedule-rename`. A failed probe leaves that
+service read only and logs one warning. A replacement service is probed again. If an edit
+returns a saved task without checking the signal, the host reports that save and withdraws
+schedule writes for the rest of the process. Already negotiated writes then get `unavailable`
+when they run or reach admission. The contract requires the DSH engine floor. A version-exempt
+service that checks cancellation at entry but lacks revision checks or the second check on
+resume is unsupported.
+
+| Socket method | Parameters beside `grant` and `terminal` |
+|---|---|
+| `schedule-list` | Optional `id` |
+| `schedule-pause` | `id`, `rev` |
+| `schedule-resume` | `id`, `rev` |
+| `schedule-rename` | `id`, `rev`, `title` |
+
+The terminal is `dsh:<botId>` with a non-empty Bot id. No chat subscription is needed.
+An eligible Bot must have a current own-chat Session and a fresh home-file binding that
+shows it for its project and machine. Private project Bots are eligible. Tasks must target
+a Session the Bot owns in its own chat, including an earlier part. Group Sessions, a Bot's
+group parts and tasks that open a new Session are outside this scope.
+
+Read returns `{ok:true, state:'read', schedules:{terminal,tasks,truncated}}`. When the caller
+gives an id, the result also carries `task`, the selected task even if it falls outside the
+list cap, or `null` if the Bot has no task with that id. Each task has `id`, `rev`, `title`,
+`state` and `timing`. State is `scheduled` or `overdue` while active, `paused` while paused
+and `finished` when ended. Timing has the stored `kind` and `at` (DSH's `scheduledAt`
+verbatim). An active task shows its next occurrence, a paused task keeps its stored instant,
+and an ended task shows its last one. Timing adds only the fields of that kind.
+
+| Kind | Extra timing fields |
+|---|---|
+| `after` | `afterSeconds` |
+| `every` | `everySeconds` |
+| `daily` | `time`, `timeZone` |
+| `weekly` | `time`, `timeZone`, `weekdays` |
+| `cron` | `expression`, `timeZone` |
+| `rrule` | `rrule` |
+| `at` or an unknown kind | None |
+
+A cron expression or RRULE over 1 KiB UTF-8 becomes `null` and adds `ruleTooLong: true`
+to timing. The wire id is the stored id if it matches
+`/^schedule-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/`.
+Every other stored id is `x` plus the first 16 lowercase hex digits of its SHA-256.
+Requests accept only these two forms. The revision is the first 16 lowercase hex digits
+of the SHA-256 of the UTF-8 `JSON.stringify([storedId, updatedAt ?? null, title, status, timing])`.
+
+After negotiation, the host checks the grant (`revoked`), then the fields (`invalid`),
+then the shared management slot (`busy`) and rate limits (`rate`), in that order. Rename
+needs a string of at most 4 KiB UTF-8 on input. The job refreshes the host's shell choice and
+checks eligibility before reading the catalog. A missing host-wide service, an unavailable
+write capability, a broken team lock or a read-only host gives `unavailable`. A missing Bot
+or current Session gives `not-found`. A binding that cannot be read or a pick that does
+not show the Bot gives `not-shown`. A Bot without a project gives `global`.
+
+For a selected read or a write, multiple own tasks with the same wire id give `ambiguous`.
+A write to an absent task gives `gone`. A write with an old revision gives `stale` with the
+current task. If the revision matches, pause and resume on a finished task give `ended`
+with the current task. Pausing a paused task, resuming an active task (overdue included), or
+renaming to the current title after trimming returns `{ok:true, state:'unchanged', task}`
+without sending an edit. Rename trims the title and requires 1 to 120 characters. A blank
+title gets `invalid` with “Give the task a name” and a long title gets `invalid` with
+“Keep the name under 120 characters”. DSH input errors become `invalid`. When DSH reports
+that a task has no future occurrence, the only additional text is
+“This task has no future occurrence.”
+
+The host sends the stored id and the catalog's `updatedAt` (or `null` for an older row) as
+`expectedUpdatedAt`. The patch is `{active:false}`, `{active:true}` or `{title}`, depending
+on the operation. DSH checks the signal after waiting for its write queue and again after checking
+a resume target. At those checks the host synchronously confirms that the grant is still
+open, the same service still accepts writes, the host still has the lock and is writable,
+the Bot is still eligible, and the captured Session still belongs to its own chat. A failed
+check refuses the edit before the store write begins. Close, a new hello, disconnect and
+shutdown abort writes still waiting, including in target validation. DSH compares the stored
+revision before changing anything. On a conflict or a missing row, the host reads the catalog
+again once and replies `stale` with the current task if it still belongs to the Bot, or `gone`.
+
+The saved reply is `{ok:true, state:'saved', task}`, projected from the entry DSH committed.
+A resumed `after` can return as `at`. Write replies carry only the affected task. Before sending
+a job reply the host checks the grant and eligibility again and checks that each projected
+task's captured Session still belongs to the Bot. It drops any list item that no longer
+belongs. A single task that no longer belongs gives `gone`. After a confirmed save, any such
+refusal also has `applied:true` and carries no task data.
+
+Once the store write begins, the edit can still land. A write whose result cannot be confirmed
+returns `{ok:false, state:'unknown', reason:'pending'}` without task data, even if authority
+has since been lost. The host keeps the management slot until the edit settles, even if the
+phone disconnects. After a lost or unknown reply the phone must not resend on its own. It calls
+`schedule-list {id}` with its grant and terminal. It keeps the outcome unknown on `busy`,
+`rate`, `unavailable` or `unknown` and allows a fresh user action only after a successful
+`read` with that id. An older revision can still yield `stale` on the next write.
+
+Schedule reads share the 60-per-minute limit per phone with memory reads. Schedule writes
+share the 20-per-minute limit per phone with chat and memory writes. A schedule job shares
+the management slot per phone and terminal with memory, across connections. Each list returns
+at most 500 tasks and sets `truncated:true` when the cap leaves tasks out. Every task-bearing
+reply fits one 1 MiB UTF-8 JSON line, including the escaped request id, envelope and newline.
+The list reserves room for the selected task first. Separately from the wire cap, each catalog
+read materializes and sorts all tasks on the DSH host.
+
+The schedule management handler does not send prompts, target Session ids, or titles from
+another Bot in its replies, and it logs failures without task data or DSH error text. A committed
+edit still makes DSH queue its own task-updated notice with the title and task id to the involved
+live Sessions, like a desktop edit. DSH may log a Session id if that notice fails. Pocket chat
+already filters these injected notices.
+
+| Peer | Result |
+|---|---|
+| Old bridge, new host | A hello without management keeps the old chat answer. |
+| New bridge, old host | The host may advertise memory only, or no management on an older host. |
+| Memory-capable bridge, new host | The bridge may already ask for `manage: 1`. The phone sees only the methods that the phone, bridge and host all support. |
+| New phone, bridge and host | The phone can use each schedule method supported by all three. |
+| Old phone or bridge | Chat keeps working. The phone gets no schedule methods. |
+
+For the Pocket Link PR, the phone names are `schedule.list`, `schedule.pause`,
+`schedule.resume` and `schedule.rename`. The bridge maps them to the socket methods and
+advertises and forwards their per-method intersection with the phone's request and the
+host's `manageMethods`. The plugin change can be tested with the installed app for
+regressions and refusals, under the app lock with a backup and byte-equal restore, and
+with scratch DSH for successful edits. The tested SHA, paired-phone action and the
+resulting values on the phone and desktop belong to the Pocket Link and Pocket PRs.
+
 ## Open questions
 
 None. See Decided for D1 to D6.
