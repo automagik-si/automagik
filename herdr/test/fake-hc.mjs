@@ -234,11 +234,16 @@ switch (words[0]) {
   case "read": {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
-    out({ text: t.screen ?? "" });
+    // Live seats normally have a rendered prompt or progress line. An explicitly blank
+    // screen represents a seat that has painted nothing.
+    const normal = t.state !== "live" ? "" : t.status?.state === "working" ? "Working… (1s)"
+      : ["idle", "done"].includes(t.status?.state) ? "❯" : "";
+    out({ text: t.screen ?? normal });
     // state.onRead: the screen (and status) changes just after this answer, between two checks.
     // The look is counted across processes: `nth` can name a read later than the first (the
     // counter is saved on every look, not only on the one that fires).
-    if (state.onRead && state.onRead.terminal === t.address) {
+    if (state.onRead && state.onRead.terminal === t.address
+      && (!state.onRead.afterSend || state.sent?.some(message => message.to === t.address))) {
       state.onRead.seen = (state.onRead.seen ?? 0) + 1;
       if (state.onRead.seen === state.onRead.nth) {
         if (state.onRead.status) t.status = { ...(t.status ?? {}), state: state.onRead.status };

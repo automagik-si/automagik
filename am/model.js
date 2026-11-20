@@ -33,6 +33,24 @@ export function restartAtProblem(value) {
     ? null : `restartAt ${JSON.stringify(value)} isn't a positive whole number of tokens`;
 }
 
+/**
+ * How a project reacts to a Claude Code seat blocked on its rate-limit dialog (#1557):
+ * `park` (the default) records the reset time and restarts the seat a minute after it;
+ * `switch` restarts it on another signed-in login with headroom, falling back to `park`.
+ * The setting is the project file's top-level `onRateLimit`, beside `version` and `categories`.
+ */
+export const RATE_LIMIT_MODES = ["park", "switch"];
+
+/** The project's rate-limit reaction: "switch" only when the file says so, else "park". */
+export const rateLimitModeOf = (file) => (file?.onRateLimit === "switch" ? "switch" : "park");
+
+/** Why a project's `onRateLimit` can't be used, or null: absent, or park/switch. */
+export function onRateLimitProblem(value) {
+  if (value === undefined || value === null) return null;
+  return RATE_LIMIT_MODES.includes(value)
+    ? null : `onRateLimit ${JSON.stringify(value)} isn't one of ${RATE_LIMIT_MODES.join(", ")}`;
+}
+
 /** A daily wake is a two-digit time on the machine that owns the roster. */
 export function wakeProblem(value) {
   return typeof value === "string" && /^daily@(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)
@@ -400,6 +418,8 @@ export function parseBots(text) {
   const mains = bots.filter((b) => b.kind === "main");
   if (mains.length === 0) warnings.push("no main bot");
   if (mains.length > 1) warnings.push(`${mains.length} main bots; ${mains[0].id} counts`);
+  const rateIssue = onRateLimitProblem(raw.onRateLimit);
+  if (rateIssue) warnings.push(`${rateIssue}; the project parks rate-limited seats`);
   const file = { ...raw, version: 1, categories, bots };
   for (const b of bots) {
     if (b.leadProject) {
@@ -677,6 +697,8 @@ export function checkBots(file, before = null, { project = null, projects = null
   const oldIds = new Set((Array.isArray(had?.categories) ? had.categories : []).map((c) => c?.id).filter(isText));
   const errors = [];
   if (!isObject(file) || file.version !== 1 || !Array.isArray(file.bots)) return ["not a version-1 bots file"];
+  const rateIssue = onRateLimitProblem(file.onRateLimit);
+  if (rateIssue) errors.push(rateIssue);
   const cats = Array.isArray(file.categories) ? file.categories : [];
   if (!Array.isArray(file.categories)) errors.push("no categories list");
   const catIds = new Set();

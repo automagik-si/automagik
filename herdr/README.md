@@ -458,6 +458,39 @@ kept there as a `send` warning: the seat is restarted and the pass exits 0, and 
 person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
 nothing.
 
+**A seat on Claude Code's rate-limit dialog.** A running Claude Code seat blocked on Claude
+Code's rate-limit options dialog is reported as `rate-limited` by `am ls`, `am show` and the
+sidebar, with the reset time the dialog shows (the field is left out when it shows none). The
+detector matches the dialog's own shape, never a word: at least two numbered options must end the
+pane tail, start at 1 and be consecutive, one must carry the `❯` selection cursor, and the limit
+cue must be the dialog's own line: one of the three non-empty lines directly above the choices,
+with only the dialog's limit/reset words between it and them. A limit sentence in a report or in
+scrollback above the options is therefore not a cue, and a screen whose question the permission
+detector owns (a permission/selection dialog) is never a rate-limit match. The footer both
+dialogs may show (`Esc to cancel`, `Press enter to confirm`) is marked as a footer, so the
+options/limit shape decides the rate-limit rule while the send guard still treats the pane as
+held. A quoted, fenced or patched transcript is text, not the live dialog: a patch stays
+text however far above the dialog its hunk header sits within the visible tail (the rule never
+measures that distance).
+A raw, unmarked paste that ends the pane tail is the accepted limit of a text-only rule: it is
+byte-for-byte the live modal, so the rule cannot tell them apart, and every marked form (a
+quote, a fence, a patch) is refused. An ordinary report
+whose text says "rate limit" and lists findings is not the dialog, and an unreadable or empty tail
+is never a match. The detection reads the pane tail only: the dialog is never answered, and no key
+is sent. Both project settings for `onRateLimit` (`"park"` and `"switch"`) preserve the original
+pane and its workers. Resume in that pane when the provider allows it. Herdr cannot atomically
+retire a pane only if it has no dependent workers, and a session named in a launch command
+does not confirm which conversation the provider actually opened.
+
+`am rate-limit [--all] [--dry-run]` runs one sweep. The scheduled `am restart --due` checks
+the dialog first. Each episode writes one item in `<app home>/automagik-herdr/attention.json`
+for `am ls` and `am show`. If the dialog names a reset time, `am restart --queued` shows a
+recheck one minute later. An unknown reset has no timed recheck. The watcher observes the
+original pane until it recovers or the watch expires. An unreadable screen keeps its attention
+item open. The updated Herdr automations scheduler checks `am delivery-status` before sending
+to a target or a notification recipient and preserves each automation's `enabled` setting.
+The installed scheduler (0.12.1-am.2) needs a separate release to gain that check.
+
 **Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
 `am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
 including for a linked project named with `--machine M --project DIR`. Its scheduler must

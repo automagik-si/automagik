@@ -1858,6 +1858,15 @@ test("#1414 a visible dialog whose status says idle is refused, not answered", (
   assert.ok(calls(s).some((argv) => same(argv, ["read", "t101", "--lines", "40", "--json"])), "the screen was looked at");
 });
 
+test("#1557 a footerless rate-limit dialog holds a message to an idle seat", (t) => {
+  const s = scene(t);
+  const screen = "You've hit your usage limit.\nYour limit resets in 2 hours.\n❯ 1. Wait for reset\n  2. Dismiss";
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen });
+  writeFileSync(s.logPath, "");
+  assertHeld(guardRun(s, ["send", "t101", "the report"]), "t101");
+  assert.equal(calls(s).some(args => hcVerbOf(args) === "send"), false);
+});
+
 test("#1414 a linked-machine pane with no status is checked by its screen", (t) => {
   const s = scene(t);
   editPane(s, "m/t101", { screen: DIALOG_SCREEN });

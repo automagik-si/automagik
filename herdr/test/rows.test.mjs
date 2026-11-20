@@ -4,7 +4,7 @@ import {
   ASLEEP_MS, liveFrom, poseOf, nextWake, helpersOf, buildTree, placeTrees, placesOf, withSpaceless, visibleRows, botFold, categoryFold, knownBots, projectId,
   secondLine, modelDefaultsFrom, modelTextsUpdate, argvToAsk, argvEntry, argvAfter, argvReader, heldClickOf, heldTerminalOf, liveOf, paneCounts, listedKeyOf, parentMarkOf, parentMarkText,
   programForApp, needsYouText, NEEDS_YOU, NEEDS_YOU_PERMISSION,
-  NEEDS_OWNER_LABEL, OWNER_QUESTION, ownerQuestionOf,
+  NEEDS_OWNER_LABEL, OWNER_QUESTION, ownerQuestionOf, RATE_LIMITED,
 } from "../mods/am-sidebar/rows.js";
 import { waitsOnPermission } from "../mods/am-sidebar/launchArgs.js";
 import { parseBots } from "../mods/am-sidebar/model.js";
@@ -859,4 +859,26 @@ test("cross-project lead (#850): buildTree nests a cross-project main or member 
   })[0];
   assert.equal(loneSpoke.main.bot.id, "b-spokemainm");
   assert.match(loneSpoke.main.warning, /project \/work\/hub has no roster/);
+});
+
+test("#1557 the sidebar marks a live Claude seat's rate-limit record on its node, and leaves a healthy one alone", () => {
+  assert.equal(RATE_LIMITED, "Rate limited");
+  const trees = buildTree({
+    projects: [{ key: KEY, file }],
+    live: { "b-mainmainma": { terminal: "t1", status: "idle", status_ms: NOW } },
+    terminals: [], now: NOW,
+    rateLimited: new Map([["t1", { question: "Rate limit reached", resets_at: "2026-11-19T14:10:00.000Z" }]]),
+  });
+  assert.deepEqual(trees[0].main.rateLimited, { question: "Rate limit reached", resets_at: "2026-11-19T14:10:00.000Z" });
+  assert.equal(trees[0].main.status, "idle", "the core status is kept beside the added word");
+  assert.equal(trees[0].main.pose, "idle", "the character keeps its core pose; the chip carries the word");
+  const clean = buildTree({
+    projects: [{ key: KEY, file }],
+    live: { "b-mainmainma": { terminal: "t1", status: "idle", status_ms: NOW } },
+    terminals: [], now: NOW, rateLimited: new Map(),
+  });
+  assert.equal("rateLimited" in clean[0].main, false);
+  const noLive = buildTree({ projects: [{ key: KEY, file }], live: {}, terminals: [], now: NOW,
+    rateLimited: new Map([["t1", { question: "x" }]]) });
+  assert.equal("rateLimited" in noLive[0].main, false, "a record on a stopped seat's old address is never drawn");
 });
