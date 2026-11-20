@@ -11,7 +11,7 @@ import java.time.ZoneOffset
 
 /** The Space Row feed, from the shared synthetic fixture (example paths and made-up numbers). */
 class SpaceFeedTest {
-    private fun fixture() = JSONObject(javaClass.classLoader!!.getResource("herdr-meter-space.sample.json")!!.readText())
+    private fun fixture() = meterFixture("space.json")
     private val dash = SpaceFeed.DASH
 
     @Test fun parsesTheFixture() {
