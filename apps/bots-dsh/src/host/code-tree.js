@@ -172,6 +172,7 @@ export function readRegistryTree({ env = process.env, readFile = readFileSync, w
   }
   const folders = new Set()
   for (const project of readHome.file.projects ?? []) {
+    if (project?.machine !== undefined) continue
     if (typeof project?.folder === 'string' && isAbsolute(project.folder)) folders.add(resolve(project.folder))
   }
   for (const bot of bots) if (typeof bot.folder === 'string') folders.add(resolve(bot.folder))

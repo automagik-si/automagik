@@ -646,3 +646,22 @@ test('#1092 narrowed Claude ask rules preserve ordinary environment and branch c
   assert.equal(CLAUDE_HARD_ASK.includes('Read(~/.ssh/**)'), false)
   for (const rule of ['Read(~/.ssh/id_*)', 'Read(~/.ssh/*.pem)', 'Read(~/.ssh/*.key)']) assert.equal(CLAUDE_HARD_ASK.includes(rule), true, rule)
 })
+
+test('RFC 0034 Claude asks about password-manager reads', () => {
+  const reads = [
+    'bw get password x', 'bw list items', 'bw export', 'bw unlock', 'bw serve',
+    'bws secret get id', 'bws secret list', 'bws run -- env',
+    'op read op://vault/item/field', 'op run -- env', 'op inject -i a.tpl', 'op item get x',
+    'pass-cli item view pass://v/i/f', 'pass-cli item get pass://v/i/f', 'pass-cli item run -- env', 'pass-cli run -- env',
+    'keepassxc-cli show db e', 'keepassxc-cli export db', 'secret-tool lookup a b',
+    'vault kv get x', 'vault read x',
+  ]
+  for (const shell of process.platform === 'win32' ? ['Bash', 'PowerShell'] : ['Bash']) {
+    const matches = command => CLAUDE_HARD_ASK.filter(rule => rule.startsWith(shell + '(')).some(rule => {
+      const pattern = rule.slice(shell.length + 1, -1).split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')
+      return new RegExp(`^${pattern}$`).test(command)
+    })
+    for (const command of reads) assert.equal(matches(command), true, command)
+    for (const command of ['bw status', 'op whoami', 'secret-tool store x']) assert.equal(matches(command), false, command)
+  }
+})
