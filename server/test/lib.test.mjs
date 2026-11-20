@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
-import { launchUrlOf, pinStore, privateMode, profileDirOf, redactTokens, seedProfile } from '../lib.mjs'
+import { launchUrlOf, MEASUREMENT_MARKER, pinStore, prepareDshHome, privateMode, profileDirOf, redactTokens, seedProfile, writeMeasurementMarker } from '../lib.mjs'
 import { sumOf, verifyTarball } from '../fetch-plugins.mjs'
 
 const temps = []
@@ -63,11 +63,21 @@ test('the first start seeds the profile; a second start never replaces it', asyn
   assert.equal(marker.version, 1)
   assert.equal(marker.release, '3.90.1')
   assert.equal(marker.packageSha256, createHash('sha256').update(readFileSync(join(first.target, 'package.json'))).digest('hex'))
+  prepareDshHome(dshHome)
+  writeMeasurementMarker(dir, first.target)
+  const measurement = join(dir, MEASUREMENT_MARKER)
+  assert.deepEqual(JSON.parse(readFileSync(measurement, 'utf8')), {
+    version: marker.version, release: marker.release, packageSha256: marker.packageSha256,
+  })
+  assert.equal(statSync(measurement).mode & 0o7777, 0o644)
+  assert.equal(statSync(dshHome).mode & 0o7777, 0o700)
 
   writeFileSync(join(first.target, 'cordis.patch.yml'), 'user edit\n')
   const second = await seedProfile({ dshHome, source })
   assert.equal(second.seeded, false)
   assert.equal(readFileSync(join(first.target, 'cordis.patch.yml'), 'utf8'), 'user edit\n')
+  writeMeasurementMarker(dir, second.target)
+  assert.equal(statSync(measurement).mode & 0o7777, 0o644, 'measurement stays readable after restart')
 })
 
 test('the profile names the runtime pnpm store, not the builder’s', () => {

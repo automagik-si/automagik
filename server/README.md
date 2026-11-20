@@ -10,7 +10,7 @@ or a published release pushes it to `ghcr.io/automagik-si/automagik-server` as
 
 Pins: dsh `0.2.2-rc.2` (the desktop runtime's own lock) and the plugins at one release, the
 content. A dispatch takes `-f content=<tag>`, a release whose assets include `plugins.json`
-(e.g. `v3.160.6`); empty picks the newest stable release that carries it, within the last 30
+(e.g. `v3.161.3`); empty picks the newest stable release that carries it, within the last 30
 releases. A release event uses its own version as the content. A herdr, Pocket or am patch
 carries no plugin tarballs: a dispatch whose content has none is refused, naming the tag, and a
 release event for such a version builds and pushes nothing. The `Dockerfile`'s
@@ -124,7 +124,7 @@ release on its tag with `content=v<version>`. This independent job only warns on
 To retry manually after merge:
 
 ```sh
-gh workflow run server-image.yml --ref dev -f content=v3.160.6
+gh workflow run server-image.yml --ref dev -f content=v3.161.3
 ```
 
 `content` is the release tag whose plugin tarballs are installed; empty means the newest stable
@@ -187,8 +187,8 @@ Each instance keeps its persistent homes on its own `/data` volume, including
 `XDG_RUNTIME_DIR=/run/automagik` with owner `1000:1000` and mode `0700`. The entrypoint uses
 `HC_RUNTIME=/run/automagik/herdr-core` and `HC_SESSION=automagik-server` by default. It sets
 `HC_SOCKET` and `HC_TERMINAL_SOCKET` to `$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock`.
-The gate mounts only the volume's `dsh/` folder, read-only, and the core socket is never on the
-volume.
+The gate mounts only the volume's `gate-view/` folder at `/dsh-view`, read-only. The core socket
+is outside the volume.
 
 The entrypoint starts `herdr-core serve` before DSH. It prints `herdr-core: serving on <path>`
 once the expected endpoint is a Unix socket. On failure it prints the directory listing, the
@@ -202,7 +202,7 @@ The optional am hc proxy requires core 0.1.14. It refuses this image's core 0.1.
 ## Build and smoke
 
 ```sh
-node server/build.mjs --tag automagik-server:local --version 3.160.6 --image-version 3.160.6 \
+node server/build.mjs --tag automagik-server:local --version 3.161.3 --image-version 3.161.3 \
   --revision "$(git rev-parse HEAD)"
 node server/smoke.mjs automagik-server:local
 node server/follow-smoke.mjs automagik-server:local
@@ -211,6 +211,7 @@ node server/follow-smoke.mjs automagik-server:local
 `--version` is the release whose plugin tarballs are installed; `--image-version` is the content
 version label (normally the same release, without its `v`); `--revision` is the commit label. With
 no arguments the release is `3.160.6` and the revision label `unknown`.
+Use `3.161.3` or later plugin content for the mode-on smoke.
 
 The builder fetches am from that release's pinned tarball and verifies it before unpacking
 (`fetch-am.mjs`); the tools stage fetches herdr-core at its own pinned version and sha256 and
@@ -313,10 +314,12 @@ mount --bind /var/lib/docker/volumes/automagik-data/_data "$view"
 
 # Search only: the view itself, then every directory on the way to a readable path.
 setfacl -m "u:$me:--x" "$view"
-for d in .claude .codex .automagik dsh dsh/profiles dsh/profiles/automagik-web; do
+for d in .claude .codex .automagik; do
   [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
 done
-marker=dsh/profiles/automagik-web/automagik-server-profile
+marker=.automagik-measurement/.automagik-server-profile
+# Give replacement marker files the read grant when they are created.
+setfacl -m "u:$me:--x,d:u:$me:r--" "$view/.automagik-measurement"
 [ -e "$view/$marker" ] && setfacl -m "u:$me:r--" "$view/$marker"
 # Search only into the agent homes: their presence decides the derived-file check.
 for d in .gemini .antigravity; do
@@ -350,6 +353,12 @@ through a temporary writable bind, or to the volume's source path: a read-only m
 `setfacl`. With Incus, bind the `dir` pool's `source` the same way; with another driver, export
 the read-only copy there. Never `setfacl -R` on the view: that makes the credential files
 readable, and rerun the deny loop after a vendor writes a new credential file.
+Run the ACL setup after the image's first start. The image publishes the seed's version, release
+and package hash under `.automagik-measurement/` and replaces the marker on restart. The directory's
+default ACL carries the read grant to each new marker, even when the volume root's default ACL
+denies the measurement account. On upgrade, remove the prior measurement traversal grant on
+`dsh/` and configure the ACL for the new marker path. `DSH_HOME` is private to uid 1000 with mode
+`0700`.
 
 Inside that view the measurement identity may read, per workspace:
 
@@ -518,6 +527,18 @@ requires the path. Incus takes `initial.uid` and `initial.gid` as positional `ke
 on `create`. For an existing root-owned volume, chown it to `1000:1000` on the host instead
 (`chown -R 1000:1000 <the volume's path>`). Docker's named volume needs neither: Docker seeds a
 fresh volume with the image's `/data` ownership (1000:1000).
+
+On upgrade, startup tightens an existing DSH-owned `DSH_HOME` to `0700`, preserving its contents.
+Startup refuses a foreign-owned DSH home in every mode. Set its owner to the image's uid on
+the host (`chown 1000 <host path to DSH_HOME>`) before restarting. Use a real directory with
+no symbolic links in its path.
+
+An older setup with `DSH_HOME=/data` refuses in either mode with
+`automagik-web: gate-view overlaps DSH_HOME`. With the instance stopped, create a private
+child directory such as `/data/dsh` owned by uid 1000 with mode `0700`. Move the existing
+profile directory (`/data/profiles`) and other DSH-home files into that child, keeping workspace,
+secrets and gate-view at their existing volume paths. Set `DSH_HOME` to the child before
+restarting.
 
 The volume flags above stay required. The image's WorkingDir is `/opt/automagik`, off the
 `/data` volume on purpose: an Incus instance pre-creates the image WorkingDir on the mounted
@@ -1127,12 +1148,12 @@ and add this later override to `cordis.patch.yml`.
 Mode on checks the effective DSH profile before starting the core or DSH. It reads the bundle,
 profile and DSH-home patches in boot order. Before turning it on, verify that the image's
 `/opt/automagik/versions.json` inventory lists all four plugins and that its `revision` matches the
-pinned digest's `server-image.json` record. An image built from the `v3.160.6` tree carries
-three plugins and refuses mode on. Set `AUTOMAGIK_CALLER_KEYS` in the container
+pinned digest's `server-image.json` record. Mode on requires Bots content from `v3.161.3` or
+later, which carries the no-runner command guard. Set `AUTOMAGIK_CALLER_KEYS` in the container
 environment to the absolute path of `caller-keys.json` on its own read-only mount. An empty
-verified mount can wait for the gate's first publication. If set, `AUTOMAGIK_INSTANCE_ID`
-must be nonempty and match the published key set. Supply both settings through the container
-environment if used. Startup refuses either setting in the workspace or DSH-home `.env`
+verified mount can wait for the gate's first publication. `AUTOMAGIK_INSTANCE_ID` must be
+non-blank and match the published key set. Supply both settings through the container
+environment. Startup refuses either setting in the workspace or DSH-home `.env`
 when the corresponding variable is unset. Cloud workspace naming still uses
 `AUTOMAGIK_GATE_CLOUD_WORKSPACE` on the gate and `AUTOMAGIK_INSTANCE_ID` for DSH key validation.
 
@@ -1142,12 +1163,104 @@ Readiness refusals report fixed codes.
 |---|---|
 | `composition`, `readiness-error` | DSH profile composition and startup preflight |
 | `adapter-enabled`, `adapter-collision` | One enabled adapter with the shipped id and name, under enabled groups |
-| `ambiguous-ancestry` | Adapter, connection and webserver entries may be nested only under Cordis group implementations |
+| `ambiguous-ancestry` | Adapter, connection, webserver and filesystem provider entries may be nested only under Cordis group implementations |
 | `provider-collision`, `connection-missing`, `webserver-missing` | One enabled DSH `connection` and one enabled `webserver`, with the shipped provider names and no second active webserver module |
 | `body-limit` | Equal, literal positive body limits. An absent limit defaults to 314572800 bytes |
-| `adapter-version`, `bots-guard` | Adapter 3.160.6 or later and Bots 3.160.5 or later |
+| `adapter-version`, `bots-guard` | Adapter 3.160.6 or later and Bots 3.161.3 or later |
 | `image-integrity` | Valid four-plugin image metadata. The installed adapter and Bots must each match the image version and package bytes, excluding nested `node_modules` |
 | `caller-keys-config`, `instance-config`, `env-file-override`, `caller-keys-mount` | Container key-path and instance settings, separate read-only mount and public key set |
+| `bot-runner-config` | `AUTOMAGIK_BOT_RUNNER_SOCKET` and `AUTOMAGIK_BOT_RUNNER_PROOFS` are normalized absolute paths outside `/data`, the Automagik and DSH homes, the workspace and the gate view. The socket path can occupy at most 107 bytes. `AUTOMAGIK_BOT_RUNNER_UID` and `AUTOMAGIK_BOT_RUNNER_GID` are the runner's non-root numeric uid and dedicated socket gid, distinct from DSH's uid and primary gid |
+| `bot-runner-socket` | The socket directory and both mount ancestries are real directories without group or other writes. The runner owns the `0750` socket directory, the `0660` Unix socket and the `1730` proof directory, all in the socket group. DSH has that group and write and search access to the proofs |
+| `member-wall-row` | Exactly one active `member-wall-fs` row for `@automagik/bots-dsh/member-wall/fs` in the shared `fs` scope. Its required Cordis services, inherited filesystem settings, protected member roots and Bot grants pass validation. Other stock filesystem providers must be disabled |
+| `bot-trees-disjoint` | `AUTOMAGIK_BOT_RUNNER_WORK_ROOT` is a normalized absolute path to a runner-owned `0711` directory that DSH can search. The work root is disjoint from `botsRoot` and every `botReadRoots` grant by path, directory identity and mount backing |
+
+Readiness copies the composition inputs into a private directory under `/tmp` and reads bundles
+through the profile's Node lookup paths. The profile manifest and legacy module projections stay
+in place during preflight. Startup refuses a `TMPDIR` that overlaps a runner directory, DSH home
+or the gate view.
+
+For mode on, the workspace template provisions the runner before DSH starts. Put the runner
+socket and proof mounts on the DSH service only. For example, with runner uid `2200` and its
+dedicated socket gid `2201`, use this Compose override alongside `compose.gate.yml`.
+
+```yaml
+services:
+  dsh:
+    environment:
+      AUTOMAGIK_INSTANCE_ID: ${AUTOMAGIK_GATE_CLOUD_WORKSPACE:?set the workspace instance id}
+      AUTOMAGIK_BOT_RUNNER_SOCKET: /bot-runner/socket/runner.sock
+      AUTOMAGIK_BOT_RUNNER_PROOFS: /bot-runner/proofs
+      AUTOMAGIK_BOT_RUNNER_UID: '2200'
+      AUTOMAGIK_BOT_RUNNER_GID: '2201'
+      AUTOMAGIK_BOT_RUNNER_WORK_ROOT: /srv/automagik/bot-runner/work
+    group_add: ['2201']
+    volumes:
+      - /srv/automagik/bot-runner/socket:/bot-runner/socket:ro
+      - /srv/automagik/bot-runner/proofs:/bot-runner/proofs:rw
+      - /srv/automagik/bot-runner/work:/srv/automagik/bot-runner/work:ro
+      - /srv/automagik/bot-files:/bot-files:rw
+```
+
+Set `AUTOMAGIK_MULTIUSER=1` for the shared switch in the base Compose file. The paths and numeric
+ids above must match the template's actual runner and mounts. The runner's work root uses the
+same absolute path in DSH's container. Use the following in the effective profile, for example
+in `DSH_HOME/cordis.patch.yml`.
+
+```yaml
+- id: fs-sandbox
+  disabled: true
+- insert:
+    - id: member-wall-fs
+      name: '@automagik/bots-dsh/member-wall/fs'
+      config:
+        members: true
+        bots: true
+        principalsFile: /data/dsh/multiuser-dsh/principals.json
+        membersRoot: /data/members
+        botsRoot: /bot-files
+        denyReadRoots: [/data/dsh, /data/secrets, /data/gate-view, /run/secrets]
+```
+
+Use the absolute `multiuser-dsh/principals.json` path under the actual DSH home. Leave
+`instanceId` omitted or empty to inherit `AUTOMAGIK_INSTANCE_ID`, or set it to that exact value.
+Keep the DSH home, both secrets locations and the gate view covered by `denyReadRoots` even if
+members can read a shared parent. Include the target of `DEEPSEEK_API_KEY_FILE` when configured
+and the target of a default key file if it links outside its secrets directory. Include the
+actual secrets directory when `AUTOMAGIK_HOME` changes it. DSH publishes a second copy
+of the launch URL in the gate view. Member read grants must avoid bind aliases that expose these
+protected paths. The wall uses the stock `sandboxPolicy` service and its `sessionProjections`
+dependency. Keep both enabled and in the wall's service scope. `sandboxPolicy` requires a valid
+mode and absolute paths for any configured `workspaceRoot` and `additionalWritableRoots`.
+Create `botsRoot` as a real, DSH-owned directory without group or other writes, outside `/data`,
+the DSH and team homes, the gate view, the member root and every denied root. The wall's Bot
+read grants use Bot ids and absolute roots and must avoid these denied roots and `botsRoot`.
+Bot file tools work under `<botsRoot>/<id>`. Bot commands use `<workRoot>/.bots/<id>` under a
+separate uid. Files stay in their respective trees.
+
+Image CI binds a DSH-owned subdirectory of the runner's work volume separately at
+`/bot-files` and checks for `bot-trees-disjoint` before either child starts. Its positive case
+checks a scoped file denial through the live `fs` service along with the signed index and replay
+checks.
+
+For a rollback, follow RFC 0038's session revocation and Bot-work drain steps first. With DSH
+stopped, append this patch after the mode-on rows in `DSH_HOME/cordis.patch.yml`. Set the shared
+Compose switch `AUTOMAGIK_MULTIUSER=0` before restarting. If you run the containers directly,
+set `AUTOMAGIK_MULTIUSER=0` on DSH and `AUTOMAGIK_GATE_MULTIUSER=0` on the gate. This restores
+the stock filesystem for owner operations on the existing profile. Image CI exercises the
+rollback on the same populated volume and checks an owner file read.
+
+```yaml
+- id: member-wall-fs
+  disabled: true
+- id: fs-sandbox
+  disabled: false
+```
+
+These are image prerequisites. The image inspects runner metadata without connecting or writing
+a probe. Keep member admission closed until the template has verified the live v2 command path,
+the distinct-uid Bot probes and the migration and isolation gates in RFC 0038. Retire old Bot
+processes, verify the executable profile and rotate credentials those processes could read
+before allowing members on an existing workspace.
 
 `app-manifest` warns when the Bots entry has `appManifest: false`. After startup, the mode-on DSH
 and gate health reports require an empty 401 for the unsigned caller probe, an empty 401 for a

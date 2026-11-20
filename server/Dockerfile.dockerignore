@@ -8,4 +8,6 @@
 !apps/desktop/scripts/prune-runtime.mjs
 !apps/desktop/scripts/runtime-patches.mjs
 !apps/desktop/src/profile-patch.mjs
+!am/runner/locks.mjs
+!am/runner/proto.mjs
 server/node_modules

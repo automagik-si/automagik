@@ -59,6 +59,12 @@ function entrypoint(t, extra = {}) {
       if (path === process.env.TEST_VIEW && info) info.uid = Number(process.env.TEST_UID)
       return info
     }
+    const fstat = fs.fstatSync
+    fs.fstatSync = (fd, options) => {
+      const info = fstat(fd, options)
+      if (process.env.TEST_DSH_HOME && fs.readlinkSync('/proc/self/fd/' + fd) === process.env.TEST_DSH_HOME) info.uid++
+      return info
+    }
     childProcess.spawn = () => {
       console.error('unexpected child process')
       process.exit(97)
@@ -93,6 +99,19 @@ function entrypoint(t, extra = {}) {
   }
   return { root, viewDir, refuse }
 }
+
+test('the entrypoint refuses a foreign DSH home with the host fix before writing into it', t => {
+  const { root, refuse } = entrypoint(t)
+  const home = join(root, 'dsh')
+  const before = readdirSync(home).sort()
+  chmodSync(home, 0o755)
+  for (const mode of ['0', '1']) {
+    refuse(/not owned by DSH uid \d+\. Chown the DSH home to \d+ on the host\./,
+      { TEST_DSH_HOME: home, AUTOMAGIK_MULTIUSER: mode })
+    assert.equal(statSync(home).mode & 0o7777, 0o755)
+    assert.deepEqual(readdirSync(home).sort(), before)
+  }
+})
 
 test('startup refuses a view that is a file, a symlink or owned by another uid', async t => {
   const typeError = /gate-view must be a real directory owned by uid \d+/

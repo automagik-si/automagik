@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 
 export const ADAPTER = '@automagik/multiuser-dsh'
 export const ADAPTER_SINCE = '3.160.6'
-export const BOTS_GUARD_SINCE = '3.160.5'
+export const BOTS_GUARD_SINCE = '3.161.3'
 export const LEGACY_PLUGINS = ['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/welcome-dsh']
 
 export const PLUGINS = [...LEGACY_PLUGINS, ADAPTER].sort()
