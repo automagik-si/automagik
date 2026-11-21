@@ -2211,6 +2211,56 @@ jobs:
         working-directory: apps/vault-dsh
         run: node --test test/keychain-macos-native.test.js
 
+  acp-macos:
+    # #869: the Bot's isolated CLI homes against the real Claude Code and Codex on macOS, with a
+    # disposable keychain. Invented credentials only. A seatbelt profile denies outbound network.
+    # apps/acp-dsh/README.md, "Credential stores on macOS (#869)".
+    name: acp-dsh (native macOS credential stores)
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/acp-dsh
+    env:
+      ACP_MACOS_NATIVE: '1'
+      DO_NOT_TRACK: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        working-directory: .
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Record macOS image
+        run: |
+          sw_vers
+          uname -m
+          printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+
+      - name: Plugin dependencies and the pinned DSH harness
+        run: |
+          bun install --frozen-lockfile
+          bun run harness
+
+      - name: Pinned Claude Code and Codex (registry integrity checked)
+        run: node test/native/install-clis.mjs "${RUNNER_TEMP}/acp-clis" >> "$GITHUB_ENV"
+
+      - name: Native credential-store checks
+        run: /usr/bin/sandbox-exec -f test/native/offline.sb node --import ./test/harness-resolve.mjs test/native/macos-accounts.native.mjs
+
   boot:
     # The plugins booted for real with Omni's channels and canvases (the release omni.json
     # pins): boot-check.yml, which Follow Omni also runs on a candidate Omni before carrying it.
@@ -2226,7 +2276,7 @@ jobs:
     name: CI result
     needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
-            plugin, reservations-macos, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
+            plugin, reservations-macos, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, acp-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

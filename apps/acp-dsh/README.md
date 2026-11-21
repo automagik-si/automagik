@@ -455,8 +455,8 @@ root to the next installation that starts.
 `authScope: 'isolated'` identifies the service and Claude/Codex status rows. `accountSignOut(id)`
 and `accountSwitch(id, { label? })` use the Bot environment. They block admission, stop
 starting/live chat, model-probe, image and login processes, wait for termination, then ask the
-CLI to log out and verify it is signed out. Credential-store separation relies on the vendor
-assumptions below. Switch starts a new isolated login afterward.
+CLI to log out and verify it is signed out. What the native macOS job checks about credential
+stores is in *Credential stores on macOS (#869)* below. Switch starts a new isolated login afterward.
 Generation checks prevent work delayed across a switch from starting on the next account.
 `imageAccess()` includes `accountGeneration` when ready; callers pass that ticket to
 `generateImage({ accountGeneration, ... })` so even a switch between those two calls refuses
@@ -498,20 +498,47 @@ version or pause marker cannot revive a captured launch. Bot models and DSH hist
 Bot CLI user settings start empty; project settings still load from the working folder.
 Account details stay on owner-only routes, never in state, transcripts, model calls or logs.
 
-**Credential-store assumptions and missing live checks.** Claude's documented macOS Keychain
-entry is namespaced by `CLAUDE_CONFIG_DIR`; Codex's current OS-keyring implementation derives
-its key from `CODEX_HOME`. Separate directories rely on those namespaces remaining distinct in
-the installed vendor versions. Fake-store/process tests do not prove the live credential paths.
-Two checks remain open on #869:
+**Credential stores on macOS (#869).** CI job `acp-dsh (native macOS credential stores)` on
+`macos-15` uses the real Claude Code 2.1.330 and Codex 0.171.0 darwin-arm64 builds, pinned with
+registry integrity in `test/native/clis.json`. The job uses invented credentials, creates and
+deletes a disposable keychain, and denies outbound network access through a seatbelt profile.
+acp-dsh runs its own sign-in, switch and sign-out with the Bot's isolated environment. The
+real CLIs answer every status and logout check. Codex sign-in in acp-dsh requests a ChatGPT
+device code. A stand-in answers that exchange and runs the real `codex login --with-api-key`
+writer offline with acp-dsh's environment and working directory. For Claude Code, the
+stand-in places the credential where the CLI reads it.
 
-- Real macOS, two accounts: sign in, switch and sign out inside the app for both vendors, and
-  verify the terminal login remains intact throughout.
-- Codex's OS-keyring-backed auth path, with separate Bot and terminal homes, through the same
-  sign-in/switch/sign-out sequence (not only the `auth.json` file path).
+- **Round P.** With pristine Bot homes, the job checks that macOS exposes no default keychain
+  or search list to either Bot. It checks that Codex uses `<Bot home>/.codex/auth.json` in
+  default file mode, fails to write in explicit `keyring` mode, and falls back to the file
+  on save in `auto` mode. Phase P5 records `auto-logout-ok` when sign-out removes the file,
+  or `auto-logout-keyring-error` when Codex keeps the file and acp-dsh reports that sign-out
+  did not finish. Claude Code reads the planted `<Bot home>/.claude/.credentials.json` and
+  reports signed out when that credential is removed. Its own logout clears the Bot sign-in.
+  The terminal's Claude keychain record and Codex file must stay byte-identical, and both
+  terminal logins must stay signed in throughout.
+- **Round K.** With both homes pointed to the disposable keychain, the job checks that each
+  vendor gives the terminal and Bot distinct items. Codex's default `Direct` backend on macOS
+  uses service `Codex Auth` and an account of `cli|` plus the first 16 hex characters of the
+  SHA-256 digest of canonical `CODEX_HOME`. Claude Code uses the current user and service
+  `Claude Code-credentials`, suffixed for the Bot with `-` and the first eight hex characters
+  of the SHA-256 digest of the NFC-normalized `CLAUDE_SECURESTORAGE_CONFIG_DIR` value.
+  Each vendor's logout must delete only the Bot's item. The job verifies that A's item is
+  gone before B is written, the Bot record changes between A and B, and the terminal's
+  records stay byte-identical. The same vendor binary can read both names in the keychain.
 
-See [Claude authentication](https://code.claude.com/docs/en/authentication) and
-[Codex auth storage](https://github.com/openai/codex/blob/main/codex-rs/login/src/auth/storage.rs)
-for those upstream namespace contracts.
+The job logs `ImageOS`, `ImageVersion` and the P5 result. The first native run is pending.
+Real OAuth with real accounts and the vendor exchanges for Claude sign-in and Codex
+device-code sign-in remain untested. Claude Code has no offline sign-in writer for these
+fixtures, so the job exercises its reads and logout against planted credentials. Codex's
+account view reports the same API-key kind for both keys. The job distinguishes A and B
+using masked CLI status, stored record digests and the absence of A at the switch.
+Other macOS images, Keychain prompts on a person's Mac, Intel Macs, newer vendor versions
+(acp-dsh installs the newest stable releases), and Windows (#1076) remain untested here.
+
+See [Claude authentication](https://code.claude.com/docs/en/authentication),
+[Codex 0.171.0 auth storage](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/login/src/auth/storage.rs)
+and [Codex 0.171.0 login and logout](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/cli/src/login.rs).
 
 **Settings migration:** terminal user settings, hooks, MCP servers, skills and CLI sessions are
 not automatically imported. Project settings still load in chat work; account/status/login
