@@ -68,7 +68,8 @@ How they fit:
   outside the Bot’s folder ask the person when the existing tool gate allows them. Children follow the same check.
   Read-only team lookups such as `recall` do not ask just because their arguments mention a hard step.
   Auto also asks about these steps inside its Workspace boundary; its judge keeps its own counts.
-  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`; a failed hook asks.
+  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`, with the classifier
+  receiving `{ tool, args, sessionId }`. A failed hook asks.
   Ordinary example env files, public SSH keys, feature-branch pushes with an explicit
   destination and local file deletes stay out of the added list; a bare `git push` or a
   destination of `HEAD` asks. Exact boundaries are in RFC 0031’s #1092 amendment.

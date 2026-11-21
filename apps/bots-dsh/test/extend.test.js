@@ -246,8 +246,15 @@ test('#1092 sendsOutside hooks register, ask on failure and dispose', () => {
   const rt = {}; install(rt)
   const step = { tool: 'team_send', args: { recipient: 'outside' } }
   assert.equal(rt.sendsOutside(step), false)
-  const dispose = rt.stepHooks.sendsOutside(input => { assert.deepEqual(input, step); return true })
+  let classified
+  const dispose = rt.stepHooks.sendsOutside(input => {
+    classified = input
+    return true
+  })
+  assert.equal(rt.sendsOutside(step, 's1'), true)
+  assert.deepEqual(classified, { ...step, sessionId: 's1' })
   assert.equal(rt.sendsOutside(step), true)
+  assert.deepEqual(classified, { ...step, sessionId: undefined })
   dispose(); dispose()
   assert.equal(rt.sendsOutside(step), false)
   const throwing = rt.stepHooks.sendsOutside(() => { throw new Error('unknown recipient') })

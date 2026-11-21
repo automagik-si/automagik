@@ -204,8 +204,14 @@ for (const full of [false, true]) test(`#1092 the new hard categories ${full ? '
     assert.deepEqual(result, full ? allow : { kind: 'ask', reason: askText(`bash: ${command}`) })
   }
   extensions1092.install(w.rt)
-  w.rt.stepHooks.sendsOutside(({ tool }) => tool === 'team_send')
-  assert.deepEqual(await w.pre(w.exec({ name: 'team_send', arguments: {} })), full ? allow : { kind: 'ask', reason: askText('team_send') })
+  let classified
+  w.rt.stepHooks.sendsOutside(input => {
+    classified = input
+    return input.tool === 'team_send'
+  })
+  const call = w.exec({ name: 'team_send', arguments: {} })
+  assert.deepEqual(await w.pre(call), full ? allow : { kind: 'ask', reason: askText('team_send') })
+  assert.deepEqual(classified, { tool: call.name, args: call.arguments, sessionId: call.agent.session.id })
 })
 test('#1092 a missing folder does not hide an absolute delete', async () => {
   const w = world()

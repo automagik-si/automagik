@@ -120,13 +120,14 @@ export function install(rt) {
     },
   }
 
-  // Apart from rt.hooks, on its own surface: rt.stepHooks.sendsOutside(fn), where fn({ tool, args })
-  // is true for a step that sends to people outside the team (an Omni channel send). Such a step is
-  // hard to undo: Auto never allows it by itself and every asking level asks the person (RFC 0031,
+  // rt.stepHooks.sendsOutside(fn) classifies steps that send to people outside the team (an Omni
+  // channel send). The classifier receives { tool, args, sessionId }. The Session id is a string,
+  // or undefined when the caller has no Session, so a plugin can keep its rules for its own Sessions.
+  // Auto never allows such a step by itself and every asking level asks the person (RFC 0031,
   // #1092). A hook that throws counts as true. The Bot team names no sender of its own.
   rt.stepHooks = { sendsOutside: fn => add(senders, fn) }
-  rt.sendsOutside = step => senders.some(fn => {
-    try { return fn({ tool: step.tool, args: step.args }) === true } catch { return true }
+  rt.sendsOutside = (step, sessionId) => senders.some(fn => {
+    try { return fn({ tool: step.tool, args: step.args, sessionId }) === true } catch { return true }
   })
 
   // What channel.js and prompt.js read.

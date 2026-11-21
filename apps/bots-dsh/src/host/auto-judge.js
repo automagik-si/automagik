@@ -469,7 +469,7 @@ function ordinaryHardAsk(step, context) {
 export function hardContext(rt, sessionId, step, session) {
   let root; let sendsOutside = false
   try { root = rt.sessionFolder?.(session ?? { id: sessionId }) } catch {}
-  try { sendsOutside = rt.sendsOutside?.(step) === true } catch { sendsOutside = true }
+  try { sendsOutside = rt.sendsOutside?.(step, sessionId) === true } catch { sendsOutside = true }
   return { root, sendsOutside }
 }
 const cleanArgs = args => JSON.parse(JSON.stringify(args ?? {}, (key, value) => key === 'diffs' ? undefined : value))
