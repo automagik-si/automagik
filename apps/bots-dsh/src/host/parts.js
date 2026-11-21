@@ -1866,6 +1866,8 @@ export function install(rt) {
     try {
       // Filter sign-in codes while ownership is fenced, before admission waits or a switch can carry the batch.
       rt.dropLoginCodes?.(payload)
+      // A fallback notice a step would answer on another harness leaves the batch (fallback.js).
+      rt.dropCrossingFallback?.(payload)
       if (rt.updateHold?.closed) {
         leave()
         await rt.updateHold.wait(payload.signal)

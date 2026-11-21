@@ -304,6 +304,19 @@ start a fresh Session needs that route restored or an access level that allows a
 route. A managed history-free move onto the selected route belongs to the pending-input
 delivery.
 
+Failover never crosses a harness (2026-11-21). A failed request always holds the person's
+request. So when the fallback model runs on another harness than the request that failed (a
+local CLI the team carries counts as its own harness), the Bot team takes no fallback. The turn
+fails with its own error, as before. The conversation records one notice of why no other model
+answered; like the Full access notice it is a context line, shown in Advanced mode. No fallback
+is taken, and no notice is written, in two more cases: when another selection on another harness
+was made meanwhile, and on a Session that may not run a coding CLI. A fallback turn whose step
+DSH fixes on another harness drops its fallback notice. A fallback on the same harness is
+unchanged, and the Full access rule for a coding CLI still comes first. The rest (Q7b, the other
+writers of Q7c, and the pending-input delivery) waits on DSH. A plugin check cannot be bound to
+the moment DSH records a selection, and input that moves between parts has no durable receipt.
+The ask is section 5 of RFC 0045, a proposal not yet merged.
+
 ### Mod by mod
 
 | Mod (`herdr/mods/`) | What it does today | After the move |
@@ -554,7 +567,7 @@ Q16 (a), Q17 (a) and Q18 (a) are the answers given, so delivery 3 keeps its orde
 | 1 | the desktop half: #1391, #1779, #1788 (the flip, the window marker, no core spawn) | the browser half (1b) |
 | 2 | typing #1394; the watching-size rule and four panes #1810 | "Typing elsewhere" with a click to take over (no resize while typing, as shipped, is Q15's answer) |
 | 3a, 3b | nothing (RFC 0028's durable wake log, its 0b, is merged: #1827) | all |
-| 4 | the selector #1025; Q13's route policy #1822; Q7a #1863 | Q7b, the note-only rule for a Bot's turns as a group member; Q7c, the other route writers (failover, migrations, a pinned route, reopen) with the in-place path's races, effort, rollback, default fallbacks and automatic moves (Handoff note); the pending-input delivery with its managed history-free move |
+| 4 | the selector #1025; Q13's route policy #1822; Q7a #1863; failover never crosses a harness (Q7c's first writer, Handoff note) | Q7b, the note-only rule for a Bot's turns as a group member; the rest of Q7c, the other route writers (migrations, a pinned route, reopen) with the in-place path's races, effort, rollback, default fallbacks and automatic moves (Handoff note); the pending-input delivery with its managed history-free move. All three wait on DSH (What waits) |
 | 5 | 5a, the Automations page: #1817 | run now, history, edit, pause and resume on that page; 5b (the Claude login); 5c (Codex and the account proxy) |
 | 6 | nothing | all |
 | 7 | the image half of the base: #1869 carries herdr-core 0.1.18 pinned by version and sha256, `am` pinned to the release's content and checked against its `.sha256`, and DSH's CLI store installing Claude Code and Codex in the background (`server/README.md`) | 1b; the end-to-end check, which also needs delivery 3's orchestrator (#1869's provisioning is kept: Q21, Q22) |
@@ -569,8 +582,9 @@ Each needs nothing from another repository. In this order:
    view's switch to xterm), its line that workers get no rows of their own, and RFC 0022's uses of
    "Code mode" change to Q9's answer and RFC 0022's Q15 answer, with no change to either RFC's
    design. Delivery 3b is built on the lead kind's text, so it is settled before the grant exists.
-2. **Delivery 4's remainder** (plugin): Q7b, Q7c and the pending-input delivery, as the
-   inventory above lists them. Hermes stays out while it is frozen.
+2. **Delivery 4's remainder** (plugin): failover never crossing a harness moved (2026-11-21).
+   Q7b, the rest of Q7c and the pending-input delivery wait on DSH (What waits). Hermes stays
+   out while it is frozen.
 3. **Delivery 5a's remainder** (plugin), through the scheduler CLI's own verbs
    (`herdr/scheduler/main.go`, its usage text), from the owner's marked window only, as 5a:
    history with `history --json`; edit with `put --original <name>`; pause and resume with
@@ -622,6 +636,7 @@ Each needs nothing from another repository. In this order:
 
 | Item | Waits on | Whose |
 |---|---|---|
+| Delivery 4's remainder: Q7b, Q7c beyond failover, the pending-input delivery | A DSH fence that records a model selection only if no input was admitted and no turn started since the host read the Session (a revision checked inside DSH's admission lock), and input that keeps the part it was meant for and moves with a durable receipt. Three plugin-only review rounds (2026-11-21) found both missing: DSH's `selectModel` awaits before it records the selection, and text prompts are admitted outside that lock. Asked in section 5 of RFC 0045, a proposal not yet merged | DSH (another repository) |
 | 3b, the Genie's two seats and the follower | RFC 0028's delivery 0, the grant, then its delivery 1 (the worker tools); the lead kind (above). The grant is herdr-core's, filed from #628 and #631 (both open) | herdr-core (another repository) |
 | 3a, `am mailbox send` | 3b (Q16) | herdr-core, through 3b |
 | The mailbox for a DSH Bot that runs in a terminal | RFC 0023's session terminal field (The Genie's two seats and the mailbox); until DSH ships it, the mailbox reaches app-hosted Sessions only | DSH (another repository) |

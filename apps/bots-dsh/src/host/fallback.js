@@ -1,7 +1,8 @@
 // A model that fails does not end the conversation: the next turn runs on the fallback
-// model (the profile's default, DeepSeek out of the box, or config.fallbackModel) and the
-// turn after it is back on the Bot's own model. It covers every Session of the team (a
-// Bot's chat, a group seat, a task), after everything that answers a failed request before
+// model (the profile's default, DeepSeek out of the box, or config.fallbackModel) when it
+// uses the same harness, and the turn after it is back on the Bot's own model. It covers
+// every Session of the team (a Bot's chat, a group seat, a task), after everything that
+// answers a failed request before
 // it: DSH's own retries of the same model, and parts.js, which moves a full or stuck chat
 // to a fresh part. A full context, a stop, and a fallback that fails too end the turn as
 // before. config.fallback: false turns it off.
@@ -18,7 +19,7 @@
 // turn ended, it opens the fallback turn. A turn that started meanwhile (the person wrote
 // again) already ran on the fallback, so the notice is not sent then.
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { commandCapableAgent, leavesCli } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness, leavesCli } from '../shared/routes.js'
 import { splitRef } from './text.js'
 import { NO_BOT_RUNNER } from './bot-runner.js'
 import { MODEL_ACCESS_REQUIRED, switchFailure, switchPending } from './model-state.js'
@@ -27,11 +28,19 @@ import { MODEL_ACCESS_REQUIRED, switchFailure, switchPending } from './model-sta
 // it on), the person stopped it, an image has to leave the request first, or the model's
 // account needs a sign-in (an agent whose CLI is signed out: model-state.js; the Bot stays on
 // its pick and the person is asked to sign in, never moved silently to another model). Any
-// other failure of an agent (ACP_AGENT) falls back like any model's, with its notice.
+// other failure of an agent (ACP_AGENT) can fall back on the same harness, with its notice.
 export const KEEP_CODES = new Set(['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'IMAGE_OFFLOAD_REQUIRED', MODEL_ACCESS_REQUIRED, NO_BOT_RUNNER, 'REMOTE_HERMES'])
 
 const sameRoute = (a, b) => a?.provider === b?.provider && a?.model === b?.model
 const label = route => `${route.provider}/${route.model}`
+const ref = label
+// A failover may never move a conversation to another harness (RFC 0030, Q7). A local CLI the
+// team carries (`local-*`) runs its own agent, so any provider change from or to one counts too,
+// although routes.js files it under DSH's harness.
+const localCli = provider => typeof provider === 'string' && provider.startsWith('local-')
+export const failoverCrosses = (from, to) => crossesHarness(ref(from), ref(to))
+  || ((localCli(from?.provider) || localCli(to?.provider)) && from?.provider !== to?.provider)
+const known = route => route?.provider !== undefined && route.model !== undefined
 
 /**
  * The route a failed request moves to, or undefined when it stays failed: a failure kept
@@ -69,6 +78,14 @@ export function stayNotice(failed) {
   })
 }
 
+export const STAYS_ON_HARNESS = 'The model failed and no other model answered in its place: the fallback model runs on another harness, and a conversation never changes harness. Try again, fix or sign in to the model, or start a new conversation on another model.'
+export function harnessNotice(failed) {
+  return createUserMessage({
+    content: [{ type: 'text', text: STAYS_ON_HARNESS }],
+    source: { kind: 'model-selection', form: 'notice', summary: `${label(failed)} failed; the fallback runs on another harness` },
+  })
+}
+
 export function install(rt) {
   const { ctx, config } = rt
   if (config.fallback === false) return
@@ -78,7 +95,7 @@ export function install(rt) {
   // Session id -> the failed turn whose fallback turn has not ended yet: parts.js waits for that
   // turn before it takes a fresh part's switch back (rt.fallbackArmed).
   const armed = new Map()
-  // Agent id -> the notice that waits for the failed turn to end.
+  // Agent id -> the expected fallback and turn whose end the notice waits for.
   const waking = new Map()
   const fallbackRoute = async noCommands => splitRef(config.fallbackModel ?? await rt.defaultModel({ noCommands }))
   // A switch that cannot run (switchFailure) goes back instead: the Bot's own chat with a switch
@@ -126,10 +143,23 @@ export function install(rt) {
       }
       return decided
     }
+    if (failoverCrosses(failed, fallback)) {
+      rt.warn(
+        'ds-bot: %s failed on %s (%s); the fallback on %s runs on another harness',
+        owner?.name ?? agent.id, label(failed), failure.code, label(fallback),
+      )
+      try {
+        agent.session.append('user/message', harnessNotice(failed), { surfaceOp: 'append' })
+      } catch (error) {
+        rt.warn('ds-bot: the notice that the conversation stays on its harness was not written: %s', error)
+      }
+      return decided
+    }
     // DSH prepares the next step's route from agent.model; the failed step's own retry
     // keeps its fixed route, so the backup runs the turn this wakes. The Bot's own selection
     // is snapshotted whole (provider, model and its explicit reasoning effort) first.
     const own = agent.model.current?.()
+    if (known(own) && failoverCrosses(own, fallback)) return decided
     if (noCommands && commandCapableAgent(own?.provider ?? failed.provider)) return decided
     try {
       agent.model.select({ provider: fallback.provider, model: fallback.model })
@@ -151,7 +181,7 @@ export function install(rt) {
       'ds-bot: %s failed on %s (%s); the next turn continues on %s',
       rt.botOf?.(agent.id)?.name ?? agent.id, label(failed), failure.code, label(fallback),
     )
-    wake(agent, fallbackNotice(failed, fallback, failure), turn, noCommands)
+    wake(agent, fallbackNotice(failed, fallback, failure), fallback, turn, noCommands)
     return decided
   })
 
@@ -161,10 +191,19 @@ export function install(rt) {
     if (sessionId !== undefined) armed.delete(sessionId)
     rt.warn('ds-bot: the fallback turn was not woken: %s', error)
   }
-  function send(agent, notice, noCommands) {
+  // A selection made while the failed turn ended that left the fallback's harness wakes no
+  // fallback turn: it would carry the conversation across (RFC 0030, Q7).
+  function send(agent, notice, fallback, noCommands) {
     try {
-      const provider = rt.botRunnerRequired === undefined ? undefined : agent.model.current?.()?.provider
-      if (!commandCapableAgent(provider) || !(noCommands || rt.botRunnerRequired?.(agent.session?.id ?? agent.id, agent))) {
+      const current = agent.model.current?.()
+      if (known(current) && failoverCrosses(current, fallback)) {
+        restore.delete(agent.id)
+        unarm(agent, 'the model changed')
+        return
+      }
+      if (!commandCapableAgent(current?.provider) || !(noCommands || rt.botRunnerRequired?.(agent.session?.id ?? agent.id, agent))) {
+        expected.set(notice.id, { agent, fallback })
+        if (expected.size > 200) expected.delete(expected.keys().next().value)
         agent.followup(notice)
       } else {
         armed.delete(agent.session?.id)
@@ -176,16 +215,16 @@ export function install(rt) {
   }
   // The notice opens the fallback turn once the failed one has ended (see the header). Never
   // awaited here: a request-error listener that waits for its own Agent to be idle never returns.
-  function wake(agent, notice, failedTurn, noCommands) {
-    if (typeof agent.whenIdle !== 'function') return send(agent, notice, noCommands)
-    const entry = { agent, failedTurn }
+  function wake(agent, notice, fallback, failedTurn, noCommands) {
+    if (typeof agent.whenIdle !== 'function') return send(agent, notice, fallback, noCommands)
+    const entry = { agent, failedTurn, fallback }
     waking.set(agent.id, entry)
     void Promise.resolve()
       .then(() => agent.whenIdle())
       .then(() => {
         if (waking.get(agent.id) !== entry) return
         waking.delete(agent.id)
-        send(agent, notice, noCommands)
+        send(agent, notice, entry.fallback, noCommands)
       }, (error) => {
         if (waking.get(agent.id) !== entry) return
         waking.delete(agent.id)
@@ -194,6 +233,24 @@ export function install(rt) {
   }
 
   rt.fallbackArmed = sessionId => armed.has(sessionId)
+
+  // Notice id -> the fallback it was sent for. DSH fixes a step's model when the step claims
+  // its input, which can be after another waiter changed the selection: a fallback notice that
+  // a step would answer on another harness leaves the step, and its fallback is undone.
+  // parts.js's pre-step calls it first, beside dropLoginCodes, before a switch can carry the batch.
+  const expected = new Map()
+  rt.dropCrossingFallback = (payload) => {
+    const messages = Array.isArray(payload?.messages) ? payload.messages : []
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const entry = expected.get(messages[index]?.id)
+      if (entry === undefined) continue
+      expected.delete(messages[index].id)
+      if (!known(payload.modelSelection) || !failoverCrosses(payload.modelSelection, entry.fallback)) continue
+      messages.splice(index, 1)
+      restore.delete(entry.agent.id)
+      unarm(entry.agent, 'the step runs on another harness')
+    }
+  }
 
   // The turn after the failed one (the fallback turn) ends: the Bot answers on its own
   // model again. The failed turn's own end comes first and is passed over. A turn that starts
@@ -213,6 +270,7 @@ export function install(rt) {
       const sameSession = pending.agent.session?.id === session?.id
       if (!sameSession || event.data.turn <= pending.failedTurn) continue
       restore.delete(id)
+      if (failoverCrosses(pending.route, pending.fallback)) continue
       const current = pending.agent.model.current?.()
       if (current?.provider !== undefined && pending.fallback !== undefined && !sameRoute(current, pending.fallback)) continue
       try {
