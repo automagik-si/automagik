@@ -36,6 +36,9 @@ const chatStatuses = bot => (bot.channels ?? []).flatMap(channel => (channel.cha
 // row, or its folded channel's, is where the owner goes.
 export function botRowStatus(bot) {
   const status = statusOr(bot.status)
+  // A Bot whose plugin is not installed cannot answer: that outranks a folded channel asking
+  // for the person, which still says so on its own row.
+  if (status === 'not-installed') return status
   if (status === 'needs' && chatStatuses(bot).includes('needs')) return 'idle'
   // A closed Bot's chats are not read yet; a channel that needs the person still reaches the
   // row he sees all day, so it is not only one line down and inside a Bot he did not open.
