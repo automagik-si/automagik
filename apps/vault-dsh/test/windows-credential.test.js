@@ -18,7 +18,7 @@ import { connection, maxBlob, maxResponse, parseResponse, provider, requestOf } 
 import { availability, createRunner, powershell, root, taskkill } from '../src/windows-credential/run.js'
 import { readerArgs } from '../src/windows-credential/script.js'
 import { checkTranscripts, compilerScratchEvidence } from './native/wincred-evidence.mjs'
-import { cleanupTargets, invokeFixture, writerArgs } from './native/wincred-writer.ps1.mjs'
+import { cleanupTargets, fixtureDeadlineMs, invokeFixture, writerArgs } from './native/wincred-writer.ps1.mjs'
 
 const host = { platform: 'win32', arch: 'x64', machine: 'x86_64', parent: { SystemRoot: root, windir: root }, exists: () => true }
 const frame = (prefix, bytes) => Buffer.from(prefix + ' ' + Buffer.from(bytes).toString('base64') + '\n')
@@ -554,7 +554,7 @@ test('a timed-out fixture writer cannot turn an early absence into cleanup succe
   const pending = invokeFixture(powershell, writerArgs, {
     timers, spawnChild, stdin: Buffer.from(marker()),
   })
-  timers.tick(30_000)
+  timers.tick(fixtureDeadlineMs)
   assert.equal(spawns[1].file, taskkill)
   timers.tick(5000)
   const result = await pending

@@ -58,7 +58,8 @@ public static class NativeFixture {
 
 export const writerArgs = encodedArgs(windowsScript(writer, '[NativeFixture]::Run()'))
 
-const deadlineMs = 30_000
+// A cold runner's first PowerShell start and compile can pass 30 s; the adapter keeps its own deadlines.
+export const fixtureDeadlineMs = 120_000
 
 // All fixture commands have bounded I/O. A writer must be known to have exited
 // before cleanup can verify that its target is absent.
@@ -95,7 +96,7 @@ export function invokeFixture(file, args, {
         child.unref()
         finish(undefined, true)
       }, 5000)
-    }, deadlineMs)
+    }, fixtureDeadlineMs)
     child.stdout.on('data', bytes => stdout.push(bytes))
     child.stderr.on('data', bytes => stderr.push(bytes))
     child.stdin.on('error', () => {})
