@@ -303,7 +303,19 @@ exec bash ${JSON.stringify(join(work, 'scripts', 'release-gates.sh'))} "$@"
     });
   };
   const tag = (name: string) => git(work, 'tag', name, 'v3.0.0');
-  return { dir, work, bin, bare, mover, run, runGates, move, remote, tag, gateLog, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  // A clock that moves only when the cut sleeps: `date` reads the file and `sleep` advances it, so
+  // the pointer waits and the deadline boundaries do not depend on when a second ticks over. Each
+  // run that uses it passes the returned path as FAKE_CUT_CLOCK.
+  const clock = (start: number) => {
+    const path = join(dir, 'clock');
+    writeFileSync(path, `${start}\n`);
+    writeFileSync(join(bin, 'date'), '#!/usr/bin/env bash\ncat "$FAKE_CUT_CLOCK"\n');
+    writeFileSync(join(bin, 'sleep'), '#!/usr/bin/env bash\nread -r now < "$FAKE_CUT_CLOCK"\nprintf "%s\\n" "$((now + $1))" > "$FAKE_CUT_CLOCK"\n');
+    chmodSync(join(bin, 'date'), 0o755);
+    chmodSync(join(bin, 'sleep'), 0o755);
+    return path;
+  };
+  return { dir, work, bin, bare, mover, run, runGates, move, remote, tag, clock, gateLog, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 describe('a cut that dev has not moved past', () => {
@@ -401,11 +413,16 @@ describe('the cut budget (#1663)', () => {
 });
 
 describe('a pointer that advances after the gates (#668)', () => {
+  // The read counts below hold only while no second passes inside the pointer wait: a second that
+  // ticks over there makes the cut re-read the pointer before it skips a build (build_is_covered),
+  // one read more than these cases count. A frozen clock keeps that re-read out of them.
+  const frozen = (repo: ReturnType<typeof repository>) => ({ FAKE_CUT_CLOCK: repo.clock(1_800_000_000) });
+
   test('Pocket and meter decide independently against a published stable tag', () => {
     const repo = repository();
     try {
       repo.tag('v3.0.2');
-      const run = repo.run({ POCKET: 'yes', METER: 'yes', POCKET_SINCE: 'v3.0.0', METER_SINCE: 'v3.0.0', FAKE_METER_SHIPS: 'yes' });
+      const run = repo.run({ ...frozen(repo), POCKET: 'yes', METER: 'yes', POCKET_SINCE: 'v3.0.0', METER_SINCE: 'v3.0.0', FAKE_METER_SHIPS: 'yes' });
       expect(run.status).toBe(0);
       expect(run.output).toContain('pocket=no\nmeter=yes\n');
       expect(run.gh.filter(call => call.startsWith('release download'))).toHaveLength(2);
@@ -461,10 +478,13 @@ describe('a pointer that advances after the gates (#668)', () => {
     try {
       repo.tag('v3.0.2');
       repo.move();
-      const run = repo.run({ POCKET: 'yes', POCKET_SINCE: 'v3.0.0', FAKE_POCKET: 'yes', FAKE_POCKET_POINTER_SECOND: '3.0.0', HAS_KEYSTORE: 'true', HAS_PASSWORD: 'true' });
+      const run = repo.run({ ...frozen(repo), POCKET: 'yes', POCKET_SINCE: 'v3.0.0', FAKE_POCKET: 'yes', FAKE_POCKET_POINTER_SECOND: '3.0.0', HAS_KEYSTORE: 'true', HAS_PASSWORD: 'true' });
       expect(run.status).toBe(0);
-      expect(run.out).toContain('skipping the pocket build for this attempt');
-      expect(run.out).toContain('re-cutting on the new tip');
+      // The first attempt skips the build; the retry, on the tip it tags, keeps it.
+      const skipped = run.out.indexOf('skipping the pocket build for this attempt');
+      expect(skipped).toBeGreaterThanOrEqual(0);
+      expect(run.out.indexOf('re-cutting on the new tip')).toBeGreaterThan(skipped);
+      expect(run.out.match(/skipping the pocket build/g)).toHaveLength(1);
       expect(run.output).toContain('pocket=yes\nmeter=no\n');
       expect(run.gates).toContain('all plugins no yes no');
       // One lane recalculation read sits between the two post-gate rechecks.
@@ -490,14 +510,7 @@ describe('waiting for the Pocket post (#668)', () => {
     const repo = repository();
     try {
       repo.tag('v3.0.2');
-      const clock = join(repo.dir, 'clock');
-      writeFileSync(clock, `${start}\n`);
-      const date = join(repo.bin, 'date');
-      const sleep = join(repo.bin, 'sleep');
-      writeFileSync(date, '#!/usr/bin/env bash\ncat "$FAKE_CUT_CLOCK"\n');
-      writeFileSync(sleep, '#!/usr/bin/env bash\nread -r now < "$FAKE_CUT_CLOCK"\nprintf "%s\\n" "$((now + $1))" > "$FAKE_CUT_CLOCK"\n');
-      chmodSync(date, 0o755);
-      chmodSync(sleep, 0o755);
+      const clock = repo.clock(start);
       check(repo, {
         POCKET: 'yes', POCKET_SINCE: 'v3.0.0', FAKE_POCKET_POINTER_VERSION: '3.0.0', FAKE_VIEW_MODE: 'ok',
         FAKE_CUT_CLOCK: clock, RELEASE_CUT_POINTER_WAIT: '28', RELEASE_CUT_POINTER_POLL: '1',
@@ -1028,14 +1041,7 @@ describe('the shared wait for published lane posts (#668)', () => {
     const repo = repository();
     try {
       repo.tag('v3.0.2');
-      const clock = join(repo.dir, 'clock');
-      writeFileSync(clock, `${start}\n`);
-      const date = join(repo.bin, 'date');
-      const sleep = join(repo.bin, 'sleep');
-      writeFileSync(date, '#!/usr/bin/env bash\ncat "$FAKE_CUT_CLOCK"\n');
-      writeFileSync(sleep, '#!/usr/bin/env bash\nread -r now < "$FAKE_CUT_CLOCK"\nprintf "%s\\n" "$((now + $1))" > "$FAKE_CUT_CLOCK"\n');
-      chmodSync(date, 0o755);
-      chmodSync(sleep, 0o755);
+      const clock = repo.clock(start);
       check(repo, { FAKE_CUT_CLOCK: clock, FAKE_VIEW_MODE: 'ok' });
     } finally {
       repo.cleanup();
