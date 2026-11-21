@@ -47,7 +47,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { verifyLane, ROOT as REPO_ROOT, type Lane } from './lane';
+import { SERVER_PLUGINS, verifyLane, ROOT as REPO_ROOT, type Lane } from './lane';
 
 const REPO = 'automagik-si/automagik';
 const PUBLIC_REPO = `https://github.com/${REPO}`;
@@ -177,7 +177,7 @@ export function parseChecksums(text: string): Map<string, string> {
 /** The release tarballs an installed profile should re-add: the release packages it depends on. */
 export function pluginsToInstall(plugins: ReleasePlugins, dependencies: Record<string, string>): PluginTarball[] {
   return Object.entries(plugins.packages)
-    .filter(([name]) => Object.hasOwn(dependencies, name))
+    .filter(([name]) => Object.hasOwn(dependencies, name) && !SERVER_PLUGINS.some(plugin => name === `@automagik/${plugin}`))
     .map(([name, entry]) => ({ name, ...entry }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }

@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { apply } from '../index.js'
 import { TEAM_TOOLS } from '../src/host/constants.js'
 import { fakeContext } from './fake-ctx.js'
+import { until } from './until.js'
 
 const flush = async () => { for (let index = 0; index < 8; index += 1) await Promise.resolve() }
 
@@ -1628,3 +1629,96 @@ test('a stop after an eviction is written down and reported to the Bot that aske
 // tasks that never sent their end keeps every record. That cost is the point of #584 L4 —
 // the record is the lineage the tools/execute guard resolves. Its stop still lands when the
 // Session reports one; a Session DSH never reopens keeps a record nobody reads.
+
+async function handleHeldSeat(bench, sessionId, run) {
+  const { rt } = bench
+  rt.state.bots.c = { id: 'c', sessionId: 'c', name: 'Reader', role: 'Read', createdAt: 99 }
+  rt.state.rooms.r9 = { id: 'r9', name: 'Ops', members: ['c'], sessions: { c: sessionId }, log: [], seen: {} }
+  await rt.save({ required: true })
+  rt.indexSessions()
+  assert.deepEqual(rt.groupOwners.get(sessionId), { botId: 'c', roomId: 'r9' })
+  assert.equal(rt.holdsLock(), true)
+  await until(() => (rt.ownershipBusy?.() ?? 0) === 0 && rt.teamCurrent(), { ms: 5000 })
+
+  const abort = new AbortController()
+  const request = { agent: { session: { id: sessionId } }, toolName: 'bash', reason: 'escalate sandbox', signal: abort.signal }
+  const chain = bench.ctx.listeners.get('approval/request')
+  const fire = at => at === chain.length ? assert.fail('the ask must be admitted by the team') : chain[at](request, () => fire(at + 1))
+  const asking = fire(0)
+  const [ask] = rt.approvalsView()
+  assert.deepEqual([ask?.sessionId, ask?.botId, ask?.roomId, ask?.answerable], [sessionId, 'c', 'r9', true])
+  const settled = []
+  const off = rt.onApproval((kind, data) => {
+    if (kind === 'settled') settled.push([data.id, data.decidedBy, data.why])
+  })
+  const save = rt.save
+  const entered = Promise.withResolvers()
+  const resume = Promise.withResolvers()
+  let first = true
+  rt.save = async (opts) => {
+    if (first && opts?.required === true) {
+      first = false
+      entered.resolve()
+      await resume.promise
+      throw new Error('disk full')
+    }
+    return save(opts)
+  }
+  const drop = async () => {
+    assert.equal(first, false)
+    if (typeof rt.ownershipBusy === 'function') assert.ok(rt.ownershipBusy() > 0)
+    rt.retireGroupSession(rt.roomOf('r9'), 'c')
+    assert.equal(await asking, 'cancelled')
+    assert.deepEqual(settled, [[ask.id, 'system', undefined]])
+    assert.deepEqual(rt.withdrawnView?.() ?? [], [])
+    assert.equal(rt.roomOf('r9').sessions.c, undefined)
+    assert.ok(bench.archived.includes(sessionId))
+  }
+  try { await run({ entered: entered.promise, release: resume.resolve, drop }) }
+  finally { resume.resolve(); rt.save = save; abort.abort(); await asking; off() }
+}
+
+async function withinSeatTransition(promise) {
+  let timer
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Timed out waiting for the required save')), 5000)
+    })])
+  } finally { clearTimeout(timer) }
+}
+
+test('rfc0039 D3b [C] G23 a seat whose Session an adoption rollback may give back is not labelled', async t => {
+  const bench = await nativeTransition(t)
+  const { rt, botId, entry } = bench
+  await handleHeldSeat(bench, botId, async ({ entered, release, drop }) => {
+    const rolling = rt.rollbackAdoption(entry.id)
+    const rejected = assert.rejects(rolling, /disk full/)
+    const record = rt.state.agents[entry.id]
+    const kept = record.sessions
+    try {
+      await withinSeatTransition(Promise.race([entered, rolling.then(() => assert.fail('rollback did not reach its save'))]))
+      assert.equal(rt.state.bots[botId], undefined)
+      record.sessions = []
+      await drop()
+    } finally { record.sessions = kept; release(); await rejected }
+    assert.equal(rt.botOf(botId), bench.bot)
+    assert.equal(rt.chatOf(botId), botId)
+  })
+})
+
+test('rfc0039 D3b [C] G24 a seat a held Session adoption may give back is not labelled', async t => {
+  const bench = await nativeTransition(t)
+  const { rt, bot, botId } = bench
+  bot.segments = [{ sessionId: botId }]
+  bot.sessionId = 'later'
+  await handleHeldSeat(bench, 'later', async ({ entered, release, drop }) => {
+    const adopting = bench.call('bot-session-adopt', { botId, sessionId: 'picked', sourceSessionId: 'later' })
+    try {
+      await withinSeatTransition(Promise.race([entered, adopting.then(() => assert.fail('adoption did not reach its save'))]))
+      assert.equal(rt.chatOf(botId), 'picked')
+      bot.segments = [{ sessionId: botId }]
+      await drop()
+    } finally { release(); assert.equal((await adopting).ok, false) }
+    assert.equal(rt.chatOf(botId), 'later')
+  })
+})

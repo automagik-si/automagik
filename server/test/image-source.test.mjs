@@ -80,3 +80,16 @@ test('forged publishing outputs cannot authorize PR/push/unknown events or check
     assert.throws(() => assertPublish(event, 'checkout'))
   }
 })
+
+import { readFileSync } from 'node:fs'
+import { ADAPTER_SINCE, compareRelease, LEGACY_PLUGINS, PLUGINS } from '../profile-state.mjs'
+
+test('checkout and release image inventory carry four plugins and follow pins the three-plugin companion', () => {
+  const pin = JSON.parse(readFileSync(new URL('../follow-companion.json', import.meta.url)))
+  assert.deepEqual([...DEFAULT_PACKAGES].sort(), PLUGINS)
+  assert.deepEqual(pin.plugins, LEGACY_PLUGINS)
+  assert.equal(pin.version, '3.160.4')
+  assert.ok(compareRelease(pin.version, ADAPTER_SINCE) < 0)
+  assert.equal(pin.revision, 'bc719b13c320bf419ab776e8f19f875063beb74e')
+  assert.equal(pin.record, 'ghcr.io/automagik-si/automagik-server@sha256:34b9a2a077961f23af2e2dd2e3111d071d1df8756433bba35f4f47b9bb443476')
+})

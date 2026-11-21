@@ -458,6 +458,39 @@ kept there as a `send` warning: the seat is restarted and the pass exits 0, and 
 person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
 nothing.
 
+**A seat on Claude Code's rate-limit dialog.** A running Claude Code seat blocked on Claude
+Code's rate-limit options dialog is reported as `rate-limited` by `am ls`, `am show` and the
+sidebar, with the reset time the dialog shows (the field is left out when it shows none). The
+detector matches the dialog's own shape, never a word: at least two numbered options must end the
+pane tail, start at 1 and be consecutive, one must carry the `❯` selection cursor, and the limit
+cue must be the dialog's own line: one of the three non-empty lines directly above the choices,
+with only the dialog's limit/reset words between it and them. A limit sentence in a report or in
+scrollback above the options is therefore not a cue, and a screen whose question the permission
+detector owns (a permission/selection dialog) is never a rate-limit match. The footer both
+dialogs may show (`Esc to cancel`, `Press enter to confirm`) is marked as a footer, so the
+options/limit shape decides the rate-limit rule while the send guard still treats the pane as
+held. A quoted, fenced or patched transcript is text, not the live dialog: a patch stays
+text however far above the dialog its hunk header sits within the visible tail (the rule never
+measures that distance).
+A raw, unmarked paste that ends the pane tail is the accepted limit of a text-only rule: it is
+byte-for-byte the live modal, so the rule cannot tell them apart, and every marked form (a
+quote, a fence, a patch) is refused. An ordinary report
+whose text says "rate limit" and lists findings is not the dialog, and an unreadable or empty tail
+is never a match. The detection reads the pane tail only: the dialog is never answered, and no key
+is sent. Both project settings for `onRateLimit` (`"park"` and `"switch"`) preserve the original
+pane and its workers. Resume in that pane when the provider allows it. Herdr cannot atomically
+retire a pane only if it has no dependent workers, and a session named in a launch command
+does not confirm which conversation the provider actually opened.
+
+`am rate-limit [--all] [--dry-run]` runs one sweep. The scheduled `am restart --due` checks
+the dialog first. Each episode writes one item in `<app home>/automagik-herdr/attention.json`
+for `am ls` and `am show`. If the dialog names a reset time, `am restart --queued` shows a
+recheck one minute later. An unknown reset has no timed recheck. The watcher observes the
+original pane until it recovers or the watch expires. An unreadable screen keeps its attention
+item open. The updated Herdr automations scheduler checks `am delivery-status` before sending
+to a target or a notification recipient and preserves each automation's `enabled` setting.
+The installed scheduler (0.12.1-am.2) needs a separate release to gain that check.
+
 **Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
 `am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
 including for a linked project named with `--machine M --project DIR`. Its scheduler must
@@ -590,7 +623,7 @@ am brief <bot>
 am forget <project>
 am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
-       [--task ID [--lead BOT]]
+       [--task ID [--lead BOT]] [--agent-home DIR]
 am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
 am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
@@ -790,21 +823,37 @@ Session ids. Claude gets its id from Herdr at launch. dsh-TUI, Antigravity, Code
 launch, so the pack reads the id from what each leaves on disk (DSH's session folders for the
 pane's folder, Antigravity's prompt history, Codex's rollout session_meta, Kimi's session index:
 only ids, folders and times) and records it as it does Claude's: a session row in the workers ledger and the pane's
-`agent.session` label. Anyone can leave a session in that folder with no pane the pack knows (a
-terminal of your own, DSH Desktop), so the pack takes only a pane's first conversation: the one
-session born within two minutes after the pane started. It records none, and the bot comes back
-on a new conversation, which the report says, when two sessions were born then, when none was,
-or when another pane of that agent in that folder (any hc pane, whoever started it, and every
-launch the workers ledger names) started within two minutes before the pane or before that
-session. A session born later is never taken, and a recorded id is never replaced. What stays
-unknowable: a session someone started outside hc in that folder inside those two minutes, when
-the pane's own agent left none. A conversation started later inside the pane is not followed:
+`agent.session` label. The search root is the seat's own, never the reviving process's: its
+launch records the person's `HOME` and the agent's own home (`$DSH_HOME`, `$CODEX_HOME` or
+`$KIMI_CODE_HOME`, only absolute ones) in the seat row, and a hand launch's own `env` words on
+the pane count too; a search reads those. When the seat's launch names no home, the search
+fails closed and the bot starts new; the reviving process's `HOME` or `$CODEX_HOME` is not used.
+The recorded home is the launching command's environment: a herdr-core started with another
+home isn't followed. A seat started before this release names none, so it comes back on a new
+conversation once, and the report says why. Anyone can leave a session in that folder
+with no pane the pack knows (a terminal of your own, DSH Desktop), so the pack takes only a
+pane's first conversation: the one session born within two minutes after the pane started. It
+records none, and the bot comes back on a new conversation, which the report says, when two
+sessions were born then, when none was, or when another pane of that agent in that folder (any
+hc pane, whoever started it, and every launch the workers ledger names) started within two
+minutes before the pane or before that session. An id another live pane's label or the workers
+ledger ties to another launch is never taken, whatever folder or agent that pane shows, and
+when hc can't read one of its panes nothing is taken. A session born later is never taken,
+and a recorded id is never replaced. A rollout's file name must name the id inside it, and a
+session file that is a symlink, or is replaced under the read, is refused. What stays
+unknowable: a session someone started outside hc in that folder inside those two minutes, or one
+an older pane of that agent there (started more than two minutes before this pane) started inside
+them, when the pane's own agent left none; that one is taken, since ids, folders and times can't
+tell it from the pane's own. A conversation started later inside the pane is not followed:
 the bot resumes its first one. Codex's UUIDv7 dates its thread's creation at launch, even if its
 first turn writes the rollout days later; the pack looks in every dated folder from the launch's
 local day minus one onward. DSH's home is `$DSH_HOME`, else `~/.dsh`; Codex's is `$CODEX_HOME`, else
 `~/.codex`; Kimi's is `$KIMI_CODE_HOME`, else `~/.kimi-code` (only absolute overrides count).
-Revive never guesses Codex's or Kimi's latest conversation: with no id of its own, it starts a
-new conversation and the report says why. Manual `am restart` keeps its existing fallback.
+Revive never guesses Codex's or Kimi's latest conversation, for a bot or its helper: with no
+conversation of its own (recorded, or found by the rule above) it starts a new one, and the report
+says why. A helper whose own shell or template command names that agent's latest-conversation
+flag (`--last`, `--continue`, `-c`) is not started; the report gives the command to run it by hand.
+A manual `am restart` keeps its latest-conversation fallback.
 Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
@@ -834,6 +883,56 @@ way. When the command is gone, or its bounded read-only question doesn't answer,
 itself — with the same 113/exact-words rule — before it removes the pack and its link. It never
 overrules a refusal from a command that answered.
 Panes on a linked machine are that machine's own to bring back.
+
+## More than one holder (#1432)
+
+Every pane belongs to one herdr-core **holder**: the process of the core that started it. When a
+holder is lost, hc ends every terminal it held (issue #1432), so on a computer with one core a
+single loss ends every bot. The pack can spread new starts over more than one holder on the same
+computer: each extra holder is another hc session's core, exposed as a linked machine on this
+host, and a bot started there runs the pack's normal linked-machine launch.
+
+- **Default: one holder, `local`, and a limit of 6 agents per holder.** Nothing is spread and no
+  core is started until the lead adds a holder, so a pack that never runs `am holders` behaves
+  exactly as before. The limit is configurable with `am holders limit N` (1-64).
+- `am holders` shows the pool: each holder's agent count against the limit (a binding on a
+  holder whose line is down still counts: its terminal keeps running there), whether its core
+  answers, and the recent losses. `am holders add --local NAME` adds one: it creates the hc
+  session `am-holder-NAME` and links it as the machine `NAME` (`hc machine add --via`), so the
+  holder's panes show in this window in that machine's space on the project. `am holders remove
+  NAME` takes one away only once it holds no agent, live or on a dropped line; the refusal names
+  the agents. `am holders up` starts a holder's core after a reboot.
+- A holder is **full at its limit**: `count >= limit` leaves no room, and `over limit` is
+  `count > limit` (the wording only; the choice and `am holders` use the same meaning). A new
+  `am start` chooses its holder and reserves that seat together under `holders.json`'s lock, so
+  two starts of different bots launched at once go to different holders instead of both picking
+  `local`; the reservation is released once the start's attach row is written, or when the start
+  fails (a reservation left by a killed CLI lapses after the holder-start timeout). `am holders`
+  counts attached agents, not in-flight reservations. One bot never gets two seats: a start is
+  refused when the bot already has a binding (live, or unknown on a holder whose line dropped)
+  or another start is still placing it. The refusal exits non-zero and says the bot and holder;
+  with `--json` it carries `error`, `bot` and `holder`. A start goes to the holder with the
+  fewest of the pack's agents, and never to a holder whose core isn't answering while another
+  is. With N agents and a limit L over two or more holders, a start above the limit goes to
+  another holder: one holder's loss cannot take every seat. A start is never refused for the
+  limit; when every holder is full, the least loaded takes it and says so on stderr (and as
+  `limitWarning` with `--json`).
+- `am ls`, `am show` and `am whois` name the holder; a bot whose holder's line dropped reads
+  `unknown in NAME/tN`, never stopped. `am restart` finds the bot's holder and runs the restart
+  there. A worker started from a holder's pane runs in that holder (its `am` talks to that
+  core). `am holders losses` reads back what each loss took; a lost holder and a dropped
+  machine line are recorded in `<app home>/automagik-herdr/holder-loss.log` as the holder's name
+  and the bot ids, never a path, socket or command line. Only a pool holder's dropped line is a
+  `holder_unreachable` record: a linked machine that isn't a holder has no seat in the spread.
+- A `holders.json` that isn't JSON, or whose limit or holder entries are bad, is said on stderr
+  (so `--json` still parses) and the run keeps the one-holder default instead of silently
+  turning spreading off; fix it with `am holders limit N` / `am holders add` / `remove`.
+- After a reboot, `am holders up` starts the extra holders, then `am restart <bot> --machine
+  NAME --project <folder> --tree` brings a holder's bot back (restart resumes its session as any
+  other restart does); `am revive` still brings back this computer's own bindings.
+- The upstream half of #1432 - the core logging why it closes a holder's link, and a holder
+  whose link is gone not sweeping its programs - belongs to `herdrdev/herdr-core` (#303), not to
+  this pack.
 
 ## The attach ledger
 
@@ -995,6 +1094,41 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
   ready (up to 30 s for one that reports no status), then `hc send <pane> "<task>"`. When hc
   refuses the send (the pane waits for a sign-in or a trust answer, or has ended), the worker
   is kept and a warning names the pane and the `hc send` to run by hand; `--json` lists it.
+- **Login home (#1208):** `--agent-home DIR` starts one Claude or Codex worker on the login
+  folder `DIR` (Claude: `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`; Codex:
+  `CODEX_HOME`). Without the flag, a worker that runs the bot's default worker agent uses the
+  bot's `worker.agentHome` when it has one; a worker on any other agent, or a bot with neither,
+  starts exactly as before (Claude on the Accounts login, `claude-logins.json`). The folder must
+  exist, belong to you and have mode exactly `0700`; it is used by its real path, and Claude's
+  default `~/.claude` is refused (omit the flag for the default login). The launch runs the
+  agent's shipped command only (a `programs.json` run for it is refused), never a template, and
+  unsets the variables that would outrank the folder's sign-in (Claude: `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL` and the Bedrock, Vertex
+  and Foundry switches; Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`). The
+  worktree's own settings may not pick another account: Claude's `.claude/settings.json` and
+  `.claude/settings.local.json` with an `apiKeyHelper` or an `env` naming one of those variables
+  (or either folder variable), and Codex's `.codex/config.toml` naming a provider, profile or
+  login method, are refused by file and key (Claude's are read again after the briefing hook is
+  written, just before the start). A call through the hc proxy or behind the full hc guard is
+  refused; the `hc kill` shim every ordinary seat runs behind is fine. An hc that doesn't
+  report a pane's launch argv is refused too: such a worker could never be told apart from a
+  seat. Every
+  refusal comes before any branch, worktree or hook is made, except the settings check, which
+  needs the worktree. Before `hc run` the launch is reserved in the workers ledger (an `intent`
+  row: its launch id, name, folder and home; no reservation, no start), and its argv carries
+  that id (`AUTOMAGIK_AGENT_HOME_LAUNCH`) after the folder words. Right after hc answers (a late
+  answer too) the pane must show that id, the folder and `die_with_parent: false`: one that is
+  this launch but not that is ended, and one hc can't show to be this launch is left alone and
+  named. The start row records `agentHome` and `launch`, and its `env` names the folder, so
+  Codex's session search reads that folder. The Bot login `generation` and `sequence` (#1532)
+  are recorded only when ACP's record names that same folder for the vendor; otherwise both are
+  null. A Codex worker reads its model list and its project trust from the chosen folder. The
+  folder decides the sign-in only: the model and effort pins, the pane's PATH (the agent's
+  program is found on it, as for every launch), Codex's granted folders, managed policy, and the
+  folder's own settings (Claude's `settings.json` there, Codex's `config.toml` there) are the
+  person's choices as for any launch. A Codex folder that is also the one the Accounts panel
+  manages is switched with it: the panel replaces that folder's `auth.json`, so a separate
+  account needs a separate folder.
 - **Templates:** `--template T` runs the hc template `T` (`hc templates` lists them)
   instead of an agent, for seats whose command sets more than a model: a custom model
   provider, keys, flags. A template owns its command, so `--template` with `--agent`,
@@ -1035,7 +1169,28 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 - **Lifecycle:** the bot checks the worker's result, and ends it with
   `am worker kill <terminal>` once the task merges (see
   [Ending a worker](#ending-a-worker)). The bot's briefing says so. As an hc child, a worker
-  also ends when its bot's program ends; its branch stays.
+  also ends when its bot's program ends; its branch stays. A worker on a chosen login home
+  (#1208) is started with `--outlive-parent` instead: it never ends with its lead, and no
+  restart, `--tree` or revive runs it again; it ends when its task ends, by `am worker kill`, the
+  worktree sweep, or by hand. It is never a Bot's seat: attach (here or on a linked machine),
+  the one-time label import, restart's adoption of a labelled pane and a restart of a binding
+  that names it refuse it, by its launch argv (and here, by its ledger rows too: a pane that
+  shows no argv while a reservation of its name less than ten minutes old has no start row yet
+  is refused as well, and a failed verification marks an observed pane unresolved for the life
+  of that instance). A restart that would end it with its parent (hc saying it doesn't outlive
+  it, at any depth under the pane) is refused before anything, `--force` included. A local start
+  that times out refuses a chosen or unresolved pane that took its name. Linked timeout recovery
+  uses the launch signature when `hc ls` supplies argv. An `am` or pack CLI older than this
+  release can attach such a worker,
+  after which a restart would run it on the seat's login, so chosen homes need both at this
+  version or newer; a worker may run for a moment before its launch is checked (on its chosen
+  folder); a linked reader sees one as ordinary when its hc reply omits launch argv, including
+  the list used for timeout recovery; a process of yours that edits the worktree's settings
+  after the last check is not seen; and hc
+  has no conditional kill, so `--tree` cleanup still reads a helper's address and ends it in two
+  calls (it skips a pane whose core, `created_ms` or launch shows another pane there now). A seat on a
+  chosen home (`am restart --agent-home`) is not done: it needs the seat's relaunch (linked
+  restart, revive, clear and switch, the restart queue) to carry the home.
 - **Cleanup (#567):** a worktree this command made (`created` in the ledger) is removed
   (`git worktree remove`, no `--force`) once every worker that ran
   in it has ended, done or killed, at least 15 minutes ago (hc's `finished_ms`: restart
@@ -1069,7 +1224,8 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 - **Ledger:** `worker`, `start` and `attach` append one row per terminal to
   `<app home>/automagik-herdr/workers.jsonl`: `{ event: "start", kind: "worker" | "seat",
   terminal, pid, botId, task, worktree, agent, model, effort, template, role, branch, project,
-  lead, base, created, swap, override, override_requested, at }` (`at` is ISO 8601).
+  lead, base, created, swap, override, override_requested, generation, sequence, at }` (`at` is
+  ISO 8601).
   - `task`: Genie's task id (`--task`), else null; a seat's is null. `project`: the main
     checkout's absolute path, the project key, on seats too. Usage joins to tasks on
     **(project, task)**: task ids are unique per project only.
@@ -1081,6 +1237,13 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
     effort or template itself. `override_requested`: on a swap task, what it asked for and
     didn't get, else null.
   - `template` is the hc template a worker runs, else null (seats and agent workers).
+  - `generation` and `sequence`: the Bot login generation and the generation record's sequence
+    the launch used, read once at launch from ACP's `generation.json` beside the pointer
+    exported as `AUTOMAGIK_BOT_CLI_POINTER` (#1527, #1532). `generation` is that record's field
+    for the launch's vendor (`claude` or `codex`); `sequence` is the record's own. Both are null
+    when the launch has no such record (another agent, a template whose agent is unknown, no
+    pointer, no readable record, or no generation for that vendor), never a guessed value. The
+    entrypoint's export of the pointer is not this command's.
   - Rows written before a field have no such key. A worker row with no `branch` key predates
     the task contract: its `task` is the branch, not a Genie id.
   When a template runs, `agent`, `model` and `effort` are null: the template sets them. The
@@ -1260,9 +1423,9 @@ path, so the real socket folder is hidden, and binds the data parent read-only o
 stable execution folder and `approved/` both live there) so a sandboxed bot cannot rewrite its
 helper, runner or guard, or its project's approved roster. The wrapper is copied byte-equal from
 `mods/am-sidebar/bin/hc-socket-mask.mjs` to `~/.local/share/automagik-herdr/dsh-sandbox/` by
-`dsh-tui install`, which also installs the profile's managed sandbox row. The proxy pins
-herdr-core 0.1.14 and refuses any other version; its socket lives in
-`$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
+`dsh-tui install`, which also installs the profile's managed sandbox row. The proxy supports
+herdr-core 0.1.14 and 0.1.21 and checks the serving version on every upstream connection. Its
+socket lives in `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
 the worktree and the app home. **Fail closed:** if the proxy cannot start, the pane's command is
 never started, so no sandbox exists and `hc` cannot auto-start a core inside one; a proxy that
 dies takes its pane with it. The wrapper also gives the pane its own network namespace
@@ -1525,6 +1688,15 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   (an empty value clears one); the form keeps the field as it is. An invalid one is ignored
   with a warning. A Codex worker runs [Codex's launch mode](#codexs-launch-mode) like its bot's
   seat; a `template` owns the command and gets no flag.
+- `worker.agentHome` (#1208) is an optional absolute folder: the login home a worker on the
+  bot's default worker agent (`worker.agent`, else the bot's own agent) runs on, Claude or Codex
+  only, never beside a `worker.template` (see the worker's login home in [Workers](#workers)).
+  `am create|edit --worker-agent-home DIR` sets it and `--worker-agent-home=` clears it. The save
+  checks its shape only; each launch checks the folder on its own machine. An edit that changes
+  the default worker agent drops it unless the same edit gives it again, and a writer that has
+  no field for it (the form, `restart --save`) keeps it while that agent stays and never brings
+  back one that was dropped. A worker object the file has to drop (a field that isn't text) takes
+  no launch with a home: one that would use it is refused, never run without those defaults.
 - Ids are `b-` plus 10 lowercase base32 characters. A bot's terminal carries the hc label
   `bot=<id>`.
 

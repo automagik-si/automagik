@@ -57,14 +57,16 @@ export function install(rt) {
 
   // The configured `ocrModel` first, then served models that declare image input, the
   // DSH default among them first. A provider with no key set is skipped.
-  async function ocrRoute() {
-    const models = (await rt.catalog()).filter(entry => entry.needsKey !== true && rt.isLocalAgentRef?.(entry.ref) !== true)
+  async function ocrRoute(sessionId) {
+    const models = (await rt.catalog({ noCommands: rt.botRunnerRequired?.(sessionId) })).filter(entry => entry.needsKey !== true && rt.isLocalAgentRef?.(entry.ref) !== true)
     const served = new Set(models.map(entry => entry.ref))
     const declared = models.filter(entry => entry.input?.includes('image')).map(entry => entry.ref)
     const fallback = rt.defaultRef()
     for (const ref of new Set([config.ocrModel, ...declared.filter(ref => ref === fallback), ...declared])) {
       const route = splitRef(ref)
-      if (route && served.has(ref) && await readsImages(route.provider, route.model)) return { ref, ...route }
+      if (!route || !served.has(ref)) continue
+      rt.assertBotRunnerProvider?.(route.provider, sessionId)
+      if (await readsImages(route.provider, route.model)) return { ref, ...route }
     }
     return undefined
   }
@@ -92,7 +94,7 @@ export function install(rt) {
 
   // `sessionId` is the Session the reading is for; its usage counts there.
   async function readImage(attachment, sessionId) {
-    const route = await ocrRoute()
+    const route = await ocrRoute(sessionId)
     if (route === undefined) throw new Error('no vision model is available')
     const callOptions = {
       provider: route.provider,
@@ -107,7 +109,7 @@ export function install(rt) {
     if (finish.kind === 'error' || finish.kind === 'aborted') throw new Error(finish.failure?.message ?? finish.kind)
     const text = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('\n').trim()
     if (text === '') throw new Error('the vision model returned no text')
-    const model = (await rt.catalog()).find(entry => entry.ref === route.ref)?.name ?? route.model
+    const model = (await rt.catalog({ noCommands: rt.botRunnerRequired?.(sessionId) })).find(entry => entry.ref === route.ref)?.name ?? route.model
     return { text, model }
   }
 

@@ -19,7 +19,7 @@ const API_ROOT = 'https://api.github.com/repos/example-org/example-repo'
 const TOKEN = 'fixture-token-not-a-real-credential'
 const PUBLIC_ROUTE = 'public release download'
 const API_ROUTE = 'REST API asset route'
-const PACKAGES = ['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh']
+const PACKAGES = ['@automagik/bots-dsh', '@automagik/welcome-dsh', '@automagik/acp-dsh', '@automagik/multiuser-dsh']
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const sha512 = (bytes) => `sha512-${createHash('sha512').update(bytes).digest('base64')}`

@@ -21,12 +21,13 @@
 // names the caller's own pane and the terminals it may type into, never another team's.
 //
 // Fail closed: a dead upstream is a JSON-RPC error, never a fallback. The upstream core must
-// answer `server.status` with HC_PIN or the proxy refuses to start. A pane whose proxy cannot
-// start is not started at all (hcPane.mjs), so `hc` cannot auto-start a core inside the sandbox.
+// answer `server.status` with a supported version at start and that same version on every new
+// upstream connection. A failed version check stops the proxy and its pane (hcPane.mjs).
 //
 // Apache-2.0.
 
 import net from "node:net";
+import { EventEmitter } from "node:events";
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -34,15 +35,21 @@ import { pathToFileURL } from "node:url";
 
 import { approvedSettingsDir, readApprovedRecord, sha256Of } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
-import { parseBots } from "./model.js";
-import { AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
+import { parseBots, workerHomeOf } from "./model.js";
+import { AGENTS, AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
 import { commandArgv, sessionId } from "./restart.js";
 import { approvedDataRootProblem, executionPathProblem, shimPathOf } from "./dshTui.mjs";
 import { OWNER_QUESTION_LABEL, sharedSendAllowed, teamOf } from "./hcGuard.mjs";
+import { DIRECT_LOGIN_PROBLEM, botLoginWords, directLoginVendor, loginLaunchProblem, loginPolicyActive, loginPolicyEnv, loginPolicyWords, loginReadIo, resolveLogin } from "./loginRecord.js";
 import { ENV, guardPathWith, stableGuardDir, stableHelper, stableKillDir, stableRootOf, stableRunner, templateAgent, workerArgs, workerPlan, WORKER_OF_LABEL } from "./workers.js";
 
-/** The one core version this proxy speaks (the box's herdr-core, hc 0.1.14). */
-export const HC_PIN = "0.1.14";
+/** The exact core versions whose plain-mode wire shapes this proxy speaks. */
+export const HC_SUPPORTED = Object.freeze(["0.1.14", "0.1.21"]);
+const versionName = (version) => typeof version === "string" && version ? oneLine(version) : "unknown";
+export function coreVersionProblem(version) {
+  return HC_SUPPORTED.includes(version) ? null
+    : `the upstream core is ${versionName(version)}, not a supported version (${HC_SUPPORTED.join(", ")}); refusing to start`;
+}
 /** The dedicated runtime folder, under $XDG_RUNTIME_DIR and outside any writable cwd. */
 export const SOCKET_FOLDER = "automagik-hc-proxy";
 /** The stable pane helper/runner a worker start may name; dsh-tui install writes them. */
@@ -70,6 +77,8 @@ export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 export const FORWARD_TIMEOUT_MS = 30 * 1000;
 /** A policy or startup call is short; a long terminal.wait is the client's own connection. */
 const CONTROL_TIMEOUT_MS = 15000;
+const STATUS_ID = "hc-proxy:status";
+const REFUSAL_FLUSH_MS = 250;
 /** The identity variables hc's CLI puts in a run's `env`; nothing else belongs in the worker shape. */
 const IDENTITY_VARS = new Set(["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"]);
 /** The labels the pack's worker start sets (hcGuard's WORKER_LABELS). */
@@ -79,7 +88,7 @@ const CALLER_METHODS = new Set([
   "terminal.get", "terminal.read", "terminal.wait", "terminal.send",
   "terminal.kill", "terminal.rm", "terminal.run",
 ]);
-const ALLOWED = new Set(["terminal.list", "terminal.label", "templates.list", "proxy.workerTransport", ...CALLER_METHODS]);
+const ALLOWED = new Set(["terminal.list", "terminal.label", "templates.list", "proxy.workerTransport", "proxy.status", ...CALLER_METHODS]);
 const OWN_WORKER_METHODS = new Set(["terminal.kill", "terminal.rm", "terminal.label"]);
 const TEAM_METHODS = new Set(["terminal.get", "terminal.read", "terminal.wait", "terminal.send"]);
 /** The exact parameters each method may forward; anything else is an unknown parameter. */
@@ -87,6 +96,7 @@ export const METHOD_PARAMS = new Map([
   ["terminal.list", new Set(["all", "labels"])],
   ["templates.list", new Set()],
   ["proxy.workerTransport", new Set()],
+  ["proxy.status", new Set()],
   ["terminal.get", new Set(["terminal", "caller"])],
   ["terminal.read", new Set(["terminal", "lines", "caller"])],
   ["terminal.wait", new Set(["terminal", "children", "output", "timeout", "caller"])],
@@ -285,7 +295,10 @@ function approvedWorkerProblem(p, snapshot, bot, templates) {
     homeDir: homedir() });
   let templateArgv = null;
   let login = [];
+  const loginEnv = snapshot.loginEnv ?? process.env;
+  const loginPolicy = loginPolicyActive(loginEnv);
   if (plan.template) {
+    if (loginPolicy) return `${DIRECT_LOGIN_PROBLEM.reason} (${DIRECT_LOGIN_PROBLEM.code})`;
     const template = templates.find((row) => row?.name === plan.template);
     if (!template || typeof template.command !== "string" || !template.command.trim()) {
       return `approved worker template ${plan.template} is not available from the core`;
@@ -304,6 +317,16 @@ function approvedWorkerProblem(p, snapshot, bot, templates) {
     login = ["-u", "CLAUDE_CONFIG_DIR"];
   } else if (plan.agent === "antigravity") {
     agySettings = agySettingsFor();
+  }
+  if (loginPolicy) {
+    const problem = loginLaunchProblem(plan.argv, plan.agent, AGENTS[plan.agent]?.run);
+    if (problem) return `${problem.reason} (${problem.code})`;
+    const vendor = directLoginVendor(plan.argv);
+    if (vendor) {
+      const reader = resolveLogin({ vendor, env: loginEnv, io: loginReadIo, readOnly: true });
+      if (reader.code) return `${reader.reason} (${reader.code})`;
+      login = botLoginWords(vendor, reader.dir);
+    }
   }
   // A chosen Antigravity mode is a worker label; auto is the default, so it has none (workers.js
   // workerArgs writes the label only when it isn't auto), and the label must name the approved mode.
@@ -406,6 +429,10 @@ export function runProblem(params, snapshot, templates = []) {
   if (snapshot.approval) {
     try { bot = workerApproval(snapshot); }
     catch (e) { return `approved worker refused: ${oneLine(e.message)}`; }
+    // #1208: a worker on a chosen agent home is a local, unproxied launch only. The approved bot
+    // naming worker.agentHome at all (any value, even one its worker defaults were dropped with)
+    // refuses both worker shapes here, before either is checked.
+    if (workerHomeOf(bot).present) return "approved worker refused: worker.agentHome needs a local, unproxied worker launch";
   }
   const namedWorker = bot?.worker?.template || (bot?.worker?.agent && bot.worker.agent !== "dsh-tui");
   const workerLabels = namedWorker
@@ -425,8 +452,10 @@ export function runProblem(params, snapshot, templates = []) {
       if (typeof value !== "string") return `env ${key} is not text`;
     }
   }
-  const argv = p.argv;
-  if (!Array.isArray(argv) || argv.length !== 14) return "argv is not the helper worker shape";
+  const policyWords = loginPolicyWords(snapshot.loginEnv ?? {});
+  if (!Array.isArray(p.argv) || p.argv.length !== 14 + policyWords.length) return "argv is not the helper worker shape";
+  if (policyWords.some((word, i) => p.argv[i + 2] !== word)) return "the worker's Bot login policy does not match the pane's";
+  const argv = [...p.argv.slice(0, 2), ...p.argv.slice(2 + policyWords.length)];
   if (argv[0] !== ENV) return `the program is not ${ENV}`;
   if (typeof argv[1] !== "string" || !argv[1].startsWith("PATH=")) return "no PATH word after the program";
   if (typeof snapshot.path !== "string" || !snapshot.path) return "the proxy has no recorded pane PATH";
@@ -482,10 +511,10 @@ export function explicitCaller(value) {
  * The proxy's frozen policy for one pane: { terminal, upstream, snapshot: { caller, file,
  * team, ... } }. The snapshot is plain data; no getter reads the writable tree again.
  */
-export function policyOf({ terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, coreId, projects }) {
+export function policyOf({ terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, loginEnv, coreId, coreVersion, projects }) {
   const env = approvalEnv ?? process.env;
   return {
-    terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, coreId,
+    terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, loginEnv, coreId, coreVersion,
     team: teamOf(file, caller, { project: caller?.project, projects, env }),
   };
 }
@@ -545,68 +574,95 @@ function listAllowed(record, policy) {
   return sendAllowed(record, policy);
 }
 
-/**
- * One `terminal.list` reply line with only the rows `listAllowed` keeps, or a refusal line when
- * the core's answer cannot be read (fail closed, never the unfiltered rows).
- *
- * An error reply carries no rows: a malformed one that also holds a `result` never passes it
- * through. The `machines` inventory is filtered the same way as the rows: a sandboxed bot may
- * reach no machine, so the reply's list is empty, never the core's names and ssh targets.
- */
-function listReply(line, id, policy) {
+/** A reply must belong to the one request in flight on this connection. */
+function parseReply(line, id, allowErrorWithResult = false) {
   let reply;
-  try { reply = JSON.parse(line); } catch { reply = null; }
-  if (isObject(reply) && reply.error) {
-    const error = { ...reply };
-    delete error.result;
-    return JSON.stringify(error);
-  }
-  if (!isObject(reply) || !isObject(reply.result) || !Array.isArray(reply.result.terminals)) {
-    return JSON.stringify(refusal(id, "terminal.list: the core's answer could not be read", "unavailable"));
-  }
-  const terminals = reply.result.terminals.filter((row) => listAllowed(row, policy));
-  const result = { ...reply.result, terminals };
-  // Whatever shape the inventory came in, none of it is information this pane can use.
-  if (Object.hasOwn(reply.result, "machines")) result.machines = [];
-  return JSON.stringify({ ...reply, result });
+  try { reply = JSON.parse(line); } catch { return null; }
+  if (!isObject(reply) || reply.jsonrpc !== "2.0" || !hasId(reply) || reply.id !== id) return null;
+  if (Object.hasOwn(reply, "error")) {
+    if (!isObject(reply.error) || !Number.isInteger(reply.error.code) || typeof reply.error.message !== "string") return null;
+    if (!allowErrorWithResult && Object.hasOwn(reply, "result")) return null;
+  } else if (!Object.hasOwn(reply, "result")) return null;
+  return reply;
 }
 
-/** One short upstream call: connect, send one request, read one reply, close. */
-export function upstreamCall(socketPath, method, params, timeoutMs = CONTROL_TIMEOUT_MS) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    let done = false;
-    let buffer = Buffer.alloc(0);
-    let timer = null;
-    const socket = net.connect(socketPath);
-    const finish = (fn, value) => {
-      if (done) return;
-      done = true;
-      if (timer) clearTimeout(timer);
-      socket.destroy();
-      fn(value);
-    };
-    timer = setTimeout(() => finish(rejectPromise, new Error(`${method} did not answer within ${timeoutMs} ms`)), timeoutMs);
-    timer.unref?.();
-    socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })}\n`);
-    });
-    socket.on("data", (chunk) => {
-      buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk;
-      const at = buffer.indexOf(10);
-      if (at < 0) {
-        if (buffer.length > MAX_REPLY_BYTES) finish(rejectPromise, new Error(`${method} reply is over the ${MAX_REPLY_BYTES}-byte cap`));
-        return;
+/** Keep only the reviewed list fields, even when the core attaches rows to an error. */
+function listReply(reply, policy) {
+  const { jsonrpc, id, error, result } = reply;
+  if (error) return { jsonrpc, id, error };
+  if (!isObject(result) || !Array.isArray(result.terminals)
+      || !Number.isInteger(result.hidden_finished) || result.hidden_finished < 0) return null;
+  return { jsonrpc, id, result: {
+    terminals: result.terminals.filter((row) => listAllowed(row, policy)),
+    hidden_finished: result.hidden_finished,
+    // A sandboxed pane cannot address linked machines. Preserve omission by older cores.
+    ...(Object.hasOwn(result, "machines") ? { machines: [] } : {}),
+  } };
+}
+
+function openUpstream(socketPath) {
+  const socket = net.connect(socketPath);
+  return { socket, reader: new ReplyReader(socket) };
+}
+
+/** One short call on a connected socket, using its only reply reader. */
+async function upstreamCall({ socket, reader }, method, params, id) {
+  socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  const reply = parseReply(await reader.next(), id);
+  if (!reply) throw new Error(`${method}: the core's answer could not be read`);
+  return reply;
+}
+
+/** A lookup keeps one deadline across the connection check and the application reply. */
+async function lookupReply(connection, method, params, deadline, timeoutMs) {
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) throw new Error(`${method} did not answer within ${timeoutMs} ms`);
+  try {
+    return await withTimeout(upstreamCall(connection, method, params, 2), Math.ceil(remaining));
+  } catch (e) {
+    if (e.timeout) throw new Error(`${method} did not answer within ${timeoutMs} ms`);
+    throw e;
+  }
+}
+
+/** Every new connection proves its version before it carries an application request. */
+async function verifyUpstream(connection, expected, id, timeoutMs, onVersionFailure) {
+  const { socket, reader } = connection;
+  let connected = false;
+  try {
+    return await withTimeout((async () => {
+      await new Promise((resolvePromise, rejectPromise) => {
+        const onConnect = () => {
+          socket.off("close", onClose);
+          resolvePromise();
+        };
+        const onClose = () => {
+          socket.off("connect", onConnect);
+          rejectPromise(new Error(reader.failure ?? "the core closed the connection"));
+        };
+        socket.once("connect", onConnect);
+        socket.once("close", onClose);
+      });
+      connected = true;
+      const status = await upstreamCall(connection, "server.status", {}, id);
+      if (status.error || !isObject(status.result) || reader.buffer.length) {
+        throw new Error("server.status did not return a single successful result");
       }
-      if (at > MAX_REPLY_BYTES) {
-        finish(rejectPromise, new Error(`${method} reply is over the ${MAX_REPLY_BYTES}-byte cap`));
-        return;
+      const version = status.result.version;
+      if (expected !== undefined && version !== expected) {
+        throw new Error(`the upstream core version is ${versionName(version)}, expected ${expected}`);
       }
-      const line = buffer.subarray(0, at).toString("utf8");
-      try { finish(resolvePromise, JSON.parse(line)); } catch { finish(rejectPromise, new Error(`${method} answered with invalid JSON`)); }
-    });
-    socket.on("error", (e) => finish(rejectPromise, e));
-    socket.on("close", () => finish(rejectPromise, new Error(`${method}: the core closed the connection`)));
-  });
+      return status.result;
+    })(), timeoutMs);
+  } catch (e) {
+    socket.destroy();
+    if (!connected && !e.timeout) throw e;
+    const error = new Error(expected === undefined
+      ? `server.status version check: ${oneLine(e.message)}`
+      : `upstream core version check failed: ${oneLine(e.message)}`);
+    onVersionFailure?.(error);
+    throw error;
+  }
 }
 
 /** Newline framing over one socket, one line at a time, with a hard line cap. */
@@ -786,32 +842,50 @@ function methodRefusal(method) {
   return `${method} is not allowed by the proxy allow-list`;
 }
 
+export const isHcTerminalId = (value) => typeof value === "string" && /^t[0-9a-z]+$/.test(value);
+
 /**
  * Start one pane's proxy. Resolves once the socket is listening; every check before that is a
- * refusal to start (the pin, the caller, the approved roster, the socket folder).
+ * refusal to start (the core version, the caller, the approved roster, the socket folder).
  */
 export async function startProxy(options = {}) {
   const env = options.env ?? process.env;
   const terminal = String(options.terminal ?? "");
   const upstream = String(options.upstream ?? "");
   const log = options.log ?? (() => {});
-  if (!/^t[0-9a-z]+$/.test(terminal)) throw new Error("--terminal must be an hc terminal id (t7, t1b)");
+  if (!isHcTerminalId(terminal)) throw new Error("--terminal must be an hc terminal id (t7, t1b)");
   if (!upstream || !isAbsolute(upstream)) throw new Error("--upstream must be an absolute socket path");
   const home = options.appHome ?? appHome(env);
   const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : IDLE_TIMEOUT_MS;
   const forwardTimeoutMs = Number.isFinite(options.forwardTimeoutMs) ? options.forwardTimeoutMs : FORWARD_TIMEOUT_MS;
+  const controlTimeoutMs = Number.isFinite(options.controlTimeoutMs) && options.controlTimeoutMs > 0
+    ? options.controlTimeoutMs : CONTROL_TIMEOUT_MS;
   const explicit = options.caller === undefined || options.caller === null ? null : explicitCaller(options.caller);
 
-  // 1. The core pin: fail closed before any socket exists.
-  const status = await upstreamCall(upstream, "server.status", {});
-  if (status.error) throw new Error(`server.status failed: ${oneLine(status.error.message)}`);
-  const version = status.result?.version;
-  if (version !== HC_PIN) throw new Error(`the upstream core is ${version ?? "unknown"}, not the pinned ${HC_PIN}; refusing to start`);
-  log({ ev: "pin", version });
+  // 1. Check the core before any pane socket exists.
+  const probe = openUpstream(upstream);
+  let status;
+  try {
+    status = await verifyUpstream(probe, undefined, 1, controlTimeoutMs);
+  } finally {
+    probe.socket.destroy();
+  }
+  const coreVersion = status.version;
+  const versionProblem = coreVersionProblem(coreVersion);
+  if (versionProblem) throw new Error(versionProblem);
+  log({ ev: "core_version", version: coreVersion });
 
-  // 2. The caller: the pane's own record. A proxied pane (the helper's explicit caller) reads
-  // only the approved roster; the by-hand path keeps the ledger and the working file.
-  const callerReply = await upstreamCall(upstream, "terminal.get", { terminal });
+  // 2. Verify the caller lookup's connection too: the path could now serve a different core.
+  // A proxied pane reads only the approved roster; the by-hand path keeps the ledger.
+  const lookupDeadline = performance.now() + controlTimeoutMs;
+  const lookup = openUpstream(upstream);
+  let callerReply, servingCore;
+  try {
+    servingCore = await verifyUpstream(lookup, coreVersion, 1, controlTimeoutMs);
+    callerReply = await lookupReply(lookup, "terminal.get", { terminal }, lookupDeadline, controlTimeoutMs);
+  } finally {
+    lookup.socket.destroy();
+  }
   if (callerReply.error) throw new Error(`the caller ${terminal} is not a live terminal: ${oneLine(callerReply.error.message)}`);
   const callerRecord = callerReply.result;
   if (!isObject(callerRecord)) throw new Error(`terminal.get ${terminal} returned no record`);
@@ -919,7 +993,8 @@ export async function startProxy(options = {}) {
     }
   }
   const snapshot = { terminal, upstream, caller, file, bound: Boolean(bound), appHome: home, path: panePath, shim: shimPathOf(env), stableRoot,
-    coreId: status.result?.core?.id, approval, approvalEnv: { HOME: env.HOME, XDG_DATA_HOME: env.XDG_DATA_HOME } };
+    coreId: servingCore.core?.id, coreVersion, approval, approvalEnv: { HOME: env.HOME, XDG_DATA_HOME: env.XDG_DATA_HOME },
+    loginEnv: loginPolicyEnv(env) };
   const policy = policyOf(snapshot);
   log({ ev: "snapshot", caller: caller.bot, project: caller.project, worker: caller.worker, bots: file.bots.length });
 
@@ -932,13 +1007,41 @@ export async function startProxy(options = {}) {
   }
   prepareSocket(socketPath);
   const sessions = new Set();
+  const clients = new Set();
+  const events = new EventEmitter();
+  const runtime = {
+    fatal: null,
+    shutdown: null,
+    fail(session, request, error) {
+      if (this.fatal) return;
+      this.fatal = error;
+      this.shutdown = (async () => {
+        // Stop forwarding immediately, but give the triggering client its correlated refusal
+        // before closing every connection, including clients blocked in a long wait.
+        if (hasId(request) && !session.client.destroyed) {
+          const line = `${JSON.stringify(refusal(request.id, error.message, "unavailable"))}\n`;
+          await withTimeout(new Promise((done) => session.client.end(line, done)), REFUSAL_FLUSH_MS).catch(() => {});
+        }
+        const closing = closeServer();
+        events.emit("fatal", error);
+        await closing;
+      })();
+    },
+  };
   const server = net.createServer((client) => {
-    if (sessions.size >= MAX_CONNECTIONS) {
-      client.write(`${JSON.stringify(refusal(null, `too many connections (${MAX_CONNECTIONS} max)`, "limit"))}\n`);
-      client.end();
+    if (runtime.fatal) {
+      client.destroy();
       return;
     }
-    const session = new Session({ client, policy, log, idleTimeoutMs, forwardTimeoutMs, onClose: () => sessions.delete(session) });
+    clients.add(client);
+    client.once("close", () => clients.delete(client));
+    if (sessions.size >= MAX_CONNECTIONS) {
+      client.once("error", () => client.destroy());
+      client.end(`${JSON.stringify(refusal(null, `too many connections (${MAX_CONNECTIONS} max)`, "limit"))}\n`,
+        () => client.destroy());
+      return;
+    }
+    const session = new Session({ client, policy, runtime, log, idleTimeoutMs, forwardTimeoutMs, controlTimeoutMs, onClose: () => sessions.delete(session) });
     sessions.add(session);
     session.start();
   });
@@ -960,29 +1063,34 @@ export async function startProxy(options = {}) {
   log({ ev: "listening", socket: socketPath, upstream });
   server.on("error", (e) => log({ ev: "server_error", message: oneLine(e.message) }));
 
-  let closed = false;
-  const close = async () => {
-    if (closed) return;
-    closed = true;
+  let closing;
+  const closeServer = () => closing ??= new Promise((done) => {
     for (const session of sessions) session.close();
-    await new Promise((resolvePromise) => server.close(() => resolvePromise()));
-    try { unlinkSync(socketPath); } catch { /* already gone */ }
-  };
-  return { socket: socketPath, server, policy, snapshot, close };
+    for (const client of clients) client.destroy();
+    server.close(() => {
+      try { unlinkSync(socketPath); } catch { /* already gone */ }
+      done();
+    });
+  });
+  const close = () => runtime.shutdown ?? closeServer();
+  return { socket: socketPath, server, policy, snapshot, events, close };
 }
 
 /** One downstream client: its own upstream, serial requests, caller overwrite and policy. */
 class Session {
-  constructor({ client, policy, log, idleTimeoutMs, forwardTimeoutMs, onClose }) {
+  constructor({ client, policy, runtime, log, idleTimeoutMs, forwardTimeoutMs, controlTimeoutMs, onClose }) {
     this.client = client;
     this.policy = policy;
+    this.runtime = runtime;
     this.log = log;
     this.onClose = onClose;
     this.idleTimeoutMs = idleTimeoutMs;
     this.forwardTimeoutMs = forwardTimeoutMs;
+    this.controlTimeoutMs = controlTimeoutMs;
     this.idleTimer = null;
     this.upstream = null;
     this.reader = null;
+    this.lookupSocket = null;
     this.dead = null;
     this.closed = false;
     this.readerIn = new LineReader(client, MAX_REQUEST_BYTES, (line) => {
@@ -1005,7 +1113,7 @@ class Session {
   /** Close a connection that has had no request in flight for the idle timeout. */
   armIdle() {
     this.clearIdle();
-    if (!(this.idleTimeoutMs > 0)) return;
+    if (this.closed || this.runtime.fatal || !(this.idleTimeoutMs > 0)) return;
     this.idleTimer = setTimeout(() => {
       this.log({ ev: "idle_close" });
       this.close();
@@ -1025,42 +1133,63 @@ class Session {
     this.clearIdle();
     this.readerIn.stop();
     try { this.client.destroy(); } catch { /* gone */ }
-    try { this.upstream?.destroy(); } catch { /* gone */ }
+    this.upstream?.destroy();
+    this.lookupSocket?.destroy();
     this.onClose();
   }
 
-  async ensureUpstream() {
+  checkActive() {
+    if (this.runtime.fatal) throw this.runtime.fatal;
+    if (this.closed) throw new Error("the client closed the connection");
+  }
+
+  verify(connection, id, request) {
+    return verifyUpstream(connection, this.policy.coreVersion, id, this.controlTimeoutMs, (error) => {
+      if (this.closed) return;
+      this.dead = error.message;
+      this.runtime.fail(this, request, error);
+    });
+  }
+
+  async lookup(request, method, params) {
+    this.checkActive();
+    const deadline = performance.now() + this.controlTimeoutMs;
+    const connection = openUpstream(this.policy.upstream);
+    this.lookupSocket = connection.socket;
+    try {
+      await this.verify(connection, 1, request);
+      this.checkActive();
+      const reply = await lookupReply(connection, method, params, deadline, this.controlTimeoutMs);
+      this.checkActive();
+      return reply;
+    } finally {
+      connection.socket.destroy();
+      this.lookupSocket = null;
+    }
+  }
+
+  async ensureUpstream(request) {
+    this.checkActive();
     if (this.dead) throw new Error(this.dead);
     if (this.upstream) return this.upstream;
-    const socket = net.connect(this.policy.upstream);
-    this.reader = new ReplyReader(socket);
-    await new Promise((resolvePromise, rejectPromise) => {
-      const onConnect = () => {
-        socket.off("error", onError);
-        socket.off("close", onClose);
-        resolvePromise();
-      };
-      const onError = (e) => {
-        socket.off("connect", onConnect);
-        socket.off("close", onClose);
-        rejectPromise(e);
-      };
-      const onClose = () => rejectPromise(new Error("the core closed the connection"));
-      socket.once("connect", onConnect);
-      socket.once("error", onError);
-      socket.once("close", onClose);
-    }).catch((e) => {
-      this.dead = `upstream unavailable: ${oneLine(e.message)}`;
+    const connection = openUpstream(this.policy.upstream);
+    const { socket, reader } = connection;
+    this.upstream = socket;
+    this.reader = reader;
+    try {
+      await this.verify(connection, STATUS_ID, request);
+      this.checkActive();
+    } catch (e) {
+      this.dead ??= `upstream unavailable: ${oneLine(e.message)}`;
       socket.destroy();
       throw new Error(this.dead);
-    });
+    }
     socket.on("close", () => {
       this.dead ??= "upstream unavailable: the core closed the connection";
     });
     socket.on("error", (e) => {
       this.dead ??= `upstream unavailable: ${oneLine(e.message)}`;
     });
-    this.upstream = socket;
     return socket;
   }
 
@@ -1070,7 +1199,7 @@ class Session {
 
   /** Write one line, waiting for the client to drain when its buffer is full. */
   async writeLine(line) {
-    if (this.client.destroyed) return;
+    if (this.runtime.fatal || this.client.destroyed) return;
     if (this.client.write(line)) return;
     await new Promise((resolvePromise) => {
       const done = () => {
@@ -1084,6 +1213,7 @@ class Session {
   }
 
   async handle(line) {
+    if (this.runtime.fatal) return;
     let request;
     try {
       request = JSON.parse(line.toString("utf8"));
@@ -1108,12 +1238,22 @@ class Session {
     }
     const params = isObject(request.params) ? { ...request.params } : {};
     const unknown = unknownParam(params, method);
-    if (unknown) {
+    if (unknown !== null) {
       reply(`${method}: unknown parameter ${unknown}`);
       return;
     }
     if (CALLER_METHODS.has(method)) params.caller = this.policy.terminal;
 
+    if (method === "proxy.status") {
+      if (request.params != null && !isObject(request.params)
+          && !(Array.isArray(request.params) && request.params.length === 0)) {
+        reply("proxy.status: no parameters are allowed");
+        return;
+      }
+      if (hasId(request)) await this.writeLine(`${JSON.stringify({ jsonrpc: "2.0", id,
+        result: { v: 1, terminal: this.policy.terminal, version: this.policy.coreVersion } })}\n`);
+      return;
+    }
     if (method === "proxy.workerTransport") {
       if (!this.policy.approval || !this.policy.bound) {
         reply("proxy.workerTransport: only an approved bot pane has a worker transport");
@@ -1127,7 +1267,7 @@ class Session {
       // #628: the reply is filtered to the terminals this caller may type into, so another
       // team's panes are never named; the request itself reaches the core unchanged.
       await this.forward(request, method, params,
-        (line) => listReply(line, id, this.policy));
+        (reply) => listReply(reply, this.policy));
       return;
     }
     if (method === "templates.list" || method === "terminal.run") {
@@ -1141,7 +1281,7 @@ class Session {
           return;
         }
         if (name) {
-          const result = await upstreamCall(this.policy.upstream, "templates.list", {});
+          const result = await this.lookup(request, "templates.list", {});
           if (result.error || !Array.isArray(result.result?.templates)) {
             throw new Error("approved worker templates are unavailable from the core");
           }
@@ -1150,7 +1290,7 @@ class Session {
         if (method === "templates.list") {
           // Recheck after the asynchronous metadata read too; never return a stale allowance.
           workerApproval(this.policy);
-          if (hasId(request)) this.client.write(`${JSON.stringify({ jsonrpc: "2.0", id,
+          if (hasId(request)) await this.writeLine(`${JSON.stringify({ jsonrpc: "2.0", id,
             result: { templates } })}\n`);
           return;
         }
@@ -1168,7 +1308,17 @@ class Session {
       await this.forward(request, method, params);
       return;
     }
-    if (method === "terminal.wait" && params.children === true) {
+    if (method === "terminal.send" && Object.hasOwn(params, "force") && params.force !== false) {
+      reply(params.force === true
+        ? "terminal.send: force is not allowed from a sandboxed pane (it types past a blocked dialog)"
+        : "terminal.send: force is malformed (expected a boolean)");
+      return;
+    }
+    if (method === "terminal.wait" && params.children != null) {
+      if (params.children !== "any" && params.children !== "all") {
+        reply('terminal.wait: children must be "any", "all", or null');
+        return;
+      }
       // --children waits on the caller's own children; no target can widen it.
       delete params.terminal;
       await this.forward(request, method, params);
@@ -1194,7 +1344,7 @@ class Session {
     }
     let record;
     try {
-      const answer = await upstreamCall(this.policy.upstream, "terminal.get", { terminal: params.terminal });
+      const answer = await this.lookup(request, "terminal.get", { terminal: params.terminal });
       if (answer.error || !isObject(answer.result) || typeof answer.result.address !== "string") {
         const kind = answer.error?.data?.kind ?? "not_found";
         reply(`${method}: the target ${params.terminal} could not be resolved (${kind})`);
@@ -1228,7 +1378,7 @@ class Session {
   }
 
   /** Forward one request on the client's own upstream and write its reply line back. `transform`
-   * rewrites the reply line (the filtered `terminal.list`); it never sees a reply for a
+   * rewrites the parsed reply (the filtered `terminal.list`); it never sees a reply for a
    * notification, which carries none. */
   async forward(request, method, params, transform = null) {
     const id = hasId(request) ? request.id : null;
@@ -1236,10 +1386,21 @@ class Session {
     if (hasId(request)) forwarded.id = id;
     let socket;
     try {
-      socket = await this.ensureUpstream();
+      socket = await this.ensureUpstream(request);
+      this.checkActive();
     } catch (e) {
       if (hasId(request)) this.writeError(id, oneLine(e.message), "unavailable");
       return;
+    }
+    // The forwarding handshake can outlast the worker approval checked in handle().
+    if (method === "terminal.run" && this.policy.approval) {
+      try { workerApproval(this.policy); }
+      catch (e) {
+        const why = `terminal.run: approved worker refused: ${oneLine(e.message)}`;
+        if (hasId(request)) this.writeError(id, why);
+        this.log({ ev: "refused", method, why });
+        return;
+      }
     }
     if (!socket.write(`${JSON.stringify(forwarded)}\n`)) {
       await new Promise((resolvePromise) => {
@@ -1264,19 +1425,32 @@ class Session {
         : e?.timeout
           ? `${method}: ${oneLine(e.message)}`
           : `${method}: upstream unavailable: ${oneLine(e.message)}`;
-      this.writeError(id, why, e?.limit ? "limit" : "unavailable");
-      // The upstream line is desynced (or gone): answer, then close this connection only.
-      try { this.upstream?.destroy(); } catch { /* gone */ }
-      this.readerIn.stop();
-      this.client.end();
+      await this.retireUpstream(id, why, e?.limit ? "limit" : "unavailable");
       return;
     }
-    if (transform) {
-      // A transform that cannot read its reply fails closed with an error line, never a hang.
-      try { line = transform(line); }
-      catch { line = JSON.stringify(refusal(id, `${method}: the core's answer could not be read`, "unavailable")); }
+    const reply = parseReply(line, id, method === "terminal.list");
+    const unreadable = `${method}: the core's answer could not be read`;
+    if (!reply) {
+      await this.retireUpstream(id, unreadable, "unavailable");
+      return;
     }
-    await this.writeLine(`${line}\n`);
+    const answer = transform ? transform(reply) : reply;
+    if (!answer) {
+      await this.writeLine(`${JSON.stringify(refusal(id, unreadable, "unavailable"))}\n`);
+      return;
+    }
+    await this.writeLine(`${transform ? JSON.stringify(answer) : line}\n`);
+  }
+
+  /** Discard the desynced upstream and give this client its final correlated refusal. */
+  async retireUpstream(id, why, kind) {
+    this.upstream?.destroy();
+    this.readerIn.stop();
+    if (!this.runtime.fatal && !this.client.destroyed) {
+      const line = `${JSON.stringify(refusal(id, why, kind))}\n`;
+      await withTimeout(new Promise((done) => this.client.end(line, done)), REFUSAL_FLUSH_MS).catch(() => {});
+    }
+    this.close();
   }
 }
 
@@ -1324,7 +1498,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, opti
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-  return new Promise(() => {});
+  return new Promise((done) => proxy.events.once("fatal", () => done(1)));
 }
 
 const invoked = process.argv[1] ? pathToFileURL(realOrNull(resolve(process.argv[1])) ?? resolve(process.argv[1])).href : "";

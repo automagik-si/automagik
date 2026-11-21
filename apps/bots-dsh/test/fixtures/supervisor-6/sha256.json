@@ -1,0 +1,21 @@
+{
+  "bounded-get.js": "e8c64f6233b41a0cbf263489a53d5c870e2b535f6e2bca02d751ea63c8415c77",
+  "home-lock.js": "dc8fda9d62ba17e4fd2116a79af8af6a7f701593380694150f82c492056ab4b0",
+  "lane-verify.js": "c628501db3107045ad6b715d57b32a10f7596d43fe09220c27ed9d4b48180c2d",
+  "role-keys.json": "9e04c415facbdba7e7d360f59fbd6db5104c9a9fad4ec3b928ad8074faa1850a",
+  "supervisor/child.js": "ec0900f1ba983b4227154caa38446d6872cf0c308b6d0ef5e030ffb8dc0f7e62",
+  "supervisor/copy.js": "bf41aa0e1ac47be4f236ccf29b4937444eea6019d00bdadb0288f31ac44095ce",
+  "supervisor/files.json": "9bd0bb060f4dae7f4e4dc5cd24db80b4e422c5249a07d72e154e6dba93545c65",
+  "supervisor/health.js": "b954387b30a8e2b1edd722eb360b354c7a3cf84410cf71c70ea5b9ee48ba1711",
+  "supervisor/main.js": "782dc6c82558ea500dc6972e4365edeabbd7191a1bffa7a97adb1e33566ebe18",
+  "supervisor/pnpm.js": "5cfa9f937d53a5e80794f1c3add89eb007a2e7e865638bcf873db69ce2ac7410",
+  "supervisor/records.js": "d8c5d4828fdc84564170fc04794be105506356fb60078ae6c32978c9e0c08eeb",
+  "supervisor/release.js": "b7cbd266afc6d60d956a4ba3c67f1cd2114222248c394158ac58e2429c1e4698",
+  "supervisor/request.js": "ebf5893e525a0d5b65fe2ffd6277af0e663c3b9ad6e100775d1db4140a3eb59b",
+  "supervisor/rollback.js": "16b75c46cb14ae97e9f12b9625b05e5a9c5aa0557b6d2c80cde814b14041237f",
+  "supervisor/stage.js": "8b99c339e901358c1263115402d95c3840b6859457c7e5a2f08bf5e7fbcd1b7c",
+  "supervisor/store.js": "7a8ab11deabce9088636633a8c41c1e0705303af3a219f42502ab5a545f6345e",
+  "supervisor/switch.js": "ac3bf4f388ae78863daa80cf55bd120f3e4feed7ee56ab4730c4b8e17d719ac8",
+  "supervisor/launcher.sh": "c2d196613af1c5e837405a4710a0a7932ef5ab6af6b98e4728a55641ff6b4186",
+  "self-update-client.cjs.gz": "6d6587cd24d4da2082d00441c1c50bb8d8fd9b15ba12c60bcf9e98a4fa2b4ebf"
+}

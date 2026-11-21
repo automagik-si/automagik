@@ -313,7 +313,7 @@ export function install(rt) {
   // The Bot an involved Session speaks for: its own chat, a group Session, an earlier part,
   // a task run, or a subagent child (through its parent lineage). DSH records every Session
   // involved in a task, the creating one included.
-  const lineageOf = async (sessionId) => {
+  const lineageOf = async (sessionId, { recorded = false } = {}) => {
     let current = sessionId
     const ids = []
     for (let depth = 0; typeof current === 'string' && current !== '' && depth < 32; depth += 1) {
@@ -325,6 +325,11 @@ export function install(rt) {
         const bot = rt.botOf(owner)
         if (bot !== undefined) return { bot, ids }
       }
+      // A record holds the Session on rollback but carries none of the Bot's limits.
+      if (rt.multiuserHold?.() || recorded) {
+        const id = rt.recordedBotOf?.(current)
+        if (id !== undefined) return { bot: { id }, ids }
+      }
       const header = await headerOf(current)
       if (header?.origin !== 'subagent' || header.parentSession === undefined) return { ids }
       current = header.parentSession
@@ -332,11 +337,10 @@ export function install(rt) {
     return { ids }
   }
   const botOfTaskSession = async sessionId => (await lineageOf(sessionId)).bot
-  // A Bot with a deny list or no shell: a fresh-Session target would open a Session no
-  // tool-deny layer can bind, so those tasks are paused (tool-deny.js denies the two
-  // schedule tools to the same Bots).
-  const restricted = bot => bot?.shell === false
-    || (Array.isArray(bot?.denyTools) && bot.denyTools.length > 0)
+  // A fresh-Session target opens a Session with no Bot lineage, so it could bypass
+  // the rollback hold, a Bot's deny list, or its shell restriction.
+  const restricted = bot => bot != null && (rt.multiuserHold?.() || bot.shell === false
+    || (Array.isArray(bot.denyTools) && bot.denyTools.length > 0))
   // Every Session a Bot speaks from now, plus the ones a caller already has.
   const sessionsOf = (bot, extra = []) => {
     const ids = new Set(extra)
@@ -506,7 +510,8 @@ export function install(rt) {
   })
   // Whether one delivery still belongs to a task a restricted Bot is involved in. Reads the
   // catalog only: management writes are serialized behind a delivery, reads are not.
-  const unsafeDelivery = async (sessionId) => {
+  const unsafeDelivery = async (sessionId, holding) => {
+    if (holding && await botOfTaskSession(sessionId) !== undefined) return true
     let entries
     try {
       entries = await service.catalog()
@@ -524,12 +529,16 @@ export function install(rt) {
     let freshUnsafe = false
     let exact = false
     for (const entry of entries) {
-      if (entry.status !== 'active') continue
+      if (!holding && entry.status !== 'active') continue
       const target = entry.target ?? {}
       const involved = Array.isArray(entry.involvedSessionIds) ? entry.involvedSessionIds : []
+      if (holding && entry.lastDelivery?.targetSessionId === sessionId && await restrictedInvolved(involved)) return true
       if (target.kind === 'new') {
         // A `new` target reserves a hidden Session id; while one of its tasks is unsafe,
-        // any unlineaged activation could be that delivery.
+        // any unlineaged activation could be that delivery. During the rollback hold the
+        // hook has no task id, so even a person's anonymous delivery stays blocked while
+        // any Bot-involved `new` task exists, including paused tasks. Delete those tasks
+        // or release the hold to resume it.
         if (await restrictedInvolved(involved)) freshUnsafe = true
         continue
       }
@@ -623,22 +632,53 @@ export function install(rt) {
       catch { throw held(cause) }
     }
   }
-  // The last line for a delivery: if the check has not run yet, or a task could not be
-  // paused, a Session no Bot binds must not be activated for a task a restricted Bot is in.
+  // Multiuser mode: a fresh Session a Bot's task opens has a plain header, so it is recorded
+  // as that Bot's before its prompt runs, and a rollback holds it and what it arms. An
+  // anonymous `new` delivery cannot name its task: when any `new` task involves a Bot, the
+  // Session is recorded as that Bot's (held on rollback rather than released as a person).
+  const recordScheduledBot = async (sessionId) => {
+    if (typeof rt.recordBotSession !== 'function' || service === null) return
+    if ((await lineageOf(sessionId, { recorded: true })).bot !== undefined) return
+    let entries
+    try {
+      entries = await service.catalog()
+    } catch (cause) {
+      throw new Error('ds-bot: a scheduled delivery is held until its Bot can be recorded', { cause })
+    }
+    const exact = entries.filter(entry => (entry.target?.kind === 'new_once' && entry.target.sessionId === sessionId)
+      || (entry.target?.kind === 'new' && entry.lastDelivery?.targetSessionId === sessionId))
+    const candidates = exact.length > 0 ? exact : entries.filter(entry => entry.target?.kind === 'new')
+    for (const entry of candidates) {
+      for (const id of entry.involvedSessionIds ?? []) {
+        const { bot } = await lineageOf(id, { recorded: true })
+        if (typeof bot?.id === 'string') {
+          rt.recordBotSession(sessionId, bot.id)
+          return
+        }
+      }
+    }
+  }
+  // Check deliveries throughout the rollback hold, including Run now and receipt recovery.
+  // Outside the hold, guard unbound Sessions through the first sweep and any failed pause.
   // DSH drives deliveries through this waterfall, before the prompt runs. It must never
   // await a management write: that would queue behind the delivery's own serialized drive.
   ctx.on('schedule/resolve-agent', async (sessionId, next) => {
-    if (!swept || stuck.size > 0) {
-      if (await botOfTaskSession(sessionId) !== undefined) {
+    const holding = rt.multiuserHold?.() === true
+    if (holding || !swept || stuck.size > 0) {
+      if (!holding && await botOfTaskSession(sessionId) !== undefined) {
         await checkScheduledReadScope(sessionId)
         return next()
       }
-      if (!teamLoaded || await unsafeDelivery(sessionId)) {
+      const unsafe = (holding || teamLoaded) && await unsafeDelivery(sessionId, holding)
+      if (!teamLoaded || unsafe) {
         void revokeNewSchedules()
           .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
-        throw new Error('ds-bot: a scheduled delivery is blocked until its task can be paused')
+        throw new Error(holding
+          ? 'ds-bot: a scheduled delivery is blocked by the multiuser Bot hold'
+          : 'ds-bot: a scheduled delivery is blocked until its task can be paused')
       }
     }
+    if (!holding) await recordScheduledBot(sessionId)
     await checkScheduledReadScope(sessionId)
     return openedLevel(sessionId, await next())
   })

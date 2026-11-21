@@ -45,8 +45,7 @@ older host can read the mapping file. Delivery 2b covers shell delivery.
 Install a stable Vault CLI 2.0, 2.1 or 2.2 release. In local Settings › Secrets › Vault,
 select **HashiCorp Vault** and enter the server address, token and optional namespace.
 Use HTTPS. HTTP is available for loopback at `127.0.0.1`, `[::1]` or `localhost`.
-Automagik Cloud does not support this provider. Other OS keychain providers are
-deferred.
+Automagik Cloud does not support this provider.
 
 Enter a KV v1 or v2 mount to browse its folders and choose a field. The plugin checks
 the exact mount before each item read or listing. The token needs access to that
@@ -165,10 +164,87 @@ Before rolling back, remove Bitwarden Secrets Manager mappings and clear the sav
 while this version is still installed. Older Bot team versions reject the mapping file
 when it contains a Bitwarden Secrets Manager row.
 
+## macOS Keychain
+
+In local Settings › Secrets › Vault, choose **macOS Keychain** and select **Unlock**.
+This opens the plugin gate without a password. The gate closes after the configured idle
+time, on Lock, when switching providers, when disabling the plugin or when quitting.
+Only a successful read renews the idle time. You can approve from Pocket, and you can
+open the gate only in local Settings. This provider is available on macOS outside
+Automagik Cloud.
+
+Use **Add a vault key**, enter the exact **Service** and **Account**, and select **Find**.
+The picker checks one generic-password item in your login keychain
+(`~/Library/Keychains/login.keychain-db` in your system account's home). The connection
+label is `login-keychain`. Recreating an item with the same service and account in the
+same keychain counts as a rotation. Apple Passwords and iCloud Keychain are outside
+this integration.
+
+The plugin gate is the vault lock for approvals. While the gate is open, **Allow**
+records approval and issues one grant even if the macOS keychain is locked. If macOS
+refuses a later read, the adapter refuses it too. Part 2b, which would deliver the value
+to the approved shell, is held. macOS may ask on this Mac. Choose **Allow**, not
+**Always Allow**. Always Allow would let any `security` call, including a Bot's shell,
+read the item without asking. A read is refused at the 30-second deadline if nobody answers.
+
+The adapter calls the system `/usr/bin/security` with both path arguments bound to the
+login keychain. It checks the reported keychain before releasing any value. The tool
+has already attempted the read when the adapter checks the header. A rejected header
+prevents delivery. The adapter drops stdout after checking its first line and drops
+stderr after parsing the password record. Child output is capped at 4 MiB. The strings
+live in plugin memory until garbage collection.
+
+## Windows Credential Manager
+
+In local Settings › Secrets › Vault, choose **Windows Credential Manager** and select
+**Unlock**. The unlock probes the reader without accessing the store. If it fails to
+start, Settings offers **Retry**. The plugin gate closes after idle time, explicit Lock,
+switching providers, plugin disposal or a read deadline. Only a successful value read
+renews idle time. Approval checks the gate and issues one command-bound grant. Part 2b
+holds delivery to the approved shell.
+
+In **Add a vault key**, enter the exact **Target** and select **Find**. The picker makes
+one native read and copies no secret from the record. Its optional user name is display
+metadata. Cards show the saved target with its original spelling. The fixed
+`current-user` connection resolves the target case-insensitively in the current token's
+logon-session credential set. Two logon sessions of the same user can have different
+sets. A copied mapping resolves in the reader's set. Replacing a credential under the
+same target, including its user name, counts as a rotation. Generic credentials with
+session, local machine or enterprise persistence are supported. The
+`automagik-vault:` namespace is reserved for Automagik. There is no enumeration or
+writing. Domain credentials, Web Credentials and certificates are outside this provider.
+
+Passwords are decoded as strict UTF-16LE text, the Windows convention. Leading BOM
+and whitespace are preserved. Empty, malformed or NUL-containing values are refused.
+Bytes from a UTF-8 or arbitrary binary writer can decode as different UTF-16LE text
+or be refused. The RFC's four-character use floor applies independently of decoding.
+
+The reader is available on x64 Windows outside Automagik Cloud when both Windows root
+variables name `C:\Windows` and the fixed Windows PowerShell 5.1 and taskkill binaries
+exist there. The fixed-root check relies on those paths and environment values. An
+administrator or someone who controls the boot configuration and can substitute a
+different Windows tree could substitute the read result. The reader respects execution
+policy and AMSI. The child's environment contains SystemRoot, windir, PATH, TEMP and
+TMP. Node or Windows may add HOMEDRIVE, HOMEPATH, LOGONSERVER, SYSTEMDRIVE, USERDOMAIN,
+USERNAME, USERPROFILE or NODE_V8_COVERAGE. PowerShell initializes PSModulePath and
+PATHEXT before compilation and the script clears both before passing control to the reader.
+Compiler scratch is private to the invocation under the plugin's profile data folder.
+The probe and each read have a 30-second deadline. Cancellation and deadlines
+trigger separately bounded process-tree cleanup when the child is still running.
+Quit reports unconfirmed cleanups. The invocation’s scratch folder can remain in that case.
+
+The target and value use private pipes. The privacy checks cover Automagik-controlled
+files, diagnostics, audit and judge payloads, and PowerShell transcripts in the native
+test. Windows' own credential-access auditing, such as Security event 5379, can record
+the target and stays enabled. Programs running as the same Windows user can call the OS
+API outside the plugin gate. Credential Guard supplies no per-read confirmation for these
+generic credentials.
+
 The host-only `secretSources` v1 service provides `status`, `unlock`, `lock`, `read`,
 `listItems` and `prepareQuit`. The `providers` property lists supported providers.
 HashiCorp Vault also exposes `listFields` for the host picker. Secret Service exposes
-`resolveHandle` and `itemDetail` for the host and `providerBinding` for gate generation checks.
+`resolveHandle` and `itemDetail` for the host. Secret Service, macOS Keychain and Windows Credential Manager
+expose `providerBinding` for gate generation checks.
 `status()` defaults to Bitwarden, and `status({ provider })` checks the named provider.
 Run `bun run harness` to install the pinned test harness and `bun run test` to run the
 fake-CLI tests.

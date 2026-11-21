@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and repaired in #1546 and landed by its takeover with this RFC (deliveries 1 and 2); layout follow-up #1719; technical amendment 2026-11-20: Q5 re-decided, the version store, the update set, the Arca path, the stop-and-resume order and the verifier's shipping, see "Amendment 2026-11-20"; deliveries 3-8 open) |
+| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and repaired in #1546 and landed by its takeover with this RFC (deliveries 1 and 2); layout follow-up #1719; technical amendment 2026-11-20: Q5 re-decided, the version store, the update set, the in-process DSH restart in Arca, the stop-and-resume order and the verifier's shipping, see "Amendment 2026-11-20"; deliveries 3-8 open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin only (3.N.P) for deliveries 3-7: `apps/bots-dsh` gains the UI, the host half and the supervisor; delivery 8 changes the server image (`server/`), which reaches Arca through the image workflow; nothing here builds the desktop app |
 | Created | 2026-11-18 |
@@ -46,12 +46,12 @@ The updater reads **only** the signed lane pointer, never the releases list:
    `:24-26`); the owner asked to update "o automagik".
 4. It downloads each tarball from GitHub only, checks the **sha256**, the size and the `integrity`
    before unpacking, and refuses anything that does not match.
-5. **Refusals, all before the click:** a version not higher than the installed one (an update never
-   downgrades); a `sequence` lower than the last one this instance took (recorded in `current.json`, as
-   am refuses its own pointer at `am/lib/self.mjs:369`); a plugin whose `engines.dsh` the running DSH
-   does not satisfy (as `scripts/upgrade.ts:543-545` and `apps/desktop/src/lane.js:132` check); an
-   instance with no supervisor or no writable home; and an instance that cannot reach the package
-   registry the install needs at the moment of the check. These checks keep the nod from offering an
+5. **Refusals before the click.** An update needs a higher version. The owner's Force update
+   can reinstall the same signed version. Both reject downgrades and a `sequence` lower than the
+   last one this instance took (recorded in `current.json`, as with am's pointer in
+   `am/lib/self.mjs`). The check also refuses if the running DSH fails a plugin's `engines.dsh`
+   requirement, the instance lacks a supervisor or writable home, or the package registry is
+   unreachable. These checks keep the nod from offering an
    update that is known to fail; they cannot promise a later download or install succeeds, and a
    failure after the click takes the path in "When the update fails before the switch".
 
@@ -77,11 +77,12 @@ with it (`server/entrypoint.mjs:158-159`). So the **supervisor is the process th
   the Bots plugin under an already shipped path (`src/host/`), so adding it does not change the
   package's install fields.
 - **Arca (a server image):** the supervisor is the image's own entrypoint (`server/entrypoint.mjs`),
-  which already starts DSH and prepares the profile before it (`:117`, `:134`). Arca keeps doing what
-  the owner chose (Q2): it restarts the container. The entrypoint records the pending step in the
-  version store, stops DSH and exits; Arca's restart brings the container back, and the next
-  entrypoint finishes the step (switch, health, or rollback) before and after it starts DSH. The
-  store is on the same writable volume, so it survives the container restart.
+  which prepares the profile before it starts DSH. It runs the supervisor shipped in the image
+  and restarts its DSH child in process for an update or rollback. In Compose the gate uses
+  `network_mode: service:dsh` and loses its network when the DSH container restarts. The Compose
+  file also has no restart policy. A container restart is the crash fallback. On the next start
+  the supervisor recovers the interrupted update from the same writable volume. Instances with
+  multiuser mode on update through the image.
 
 The host plugin only asks for an update and reads its state. Where no supervisor runs (a DSH started
 by hand, the desktop app), it offers no update and says why in Settings; the desktop app keeps its own
@@ -126,8 +127,10 @@ profile directory (`server/profile-follow.mjs:144-174`), which would carry or dr
   plugins' entries into the live `package.json` (leaving every other key as it is) and puts the staged
   lockfile in place. It then relinks that tree in place, offline (`dsh plugin install --offline
   --frozen-lockfile` on the live profile: every package is already in the store), so no path written
-  under the staging profile survives the move; a relink that fails is a failed candidate and the
-  rollback below runs. Plugin installs and removals are refused while an update runs.
+  under the staging profile survives the move. If live relinking fails, the supervisor reverses the
+  switch and checks the previous version's health. A healthy previous version gives back stopped
+  work with `notUpdated` and `stage-failed`. Failed recovery needs manual recovery. Plugin installs
+  and removals are refused while an update runs.
 - **A switch or a rollback cut half-way is finished before anything starts.** Each switch and each
   rollback writes its intent and every completed rename to `state.json` before the next one, under
   the store's lock. A supervisor that starts and finds an unfinished one completes it or undoes it, by
@@ -154,14 +157,18 @@ profile directory (`server/profile-follow.mjs:144-174`), which would carry or dr
 - `current.json` names the live version, the version kept beside it and the last lane `sequence`
   taken. At most two versions are kept; the third is removed only after a healthy run of the new one,
   and never the one a rollback would return to.
+- A same-version reinstall keeps the replaced tree, lockfile, archives, entries and team snapshot in
+  `reinstall/<runId>/` through the trial. The previous kept version stays in `versions/`. A durable
+  healthy, rolled-back or given-back verdict lets the supervisor move the replaced copy into
+  `reinstall-trash/` for removal. An unfinished reinstall keeps its recovery files.
 - **The data a person cares about — sessions, Bots, memory, settings, secrets and model keys — is not
   part of a version** and is never copied, restored or touched by an update or a rollback. Both move
   only the installer-owned files above; neither restores a whole-profile copy or backup.
   That is what "nothing was lost" means here, and the rollback screen says it in those words.
-- **In Arca** the in-app update moves the profile ahead of the image. The image's follow learns that a
-  profile a signed in-app update put there, recorded in `current.json`, is followed and healthy: it
-  leaves that profile as it is until the image's own release reaches that version, and then follows the
-  image as today (delivery 8). The follow's own backup stays the follow's; the in-app rollback uses the
+- **In Arca** the in-app update moves the profile ahead of the image. The follow checks the committed
+  dependency pins and their original base specs in `current.json` against the installed profile and
+  its image seed. It leaves that signed-ahead profile as it is until the image's release reaches the
+  update, and then follows the image as today. The follow's own backup stays the follow's, and the in-app rollback uses the
   version store above. If a host offers no writable home, the updater refuses and says why — it never
   installs in place with nothing kept.
 
@@ -213,11 +220,17 @@ The restart kills the web socket under the open page, so the modal cannot be dri
 
 Work stops at the click, before the download (Q6), so a failure before the switch must give it back:
 a refused or failed download, a failed check, a staged install that does not converge, a refused
-switch, or a supervisor restart before the switch. In each case the supervisor discards the staging
-profile, starts the unchanged DSH child again if it had stopped it, confirms the still-current
-instance answers the health checks above (or records `manualRecovery` if it does not), records `notUpdated`
-with the reason, reopens admission and releases the held work once, through the same resume as after a
-healthy update. The modal says the update did not happen, why, and that the work came back.
+switch, or a supervisor restart before the switch. For an ordinary update or a reinstall that
+reached staging, the supervisor discards the staging profile and starts the unchanged DSH child
+again if it had stopped it. It checks the still-current instance's health, records `notUpdated`
+with the reason when health passes or `manualRecovery` when health fails, and releases held work
+once on `notUpdated`.
+
+If the supervisor refuses a same-version reinstall before staging begins, it publishes `notUpdated`
+immediately. The existing DSH child resumes held work on that verdict even when a selected plugin
+failed to load. The verdict uses a reason that older supervisor copies can read, and
+`reinstall-refusal.json` records the precise cause for that run. The modal says the update did not
+happen, why, and that the work came back.
 
 ## Trust, consent and what the updater never does
 
@@ -253,9 +266,8 @@ they are his, and marks the card options as choices, not sentences.
   hoje". This is an option choice, not a sentence of his.
 - **Q2 — who keeps the previous version.** The owner chose the card option **"A instância, e o Arca
   reinicia (Recomendado)"**, described as "Funciona igual no Arca e numa máquina comum; o Arca só faz
-  o restart e fornece a pasta". An option choice, as designed in "Who runs the update" (Arca restarts
-  the container) and "Where the previous version is kept" (the instance keeps the version, on the
-  folder Arca provides).
+  o restart e fornece a pasta". The instance keeps the version on the folder Arca provides. The
+  technical restart design is recorded in the amendment below.
 
 Decided by the chief of staff on 2026-11-18 — technical, not the owner's:
 
@@ -324,9 +336,8 @@ and the sections above now carry the corrected design:
 
 1. **Q5 re-decided: the supervisor is the process that starts DSH**, not a host plugin, which dies
    with the restart it supervises ("Who runs the update").
-2. **Q2 kept as the owner chose it:** in Arca the restart is Arca's container restart; the entrypoint
-   records the pending step and finishes it on the next start. On a plain host the wrapper restarts its
-   DSH child.
+2. **The instance keeps the previous version on the folder Arca provides.** The plain-host wrapper
+   restarts its DSH child. Item 15 records how the image restarts DSH.
 3. **The version store moved beside the profile** (`$DSH_HOME/update/<profile>/`); what a version
    keeps is the inventory in "Where the previous version is kept". A rollback never restores a
    whole-profile backup, so settings, secrets and model keys written after the update survive it.
@@ -358,6 +369,18 @@ and the sections above now carry the corrected design:
 13. **Corrections to "What exists already":** the Bots plugin's own updater and the desktop's lane
    reader are listed (the desktop can take a subset; the web takes the whole set); am reads its own pointer; the plugin pointer moves only on releases that ship
    plugins; the supervisor ships under an already shipped path, so the plugin-only lane holds.
+14. **Failed live relink (delivery 6):** the supervisor reverses the switch and checks the previous
+    version. It records `notUpdated` with `stage-failed` if that version passes health. The candidate
+    never reached its trial.
+15. **Arca restarts DSH in process.** In Compose the gate shares DSH's network namespace with
+    `network_mode: service:dsh` and loses its network when the DSH container restarts. The Compose
+    file has no restart policy. The entrypoint restarts its child for updates and rollbacks. A
+    container restart after a crash runs the same supervisor recovery on the next start. Multiuser
+    mode on updates through the image. The follow recognizes a signed-ahead profile by its
+    installed versions and the committed pins and base specs in `current.json`. The image host does
+    not announce same-version reinstall (Force update) until the entrypoint recovers a pending
+    reinstall before the image follow and recognizes a committed signed reinstall at the image's
+    version.
 
 ## Deliveries (each one PR)
 
@@ -367,10 +390,33 @@ and the sections above now carry the corrected design:
 | 2 | This RFC | no |
 | 3 | Host half: the version store, `current.json`, `state.json` and its stale-run rule, the read-only `self-update-status` answer the page and the supervisor use | no (no update yet) |
 | 4 | Verified check: `plugin-lane/verify.mjs` and the plugin's checked copy; read `lane.json`, take the set the profile has, download and check every tarball, check `engines.dsh`, the sequence and the registry, and stop — a dry run that writes what it would do | a "check for updates" line in Settings, no install |
-| 5 | The supervisor and the plain-host wrapper with its self-check and fallback (documented in `docs/upgrade.md`): the click closes admission and stops work, the staged install of the set on installer-owned files, the switch with DSH stopped, the restart of the DSH child, the pre-switch failure path, the state written at every step | a real update behind a setting, off by default |
+| 5a | The supervisor and the plain-host launcher with its self-check and fallback, staged install, the journaled switch and recovery, and setup and recovery in `docs/upgrade.md` | inert without an update request |
+| 5b | The setting, `self-update-start`, the hold at the click, resume after the verdict and the "Update now" line | a real update behind a setting, off by default |
 | 6 | Health and automatic rollback by renaming the kept version back; the resume held until health | the rollback screen tells the truth |
 | 7 | The nod and the full-screen modal wired to the real state instead of the mock's timers; the mock and its flag retire | the approved flow, working |
-| 8 | Arca: the entrypoint as the supervisor (record, exit for Arca's restart, finish on the next start), and the follow and the health check keeping a profile a signed update moved ahead; a server image change, documented in `server/README.md` (closes #1540) | an instance in Arca updating itself |
+| 8 | Arca: the entrypoint hosts the supervisor, restarts DSH in process and recovers after a crash. The follow and health check recognize a profile a signed update moved ahead. Multiuser mode on updates through the image. See `server/README.md` (closes #1540). | an instance in Arca updating itself |
+
+Delivery 5 ships as two PRs, 5a then 5b, as approved by the coordinator on 2026-11-20.
 
 Delivery 4 must not install anything; 5 and 6 are one setting apart from people; 7 is the switch that
 retires `?mock-1540`.
+
+**Force update (coordinator, 2026-11-20).** On an identified web host, Settings > About's Automagik line
+also has Force update, as the desktop app's (#1270). It runs a fresh signed check even when the last one
+said up to date. It asks for one confirmation when the check offers the set and the running supervisor
+supports automatic rollback (delivery 6). Stop and update binds the start to that check's run ID and
+reinstall intent. A newer release uses the usual four-key request and the same hold and supervisor
+run as Update now. A reinstall request also carries the checked version, sequence and each selected
+tarball's SHA-256. The supervisor checks these against the independently verified lane before staging. Delivery 7 adds the modal and delivery 8 brings
+the flow to Arca. The row explains refusals. A refusal before the start stops nothing. If the host
+refuses a start after stopping work, it reopens admission and gives the work back while it still holds
+the team, as it does for Update now. Both actions can lose track of an accepted request if the page
+reloads before the supervisor records the run. The browser checks rollback capability again at
+confirmation. A host downgraded by hand during confirmation may lack the Force start gate. A same-version
+reinstall can replace damaged or missing files inside the installed plugin trees while their manifests,
+the owner route and update contract still load. It runs the same health checks and restores the original
+tree on failure. Fresh installs can reinstall at the first supervisor start. On an existing install with
+an older current copy, two healthy updates that ship capable supervisor copies and a service restart
+enable reinstall. The running copy and every populated launcher slot must support it. Arca must first
+support same-version journal recovery before image follow and preserve a committed reinstall across
+boots on a persisted volume.

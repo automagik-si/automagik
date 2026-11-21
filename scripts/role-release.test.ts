@@ -51,7 +51,7 @@ function fixture(extraRole?: string) {
   for (const file of [
     'scripts/lane.ts', 'scripts/role-pack.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json',
     PLUGIN + '/package.json', PLUGIN + '/roles',
-    ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js'].map(file => PLUGIN + '/src/host/' + file),
+    ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js', 'bounded-get.js', 'no-runner.js'].map(file => PLUGIN + '/src/host/' + file),
     PLUGIN + '/src/shared/roles.js',
   ]) {
     mkdirSync(dirname(join(root, file)), { recursive: true });

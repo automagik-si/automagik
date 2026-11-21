@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server'
 import { decodeAttestationObject, decodeClientDataJSON } from '@simplewebauthn/server/helpers'
 import { createOwner, principalOf, readOwner, sessionCookie, LOCAL_TRUST_NOTICE } from './gate-store.mjs'
+import { CLEAR_SITE_DATA } from './gate-roles.mjs'
 import { claimPage } from './gate-claim-ui.mjs'
 
 export const CLAIM_MS = 15 * 60 * 1000
@@ -69,10 +70,11 @@ function validateAuth(auth) {
 }
 
 export class SelfHostedClaim extends EventEmitter {
-  constructor({ dir, origin, sessions, claimMode = 'local', now = Date.now, audit = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
+  constructor({ dir, origin, sessions, claimMode = 'local', clearOnSignIn = false, now = Date.now, audit = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
     super()
     if (!['local', 'remote'].includes(claimMode)) throw new ClaimConfigurationError('AUTOMAGIK_GATE_CLAIM must be local or remote')
     this.claimMode = claimMode
+    this.clearOnSignIn = clearOnSignIn
     this.dir = dir; this.origin = passkeyOrigin(origin); this.sessions = sessions; this.now = now; this.audit = audit
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     this.owner = readOwner(dir)
@@ -378,7 +380,11 @@ export class SelfHostedClaim extends EventEmitter {
         if (res.destroyed || controller.signal.aborted) return true
         const result = await this.action(route, data, family, this.browser(req, res), controller.signal)
         if (res.destroyed) return true
-        if (result.cookie) { res.setHeader('set-cookie', result.cookie); delete result.cookie }
+        if (result.cookie) {
+          res.setHeader('set-cookie', result.cookie)
+          if (this.clearOnSignIn) res.setHeader('clear-site-data', CLEAR_SITE_DATA)
+          delete result.cookie
+        }
         reply(res, 200, result)
       } finally { res.off('close', disconnected) }
     } catch (error) {

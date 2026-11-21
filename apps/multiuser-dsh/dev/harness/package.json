@@ -1,0 +1,12 @@
+{
+  "name": "multiuser-dsh-test-harness",
+  "private": true,
+  "description": "The DeepSeek Harness packages that the unit tests and the linter run against. Install with bun run harness in apps/multiuser-dsh.",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.2",
+    "oxlint": "1.76.0"
+  },
+  "overrides": {
+    "@opentelemetry/api": "1.9.1"
+  }
+}

@@ -130,3 +130,8 @@ export const HISTORY_TIMEOUT_MS = 20_000
 export const ASIDE_LIMIT = 'Answer cut off at the output limit.'
 
 export const STEER_CUT = 'ds-bot/steer'
+// The hook reason the web self-update stops running turns with at the click (RFC 0041): resume.js reads it as a
+// restart cut, so the stopped work comes back after the supervisor's verdict.
+export const UPDATE_CUT = 'ds-bot/update'
+export const cutByUpdate = reason => reason?.kind === 'aborted' && reason.reason?.kind === 'hook'
+  && reason.reason.reason === UPDATE_CUT

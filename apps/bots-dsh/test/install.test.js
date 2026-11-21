@@ -170,6 +170,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/status',
     'on llm/stream',
     'on session/event',
+    'provide automagikCallerRoutes',
+    'on webserver/index-inject',
     'on agent/request-error',
     'on session/event',
     // What a Bot's model really did, and a failed switch going back (model-state.js).

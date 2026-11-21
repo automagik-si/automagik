@@ -3,7 +3,7 @@ import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 
 const { outputFiles } = await build({
-  stdin: { contents: "export { SecretsPage } from './src/client/secret-card.js'; export { teamActions } from './src/client/team-actions.js'",
+  stdin: { contents: "export { SecretsPage, SecretCard } from './src/client/secret-card.js'; export { teamActions } from './src/client/team-actions.js'",
     resolveDir: fileURLToPath(new URL('../..', import.meta.url)) },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
   external: ['react', '@deepseek-ai/dsh-client-ui-primitives'],
@@ -18,7 +18,7 @@ export const text = node => Array.isArray(node) ? node.map(text).join('')
   : node === null || typeof node !== 'object' ? String(node ?? '') : text(node.props.children)
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
-export function renderVaultSettings({ roster, actions, call, run, hostname = 'localhost', protocol = 'http:' }) {
+export function renderVaultSettings({ roster, actions, call, run, hostname = 'localhost', protocol = 'http:', card }) {
   const module = { exports: {} }
   const slots = new Map()
   let mountedInputs = new Map()
@@ -71,7 +71,8 @@ export function renderVaultSettings({ roster, actions, call, run, hostname = 'lo
   }
   const render = () => {
     const inputs = new Map()
-    const tree = paint(react.createElement(module.exports.SecretsPage, props), '', inputs)
+    const tree = paint(card === undefined ? react.createElement(module.exports.SecretsPage, props)
+      : react.createElement(module.exports.SecretCard, { ...card, actions: props.actions, roster }), '', inputs)
     for (const ref of mountedInputs.keys()) if (!inputs.has(ref)) ref.current = null
     mountedInputs = inputs
     for (const effect of effectQueue.splice(0)) effect()
@@ -82,5 +83,12 @@ export function renderVaultSettings({ roster, actions, call, run, hostname = 'lo
   const input = label => find(node => node.props['aria-label'] === label)
   const fill = (label, value) => input(label).props.onChange({ target: { value } })
   const ready = async () => { render(); await tick(); render() }
-  return { render, ready, button, input, fill, find }
+  return { render, ready, button, input, fill, find,
+    async poll() {
+      const pending = [...scheduled.values()]
+      scheduled.clear()
+      await Promise.all(pending.map(refresh => refresh()))
+      await ready()
+    },
+  }
 }

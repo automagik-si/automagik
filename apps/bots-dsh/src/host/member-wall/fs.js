@@ -21,13 +21,16 @@
 // - DSH also reads files for a session after a tool's result and at a step's end (instruction
 //   files), outside the tool call itself; those reads carry the session's scope too.
 // Work outside any session (the owner's own interface) and owner sessions are unchanged.
+import { lstatSync, mkdirSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { FsError } from '@deepseek-ai/dsh-fs'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
-import { principalOf, scopeSessions, scopeWith, sessionScope } from './principals.js'
-import { mayUse } from './paths.js'
+import { multiuserMode } from '../multiuser.js'
+import { BOT_ID } from '../../shared/registry.js'
+import { botPrincipalOf, NOBODY, principalOf, scopeSessions, scopeWith, sessionScope } from './principals.js'
+import { checkBotConfig, mayUse, rootsOverlap } from './paths.js'
 
 export const SEARCH_TOOLS = Object.freeze(['grep', 'glob'])
 
@@ -39,14 +42,21 @@ const WallConfig = z.object({
   membersRoot: z.string().default('').description('Each member\'s own area is <membersRoot>/<name>.'),
   sharedReadRoots: z.array(absolute).default([]).description('Roots every member may read.'),
   denyReadRoots: z.array(absolute).default([]).description('Roots no member may read; wins over the rest.'),
+  bots: z.boolean().default(false),
+  botsRoot: z.string().default(''),
+  botReadRoots: z.dict(z.array(absolute)).default({}),
+  botDenyRoots: z.array(absolute).default([]),
+  instanceId: z.string().default(''),
 })
 
 // An Agent's id is its session's id (dsh-agent); its session carries the same id.
 export const sessionOfAgent = agent => agent?.id ?? agent?.session?.id
 
 const absent = (what, displayPath) => new FsError(`cannot ${what} "${displayPath}": not found`, 'FS_NOT_FOUND')
-const refused = (what, displayPath) => new FsError(
-  `cannot ${what} "${displayPath}": outside the files this member may use`, 'FS_SANDBOX_DENIED')
+const refused = (what, displayPath, actor = 'member') => new FsError(
+  `cannot ${what} "${displayPath}": outside the files this ${actor} may use`, 'FS_SANDBOX_DENIED')
+const actorOf = principals => principals.some(({ kind }) => kind === 'bot' || kind === 'none') ? 'Bot' : 'member'
+const identityOf = info => `${info.dev}:${info.ino}`
 
 export default class MemberWallFileSystem extends SandboxedFileSystem {
   static Config = z.intersect([LocalFileSystem.Config, WallConfig])
@@ -54,9 +64,18 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
   constructor(ctx, config) {
     super(ctx, config)
     this.wall = config
+    if (config.bots && !config.members) throw new Error('member wall: bots on needs members on')
+    if (config.bots && !multiuserMode()) throw new Error('member wall: bots on needs AUTOMAGIK_MULTIUSER on')
     if (!config.members) return
     if (!isAbsolute(config.principalsFile)) throw new Error('member wall: members on needs an absolute principalsFile')
     if (!isAbsolute(config.membersRoot)) throw new Error('member wall: members on needs an absolute membersRoot')
+    if (config.bots) {
+      this.staticBotDenied = checkBotConfig(config)
+      this.botsRoot = config.botsRoot.replace(/\/+$/, '') || '/'
+      this.botsRootIdentity = identityOf(lstatSync(this.botsRoot))
+      this.botWarnings = new Set()
+      this.warnPrincipal = (id, message) => ctx.logger.warn('member wall: session %s: %s', id, message)
+    }
     const inScope = (sessionId, next) => sessionId === undefined ? next() : sessionScope.run(scopeWith(sessionId), next)
     // First in each waterfall, so every later listener and the tool body run in the scope.
     ctx.on('tools/execute', (exec, next) => inScope(sessionOfAgent(exec.agent), next), { prepend: true })
@@ -76,9 +95,14 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
       const sessionId = sessionOfAgent(exec.agent)
       const principals = this.principals(sessionId === undefined ? scopeSessions() : scopeWith(sessionId).sessions)
       if (principals.every(principal => principal.kind === 'owner')) return next()
+      const operand = exec.arguments?.path
+      // Ripgrep resolves a relative operand against the working directory again at spawn.
+      if (actorOf(principals) === 'Bot' && typeof operand === 'string' && !isAbsolute(operand)) {
+        return { kind: 'deny', reason: `${exec.name}: give an absolute path` }
+      }
       const where = await this.searchRoot(exec)
-      if (where === undefined || !mayUse(config, principals, where.path, where.cwd, { search: true })) {
-        return { kind: 'deny', reason: `${exec.name}: outside the files this member may search` }
+      if (where === undefined || !mayUse(this.decisionConfig(), principals, where.path, where.cwd, { search: true })) {
+        return { kind: 'deny', reason: `${exec.name}: outside the files this ${actorOf(principals)} may search` }
       }
       return next()
     }, { prepend: true })
@@ -101,21 +125,104 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
 
   // The principal of each session in a scope.
   principals(sessions) {
+    if (this.wall.bots) {
+      const instance = process.env.AUTOMAGIK_INSTANCE_ID
+      const configuredInstance = this.wall.instanceId
+      const record = this.ctx.get('automagikPrincipalRecord')
+      if (!instance?.trim() || (configuredInstance?.trim() && configuredInstance !== instance)
+          || record?.version !== 1 || record.file !== this.wall.principalsFile
+          || record.instance !== instance || typeof record.folder !== 'string') {
+        return sessions.map(() => NOBODY)
+      }
+      const botOf = this.service()?.botOf
+      const bots = sessionScope.getStore()?.bots
+      return sessions.map(id => {
+        const principal = botPrincipalOf(record.file, id, {
+          botOf, instance, folderIdentity: record.folder, warn: this.warnPrincipal,
+        })
+        const expected = bots?.get(id)
+        return expected !== undefined && (principal.kind !== 'bot' || principal.id !== expected) ? NOBODY : principal
+      })
+    }
     return sessions.map(sessionId => principalOf(this.wall.principalsFile, sessionId))
+  }
+
+  service() {
+    const service = this.ctx.get('automagikBotSessions')
+    return service?.version === 1 ? service : undefined
+  }
+
+  warnBotOnce(key, message) {
+    if (this.botWarnings.has(key)) return
+    this.botWarnings.add(key)
+    this.ctx.logger.warn('member wall: %s', message)
+  }
+
+  decisionConfig() {
+    if (!this.wall.bots) return this.wall
+    let protectedRoots
+    const roots = () => {
+      if (protectedRoots === undefined) {
+        try {
+          const result = this.service()?.protectedRoots?.()
+          const paths = Array.isArray(result) ? [...result] : undefined
+          const valid = paths?.length >= 2 && paths.every(root => typeof root === 'string' && isAbsolute(root) && !root.includes('\0'))
+          protectedRoots = valid ? paths : ['/']
+        } catch {
+          protectedRoots = ['/']
+        }
+      }
+      return protectedRoots
+    }
+    return {
+      ...this.wall,
+      botDenied: () => [...this.staticBotDenied, ...roots()],
+      botGrants: id => (this.wall.botReadRoots[id] ?? []).filter(grant => {
+        if (!roots().some(root => rootsOverlap(grant, root))) return true
+        this.warnBotOnce(`grant:${id}:${grant}`, `ignoring ${id}'s read grant ${grant}: overlaps a protected root`)
+        return false
+      }),
+      ownBot: id => this.ownFolder(id),
+    }
+  }
+
+  ownFolder(id) {
+    if (!BOT_ID.test(id)) return undefined
+    const rootStillOurs = () => {
+      const info = lstatSync(this.botsRoot)
+      return info.isDirectory() && info.uid === process.getuid?.()
+        && (info.mode & 0o022) === 0 && identityOf(info) === this.botsRootIdentity
+    }
+    const folder = `${this.botsRoot}/${id}`
+    try {
+      if (rootStillOurs()) {
+        try {
+          mkdirSync(folder, { mode: 0o700 })
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error
+        }
+        const info = lstatSync(folder)
+        if (info.isDirectory() && info.uid === process.getuid?.() && (info.mode & 0o077) === 0 && rootStillOurs()) {
+          return identityOf(info)
+        }
+      }
+    } catch {}
+    this.warnBotOnce(`folder:${id}`, `cannot use ${id}'s own folder ${folder}`)
+    return undefined
   }
 
   // Whether the current work may touch a path: always outside a session and with members off;
   // otherwise only when every session it acts for may (the owner always may).
-  open(path, cwd = '/') {
+  open(path, cwd = '/', opts) {
     if (!this.wall.members) return true
-    return mayUse(this.wall, this.principals(scopeSessions()), path, cwd)
+    return mayUse(this.decisionConfig(), this.principals(scopeSessions()), path, cwd, opts)
   }
 
   // The target key is the target's real path and the display path is the walk the kernel takes
   // to it. What is read is decided by both: a target whose walk crosses a denied folder is
   // denied even when the real path it ends on is allowed.
-  visible(target) {
-    return this.open(String(target.targetKey)) && this.open(String(target.displayPath))
+  visible(target, opts) {
+    return this.open(String(target.targetKey), '/', opts) && this.open(String(target.displayPath), '/', opts)
   }
 
   // The fenced methods are async, so a refusal is a rejection, as DSH's own errors are.
@@ -124,7 +231,10 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
   }
 
   deny(what, target) {
-    if (!this.visible(target)) throw refused(what, target.displayPath)
+    if (!this.visible(target)) {
+      const actor = this.wall.bots ? actorOf(this.principals(scopeSessions())) : 'member'
+      throw refused(what, target.displayPath, actor)
+    }
   }
 
   async lstat(path, opts, signal) {
@@ -174,6 +284,17 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
     // the listing whole, its name and metadata included, so the listing cannot name what the
     // member may not see.
     return this.wall.members ? entries.filter(entry => this.visible(entry.target)) : entries
+  }
+
+  async checkedTarget(target, policy) {
+    const fresh = await super.checkedTarget(target, policy)
+    if (this.wall.bots) {
+      const principals = this.principals(scopeSessions())
+      if (!principals.every(({ kind }) => kind === 'owner') && !this.visible(fresh, { write: true })) {
+        throw refused('write', fresh.displayPath, actorOf(principals))
+      }
+    }
+    return fresh
   }
 
   async writeText(target, content, expected, signal, sandboxPolicy) {

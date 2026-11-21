@@ -1005,7 +1005,9 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
       : t('Paused after {count} Bot relays. Waiting: {names}', { count: reply.count, names: (reply.names ?? []).join(t(' and ')) }))
   }
   if (reply.kind === 'resumed') {
-    return h('div', { className: 'bt-event' }, t('{name} was cut off by a restart and picked its work back up', { name: bot.name }))
+    return h('div', { className: 'bt-event' }, reply.resumedByUpdate
+      ? t('{name} was interrupted by an Automagik update and picked its work back up', { name: bot.name })
+      : t('{name} was cut off by a restart and picked its work back up', { name: bot.name }))
   }
   if (reply.kind === 'cut') {
     return h('div', { className: 'bt-event' }, t('{name} was cut off by a restart again and stopped', { name: bot.name }))

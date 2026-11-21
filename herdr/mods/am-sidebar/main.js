@@ -13,6 +13,11 @@ import { spaces, machines, panes, agents, terminals, focused, setAgentOrder, run
 import * as fs from "fs/promises";
 import { isPng, keysFor, remote } from "./paste.js";
 import { command } from "./argv.js";
+import { AGY_APPS, AGY_SHAPES, agyCandidate } from "./agyPrompt.js";
+import { AGY_LOCAL_LIMIT, AGY_PER_TICK, AGY_READ_LINES, AGY_READ_MS, AGY_REMOTE_LIMIT, AGY_SCAN_MS,
+  crossJoined, heldKey, heldSpaces, machineOf, nextVisits, observe, resolvePane, stillCandidate,
+  treeTerminals } from "./agyScan.js";
+import { machineGate } from "./discover.js";
 import { discoverProjects, discoverySnapshot, restoreDiscovery, watchProject, paneKeyOfFolder } from "./bots.js";
 import { BOT_LABEL } from "./model.js";
 import { BotForm, FORM_SIZE } from "./create.js";
@@ -23,13 +28,14 @@ import { Updater } from "./updater.js";
 import { METER_EVERY_MS, METER_FIRST_MS, meterBin, syncMeter, syncTargets, writeFleetRecord } from "./meter.js";
 import { parseMarker } from "./release.js";
 import { fleetPlan, meterScope } from "./meterFleet.js";
-import { MACHINES_FIRST_MS, MACHINES_SHOWN_KEY, MACHINES_TICK_MS, STATE_FILE as MACHINES_STATE, failureNotice, parseState as parseMachines, startCycle } from "./machineUpdates.js";
+import { MACHINES_FIRST_MS, MACHINES_SHOWN_KEY, MACHINES_TICK_MS, STATE_FILE as MACHINES_STATE, failureNotice, parseState as parseMachines, startAccountsRetry, startCycle } from "./machineUpdates.js";
 import { startBot, attachBot, botOfTerminal, ledgerBindings, modelTexts, sleepOf } from "./launch.js";
 import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
-import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION } from "./rows.js";
+import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED } from "./rows.js";
+import { rateLimitDialog } from "./restart.js";
 
 // The pack itself as a dialog: the bot form (create.js), or the attach picker, the Bots list
 // and a bot row's menu as a popup (a popup is as tall as its items; height is only the most).
@@ -150,6 +156,8 @@ const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
+const AGY_PROGRAM = { key: "antigravity", name: "Antigravity", icon: null, tint: false };
+const SKIPPED = Symbol("agy read skipped");
 // Character pictures (characters.js), under the app home outside mods/, by their path
 // relative to the app home, as image() takes it.
 const PETS = "am-sidebar-pets";
@@ -209,6 +217,9 @@ export default class Spaces extends View {
     // Hermes reports no status to the core: read its screen for the question footer.
     this.screen = {}; // terminal address -> "blocked" | null
     cx.timer.every(2500, (cx) => this.scanHermes(cx));
+    // Antigravity fires no hook while it waits at its folder-trust or file-access question
+    // (RFC 0042). Its screen is read on a timer and gates of its own, apart from Hermes's.
+    this.startAgy(cx);
     cx.timer.every(15000, cx => {
       this.refreshMachines(cx); this.loadExtra(cx); this.refreshBots(cx); this.loadModelTexts(cx);
       if (!themeSettled()) this.applyTheme(cx); // Herdr may list a copied theme only later
@@ -277,6 +288,7 @@ export default class Spaces extends View {
     this.botsShown = 0; // the discovery drawn last: an older one answering after it is dropped
     this.botWatch = new Map(); // local project key -> the token of its one watcher
     this.refreshBots(cx);
+    cx.timer.every(15000, (cx) => this.scanRateLimits(cx));
     // The bot view (rows.js): the folds made this session (A7: fold id -> open), the row under
     // the pointer, the trees drawn last, the terminals drawn as bots (left out of the space's
     // own agent rows), the pictures known to be on disk, and when the next idle bot falls
@@ -302,6 +314,12 @@ export default class Spaces extends View {
     this.petsWanted = new Map(); // file -> { look, pose, dark }
     this.petsFailed = new Set();
     this.wakeAt = null;
+    // #1557: each live Claude seat's pane tail, read for Claude Code's rate-limit dialog on the
+    // 15-second sweep below (address -> { question, resets_at?, created_ms }), and the cursor
+    // that keeps one look at a handful of seats.
+    this.rateLimited = new Map();
+    this.rateLimitCursor = 0;
+    this.rateLimitBusy = false;
     // The model a bot row shows (A12, rows.js secondLine): the agents' own config files, read
     // now and on the 15-second timer, and each live bot pane's foreground command line by
     // address ({ argv, created }), read with hc get after each bot discovery when terminals()
@@ -316,6 +334,8 @@ export default class Spaces extends View {
     // Workers whose tab is on its way (openWorker): a second click waits for it.
     this.opening = new Set();
     this.loadModelTexts(cx);
+    // #1557: the first rate-limit look, after this.rateLimited exists (the timer above repeats it).
+    this.scanRateLimits(cx);
     // Hermes's own icon from the program table (its process shows as Python).
     this.hermes = { key: "hermes", name: "Hermes", icon: "icons/hermes.svg", tint: true };
     cx.spawn(async (cx) => {
@@ -401,6 +421,39 @@ export default class Spaces extends View {
     });
   }
 
+  startAgy(cx) {
+    cx.timer.every(AGY_SCAN_MS, (cx) => this.scanAgy(cx));
+  }
+
+  armed() { return (this.agyShapes ?? AGY_SHAPES).length > 0; }
+
+  agyAppList() { return this.agyApps ?? AGY_APPS; }
+
+  heldOf(address) {
+    const h = this.agyHeld?.get(address);
+    return h ? { address, question: h.question } : null;
+  }
+
+  clearAgy(address) {
+    this.agyObs?.delete(address);
+    const gen = (this.agyGen ??= new Map());
+    gen.set(address, (gen.get(address) ?? 0) + 1);
+  }
+
+  // A render can see a terminal change while a read is in flight, even its first read.
+  agyHeldNow() {
+    this.agyHeld = new Map();
+    if (!this.armed()) return;
+    const apps = this.agyAppList();
+    for (const [address, entry] of this.agyObs ?? []) {
+      if (!stillCandidate(this.byAddress.get(address), entry.created, apps)) this.clearAgy(address);
+      else if (entry.held) this.agyHeld.set(address, entry.held);
+    }
+    for (const [address, pending] of this.agyPending ?? []) {
+      if (!stillCandidate(this.byAddress.get(address), pending.created, apps)) this.clearAgy(address);
+    }
+  }
+
   // Hermes terminals agents() leaves out (they report no status): live, with a pane,
   // and Hermes by their argv, never by a title. Their status is unknown, never guessed.
   // Name: sidebar-agents.json's, else the tab's name, else the pane's title.
@@ -408,23 +461,32 @@ export default class Spaces extends View {
     const listed = new Set(this.agentList.map((a) => a.address));
     const listedPanes = new Set(this.agentList.map((a) => a.pane));
     const tabs = new Map(this.snap.spaces.flatMap((s) => s.tabs ?? []).map((c) => [c.id, c]));
+    const armed = this.armed(), apps = this.agyAppList();
     const rows = ps.flatMap((p) => {
       if (!p.terminal || listed.has(p.terminal) || listedPanes.has(p.pane)) return [];
       const core = this.coreTerminal(p);
       const term = core?.state === "live" ? core : null;
-      if (command(term?.argv) !== "hermes") return [];
+      const agy = armed && agyCandidate(term, apps) === true;
+      if (!agy && command(term?.argv) !== "hermes") return [];
       const e = this.extra[p.terminal];
       const named = e?.name && (!e.tab || e.tab === p.tab) ? e.name : null;
-      return [{ extra: true, address: p.terminal, pane: p.pane, tab: p.tab, named, status: this.screen?.[p.terminal] ?? null, program: this.hermes, focused: p.focused }];
+      if (agy) return [{ extra: true, agy: true, core: term.address, address: p.terminal, pane: p.pane,
+        tab: p.tab, named, status: term.status ?? null, program: programForApp("agy", this.known) ?? AGY_PROGRAM, focused: p.focused }];
+      return [{ extra: true, hermes: true, address: p.terminal, pane: p.pane, tab: p.tab, named,
+        status: this.screen?.[p.terminal] ?? null, program: this.hermes, focused: p.focused }];
     });
     // A tab's name says which only when it holds one of them.
     const perTab = {};
-    for (const r of rows) perTab[r.tab] = (perTab[r.tab] ?? 0) + 1;
+    const tabKey = (r) => (r.agy ? "agy" : "hermes") + "\u0000" + r.tab;
+    for (const r of rows) {
+      const key = tabKey(r);
+      perTab[key] = (perTab[key] ?? 0) + 1;
+    }
     for (const r of rows) {
       const tab = tabs.get(r.tab)?.name;
-      const tabName = tab && !/^\d+$/.test(tab) && perTab[r.tab] === 1 ? tab : null;
+      const tabName = tab && !/^\d+$/.test(tab) && perTab[tabKey(r)] === 1 ? tab : null;
       const p = this.paneById.get(r.pane);
-      r.name = r.named ?? tabName ?? (clean(p?.title) || tab || this.hermes.name);
+      r.name = r.named ?? tabName ?? (clean(p?.title) || tab || r.program.name);
     }
     return rows;
   }
@@ -433,10 +495,16 @@ export default class Spaces extends View {
   // terminal; a blocked mark names a permission when it says so. `owner` is the pane's
   // needs-owner question: a stopped agent waiting on the person draws its own Question chip,
   // apart from the blocked chip, its tooltip carrying what it asks.
-  status(t, a, report = null, owner = null) {
+  status(t, a, report = null, owner = null, held = null, rate = null) {
     const color = t[a.status] ?? t.dim;
+    // #1557: the rate-limit chip, beside (never instead of) the core status the row keeps.
+    if (a.status === "rate-limited") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold()
+      .text_color(t.blocked).flex().items_center()
+      .tooltip(rate?.resets_at ? `Rate-limited until ${rate.resets_at}; am parks or switches it` : "Rate-limited; am parks or switches it")
+      .child(RATE_LIMITED);
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
-    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child(needsYouText(report));
+    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child(needsYouText(report))
+      .when(Boolean(held), (el) => el.id(`needs-${held.address}`).tooltip(held.question));
     if (owner) return div().flex_none().px(6).h(18).rounded(5).bg(t.ansi3 + "26").text_size(10.5).font_semibold().text_color(t.ansi3)
       .flex().items_center().tooltip(`Waiting on you: ${owner}`).child(OWNER_QUESTION);
     if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
@@ -472,7 +540,8 @@ export default class Spaces extends View {
     if (!a.extra) this.order.push(a.address);
     const pic = icon(a.program, 14, t.foreground);
     const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
-    const idle = a.status === "idle" && !a.focused;
+    const addr = a.core ?? a.address, held = this.heldOf(addr), st = held ? "blocked" : a.status;
+    const idle = st === "idle" && !a.focused;
     return h_flex().id(`ag-${a.address}`).h(26).flex_none().pl(indent).pr(8).gap(8).items_center().rounded(8).text_size(12.5)
       .cursor_pointer()
       .when(a.focused, (el) => el.bg(t.selected))
@@ -484,16 +553,17 @@ export default class Spaces extends View {
       .when(Boolean(pic), (el) => el.child(pic))
       .child(div().flex_1().min_w(0).truncate().text_color(idle ? t.muted : t.foreground).child(a.extra ? a.name : this.agentName(a)))
       .when(Boolean(machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(machine)))
-      .child(a.extra && !a.status
+      .child(a.extra && !st
         ? div().id(`unknown-${a.address}`).size(7).mx(3).flex_none().rounded(4).bg(t.unknown).tooltip("No status reported")
-        : this.status(t, a, this.reportOf(a.core ?? a.address), this.ownerOf(a.core ?? a.address, a.status)));
+        : this.status(t, held ? { ...a, status: st } : a, this.reportOf(addr), this.ownerOf(addr, st), held));
   }
 
   // A plain agent's sub-agent, with the tree lines in front of it.
   subRow(k, lines, indent, t) {
     const on = k.address === this.snap.focused?.agent;
     const kpic = icon(k.program, 13, t.foreground);
-    const st = kidStatus(k, this.listed);
+    const held = this.heldOf(k.address);
+    const st = held ? "blocked" : kidStatus(k, this.listed);
     return h_flex().id(`sub-${k.address}`).h(24).flex_none().pl(indent + 4).pr(8).items_center().rounded(8).text_size(12)
       .cursor_pointer()
       .when(on, (el) => el.bg(t.raised))
@@ -504,7 +574,7 @@ export default class Spaces extends View {
         .when(l === "└" || l === "├", (el) => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(kpic), (el) => el.child(div().mr(7).child(kpic)))
       .child(div().flex_1().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
-      .child(this.status(t, { status: st }, k.report ?? null, ownerQuestionOf(k, st, this.now)));
+      .child(this.status(t, { status: st }, k.report ?? null, ownerQuestionOf(k, st, this.now), held));
   }
 
   // The agents list's grouped-view name: a tab someone named or the agent's own
@@ -559,7 +629,7 @@ export default class Spaces extends View {
     this.paneSig = JSON.stringify(this.all.filter((k) => k.state === "live" && !String(k.address).includes("/") && known.has(k.labels?.[BOT_LABEL]))
       .map((k) => [k.address, k.created_ms ?? null, paneFolder(k)]));
     this.botOf = botTerminals(this.all, known, this.ledger);
-    this.trees = buildTree({ projects: this.bots, live, terminals: this.all, now });
+    this.trees = buildTree({ projects: this.bots, live, terminals: this.all, now, rateLimited: this.rateLimited });
     this.wakeAt = nextWake(live, now);
   }
 
@@ -631,7 +701,9 @@ export default class Spaces extends View {
         const { sig, notice } = failureNotice(parseMachines(text ?? ""), shared(MACHINES_SHOWN_KEY) ?? null);
         if (sig !== (shared(MACHINES_SHOWN_KEY) ?? "")) setShared(MACHINES_SHOWN_KEY, sig);
         if (notice) notify({ ...notice, timeout: 15000 });
-        await startCycle({ exec, cli: `${appHome()}/mods/am-sidebar/bin/automagik-herdr`, get: shared, set: setShared });
+        const app = appHome();
+        const cycle = await startCycle({ exec, cli: `${app}/mods/am-sidebar/bin/automagik-herdr`, get: shared, set: setShared });
+        if (cycle.started) await startAccountsRetry({ exec, appHome: app, readText: readTextFile });
       } catch {}
       cx.timer.after(MACHINES_TICK_MS, (cx) => this.machinesTick(cx));
     });
@@ -766,7 +838,8 @@ export default class Spaces extends View {
     this.order.push(h.terminal);
     const shown = this.snap.focused?.agent === h.terminal;
     const pic = icon(h.program, 14, t.foreground) ?? image("icons/shell.svg").size(14).flex_none();
-    const st = kidStatus({ address: h.terminal, status: h.status }, this.listed);
+    const held = this.heldOf(h.terminal);
+    const st = held ? "blocked" : kidStatus({ address: h.terminal, status: h.status }, this.listed);
     return h_flex().items_stretch()
       .children(this.guides(r.guides, t))
       .child(h_flex().id(`row-${r.id}`).flex_1().min_w(0).h(26).px(6).gap(8).items_center().rounded(8).text_size(12).cursor_pointer()
@@ -777,7 +850,7 @@ export default class Spaces extends View {
         .when(Boolean(h.template || h.model || h.effort), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(10)
           .text_color(t.dim).child([h.template, h.model, h.effort].filter(Boolean).join(" · "))))
         .when(h.terminal.includes("/"), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(h.terminal.split("/")[0])))
-        .child(this.status(t, { status: st }, this.reportOf(h.terminal), ownerQuestionOf(this.byAddress?.get(h.terminal), st, this.now))));
+        .child(this.status(t, { status: st }, this.reportOf(h.terminal), ownerQuestionOf(this.byAddress?.get(h.terminal), st, this.now), held)));
   }
 
   // A helper, worker or live bot row's click (workerTab.js rowWorker): its pane; else a tab
@@ -796,6 +869,13 @@ export default class Spaces extends View {
     });
   }
 
+  // The status and click target of a bot, including a terminal it holds before an agent shows.
+  botTerminal(n, tree) {
+    if (n.live) return n.live.terminal;
+    if (n.planned) return null;
+    return heldTerminalOf(n.bot.id, this.all, [], { key: n.project ?? tree.key, machine: tree.machine }, this.keyOf, this.ledger);
+  }
+
   // A bot row (A4): fold slot, character, name in its ink over `role · model`, the agent's
   // icon and the status mark. The main bot's is a raised card bordered in its ink; a planned
   // bot's is dimmed and dashed, asleep, with its note and wave (A3).
@@ -806,11 +886,13 @@ export default class Spaces extends View {
     const live = n.live;
     if (live) this.order.push(live.terminal);
     const second = secondLine(r, tree, { texts: this.modelTexts, defaults: this.modelDefaults, argvOf: (a) => this.argvOf.get(a)?.argv ?? null });
-    const s = n.status === "error" ? "blocked" : n.status;
     const project = { key: n.project ?? tree.key, machine: tree.machine };
     // Not counted live but holding a live terminal (no agent seen in front yet): its pane, or
     // a peek, rather than nothing; read again at click time (panes() too), nothing if it is gone.
     const held = live || planned ? null : heldTerminalOf(b.id, this.all, [], project, this.keyOf, this.ledger);
+    const promptHold = planned ? null : this.heldOf(live ? live.terminal : held);
+    const s = promptHold ? "blocked" : n.rateLimited ? "rate-limited" : n.status === "error" ? "blocked" : n.status;
+    const pose = promptHold ? "needs-you" : n.pose;
     const onClick = live
       ? (cx) => this.openWorker(r, cx)
       : held ? () => { const a = heldClickOf(b.id, terminals(), panes(), project, this.keyOf, this.ledger); if (a) run(a.command, a.args); }
@@ -825,7 +907,7 @@ export default class Spaces extends View {
     const size = main ? 30 : 26;
     let row = h_flex().flex_1().min_w(0).gap(8).items_center()
       .when(!planned, (el) => el.child(this.arrow(r, t)))
-      .child(planned ? div().flex_none().opacity(0.45).child(this.pet(b, "asleep", size, dark)) : this.pet(b, n.pose, size, dark))
+      .child(planned ? div().flex_none().opacity(0.45).child(this.pet(b, "asleep", size, dark)) : this.pet(b, pose, size, dark))
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().min_w(0).gap(5).items_center()
           .child(div().min_w(0).truncate().text_size(main ? 14 : 13).font_weight(main ? 700 : 600).text_color(planned ? t.muted : ink).child(b.name))
@@ -842,7 +924,9 @@ export default class Spaces extends View {
         .text_size(10).font_semibold().text_color(t.muted).child(`Wave ${b.planned.wave}`));
     } else {
       row = row.child(this.agentIcon(n, main ? 16 : 15, t))
-        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal), ownerQuestionOf(this.byAddress?.get(live.terminal), s, this.now)) : div().w(13).flex_none());
+        .child(live ? this.status(t, { status: s }, this.reportOf(live.terminal), ownerQuestionOf(this.byAddress?.get(live.terminal), s, this.now), promptHold, n.rateLimited)
+          : promptHold ? this.status(t, { status: "blocked" }, this.reportOf(held), null, promptHold)
+            : div().w(13).flex_none());
     }
     const box = this.rowEvents(row, r, t, onClick, onMenu).rounded(main ? 10 : 8);
     const styled = main
@@ -871,10 +955,11 @@ export default class Spaces extends View {
   // The same project while the sidebar is narrow: its main bot; a click starts it.
   compactProject(tree, t, dark) {
     const b = this.startable(tree), main = tree.main;
+    const held = this.agyHeld?.size && main && !main.planned && this.heldOf(this.botTerminal(main, tree));
     return h_flex().id(`project-${projectId(tree)}`).h(26).flex_none().justify_center().items_center().hover((s) => s.bg(t.hover))
       .tooltip(main ? `${main.bot.name} · ${base(tree.key)}` : base(tree.key))
       .when(Boolean(b), (el) => el.cursor_pointer().on_click((_e, cx) => this.startFromRow(b.id, cx)))
-      .child(main ? this.pet(main.bot, main.pose, 18, dark) : svg("mods/workspace-chrome/folder.svg").size(13).flex_none());
+      .child(main ? this.pet(main.bot, held ? "needs-you" : main.pose, 18, dark) : svg("mods/workspace-chrome/folder.svg").size(13).flex_none());
   }
 
   // The bot a spaceless project's Start starts: its main bot, on this computer, not live.
@@ -943,7 +1028,7 @@ export default class Spaces extends View {
   }
 
   scanHermes(cx) {
-    const rows = (this.extraList ?? []).filter((a) => a.extra);
+    const rows = (this.extraList ?? []).filter((a) => a.extra && a.hermes);
     if (!rows.length || this.scanning) return;
     this.scanning = true;
     cx.spawn(async (cx) => {
@@ -963,6 +1048,122 @@ export default class Spaces extends View {
         if (changed) cx.notify();
       } finally { this.scanning = false; }
     });
+  }
+
+  // #1557: each live Claude seat's pane tail, read for Claude Code's rate-limit dialog (the
+  // same text rule the CLI uses, restart.js rateLimitDialog): a handful per 15-second sweep,
+  // never a loop. The address -> { question, resets_at?, created_ms } map is what rows.js marks
+  // a bot row with, so the sidebar draws "Rate limited" beside the core status. It never types.
+  scanRateLimits(cx) {
+    if (this.rateLimitBusy) return;
+    const bots = new Map((this.bots ?? []).flatMap((p) => (p.file?.bots ?? []).map((b) => [b.id, b])));
+    const seats = terminals().filter((t) => t.state === "live" && !String(t.address).includes("/")
+      && bots.get(t.labels?.[BOT_LABEL])?.agent === "claude" && t.status?.state !== "working");
+    if (!seats.length) {
+      if (this.rateLimited.size) { this.rateLimited.clear(); cx.notify(); }
+      return;
+    }
+    const start = this.rateLimitCursor % seats.length;
+    const ask = [...seats.slice(start), ...seats.slice(0, start)].slice(0, 8);
+    this.rateLimitCursor = (start + ask.length) % seats.length;
+    this.rateLimitBusy = true;
+    cx.spawn(async (cx) => {
+      let changed = false;
+      try {
+        await Promise.all(ask.map(async (t) => {
+          let found = null;
+          try { const r = await hc(["read", t.address]); if (r.code === 0) found = rateLimitDialog(r.stdout); } catch {}
+          const next = found ? { ...found, created_ms: t.created_ms ?? null } : null;
+          const prev = this.rateLimited.get(t.address) ?? null;
+          if (JSON.stringify(prev) !== JSON.stringify(next)) {
+            if (next) this.rateLimited.set(t.address, next); else this.rateLimited.delete(t.address);
+            changed = true;
+          }
+        }));
+        // A pane that ended or stopped being a live Claude seat keeps no record.
+        const live = new Set(seats.map((t) => t.address));
+        for (const address of [...this.rateLimited.keys()]) {
+          if (live.has(address)) continue;
+          this.rateLimited.delete(address);
+          changed = true;
+        }
+      } finally { this.rateLimitBusy = false; }
+      if (changed) cx.notify();
+    });
+  }
+
+  scanAgy(cx) {
+    if (!this.armed() || this.agyScanning) return;
+    const apps = this.agyAppList(), shapes = this.agyShapes ?? AGY_SHAPES;
+    const fresh = terminals();
+    const recs = firstBy(fresh, (k) => k.address);
+    const names = new Set(machines().map((m) => m.name).filter(Boolean));
+    const obs = (this.agyObs ??= new Map()), gen = (this.agyGen ??= new Map());
+    // The fresh core records say which terminals can be read. The last render says
+    // which have a row, in drawn order, and which pane aliases still need that join.
+    const candidates = new Set([...recs.values()].filter((k) => stillCandidate(k, k.created_ms, apps)).map((k) => k.address));
+    const list = [...(this.agyPlace ?? new Map()).keys()].filter((address) => {
+      if (!candidates.has(address)) return false;
+      const via = this.agyVia?.get(address);
+      return !via || resolvePane(fresh, via.terminal, via.tab, names)?.address === address;
+    });
+    const shown = new Set(list);
+    let changed = false;
+    for (const [address, entry] of obs) {
+      if (shown.has(address) && recs.get(address).created_ms === entry.created) continue;
+      if (entry.held) changed = true;
+      this.clearAgy(address);
+    }
+    for (const address of gen.keys()) if (!recs.has(address)) gen.delete(address);
+    const { visit, next } = nextVisits(list, this.agyCursor ?? 0, AGY_PER_TICK);
+    this.agyCursor = next;
+    if (changed) cx.notify();
+    if (!visit.length) return;
+    const pending = (this.agyPending ??= new Map());
+    // Register even queued visits so a render can clear them before dispatch.
+    for (const address of visit) pending.set(address, { created: recs.get(address).created_ms, g: gen.get(address) ?? 0 });
+    this.agyScanning = true;
+    cx.spawn(async (cx) => {
+      try {
+        await Promise.all(visit.map(async (address) => {
+          const { created, g } = pending.get(address), machine = machineOf(address);
+          let outcome = { ok: false };
+          try {
+            const r = await this.agyGate(machine).call(() => {
+              // A queued visit may get its slot after the terminal stopped being agy.
+              if ((gen.get(address) ?? 0) !== g
+                || !stillCandidate(terminals().find((k) => k.address === address), created, apps)) return SKIPPED;
+              return hc(["read", address, "--lines", String(AGY_READ_LINES)]);
+            }, { sleep: sleepOf(cx), remote: Boolean(machine) });
+            if (r === SKIPPED) outcome = { skipped: true };
+            else if (r?.code === 0 && typeof r.stdout === "string") outcome = { ok: true, text: r.stdout };
+          } catch {}
+          pending.delete(address);
+          this.applyAgy(address, created, g, outcome, apps, shapes, cx);
+        }));
+      } finally { this.agyScanning = false; }
+    });
+  }
+
+  agyGate(machine) {
+    const gates = (this.agyGates ??= new Map()), key = machine ?? "";
+    if (!gates.has(key)) gates.set(key, machineGate(machine ? AGY_REMOTE_LIMIT : AGY_LOCAL_LIMIT, AGY_READ_MS));
+    return gates.get(key);
+  }
+
+  applyAgy(address, created, g, outcome, apps, shapes, cx) {
+    if ((this.agyGen?.get(address) ?? 0) !== g) return;
+    const rec = terminals().find((k) => k.address === address);
+    const before = this.agyObs.get(address);
+    if (!stillCandidate(rec, created, apps)) {
+      this.clearAgy(address);
+      if (before?.held) cx.notify();
+      return;
+    }
+    if (outcome.skipped) return;
+    const after = observe(before, outcome, created, shapes);
+    this.agyObs.set(address, after);
+    if (heldKey(before) !== heldKey(after)) cx.notify();
   }
 
   // The rename map: an absent file is an empty map; one that can't be read or parsed
@@ -1279,6 +1480,40 @@ export default class Spaces extends View {
     return out;
   }
 
+  // The grouped view supplies the space for each status target, including tabless children.
+  placeAgy(rows, at, rest, byId) {
+    const place = new Map(), via = new Map();
+    this.agyPlace = place;
+    this.agyVia = via;
+    this.agyHeldSpaces = null;
+    if (!this.armed()) return;
+    const keep = (address) => !crossJoined(this.byAddress.get(address));
+    const put = (address, space) => {
+      if (!place.has(address) && keep(address)) place.set(address, space);
+    };
+    const putTree = (tree, space) => {
+      for (const address of treeTerminals(tree, (n) => this.botTerminal(n, tree), keep)) put(address, space);
+    };
+    for (const { w } of rows) {
+      for (const { terminal, a, subs } of this.spaceAgents(w)) {
+        put(terminal, w.id);
+        if (a.core && a.core !== a.address) via.set(a.core, { terminal: a.address, tab: a.tab });
+        // A remote child joined under a bare parent id is drawn on the wrong machine.
+        // Skip it and its subtree here, leaving the existing rows alone.
+        let skipDepth = Infinity;
+        for (const sub of subs) {
+          if (sub.depth > skipDepth) continue;
+          skipDepth = Infinity;
+          if (keep(sub.terminal)) put(sub.terminal, w.id);
+          else skipDepth = sub.depth;
+        }
+      }
+      if (at.has(w.id)) putTree(byId.get(at.get(w.id)), w.id);
+    }
+    for (const id of rest) putTree(byId.get(id), null);
+    if (this.agyHeld.size) this.agyHeldSpaces = heldSpaces(place, this.agyHeld);
+  }
+
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
@@ -1288,6 +1523,7 @@ export default class Spaces extends View {
     const dark = isDark(t.chrome);
     const { at, rest } = placeTrees(rows.map((r) => r.w.id), this.trees);
     const byId = new Map(this.trees.map((tr) => [projectId(tr), tr]));
+    this.placeAgy(rows, at, rest, byId);
     const treeRows = (tree) => spaceRowOrder({ tree, open: this.open }).map((d) => d.row);
     const spaceless = (tree) => (collapsed ? [this.compactProject(tree, t, dark)]
       : [this.projectHeader(tree, t), ...this.botBlock(tree, t, dark, treeRows(tree))]);
@@ -1386,6 +1622,7 @@ export default class Spaces extends View {
     const color = colors[w.id] ?? "ansi6";
     const fill = color === "transparent" ? null : color.startsWith("#") ? color : (MARK[color] ?? t[color]);
     const owner = this.waiting?.get(w.id) ?? null;
+    const held = this.agyHeldSpaces?.get(w.id) ?? null;
     return v_flex()
       .relative()
       .id(`space-${w.id}`)
@@ -1422,7 +1659,9 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(this.avatar(w, fill, t)))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .when(Boolean(owner), el => el.child(div().id(`owner-${w.id}`).size(6).rounded(3).flex_none().bg(t.ansi3)
+          .when(Boolean(held), (el) => el.child(div().id(`needs-space-${w.id}`).size(6).rounded(3).flex_none().bg(t.blocked)
+            .tooltip(`Needs you: ${held}`)))
+          .when(Boolean(owner) && !held, el => el.child(div().id(`owner-${w.id}`).size(6).rounded(3).flex_none().bg(t.ansi3)
             .tooltip(`Waiting on you: ${owner}`)))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
           .child(this.addButton(w, t)),
@@ -1480,6 +1719,7 @@ export default class Spaces extends View {
 
   compact({ w, i }, t) {
     const owner = this.waiting?.get(w.id) ?? null;
+    const held = this.agyHeldSpaces?.get(w.id) ?? null;
     return h_flex()
       .id(`space-${w.id}`)
       .h(26)
@@ -1490,7 +1730,8 @@ export default class Spaces extends View {
       .hover((s) => s.bg(t.hover))
       .on_click(() => run("space.select", { id: w.id }))
       .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
-      .child(div().text_color(owner ? t.ansi3 : tone(t, w.status)).child(glyph(owner ? "done" : w.status)));
+      .child(div().text_color(held ? tone(t, "blocked") : owner ? t.ansi3 : tone(t, w.status))
+        .child(glyph(held ? "blocked" : owner ? "done" : w.status)));
   }
 
   advisoryRow(notes, t) {
@@ -1526,6 +1767,7 @@ export default class Spaces extends View {
     if (changed) setShared("am.space.colors", kept);
     this.prepareAgents();
     this.prepareBots();
+    this.agyHeldNow();
     this.nameBotTabs();
     // The spaces a stopped pane's needs-owner label marks, read once from this render's snapshot.
     this.waiting = this.ownerSpaces();

@@ -13,6 +13,7 @@ import { install as installPermissions } from '../src/host/permissions.js'
 import { cliRoute, leavesCli } from '../src/shared/routes.js'
 
 const CODEX = { provider: 'acp-codex', model: 'default' }
+const CODEX_FALLBACK = { provider: 'acp-codex', model: 'gpt-5' }
 const CLAUDE = { provider: 'acp-claude', model: 'opus' }
 const OPENAI = { provider: 'openai', model: 'gpt-5.4-mini' }
 const DEEPSEEK = { provider: 'deepseek-official', model: 'deepseek-flash' }
@@ -88,9 +89,9 @@ test('the line is one fixed sentence, worded in Chinese and pt-BR too, as the st
 
 test('every other level on a coding CLI still falls back as before', async () => {
   // Read only, Workspace, Auto review: the Session does not read Full access.
-  const h = fallbackHarness({ route: CODEX, wide: false })
+  const h = fallbackHarness({ route: CODEX, wide: false, fallbackModel: 'acp-codex/gpt-5' })
   await h.failed({ code: 'ACP_AGENT', message: 'the agent stopped' })
-  assert.deepEqual(h.selected, [DEEPSEEK])
+  assert.deepEqual(h.selected, [CODEX_FALLBACK])
   assert.equal(h.followed.length, 1)
   assert.match(h.followed[0].content[0].text, /^\[model fallback: acp-codex\/default failed/)
   assert.deepEqual(h.appended, [], 'no stay line')
@@ -107,9 +108,9 @@ test('Full access on a route that is not a coding CLI still falls back as before
 
 test('Full access on another agent over ACP still falls back as before', async () => {
   for (const provider of ['acp-fake', 'acp-gemini']) {
-    const h = fallbackHarness({ route: { provider, model: 'm' }, wide: true })
+    const h = fallbackHarness({ route: { provider, model: 'm' }, wide: true, fallbackModel: `${provider}/other` })
     await h.failed({ code: 'ACP_AGENT', message: 'the agent stopped' })
-    assert.deepEqual(h.selected, [DEEPSEEK], provider)
+    assert.deepEqual(h.selected, [{ provider, model: 'other' }], provider)
     assert.deepEqual(h.appended, [])
   }
 })
@@ -124,9 +125,9 @@ test('a Session left on a CLI its Bot was moved off still falls back at Full acc
     { owned: false },
   ]
   for (const options of cases) {
-    const h = fallbackHarness({ route: CODEX, wide: true, ...options })
+    const h = fallbackHarness({ route: CODEX, wide: true, fallbackModel: 'acp-codex/gpt-5', ...options })
     await h.failed({ code: 'ACP_AGENT', message: 'the agent stopped' })
-    assert.deepEqual(h.selected, [DEEPSEEK], JSON.stringify(options))
+    assert.deepEqual(h.selected, [CODEX_FALLBACK], JSON.stringify(options))
     assert.equal(h.followed.length, 1)
     assert.match(h.followed[0].content[0].text, /^\[model fallback: acp-codex\/default failed/)
     assert.deepEqual(h.appended, [], 'no stay line')
@@ -151,15 +152,38 @@ test('a fallback that is another model of the same CLI is still taken at Full ac
 })
 
 test('a level that cannot be read is not taken for Full access, and a failure kept as it is stays kept', async () => {
-  const unknown = fallbackHarness({ route: CODEX })
+  const unknown = fallbackHarness({ route: CODEX, fallbackModel: 'acp-codex/gpt-5' })
   await unknown.failed({ code: 'SERVER' })
-  assert.deepEqual(unknown.selected, [DEEPSEEK], 'without the level reader the fallback goes on as before')
-  const odd = fallbackHarness({ route: CODEX, wide: () => undefined })
+  assert.deepEqual(unknown.selected, [CODEX_FALLBACK], 'without the level reader the fallback goes on as before')
+  const odd = fallbackHarness({ route: CODEX, wide: () => undefined, fallbackModel: 'acp-codex/gpt-5' })
   await odd.failed({ code: 'SERVER' })
-  assert.deepEqual(odd.selected, [DEEPSEEK])
+  assert.deepEqual(odd.selected, [CODEX_FALLBACK])
   const kept = fallbackHarness({ route: CODEX, wide: true })
   await kept.failed({ code: 'MODEL_ACCESS_REQUIRED' })
   assert.deepEqual([kept.selected, kept.followed, kept.appended], [[], [], []], 'a signed-out CLI was never moved, and gets no stay line either')
+})
+
+test('a different harness prevents fallback even when Full access leaves the decision to fallback', async t => {
+  const cases = [
+    ['below Full access', { route: CODEX, wide: false }],
+    ['Full access on another ACP agent', { route: { provider: 'acp-fake', model: 'm' }, wide: true }],
+    ['Full access on Gemini', { route: { provider: 'acp-gemini', model: 'm' }, wide: true }],
+    ['the Bot now uses a native model', { route: CODEX, wide: true, saved: 'deepseek-official/deepseek-pro' }],
+    ['the Bot now uses another CLI', { route: CODEX, wide: true, saved: 'acp-claude/opus' }],
+    ['the Bot has no saved model', { route: CODEX, wide: true, saved: null }],
+    ['there is no Bot', { route: CODEX, wide: true, owned: false }],
+    ['there is no level reader', { route: CODEX }],
+    ['the level reader returns no level', { route: CODEX, wide: () => undefined }],
+  ]
+  for (const [name, options] of cases) {
+    await t.test(name, async () => {
+      const h = fallbackHarness(options)
+      await h.failed({ code: 'ACP_AGENT', message: 'the agent stopped' })
+      const { provider, model } = options.route
+      assert.deepEqual([h.selected, h.followed.length, h.appended.map(([, message]) => message.source.summary)],
+        [[], 0, [`${provider}/${model} failed; the fallback runs on another harness`]])
+    })
+  }
 })
 
 test('a notice that cannot be written does not move the Bot either', async () => {

@@ -29,6 +29,8 @@ const GATED: Record<string, string> = {
   meter: 'meter',
   usagemeter: 'usagemeter',
   'dsh-sandbox': 'sandbox',
+  id: 'id',
+  'brand-font': 'font',
 };
 const AREAS = Object.values(GATED);
 
@@ -45,6 +47,8 @@ const RULES: Record<string, [string, string, string]> = {
   meter: ['METER_CHANGED_PATHS', 'meter/statusline/x', 'meter/usagemeter/x'],
   usagemeter: ['USAGEMETER_CHANGED_PATHS', 'meter/usagemeter/x', 'meter/statusline/x'],
   sandbox: ['SANDBOX_CHANGED_PATHS', 'apps/dsh-sandbox/x', 'apps/x'],
+  id: ['ID_CHANGED_PATHS', 'apps/id/x', 'apps/landing/x'],
+  font: ['BRAND_FONT_CHANGED_PATHS', 'scripts/brand-font/rebuild.mjs', 'docs/brand/tokens/tokens.json'],
 };
 
 /** The inputs each rule carries beyond its own folder, which must still count as a change. */
@@ -60,6 +64,11 @@ const CROSS = [
   ['USAGEMETER_CHANGED_PATHS', 'meter/schema/query/v1/envelope.schema.json'],
   ['METER_CHANGED_PATHS', '.github/workflows/ci.yml'],
   ['SANDBOX_CHANGED_PATHS', '.github/workflows/ci.yml'],
+  ['ID_CHANGED_PATHS', '.github/workflows/ci.yml'],
+  ['ID_CHANGED_PATHS', '.github/scripts/apt-canonical-sources.sh'],
+  ['BRAND_FONT_CHANGED_PATHS', 'docs/brand/fonts/fredoka-latin.woff2'],
+  ['BRAND_FONT_CHANGED_PATHS', 'docs/brand/fonts/README.md'],
+  ['BRAND_FONT_CHANGED_PATHS', '.github/workflows/ci.yml'],
 ];
 
 /** Runs the `changes` job's real script the way the runner does, with an output file. */
@@ -161,7 +170,7 @@ describe('the changes job', () => {
       { 'meter/statusline/statusline.mjs': 'export {};\n' },
     ]);
     try {
-      // The areas grep the checked-out HEAD, as the job does; the link rule reads HEAD_SHA.
+      // Every rule reads the pull request's head (HEAD_SHA); the job also checks it out.
       git(dir, 'checkout', '-q', '--detach', commits[1]);
       const botsOnly = decide({ base: commits[0], head: commits[1], cwd: dir });
       for (const area of AREAS) expect(botsOnly.outputs[area]).toBe('false');
@@ -171,6 +180,68 @@ describe('the changes job', () => {
       expect(withMeter.outputs.meter).toBe('true');
       expect(withMeter.outputs.herdr).toBe('false');
       expect(withMeter.outputs.pocket).toBe('false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an ID-only pull request checks ID alone, and its job asserts the steps it gates', () => {
+    const { dir, commits: [base, head] } = scratchRepo([
+      { 'README.md': 'first\n' },
+      { 'apps/id/src/index.ts': 'export {};\n' },
+    ]);
+    try {
+      const { outputs } = decide({ base, head, cwd: dir });
+      for (const area of AREAS) expect(outputs[area]).toBe(area === 'id' ? 'true' : 'false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const steps = ci.jobs.id.steps;
+    // The second read of the diff (#895) needs the base commit, so the checkout keeps history.
+    expect(steps[0].with['fetch-depth']).toBe(0);
+    const assert = steps.find((step: any) => step.name === 'Assert the steps ran');
+    expect(assert.if).toBe('always()');
+    expect(assert.run).toContain('grep -E "${ID_CHANGED_PATHS}"');
+    for (const id of ['check', 'test', 'mutations']) {
+      expect(steps.some((step: any) => step.id === id)).toBe(true);
+      expect(assert.env.OUTCOMES).toContain(`${id}=\${{ steps.${id}.outcome }}`);
+    }
+  });
+
+  test('reads only the pull request, not base commits newer than its base.sha', () => {
+    // GitHub checks out a merge with today's base, while the event's base.sha can be the
+    // older base the pull request was opened on: a release bump on the base since then must
+    // not mark herdr, am, Pocket or usagemeter as changed on a docs-only pull request.
+    const { dir, commits: [base] } = scratchRepo([{ 'README.md': 'first\n' }]);
+    try {
+      git(dir, 'checkout', '-q', '-b', 'pr');
+      mkdirSync(join(dir, 'docs'), { recursive: true });
+      writeFileSync(join(dir, 'docs', 'note.md'), 'docs only\n');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'docs only');
+      const docsHead = git(dir, 'rev-parse', 'HEAD');
+      git(dir, 'checkout', '-q', '--detach', base);
+      for (const path of ['package.json', 'herdr/package.json', 'am/VERSION', 'meter/usagemeter/Cargo.toml']) {
+        mkdirSync(dirname(join(dir, path)), { recursive: true });
+        writeFileSync(join(dir, path), '3.165.0\n');
+      }
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'release bump on the base');
+      git(dir, 'merge', '-q', '--no-ff', '-m', 'merge', docsHead);
+      const docsOnly = decide({ base, head: docsHead, cwd: dir });
+      for (const area of AREAS) expect(docsOnly.outputs[area]).toBe('false');
+
+      // The same base move under a pull request that does touch herdr/ still checks herdr.
+      git(dir, 'checkout', '-q', 'pr');
+      writeFileSync(join(dir, 'README.md'), 'second\n');
+      mkdirSync(join(dir, 'herdr'), { recursive: true });
+      writeFileSync(join(dir, 'herdr', 'x.mjs'), 'export {};\n');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'herdr change');
+      const herdrHead = git(dir, 'rev-parse', 'HEAD');
+      const herdr = decide({ base, head: herdrHead, cwd: dir });
+      expect(herdr.outputs.herdr).toBe('true');
+      expect(herdr.outputs.pocket).toBe('false');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -231,6 +302,8 @@ describe('a gated job', () => {
     expect(ci.jobs['pocket-link'].name).toBe('Pocket Link bridge (${{ matrix.os }})');
     expect(ci.jobs.usagemeter.name).toBe('usagemeter (${{ matrix.os }})');
     expect(ci.jobs.meter.name).toBe('Meter status line');
+    expect(ci.jobs.id.name).toBe('Automagik ID (local Workers runtime)');
+    expect(ci.jobs['brand-font'].name).toBe('Brand font rebuild');
   });
 
   test('reads a rule defined once, with the cross-area inputs each rule carries', () => {
@@ -250,6 +323,29 @@ describe('a gated job', () => {
     for (const [name, path] of CROSS) {
       expect(new RegExp(ci.env[name]).test(path)).toBe(true);
     }
+  });
+});
+
+describe('the brand font gate', () => {
+  test('a font-only pull request checks the font alone, and its job asserts the rebuild', () => {
+    const { dir, commits: [base, head] } = scratchRepo([
+      { 'README.md': 'first\n' },
+      { 'docs/brand/fonts/fredoka-latin.woff2': 'font\n' },
+    ]);
+    try {
+      const { outputs } = decide({ base, head, cwd: dir });
+      for (const area of AREAS) expect(outputs[area]).toBe(area === 'font' ? 'true' : 'false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const steps = ci.jobs['brand-font'].steps;
+    // The second read of the diff (#895) needs the base commit, so the checkout keeps history.
+    expect(steps[0].with['fetch-depth']).toBe(0);
+    const assert = steps.find((step: any) => step.name === 'Assert the steps ran');
+    expect(assert.if).toBe('always()');
+    expect(assert.run).toContain('grep -E "${BRAND_FONT_CHANGED_PATHS}"');
+    expect(steps.some((step: any) => step.id === 'rebuild')).toBe(true);
+    expect(assert.env.OUTCOMES).toBe('rebuild=${{ steps.rebuild.outcome }}');
   });
 });
 

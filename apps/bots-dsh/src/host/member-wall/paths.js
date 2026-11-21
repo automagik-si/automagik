@@ -12,7 +12,9 @@
 //   disk treats as the same name is the same folder, and `ana` never holds `anabel`;
 // - a root that does not exist holds nothing: there is nothing on disk to compare with.
 import { lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, sep } from 'node:path'
+import { automagikHomeOf, dshHomeOf, teamHomeOf } from '../folders.js'
+import { BOT_ID } from '../../shared/registry.js'
 
 // The real path a spelling reaches, or undefined when it cannot be placed.
 export function physical(spelling, cwd = '/') {
@@ -148,9 +150,91 @@ function memberMaySearch(config, principal, spelling, cwd) {
   })
 }
 
+// Physical names can still overlap before either root exists.
+function contains(path, root) {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep) || under(path, identity(root))
+}
+
+export function rootsOverlap(left, right) {
+  const a = physical(left)
+  const b = physical(right)
+  return a !== undefined && b !== undefined && (contains(a, b) || contains(b, a))
+}
+
+export function checkBotConfig(config, env = process.env) {
+  const { botsRoot, botReadRoots, principalsFile, membersRoot } = config
+  let info
+  if (typeof botsRoot === 'string' && isAbsolute(botsRoot)) {
+    try { info = lstatSync(botsRoot.replace(/\/+$/, '') || '/') } catch {}
+  }
+  if (!info?.isDirectory() || info.uid !== process.getuid?.()) {
+    throw new Error('member wall: botsRoot must be an absolute directory owned by DSH and must not be a link')
+  }
+  if ((info.mode & 0o022) !== 0) {
+    throw new Error('member wall: botsRoot must not be group- or world-writable')
+  }
+  const denied = [
+    dshHomeOf(env.DSH_HOME), automagikHomeOf(env.AUTOMAGIK_HOME), teamHomeOf(env),
+    dirname(principalsFile), '/data/gate-view', '/data/secrets', ...config.denyReadRoots,
+    ...config.botDenyRoots, membersRoot,
+  ]
+  if (denied.some(root => rootsOverlap(botsRoot, root))) {
+    throw new Error('member wall: botsRoot overlaps a denied root')
+  }
+  const prototype = botReadRoots == null ? undefined : Object.getPrototypeOf(botReadRoots)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error('member wall: botReadRoots must be a plain object')
+  }
+  for (const [id, roots] of Object.entries(botReadRoots)) {
+    if (!BOT_ID.test(id) || !Array.isArray(roots) || roots.some(root => typeof root !== 'string' || !isAbsolute(root))) {
+      throw new Error('member wall: botReadRoots needs Bot ids and absolute paths')
+    }
+    if (roots.some(root => [botsRoot, ...denied].some(blocked => rootsOverlap(root, blocked)))) {
+      throw new Error('member wall: a botReadRoots grant overlaps a denied root or botsRoot')
+    }
+  }
+  return denied
+}
+
+export function botMay(config, principal, spelling, cwd, { write } = {}) {
+  const own = principal.id === undefined ? undefined : config.ownBot(principal.id)
+  if (own === undefined) return false
+  const path = physical(spelling, cwd)
+  const walked = walk(spelling, cwd)
+  if (path === undefined || walked === undefined) return false
+  const bots = rootIdentity(config.botsRoot)
+  if (bots === undefined || identity(path) === bots) return false
+  const denied = config.botDenied().map(root => physical(root)).filter(root => root !== undefined)
+  const blocked = at => denied.some(root => contains(at, root))
+    || (under(at, bots) && identity(at) !== bots && !under(at, own))
+  if (blocked(path) || walked.hops.some(blocked)) return false
+  try {
+    const info = statSync(path, { throwIfNoEntry: false })
+    if (info?.isFile() && info.nlink > 1) return false
+  } catch {
+    return false
+  }
+  return under(path, own) || (!write && config.botGrants(principal.id).some(root => within(path, root)))
+}
+
+export function botMaySearch(config, principal, spelling, cwd, opts) {
+  if (!botMay(config, principal, spelling, cwd, opts)) return false
+  const root = physical(spelling, cwd)
+  return root !== undefined && ![config.botsRoot, ...config.botDenied()].some(denied => {
+    const held = physical(denied)
+    return held !== undefined && contains(held, root)
+  })
+}
+
 // Whether work acting for these principals may use a path (or search from it): the owner
-// always; each member only by its own rule. Work for several sessions needs every one of them.
-export function mayUse(config, principals, spelling, cwd, { search = false } = {}) {
-  const rule = search ? memberMaySearch : memberMay
-  return principals.every(principal => principal.kind === 'owner' || rule(config, principal, spelling, cwd))
+// always; each Bot and member by its own rule. A scope needs every principal to allow it.
+export function mayUse(config, principals, spelling, cwd, { search = false, write = false } = {}) {
+  const memberRule = search ? memberMaySearch : memberMay
+  const botRule = search ? botMaySearch : botMay
+  return principals.every(principal => {
+    if (principal.kind === 'owner') return true
+    if (principal.kind === 'none') return false
+    if (principal.kind === 'bot') return botRule(config, principal, spelling, cwd, { write })
+    return memberRule(config, principal, spelling, cwd)
+  })
 }

@@ -20,10 +20,12 @@ const keyPaths = [
   'am/pack-keys.json',
   'am/plugin-lane-keys.json',
   'herdr/mods/am-sidebar/meter-keys.json',
+  'herdr/mods/am-sidebar/am-keys.json',
   'herdr/install.sh',
   'apps/welcome-dsh/src/host/lane-keys.json',
   'apps/desktop/src/lane-keys.js',
   'apps/bots-dsh/src/host/role-keys.json',
+  'apps/welcome-dsh/src/host/publisher-keys.json',
 ];
 const withoutKey: Rules = {
   ...rules,
@@ -96,12 +98,13 @@ describe('changed files', () => {
     expect(changesFromFiles(files).complete).toBe(false);
   });
 
-  test('protects deleted keys, release workflows, the policy, and either side of a rename', () => {
+  test('protects deleted keys, release workflows, the policy, rulesets, and either side of a rename', () => {
     const deleted = { filename: keyPath, status: 'removed' };
     const changes = changesFromFiles([
       deleted,
       { filename: '.github/workflows/release.yml' },
       { filename: '.github/pr-reviewer.json' },
+      { filename: '.github/rulesets/dev-reviewed-merges.json' },
       { filename: '.github/workflows/pr-reviewer-watch.yml' },
       { filename: '.github/workflows/follow-omni.yml' },
       { filename: 'docs/new.md', previous_filename: 'scripts/pr-reviewer/old.ts' },
@@ -110,6 +113,7 @@ describe('changed files', () => {
     ]).changes;
     expect(classify(changes, rules)).toEqual({ ownerReview: [
       { path: '.github/pr-reviewer.json', group: 'reviewer' },
+      { path: '.github/rulesets/dev-reviewed-merges.json', group: 'reviewer' },
       { path: '.github/workflows/follow-omni.yml', group: 'release' },
       { path: '.github/workflows/pr-reviewer-watch.yml', group: 'reviewer' },
       { path: '.github/workflows/release.yml', group: 'release' },

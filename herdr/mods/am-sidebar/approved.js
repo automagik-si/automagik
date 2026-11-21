@@ -20,7 +20,7 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync
   unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseBots } from "./model.js";
+import { parseBots, workerHomeOf } from "./model.js";
 import { dataRootOf } from "./workers.js";
 
 /** The record shape this pack writes and reads. */
@@ -171,6 +171,18 @@ export function approvedProxyState({ project, bot, env = process.env }) {
     return proxyStateFor(bot, null, e?.code === "ENOENT" ? null
       : `invalid approved record ${path ?? project}: ${e?.message ?? e}`);
   }
+}
+
+/**
+ * Whether the approved snapshot's bot names `worker.agentHome` at all (#1208): the hc proxy
+ * refuses such a bot's worker start, so the CLI refuses a proxied one before anything is made.
+ * Presence counts, even a value the snapshot can't use; no record (or an unreadable one) is false.
+ */
+export function approvedWorkerHome({ project, bot, env = process.env }) {
+  let file;
+  try { file = readApprovedRecord({ project, env }).file; } catch { return false; }
+  const approved = file.bots.find((entry) => entry.id === bot.id);
+  return approved ? workerHomeOf(approved).present : false;
 }
 
 /** Invalid approval cannot supply a value: only a working opt-in refuses. Callers warn off. */

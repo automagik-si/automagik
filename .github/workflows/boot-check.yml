@@ -47,22 +47,26 @@ jobs:
 
       - name: The candidate Omni
         if: inputs.omni_version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "${OMNI_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error ::omni_version is not a release version (x.y.z)"; exit 1; }
           [[ "${OMNI_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::omni_commit '${OMNI_COMMIT}' is not a full commit sha"; exit 1; }
+          tree=$(gh api "repos/automagik-si/omni/git/commits/${OMNI_COMMIT}" --jq .tree.sha)
+          [[ "${tree}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::Omni's candidate tree is not a full sha"; exit 1; }
           node -e '
             const fs = require("node:fs")
-            const [version, commit] = process.argv.slice(1)
+            const [version, commit, tree] = process.argv.slice(1)
             const file = "apps/desktop/omni.json"
             const json = JSON.parse(fs.readFileSync(file, "utf8"))
             fs.writeFileSync(file, JSON.stringify({ ...json, version, commit }, null, 2) + "\n")
             // The welcome installs the same release of the Omni plugins in a plain DSH.
             const welcome = "apps/welcome-dsh/package.json"
             const pkg = JSON.parse(fs.readFileSync(welcome, "utf8"))
-            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit }
+            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit, tree }
             fs.writeFileSync(welcome, JSON.stringify(pkg, null, 2) + "\n")
-          ' "${OMNI_VERSION}" "${OMNI_COMMIT}"
+          ' "${OMNI_VERSION}" "${OMNI_COMMIT}" "${tree}"
           cat apps/desktop/omni.json
           node -p 'JSON.stringify(require("./apps/welcome-dsh/package.json").automagik.omni)'
 

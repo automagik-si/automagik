@@ -326,7 +326,7 @@ export const sandboxCapable = (root = packRootOf()) => ["am-sidebar", "dsh-sandb
 export const STABLE_FILES = Object.freeze([
   "hcPane.mjs", "hcProxy.mjs", "approved.js", "dshTui.mjs", "workers.js", "models.js", "model.js",
   "hermesPair.js", "actionError.js",
-  "logins.js", "attach.js", "hcGuard.mjs", "dialog.js", "restart.js", "launchArgs.js", "layoutSafe.mjs", "release.js", "retired.js",
+  "logins.js", "loginRecord.js", "loginWords.js", "attach.js", "hcGuard.mjs", "agyPrompt.js", "dialog.js", "restart.js", "launchArgs.js", "layoutSafe.mjs", "release.js", "retired.js",
   "bin/dsh-sandbox.mjs", "bin/run.sh",
 ]);
 
@@ -915,34 +915,61 @@ export function workerProxyTransport(socketPath, terminal, timeoutMs = 750) {
   });
 }
 
-/** Probe only an existing per-pane proxy. Never invoke hc or discover a real core socket. */
-function proxyAnswers(socketPath, binding, bot, timeoutMs) {
+/** Check the live binding and version on one proxy connection. Null calls for a binding retry. */
+function probeProxy(socketPath, binding, bot, timeoutMs, bindingOnly = false) {
   return new Promise((done) => {
     const socket = net.connect(socketPath);
-    let buffer = "", finished = false;
-    const finish = (up) => {
+    let buffer = "", finished = false, checkingStatus = false;
+    const finish = (answer) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
       socket.destroy();
-      done(up);
+      done(answer);
     };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    socket.on("error", () => finish(false));
-    socket.on("close", () => finish(false));
-    socket.on("connect", () => socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1,
-      method: "terminal.get", params: { terminal: binding.terminal } })}\n`));
+    const unavailable = () => finish(checkingStatus ? null : { up: false, coreVersion: null });
+    const timer = setTimeout(unavailable, timeoutMs);
+    const send = (id, method, params) => socket.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    socket.on("error", unavailable);
+    socket.on("close", unavailable);
+    socket.on("connect", () => send(1, "terminal.get", { terminal: binding.terminal }));
+    socket.setEncoding("utf8");
     socket.on("data", (chunk) => {
-      buffer += chunk.toString("utf8");
-      if (Buffer.byteLength(buffer) > 65536) { finish(false); return; }
+      buffer += chunk;
+      if (Buffer.byteLength(buffer) > 65536) { unavailable(); return; }
       const end = buffer.indexOf("\n");
       if (end < 0) return;
-      try {
-        const reply = JSON.parse(buffer.slice(0, end));
-        finish(reply.id === 1 && !reply.error && reply.result?.state === "live"
-          && reply.result?.labels?.bot === bot.id
-          && reply.result?.created_ms === binding.created_ms);
-      } catch { finish(false); }
+      let reply;
+      try { reply = JSON.parse(buffer.slice(0, end)); }
+      catch { unavailable(); return; }
+      if (reply?.jsonrpc !== "2.0" || reply.id !== (checkingStatus ? 2 : 1)) {
+        unavailable();
+        return;
+      }
+      const { result, error } = reply;
+      if (!checkingStatus) {
+        if (Object.hasOwn(reply, "error") || result?.state !== "live" || result.labels?.bot !== bot.id
+            || result.created_ms !== binding.created_ms) {
+          unavailable();
+          return;
+        }
+        if (bindingOnly) { finish({ up: true, coreVersion: null }); return; }
+        checkingStatus = true;
+        buffer = "";
+        timer.refresh();
+        send(2, "proxy.status");
+        return;
+      }
+      if (Object.hasOwn(reply, "error")) {
+        if (!Object.hasOwn(reply, "result") && Number.isInteger(error?.code) && typeof error.message === "string") {
+          finish({ up: true, coreVersion: null });
+        } else unavailable();
+        return;
+      }
+      if (result?.v === 1 && result.terminal === binding.terminal && typeof result.version === "string") {
+        finish({ up: true, coreVersion: result.version });
+      } else unavailable();
     });
   });
 }
@@ -955,7 +982,7 @@ export async function doctorBotProxies({ bots, project, bindings, env = process.
     const applicable = process.platform === "linux" && bot.agent === "dsh-tui";
     const row = { id: bot.id, name: bot.name, hcProxy: bot.hcProxy === true, applicable,
       hcProxyState: approvedProxyState({ project, bot, env }),
-      terminal: binding?.project === project ? binding.terminal : null, up: false };
+      terminal: binding?.project === project ? binding.terminal : null, up: false, coreVersion: null };
     if (!row.terminal) return { ...row, detail: "no attached local pane" };
     if (!isAbsolute(env.XDG_RUNTIME_DIR ?? "") || !/^t[0-9a-z]+$/.test(row.terminal)) {
       return { ...row, detail: "proxy runtime path is unavailable" };
@@ -963,11 +990,15 @@ export async function doctorBotProxies({ bots, project, bindings, env = process.
     const socket = join(env.XDG_RUNTIME_DIR, "automagik-hc-proxy", row.terminal, "hc.sock");
     try {
       if (!lstatSync(socket).isSocket()) return { ...row, detail: "proxy path is not a socket" };
-      row.up = await proxyAnswers(socket, binding, bot, timeoutMs);
+      const status = await probeProxy(socket, binding, bot, timeoutMs)
+        ?? await probeProxy(socket, binding, bot, timeoutMs, true);
+      Object.assign(row, status);
     } catch { /* absent or unreadable: down, never fall back to the real socket */ }
-    return { ...row, warning: row.up && !row.hcProxy,
-      detail: row.up ? (!row.hcProxy ? "proxy is up; rollback not finished" : "proxy is up")
-        : "proxy is down or not responding" };
+    const core = row.coreVersion === null ? "core version unavailable" : `core ${row.coreVersion}`;
+    const warning = row.up && !row.hcProxy;
+    return { ...row, warning, detail: row.up
+      ? `proxy is up, ${core}${warning ? "; rollback not finished" : ""}`
+      : "proxy is down or not responding" };
   }));
 }
 

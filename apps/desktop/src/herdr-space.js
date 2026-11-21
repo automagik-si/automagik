@@ -1,27 +1,34 @@
 // Code mode's fourth step (RFC 0013, delivery 4): the right space. Once Herdr's window is open,
-// main looks up the Bot's folder and machine itself (the page sends a Bot id and nothing else),
+// main looks up the Bot's folder and machine itself (the page identifies a Bot and its source),
 // reads `herdr-app ls`, and shows the space on that folder and machine: an open one is selected,
 // else one is made (space.new). A Bot with no folder gets no space picked (D27). Like herdr.js,
 // pure apart from what it is handed: main.js passes the real file system and execFile; tests
 // pass fakes. Every call to herdr-app goes through herdr.js's run(): an argv array, no shell,
 // a 10 s limit.
-import { realpathSync, statSync } from 'node:fs'
+import { constants, realpathSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { posix, win32 } from 'node:path'
 import { isBotId } from './bot-views.js'
-import { run } from './herdr.js'
+import { findHerdr as defaultFindHerdr, run } from './herdr.js'
+import { openLatest as defaultOpenLatest } from './herdr-update.js'
+import { HOME_PATH, MAX_FILE_BYTES, REPO_PATH, isBotId as isRegistryBotId, parseRegistry } from './registry.js'
+import { steps } from './timeline.js'
 
 const pathOf = platform => (platform === 'win32' ? win32 : posix)
+// The Code tree applies this cap before removing empty projects or sorting by name.
+const MAX_CODE_PROJECTS = 200
 
 /**
  * What main takes from the page's open request: the Bot id when it has a Bot id's shape, and
- * the person's yes or no to an update offer. Anything else in it (a folder, a machine, a path)
- * is dropped here, so nothing the page names reaches herdr-app.
+ * the person's yes or no to an update offer. The Code row capability selects the registry
+ * lookup. Main discards page-supplied folders, machines and paths.
  */
 export function openRequest(request) {
-  const botId = isBotId(request?.botId) ? request.botId : null
+  const code = request?.source === 'code'
+  const validId = code ? isRegistryBotId : isBotId
+  const botId = validId(request?.botId) ? request.botId : null
   const update = typeof request?.update === 'boolean' ? request.update : undefined
-  return { botId, update }
+  return { botId, update, ...(code ? { source: 'code' } : {}) }
 }
 
 /** The Bot team's saved state under the app's home (appHome, dsh.js AUTOMAGIK_BOTS_HOME). */
@@ -33,9 +40,8 @@ export const botsStateOf = (appHome, platform = process.platform) => pathOf(plat
  * its own (it works in the team's workspace: a global Bot, D3), and for one whose folder is
  * gone or not a full path. `machine` is null for this computer.
  *
- * This is the one place the switch learns a Bot's folder and machine. Today it reads the Bot
- * team's state.json, which keeps no machine, so every Bot is on this computer; RFC 0014's
- * shared registry replaces what is behind it, and nothing else changes.
+ * The Team footer reads the Bot team's state.json, which keeps no machine, so every Bot is
+ * on this computer.
  */
 export async function botPlace(botId, { appHome, platform = process.platform, read = readText, isFolder = defaultIsFolder } = {}) {
   if (!isBotId(botId) || !appHome) return null
@@ -54,6 +60,68 @@ export async function botPlace(botId, { appHome, platform = process.platform, re
   const dir = bot.workDir
   const usable = typeof dir === 'string' && dir !== '' && pathOf(platform).isAbsolute(dir) && isFolder(dir)
   return { folder: usable ? dir : null, machine: null }
+}
+
+/** A Bot in the visible Code tree, using the ordering and grants in host/code-tree.js. */
+export async function codeRowPlace(botId, { registryRoot, platform = process.platform, read = readRegistryText, isFolder = defaultIsFolder } = {}) {
+  const p = pathOf(platform)
+  if (!isRegistryBotId(botId) || typeof registryRoot !== 'string' || !p.isAbsolute(registryRoot)) return null
+  const root = p.resolve(registryRoot)
+  if (p.dirname(root) === root) return null
+  const home = await readRegistry(p.join(root, HOME_PATH), 'home', read)
+  if (!home) return null
+
+  const shown = new Set(home.shown
+    .filter(entry => entry.machine === undefined && entry.project !== null && p.isAbsolute(entry.project))
+    .map(entry => p.resolve(entry.project)))
+  const local = home.bots.filter(bot => bot.machine === undefined)
+  // A local home Bot reserves the id even if its folder isn't shown. Remote Bots are skipped
+  // before reserving an id. Repo Bots can claim the id in project order after the home Bots.
+  const homeBot = local.find(bot => bot.id === botId)
+  if (homeBot && !homeBot.folder) return { folder: null }
+  const shownFolder = folder => (typeof folder === 'string' && p.isAbsolute(folder) && shown.has(p.resolve(folder)))
+  const folders = new Set()
+  for (const project of home.projects) {
+    if (project.machine === undefined && shownFolder(project.folder)) folders.add(p.resolve(project.folder))
+  }
+  for (const bot of local) {
+    if (shownFolder(bot.folder)) folders.add(p.resolve(bot.folder))
+  }
+  const visibleFolders = [...folders].slice(0, MAX_CODE_PROJECTS)
+  const place = folder => (isFolder(folder) ? { folder, machine: null } : null)
+  if (homeBot) {
+    if (!shownFolder(homeBot.folder)) return null
+    const folder = p.resolve(homeBot.folder)
+    return visibleFolders.includes(folder) ? place(folder) : null
+  }
+  for (const folder of visibleFolders) {
+    const repo = await readRegistry(p.join(folder, REPO_PATH), 'repo', read)
+    if (repo?.bots.some(bot => bot.id === botId)) return place(folder)
+  }
+  return null
+}
+
+async function readRegistry(file, kind, read) {
+  try {
+    return parseRegistry(await read(file), { kind }).file
+  } catch {
+    return null
+  }
+}
+
+async function readRegistryText(file) {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK)
+  try {
+    const stat = await handle.stat()
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return null
+    // Read at most one extra byte to catch a file that grew after stat.
+    const chunks = []
+    for await (const chunk of handle.createReadStream({ start: 0, end: MAX_FILE_BYTES, autoClose: false })) chunks.push(chunk)
+    const bytes = Buffer.concat(chunks)
+    return bytes.length <= MAX_FILE_BYTES ? bytes.toString('utf8') : null
+  } finally {
+    await handle.close()
+  }
 }
 
 // state.json holds the team's chat history too, and is read on every click: one over this is
@@ -175,15 +243,15 @@ function doAnswer(result) {
 }
 
 /**
- * Shows the Bot's space in Herdr's open window: looks the Bot up (botPlace), reads `ls`, and
- * runs the planner's `do`. Only the Bot id comes from the page. Resolves to `{ action, id? }`
+ * Shows the Bot's space in Herdr's open window: looks the Bot up, reads `ls`, and runs the
+ * planner's `do`. Resolves to `{ action, id? }`
  * (`action` 'select', 'new' or 'none') or `{ action, error }` when herdr-app refused; never
  * throws. Log lines (logs/switch.log): `space select|new <id>`, `no-space <why>`, `do-error`.
  */
-export async function pickSpace({ botId, found, platform, env, appHome, execFile, read, isFolder, resolve = defaultResolve, place = botPlace, mark = () => {}, log: write = () => {} }) {
+export async function pickSpace({ botId, source, found, platform, env, appHome, registryRoot, execFile, read, isFolder, resolve = defaultResolve, place = source === 'code' ? codeRowPlace : botPlace, mark = () => {}, log: write = () => {} }) {
   // One line each in switch.log: a folder, a machine or herdr-app's message can hold anything.
   const log = line => write(oneLine(line))
-  const bot = botId ? await place(botId, { appHome, platform, read, isFolder }) : null
+  const bot = botId ? await place(botId, { appHome, registryRoot, platform, read, isFolder }) : null
   if (!bot || !bot.folder) {
     log(`no-space ${!botId ? 'no Bot' : !bot ? 'unknown Bot' : 'no folder'}`)
     return { action: 'none' }
@@ -207,4 +275,29 @@ export async function pickSpace({ botId, found, platform, env, appHome, execFile
   mark('space')
   log(`space ${plan.action} ${id ?? '(no id)'}`)
   return { action: plan.action, ...(id ? { id } : {}) }
+}
+
+/** Opens Herdr, keeping the current update offer and declined version for this app session. */
+export async function openHerdr({ botId, source, update }, {
+  host, appHome, registryRoot, offer, openLatest = defaultOpenLatest, findHerdr = defaultFindHerdr,
+  execFile, read, isFolder, write = () => {},
+}) {
+  const { mark } = steps(`switch${botId ? ` ${botId}` : ''}`, { write, since: Date.now() })
+  const log = what => write(`${new Date().toISOString()} switch: ${what}\n`)
+  try {
+    if (update === false && offer.offered) offer.declined = offer.offered
+    // A yes counts only for the version this session offered (openLatest checks the feed).
+    const result = await openLatest({ ...host, update, offered: offer.offered, skip: offer.declined, execFile, mark, log })
+    offer.offered = result.reason === 'update' ? result.latest : null
+    if (!result.ok) return result
+    log(`opened${result.raised === true ? '' : ' (no focus)'}`)
+    const found = findHerdr(host)
+    const space = found
+      ? await pickSpace({ ...host, botId, source, found, appHome, registryRoot, execFile, read, isFolder, mark, log })
+      : { action: 'none' }
+    return { ...result, space }
+  } catch (error) {
+    log(`failed ${error?.message ?? error}`)
+    return { ok: false, reason: 'error', message: "Herdr didn't open" }
+  }
 }

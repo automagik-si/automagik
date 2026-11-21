@@ -1,9 +1,14 @@
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
+import { bootView, canClearDraftInMemory, isRetired, onRetire, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
-import { badges, botChannels, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons, mountShellInstallers, nav, onShell, registerComposerPack, sidebarTools, toolCards } from './extend.js'
+import {
+  badges, botChannels, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons,
+  mountShellInstallers, nav, officialInstall, onShell, registerComposerPack, sidebarTools,
+  toolCards,
+} from './extend.js'
 import { BUILTIN_PACKS, packCellSync, stepsAside } from './composer-packs.js'
 import { COMPOSER_PACK_CSS, packModelCell } from './composer-pack-cells.js'
 import { agentRowSessions, TASK_CSS } from './task-card.js'
@@ -13,7 +18,6 @@ import { LAMP_CSS } from './lamp.js'
 import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
-import { installSelfUpdateMock } from './self-update-mock.js'
 import { teamActions } from './team-actions.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
@@ -82,7 +86,7 @@ import { FOLDER_CSS } from './folder-menu.js'
 import { USAGE_CSS } from './usage-page.js'
 import { SCHEDULE_CSS } from './schedules.js'
 import { STORAGE, migrateStorage } from './storage.js'
-import { rememberOpen, takeReopen } from './reopen.js'
+import { armUpdateReopen, endUpdateReopen, ensureBotHome as goToBotHome, watchChatReopen } from './reopen.js'
 import { noteLeft, setUnread, sharedMap, toggleReaction } from './shared-map.js'
 import { freePriority, groupsFor, readMode, surfaceGroups, writeMode } from './surface.js'
 import { addStrings, dateLocale, hostText, installLocale, language, t } from './i18n.js'
@@ -101,6 +105,9 @@ import { noticeApprovals } from './approval-notices.js'
 import { listedOpener } from './open-listed.js'
 import { agentSessionToReuse, singleFlight } from './agent-new.js'
 import { ReadScopeControl } from './read-scope.js'
+import { installSelfUpdate } from './self-update.js'
+import { installPeopleCard } from './bot-settings.js'
+import * as gatedShared from './gated-shared.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -116,7 +123,8 @@ export const omni = Object.freeze({
   // Copy in this plugin's namespace; addStrings brings a plugin's Chinese copy.
   t, addStrings, hostText, language, dateLocale,
   // The Bot surface: what runs while it is up, and what draws in its places.
-  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
+  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools,
+  botSettings, officialInstall, chatSuggestions, registerComposerPack, setCanvasRenderer,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
   // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's
@@ -141,7 +149,31 @@ export const omni = Object.freeze({
 const DSH_SETTINGS = new Set(['general', 'account', 'models', 'agent-presets', 'plugins'])
 
 export function apply(ctx) {
-  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
+  const boot = bootView()
+  if (boot === undefined) return applyOwner(ctx)
+  const lifetime = new AbortController()
+  ctx.effect(() => () => lifetime.abort(), 'ds-bot: gated viewer')
+  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy (gated)')
+  let gated
+  const prepare = async () => {
+    const chunk = await globalThis.__dshChunk('./client.gated.js')
+    gated = chunk.initialize(gatedShared)
+  }
+  startViewer(boot, lifetime.signal, prepare).then(viewer => {
+    if (lifetime.signal.aborted || (ctx.fiber && ctx.fiber.state !== 2) || isRetired()) return
+    const surface = ctx.inject([], scope => {
+      if (viewer.role === 'member' || viewer.role === 'guest') gated.applyMember(scope)
+      else {
+        scope.effect(() => installPeopleCard(gated.PeopleCard), 'ds-bot: gated People card')
+        applyOwner(scope, { gated: true })
+      }
+    })
+    ctx.effect(() => onRetire(() => { void Promise.resolve().then(() => surface.dispose()) }), 'ds-bot: retire gated surface')
+  }, () => {})
+}
+
+function applyOwner(ctx, { gated = false } = {}) {
+  if (!gated) ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
   // A Bot's own browser hold, from the team view, where no browser bridge reports holds.
   const hostHolds = createSource({})
   migrateStorage()
@@ -158,7 +190,8 @@ export function apply(ctx) {
   let seenAt = seenStore.read()
   // `details` is the panel's subject (a Session id); `view` picks details or the
   // subject Bot's browser inside it.
-  const ui = createSource({ details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: unreadStore.read(), reactions: reactionStore.read(), visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null })
+  const emptyUi = { details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: {}, reactions: {}, visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null }
+  const ui = createSource({ ...emptyUi, unread: unreadStore.read(), reactions: reactionStore.read() })
   // The window's width, which the Bot panel's fit rule reads (frame-layout.js). The team's bar
   // sits in the shell's own sidebar, which keeps its own track: no column of ours takes room.
   const frame = createSource({ viewport: typeof window === 'undefined' ? 0 : window.innerWidth })
@@ -264,7 +297,7 @@ export function apply(ctx) {
     const order = ++pulls
     const known = roster.getSnapshot()
     const value = await call('state', { since: known.revision, models: known.modelsKey ?? '', live: liveKey, locale: language(), allowPlace: allowPlace() })
-    if (order < applied) return
+    if (order < applied || (gated && isRetired())) return
     applied = order
     if (value.liveKey !== undefined) liveKey = value.liveKey
     if (value.activity !== undefined) {
@@ -288,6 +321,8 @@ export function apply(ctx) {
     if (value.connectors !== undefined && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live.connectors = value.connectors
     if (value.secretSources !== undefined && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live.secretSources = value.secretSources
     if (value.secretSourcesPresent !== undefined && value.secretSourcesPresent !== current.secretSourcesPresent) live.secretSourcesPresent = value.secretSourcesPresent
+    // The web self-update holds new work while it runs (the host's self-update-hold.js); the composer says so.
+    if (value.updateHold !== undefined && value.updateHold !== (current.updateHold === true)) live.updateHold = value.updateHold
     if (value.capabilityStatuses !== undefined && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live.capabilityStatuses = value.capabilityStatuses
     if (value.learning !== undefined && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live.learning = value.learning
     if (value.learningSettled !== undefined && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live.learningSettled = value.learningSettled
@@ -325,6 +360,24 @@ export function apply(ctx) {
     }
   }
 
+  let selfUpdate
+  const selfUpdateStatusSource = createSource(null)
+  if (gated) ctx.effect(() => onRetire(() => {
+    currentFace = null
+    for (const [source, empty] of [[roster, EMPTY_ROSTER], [ui, emptyUi], [work, { bots: {}, approvals: [] }],
+      ...[hostHolds, activity, live, computer, cards, heldCards, turnClock, memoryNews].map(source => [source, {}])]) {
+      try { source.set(empty) } catch { /* Continue even if a subscriber is being removed. */ }
+    }
+    seenAt = savedPrefs = {}
+    agentSessionCache.clear()
+    for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear()
+    if (canClearDraftInMemory()) {
+      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+        try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
+      }
+    }
+  }), 'ds-bot: clear owner state on retirement')
+
   ctx.effect(() => {
     let stopped = false
     let running = false
@@ -334,6 +387,7 @@ export function apply(ctx) {
       clearTimeout(timer)
       if (running || stopped) return
       running = true
+      void selfUpdate?.refresh()
       try {
         await pull()
         misses = 0
@@ -359,20 +413,26 @@ export function apply(ctx) {
     return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', wake) }
   }, 'ds-bot: roster poll')
 
-  // Plugin updates: every window that opens asks the host once (the host keeps its
-  // answer for a while), again each hour, and every two seconds while installing.
+  // Plugin updates: each window asks the host on open, retries early misses, then
+  // checks hourly and every two seconds while installing.
   const update = createSource({ available: false, phase: 'idle' })
+  const takeUpdateReply = value => update.set(previous => ({ ...value, app: previous.app, hostAnswered: true }))
   let wakeUpdate = () => {}
   ctx.effect(() => {
     let stopped = false
     let timer
+    const firstReplyBackoff = [5000, 15_000, 30_000]
+    let request = 0
     const loop = async () => {
       clearTimeout(timer)
       if (stopped) return
+      const current = ++request
       const value = await call('update-check', { fresh: false }).catch(() => null)
-      if (stopped) return
-      if (value) update.set(previous => ({ ...value, app: previous.app }))
-      timer = setTimeout(loop, value?.phase === 'installing' || value?.dsh?.phase === 'installing' ? 2000 : 60 * 60_000)
+      if (stopped || current !== request) return
+      if (value) takeUpdateReply(value)
+      const retry = update.getSnapshot().hostAnswered ? undefined : firstReplyBackoff.shift()
+      const installing = value?.phase === 'installing' || value?.dsh?.phase === 'installing'
+      timer = setTimeout(loop, installing ? 2000 : retry ?? 60 * 60_000)
     }
     wakeUpdate = loop
     void loop()
@@ -542,31 +602,12 @@ export function apply(ctx) {
     return frameLayout({ viewport: frame.getSnapshot().viewport, sidebarWidth: 0, pref: 'hidden', panel: { view: view ?? state.view, yielded: state.panelYield === true } }).panel === 'folded'
   }
   const yieldBrowser = state => state.panelYield === true || panelFolded('browser')
-  // Bot mode's view must hold a team conversation; an outside Session wears the
-  // Bot skin without one. Runs whenever the surface is (or stays) Bot mode —
-  // including a cold start, where no setSurface call ever fires.
-  const homeToMainBot = () => {
-    const snapshot = roster.getSnapshot()
-    if (!snapshot.ready || !snapshot.mainBotId) return
-    const main = mainView()
-    if (main !== undefined && snapshot.byId[main] === undefined && snapshot.roomsById[main] === undefined) {
-      actions.openSession(snapshot.mainBotId)
-    }
-  }
-  const ensureBotHome = () => {
-    if (roster.getSnapshot().ready) homeToMainBot()
-    else {
-      const off = roster.subscribe(() => {
-        if (!roster.getSnapshot().ready) return
-        off()
-        homeToMainBot()
-      })
-    }
-  }
+  const ensureBotHome = () => goToBotHome({ roster, mainView, openSession: actions.openSession })
   let cliLogin
   const codePanel = codePanelNavigation(ctx.layout)
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
+    selfUpdateStatusSource,
     learningAnswer: (id, approve) => after(call('learning-answer', { id, approve })),
     // The full-pane overlays sit above the conversation, so opening one must dismiss them
     // or the click appears to do nothing.
@@ -879,7 +920,7 @@ export function apply(ctx) {
   }
   actions.checkUpdate = async () => {
     const value = await call('update-check', { fresh: true })
-    update.set(previous => ({ ...value, app: previous.app }))
+    takeUpdateReply(value)
     wakeUpdate()
   }
   actions.freshConversation = botId => after(call('bot-fresh', { id: botId }))
@@ -966,11 +1007,15 @@ export function apply(ctx) {
     })
   }
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, computer, cards, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } })
+  const updateQueue = async (sessionId, itemId, action) => {
+    if (gated) await call('whoami')
+    return (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false }
+  }
   // The queue dock's per-session verbs, supplied the way the shell's own dock
   // injects them (the session facade and the conversation service).
   const queueFace = (sessionId) => ({
     ...face(),
-    updateQueue: async (itemId, action) => (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false },
+    updateQueue: (itemId, action) => updateQueue(sessionId, itemId, action),
     loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment),
   })
   ctx.effect(() => noticeApprovals({
@@ -1027,7 +1072,7 @@ export function apply(ctx) {
   actions.steerQueued = async (sessionId) => {
     const session = ctx.sessions.binding(sessionId)?.session
     if (session === undefined) return
-    if (await steerQueued(session) === 'failed') {
+    if (await steerQueued(session, gated ? (id, action) => updateQueue(sessionId, id, action) : undefined) === 'failed') {
       actions.reportError(new Error(t('Couldn’t steer the queued messages. Try again.')), 'steer-queue')
     }
   }
@@ -1544,24 +1589,13 @@ export function apply(ctx) {
     return () => { offList(); offRoster() }
   }, 'ds-bot: agent surface')
 
-  // The chat on screen, kept for a restart of DSH alone (reopen.js): taken before it is noted
-  // again, opened once the team is known, and noted from then on.
+  // A reload consumes the marker once. A web reconnect can use the same validated open path.
+  let chatReopen
   ctx.effect(() => {
-    let reopening = takeReopen()
-    const note = () => { if (reopening === null) rememberOpen(mainView()) }
-    const reopen = () => {
-      const snapshot = roster.getSnapshot()
-      if (!snapshot.ready) return
-      const id = reopening
-      reopening = null
-      if (isAgentSessionId(id) || snapshot.byId?.[id] !== undefined || snapshot.roomsById?.[id] !== undefined) actions.openSession(id)
-      note()
-    }
-    const offList = ctx.sessions.list.subscribe(note)
-    const offRoster = reopening === null ? () => {} : roster.subscribe(() => { if (reopening !== null) reopen() })
-    if (reopening !== null) reopen()
-    note()
-    return () => { offList(); offRoster() }
+    chatReopen = watchChatReopen({
+      roster, sessions: ctx.sessions.list, mainView, isAgentSession: isAgentSessionId, openSession: actions.openSession,
+    })
+    return () => { chatReopen.dispose(); chatReopen = undefined }
   }, 'ds-bot: keep the open chat across a DSH restart')
 
   ctx.effect(() => {
@@ -1615,8 +1649,26 @@ export function apply(ctx) {
       groups.dispose()
     }
   }, 'ds-bot: surface')
-  // The web self-update preview (issue 1540, step 1): a clickable mock behind `?mock-1540`, so a normal
-  // start of the app is untouched and the owner can open it on a running instance without any
-  // updater code. It goes away with this plugin's context.
-  ctx.effect(() => installSelfUpdateMock(), 'ds-bot: self-update preview (issue 1540)')
+  ctx.effect(() => {
+    const connection = ctx.get('connection')?.state
+    const update = installSelfUpdate({
+      readStatus: actions.selfUpdateStatus,
+      startUpdate: actions.startSelfUpdate,
+      connection,
+      onStatus: selfUpdateStatusSource.set,
+      desktop: window.dshDesktop?.protocolVersion === 1,
+      keepChat(active, restore) {
+        if (active) armUpdateReopen(chatReopen?.getPending() ?? mainView())
+        else {
+          const id = endUpdateReopen(restore)
+          if (id !== null) chatReopen?.setPending(id)
+        }
+      },
+    })
+    selfUpdate = update
+    return () => {
+      update?.dispose()
+      if (selfUpdate === update) selfUpdate = null
+    }
+  }, 'ds-bot: web self-update')
 }

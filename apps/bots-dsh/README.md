@@ -718,6 +718,10 @@ Auto asks before recognized Secret Service reads, monitors and captures.
 
 Remove Proton Pass mappings before rolling back to a Bot team version that predates this provider.
 
+macOS Keychain uses `/usr/bin/security` for generic passwords in the login keychain. Unlock the plugin gate in local Settings › Secrets › Vault and find a single item by its exact service and account. macOS may ask on this Mac. Choose **Allow**, not **Always Allow**. The provider is unavailable on Linux, Windows and Automagik Cloud. Locking the gate invalidates its pending approvals and grants.
+
+Windows Credential Manager opens a local Settings gate and finds one generic credential by its exact target. The user's private card shows the saved target. Settings can show its user name during Find. A lock invalidates pending approvals and grants for this provider. Auto asks before recognized credential commands, including Windows PowerShell credential API calls or opaque invocations, vaultcmd and cmdkey listings or writes. Auto omits recognized credential command details from its diagnostics, audit and subsequent judge requests. A tool-call event emitted by an agent can still contain text the agent supplied. Same-user shell code can access the Windows credential store outside Automagik's gate, and Windows credential-access auditing can record the target name.
+
 Vault mappings live in a separate `vault-sources.json` in the team home, written atomically with file mode 600. Mapped names stay reserved even when the vault plugin is off. When the vault is unlocked, a Bot in scope can ask for approval in its own chat. Each approval covers one attempt at the exact command, in the shell and folder shown on the card. Vault values cannot reach a shell in this version. If a name appears in both files, remove one definition in Settings → Secrets to resolve the conflict. You can remove a mapping there with the vault plugin off. If the mapping file cannot be read, secret use stops until the file is fixed.
 
 Limits:

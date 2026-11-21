@@ -1,12 +1,13 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { cp } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { basename, dirname, join } from 'node:path'
 import * as yaml from 'yaml'
 import { hasReadScopeAdapters, mergePatch, replaceProfilePatch } from '../apps/desktop/src/profile-patch.mjs'
-import { pinStore, profileDirOf, PROFILE, seedProfile } from './lib.mjs'
-import { FOLLOW_STATUS, installedPlugins, markSeed, ownership, packageHash, profileState, compareRelease, validBuild, writeJson, readJson } from './profile-state.mjs'
+import { pinStore, profileDirOf, PROFILE, seedProfile, workspaceFileStat } from './lib.mjs'
+import { ADAPTER, basePlugins, FOLLOW_STATUS, installedPlugins, LEGACY_PLUGINS, markSeed, ownership, packageHash, profileState, compareRelease, signedProfileReason, validBuild, vendorRelease, writeJson, readJson } from './profile-state.mjs'
+import { updateRecovery, updateStoreOf } from './profile-update.mjs'
 import { materializePlugins, PLUGINS, pruneImageArchives } from './plugin-payload.mjs'
 import { mergeImageProfile, readLock } from './profile-lock.mjs'
 import { withVolumeLock } from './volume-lock.mjs'
@@ -20,6 +21,57 @@ function mergeReadScopePatch(source, profile, readScopeAvailable) {
   if (stat !== undefined && !stat.isFile()) throw new Error('Unsupported image profile patch file')
   const merged = mergePatch(yaml, stat === undefined ? '' : readFileSync(file, 'utf8'), shipped, { readScopeOnly: true, readScopeAvailable })
   if (merged !== null) replaceProfilePatch(file, merged, stat === undefined ? undefined : stat.mode & 0o777)
+}
+
+export function mergeImageRows(source, profile) {
+  const name = 'cordis.patch.yml'
+  const shipped = yaml.parse(readFileSync(join(source, name), 'utf8'), { logLevel: 'error' }) ?? []
+  const rows = shipped.flatMap(row => {
+    const insert = row?.insert
+    if (!Array.isArray(insert)) return []
+    const adapter = insert.filter(entry => entry?.name === ADAPTER)
+    return adapter.length ? [{ ...row, insert: adapter }] : []
+  })
+  if (!rows.length) return
+  const file = join(profile, name)
+  const stat = lstatSync(file, { throwIfNoEntry: false })
+  if (stat !== undefined && !stat.isFile()) throw new Error('Unsupported image profile patch file')
+  const fragment = yaml.stringify(rows, { singleQuote: true })
+  const merged = mergePatch(yaml, stat ? readFileSync(file, 'utf8') : '', fragment, { readScopeOnly: false })
+  if (merged !== null) replaceProfilePatch(file, merged, stat === undefined ? undefined : stat.mode & 0o777)
+}
+
+function inputHash(profile, name) {
+  const file = join(profile, name)
+  const stat = lstatSync(file, { throwIfNoEntry: false })
+  if (stat && !stat.isFile()) throw new Error('Unsupported image profile input file')
+  try { return createHash('sha256').update(readFileSync(file)).digest('hex') }
+  catch (error) {
+    if (error.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function profileListing(profile) {
+  const root = requireProfileDirectory(profile)
+  const listing = []
+  function visit(dir = '') {
+    for (const name of readdirSync(join(profile, dir)).sort()) {
+      if (!dir && name === 'node_modules') continue
+      const path = join(dir, name)
+      const stat = lstatSync(join(profile, path))
+      listing.push([path, stat.mode & constants.S_IFMT, stat.mode & 0o7777, stat.size, stat.mtimeMs, stat.ctimeMs])
+      if (stat.isDirectory()) visit(path)
+    }
+  }
+  visit()
+  return JSON.stringify({ mode: root.mode & 0o7777, ctimeMs: root.ctimeMs, entries: listing })
+}
+
+function requireProfileDirectory(path) {
+  const stat = lstatSync(path, { throwIfNoEntry: false })
+  if (!stat?.isDirectory()) throw new Error('Unsupported image profile directory')
+  return stat
 }
 
 /** Copy cache files by rename: an existing store file may be hard-linked by the old profile. */
@@ -68,20 +120,25 @@ function record(dshHome, target, build, result) {
   try {
     writeJson(join(dshHome, FOLLOW_STATUS), { version: 1, imageVersion: build.automagik,
       packageSha256: packageHash(target), result })
-  } catch { /* Live version/ownership checks still make a mismatch unhealthy. */ }
+  } catch { /* The follower still reports its rollback to the entrypoint. */ }
 }
 
 /** Recover the directory-swap window before first-start seeding can mistake it for no profile. */
 function recoverSwap(target, source) {
   const previous = `${target}.image-previous`
   if (!existsSync(previous)) return false
-  if (!ownership(previous, source).managed) throw new Error('Unsupported previous image profile')
+  if (!ownership(previous, source, { updateStore: updateStoreOf(target) }).managed) throw new Error('Unsupported previous image profile')
   if (!existsSync(target)) { renameSync(previous, target); return true }
   // A completed swap already has the new marker and coherent installed versions. An owner
   // edit afterwards wins: never replace it with the previous image's directory.
   const current = ownership(target, source)
   if (!current.managed) return false
-  if (!PLUGINS.every(name => installedPlugins(target)[name] === current.release)) throw new Error('Incomplete image profile swap')
+  const plugins = installedPlugins(target)
+  // Recovery needs the recorded base, even when reporting can use a fallback inventory.
+  const dependencies = current.imagePackage.dependencies ?? {}
+  const base = PLUGINS.filter(name => Object.hasOwn(dependencies, name))
+  if (!LEGACY_PLUGINS.every(name => base.includes(name)) ||
+      !base.every(name => plugins[name] === current.release)) throw new Error('Incomplete image profile swap')
   rmSync(previous, { recursive: true, force: true })
   return false
 }
@@ -92,6 +149,12 @@ export function followImage(options) {
 
 async function followImageUnlocked({ dshHome, source, store, build, dshBin, install = installOffline, now = () => new Date() }) {
   const target = profileDirOf(dshHome)
+  const done = result => {
+    record(dshHome, target, build, result)
+    return { target, seeded: false, result, ...profileState({ profile: target, source, build, dshHome,
+      rolledBack: result === 'update-rolled-back' }) }
+  }
+  if (updateRecovery(target) === 'recover') return done('self-update-unfinished')
   const recovered = recoverSwap(target, source)
   if (!existsSync(target)) {
     if (!validBuild(build)) throw new Error('Invalid image metadata for first seed')
@@ -106,10 +169,6 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     // this process must not stamp an existing profile as its own fresh seed.
   }
   let own = ownership(target, source)
-  const done = result => {
-    record(dshHome, target, build, result)
-    return { target, seeded: false, result, ...profileState({ profile: target, source, build, dshHome }) }
-  }
   if (own.reason === 'legacy-image-seed') {
     try { markSeed(target, own.release, own.packageSha256); own = ownership(target, source) }
     catch { return done('update-rolled-back') }
@@ -118,25 +177,43 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
   if (!own.managed) return done(own.reason)
   if (!validBuild(build)) return done('invalid-image-metadata')
   const plugins = installedPlugins(target)
-  if (PLUGINS.some(name => plugins[name] === null)) return done('missing-plugins')
-  if (PLUGINS.some(name => compareRelease(plugins[name], build.automagik) > 0) || compareRelease(own.release, build.automagik) > 0) return done('newer-than-image')
-  if (PLUGINS.every(name => plugins[name] === build.plugins[name])) {
+  const base = basePlugins(own)
+  const signedReason = signedProfileReason(own, build.automagik, plugins)
+  if (signedReason) return done(signedReason)
+  if (base.some(name => plugins[name] === null)) return done('missing-plugins')
+  if (Object.values(plugins).some(version => version !== null && compareRelease(version, build.automagik) > 0) ||
+      compareRelease(own.release, build.automagik) > 0) return done('newer-than-image')
+  const oldSpecs = own.imagePackage.dependencies ?? {}
+  const previousFiles = base.filter(name => vendorRelease(name, oldSpecs[name])).map(name => basename(oldSpecs[name]))
+  if (!own.signed && base.length === PLUGINS.length && PLUGINS.every(name => plugins[name] === build.plugins[name])) {
     // Repair seeds made by older images too. These inputs must survive every later
     // `dsh plugin install`, which resolves all direct dependencies again.
     // Rebuild the lock too: a stopped seed may have written the archives but not
     // yet their new integrity. The workspace's own lock keeps what the welcome added; one
     // that cannot be read falls back to the image's, so a broken lock never stops the server.
-    try { materializePlugins({ source, target, lock: readLock(target) }) }
-    catch { materializePlugins({ source, target }) }
-    pinStore(target, dshHome)
+    try {
+      workspaceFileStat(join(target, 'pnpm-workspace.yaml'))
+      let lock
+      try { lock = readLock(target) } catch { /* Use the image lock when the workspace lock is unreadable. */ }
+      materializePlugins({ source, target, lock, previousFiles })
+    } catch { return done('update-rolled-back') }
+    try { pinStore(target, dshHome) }
+    catch (error) {
+      if (error.code === 'UNSUPPORTED_PROFILE_WORKSPACE') return done('update-rolled-back')
+      throw error
+    }
     mergeReadScopePatch(source, target, hasReadScopeAdapters(source) && hasReadScopeAdapters(target))
     return done('matching-image')
   }
-  if (compareRelease(build.automagik, own.release) <= 0) return done('update-required')
+  const releaseOrder = compareRelease(build.automagik, own.release)
+  const addsAdapter = !base.includes(ADAPTER) && base.every(name => plugins[name] === own.release)
+  if (releaseOrder < 0 || (releaseOrder === 0 && !own.signed && !addsAdapter)) return done('update-required')
 
   let staging
   const previous = `${target}.image-previous`
   try {
+    const listing = profileListing(target)
+    const inputs = ['cordis.patch.yml', 'pnpm-lock.yaml'].map(name => [name, inputHash(target, name)])
     const extras = Object.keys(readJson(join(target, 'package.json')).dependencies).filter(name => !PLUGINS.includes(name))
     const addedVersions = Object.fromEntries(extras.map(name => [name, readJson(join(target, 'node_modules', name, 'package.json'))?.version]))
     if (Object.values(addedVersions).some(version => typeof version !== 'string')) throw new Error('Missing added plugin')
@@ -144,29 +221,39 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     const backup = join(dshHome, 'backups', stamp)
     mkdirSync(dirname(backup), { recursive: true, mode: 0o700 })
     mkdirSync(backup, { mode: 0o700 })
+    requireProfileDirectory(target)
     await cp(target, join(backup, PROFILE), { recursive: true, verbatimSymlinks: true })
-    writeJson(join(backup, 'update.json'), { version: 1, from: own.release, to: build.automagik })
+    writeJson(join(backup, 'update.json'), { version: 1, from: own.signed ?? own.release, to: build.automagik })
     staging = mkdtempSync(join(dshHome, '.image-update-'))
     const profile = profileDirOf(staging)
     mkdirSync(dirname(profile), { recursive: true })
+    requireProfileDirectory(target)
     await cp(target, profile, { recursive: true, verbatimSymlinks: true })
+    requireProfileDirectory(profile)
+    for (const dir of ['.plugin-manager', '.plugin-manager/logs']) {
+      const stat = lstatSync(join(profile, dir), { throwIfNoEntry: false })
+      if (stat && !stat.isDirectory()) throw new Error('Unsupported image profile plugin manager directory')
+    }
     rmSync(join(profile, 'node_modules'), { recursive: true, force: true })
-    const lock = mergeImageProfile({ source, target: profile })
+    const lock = mergeImageProfile({ source, target: profile, base, signedEntries: own.signedEntries })
     const readScope = hasReadScopeAdapters(source)
     mergeReadScopePatch(source, profile, readScope)
-    materializePlugins({ source, target: profile, lock })
+    mergeImageRows(source, profile)
+    materializePlugins({ source, target: profile, lock, previousFiles })
+    pinStore(profile, dshHome)
     await overlayStore(store, join(dshHome, 'pnpm-store'))
     reuseInstalledIndexes(join(dshHome, 'pnpm-store'))
-    pinStore(profile, dshHome)
     await install({ dshBin, profile, dshHome: staging })
-    if (!PLUGINS.every(name => installedPlugins(profile)[name] === build.plugins[name])) throw new Error('Image plugin install did not converge')
+    const staged = installedPlugins(profile)
+    if (!PLUGINS.every(name => staged[name] === build.plugins[name])) throw new Error('Image plugin install did not converge')
     if (readScope && !hasReadScopeAdapters(profile)) throw new Error('Image profile install lost the file-scope adapters')
     if (!extras.every(name => readJson(join(profile, 'node_modules', name, 'package.json'))?.version === addedVersions[name])) throw new Error('Added plugin did not survive image update')
-    if (packageHash(target) !== own.packageSha256) return done('owner-managed')
     // Keep the materialized inputs on the data volume for subsequent plugin installs; the
     // previous image's are only in the backup.
-    pruneImageArchives(profile)
+    pruneImageArchives(profile, previousFiles)
     markSeed(profile, build.automagik, undefined, readJson(join(source, 'package.json')))
+    if (inputHash(target, 'package.json') !== own.packageSha256) return done('owner-managed')
+    if (inputs.some(([name, hash]) => inputHash(target, name) !== hash) || profileListing(target) !== listing) return done('update-rolled-back')
     renameSync(target, previous)
     try { renameSync(profile, target) }
     catch (error) { renameSync(previous, target); throw error }

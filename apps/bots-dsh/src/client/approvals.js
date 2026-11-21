@@ -3,6 +3,7 @@ import { t } from './i18n.js'
 export function withdrawnText(why) {
   switch (why) {
     case 'task': return t('This step was withdrawn: its task ended')
+    case 'group': return t('This step was withdrawn: its group Session ended')
     default: return ''
   }
 }

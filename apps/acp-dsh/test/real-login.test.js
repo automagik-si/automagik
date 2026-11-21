@@ -24,7 +24,8 @@ async function linkStart(logins, id, cli, env) {
     }
     if (view.status === 'ready') return { status: 'precondition', cause: 'sign-in became ready without a link' }
     if (view.status !== 'waiting') return {
-      status: view.status, cause: view.cause ?? (view.status === 'starting' ? 'no sign-in link in time' : 'sign-in ended before the link'), retry: true,
+      status: view.status, cause: view.cause ?? (view.status === 'starting' ? 'no sign-in link in time' : 'sign-in ended before the link'),
+      retry: view.cause !== 'short sign-in link unsupported',
     }
 
     const validUrl = isLoginUrl(id, view.url)

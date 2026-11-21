@@ -5,10 +5,22 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { READ_SCOPE_CODE } from '../shared/read-scope.js'
 import { PROVIDER_REFUSAL, READ_PATH, scopedArguments } from './read-scope-policy.js'
+import { registerTrustedTool } from './tool-registrations.js'
 
 const providers = new WeakMap()
+const wallFileTools = new WeakMap()
+const memberWalls = new WeakSet()
 const admissions = new WeakMap()
 
+export function isEnforcingMemberWall(fs) {
+  return fs != null && memberWalls.has(Object.getPrototypeOf(fs)) && fs.wall?.members === true && fs.wall?.bots === true
+}
+export function wallFileSystemOf(definition) {
+  try {
+    const fs = wallFileTools.get(definition)?.()
+    if (isEnforcingMemberWall(fs)) return fs
+  } catch {}
+}
 export const scopedProviderOf = definition => providers.get(definition)?.()
 export const admitScopedRead = (exec, folder, definition) => admissions.set(exec.token, { folder, definition })
 
@@ -69,7 +81,8 @@ function scopedProvider(provider, service, folder, name) {
   })
 }
 
-export function registerLocalReadTools(ctx, config, apply, { service, prototypes, verified }) {
+export function registerLocalReadTools(ctx, config, apply, { service, prototypes, verified, memberWall }) {
+  if (memberWall !== undefined && verified) memberWalls.add(memberWall)
   const activeProvider = new AsyncLocalStorage()
   const adapt = target => new Proxy(target, {
     get(target, key) {
@@ -79,7 +92,13 @@ export function registerLocalReadTools(ctx, config, apply, { service, prototypes
       return {
         get: (...args) => target.tools.get(...args),
         register(definition, options) {
-          if (!Object.hasOwn(READ_PATH, definition.name)) return target.tools.register(definition, options)
+          const register = (tool) => {
+            if (memberWall === undefined || !verified) return target.tools.register(tool, options)
+            const dispose = registerTrustedTool(target.tools, tool, options)
+            wallFileTools.set(tool, () => target.fs)
+            return dispose
+          }
+          if (!Object.hasOwn(READ_PATH, definition.name)) return register(definition)
           const providerOf = () => {
             const provider = target[service]
             return verified && provider && prototypes.includes(Object.getPrototypeOf(provider)) ? provider : undefined
@@ -99,7 +118,7 @@ export function registerLocalReadTools(ctx, config, apply, { service, prototypes
             },
           }
           providers.set(wrapped, providerOf)
-          return target.tools.register(wrapped, options)
+          return register(wrapped)
         },
       }
     },

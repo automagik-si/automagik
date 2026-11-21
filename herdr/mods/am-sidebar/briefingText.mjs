@@ -674,9 +674,13 @@ export async function ensureExcluded(folder, io) {
  * or one an older updater installed). When it can't be, the sidebar folder's own path, so the
  * bot still gets its briefing.
  */
-async function entryCommand(appHome, io) {
+async function entryCommand(appHome, io, createEntry) {
   const read = async (path) => { try { return await io.read(path); } catch { return null; } };
   const entry = stableBriefingPath(appHome);
+  if (!createEntry) {
+    if ((await io.read(entry)) === null) throw new Error(`${entry} is missing`);
+    return hookCommand(appHome);
+  }
   if ((await read(entry)) !== null) return hookCommand(appHome);
   const script = briefingPath(appHome);
   const source = await read(`${script.slice(0, script.lastIndexOf("/"))}/${ENTRY_SOURCE}`);
@@ -702,13 +706,13 @@ async function entryCommand(appHome, io) {
  * Resolves { written, warnings } (`written`: the hook entry was added or updated).
  * `lost`: what a failure costs, for the warnings (default: the bot's briefing).
  */
-export async function installHook(botName, folder, appHome, io, { lost = null, amStore = null } = {}) {
+export async function installHook(botName, folder, appHome, io, { lost = null, amStore = null, pack: usePack = true, createEntry = true } = {}) {
   const warnings = [];
   const script = briefingPath(appHome);
   try {
     // A pack installed under the app home keeps today's paths, even when a leftover stable entry
     // is all an older install left: the pack's briefing.mjs is what the hook's runner needs.
-    const pack = (await io.read(script)) !== null;
+    const pack = usePack && (await io.read(script)) !== null;
     const amEntry = pack ? null : amStore ? amPartEntryPath(amStore) : null;
     const amThere = amEntry !== null && (await io.read(amEntry)) !== null;
     if (!pack && !amThere) {
@@ -723,7 +727,7 @@ export async function installHook(botName, folder, appHome, io, { lost = null, a
     const excluded = await ensureExcluded(folder, io);
     if (excluded) warnings.push(excluded);
     const before = await io.read(path);
-    const merged = mergeHook(before, pack ? await entryCommand(appHome, io) : amPartHookCommand(appHome, amStore));
+    const merged = mergeHook(before, pack ? await entryCommand(appHome, io, createEntry) : amPartHookCommand(appHome, amStore));
     if (merged.error) throw new Error(`${path} was left as it is: ${merged.error}.`);
     if (!merged.changed) return { written: false, warnings };
     if (before === null) await io.mkdir(`${folder}/.claude`);

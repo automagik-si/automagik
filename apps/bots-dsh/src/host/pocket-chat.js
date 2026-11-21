@@ -12,11 +12,13 @@
 //   answerer waterfalls (`approval/request`, `user-questions/request`) passes each request on at
 //   once and races the computer's answer against the phone's; the first answer wins, the other
 //   side closes with a receipt (Amendments, "Approvals on the phone, and the race").
-// - Own Bots only: each live Bot's own current chat Session. No group, task or archived Sessions,
-//   no subagents (a Session whose header says `origin: 'subagent'` is refused). A project Bot is
+// - Each live Bot's own current chat Session. No task or archived Sessions, no subagents
+//   (a Session whose header says `origin: 'subagent'` is refused). A project Bot is
 //   served only with the person's yes for its project (`shown`, the home file's `shown[]`, read
 //   by shown.js); global Bots need none. A Bot's project and machine are its home-file folder and
 //   machine; a Bot the home file does not list is global.
+// - Since RFC 0040 the team's eligible group chats are also served, to connections that
+//   negotiate `groups: 1` (pocket-groups.js).
 // - Each listed chat keeps its `dsh:<sessionId>` terminal and Session id and carries the Bot's
 //   registry id beside them (`registryId`, a Herdr `b-...` or null), so Pocket can join the chat
 //   to the registry Bot (#672). Watch, send and the terminal ids are unchanged.
@@ -122,7 +124,7 @@ const TERMINAL_PREFIX = 'dsh:'
 const realTimers = { setInterval, clearInterval }
 
 export const terminalOf = botId => `${TERMINAL_PREFIX}${botId}`
-export const botIdOf = terminal => (typeof terminal === 'string' && terminal.startsWith(TERMINAL_PREFIX) && terminal.length > TERMINAL_PREFIX.length
+export const botIdOf = terminal => (typeof terminal === 'string' && terminal.startsWith(TERMINAL_PREFIX) && terminal.length > TERMINAL_PREFIX.length && !terminal.startsWith('dsh:room:')
   ? terminal.slice(TERMINAL_PREFIX.length)
   : null)
 
@@ -304,11 +306,12 @@ const globalOnly = bot => bot?.project == null
  *   keep?: number, maxFollowed?: number, log?: (...args: any[]) => void, writable?: boolean,
  *   shown?: (bot: { id: string, project?: string | null, machine?: string, placeUnknown?: true }) => boolean, chatOwner?: (sessionId: string) => string | undefined, now?: () => number,
  *   fileUploads?: () => any, attachmentStore?: () => any,
+ *   groups?: import('./pocket-groups.js').GroupSource,
  *   stopOf?: (sessionId: string, turn: number) => string | undefined,
  *   carriesSignInCode?: (text: string) => boolean }} options
  */
 export class DshChatSource {
-  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore }) {
+  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore, groups }) {
     Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, fileUploads, attachmentStore })
     /** Whether a text carries a Claude sign-in code the computer showed (cli-login.js). Never throws. */
     this.carriesSignInCode = (text) => { try { return carriesSignInCode(text) === true } catch { return false } }
@@ -317,6 +320,7 @@ export class DshChatSource {
     this.management = management
     this.schedules = schedules
     this.settings = settings
+    this.groups = groups
     this.chatOwner = chatOwner ?? (sessionId => [...this.entries.values()].find(entry => entry.sessionId === sessionId)?.botId)
     /** botId -> entry */
     this.entries = new Map()
@@ -327,6 +331,8 @@ export class DshChatSource {
     /** sessionId -> request ids already prompted (KEEP_SENT_IDS), the phone's and the log's. */
     this.sent = new Map()
   }
+
+  get groupsOffer() { return this.writable && this.groups?.available() === true }
 
   attachmentServices() {
     if (!this.writable || this.adapter.supportsReceipts !== true) return
@@ -1071,12 +1077,17 @@ function questionAnswer(request, choice, text) {
   return { ok: true, value: { answers: [{ id: question.id, selected }] }, outcome: selected.join(', ') }
 }
 
-/**
- * The team's own live Bots, each with its current own-chat Session (never a group, task or
- * archived one). With a reader (shown.js), a Bot the home file lists with a folder takes that
- * folder as its project and its machine; a Bot it does not list stays global. When the file
- * can't be read, a Bot with a registry id is marked `placeUnknown`, which is never shown.
- */
+// A Bot the home file lists with a folder takes that project and machine. When the file
+// cannot be read, a registry Bot's place stays unknown and it is withheld.
+export function placedBot(_rt, places, bot) {
+  const own = { id: bot.id, name: typeof bot.name === 'string' ? bot.name : '' }
+  if (places === null && isBotId(bot.id)) return { ...own, project: null, placeUnknown: true }
+  const place = places?.get(bot.id)
+  if (place) return { ...own, project: place.folder, ...(place.machine !== undefined ? { machine: place.machine } : {}) }
+  return { ...own, project: typeof bot.project === 'string' ? bot.project : null }
+}
+
+// The team's live Bots with their current own-chat Sessions.
 export function ownBots(rt, reader) {
   return async () => {
     await rt.load?.()
@@ -1085,11 +1096,8 @@ export function ownBots(rt, reader) {
     return bots
       .filter(bot => typeof bot?.id === 'string' && rt.botOf(bot.id) === bot)
       .map((bot) => {
-        const own = { id: bot.id, name: typeof bot.name === 'string' ? bot.name : '', sessionId: rt.chatOf(bot.id) }
-        if (places === null && isBotId(bot.id)) return { ...own, project: null, placeUnknown: true }
-        const place = places?.get(bot.id)
-        if (place) return { ...own, project: place.folder, ...(place.machine !== undefined ? { machine: place.machine } : {}) }
-        return { ...own, project: typeof bot.project === 'string' ? bot.project : null }
+        const { id, name, ...place } = placedBot(rt, places, bot)
+        return { id, name, sessionId: rt.chatOf(id), ...place }
       })
       .filter(bot => typeof bot.sessionId === 'string' && bot.sessionId !== '')
   }
@@ -1157,8 +1165,18 @@ export function install(rt) {
   const controller = ctx.get?.('sessionController') ?? ctx.sessionController
   if (!hasSessionApi(controller) || typeof rt.home !== 'string' || process.platform === 'win32') return
   const writable = hasWriteApi(controller)
+  const lineListeners = new Set()
+  const carriesSignInCode = (text) => {
+    try { return rt.loginTextMatches?.(text) === true } catch { return false }
+  }
+  const log = (...args) => rt.warn?.(...args)
   let source
   if (writable) {
+    rt.roomLineAdded = (room, record) => {
+      for (const listener of lineListeners) {
+        try { listener(room, record) } catch {}
+      }
+    }
     // Ahead of the computer's own answerer, which holds the request until someone answers; both
     // listeners pass every request on at once, so the computer is never held up.
     ctx.on('approval/request', (request, next) => (source ? source.raceApproval(request, next) : next()), { prepend: true })
@@ -1170,27 +1188,36 @@ export function install(rt) {
   }
   ctx.effect(() => {
     let socket
+    let groups
     let stopped = false
     const started = (async () => {
       const { createAdapter } = await import('./pocket-chat-adapter.js')
+      const GroupSource = writable ? (await import('./pocket-groups.js')).GroupSource : undefined
       if (stopped) return
-      const reader = shownReader({ path: rt.registryPath ?? homeRegistryPathOf(), warn: (...args) => rt.warn?.(...args) })
+      const reader = shownReader({ path: rt.registryPath ?? homeRegistryPathOf(), warn: log })
+      if (GroupSource !== undefined) {
+        groups = new GroupSource({ rt, reader, lines: lineListeners, log, carriesSignInCode })
+        if (groups.available()) groups.start()
+      }
       source = new DshChatSource({
         adapter: createAdapter(controller), bots: ownBots(rt, reader), shown: reader.shown, registryIdOf: reader.registryIdOf,
-        log: (...args) => rt.warn?.(...args), writable, chatOwner, management: ownMemory(rt, reader),
+        log, writable, chatOwner, management: ownMemory(rt, reader), groups,
         schedules: ownSchedules(rt, reader), settings: ownSettings(rt, reader),
         fileUploads: () => ctx.get?.('fileUploads'), attachmentStore: () => ctx.get?.('attachments'),
         stopOf: (id, turn) => rt.stopLineOfTurn?.(id, turn),
-        carriesSignInCode: text => rt.loginTextMatches?.(text) === true,
+        carriesSignInCode,
       })
-      socket = await startPocketSocket({ home: rt.home, source, log: (...args) => rt.warn?.(...args) })
-      if (stopped) await socket.close()
-    })().catch(error => rt.warn?.('omni-ui: Pocket chat is off: %s', error?.message ?? error))
+      socket = await startPocketSocket({ home: rt.home, source, log })
+    })().catch((error) => {
+      groups?.close()
+      rt.warn?.('omni-ui: Pocket chat is off: %s', error?.message ?? error)
+    })
     return async () => {
       stopped = true
       await started
       const closing = source
       source = undefined
+      groups?.close()
       closing?.close()
       await socket?.close()
     }

@@ -203,6 +203,237 @@ CLI cannot authenticate, and the script does not mint a login URL.
   kills its whole cgroup, and `setsid` does not escape it. If you must drive it from a script,
   run that script from a transient unit outside `automagik-web.service`.
 
+## In-app updates: the supervisor
+
+The supervisor starts the web profile as its child. On an update request it verifies the signed
+plugin lane, stages the installed Automagik plugin set through DSH, and switches the profile's
+installer files with the child stopped. It then starts the child with the same DSH command.
+The owner starts an update from Settings > About with **Update now**, once in-app updates are turned on
+(below).
+
+### One-time host setup
+
+As the service user, run `install-copy` with the unit's Node executable and DSH home. For example:
+
+```sh
+/usr/bin/node $HOME/.automagik/web/dsh/profiles/web/node_modules/@automagik/bots-dsh/src/host/supervisor/main.js \
+  install-copy --dsh-home $HOME/.automagik/web/dsh --profile web
+```
+
+Use the launcher path printed by `install-copy`. With your usual host administration tools, edit
+the unit's `ExecStart` to run the launcher with the same DSH home and profile. Put the unit's
+existing DSH command and every argument after `--`. In the example, `%h` is systemd's specifier
+for the service user's home folder. Keep the unit's existing environment, user, working directory
+and stop timeout. Apply the unit edit and restart it with your usual tools.
+
+```ini
+ExecStart=%h/.automagik/web/dsh/update/web/supervisor/launcher.sh --dsh-home %h/.automagik/web/dsh --profile web -- /usr/bin/node %h/prod/automagik/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open --host 127.0.0.1 --port 8080
+```
+
+The launcher runs the original DSH command under the first copy that passes its self-check,
+trying `current` before `kept`. If both checks fail, it can start DSH directly when the store has
+no `state.json` or the state records a completed verdict with a valid journal in the expected direction.
+The launcher redacts launch tokens from both output streams during direct startup.
+An unreadable state, unfinished update or `manualRecovery` verdict stops startup and points to
+`state.json`. Direct startup runs without the update capability.
+
+### Turn on in-app updates
+
+In-app updates are off by default. To offer **Update now**, set `selfUpdate: true` in the Bots plugin's
+config through the profile's own `cordis.patch.yml` (see "Configuration layers" below), then restart the
+service with your usual tools. A patch replaces the entry's whole `config`, so repeat the keys the
+plugin's own patch sets (today `updateCheck: false`):
+
+```yaml
+- id: omni-ui
+  config:
+    updateCheck: false
+    selfUpdate: true
+```
+
+**Update now** appears in Settings > About only when all of these hold: the setting is on, the
+instance runs under the supervisor, a check from the last 10 minutes found a signed, checked update,
+and the team lives at the home the service's environment names (`$AUTOMAGIK_BOTS_HOME`, else
+`$AUTOMAGIK_HOME/bots`), because the supervisor snapshots that team file. Only the window that holds
+the team can start it; it is not a Bot tool.
+
+**Force update** runs a fresh signed check. With a capable supervisor, it can reinstall the same
+signed version to replace missing or damaged files inside installed plugin trees whose manifests,
+owner route and update contract still load. The check binds the confirmation to the selected signed
+tarballs. A fresh capable install can reinstall after its first supervisor start. An existing
+installation with an older copy needs two healthy updates that ship capable supervisor copies,
+then a service restart. The executing copy, `current` and any `kept` copy must support reinstall.
+If an already-open older page shows “Cannot update: the update check could not be completed.”
+after Stop and update, reload the page and check again.
+
+What the click does, in order:
+
+1. New work is held: every step of every agent waits before its next model call or tool, and the
+   composer says an update is running. A message sent meanwhile waits and is not lost.
+2. The team's running turns (Bot chats and groups, tasks, DSH bots, automation runs) are noted as
+   stopped by an update and stopped at once. A tool call already running finishes its current step.
+3. The plugin writes `request.json` in the store. The supervisor takes it within a second.
+4. The held work goes on after the supervisor's verdict: on `healthy` in the new version, on
+   `rolledBack` in the restored version, and `notUpdated` in the unchanged one (in the same DSH
+   process when the child was never stopped). The
+   stopped turns are picked up with a note that an update stopped them, and an update's stop does not
+   count toward the daily limit of restart resumes. On `manualRecovery` the work stays held and its
+   notes stay on disk until the instance is recovered.
+
+The hold also opens, with a warning in the log, when the supervisor does not answer the request
+within about a minute (`request-unanswered`). If a running phase records no progress for 20 minutes,
+the plugin warns and keeps work held. Restart the service to recover a supervisor that has stopped
+progressing. A fresh boot with no live run of its own can pick up the saved work.
+
+### Store and state
+
+The store is `$DSH_HOME/update/web/`, beside the live profile at `$DSH_HOME/profiles/web/`.
+Both directories need to be on the same filesystem. A profile `.npmrc` can name the package
+registry with `registry=`. Additional settings in that file make the update check refuse the
+profile. The supervisor reads the pnpm configuration before any package-manager probe and
+runs the registry and write-path probes in staging. The check refuses a different effective
+registry reported by the DSH plugin manager. The lockfile, modules and virtual store must stay
+inside staging, and a shared store must be outside the live profile. The check rejects pnpm
+configuration dependencies, configured hooks and a global virtual store. Staging and relinking
+skip pnpm hooks and lifecycle scripts, and relinking and its compatibility repair run offline.
+If the DSH profile lock times out, confirm its writer has exited before removing `package.json.lock`.
+
+| Path in the store | Contents |
+|---|---|
+| `supervisor/launcher.sh`, `supervisor/current/`, `supervisor/kept/` | The fixed launcher and the two self-checked code copies. If a rotation displaces the executing copy, it stays in `supervisor/running/` until that supervisor exits. |
+| `update.lock`, `supervisor.json` | Supervisor ownership, the current boot ID and the current or most recent run ID |
+| `listener.json` | The current boot's listener eligibility, unknown until DSH announces and the supervisor verifies it |
+| `request.json`, `check.json` | A pending one-use request and the most recent Settings check |
+| `state.json`, `current.json` | Update progress and verdict, and the live version, kept version and last accepted lane sequence |
+| `reinstall-refusal.json` | The precise cause of a reinstall refusal before staging, matched to its run |
+| `stage-<runId>/`, `versions/<version>/` | Temporary install and source files, and the previous installer files and data snapshot |
+| `reinstall/<runId>/`, `reinstall-trash/<runId>/` | Same-version recovery files and backups moved aside for removal after a durable verdict |
+| `rollback-data/<runId>/` | The kept team snapshot and any trial team replaced by rollback |
+
+Read `state.json` with `jq . "$DSH_HOME/update/web/state.json"` or a text viewer. Its
+`phase`, `reason`, `from`, `to` and `updatedAt` show the last step and verdict.
+`requestId` identifies the request, and `runId` and `bootId` link the verdict to
+`supervisor.json`. During a switch, `journal.keep` identifies the recovery directory,
+`journal.done` lists completed steps and `journal.pending` names the step that may have been
+interrupted. `journal.commitCurrent` records that the candidate passed health and recovery can
+finish committing `current.json`. `healthy` means the child passed these checks while work was held.
+
+1. The child announces its listener and local sign-in returns a browser session cookie. The
+   supervisor exchanges the in-memory launch token over direct HTTP and uses the cookie for the
+   remaining checks. It uses the local listener's host and port, never follows redirects, and
+   records only failure codes. With no public URL, the announcement must match the command. With
+   `--public-url`, the supervisor needs a fixed port and the local listener must return DSH's
+   unauthenticated response before it receives credentials. The response identifies DSH, while the
+   port still comes from the command. `--tls-cert` and `--port 0 --public-url` give
+   `listener-unknown` before the click.
+2. The owner's status route confirms the expected plugin versions are active and admission is
+   closed for this run. The version comes from the manifest resolved by the loader entry when it
+   first reports active. Avoid changing plugins through DSH's own plugin manager during the trial.
+3. The roster's health form checks the saved team without bootstrapping a new Bot, opening a
+   Session or making a model call. If a team was snapshotted, the file on disk must have an integer
+   revision at least as high as the snapshot's. The normal startup migration may update the team
+   format and retitle existing Sessions.
+4. The authenticated page contains the frontend mount element and inline module loader. Health
+   checks the frontend module, the blocking bootstrap scripts listed in the DSH boot graph, and
+   the application batch containing Bots. The JavaScript responses must complete and contain data.
+
+The supervisor allows up to 60 seconds for sign-in and plugin status, then a further 60 seconds
+for the roster and page. The previous version also passes health before it releases stopped work
+after a failed relink or a refused switch. An older live Bots release without the update contract
+gives work back with `notUpdated` and `profile-invalid` before any download. Upgrade that release
+once by hand. A verdict that cannot be written durably makes the supervisor exit with an error.
+The service manager stops and restarts the unit, and the next supervised start uses the last
+durable state. If the directory fsync fails immediately after the verdict file is renamed, a
+power loss can erase a verdict that the child already saw. The next start resumes from the journal.
+
+### Automatic rollback
+
+If the candidate fails health, the supervisor records `rollingBack` and stops the trial. It checks
+every reverse move before touching the profile. If a candidate commit was interrupted, it restores
+the previous `current.json`, then reverses the journaled renames and verifies the restored profile.
+It uses the kept module tree, lockfile and archives. This needs no external connection, registry or
+dependency store. If the service stops during trial health, the next start checks the candidate
+again using the already linked profile if its saved team and installer inputs match. The supervisor
+checks installer inputs again before committing. With a legacy journal missing the original plugin
+versions, the supervisor verifies the manifest and lockfile by content and checks the active
+plugins without version pins. A previous version without the update contract cannot be started
+for rollback health.
+
+Rollback restores a missing team file or a replacement that fails the snapshot revision check.
+Malformed data without evidence of loss is left in place. For a team that passes the revision
+check, a format newer than the previous version can read can require restoration.
+The supervisor takes the team's writer lock and checks recorded hashes before writing. The original snapshot and any
+replaced trial team are retained in `rollback-data/<runId>/`, even after a later update. If a team
+change was saved during the trial window and the snapshot replaced the team, the trial copy
+contains that change. Keep the directory as long as you need those files. Sessions, memory,
+settings and keys remain available.
+
+The previous child boots with work held and must pass the same health checks. A successful
+`rolledBack` verdict records the failed trial check, trial times and team restore outcome. The
+previous version and release sequence remain current. Interrupted launches of the previous child
+have a budget of three attempts. An I/O error during a reverse move leaves rollback in progress
+for the next supervised start to replay. A second such error or an observed previous-child failure
+ends in `manualRecovery`,
+with held work still on disk. The supervisor records the last step and the locations of
+`node_modules/` and `pnpm-lock.yaml` and stops.
+
+### Recover an unchanged or restored profile after `manualRecovery`
+
+Stop the unit with your usual host tools and confirm the supervisor and DSH have exited.
+If there is no journal, no installer-owned files moved. If the journal has `undo: true`, an empty
+`done` list and `pending: null`, the original files are already in the live profile. Inspect the
+logs and `rollback.previousFailed` in `state.json`. Check the team snapshot and any pending restore
+as described below. After correcting the failure, set `state.json` aside, start the unit and verify
+the previous profile answers locally.
+
+### Rename back after `manualRecovery`
+
+Stop the unit and confirm DSH and the supervisor have exited before moving files. Read
+`state.json` for `rollback.step`, `rollback.location`, and the folders named by `journal.keep` and
+`stage-<runId>`. Use `done`, `pending` and the actual files to identify each original if the
+journal was interrupted. If the kept originals are missing, use the previous host backup.
+
+```sh
+jq '{phase, reason, rollback, keep: .journal.keep, done: .journal.done, pending: .journal.pending}' "$DSH_HOME/update/web/state.json"
+```
+
+If rollback stopped at `manifest` with no reverse renames, the candidate tree is still live.
+Reconcile the trial-time plugin or installer-input change before restoring the old lockfile and
+modules. Use DSH's plugin manager for the plugin change. Compare against `stage-<runId>/source`
+for the source manifest and installer inputs before following the steps below.
+
+1. For each of `node_modules/` and `pnpm-lock.yaml`, leave an already restored original in place.
+   If the candidate occupies its live path, set that candidate file or tree aside. Rename the kept
+   original back into the profile.
+2. Rename the kept `vendor/*.tgz` into the live profile's `vendor/automagik-update/`. Leave the
+   archives referenced by the original lockfile that are already in place.
+3. Use the journaled `stage-<runId>/source/rollback.json` if available and its digest matches the
+   rollback record. Otherwise merge only the lane dependency keys in kept `entries.json` and
+   verify the result against `stage-<runId>/source/package.json`. Preserve DSH's profile metadata.
+   Write the verified manifest through a temporary sibling and rename it into place.
+4. If `journal.restore` exists and `journal.restored` is absent, verify that the live team's SHA-256
+   equals `trialHash` and the snapshot's SHA-256 equals `snapshotHash`. A null `trialHash` means the
+   recorded trial file was absent. Preserve any trial bytes before copying the matching snapshot
+   to the recorded team path. If the hashes differ or a restore already completed, leave the
+   current team in place and retain the saved copies.
+5. If `current.json` names the trial, restore the recorded `priorCurrent` or remove the file if
+   the record says it was originally absent. For a same-version reinstall, use the journal's
+   `commitCurrent` or rollback's `restoreCurrent` flag because the version can identify both trees. Use the previous backup if the journal lacks this
+   information. Set `state.json` aside with the trial files, start the unit and verify the
+   previous version locally.
+
+A 5b supervisor copy refuses an in-progress delivery 6 rollback. The fixed launcher allows its
+bare fallback after a durable `rolledBack` verdict when both copies are broken. For an unfinished
+rollback, restore a working delivery 6 supervisor copy or follow the manual steps above.
+
+An unfinished reinstall needs a reinstall-capable supervisor for automatic recovery. If both
+supervisor copies fail self-check, the fixed launcher can start DSH directly after a completed
+`healthy`, `rolledBack` or `notUpdated` reinstall. For `switching` or `rollingBack`, restore a working
+capable copy and restart. For `manualRecovery`, follow the manual steps above. A backup left in
+`reinstall/<runId>/` may be needed for recovery, including when its journal has been set aside.
+`reinstall-trash/` holds backups already released by a durable verdict and is cleared on a later
+supervised start if cleanup was interrupted.
+
 ## Rollback
 
 Rollback is automatic. On any failure after the service was stopped the script:

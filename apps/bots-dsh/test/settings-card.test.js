@@ -219,3 +219,8 @@ test('a refused or unfinished call draws no proposal; a Bot gone from the team s
   states = ['open', '']
   assert.match(textOf(card.ProposalCard({ proposal: { bot: 'gone', change: { role: 'x' } }, roster, actions })), /no longer on the team/)
 })
+
+test('the dialog-only Accounts and Automations pages are unknown to Settings cards', () => {
+  assert.equal(card.settingsTarget({ page: 'accounts' }, roster).known, false)
+  assert.equal(card.settingsTarget({ page: 'automations' }, roster).known, false)
+})

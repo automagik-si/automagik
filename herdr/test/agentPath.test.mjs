@@ -91,6 +91,21 @@ test("node already on the worker's PATH: PATH unchanged, nothing said", (t) => {
   assert.equal(pathOf(got.path), path);
 });
 
+test("a FIFO named like the agent is never opened for its first line", (t) => {
+  const s = scratch(t);
+  const fifo = join(s.empty, "claude");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  chmodSync(fifo, 0o755);
+  const module = new URL("../mods/am-sidebar/agentPath.mjs", import.meta.url).href;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import { interpreterPath } from ${JSON.stringify(module)};
+    console.log(JSON.stringify(interpreterPath("claude", process.argv[1])));
+  `, s.empty], { timeout: 5000, encoding: "utf8", env: { ...process.env, ...s.env } });
+  assert.ifError(r.error);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { path: s.empty, note: null });
+});
+
 test("node missing, codex reached through a link to nvm's bin: nvm's bin goes first, nothing removed", (t) => {
   const s = scratch(t);
   const prefix = npmPrefix(s.root);
@@ -252,6 +267,10 @@ function codexProject(t, extra = [], { terminals = [], env: more = {} } = {}) {
   mkdirSync(bin);
   symlinkSync(join(prefix, "bin/codex"), join(bin, "codex"));
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+  // The test's own herdr-app has no window, so a Start places the bot as on a machine without one.
+  const appLog = join(s.root, "herdr-app.log");
+  writeFileSync(appLog, "");
+  exe(join(bin, "herdr-app"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${appLog}"\necho "herdr-app: no window is open" >&2\nexit 1\n`);
   symlinkSync(execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(), join(bin, "git"));
   const project = join(s.root, "proj");
   mkdirSync(join(project, ".herdr"), { recursive: true });
@@ -278,7 +297,8 @@ function codexProject(t, extra = [], { terminals = [], env: more = {} } = {}) {
   Object.assign(env, { ...core.env });
   const cli = (...args) => spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
   const run = () => readJsonLines(log).find((c) => c[0] === "run");
-  return { s, prefix, path, app, cli, run };
+  const appCalls = () => readFileSync(appLog, "utf8").split("\n").filter(Boolean);
+  return { s, prefix, path, app, cli, run, appCalls };
 }
 
 test("worker CLI: a codex the pane reaches without node starts under env PATH=<nvm bin>:<pane PATH>, and says so", (t) => {
@@ -291,7 +311,7 @@ test("worker CLI: a codex the pane reaches without node starts under env PATH=<n
 });
 
 test("start CLI (#56): a codex bot whose node is only in nvm starts under env PATH=<nvm bin>:<PATH>, and the command runs", (t) => {
-  const { prefix, path, app, cli, run: runCall } = codexProject(t, [{ id: "b-dddddddddd", name: "Maint", kind: "member", agent: "codex" }]);
+  const { prefix, path, app, cli, run: runCall, appCalls } = codexProject(t, [{ id: "b-dddddddddd", name: "Maint", kind: "member", agent: "codex" }]);
   const r = cli("start", "Maint", "--json");
   assert.equal(r.status, 0, r.stderr);
   const run = runCall();
@@ -306,6 +326,8 @@ test("start CLI (#56): a codex bot whose node is only in nvm starts under env PA
   assert.equal(bare.status, 127, bare.stderr);
   const seat = spawnSync(argv[0], argv.slice(1), { env: {}, encoding: "utf8" });
   assert.equal(seat.status, 0, seat.stderr);
+  assert.ok(appCalls().includes("ls"), "the start asked the test's own herdr-app for the window");
+  assert.ok(appCalls().every((c) => c === "ls"), `only ls: ${appCalls()}`);
 });
 
 test("restart CLI (#56): restarting a codex bot whose node is only in nvm runs under env PATH=<nvm bin>:<PATH>, not into 127", (t) => {

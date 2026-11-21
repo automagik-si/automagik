@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
+import { allowlist, code, fixture, member, owners, stranger, workspace } from './caller-fixture.js'
 
 const TEAM = {
   version: 1,
@@ -152,4 +154,62 @@ test('a Bot whose greeting is still held gets no notice before its model pick', 
   assert.equal((await call('update-bot', { id: 'b3', instructions: 'Ship the fix' })).ok, true)
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.equal(sent.length, 0)
+})
+
+test('U1 only the owner settings write can change people, and write failures leave access intact', async t => {
+  const f = fixture(t)
+  await f.start()
+  assert.ok((await f.call('people-seen')).value.some(row => row.subject === member.person.subject))
+  const before = Object.keys(f.rt.state.bots)
+  for (const [endpoint, payload] of [
+    ['update-bot', { id: 'b', name: 'Different', people: allowlist }],
+    ['create-bot', { name: 'Injected', people: allowlist }],
+    ['duplicate-bot', { id: 'b', people: allowlist }],
+  ]) {
+    const result = await f.call(endpoint, payload)
+    assert.equal(result.error.code, 'bot/refused', endpoint)
+    assert.deepEqual(Object.keys(f.rt.state.bots), before)
+    assert.equal(f.rt.botOf('b').name, 'Writer')
+  }
+  const tool = f.rt.teamTools.find(item => item.name === 'update_bot')
+  await assert.rejects(tool.execute({ people: allowlist, name: 'Injected' }, { agent: { id: 'b' } }), code('refused'))
+  await assert.rejects(f.rt.updateBot('b', { name: 'Injected', people: workspace }, 'a'), code('refused'))
+  const result = await f.call('update-bot', { id: 'b', people: { ...workspace, allow: allowlist.allow } })
+  assert.equal(result.ok, true)
+  await f.finishSwitch()
+  assert.deepEqual(f.saved().bots.b.people, result.value.people)
+  const duplicate = await f.call('duplicate-bot', { id: 'b' })
+  assert.equal(duplicate.ok, true)
+  assert.equal(f.saved().bots[duplicate.value.id].people, undefined)
+  assert.equal((await f.call('set-main', { id: 'b', main: true })).ok, true)
+  assert.deepEqual(f.saved().bots.b.people, allowlist)
+  assert.equal(f.rt.callerBots(stranger).length, 0)
+  const losses = []
+  const unsubscribe = f.rt.onAccessLoss(id => losses.push(id))
+  t.mock.method(f.rt, 'saveCopy', () => Promise.reject(new Error('disk failure')))
+  await assert.rejects(f.rt.setPeople('b', owners), /disk failure/)
+  assert.deepEqual(f.rt.botOf('b').people, allowlist)
+  assert.deepEqual(f.rt.callerBots(member).map(bot => bot.id), ['b'])
+  assert.deepEqual(losses, [])
+  unsubscribe()
+})
+
+test('U1 the off-mode agent route rejects a people argument at the schema boundary', async t => {
+  const f = fixture(t, { service: null })
+  await f.start()
+  const token = 'fixture-agent-token'
+  writeFileSync(join(f.rt.home, 'agent-tokens.json'), JSON.stringify([{
+    id: 'fixture', hash: createHash('sha256').update(token).digest('hex'), name: 'Test agent',
+  }]))
+  const request = new Request('http://localhost/api/omni-mcp', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + token, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: 'update_bot', arguments: { id: 'b', people: allowlist },
+    } }),
+  })
+  const response = await f.routes.get('/api/omni-mcp').fetch(request)
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).error.code, -32602)
+  assert.equal(f.rt.botOf('b').people, undefined)
 })

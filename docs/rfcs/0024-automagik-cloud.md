@@ -1447,6 +1447,14 @@ keep their meaning.
     off on an OS until it exists there. The alternative is the owner's written acceptance of the
     risk for that OS ((d)).
 18. **Until the three safeguards hold.** Answered in Decided 26.
+19. **The Cloud rail on another site than its workspaces.** Browser acceptance on
+    `a8d663c1e` (#1373, 2026-11-20) saw the rail's direct 303 land on a cross-site 401. In
+    multiuser mode, RFC 0038 delivery 5d now returns a 200 workspace document from
+    `POST /_gate/cloud/open`. Its same-origin POST to `/_gate/cloud/open/finish` can carry the
+    previous Lax cookie, retire that family, and issue the new cookie with a 303 to `/`.
+    Verify the final cross-site landing in a browser before Cloud ships. The two options
+    remain to serve the rail on the same site as the workspaces or add a signed exception
+    in `trustedRequest` for the Cloud landing, like the Access exception (#1082).
 
 ## Tracking
 

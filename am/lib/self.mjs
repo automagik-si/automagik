@@ -25,15 +25,18 @@
 // file:// one only, AM_TRUSTED_KEYS (am-keys.json's shape, a test's own keys): never honoured for
 // a GitHub URL. Apache-2.0.
 
+import * as fs from "node:fs";
+import * as paths from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, openSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync,
-  statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, openSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync,
+  rmdirSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // removePath: rmSync that unlinks a link (live or dangling) and never follows it (#550).
 import { removePath } from "../layoutSafe.mjs";
+import { classify, installState, liveInstallLock, packEntries as packEntriesAt, PENDING, recordAt, sameRealPath, storeProblem } from "../amInstallState.js";
 import { hookDoctorLine } from "../briefingText.mjs";
 import { LANE_RELEASE, PART, POINTER, RELEASES, REPOSITORY, SIGNATURE, VERSION, sequenceOf, verifyPointer } from "./lane.mjs";
 
@@ -94,52 +97,153 @@ export async function readLane({ env = process.env, keys = ownKeys(), fetch } = 
 /** The record (record.json), with empty slots when there is none. */
 export function readRecord(store) {
   const r = readJson(join(store, "record.json"));
-  return { current: r?.current ?? null, previous: r?.previous ?? null, seen: Number.isSafeInteger(r?.seen) ? r.seen : null };
+  return { current: r?.current ?? null, previous: r?.previous ?? null, seen: Number.isSafeInteger(r?.seen) ? r.seen : null, entry: r?.entry };
 }
 
 function writeRecord(store, record) {
+  writeRecordText(store, `${JSON.stringify({ schemaVersion: 1, id: PART, ...record }, null, 2)}\n`);
+}
+
+function writeRecordText(store, text) {
   const tmp = join(store, `.record-${randomBytes(4).toString("hex")}`);
-  writeFileSync(tmp, `${JSON.stringify({ schemaVersion: 1, id: PART, ...record }, null, 2)}\n`);
-  renameSync(tmp, join(store, "record.json"));
+  try {
+    writeFileSync(tmp, text);
+    renameSync(tmp, join(store, "record.json"));
+  } finally { rmSync(tmp, { force: true }); }
 }
 
 const LOCK = ".lock";
-const LOCK_STALE_MS = 10 * 60_000;
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+
+function requireStore(store, linked) {
+  let checked = store;
+  if (!linked) {
+    // Local launchers keep their configured paths, even when the am home lives elsewhere.
+    const parts = dirname(store);
+    const home = dirname(parts);
+    try {
+      const st = lstatSync(home);
+      if (st.uid !== process.getuid()) throw signedError("broken", `${home}: belongs to uid ${st.uid}, expected ${process.getuid()}`);
+      checked = join(realpathSync(home), basename(parts), basename(store));
+    } catch (e) { if (e.code !== "ENOENT") throw e; }
+  }
+  const problem = storeProblem(checked, fs, paths);
+  if (problem) throw signedError("broken", `${problem.path}: ${problem.why}`);
+}
+
+function processStart(pid) {
+  if (process.platform === "linux") {
+    const stat = readText(`/proc/${pid}/stat`);
+    // The command name can contain spaces and parentheses. Field 3 follows the last ')'.
+    return stat?.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  }
+  try {
+    return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, timeout: 2_000, killSignal: "SIGKILL" }).trim();
+  } catch { return null; }
+}
+
+/** Move a complete owner directory into place so other reclaimers never see a new empty one. */
+function lockReclaim(reclaim, busy) {
+  try {
+    const st = lstatSync(reclaim);
+    if (!st.isDirectory() || st.uid !== process.getuid()) throw busy();
+    const names = readdirSync(reclaim);
+    const owner = names.length === 1 && /^owner-[a-z0-9]+\.json$/.test(names[0]) ? join(reclaim, names[0]) : null;
+    if (names.length && !owner) throw busy();
+    const info = owner ? JSON.parse(readFileSync(owner, "utf8")) : null;
+    if (owner && (!Number.isSafeInteger(info?.pid) || info.pid <= 0)) throw busy();
+    // A live reclaimer may be paused between checking the stale inode and renaming it.
+    const held = liveInstallLock(info, st.mtimeMs, Infinity);
+    const start = held?.pid && typeof info.start === "string" && info.start ? processStart(held.pid) : null;
+    if (held && (!start || start === info.start)) throw busy(held.pid);
+    // The filename belongs to this owner only. Removing it cannot remove a newer owner.
+    if (owner) rmSync(owner, { force: true });
+  } catch (e) { if (e.code !== "ENOENT") throw e; }
+  const start = processStart(process.pid);
+  if (!start) throw new Error("cannot identify the am process reclaiming the store lock");
+  const token = JSON.stringify({ pid: process.pid, start });
+  const staged = mkdtempSync(`${reclaim}-`);
+  const ownerName = `owner-${randomBytes(8).toString("hex")}.json`;
+  const owner = join(reclaim, ownerName);
+  try {
+    writeFileSync(join(staged, ownerName), token);
+    renameSync(staged, reclaim);
+  } catch (e) {
+    if (["ENOTEMPTY", "EEXIST"].includes(e.code)) throw busy();
+    throw e;
+  } finally { rmSync(staged, { recursive: true, force: true }); }
+  const held = () => readText(owner) === token;
+  return { held, release() {
+    if (!held()) return;
+    rmSync(owner, { force: true });
+    try { rmdirSync(reclaim); } catch (e) { if (!["ENOTEMPTY", "ENOENT", "EEXIST"].includes(e.code)) throw e; }
+  } };
+}
 
 /**
  * Takes the store's lock (an exclusive create), so one am installs, updates, rolls back or
  * uninstalls itself at a time; returns its release. A lock whose process is gone, or that is over
  * ten minutes old, is taken over; a live one is refused.
  */
-export function lockStore(store) {
+export function lockStore(store, { linked = false } = {}) {
+  requireStore(store, linked);
   mkdirSync(store, { recursive: true });
+  requireStore(store, linked);
   const path = join(store, LOCK);
-  for (let tries = 0; tries < 2; tries++) {
-    try {
-      const fd = openSync(path, "wx");
-      try { writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() })); } finally { closeSync(fd); }
-      return () => rmSync(path, { force: true });
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      const held = readJson(path);
-      if (held && Number.isSafeInteger(held.pid) && alive(held.pid) && Date.now() - (held.at ?? 0) < LOCK_STALE_MS) {
-        throw new Error(`another am (pid ${held.pid}) is installing or updating am: try again once it is done`);
-      }
-      removePath(path, { force: true });
+  const token = JSON.stringify({ pid: process.pid, at: Date.now(), token: randomBytes(8).toString("hex") });
+  const busy = (pid) => Object.assign(new Error(`another am${pid ? ` (pid ${pid})` : ""} is installing or updating am: try again once it is done`), { state: "busy" });
+  const reclaim = `${path}-reclaim`;
+  for (let tries = 0; tries < 3; tries++) {
+    let fd;
+    try { fd = openSync(path, "wx"); } catch (e) { if (e.code !== "EEXIST") throw e; }
+    if (fd !== undefined) {
+      try { writeSync(fd, token); } finally { closeSync(fd); }
+      return () => { if (readText(path) === token) rmSync(path, { force: true }); };
     }
+    let before;
+    try { before = lstatSync(path); } catch (e) { if (e.code === "ENOENT") continue; throw e; }
+    const held = liveInstallLock(readJson(path), before.mtimeMs);
+    if (held) throw busy(held.pid);
+    // Only one reclaimer moves the stale inode. A new lock created in its place is left alone.
+    const reclaimer = lockReclaim(reclaim, busy);
+    try {
+      const found = lstatSync(path);
+      if (found.ino !== before.ino || found.dev !== before.dev || found.mtimeMs !== before.mtimeMs) continue;
+      if (!reclaimer.held()) throw busy();
+      const aside = `${path}-${randomBytes(8).toString("hex")}`;
+      renameSync(path, aside);
+      removePath(aside, { force: true });
+    } catch (e) { if (e.code !== "ENOENT") throw e; }
+    finally { reclaimer.release(); }
   }
-  throw new Error("could not take am's store lock");
+  throw busy();
 }
 
 const sequenceOrNull = (version) => (VERSION.test(version) ? sequenceOf(version) : null);
 const dirOf = (entry) => entry?.dir ?? entry?.version;
 
+function lockLocalStore(store, env) {
+  const release = lockStore(store);
+  const marker = join(store, PENDING);
+  try {
+    if (exists(marker)) {
+      const record = recordAt(join(store, "record.json"), fs);
+      if (record.state !== "ok") throw new Error("invalid install record");
+      verifyLauncher(store, env, record.current);
+      rmSync(marker);
+    }
+    return release;
+  } catch {
+    release();
+    throw new Error("am launcher verification pending. Retry `am machines install --machine <this machine>` from the controller.");
+  }
+}
+
 /** Points the link `name` in `store` at `target` (a folder name in it) by one rename. */
 function swapLink(store, name, target) {
   const tmp = join(store, `.${name}-${randomBytes(4).toString("hex")}`);
   symlinkSync(target, tmp);
-  renameSync(tmp, join(store, name));
+  try { renameSync(tmp, join(store, name)); } finally { removePath(tmp, { force: true }); }
 }
 
 /** What is wrong with an am extract in `dir`: empty when it is one, of `version` when given. */
@@ -160,7 +264,8 @@ export function extractProblems(dir, version) {
  * Installs the am extract in `dir` as current, holding the store's lock (placeExtract).
  */
 export function installExtract(dir, options = {}) {
-  const release = lockStore(storeOf(options.env ?? process.env));
+  const env = options.env ?? process.env;
+  const release = lockLocalStore(storeOf(env), env);
   try { return placeExtract(dir, options); } finally { release(); }
 }
 
@@ -205,28 +310,28 @@ function placeExtract(dir, { env = process.env, sequence = null, signed = false,
   else removePath(join(store, "previous"), { force: true });
   swapLink(store, "current", name);
   const seen = [record.seen, seq].filter(Number.isSafeInteger);
-  writeRecord(store, { current: entry, previous, seen: seen.length ? Math.max(...seen) : null });
+  writeRecord(store, { current: entry, previous, seen: seen.length ? Math.max(...seen) : null, entry: record.entry });
   prune(store);
-  return { version, from, links: linkCommands(env), entry: writeEntry(env) };
+  return { version, from, links: linkCommands(env), entry: record.entry === false ? null : writeEntry(env) };
 }
 
 /** Removes every folder in the store but current's and previous's (and stray staging). */
-export function prune(store) {
-  const keep = new Set(["record.json", "current", "previous", LOCK]);
+export function prune(store, { linked = false } = {}) {
+  requireStore(store, linked);
+  const keep = new Set(["record.json", "current", "previous", LOCK, `${LOCK}-reclaim`, PENDING]);
   for (const name of ["current", "previous"]) { const to = linkOf(join(store, name)); if (to) keep.add(to); }
   for (const name of readdirSync(store)) if (!keep.has(name)) removePath(join(store, name), { recursive: true, force: true });
 }
 
 /** The pack's CLI entries a ~/.local/bin/automagik-herdr link may point at (install.sh's). */
-const packEntries = (env) => ["am-sidebar", "spaces-agents"].flatMap((m) =>
-  ["automagik-herdr", "automagik-herdr.mjs"].map((f) => join(appHomeOf(env), "mods", m, "bin", f)));
+const packEntries = (env) => packEntriesAt(appHomeOf(env), join);
 
 /**
  * Links ~/.local/bin/am and ~/.local/bin/automagik-herdr to the current am. Either is taken only
  * when it is missing, already am's, or one of the pack's own links (install.sh links the pack's
  * CLI under both names); a file there, or a link elsewhere, is left alone and reported. Returns one line per link.
  */
-export function linkCommands(env = process.env) {
+export function linkCommands(env = process.env, linked = () => {}) {
   const bin = binDirOf(env);
   const store = storeOf(env);
   mkdirSync(bin, { recursive: true });
@@ -236,13 +341,16 @@ export function linkCommands(env = process.env) {
     const link = join(bin, name);
     const want = join(store, "current", "bin", name);
     const to = linkOf(link);
-    if (to !== null && absolute(link, to) === want) return { link, state: "linked" };
+    if (to !== null && absolute(link, to) === want) {
+      try { if (sameRealPath(link, want, fs)) return { link, state: "linked" }; } catch { /* replace an unusable link */ }
+    }
     if (exists(link) && (to === null || !takes(absolute(link, to)))) {
       return { link, state: "left", detail: to === null ? "a file, not a link" : `it points at ${to}` };
     }
     const tmp = join(bin, `.${name}-${randomBytes(4).toString("hex")}`);
     symlinkSync(want, tmp);
-    renameSync(tmp, link);
+    try { renameSync(tmp, link); } finally { removePath(tmp, { force: true }); }
+    linked(link);
     return { link, state: to === null ? "created" : "moved", detail: to ?? undefined };
   };
   const takes = (to) => ours(to) || pack.has(to);
@@ -295,8 +403,8 @@ function unlinkEntry(env) {
 export function uninstallSelf({ env = process.env, purge = false } = {}) {
   const bin = binDirOf(env);
   const store = storeOf(env);
-  const release = existsSync(store) ? lockStore(store) : () => {};
-  try { return unplace({ env, purge, bin, store }); } finally { if (!purge) release(); }
+  const release = existsSync(store) ? lockLocalStore(store, env) : () => {};
+  try { return unplace({ env, purge, bin, store }); } finally { release(); }
 }
 
 function unplace({ env, purge, bin, store }) {
@@ -325,14 +433,14 @@ function unplace({ env, purge, bin, store }) {
 /** Swaps current and previous; returns { from, to }. */
 export function rollbackSelf({ env = process.env } = {}) {
   const store = storeOf(env);
-  const release = lockStore(store);
+  const release = lockLocalStore(store, env);
   try {
     const record = readRecord(store);
     if (!record.previous || !existsSync(join(store, dirOf(record.previous)))) throw new Error("am has no previous version to roll back to");
     swapLink(store, "current", dirOf(record.previous));
     swapLink(store, "previous", dirOf(record.current));
-    writeRecord(store, { current: record.previous, previous: record.current, seen: record.seen });
-    return { from: record.current.version, to: record.previous.version, links: linkCommands(env), entry: writeEntry(env) };
+    writeRecord(store, { current: record.previous, previous: record.current, seen: record.seen, entry: record.entry });
+    return { from: record.current.version, to: record.previous.version, links: linkCommands(env), entry: record.entry === false ? null : writeEntry(env) };
   } finally { release(); }
 }
 
@@ -354,6 +462,157 @@ export function unsafeEntries(names, lines) {
 
 const tarList = (tgz, flags) => execFileSync("tar", [flags, tgz], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).split("\n").filter(Boolean);
 
+const signedError = (state, message) => Object.assign(new Error(message), { state });
+
+/** A linked bootstrap installs only the archive that passes this am's own keys. */
+export function installSigned(folder, { env = process.env } = {}) {
+  const store = storeOf(env);
+  const made = [];
+  for (const base of [store, binDirOf(env)]) {
+    for (let dir = base; !exists(dir); dir = dirname(dir)) made.push(dir);
+  }
+  try {
+    const release = lockStore(store, { linked: true });
+    try { return verifyAndPlaceSigned(folder, store, env); } finally { release(); }
+  } catch (e) {
+    for (const dir of made) { try { rmdirSync(dir); } catch { /* in use or never made */ } }
+    throw e;
+  }
+}
+
+function verifyAndPlaceSigned(folder, store, env) {
+  const state = installState({ home: homeOf(env), amHome: amHomeOf(env), appHome: appHomeOf(env) }, fs, paths);
+  const before = classify(state);
+  if (before.action === "refuse") throw signedError("broken", before.why);
+  const { record } = state;
+  let pointer, bytes;
+  try {
+    pointer = verifyPointer(readFileSync(join(folder, POINTER)), readFileSync(join(folder, SIGNATURE), "utf8"), ownKeys());
+    if (before.state !== "installed" && pointer.sequence < (record.seen ?? 0)) throw new Error(`am lane: sequence ${pointer.sequence} is older than the newest this machine took (${record.seen})`);
+    bytes = readFileSync(join(folder, pointer.tarball.name));
+    if (bytes.length !== pointer.tarball.size || sha256(bytes) !== pointer.tarball.sha256) throw new Error(`${pointer.tarball.name} does not match the signed pointer (sha256 or size)`);
+  } catch (e) { throw signedError("refused", e.message); }
+  if (before.state === "installed") {
+    return { part: PART, ok: true, changed: false, state: before.version === pointer.version ? "current" : "installed",
+      version: before.version, sequence: record.current.sequence, sha256: record.current.sha256 };
+  }
+  const work = mkdtempSync(join(store, ".signed-"));
+  let result;
+  try {
+    const archive = join(work, pointer.tarball.name);
+    writeFileSync(archive, bytes);
+    const unsafe = unsafeEntries(tarList(archive, "-tzf"), tarList(archive, "-tvzf"));
+    if (unsafe.length) throw signedError("refused", `${archive}: ${unsafe.join("; ")}`);
+    const staging = join(work, "extract");
+    mkdirSync(staging, { mode: 0o755 });
+    execFileSync("tar", ["-xzf", archive, "-C", staging], { stdio: ["ignore", "ignore", "pipe"] });
+    const problems = extractProblems(staging, pointer.version);
+    if (problems.length) throw signedError("refused", `${pointer.tarball.name}: ${problems.join("; ")}`);
+    result = placeSigned(staging, store, env, pointer, state);
+    return result;
+  } finally {
+    try { rmSync(work, { recursive: true, force: true }); }
+    catch (e) { if (result) result.cleanup ??= `am installed; cleanup: ${e.message}`; }
+  }
+}
+
+function verifyLauncher(store, env, entry) {
+  const current = join(store, "current");
+  const tree = join(store, dirOf(entry));
+  if (!lstatSync(tree).isDirectory() || linkOf(current) === null || !sameRealPath(current, tree, fs)) {
+    throw new Error(`${current} did not link to ${tree}`);
+  }
+  for (const name of ["am", "automagik-herdr"]) {
+    const path = join(binDirOf(env), name);
+    const want = join(current, "bin", name);
+    if (linkOf(path) === null || !sameRealPath(path, want, fs)) throw new Error(`${path} did not link to ${want}`);
+    fs.accessSync(path, fs.constants.X_OK);
+  }
+  const cmd = join(binDirOf(env), "am");
+  const got = execFileSync(cmd, ["--version"], { env, timeout: 10_000, killSignal: "SIGKILL", encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (got.trim() !== `am ${entry.version}`) throw new Error(`${cmd} --version did not print am ${entry.version}`);
+}
+
+function savedTreeMatches(store, slot) {
+  const tree = join(store, dirOf(slot));
+  try { return lstatSync(tree).isDirectory() && extractProblems(tree, slot.version).length === 0; }
+  catch { return false; }
+}
+
+/** The successful launcher check commits the swap. The old trees stay until then. */
+function placeSigned(staging, store, env, pointer, snapshot) {
+  const { version, sequence, tarball } = pointer;
+  const { record, current, previous, am, alias, pending } = snapshot;
+  const name = exists(join(store, version)) ? `${version}-${randomBytes(8).toString("hex")}` : version;
+  const placed = join(store, name);
+  const legacy = pending && !Object.hasOwn(pending, "current");
+  const saved = pending && !legacy ? pending : { current: record.current ?? null, previous: record.previous ?? null };
+  let rollback = [saved.current, saved.previous];
+  let cleanup;
+  if (legacy) {
+    // An empty marker cannot tell whether record.current was ever verified.
+    if (saved.current) {
+      try { verifyLauncher(store, env, saved.current); }
+      catch { cleanup = `am ${saved.current.version} failed launcher verification and was not kept for rollback`; }
+    }
+    rollback = [saved.previous, cleanup ? null : saved.current];
+  }
+  const uncertain = pending && !legacy && rollback.some((slot) => slot && !savedTreeMatches(store, slot));
+  const nextPrevious = uncertain ? record.previous ?? null : rollback.find((slot) => slot && slot.version !== version) ?? null;
+  if (uncertain && nextPrevious && !savedTreeMatches(store, nextPrevious)) {
+    throw signedError("broken", `recorded rollback tree ${dirOf(nextPrevious)} is missing or does not match am ${nextPrevious.version}`);
+  }
+  const next = { version, dir: name, sequence, signed: true, source: LANE_RELEASE, sha256: tarball.sha256,
+    installed: new Date().toISOString(), part: readJson(join(staging, "part.json")) };
+  const changed = new Set();
+  const marker = join(store, PENDING);
+  // Flush the marker and its directory before publishing any of the new install.
+  const syncStore = () => {
+    const fd = openSync(store, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+  };
+  try {
+    if (!pending) {
+      const stagedMarker = join(dirname(staging), PENDING);
+      writeFileSync(stagedMarker, JSON.stringify(saved), { flag: "wx", mode: 0o600, flush: true });
+      renameSync(stagedMarker, marker);
+      changed.add(marker);
+      syncStore();
+    }
+    renameSync(staging, placed);
+    changed.add(placed);
+    if (nextPrevious) swapLink(store, "previous", dirOf(nextPrevious));
+    else removePath(previous.path, { force: true });
+    changed.add(previous.path);
+    swapLink(store, "current", name);
+    changed.add(current.path);
+    writeRecord(store, { current: next, previous: nextPrevious, seen: Math.max(record.seen ?? 0, sequence), entry: false });
+    changed.add(record.path);
+    linkCommands(env, (path) => changed.add(path));
+    verifyLauncher(store, env, next);
+    syncStore();
+    rmSync(marker);
+  } catch (e) {
+    const errors = [];
+    const restore = (path, fn) => { try { fn(); } catch (error) { errors.push(`${path}: ${error.message}`); } };
+    for (const link of [current, previous, am, alias]) {
+      if (!changed.has(link.path)) continue;
+      restore(link.path, () => link.target === undefined ? removePath(link.path, { force: true }) : swapLink(dirname(link.path), basename(link.path), link.target));
+    }
+    if (changed.has(record.path)) restore(record.path, () => record.text === undefined ? rmSync(record.path, { force: true }) : writeRecordText(store, record.text));
+    if (!errors.length && changed.has(placed)) restore(placed, () => rmSync(placed, { recursive: true, force: true }));
+    if (!errors.length && changed.has(marker)) restore(marker, () => rmSync(marker, { force: true }));
+    throw signedError("broken", `${e.message}; ${errors.length ? `could not restore ${errors.join("; ")}` : `restored ${[current.path, previous.path, record.path, am.path, alias.path].join(", ")}`}`);
+  }
+  const result = { part: PART, ok: true, changed: true, state: "installed", version, sequence, sha256: tarball.sha256 };
+  if (cleanup) result.cleanup = cleanup;
+  if (!uncertain) {
+    try { prune(store, { linked: true }); }
+    catch (e) { result.cleanup = [cleanup, `am installed; cleanup: ${e.message}`].filter(Boolean).join("; "); }
+  }
+  return result;
+}
+
 /**
  * Updates am from am-lane: refuses a pointer older than one this machine took (`seen`), does
  * nothing when current, downloads the tarball from the pointer's release, checks it against the
@@ -362,18 +621,22 @@ const tarList = (tgz, flags) => execFileSync("tar", [flags, tgz], { encoding: "u
  */
 export async function updateSelf({ env = process.env, keys = ownKeys(), fetch, check = false } = {}) {
   const store = storeOf(env);
-  const record = readRecord(store);
-  const from = record.current?.version ?? null;
-  const pointer = await readLane({ env, keys, fetch });
-  if (!pointer) return { state: "none", from, to: null, detail: "nothing is posted on am-lane yet" };
-  if (record.seen !== null && pointer.sequence < record.seen) {
-    throw new Error(`am lane: it names ${pointer.version} (sequence ${pointer.sequence}), older than the newest this machine took (sequence ${record.seen}): refusing it`);
-  }
-  if (record.current?.sequence === pointer.sequence && existsSync(join(store, "current"))) return { state: "current", from, to: pointer.version };
-  if (check) return { state: "available", from, to: pointer.version };
-  // One update at a time: the record is read again under the lock, and the sequence checked again.
-  const release = lockStore(store);
-  try { return await fetchAndPlace({ env, keys, fetch, store, pointer }); } finally { release(); }
+  let release;
+  try {
+    if (!check && exists(join(store, PENDING))) release = lockLocalStore(store, env);
+    const record = readRecord(store);
+    const from = record.current?.version ?? null;
+    const pointer = await readLane({ env, keys, fetch });
+    if (!pointer) return { state: "none", from, to: null, detail: "nothing is posted on am-lane yet" };
+    if (record.seen !== null && pointer.sequence < record.seen) {
+      throw new Error(`am lane: it names ${pointer.version} (sequence ${pointer.sequence}), older than the newest this machine took (sequence ${record.seen}): refusing it`);
+    }
+    if (record.current?.sequence === pointer.sequence && existsSync(join(store, "current"))) return { state: "current", from, to: pointer.version };
+    if (check) return { state: "available", from, to: pointer.version };
+    // Reconcile under lock even when the marker appeared while reading the lane.
+    release ??= lockLocalStore(store, env);
+    return await fetchAndPlace({ env, keys, fetch, store, pointer });
+  } finally { release?.(); }
 }
 
 async function fetchAndPlace({ env, keys, fetch, store, pointer }) {
@@ -441,7 +704,8 @@ export function doctorSelf({ env = process.env, project = process.cwd() } = {}) 
     lines.push(line(`link ${name}`, ok, ok ? `${link} -> ${to}` : to ? `${link} points at ${to}` : exists(link) ? `${link} is a file` : `${link} is missing`,
       `am self install (a ${name} that is not am's is left alone: remove it first)`));
   }
-  if (existsSync(appHomeOf(env))) {
+  if (record.entry === false) lines.push(line("briefing entry", true, "a linked install writes no stable entry"));
+  else if (existsSync(appHomeOf(env))) {
     const { path, want } = entryOf(env);
     const to = linkOf(path);
     const ok = to !== null && absolute(path, to) === want && existsSync(want);

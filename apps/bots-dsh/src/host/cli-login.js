@@ -72,6 +72,7 @@ const FAILED_REASONS = new Map([
   ['no sign-in link in time', 'The CLI did not offer a sign-in link in time. Try again.'],
   ['the CLI could not be started', 'The CLI could not be started. Run it once in a terminal, then try again.'],
   ['unsupported sign-in link', 'The CLI returned an old sign-in link. Update it, then try again.'],
+  ['short sign-in link unsupported', 'The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.'],
   ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
   ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
 ])
@@ -659,14 +660,19 @@ export function install(rt, reservationDeps) {
   // never re-queued; the rest of the batch goes on. The claimed array itself is changed, so
   // DSH's own default decision, which reads it, no longer holds the message either. A message
   // the team delivered was noted for a resend after a restart (resume.js); that note goes too.
+  const isLoginCodeInput = (agentId, message) => message?.role === 'user'
+    && (rt.isBotSession?.(agentId) || rt.roomOf?.(agentId) !== undefined)
+    && loginTextMatches(textOf(message))
+
   function dropLoginCodes(payload) {
     const agentId = payload?.agent?.id
     if (!Array.isArray(payload?.messages) || payload.messages.length === 0) return
     if (!rt.isBotSession?.(agentId) && rt.roomOf?.(agentId) === undefined) return
     for (let index = payload.messages.length - 1; index >= 0; index--) {
       const message = payload.messages[index]
-      if (message?.role === 'user' && loginTextMatches(textOf(message))) {
+      if (isLoginCodeInput(agentId, message)) {
         payload.messages.splice(index, 1)
+        rt.forgetHeldInput?.(agentId, message.id)
         const exchangeId = message.source?.exchangeId
         if (typeof exchangeId === 'string' && exchangeId !== '') {
           try {
@@ -698,5 +704,5 @@ export function install(rt, reservationDeps) {
     }
   }
 
-  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, reportHasLoginCode, dropLoginCodes, cliLoginChoice: choiceOf })
+  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, reportHasLoginCode, isLoginCodeInput, dropLoginCodes, cliLoginChoice: choiceOf })
 }

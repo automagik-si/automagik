@@ -26,6 +26,7 @@
 // unremovable cases would be meaningless and those tests skip.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import filesystem from 'node:fs'
 import {
   chmodSync,
   closeSync,
@@ -36,15 +37,18 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { ensureDataDirs, prepareWorkspace } from '../lib.mjs'
+import { ensureDataDirs, prepareDshHome, prepareWorkspace } from '../lib.mjs'
 
 const LIB = fileURLToPath(new URL('../lib.mjs', import.meta.url))
 const temps = []
@@ -61,6 +65,97 @@ const temp = () => {
 }
 const root = typeof process.getuid === 'function' && process.getuid() === 0
 const skipAsRoot = root ? 'root can write through 0555, so the case is meaningless' : false
+
+test('DSH home is created privately and an owned wider home is tightened in place', () => {
+  const home = join(temp(), 'data', 'dsh')
+  prepareDshHome(home)
+  const initial = statSync(home)
+  assert.equal(initial.mode & 0o7777, 0o700)
+  assert.equal(initial.uid, process.geteuid())
+  chmodSync(home, 0o755)
+  writeFileSync(join(home, 'keep'), 'existing profile data')
+  prepareDshHome(home)
+  assert.equal(statSync(home).mode & 0o7777, 0o700)
+  assert.equal(statSync(home).ino, initial.ino)
+  assert.equal(readFileSync(join(home, 'keep'), 'utf8'), 'existing profile data')
+  assert.deepEqual(readdirSync(home), ['keep'])
+  prepareDshHome(home, { prepareStore: true })
+  assert.deepEqual(readdirSync(home).sort(), ['keep', 'pnpm-store'])
+  assert.deepEqual(readdirSync(join(home, 'pnpm-store')), [])
+})
+
+test('DSH home refuses a foreign owner without modifying the directory or contents', () => {
+  const home = temp()
+  chmodSync(home, 0o755)
+  writeFileSync(join(home, 'keep'), 'original')
+  const uid = process.geteuid() + 1
+  assert.throws(() => prepareDshHome(home, { uid }), new RegExp(`not owned by DSH uid ${uid}.*Chown.*${uid} on the host`))
+  assert.equal(statSync(home).mode & 0o7777, 0o755)
+  assert.equal(readFileSync(join(home, 'keep'), 'utf8'), 'original')
+})
+
+test('DSH home refuses a symlink at the leaf or an ancestor, including before creation', () => {
+  const root = temp(), home = join(root, 'dsh'), alias = join(root, 'alias')
+  mkdirSync(home, { mode: 0o755 })
+  writeFileSync(join(home, 'keep'), 'original')
+  symlinkSync(home, alias)
+  for (const path of [alias, join(alias, 'missing', 'dsh')]) {
+    assert.throws(() => prepareDshHome(path), /no symbolic links/)
+  }
+  assert.equal(statSync(home).mode & 0o7777, 0o755)
+  assert.deepEqual(readdirSync(home), ['keep'])
+  assert.equal(readFileSync(join(home, 'keep'), 'utf8'), 'original')
+})
+
+test('a parent replaced during home creation cannot redirect mkdir', () => {
+  const root = temp()
+  const parent = join(root, 'parent'), moved = join(root, 'moved'), replacement = join(root, 'replacement')
+  mkdirSync(parent)
+  mkdirSync(replacement)
+  const home = join(parent, 'dsh')
+  const mkdir = filesystem.mkdirSync
+  filesystem.mkdirSync = (path, options) => {
+    renameSync(parent, moved)
+    symlinkSync(replacement, parent)
+    return mkdir(path, options)
+  }
+  syncBuiltinESMExports()
+  try {
+    assert.throws(() => prepareDshHome(home), /no symbolic links/)
+    assert.deepEqual(readdirSync(replacement), [])
+  } finally {
+    filesystem.mkdirSync = mkdir
+    syncBuiltinESMExports()
+  }
+})
+
+test('replacing a hardened home just before the first probe cannot redirect startup writes', () => {
+  const root = temp(), home = join(root, 'dsh'), moved = join(root, 'moved')
+  mkdirSync(home, { mode: 0o755 })
+  const open = filesystem.openSync
+  let swapped = false
+  filesystem.openSync = (path, ...args) => {
+    if (!swapped && path.includes('/.automagik-write-probe-')) {
+      assert.equal(statSync(home).mode & 0o7777, 0o700, 'the race begins after hardening')
+      renameSync(home, moved)
+      mkdirSync(home, { mode: 0o755 })
+      swapped = true
+    }
+    return open(path, ...args)
+  }
+  syncBuiltinESMExports()
+  try {
+    assert.throws(() => prepareDshHome(home, { prepareStore: true }), /no symbolic links/)
+    assert.equal(swapped, true)
+    assert.deepEqual(readdirSync(home), [])
+    assert.equal(statSync(home).mode & 0o7777, 0o755)
+    assert.deepEqual(readdirSync(moved), ['pnpm-store'])
+    assert.deepEqual(readdirSync(join(moved, 'pnpm-store')), [])
+  } finally {
+    filesystem.openSync = open
+    syncBuiltinESMExports()
+  }
+})
 
 test(
   'an unwritable /data fails with one line naming the uid fix, writable passes',

@@ -1,0 +1,193 @@
+{
+  "pulls": [
+    {
+      "number": 101,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000065",
+      "checkRuns": [],
+      "complete": true
+    },
+    {
+      "number": 102,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000066",
+      "checkRuns": [
+        {
+          "id": 1001,
+          "name": "pr-reviewer",
+          "appId": 43,
+          "status": "completed",
+          "startedAt": "2026-11-20T10:50:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 103,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000067",
+      "checkRuns": [
+        {
+          "id": 1002,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "in_progress",
+          "startedAt": "2026-11-20T10:59:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 104,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000068",
+      "checkRuns": [
+        {
+          "id": 1003,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "in_progress",
+          "startedAt": "2026-11-20T11:01:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 105,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000069",
+      "checkRuns": [
+        {
+          "id": 1004,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "completed",
+          "startedAt": "2026-11-20T10:59:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 106,
+      "draft": true,
+      "baseRef": "dev",
+      "headSha": "000000000000000000000000000000000000006a",
+      "checkRuns": [],
+      "complete": true
+    },
+    {
+      "number": 107,
+      "draft": false,
+      "baseRef": "main",
+      "headSha": "000000000000000000000000000000000000006b",
+      "checkRuns": [],
+      "complete": true
+    },
+    {
+      "number": 108,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "000000000000000000000000000000000000006c",
+      "checkRuns": [
+        {
+          "id": 1005,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "queued",
+          "startedAt": "2026-11-20T10:59:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 109,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "000000000000000000000000000000000000006d",
+      "checkRuns": [
+        {
+          "id": 1006,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "in_progress",
+          "startedAt": "2026-11-20T11:00:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 110,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "000000000000000000000000000000000000006e",
+      "checkRuns": [
+        {
+          "id": 1007,
+          "name": "ci",
+          "appId": 42,
+          "status": "queued",
+          "startedAt": null
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 111,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "000000000000000000000000000000000000006f",
+      "checkRuns": [
+        {
+          "id": 1009,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "completed",
+          "startedAt": "2026-11-20T11:05:00Z"
+        },
+        {
+          "id": 1008,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "in_progress",
+          "startedAt": "2026-11-20T10:59:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 112,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000070",
+      "checkRuns": [
+        {
+          "id": 1010,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "completed",
+          "startedAt": "2026-11-20T10:58:00Z"
+        },
+        {
+          "id": 1011,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "in_progress",
+          "startedAt": "2026-11-20T10:59:00Z"
+        }
+      ],
+      "complete": true
+    }
+  ],
+  "runs": [],
+  "pushes": [],
+  "complete": {
+    "pulls": true,
+    "runs": true,
+    "pushes": true
+  }
+}

@@ -660,6 +660,8 @@ The twelve questions this RFC asked are answered as decided (2026-11-19): Q6 by 
 #1668 contract, the other eleven as the owner's delegate decided. Q4 takes the conservative end of
 its range, 5 minutes. No question is open.
 
+On 2026-11-20 the owner's delegate chose option (a) for Windows Credential Manager, PowerShell Add-Type P/Invoke of CredReadW with the target on stdin, following delivery 4c. Hosts that block the reader show the provider as unavailable. Windows' own credential-access auditing can record the target name and stays enabled.
+
 1. **Transport for the first cut.** **Decided: the installed `bw` CLI**; the Management API does
    not enter now, because the CLI reaches Bitwarden cloud, self-hosted and Vaultwarden through the
    person's existing login, while the API is not a stable personal-vault contract. `bws` follows
