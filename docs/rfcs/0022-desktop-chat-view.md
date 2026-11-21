@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); 2L amended 2026-11-20, approved by the owner's delegate on 2026-11-20: a local seat's rendered face sends only to an idle seat with an empty input row, see (b); (f) amended 2026-11-20, decided by the owner's delegate: client plugins in the window's page are trusted, as in RFC 0013; amends RFC 0024 (f); wording amended 2026-11-21 (RFC 0030 Q9: Code mode means the Code side; one pane's xterm face is the terminal face), no design change) |
+| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); 2L amended 2026-11-20, approved by the owner's delegate on 2026-11-20: a local seat's rendered face sends only to an idle seat with an empty input row, see (b); (f) amended 2026-11-20, decided by the owner's delegate: client plugins in the window's page are trusted, as in RFC 0013; amends RFC 0024 (f); wording amended 2026-11-21 (RFC 0030 Q9: Code mode means the Code side; one pane's xterm face is the terminal face), no design change; on 2026-11-21 the owner's delegate approved delivery B's drawing: the current bar's design, existing components and tokens only, and RFC 0030's 6b (starting on a linked machine) moved to delivery H (RFC 0030, Decisions (2026-11-21)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) for the shell; herdr (3.N.P) for the chat engine |
 | Created | 2026-11-09 |
@@ -764,6 +764,10 @@ H. **The scoped link** (before phase 1, Decided 9; (f) "The link's reach"). The 
    view's link, `hc exec` on the box and a send to another terminal are refused; the view's own
    calls still work. *Rollback:* none that reopens the reach while the view is installed: the
    view refuses an unscoped link, and reverting H reverts the view with it.
+   *Tracked here since 2026-11-21:* RFC 0030's 6b, starting on a linked machine (decided by the
+   owner's delegate, recommended option; RFC 0030, Decisions (2026-11-21), 3). H keeps refusing
+   `run`, `exec` and file writes on a link; once herdr-core ships H's scoping, a start scope on a
+   link is designed as an amendment to H.
 1. **The view of the main bot, with the terminal face** (plugin; after H; the desktop lane for
    #843 and #845, which must merge first; needs RFC 0014 delivery 3 for the listing, or the
    `front` bot alone ahead of it). The `live-chat/` copy and its gate check (new: no such check
@@ -854,7 +858,8 @@ becomes 0, 1L, 2L, B, then H, 1, 2, 3, 4 as decided, and I after H and RFC 0024 
    owner's computer: a message from the rendered face is answered in the seat's terminal and
    both faces show the same turn; with a draft typed in the terminal face, a rendered-face send is
    refused and the draft stays. *Rollback:* as phase 2.
-B. **The Team and Code bar** (plugin; after 1L; the drawing approved by the owner first). (i)'s
+B. **The Team and Code bar** (plugin; after 1L; the drawing: the current bar's design, existing
+   components and tokens only, approved by the owner's delegate on 2026-11-21). (i)'s
    model: the side switch replacing RFC 0013's Work and Code segments, Team's sections, Code's tree
    of this computer from the registry and the two ledgers, humanized bots ((j)) as Team rows.
    *Acceptance:* no row starts, stops or restarts anything; herdr-app still opens from a Code row; a
@@ -952,6 +957,9 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
   Proposed, Q9-Q17); RFC 0024 (f) amended to match.
 - 2026-11-19: the 2026-11-10 revision approved by the owner's delegate; Q9-Q17 answered with this
   RFC's recommendations (Answers); RFC 0030's delivery 0 is met.
+- 2026-11-21: decided by the owner's delegate with the recommended options (RFC 0030, Decisions
+  (2026-11-21)): delivery B's drawing is the current bar's design, existing components and
+  docs/brand tokens, no new visual item; RFC 0030's 6b is tracked under delivery H.
 
 ## Links
 

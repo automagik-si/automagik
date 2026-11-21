@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; amended 2026-11-20: what moves now and what waits, approved by the owner's delegate on 2026-11-20, Q15-Q23 answered with the amendment's recommendations; Q18 narrowed by the owner's delegate on 2026-11-21 (the Code side in a gated browser needs member admission on and RFC 0038 delivery 3); what has merged is in that amendment's inventory, see Amendment (2026-11-20); owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; amended 2026-11-20: what moves now and what waits, approved by the owner's delegate on 2026-11-20, Q15-Q23 answered with the amendment's recommendations; Q18 narrowed by the owner's delegate on 2026-11-21 (the Code side in a gated browser needs member admission on and RFC 0038 delivery 3); five decisions of the owner's delegate on 2026-11-21, each the recommended option (Q19's Add and Remove login, RFC 0022 delivery B's drawing, 6b moved to RFC 0022 delivery H, Pocket Link as its own part, 6a's Bots with no CLI start path), see Decisions (2026-11-21); what has merged is in that amendment's inventory, see Amendment (2026-11-20); owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) only if the preload must change; the server image; herdr (3.N.P) for the pack's fix-only period, the `am mailbox send` verb (the pack's CLI is its source; `am/` gets it as a byte copy) and the retirement notice; am (3.N.P) for those copies |
 | Created | 2026-11-10 |
@@ -503,7 +503,9 @@ Herdr install.
    written from the page reads back from the CLI. *Rollback:* the pack's panels stay.
 6. **Start from the tree** (amended 2026-11-20, Q17: 6a on this computer, without #206, as the
    Amendment's What moves now, 6, specifies; starting on a linked machine is deferred). The New menu
-   moves in. *Check:* a start from the tree writes the attach ledger the same way the CLI does.
+   moves in. Global Bots and Bots only in a v2 registry are listed with Start disabled until the
+   CLI starts them (RFC 0014; Decisions (2026-11-21), 5). *Check:* a start from the tree writes
+   the attach ledger the same way the CLI does.
    *Rollback:* the tree reads only.
 7. **Code mode in the image** (server image and plugin; after RFC 0024 delivery 2). herdr-core,
    `am`, agent CLIs enabled into the volume, sign-in. *Check:* before the claim no terminal is
@@ -522,7 +524,8 @@ Herdr install.
    the pack keeps its fix-only lane.
 
 Linked machines come after RFC 0022's delivery H, as a delivery of that RFC widened by its Q16,
-not of this one.
+not of this one. 6b, starting on a linked machine, is tracked there too (Decisions
+(2026-11-21), 3).
 
 ## Amendment (2026-11-20): what moves now, and what waits
 
@@ -627,6 +630,9 @@ Each needs nothing from another repository. In this order:
    written by the CLI itself. *Check:* against a fake `hc` with a two-holder pool and a connected
    linked binding, a start from the tree writes the same ledger row as the CLI on the local holder
    and makes zero calls toward the linked machine; an unmarked window starts nothing.
+   Global Bots and Bots only in a v2 registry are listed with Start disabled until the CLI starts
+   them (RFC 0014): the CLI reads only a project's v1 `.herdr/bots.json`, and a folderless global
+   Bot has no CLI project (Decisions (2026-11-21), 5).
 7. **Fixes left by #1788** that need nothing outside: the pack's `coreSocket.mjs` discovery gaps
    (`HC_SOCKET` first, a `config.toml` socket, session names with spaces, lock paths without
    `.sock`), a herdr fix under the pack's fix-only rule; opening a registry Bot's own Herdr space
@@ -644,11 +650,11 @@ Each needs nothing from another repository. In this order:
 | 3a, `am mailbox send` | 3b (Q16) | herdr-core, through 3b |
 | The mailbox for a DSH Bot that runs in a terminal | RFC 0023's session terminal field (The Genie's two seats and the mailbox); until DSH ships it, the mailbox reaches app-hosted Sessions only | DSH (another repository) |
 | 2's take-over from another typer | a signal from herdr-core that says which client is typing into a terminal. Until then a refused take stays "Typing elsewhere · view only" | herdr-core |
-| 1b, the browser half | RFC 0022's delivery B (paused for scheduling, not for its design), with the owner's approval of its drawing; and the owner proof behind the gate that Q18 set (RFC 0038's amendment of 2026-11-21, which, by the owner's delegate's decision of 2026-11-21, also requires member admission on and RFC 0038 delivery 3's readiness). The gate is in the image (`server/gate*.mjs`) and RFC 0038's delivery 1 (#1892) checks its caller assertion, but only for members and guests; the owner reaches DSH through the stock app's fallback (`apps/multiuser-dsh/README.md`), so the core bridge cannot yet tell the claimed owner from any browser | the owner (B's drawing), then this repository (an RFC 0038 amendment, then the plugin) |
+| 1b, the browser half | RFC 0022's delivery B (paused for scheduling, not for its design; its drawing is the current bar's design, decided by the owner's delegate on 2026-11-21, Decisions (2026-11-21), 2); and the owner proof behind the gate that Q18 set (RFC 0038's amendment of 2026-11-21, which, by the owner's delegate's decision of 2026-11-21, also requires member admission on and RFC 0038 delivery 3's readiness). The gate is in the image (`server/gate*.mjs`) and RFC 0038's delivery 1 (#1892) checks its caller assertion, but only for members and guests; the owner reaches DSH through the stock app's fallback (`apps/multiuser-dsh/README.md`), so the core bridge cannot yet tell the claimed owner from any browser | this repository (B, an RFC 0038 amendment, then the plugin) |
 | 7, Code mode in the image | 1b; delivery 3 for its end-to-end check (Q21 and Q22 keep #1869's provisioning) | herdr-core (through delivery 3), then this repository |
 | 5c's switch | an amendment to RFC 0043's Q5 (Q23) | this repository |
-| 6b, starting on a linked machine | deferred (Q17): RFC 0022's delivery H allows a shown terminal's view and input but refuses `run`, `exec` and file writes on a link, and H's own scoping is upstream in herdr-core | herdr-core and a later decision of the owner's |
-| 8, the pack's retirement | Q19's condition: 1, 2 as shipped, 5 and 6a in one stable release, with 5c's switch (Q23) and an amendment to RFC 0043 that moves a plan's apply and its retries off the pack; removing herdr-app from Automagik's install waits for Pocket Link to run without it (Q20) | this repository, then Pocket |
+| 6b, starting on a linked machine | deferred (Q17): RFC 0022's delivery H allows a shown terminal's view and input but refuses `run`, `exec` and file writes on a link, and H's own scoping is upstream in herdr-core. Tracked under RFC 0022 delivery H (Q16), not a gate for #1007; a start scope on a link is designed as an amendment to H once herdr-core ships its scoping (Decisions (2026-11-21), 3) | herdr-core, then RFC 0022 |
+| 8, the pack's retirement | Q19's condition: 1, 2 as shipped, 5 (the panel's Add and Remove login on the page included, through `set-login`: Decisions (2026-11-21), 1) and 6a in one stable release, with 5c's switch (Q23) and an amendment to RFC 0043 that moves a plan's apply and its retries off the pack; removing herdr-app from Automagik's install waits for Pocket Link to run without it (Q20), as its own Pocket-owned part (Decisions (2026-11-21), 4) | this repository, then Pocket |
 | A linked Claude bot's per-turn briefing | `am` on the linked machine, RFC 0012's Fleet delivery (its amendment is #1932). Not a gate for any delivery here (Q17) | this repository |
 
 ### Questions for the owner (2026-11-20)
@@ -769,8 +775,12 @@ recommended option:
     and the Accounts page carries RFC 0043's per-machine view, the plan's preview, approval and
     apply, and its retries, with apply and retries moved off the pack. Installed packs keep their
     panels.
+    *Clarified by the owner's delegate on 2026-11-21:* "all of 5" includes the panel's Add and
+    Remove login on the Accounts page, through RFC 0043's `set-login` (Decisions (2026-11-21), 1).
 20. **Q20:** herdr-app leaves Automagik's install only once Pocket Link runs without it; until
     then a fresh install after the pack's retirement keeps herdr-app with no pack UI.
+    *Followed by the owner's delegate on 2026-11-21:* Pocket Link runs without herdr-app as its
+    own Pocket-owned part (Decisions (2026-11-21), 4); Q20's condition is unchanged.
 21. **Q21:** the image keeps #1869's CLI store, which installs npm's current versions in the
     background at every boot; no agent CLI is baked into the image. Q5's answer and The image say
     so.
@@ -778,6 +788,39 @@ recommended option:
 23. **Q23:** this computer's Codex and proxy switch stays the panel's until an amendment to RFC
     0043's Q5 moves it to one locked CLI writer that gets the same `CODEX_HOME` and proxy key as
     the panel, with an older panel refused during the move; 5c's page reads only until then.
+
+### Decisions (2026-11-21)
+
+The five points the 2026-11-20 amendment left with the owner. The owner's delegate decided each
+on 2026-11-21 with its recommended option; none changes a design above, and each changed text is
+marked there with this section's number. None touches a private key, Play, real data or money.
+
+1. **D8's gate: Add and Remove login.** Q19's "all of 5" includes Add and Remove login on the
+   Accounts page, through RFC 0043's `set-login`; decided by the owner's delegate, 2026-11-21,
+   recommended option. The panel's sign-in probe runs before `--add`, so a fresh install with no
+   pack loses nothing the panel had. Q19's answer and What waits, 8, say so.
+2. **RFC 0022 delivery B's drawing (1b).** RFC 0022 delivery B's drawing is the current bar's
+   design (existing components and docs/brand tokens, no new visual item); decided by the owner's
+   delegate, 2026-11-21, recommended option. B's behaviour follows (i) as approved on 2026-11-19.
+   RFC 0022's delivery B and Status record it; What waits, 1b, no longer waits on the owner. 1b
+   still needs RFC 0038 delivery 7's proof and delivery 3's readiness with member admission on.
+3. **6b, starting on a linked machine.** 6b stays deferred and moves to RFC 0022 delivery H, out
+   of #1007; decided by the owner's delegate, 2026-11-21, recommended option. H keeps refusing
+   `run`, `exec` and file writes on a link; once herdr-core ships H's scoping, a start scope on a
+   link is designed as an amendment to H, under RFC 0022. What waits, 6b, and RFC 0022's delivery
+   H say so.
+4. **Pocket Link without herdr-app (Q11, Q20).** Pocket Link runs without herdr-app as its own
+   Pocket-owned part, installed and started by `am`, paired with `am pocket pair` (RFC 0012's
+   proposal), specified in a Pocket RFC and an RFC 0012 amendment; herdr-app stays in the install
+   until it ships; decided by the owner's delegate, 2026-11-21, recommended option. The Pocket RFC
+   and the RFC 0012 amendment follow in their own pull request; Q11's and Q20's answers are
+   unchanged.
+5. **6a's Bots with no CLI start path.** 6a PR 2 lists global and v2-only Bots with Start
+   disabled and their reasons; each is enabled by its own CLI start path later; decided by the
+   owner's delegate, 2026-11-21, recommended option. A global Bot with no folder (RFC 0014) and a
+   Bot only in a v2 registry, which the CLI does not read yet (RFC 0014 delivery 2), each get a
+   herdr-lane CLI start path, then a small plugin change enables its rows. Delivery 6 and What
+   moves now, 6, say so.
 
 ## Answers (2026-11-19)
 
