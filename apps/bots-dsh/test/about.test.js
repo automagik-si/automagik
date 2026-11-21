@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 import { install as installDshUpdate } from '../src/host/dsh-update.js'
 import { install as installUpdate } from '../src/host/update.js'
+import { triskleThreeColours64 } from '../src/client/art/inline.js'
 
 // Settings → About (#90), as the browser gets it, with stand-ins for the platform. The page's
 // state hooks are answered in the order it asks: the app's update presentation, the app's
@@ -186,13 +187,41 @@ test('in a plain DSH the page is Automagik\'s and the Bot team\'s own update sta
   assert.equal(page.name, 'Automagik')
   assert.equal(page.version, 'Version 3.117.2')
   assert.deepEqual(page.sections, ['Updates', 'Links'])
-  assert.equal(page.rows.Omni, 'Omni 3.118.0 is available')
-  assert.equal(textOf(page.buttons.Omni[0]), 'Update')
+  // The row is the Bot team plugin's own update, under its own name: never Omni's, which may
+  // not be installed at all.
+  assert.equal(page.rows['Bot team'], 'Omni 3.118.0 is available')
+  assert.equal(textOf(page.buttons['Bot team'][0]), 'Update')
+  assert.equal('Omni' in page.rows, false)
   assert.equal(page.rows['DeepSeek Harness'], 'Version 0.2.3')
   // A check switched off there is still said, with its button disabled.
   const off = draw({ update: { ...update, available: false, latest: null, enabled: false, source: 'unknown' } })
-  assert.equal(off.rows.Omni, 'Update checks are off.')
-  assert.equal(off.buttons.Omni[0].props.disabled, true)
+  assert.equal(off.rows['Bot team'], 'Update checks are off.')
+  assert.equal(off.buttons['Bot team'][0].props.disabled, true)
+  assert.equal('Omni' in off.rows, false)
+})
+
+test('the hero carries Automagik\'s triskle and asks for a star for Automagik, never Omni\'s pet', () => {
+  const update = { name: '@automagik/bots-dsh', current: '3.117.2', repoUrl: 'https://github.com/automagik-si/automagik', source: 'registry', enabled: true, phase: 'idle', dsh: { current: null, phase: 'idle' } }
+  asked = 0
+  states = []
+  const tree = AboutPage({ useUpdate: () => update, actions: { repoStars: () => Promise.resolve(null), openSettings: () => {} }, run: () => Promise.resolve(true), Section, Row })
+  let mark = null, star = null, ask = null
+  walk(tree, (node) => {
+    if (node.props.className === 'bt-about-mark') mark = node
+    if (node.props.className === 'bt-star') star = node
+    if (node.props.className === 'bt-about-ask') ask = textOf(node)
+  })
+  // The stand-in createElement does not render components: draw the mark's own element.
+  const [child] = mark.children
+  const img = typeof child.type === 'function' ? child.type(child.props) : child
+  assert.equal(img.type, 'img')
+  assert.match(img.props.className, /omni-mark/)
+  // The drawing made for the size it is shown at: the triskle's 64px file, in its three colours.
+  assert.equal(img.props.width, 52)
+  assert.equal(img.props.src, triskleThreeColours64)
+  assert.equal(star.props.href, 'https://github.com/automagik-si/automagik')
+  assert.equal(star.props.title, 'Star Automagik on GitHub')
+  assert.equal(ask, 'If Automagik helps you, a star on GitHub helps more people find it.')
 })
 
 test('in the desktop environment without the app\'s bridge, updates still come with the app', () => {

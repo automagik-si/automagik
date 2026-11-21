@@ -1203,9 +1203,9 @@ export const ES = {
   // About
   'About Omni': 'Acerca de Omni',
   'Version {version}': 'Versión {version}',
-  'Star Omni on GitHub': 'Dar una estrella a Omni en GitHub',
+  'Star Automagik on GitHub': 'Dar una estrella a Automagik en GitHub',
   '{count} stars': '{count} estrellas',
-  'If Omni helps you, a star on GitHub helps more people find it.': 'Si Omni te resulta útil, una estrella en GitHub ayuda a que más personas lo descubran.',
+  'If Automagik helps you, a star on GitHub helps more people find it.': 'Si Automagik te resulta útil, una estrella en GitHub ayuda a que más personas lo descubran.',
   Updates: 'Actualizaciones',
   'Check for updates': 'Buscar actualizaciones',
   'Checking…': 'Comprobando…',

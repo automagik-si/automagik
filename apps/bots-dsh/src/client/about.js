@@ -1,7 +1,7 @@
 // Settings → About Automagik: the version, updates for Automagik and DSH, the plugins' versions
 // and the links to the repository. The sidebar's cloud button shows the same update state.
 // Inside the Automagik app the page is the app's: its version, its update and its plugins come
-// from the app (desktop-update.js); in a plain DSH the Bot team's own update (Omni's) shows.
+// from the app (desktop-update.js); in a plain DSH the Bot team's own update shows.
 import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { CHECK_FRESH_MS } from '../shared/self-update.js'
 import { GitHubMark } from './connector-marks.js'
@@ -9,16 +9,13 @@ import { whenText } from './feedback.js'
 import { dateLocale, hostText, t } from './i18n.js'
 import { StarLineIcon } from './icons.js'
 import { SPRING_POP } from './motion.js'
-import { BotMark } from './mark.js'
-import { MAIN_LOOK } from './characters.js'
+import { OmniMark } from './logo.js'
 import { showsDshRow } from './dsh-offer.js'
 import { appState, pluginName, updatePill, useDesktopUpdate, useDesktopVersions } from './desktop-update.js'
 import { opensIntoPlugins, splitsPlugins } from './update-hold.js'
 import { Switch } from './bot-settings.js'
 import { recoveryDetails } from './self-update-recovery.js'
 
-// The length of the mark's `done` hop (bt-done in styles.js).
-const CHEER_MS = 1800
 const CHECK_POLL_MS = 2000
 // Up to five tarballs can each take a minute to download.
 const MAX_CHECK_POLLS = 180
@@ -657,22 +654,13 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
     actions.repoStars().then((count) => { if (live && Number.isInteger(count)) setStars(count) }, () => {})
     return () => { live = false }
   }, [])
-  // The whale hops when the page opens, after a check, and when an update is in.
-  const [cheer, setCheer] = useState(true)
-  useEffect(() => {
-    if (!cheer) return undefined
-    const timer = setTimeout(() => setCheer(false), CHEER_MS)
-    return () => clearTimeout(timer)
-  }, [cheer])
   const check = () => {
     setChecking(true)
-    void run(actions.checkUpdate()).then((done) => { setChecking(false); if (done) setCheer(true) })
+    void run(actions.checkUpdate()).then(() => { setChecking(false) })
   }
   const phase = update.phase ?? 'idle'
   const dsh = update.dsh
   const dshPhase = dsh?.phase ?? 'idle'
-  useEffect(() => { if (phase === 'installed' || phase === 'updated' || dshPhase === 'installed') setCheer(true) }, [phase, dshPhase])
-  const markState = checking ? 'searching' : phase === 'installing' || dshPhase === 'installing' ? 'working' : cheer ? 'done' : 'idle'
   // Same rule as the sidebar card.
   const dshNew = showsDshRow(dsh, update.app)
   const dshShown = dshNew && dsh.available
@@ -732,23 +720,24 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
   const plugins = ours ? versionRows({ versions, update, Row }) : []
   return [
     h('div', { key: 'hero', className: 'bt-about-hero' },
-      h('span', { className: 'bt-about-mark' }, h(BotMark, { look: MAIN_LOOK, bot: { id: 'about' }, size: 52, state: markState, live: true, gaze: true, pokeable: true })),
+      // Automagik's own mark, the triskle in its three colours (docs/brand): never a Bot's pet.
+      h('span', { className: 'bt-about-mark' }, h(OmniMark, { size: 52 })),
       h('div', { className: 'bt-about-copy' },
         h('span', { className: 'bt-about-name' }, 'Automagik'),
         version ? h('span', { className: 'bt-about-version' }, t('Version {version}', { version })) : null),
       repo ? h('a', {
-        className: 'bt-star', href: repo, target: '_blank', rel: 'noopener noreferrer', title: t('Star Omni on GitHub'),
-        'aria-label': stars === null ? t('Star Omni on GitHub') : `${t('Star Omni on GitHub')} · ${t('{count} stars', { count: stars })}`,
+        className: 'bt-star', href: repo, target: '_blank', rel: 'noopener noreferrer', title: t('Star Automagik on GitHub'),
+        'aria-label': stars === null ? t('Star Automagik on GitHub') : `${t('Star Automagik on GitHub')} · ${t('{count} stars', { count: stars })}`,
       },
       h('span', { className: 'bt-star-main' }, h('span', { className: 'bt-star-icon' }, h(StarLineIcon)), 'Star'),
       stars === null ? null : h('span', { className: 'bt-star-count' }, starCount(stars))) : null),
-    repo ? h('p', { key: 'ask', className: 'bt-about-ask' }, t('If Omni helps you, a star on GitHub helps more people find it.')) : null,
+    repo ? h('p', { key: 'ask', className: 'bt-about-ask' }, t('If Automagik helps you, a star on GitHub helps more people find it.')) : null,
     h(Section, { key: 'updates', title: t('Updates') },
       !ours && update.hostAnswered
         ? h(SelfUpdateRow, { Row, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate, force: true }) : null,
       !ours && update.hostAnswered && actions.selfUpdateStatusSource
         ? h(SelfUpdateRecoveryDetail, { source: actions.selfUpdateStatusSource }) : null,
-      h(Row, { label: ours ? 'Automagik' : 'Omni', hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
+      h(Row, { label: ours ? 'Automagik' : pluginName(update.name ?? '@automagik/bots-dsh'), hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? h('a', linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)
         // With the plugin's own check off, the app still knows the runtime it carries.
         : ours && typeof versions?.dsh === 'string' ? h(Row, { label: 'DeepSeek Harness', hint: t('Version {version}', { version: versions.dsh }) }) : null,
@@ -771,10 +760,6 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
 export const ABOUT_CSS = `
 .bt-about-hero{display:flex;align-items:center;gap:14px;padding:16px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card)}
 .bt-about-mark{flex:none;display:inline-flex;position:relative}
-.bt-about-mark::before{content:'';position:absolute;inset:-20%;border-radius:50%}
-body:not([data-bt-motion=quiet]) .bt-about-mark:hover .bt-mark[data-live][data-state=idle]:not(.bt-mark-poke) .bt-b{rotate:8deg;translate:5% -1%;animation:bt-nuzzle .78s ease-in-out .32s infinite}
-body:not([data-bt-motion=quiet]) .bt-about-mark:hover .bt-mark[data-live][data-state=idle] .bt-eye{scale:1 0;animation:none}
-body:not([data-bt-motion=quiet]) .bt-about-mark:hover .bt-mark[data-live][data-state=idle] .bt-eye-happy{opacity:1;transition-delay:.1s}
 .bt-about-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .bt-about-name{font-size:16px;line-height:22px;font-weight:600}
 .bt-about-version{font-size:12px;line-height:16px;color:var(--bt-ink-2);font-variant-numeric:tabular-nums}

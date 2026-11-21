@@ -2508,9 +2508,9 @@ var ZH = {
   "About Omni": "关于 Omni",
   "About Automagik": "关于 Automagik",
   "Version {version}": "版本 {version}",
-  "Star Omni on GitHub": "在 GitHub 上给 Omni 点 Star",
+  "Star Automagik on GitHub": "在 GitHub 上给 Automagik 点 Star",
   "{count} stars": "{count} 个 Star",
-  "If Omni helps you, a star on GitHub helps more people find it.": "如果 Omni 对你有用，欢迎在 GitHub 上点个 Star，让更多人看到它。",
+  "If Automagik helps you, a star on GitHub helps more people find it.": "如果 Automagik 对你有用，欢迎在 GitHub 上点个 Star，让更多人看到它。",
   Updates: "更新",
   "Check for updates": "检查更新",
   "Checking…": "正在检查…",
@@ -35584,7 +35584,6 @@ function recoveryDetails(run3, recovery) {
 
 // src/client/about.js
 var import_react90 = require("react");
-var CHEER_MS = 1800;
 var CHECK_POLL_MS = 2e3;
 var MAX_CHECK_POLLS = 180;
 var FORCE_CHECK_DEADLINE_MS = MAX_CHECK_POLLS * CHECK_POLL_MS;
@@ -36295,26 +36294,15 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
       live = false;
     };
   }, []);
-  const [cheer, setCheer] = (0, import_react90.useState)(true);
-  (0, import_react90.useEffect)(() => {
-    if (!cheer) return void 0;
-    const timer = setTimeout(() => setCheer(false), CHEER_MS);
-    return () => clearTimeout(timer);
-  }, [cheer]);
   const check = () => {
     setChecking(true);
-    void run3(actions.checkUpdate()).then((done) => {
+    void run3(actions.checkUpdate()).then(() => {
       setChecking(false);
-      if (done) setCheer(true);
     });
   };
   const phase = update.phase ?? "idle";
   const dsh = update.dsh;
   const dshPhase = dsh?.phase ?? "idle";
-  (0, import_react90.useEffect)(() => {
-    if (phase === "installed" || phase === "updated" || dshPhase === "installed") setCheer(true);
-  }, [phase, dshPhase]);
-  const markState = checking ? "searching" : phase === "installing" || dshPhase === "installing" ? "working" : cheer ? "done" : "idle";
   const dshNew = showsDshRow(dsh, update.app);
   const dshShown = dshNew && dsh.available;
   const appPill = updatePill(appState(app.state));
@@ -36367,7 +36355,8 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
     (0, import_react90.createElement)(
       "div",
       { key: "hero", className: "bt-about-hero" },
-      (0, import_react90.createElement)("span", { className: "bt-about-mark" }, (0, import_react90.createElement)(BotMark, { look: MAIN_LOOK, bot: { id: "about" }, size: 52, state: markState, live: true, gaze: true, pokeable: true })),
+      // Automagik's own mark, the triskle in its three colours (docs/brand): never a Bot's pet.
+      (0, import_react90.createElement)("span", { className: "bt-about-mark" }, (0, import_react90.createElement)(OmniMark, { size: 52 })),
       (0, import_react90.createElement)(
         "div",
         { className: "bt-about-copy" },
@@ -36381,20 +36370,20 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
           href: repo,
           target: "_blank",
           rel: "noopener noreferrer",
-          title: t("Star Omni on GitHub"),
-          "aria-label": stars === null ? t("Star Omni on GitHub") : `${t("Star Omni on GitHub")} · ${t("{count} stars", { count: stars })}`
+          title: t("Star Automagik on GitHub"),
+          "aria-label": stars === null ? t("Star Automagik on GitHub") : `${t("Star Automagik on GitHub")} · ${t("{count} stars", { count: stars })}`
         },
         (0, import_react90.createElement)("span", { className: "bt-star-main" }, (0, import_react90.createElement)("span", { className: "bt-star-icon" }, (0, import_react90.createElement)(StarLineIcon)), "Star"),
         stars === null ? null : (0, import_react90.createElement)("span", { className: "bt-star-count" }, starCount(stars))
       ) : null
     ),
-    repo ? (0, import_react90.createElement)("p", { key: "ask", className: "bt-about-ask" }, t("If Omni helps you, a star on GitHub helps more people find it.")) : null,
+    repo ? (0, import_react90.createElement)("p", { key: "ask", className: "bt-about-ask" }, t("If Automagik helps you, a star on GitHub helps more people find it.")) : null,
     (0, import_react90.createElement)(
       Section3,
       { key: "updates", title: t("Updates") },
       !ours && update.hostAnswered ? (0, import_react90.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate, force: true }) : null,
       !ours && update.hostAnswered && actions.selfUpdateStatusSource ? (0, import_react90.createElement)(SelfUpdateRecoveryDetail, { source: actions.selfUpdateStatusSource }) : null,
-      (0, import_react90.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react90.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
+      (0, import_react90.createElement)(Row3, { label: ours ? "Automagik" : pluginName(update.name ?? "@automagik/bots-dsh"), hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react90.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react90.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react90.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),
       reason ? (0, import_react90.createElement)(Row3, { label: t("Plugin updates"), hint: reason }) : null,
@@ -36422,10 +36411,6 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
 var ABOUT_CSS = `
 .bt-about-hero{display:flex;align-items:center;gap:14px;padding:16px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card)}
 .bt-about-mark{flex:none;display:inline-flex;position:relative}
-.bt-about-mark::before{content:'';position:absolute;inset:-20%;border-radius:50%}
-body:not([data-bt-motion=quiet]) .bt-about-mark:hover .bt-mark[data-live][data-state=idle]:not(.bt-mark-poke) .bt-b{rotate:8deg;translate:5% -1%;animation:bt-nuzzle .78s ease-in-out .32s infinite}
-body:not([data-bt-motion=quiet]) .bt-about-mark:hover .bt-mark[data-live][data-state=idle] .bt-eye{scale:1 0;animation:none}
-body:not([data-bt-motion=quiet]) .bt-about-mark:hover .bt-mark[data-live][data-state=idle] .bt-eye-happy{opacity:1;transition-delay:.1s}
 .bt-about-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .bt-about-name{font-size:16px;line-height:22px;font-weight:600}
 .bt-about-version{font-size:12px;line-height:16px;color:var(--bt-ink-2);font-variant-numeric:tabular-nums}
