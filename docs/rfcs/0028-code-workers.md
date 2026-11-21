@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; delivery 0b merged (#1827); amended 2026-11-20: reports are not batched on DSH rc.2, one message each in order, approved by the owner's delegate on 2026-11-20; delivery 1 waits for delivery 0, the grant, upstream; amended 2026-11-21: a second worker kind, `lead`, writing in RFC 0030's Q8 answer (approved 2026-11-19); Q5 (leads per Bot) and Q6 (held sends) proposed for the owner's delegate) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; delivery 0b merged (#1827); amended 2026-11-20: reports are not batched on DSH rc.2, one message each in order, approved by the owner's delegate on 2026-11-20; delivery 1 waits for delivery 0, the grant, upstream; amended 2026-11-21: a second worker kind, `lead`, writing in RFC 0030's Q8 answer (approved 2026-11-19); Q5 (leads per Bot) and Q6 (held sends) answered with their recommendations, approved by the owner's delegate on 2026-11-21) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr-core (the scoped grant), plugin (3.N.P) for each Automagik delivery |
 | Created | 2026-11-10 |
@@ -14,7 +14,8 @@
 > 2026-11-19.
 > Lead workers (Design, and delivery 1b) are written here on 2026-11-21. Their four rules are RFC
 > 0030's Q8 answer, approved by the owner's delegate on 2026-11-19 ("RFC 0028 gains a worker kind
-> `lead`"). What that answer left open is asked as Q5 and Q6, proposed, not decided.
+> `lead`"). What that answer left open, Q5 and Q6, was answered with their recommendations,
+> approved by the owner's delegate on 2026-11-21 (Answers (2026-11-21)).
 
 ## Summary
 
@@ -365,15 +366,25 @@ these four rules from Q8:
   refuse: the host holds the text, and when that turn ends it sends the text with
   `hc send --if idle`. `hc send --wait` is not this: it waits for the turn the send itself starts.
 
+Q5 and Q6 (answered 2026-11-21) add:
+
+- **One running lead per Bot.** A second `code_start` of the kind `lead` while the Bot's lead runs
+  is refused, naming the one that runs (Q5).
+- **Held sends (Q6).** Texts held for a lead are kept in order, at most 5 per lead; a sixth is
+  refused, naming the five. Each is sent at the next idle, one per turn: the next one only after
+  the turn the previous send started ends. Held texts are kept in the Bot's store, owner-only and
+  never logged, and are sent after a host restart. `code_stop` drops them and says how many.
+  `code_send` answers `held` with the text's place in line.
+
 What stays as it is: a lead starts with `code_start` from the owner's allowlist of templates (Q2),
 with the same labels (`automagik.bot`, `automagik.worker`), so the grant reaches a lead exactly as
 it reaches a worker and never reaches the lead's own children. `code_send` to a blocked lead is
 refused, as for a worker: the Bot never answers an approval (Approvals). A lead's permission
 level follows Approvals.
 
-Left open by Q8, and asked below: how many leads a Bot may run (Q5), and what the host does with
-several sends during one turn, a host restart while a text is held, and `code_stop` while a text
-is held (Q6).
+Q8 left two choices open: how many leads a Bot may run (Q5), and what the host does with several
+sends during one turn, a host restart while a text is held, and `code_stop` while a text is held
+(Q6). Both are answered (Answers (2026-11-21)) and written in above.
 
 ### Caps and cleanup
 
@@ -401,9 +412,9 @@ is held (Q6).
 - Bot setting `codeWorkers` (boolean, default off) and the caps `codeWorkers.perBot` and
   `codeWorkers.perTeam`. Compatibility: new.
 - Tool names `code_start`, `code_send`, `code_read`, `code_list`, `code_stop`.
-- The worker kind (`worker`, `lead`) in `code_start`'s input and in `code_list` (amendment of
-  2026-11-21). Compatibility: new; a worker without a kind is a `worker`. How `code_send` reports a
-  held text waits for Q6.
+- The worker kind (`worker`, `lead`) in `code_start`'s input and in `code_list`, and `held` with the
+  text's place in line in `code_send`'s answer for a lead (amendment of 2026-11-21, Q6).
+  Compatibility: new; a worker without a kind is a `worker`.
 - Terminal label `automagik.worker=<workerId>`, beside RFC 0006's `automagik.bot`.
 - Space prefix `automagik:` (RFC 0006's contract, kept).
 - A worker report message kind in the Bot's Session.
@@ -454,9 +465,11 @@ either order; delivery 1 needs both.
 - **1b. Lead workers** (plugin, after delivery 1; amendment of 2026-11-21). The kind in
   `code_start` and `code_list`; no wake on a lead's events; the held send. RFC 0030's delivery 3b
   needs it, with deliveries 0 and 1. *Check:* a lead's turn end, block and exit queue no report
-  into the Session while a worker's still do; a `code_send` while the lead works is typed after
-  that turn ends, with `--if idle`; a send to a blocked lead is refused. Delivery 3 adds the
-  cap and cleanup checks for leads.
+  into the Session while a worker's still do; a second running lead for the Bot is refused; a
+  `code_send` while the lead works answers `held` with its place and is typed after that turn
+  ends, with `--if idle`, one per turn, in order, also across a host restart; a sixth held text
+  and a send to a blocked lead are refused; `code_stop` drops the held texts and says how many.
+  Delivery 3 adds the cap and cleanup checks for leads.
 - **2. The worker card and the sidebar pill** (plugin). *Check:* the card updates in place
   through working, blocked and done; Open in Code and Stop act on the right worker.
 - **3. Caps, cleanup and worktrees** (plugin). *Check:* the fourth start for one Bot is refused;
@@ -481,10 +494,21 @@ each is answered with it, restated; the questions below stay as they were asked.
 4. **Q4, default caps:** 3 running workers per Bot and 6 per team, settable by the owner (Caps
    and cleanup).
 
+## Answers (2026-11-21)
+
+Approved by the owner's delegate on 2026-11-21, each with its recommendation (a), restated:
+
+5. **Q5, leads per Bot:** one running lead per Bot; a second start is refused, naming the one that
+   runs.
+6. **Q6, held sends:** kept in order, at most 5 per lead (a sixth refused, naming the five), each
+   sent at the next idle, one per turn; kept in the Bot's store (owner-only, never logged) and
+   sent after a restart; `code_stop` drops them and says how many; `code_send` answers `held`
+   with the text's place in line.
+
 ## Open questions
 
-Q1-Q4 were answered on 2026-11-19 (Answers, above) and are kept as asked. Q5 and Q6 come with the
-amendment of 2026-11-21.
+Q1-Q4 were answered on 2026-11-19 and Q5-Q6 on 2026-11-21 (Answers, above); all are kept as
+asked.
 
 1. **The Main Bot's default.** Recommended: off like every Bot, with a one-time offer in the Main
    Bot's chat the first time the owner asks for coding work.
