@@ -4,6 +4,7 @@
     "billing": [],
     "reviewer": [
       ".github/pr-reviewer.json",
+      ".github/rulesets/**",
       "scripts/pr-reviewer/**",
       ".github/workflows/pr-reviewer-watch.yml"
     ],
