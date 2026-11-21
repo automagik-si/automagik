@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35; #206 amendment (delivery 9a, am on a linked machine) approved by the owner's delegate on 2026-11-20, questions 6-11 answered with its recommendations, 9a in delivery; #1007 amendment (Pocket Link's part, `am pocket`) on 2026-11-21, after the owner's delegate's decision in RFC 0030, its questions in RFC 0046) |
+| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35; #206 amendment (delivery 9a, am on a linked machine) approved by the owner's delegate on 2026-11-20, questions 6-11 answered with its recommendations, 9a in delivery; #1007 amendment (Pocket Link's part, `am pocket`) approved by the owner's delegate on 2026-11-21, RFC 0046's six questions decided with its recommendations) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | am (3.N.P, D35), herdr (3.N.P), plugin (3.N.P), pocket (3.N.P), desktop (3.N) |
 | Created | 2026-11-03 |
@@ -675,11 +675,11 @@ the far side through a fake `hc exec` runner. (`am update`'s own test overrides 
 
 ### Amendment (2026-11-21, #1007): Pocket Link, Pocket's own part
 
-Status: Proposed. The owner's delegate decided the direction on 2026-11-21 (RFC 0030, Decisions
+Status: Accepted. The owner's delegate decided the direction on 2026-11-21 (RFC 0030, Decisions
 (2026-11-21), 4: Pocket Link runs without herdr-app as its own Pocket-owned part, installed and
-started by `am`, paired with `am pocket pair`). The design and its questions are
-[RFC 0046](0046-pocket-link-without-herdr-app.md), Pocket's; this amendment records what changes
-here.
+started by `am`, paired with `am pocket pair`) and RFC 0046's six questions, each with its
+recommended option. The design is [RFC 0046](0046-pocket-link-without-herdr-app.md), Pocket's;
+this amendment records what changes here.
 
 - **A part `pocket.link`** (proposed id), kind `binary`, `macos` and `linux`, in no set. Its files
   are byte copies of `herdr/mods/pocket-link/`'s shipped bridge and chat files in `am/pocket-link/`
@@ -697,7 +697,7 @@ here.
   them is unchanged.
 - **Who may pair.** `am pocket pair` refuses inside a Herdr terminal or a DSH tool call, by D35's
   test for an unsigned-source prompt (Threat model), and never prints the code in `--json`
-  (RFC 0046, question 3).
+  (RFC 0046, Decided 3).
 - **Unchanged:** the pack, herdr-app as a part, the bridge's service names, state folder and
   pairing link, and Pocket's `latest.json`, `pocket-lane`, app ID and signing key.
 - **Delivery 8** gains Pocket Link's part as RFC 0046's deliveries 1 and 2 (a herdr patch carrying
@@ -1009,7 +1009,7 @@ recommendation; the owner may amend on return):
 Ledger pass (2026-11-10): the board links this RFC from its file.
 
 - Open issues: #768, #815, #206 (delivery 9a; amendment approved 2026-11-20, #1932), #1007
-  (Pocket Link's part; amendment of 2026-11-21, RFC 0046).
+  (Pocket Link's part; amendment approved 2026-11-21, RFC 0046).
 - Merged changes that cite this RFC: #203, #205, #252, #254, #258, #263, #265, #288, #292, #300, #302, #330, #427, #751, #783, #806 (last merged 2026-11-09).
 
 ## Links

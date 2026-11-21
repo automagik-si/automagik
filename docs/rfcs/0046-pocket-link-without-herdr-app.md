@@ -2,12 +2,15 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (direction decided by the owner's delegate on 2026-11-21: [RFC 0030](0030-code-mode-in-the-app.md), Decisions (2026-11-21), 4; the questions below wait for the owner's delegate; nothing built) |
-| Owner | Pocket ([apps/pocket/AGENTS.md](../../apps/pocket/AGENTS.md): Pocket Link belongs to Pocket) |
+| Status | Accepted (direction decided by the owner's delegate on 2026-11-21: [RFC 0030](0030-code-mode-in-the-app.md), Decisions (2026-11-21), 4; its six questions decided by the owner's delegate on 2026-11-21, each the recommended option, see Decided; nothing built) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none for this RFC (docs only). Deliveries: herdr (3.N.P) carrying am's byte copies, then pocket (3.N.P) for the phone's text |
 | Created | 2026-11-21 |
+| Owner | Pocket ([apps/pocket/AGENTS.md](../../apps/pocket/AGENTS.md): Pocket Link belongs to Pocket) |
 | Amends | [RFC 0012](0012-am-cli-and-parts.md) (Pocket Link's part, delivery 8): see its Amendment (2026-11-21, #1007) |
+
+> Accepted by the owner's delegate on 2026-11-21 while the owner is away; the owner may amend on
+> return.
 
 ## Summary
 
@@ -65,20 +68,20 @@ until this ships (RFC 0030 Q20, unchanged).
 | `id` | `pocket.link` (proposed; Pocket's to confirm) |
 | `kind` | `binary`, like `automagik.am` |
 | `os` | `macos`, `linux` (systemd). Windows is not applicable (exit 2) until RFC 0016's guest |
-| `set` | none: Pocket installs nothing on a computer by itself (Q4) |
+| `set` | none: Pocket installs nothing on a computer by itself (Decided 4) |
 | `requires` | Node 20.3+ and npm (the bridge's floor; am's own floor, 22.7, already covers Node), and a reachable herdr-core |
 | `writes` | `~/.automagik/parts/pocket.link/**`, `~/Library/LaunchAgents/dev.herdr.pocket-link.plist`, `~/.config/systemd/user/herdr-pocket-link.service`, the state folder above |
 
-- **Where the bytes come from** (Q1). `scripts/am-copies.mjs` copies Pocket Link's shipped files
-  (`bridge/*.mjs` but tests, `bridge/package.json`, `bridge/package-lock.json`, `chat/` but tests,
-  `LICENSE`) to `am/pocket-link/`. Pocket Link stays the source, as the pack stays the source of
-  the CLI; nobody edits the copy. They ship in `automagik-am-<v>.tgz` and are as signed as am.
+- **Where the bytes come from** (Decided 1). `scripts/am-copies.mjs` copies Pocket Link's shipped
+  files (`bridge/*.mjs` but tests, `bridge/package.json`, `bridge/package-lock.json`, `chat/` but
+  tests, `LICENSE`) to `am/pocket-link/`. Pocket Link stays the source, as the pack stays the source
+  of the CLI; nobody edits the copy. They ship in `automagik-am-<v>.tgz` and are as signed as am.
 - **Where they go.** `am` keeps each version in its parts store,
   `<AM_HOME>/parts/pocket.link/<version>/`, with `current` and `previous` links (RFC 0012's store,
   already used by `automagik.am`). The login service runs `current/bridge/bridge.mjs serve`.
-- **Packages** (Q2). `npm ci --omit=dev --no-audit --no-fund` in that version's `bridge/`, from
-  the committed lockfile, as the dialog does today. A version whose lockfile equals the previous
-  one's reuses its `node_modules`.
+- **Packages** (Decided 2). `npm ci --omit=dev --no-audit --no-fund` in that version's `bridge/`,
+  from the committed lockfile, as the dialog does today. A version whose lockfile equals the
+  previous one's reuses its `node_modules`.
 - **Names kept.** The service label and unit, the state folder, the pairing link and every bridge
   verb stay as they are, so pairings made in the dialog keep working and the footer keeps reading
   the same file. Nothing in the phone's contract changes.
@@ -94,7 +97,7 @@ until this ships (RFC 0030 Q20, unchanged).
 | `am pocket link reset` | `reset`, after a confirmation that names its effect: every phone unpaired. |
 | `am install` / `uninstall` / `doctor pocket.link` | RFC 0012's entries. Uninstall stops and removes the service and the store, and keeps the state folder (the pairings) unless `--purge`. |
 
-- **Who may pair** (Q3). A pairing gives a phone everything a terminal running `hc` has
+- **Who may pair** (Decided 3). A pairing gives a phone everything a terminal running `hc` has
   (`README.md`, "What it does on your computer"). `am pocket pair` refuses inside a Herdr terminal
   or a DSH tool call, by D35's test for an unsigned-source prompt (RFC 0012, Threat model), and
   needs a TTY; `--json` never prints the code. Today's dialog needs a click in herdr-app.
@@ -109,7 +112,7 @@ until this ships (RFC 0030 Q20, unchanged).
 
 - One bridge per computer. When `pocket.link` is installed, the dialog drives that copy (its
   `BRIDGE` becomes `current/bridge/bridge.mjs`) and says Pocket Link is managed by `am`; its own
-  Install the bridge step goes away (Q5).
+  Install the bridge step goes away (Decided 5).
 - `am pocket pair` on a computer whose service still runs the mod's copy takes the service over
   (it rewrites the one service file); the mod folder is left alone, since herdr-app owns it.
 
@@ -121,9 +124,9 @@ until this ships (RFC 0030 Q20, unchanged).
    the mod is reused and its phones listed; an update stops, swaps and restarts, and a failed start
    rolls back; refusal inside a Herdr pane env; uninstall keeps the state folder. *Rollback:*
    revert; a running service keeps its stored files and the dialog can still stop it.
-2. **The dialog defers to `am`** (herdr). Q5's dialog change, and Pocket Link's README Install and
-   Update rewritten around `am pocket pair`. *Check:* `pocket-link`'s CI job; the dialog drives
-   am's copy when it exists.
+2. **The dialog defers to `am`** (herdr). Decided 5's dialog change, and Pocket Link's README
+   Install and Update rewritten around `am pocket pair`. *Check:* `pocket-link`'s CI job; the
+   dialog drives am's copy when it exists.
 3. **The phone's text** (pocket). The pairing hint names `am pocket pair`, and Herdr's dialog while
    it exists. *Check:* the GitHub APK build and both flavor gates.
 
@@ -134,30 +137,44 @@ herdr-app's removal from the install (RFC 0013 delivery 7, re-scoped by RFC 0030
 ## Threat model
 
 - **Pairing.** The bridge's `pair` verb can already be run by any code of the same user; `am pocket
-  pair` adds no reach. Q3 only keeps `am` from being the easy path for a Bot.
+  pair` adds no reach. Decided 3 only keeps `am` from being the easy path for a Bot.
 - **Bytes.** Pocket Link's code comes from am's signed tarball (am-lane, `AM_LANE_KEY`); its two
   npm packages come from the registry, pinned by the lockfile's integrity hashes, as today.
 - **Unchanged:** the guard, the 128-bit codes, the paired-key check, the state folder's modes and
   one writer for `devices.json`.
 
-## Open questions (recommended answer first)
+## Decided (owner's delegate, 2026-11-21)
 
-1. **Where the bytes come from.** (a) Byte copies in am's tarball, signed with am. (b) Its own
-   asset with its own signed pointer: a new key, which only the owner makes. (c) A pinned git
-   commit fetched by am: an unsigned source, which needs a yes every time.
-2. **npm packages.** (a) `npm ci` from the lockfile on the computer, as today. (b) `node_modules`
-   built per OS and architecture into the tarball: about 25 MB more per target in every release.
-3. **Who may pair.** (a) Refused inside a Herdr terminal or a DSH tool call, TTY only, no code in
-   `--json`. (b) Allowed anywhere, as the bridge's own verb is.
-4. **Default set.** (a) In no set: `am pocket pair` or `am install pocket.link` installs it. (b) In
-   `code`, so every Code machine runs a bridge.
-5. **The dialog while herdr-app stays.** (a) It drives am's copy when one is installed. (b) It
-   refuses to act and names `am pocket`. (c) It keeps its own copy: two copies would fight over
-   one service.
-6. **The phone's spaces without herdr-app.** The phone lays out spaces from herdr-app's doc in
-   herdr-core (`PocketViewModel.kt:841`, `HostReads.kt:96`). (a) Not this RFC's: herdr-app's
-   removal checks that the phone still shows terminals without that doc, as it does for a linked
-   machine with no layout. (b) Add it here as a fourth delivery.
+Each question this RFC put, decided by the owner's delegate, 2026-11-21, recommended option. The
+options not taken are under Alternatives considered. The owner may amend on return.
+
+1. **Where the bytes come from.** Byte copies of Pocket Link's shipped files in am's tarball,
+   signed with am; decided by the owner's delegate, 2026-11-21, recommended option.
+2. **npm packages.** `npm ci` from the committed lockfile on the computer, as today; decided by the
+   owner's delegate, 2026-11-21, recommended option.
+3. **Who may pair.** `am pocket pair` is refused inside a Herdr terminal or a DSH tool call, runs
+   on a TTY only, and never prints the code in `--json`; decided by the owner's delegate,
+   2026-11-21, recommended option.
+4. **Default set.** `pocket.link` is in no set: `am pocket pair` or `am install pocket.link`
+   installs it; decided by the owner's delegate, 2026-11-21, recommended option.
+5. **The dialog while herdr-app stays.** It drives am's copy when one is installed; decided by the
+   owner's delegate, 2026-11-21, recommended option.
+6. **The phone's spaces without herdr-app.** Not this RFC's: herdr-app's removal checks that the
+   phone still shows terminals without herdr-app's doc in herdr-core (`PocketViewModel.kt:841`,
+   `HostReads.kt:96`), as it does for a linked machine with no layout; decided by the owner's
+   delegate, 2026-11-21, recommended option.
+
+## Alternatives considered
+
+1. Its own release asset with its own signed pointer: a new key, which only the owner makes. A
+   pinned git commit fetched by am: an unsigned source, which needs a yes every time.
+2. `node_modules` built per OS and architecture into the tarball: about 25 MB more per target in
+   every release.
+3. Pairing allowed anywhere, as the bridge's own verb is.
+4. `pocket.link` in the `code` set, so every Code machine runs a bridge.
+5. A dialog that refuses to act and names `am pocket`; a dialog that keeps its own copy, so two
+   copies would fight over one service.
+6. The phone's handling of a missing herdr-app doc as a fourth delivery here.
 
 ## Links
 
