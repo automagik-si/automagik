@@ -153,7 +153,9 @@ if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
     });
   });
   if (reply.error) fail(reply.error.message);
-  const terminal = { ...reply.result.terminal, cwd: params.cwd, labels: params.labels,
+  // herdr-core's RunResult flattens the terminal record into the result (both tagged versions).
+  const { argv: _argv, ...record } = reply.result;
+  const terminal = { ...record, cwd: params.cwd, labels: params.labels,
     parent: params.parent, foreground: { argv: params.argv, pid: 5000 }, pid: 5000 };
   state.terminals.push(terminal); save(); out(terminal); process.exit(0);
 }

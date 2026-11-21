@@ -28,6 +28,7 @@ import { projectOfFolder, startProxy } from "./hcProxy.mjs";
 
 /** Every line this helper prints starts with this. */
 export const MSG_PREFIX = "hc-pane: ";
+const TERMINATION_GRACE_MS = 2000;
 
 const oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
@@ -130,6 +131,7 @@ export async function runPane(argv = process.argv.slice(2), env = process.env, i
   const childEnv = paneEnv(env, upstream, proxy.socket);
   let child;
   let proxyLost = false;
+  let killTimer;
   const stop = (signal) => {
     try { child?.kill(signal); } catch { /* already gone */ }
   };
@@ -138,10 +140,17 @@ export async function runPane(argv = process.argv.slice(2), env = process.env, i
     proxyLost = true;
     (io.stderr ?? process.stderr).write(
       `${MSG_PREFIX}${oneLine(error?.message ?? "the proxy stopped")}; ending the pane\n`);
-    stop("SIGTERM");
+    if (child?.exitCode === null && child.signalCode === null) {
+      stop("SIGTERM");
+      killTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) stop("SIGKILL");
+      }, TERMINATION_GRACE_MS);
+      killTimer.unref();
+    }
   };
   proxy.server.on("error", lost);
   proxy.server.on("close", lost);
+  proxy.events.on("fatal", lost);
   if (!proxy.server.listening) {
     await proxy.close().catch(() => {});
     throw new Error("the proxy is not listening; the pane was not started");
@@ -151,6 +160,7 @@ export async function runPane(argv = process.argv.slice(2), env = process.env, i
   } catch (e) {
     proxy.server.off("error", lost);
     proxy.server.off("close", lost);
+    proxy.events.off("fatal", lost);
     await proxy.close().catch(() => {});
     throw new Error(`cannot start ${args.command[0]}: ${oneLine(e?.message ?? e)}`);
   }
@@ -160,10 +170,13 @@ export async function runPane(argv = process.argv.slice(2), env = process.env, i
     const finish = async (code, signal) => {
       if (done) return;
       done = true;
+      clearTimeout(killTimer);
       for (const signalName of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signalName, stop);
       proxy.server.off("error", lost);
       proxy.server.off("close", lost);
+      // A version refusal can still be flushing when the child exits on its own.
       await proxy.close().catch(() => {});
+      proxy.events.off("fatal", lost);
       resolvePromise(proxyLost || signal ? 1 : code ?? 0);
     };
     child.on("error", async (e) => {
