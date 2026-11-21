@@ -2116,7 +2116,7 @@ Usage: am <command> [options]                   (every command takes --json and 
   accounts plan --show          the Accounts plan and each machine's row, as JSON
   accounts apply [--retry]       switch linked machines to their approved Claude login
                                 (changes only claude-logins.json's use through set-login)
-  accounts set-login --use ID|--add ID --dir DIR|--remove ID --snapshot S
+  accounts set-login --use ID [--expect-qualified]|--add ID --dir DIR|--remove ID --snapshot S
                                 change this machine's claude-logins.json under its lock
 
 Antigravity (\`agy\`, 1.5.3): --model takes the ids \`agy models\` lists (a Gemini or Claude
@@ -13192,7 +13192,7 @@ export async function setLoginRun(op, {
   form = { home: home(), realpath: realpathSync, isDir: (path) => statSync(path).isDirectory() },
 } = {}) {
   try {
-    const { home: expectedHome, core, snapshot, slotDigest, effDigest, canWrite } = op;
+    const { home: expectedHome, core, snapshot, slotDigest, effDigest, canWrite, qualified } = op;
     const dir = op.kind === "launch" && !op.projectHome ? defaultLaunchHome(form.home) : resolveHome();
     if (expectedHome !== undefined && expectedHome !== dir) return refusal("home");
     if (!dir || kind(dir) !== "dir") return refusal("no-home");
@@ -13213,7 +13213,12 @@ export async function setLoginRun(op, {
         return { ok: true, core: found, home: dir, dir: slot, fallback: Boolean(login.warning) || slot !== login.dir };
       }
     }
-    const probeRefusal = slotDigest !== undefined || effDigest !== undefined ? checkSlotIdentity(await probe(), op) : null;
+    let probeRefusal;
+    if (slotDigest !== undefined || effDigest !== undefined) {
+      const read = await probe();
+      probeRefusal = checkSlotIdentity(read, op);
+      if (!probeRefusal && qualified && read.state === "unresolved") probeRefusal = refusal("slot-changed");
+    }
     const path = loginsPath(dir);
     return lock(`${path}.lock`, () => {
       let receipt;
@@ -13240,7 +13245,7 @@ export async function setLoginRun(op, {
         return refusal(code);
       };
       if (probeRefusal) return refuseWrite(probeRefusal.error);
-      if (core !== undefined && !writerCapability(dir, capabilityIo).qualified) return refuseWrite("update-first");
+      if ((core !== undefined || qualified) && !writerCapability(dir, capabilityIo).qualified) return refuseWrite("update-first");
       let bytes = null;
       try { bytes = readBytes(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
       if ((bytes === null ? "none" : accountsHash(bytes)) !== snapshot) return refuseWrite("conflict");
@@ -13251,6 +13256,10 @@ export async function setLoginRun(op, {
       try {
         atomicAccountsWrite(path, edit.text, () => {
           if (canWrite && (code = canWrite())) throw refused;
+          if (qualified && !writerCapability(dir, capabilityIo).qualified) {
+            code = "update-first";
+            throw refused;
+          }
           // If the process dies between the two renames, recovery cannot assume it never wrote.
           if (receipt) keep("indeterminate");
         }, { writeTemp, rename });
@@ -13421,13 +13430,16 @@ const PLAN_OPTIONS = Object.fromEntries([...new Set(Object.entries(PLAN_OPERATIO
 const wholeRevision = (value) => matches(/^(0|[1-9][0-9]*)$/, value) && Number.isSafeInteger(Number(value));
 
 const SET_LOGIN_OPTIONS = Object.fromEntries(["json", "use", "add", "dir", "remove", "snapshot", "expect-home",
-  "expect-core", "expect-slot", "expect-eff", "expect-rev", "attempt", "dispatch", "cancel-attempt", "launch-login", "project-home"]
-  .map((key) => [key, { type: ["json", "cancel-attempt", "launch-login", "project-home"].includes(key) ? "boolean" : "string" }]));
+  "expect-core", "expect-slot", "expect-eff", "expect-rev", "expect-qualified", "attempt", "dispatch", "cancel-attempt",
+  "launch-login", "project-home"]
+  .map((key) => [key, { type: ["json", "expect-qualified", "cancel-attempt", "launch-login", "project-home"].includes(key) ? "boolean" : "string" }]));
 
 function parseSetLoginOptions(args) {
   const { values, tokens } = parseArgs({ args, options: SET_LOGIN_OPTIONS, allowPositionals: false, strict: true, tokens: true });
   if (tokens.some((token) => token.kind !== "option") || tokens.length !== Object.keys(values).length) return null;
-  return setLoginOp(values).op;
+  const { op } = setLoginOp(values);
+  if (values["expect-qualified"] && (op?.kind !== "use" || op.qualified !== true)) return null;
+  return op;
 }
 
 function parseApplyOptions(args) {

@@ -434,3 +434,128 @@ test("a linked use changes only use and preserves extra record and slot fields",
   assert.equal(result.ok, true);
   assert.deepEqual(JSON.parse(s.read()), { ...original, use: "slot-two" });
 });
+
+const qualifiedOptions = (s, email = A) => ({ use: "slot-two", snapshot: s.snapshot, "expect-qualified": true,
+  "expect-home": s.app, "expect-slot": idDigest("slot-two", B, sha256), "expect-eff": idDigest("default", email, sha256) });
+const optionArgs = (values) => Object.entries(values).flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, value]);
+const qualifiedRead = (s) => async () => ({ record: "ok", snapshot: s.snapshot, slotsComplete: true,
+  effective: "default", email: A, state: "eligible", slots: [{ id: "slot-two", state: "eligible", email: B }] });
+
+function installClaude(s, defaultEmail = A) {
+  const normal = defaultEmail ? JSON.stringify({ loggedIn: true, email: defaultEmail, authMethod: "claude.ai" })
+    : JSON.stringify({ loggedIn: false });
+  const alternate = JSON.stringify({ loggedIn: true, email: B, authMethod: "claude.ai" });
+  exe(join(s.home, "bin/claude"), `#!/bin/sh
+[ "$1 $2" = "auth status" ] || exit 3
+case "$CLAUDE_CONFIG_DIR" in
+  */login-é) printf '%s\\n' '${alternate}' ;;
+  *) printf '%s\\n' '${normal}' ;;
+esac
+`);
+}
+
+test("qualified local use accepts an absent, disabled or confirmed panel and refuses unconfirmed or unknown panels", (t) => {
+  const s = scene(t);
+  installClaude(s);
+  const args = optionArgs(qualifiedOptions(s));
+  const writes = (entry = PACK) => {
+    success(s.run(args, entry), "slot-two", format("slot-two", s.logins));
+    writeFileSync(s.file, s.text);
+  };
+  writes();
+  mkdirSync(join(s.app, "mods-disabled/am-quota"), { recursive: true });
+  writes(AM_READER);
+  const panel = s.install("mods/am-quota");
+  assert.deepEqual(s.run(args), refused("update-first"), "unknown panel");
+  assert.equal(s.read(), s.text);
+  rmSync(panel);
+  s.install(PANEL_MARKER);
+  for (const marker of SIDEBAR_MARKERS) s.install(marker);
+  s.install(SIDEBAR_VERSION, "1.2.3\n");
+  assert.deepEqual(s.run(args), refused("update-first"), "unconfirmed panel");
+  assert.equal(s.read(), s.text);
+  s.confirm();
+  writes();
+});
+
+test("qualified local use checks a panel that was enabled while acquiring the login lock", async (t) => {
+  const s = scene(t);
+  const { op } = setLoginOp(qualifiedOptions(s));
+  const result = await setLoginRun(op, s.io({ readClaude: qualifiedRead(s), lock: (path, run) => {
+    assert.equal(path, s.lock);
+    mkdirSync(join(s.app, "mods/am-quota"), { recursive: true });
+    return run();
+  } }));
+  assert.deepEqual(result, { error: "update-first" });
+  assert.equal(s.read(), s.text);
+});
+
+test("qualified local use preserves the panel's edit when it activates during the temporary write", async (t) => {
+  const s = scene(t);
+  const { op } = setLoginOp(qualifiedOptions(s));
+  const competing = format("default", [...s.logins, { id: "slot-three", dir: s.other }]);
+  let temp;
+  const result = await setLoginRun(op, s.io({ readClaude: qualifiedRead(s), writeTemp: (path, text) => {
+    temp = path;
+    writeFileSync(path, text, { flag: "wx", mode: 0o600 });
+    mkdirSync(join(s.app, "mods/am-quota"), { recursive: true });
+    writeFileSync(s.file, competing);
+  } }));
+  assert.deepEqual(result, { error: "update-first" });
+  assert.equal(s.read(), competing);
+  assert.equal(existsSync(temp), false);
+  assert.deepEqual(readdirSync(s.app).sort(), ["claude-logins.json", "mods"]);
+});
+
+test("qualified use requires local use with both login digests and an expected home", (t) => {
+  const s = scene(t);
+  const valid = qualifiedOptions(s);
+  const bound = { "expect-qualified": true, "expect-home": s.app, "expect-core": "core-one" };
+  const args = [
+    ["--add", "slot-three", "--dir", s.other, "--snapshot", s.snapshot, "--expect-qualified"],
+    ["--remove", "slot-two", "--snapshot", s.snapshot, "--expect-qualified"],
+    optionArgs({ ...bound, ...fence, "cancel-attempt": true }),
+    optionArgs({ ...bound, "launch-login": true }),
+    optionArgs({ ...valid, "expect-core": bound["expect-core"], ...fence }),
+  ];
+  for (const key of ["expect-home", "expect-slot", "expect-eff"]) {
+    args.push(optionArgs(Object.fromEntries(Object.entries(valid).filter(([name]) => name !== key))));
+  }
+  for (const options of args) assert.deepEqual(s.run(options), usage);
+  assert.equal(s.read(), s.text);
+  assert.deepEqual(readdirSync(s.app), ["claude-logins.json"]);
+});
+
+test("a mixed folder whose older operation parser ignores qualification refuses usage", (t) => {
+  const s = scene(t);
+  installClaude(s);
+  const closure = join(s.root, "mixed");
+  cpSync(dirname(dirname(READER)), closure, { recursive: true });
+  const writer = join(closure, "accountsWrite.js");
+  renameSync(writer, join(closure, "accountsWrite-current.js"));
+  writeFileSync(writer, `import { setLoginOp as current } from "./accountsWrite-current.js";
+export * from "./accountsWrite-current.js";
+export function setLoginOp(opts) {
+  const { "expect-qualified": ignored, ...old } = opts;
+  return current(old);
+}
+`);
+  assert.deepEqual(s.run(optionArgs(qualifiedOptions(s)), join(closure, "bin/accounts.mjs")), usage);
+  assert.equal(s.read(), s.text);
+  assert.deepEqual(readdirSync(s.app), ["claude-logins.json"]);
+});
+
+test("qualified use can switch away from a signed-out default and refuses an own launcher with the same digests", (t) => {
+  const s = scene(t);
+  installClaude(s, null);
+  const args = optionArgs(qualifiedOptions(s, ""));
+  success(s.run(args), "slot-two", format("slot-two", s.logins));
+  writeFileSync(s.file, s.text);
+  const ownLauncher = join(s.home, "bin/custom-claude");
+  const marker = join(s.root, "launcher-ran");
+  exe(ownLauncher, `#!/bin/sh\ntouch "${marker}"\n`);
+  s.install("programs.json", JSON.stringify({ programs: { claude: { run: [ownLauncher] } } }));
+  assert.deepEqual(s.run(args), refused("slot-changed"));
+  assert.equal(s.read(), s.text);
+  assert.equal(existsSync(marker), false);
+});
