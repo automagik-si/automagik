@@ -8,6 +8,7 @@
 // pane (`loadPane` below). Opening Chat alone fetches neither the chunk nor the team tree.
 import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react'
 import { call } from './api.js'
+import { isRetired } from './viewer.js'
 import { t } from './i18n.js'
 import { FaceSwitch, TwoPartSwitch } from './left-bar-faces.js'
 import { botRowOf, codeHasPane, paneFor, prunePanes, statusKey, stillThere, togglePane } from './code-side-model.js'
@@ -19,6 +20,7 @@ export const CODE_PANEL = 'automagik-code'
 const NO_STATE = {
   side: 'team', face: 'chat', botId: null, seat: false, tree: null, loading: false, error: null, loadedAt: 0,
   selected: null, beside: [], refused: null, barSelected: null, barBeside: [], barRefused: null,
+  start: null,
 }
 
 // One store for the window, as the rest of the team's client uses.
@@ -47,22 +49,102 @@ const prune = (tree) => {
   }
 }
 
-/** Re-read the team tree; one read at a time. Resolves the store's tree (or null). */
-export async function loadTree({ fresh = false } = {}) {
-  if (!fresh && state.tree && Date.now() - state.loadedAt < TREE_FRESH_MS) return state.tree
-  if (reading) return reading
-  set({ loading: true, error: null })
-  reading = Promise.resolve()
+/**
+ * Re-read the team tree; one read at a time. Resolves the store's tree (or null). `after` is a
+ * read after a change: it waits for a read already in flight, then always makes its own.
+ */
+export async function loadTree({ fresh = false, after = false } = {}) {
+  if (!fresh && !after && state.tree && Date.now() - state.loadedAt < TREE_FRESH_MS) return state.tree
+  // A reset store forgets reads started before it: their answers land nowhere.
+  const generation = storeGeneration
+  if (after) {
+    while (reading) await reading
+    if (generation !== storeGeneration) return null
+  } else if (reading) return reading
+  const landing = patch => { if (generation === storeGeneration) set(patch) }
+  landing({ loading: true, error: null })
+  const read = Promise.resolve()
     .then(() => call('code-tree'))
     .then((tree) => {
-      set({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), ...prune(tree) })
-      return tree
+      landing({ tree: tree ?? null, loading: false, error: null, loadedAt: Date.now(), ...prune(tree) })
+      return tree ?? null
     }, (error) => {
-      set({ loading: false, error: error?.code ?? 'unavailable', tree: null, loadedAt: Date.now(), ...prune(null) })
+      landing({ loading: false, error: error?.code ?? 'unavailable', tree: null, loadedAt: Date.now(), ...prune(null) })
       return null
     })
-    .finally(() => { reading = null })
-  return reading
+    .finally(() => { if (reading === read) reading = null })
+  reading = read
+  return read
+}
+
+/** How often, and how long, a start whose result is not known yet re-reads the tree. */
+export const START_POLL_MS = 3_000
+export const START_POLL_FOR_MS = 120_000
+// Outcomes after which nothing changed on the computer, so the tree is not read again.
+const UNCHANGED = new Set(['desktop-only', 'invalid', 'busy', 'read-only'])
+let startRun = 0
+let storeGeneration = 0
+const startRow = (tree, botId) => {
+  for (const project of tree?.projects ?? []) {
+    const bot = project.bots.find(row => row.id === botId)
+    if (bot) return bot
+  }
+  return null
+}
+// Started means seen: a read that answered and shows that Bot live, in the project it was started
+// for, on the core that was asked.
+const seenLive = (tree, { id, folder, launch, core }) => {
+  if (!tree?.machine || tree.reason || (core && tree.machine.core !== core)) return false
+  const project = (tree.projects ?? []).find(group => group.bots.some(bot => bot.id === id))
+  if (!project || (folder && project.folder !== folder)) return false
+  const row = startRow(tree, id)
+  // The live seat must be the one started for this project, not the same id's seat elsewhere.
+  if (folder && row?.seatProject !== (launch ?? folder)) return false
+  return ['working', 'needs-you', 'idle'].includes(row?.status)
+}
+const pauseFor = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * New › Start an existing Bot: ask the host to start one not-running Bot of this computer, then
+ * read the tree again. A start whose result is not known yet (`pending`, or a reply lost after
+ * the request went out) re-reads the tree until the Bot shows up running, or the time is up.
+ */
+export async function startBot({ id, name, folder = null, launch = null, core = null }) {
+  // One start at a time, its reconciliation included: a second click waits for the first to settle.
+  if (state.start?.busy) return state.start.outcome
+  const run = ++startRun
+  const generation = storeGeneration
+  const stopped = () => run !== startRun || generation !== storeGeneration || isRetired()
+  const current = patch => { if (!stopped()) set({ start: { ...state.start, ...patch } }) }
+  set({ start: { botId: id, name, outcome: null, busy: true } })
+  let outcome
+  try {
+    outcome = (await call('code-start', { botId: id }))?.outcome ?? 'unknown'
+  } catch (error) {
+    outcome = error?.code === 'bot/read-only' ? 'read-only' : 'unknown'
+  }
+  const waiting = outcome === 'pending' || outcome === 'unknown'
+  current({ outcome, busy: waiting })
+  if (UNCHANGED.has(outcome) || stopped()) return outcome
+  let tree = await loadTree({ after: true })
+  if (!waiting) return outcome
+  // Until the Bot is seen live, or the time is up; a missing row or a failed read keeps waiting.
+  const until = Date.now() + START_POLL_FOR_MS
+  try {
+    while (!stopped()) {
+      if (seenLive(tree, { id, folder, launch, core })) {
+        current({ outcome: 'started' })
+        return 'started'
+      }
+      if (Date.now() >= until) return outcome
+      await pauseFor(START_POLL_MS)
+      if (stopped()) return outcome
+      tree = await loadTree({ after: true })
+    }
+    return outcome
+  } finally {
+    current({ busy: false })
+  }
 }
 
 /**
@@ -166,8 +248,21 @@ export function codePanelNavigation(layout) {
 export function CodeBody() {
   const current = useCodeSide()
   return h(CodeRenderer, { current, render: pane => h(CodeTreeHerdr, {
-    render: herdr => h(pane.CodeBody, { code: { ...codeApi, herdr } }),
+    render: herdr => h(pane.CodeBody, { code: { ...codeApi, herdr, ...startControls(current) } }),
   }) })
+}
+
+// New › Start an existing Bot's two components (code-start-menu.js), handed in by the team's
+// client when it installs the Code side, so this module stays free of the menus it draws with.
+let startUi = null
+
+/** New › Start an existing Bot, as two elements the chunk places: the control and its line. */
+function startControls(current, statusClass) {
+  if (!startUi) return {}
+  return {
+    newControl: h(startUi.Menu, { current, startBot }),
+    newStatus: h(startUi.Status, { current, ...(statusClass ? { className: statusClass } : {}) }),
+  }
 }
 
 export function CodeBarList({ current, onSelect }) {
@@ -176,6 +271,7 @@ export function CodeBarList({ current, onSelect }) {
     render: pane => h(CodeTreeHerdr, {
       render: herdr => h(pane.CodeTree, {
         current: { ...current, selected: current.barSelected, beside: current.barBeside }, onSelect, sidebar: true, herdr,
+        ...startControls(current, 'cs-empty'),
       }),
     }),
   })
@@ -225,7 +321,8 @@ const codeApi = { subscribe: storeSubscribe, snapshot, loadTree, selectPane }
  * Install the flip on a running team: the body's shadow while the face is terminal, and the
  * view watch that takes it down when the window moves to any other view.
  */
-export function installCodeSide(ctx) {
+export function installCodeSide(ctx, { start = null } = {}) {
+  startUi = start
   let off = null
   let openedFor = null
   let listOff = null
@@ -254,6 +351,11 @@ export function installCodeSide(ctx) {
   const unsubscribe = storeSubscribe(sync)
   sync()
   return () => {
+    if (startUi === start) startUi = null
+    // A start still reconciling belongs to this surface: it ends with it.
+    startRun += 1
+    storeGeneration += 1
+    if (state.start?.busy) set({ start: { ...state.start, busy: false } })
     unsubscribe()
     listOff?.()
     listOff = null
@@ -264,5 +366,8 @@ export function installCodeSide(ctx) {
 }
 
 /** The flip's store, for the plugin and its tests. */
-export const codeStore = { subscribe: storeSubscribe, snapshot, loadTree, openTerminal, closeTerminal, selectPane, reset: () => set({ ...NO_STATE }) }
+export const codeStore = {
+  subscribe: storeSubscribe, snapshot, loadTree, openTerminal, closeTerminal, selectPane, startBot,
+  reset: () => { startRun += 1; storeGeneration += 1; reading = null; set({ ...NO_STATE }) },
+}
 export { codeHasPane, botRowOf, paneFor, statusKey, stillThere, PANE_CHUNK, loadPane }
