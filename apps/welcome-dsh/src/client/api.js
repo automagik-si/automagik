@@ -2,18 +2,23 @@
 // working under a mounted base path. Its own errors read in the DSH language (i18n.js); the
 // host's come as the host words them.
 import { t } from './i18n.js'
+import { needsViewer } from '../viewer-policy.js'
 
 const ROUTE = 'api/omni-ai'
 // The Omni plugins' endpoint, which @automagik/omni-channels-dsh extends with discovery and
 // linking (omni-discover, omni-link…). It answers only once those plugins run here.
 const OMNI_UI = 'api/omni-ui'
 
-export const call = (endpoint, payload) => callRoute(ROUTE, endpoint, payload)
-export const callOmniUi = async (endpoint, payload) => {
-  if (globalThis.__AUTOMAGIK_VIEW__ === undefined) return callRoute(OMNI_UI, endpoint, payload)
+export const call = (endpoint, payload) => needsViewer(endpoint)
+  ? callWithViewer(ROUTE, endpoint, payload)
+  : callRoute(ROUTE, endpoint, payload)
+export const callOmniUi = (endpoint, payload) => callWithViewer(OMNI_UI, endpoint, payload)
+
+async function callWithViewer(route, endpoint, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ === undefined) return callRoute(route, endpoint, payload)
   const viewer = globalThis.__AUTOMAGIK_MOUNTED_VIEWER__
   if (!viewer) throw Object.assign(new Error('Viewer unavailable'), { code: 'bot/retired' })
-  return callRoute(OMNI_UI, endpoint, payload, viewer)
+  return callRoute(route, endpoint, payload, viewer)
 }
 
 async function callRoute(route, endpoint, payload, viewer) {
@@ -39,7 +44,7 @@ async function callRoute(route, endpoint, payload, viewer) {
   const result = await response.json()
   viewer?.check()
   if (!result.ok) {
-    const code = result.error?.code ?? (viewer ? 'bot/error' : 'omni-ai/error')
+    const code = result.error?.code ?? (route === OMNI_UI && viewer ? 'bot/error' : 'omni-ai/error')
     viewer?.refused(code)
     throw Object.assign(new Error(result.error?.message ?? t('Request failed')), { code })
   }

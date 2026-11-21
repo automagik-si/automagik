@@ -9532,16 +9532,33 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 
+// src/viewer-policy.js
+var READS = /* @__PURE__ */ new Set([
+  "state",
+  "ais",
+  "providers",
+  "signin-status",
+  "companion",
+  "companion-image",
+  "omni-plugins",
+  "genie-plugin",
+  "unfold-plugin",
+  "bot-type",
+  "migrate-status"
+]);
+var needsViewer = (endpoint) => !READS.has(endpoint);
+
 // src/client/api.js
 var ROUTE = "api/omni-ai";
 var OMNI_UI = "api/omni-ui";
-var call = (endpoint, payload) => callRoute(ROUTE, endpoint, payload);
-var callOmniUi = async (endpoint, payload) => {
-  if (globalThis.__AUTOMAGIK_VIEW__ === void 0) return callRoute(OMNI_UI, endpoint, payload);
+var call = (endpoint, payload) => needsViewer(endpoint) ? callWithViewer(ROUTE, endpoint, payload) : callRoute(ROUTE, endpoint, payload);
+var callOmniUi = (endpoint, payload) => callWithViewer(OMNI_UI, endpoint, payload);
+async function callWithViewer(route, endpoint, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ === void 0) return callRoute(route, endpoint, payload);
   const viewer = globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
   if (!viewer) throw Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
-  return callRoute(OMNI_UI, endpoint, payload, viewer);
-};
+  return callRoute(route, endpoint, payload, viewer);
+}
 async function callRoute(route, endpoint, payload, viewer) {
   const body = { endpoint, payload: payload ?? null };
   if (viewer) body.viewer = viewer.id;
@@ -9565,7 +9582,7 @@ async function callRoute(route, endpoint, payload, viewer) {
   const result = await response.json();
   viewer?.check();
   if (!result.ok) {
-    const code = result.error?.code ?? (viewer ? "bot/error" : "omni-ai/error");
+    const code = result.error?.code ?? (route === OMNI_UI && viewer ? "bot/error" : "omni-ai/error");
     viewer?.refused(code);
     throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code });
   }

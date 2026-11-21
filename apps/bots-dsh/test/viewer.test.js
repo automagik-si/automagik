@@ -169,6 +169,28 @@ test('VW8 a gate-marked DSH 401 refresh does not retire the current owner or era
   assert.equal(await f.api.call('state'), 'refreshed')
 })
 
+test('VW10 a gated chunk that fails twice closes both pages and reloads only once', async () => {
+  const session = new Map()
+  const prepare = async () => { throw new Error('gated chunk unavailable') }
+  for (const role of ['owner', 'member']) {
+    session.clear()
+    const boot = { version: 1, role }
+    for (const reloads of [[true], []]) {
+      const f = fixture({ boot, session, fetch: () => viewerReply(role) })
+      await assert.rejects(f.api.startViewer(boot, undefined, prepare), /gated chunk unavailable/)
+      assert.equal(f.api.isRetired(), true)
+      assert.equal(f.api.mountedViewer(), undefined)
+      assert.equal(f.document.body.inert, true)
+      assert.equal(f.document.body.style.getPropertyValue('display'), 'none')
+      assert.deepEqual(f.reloads, reloads)
+    }
+    const recovered = fixture({ boot, session, fetch: () => viewerReply(role) })
+    await recovered.api.startViewer(boot, undefined, async () => {})
+    assert.equal(recovered.document.body.inert, false)
+    assert.equal(session.has('automagik.retired'), false)
+  }
+})
+
 test('VW9 an asynchronous Codex atlas export checks its mounted viewer before the PUT', async () => {
   const sheet = Promise.withResolvers()
   const owner = { version: 1, role: 'owner' }

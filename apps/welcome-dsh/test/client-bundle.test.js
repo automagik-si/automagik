@@ -32,10 +32,12 @@ test('Welcome uses the mounted Bot viewer for gated writes and preserves its des
     },
   }
   runInNewContext(outputFiles[0].text, context)
-  const { callOmniUi } = context.module.exports
+  const { call, callOmniUi } = context.module.exports
   assert.equal(await callOmniUi('omni-pair-cancel'), 'saved')
   context.__AUTOMAGIK_VIEW__ = { version: 1, role: 'owner' }
   await assert.rejects(callOmniUi('omni-pair-cancel'), { code: 'bot/retired' })
+  assert.equal(requests.length, 1)
+  await assert.rejects(call('done'), { code: 'bot/retired' })
   assert.equal(requests.length, 1)
   context.__AUTOMAGIK_MOUNTED_VIEWER__ = {
     get id() { check(); return 'owner-viewer' },
@@ -49,11 +51,15 @@ test('Welcome uses the mounted Bot viewer for gated writes and preserves its des
   reply = { ok: false, error: { code: 'bot/viewer-changed' } }
   await assert.rejects(callOmniUi('omni-pair-cancel'), { code: 'bot/viewer-changed' })
   await assert.rejects(callOmniUi('omni-pair-cancel'), { code: 'bot/retired' })
+  delete context.__AUTOMAGIK_VIEW__
+  reply = { ok: true, value: 'saved' }
+  assert.equal(await call('done', { stepId: 'omni-team' }), 'saved')
   const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' } }
   assert.deepEqual(requests, [
     ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: null } }],
     ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: { account: 'test' }, viewer: 'owner-viewer' } }],
     ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: null, viewer: 'owner-viewer' } }],
+    ['api/omni-ai', { ...init, body: { endpoint: 'done', payload: { stepId: 'omni-team' } } }],
   ])
 })
 

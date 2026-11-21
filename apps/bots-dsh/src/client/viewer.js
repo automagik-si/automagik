@@ -178,7 +178,6 @@ export async function startViewer(boot, signal, prepare) {
   const viewer = active.viewer = answer.viewer
   try {
     localStorage.setItem(VIEWER_KEY, viewer.id)
-    sessionStorage.removeItem(RELOAD_KEY)
   } catch { /* The server still checks each request's viewer. */ }
   const untrackDrafts = trackDrafts(active, viewer)
   active.draftsProtected = untrackDrafts !== undefined
@@ -223,5 +222,6 @@ export async function startViewer(boot, signal, prepare) {
     if (!current()) throw unavailable()
   }
   show()
+  try { sessionStorage.removeItem(RELOAD_KEY) } catch { /* The page is ready even without site storage. */ }
   return viewer
 }

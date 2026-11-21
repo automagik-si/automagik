@@ -13,7 +13,7 @@ const workspace = 'workspace'
 const issuer = 'https://id.invalid'
 const feed = '/api/omni-ui/feed?viewer=mounted.owner'
 
-function fixture(t, { upstreamStatus = 200 } = {}) {
+function fixture(t, { upstreamStatus = 200, cookie: credential = async () => 'dsh=fixture', renew } = {}) {
   let now = 1000
   const sessions = new SessionStore(undefined, { memory: true, accepts: () => true, now: () => now })
   const upstreams = []
@@ -49,11 +49,14 @@ function fixture(t, { upstreamStatus = 200 } = {}) {
   const gate = createGate({
     origin, sessions, multiuser: true, caller: { sign: value => { signed.push(value); return 'fixture' } },
     connectDsh: async () => new PassThrough(),
-    credentials: { port: 1, authority: '127.0.0.1:1', cookie: async () => 'dsh=fixture', invalidate: value => invalidated.push(value) },
+    credentials: { port: 1, authority: '127.0.0.1:1', cookie: credential, invalidate: value => invalidated.push(value) },
     cloud: {
       config: { workspace, rail: 'https://rail.invalid' }, drops: () => false, pollInterval: 300_000,
-      open: async subject => ({ principal: { issuer, subject, roles: ['guest'], workspace }, expires: 60_000 }),
-      renew: async principal => ({ principal: { ...principal, roles: ['member'] }, expires: 60_000 }),
+      open: async subject => ({
+        principal: { issuer, subject, roles: [subject === 'owner' ? 'owner' : 'guest'], workspace }, expires: 60_000,
+        proof: { aud: workspace, token: 'proof', exp: 60 },
+      }),
+      renew: renew ?? (async principal => ({ principal: { ...principal, roles: ['member'] }, expires: 60_000 })),
     },
     auditAccess: () => {},
   })
@@ -110,7 +113,7 @@ test('G5 sign-out and Cloud demotion cut the owner and admin HTTP feeds at both 
     assert.equal(changed.status, 200)
     assert.equal(f.sessions.active(family), false)
     if (transition === 'demotion') {
-      const current = f.sessions.authenticate(cookieSecret(changed.headers['set-cookie'].split(';', 1)[0]), origin)
+      const current = f.sessions.authenticate(cookieSecret(cookiesOf(changed)[0]), origin)
       assert.deepEqual(current.principal.roles, ['member'])
     }
     assert.equal(response.destroyed, true)
@@ -125,8 +128,16 @@ test('G5 sign-out and Cloud demotion cut the owner and admin HTTP feeds at both 
 })
 
 const form = { 'content-type': 'application/x-www-form-urlencoded' }
-const startOpen = f => f.request(CLOUD_OPEN_PATH, { method: 'POST', body: 'code=new-person',
+const startOpen = (f, subject = 'new-person') => f.request(CLOUD_OPEN_PATH, { method: 'POST', body: 'code=' + subject,
   headers: { ...form, origin: 'https://rail.invalid', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' } })
+const finishOpen = (f, rail, cookie) => {
+  const open = /name="open" value="([^"]+)"/.exec(rail.body)?.[1]
+  assert.ok(open)
+  return f.request(CLOUD_OPEN_FINISH_PATH, { cookie, method: 'POST', body: 'open=' + open, headers: form })
+}
+const renewCloud = (f, cookie) => f.request(CLOUD_RENEW_PATH, { cookie, method: 'POST',
+  headers: { 'content-type': 'application/json' }, body: { version: 2, renew: true, workspace } })
+const cookiesOf = response => [response.headers['set-cookie']].flat().filter(Boolean).map(value => value.split(';', 1)[0])
 
 test('G7 the cookie-less rail POST finishes on-origin and cuts the previous family before installing the guest', async t => {
   const f = fixture(t)
@@ -155,29 +166,119 @@ test('G7 the cookie-less rail POST finishes on-origin and cuts the previous fami
     await setImmediate()
     assert.doesNotMatch(response.body, /after replacement/)
     assert.equal(independent.destroyed, false)
-    assert.deepEqual(f.sessions.authenticate(cookieSecret(finished.headers['set-cookie']), origin).principal.roles, ['guest'])
+    assert.deepEqual(f.sessions.authenticate(cookieSecret(cookiesOf(finished)[0]), origin).principal.roles, ['guest'])
     assert.equal((await f.request(CLOUD_OPEN_FINISH_PATH, complete)).status, 401)
     f.sessions.revoke(other.family)
   }
 })
 
-test('G8 an unidentified old stream is closed, and an expired family cannot deliver another HTTP frame', async t => {
+test('G8 a browser binding closes the old stream without a session cookie, and expiry cuts later frames', async t => {
   const f = fixture(t)
-  const owner = f.issue('owner', 'owner')
-  const first = await f.request(feed, { cookie: owner.cookie })
-  const rail = await startOpen(f)
-  const open = /name="open" value="([^"]+)"/.exec(rail.body)?.[1]
-  assert.ok(open)
-  const finished = await f.request(CLOUD_OPEN_FINISH_PATH, { method: 'POST', body: 'open=' + open, headers: form })
+  const signedIn = await finishOpen(f, await startOpen(f, 'owner'))
+  const [cookie, browser] = cookiesOf(signedIn)
+  const owner = f.sessions.authenticate(cookieSecret(cookie), origin)
+  const first = await f.request(feed, { cookie })
+  const finished = await finishOpen(f, await startOpen(f), browser)
   assert.equal(finished.status, 303)
   assert.equal(first.destroyed, true)
-  assert.equal(f.sessions.active(owner.family), true)
-  const next = await f.request(feed, { cookie: owner.cookie })
+  assert.equal(f.sessions.active(owner), true)
+  assert.ok(browser)
+  const next = await f.request(feed, { cookie })
   f.setTime(60_000)
   f.upstreams.at(-1).upstream.write('data: after expiry\n\n')
   await setImmediate()
   assert.equal(next.destroyed, true)
   assert.doesNotMatch(next.body, /after expiry/)
+})
+
+test('G12 a Cloud renewal waiting on Cloud cannot replace a different person’s sign-in', async t => {
+  for (const hasSession of [true, false]) {
+    const entered = Promise.withResolvers()
+    const release = Promise.withResolvers()
+    const f = fixture(t, { async renew(principal) {
+      entered.resolve()
+      await release.promise
+      return { principal, expires: 60_000 }
+    } })
+    const signedIn = await finishOpen(f, await startOpen(f, 'owner'))
+    const [cookie, browser] = cookiesOf(signedIn)
+    const owner = f.sessions.authenticate(cookieSecret(cookie), origin)
+    const pending = renewCloud(f, cookie)
+    await entered.promise
+    const finished = await finishOpen(f, await startOpen(f), hasSession ? cookie : browser)
+    assert.equal(finished.status, 303)
+    assert.equal(f.sessions.active(owner), !hasSession)
+    release.resolve()
+    const late = await pending
+    assert.equal(late.status, 401)
+    assert.equal(late.headers['set-cookie'], undefined)
+    assert.equal(late.headers['clear-site-data'], undefined)
+    const [newCookie] = cookiesOf(finished)
+    assert.equal(f.sessions.authenticate(cookieSecret(newCookie), origin).principal.subject, 'new-person')
+    assert.deepEqual(f.sessions.families.map(family => family.principal.subject), hasSession ? ['new-person'] : ['owner', 'new-person'])
+  }
+})
+
+test('G13 a request awaiting DSH credentials cannot clear site data after same-person renewal', async t => {
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const f = fixture(t, { cookie() { entered.resolve(); return release.promise },
+    renew: async principal => ({ principal, expires: 60_000 }) })
+  const opened = await finishOpen(f, await startOpen(f, 'owner'))
+  const browserCookies = cookiesOf(opened).join('; ')
+  const pending = f.request(feed, { cookie: browserCookies })
+  await entered.promise
+  const renewed = await renewCloud(f, browserCookies)
+  assert.equal(renewed.status, 200)
+  assert.equal(renewed.headers['clear-site-data'], undefined)
+  assert.equal(f.sessions.authenticate(cookieSecret(cookiesOf(renewed)[0]), origin).principal.subject, 'owner')
+  release.resolve('dsh=fixture')
+  const late = await pending
+  assert.equal(late.headers['clear-site-data'], undefined)
+  assert.ok(late.destroyed || late.status === 401)
+  const staleCookie = await f.request(feed, { cookie: browserCookies })
+  assert.equal(staleCookie.status, 401)
+  assert.equal(staleCookie.headers['clear-site-data'], undefined)
+  assert.equal(f.upstreams.length, 0)
+})
+
+test('G14 a first Cloud sign-in leaves an independent browser’s feed and mux connected', async t => {
+  const f = fixture(t)
+  const signedIn = await finishOpen(f, await startOpen(f, 'owner'))
+  const [cookie] = cookiesOf(signedIn)
+  const stream = await f.request(feed, { cookie })
+  const upstream = f.upstreams.at(-1).upstream
+  const mux = await f.upgrade(cookie)
+  const finished = await finishOpen(f, await startOpen(f))
+  assert.equal(finished.status, 303)
+  assert.equal(stream.destroyed, false)
+  assert.equal(mux.destroyed, false)
+  upstream.write('data: owner still connected\n\n')
+  await setImmediate()
+  assert.match(stream.body, /owner still connected/)
+  f.sessions.revoke(f.sessions.authenticate(cookieSecret(cookie), origin))
+})
+
+test('G15 private media rejects documents and frames while owner image subresources still load', async t => {
+  const f = fixture(t)
+  const { family, cookie } = f.issue('owner', 'owner')
+  const privateMedia = ['/api/omni-ui/image', '/api/omni-ui/pet', '/api/omni-ui/genui-media', '/api/omni-ui/%69mage']
+  for (const path of privateMedia) {
+    for (const dest of ['document', 'iframe', 'frame']) {
+      const response = await f.request(path + '?id=fixture', { cookie, headers: { 'sec-fetch-dest': dest } })
+      assert.equal(response.status, 403, path)
+      assert.doesNotMatch(response.body, /private content/)
+      assert.equal(response.headers['clear-site-data'], undefined)
+    }
+  }
+  assert.equal(f.upstreams.length, 0)
+  for (const path of privateMedia) {
+    const response = await f.request(path + '?id=fixture', { cookie, headers: { 'sec-fetch-dest': 'image' } })
+    assert.equal(response.status, 200, path)
+    assert.match(response.body, /private content/)
+    assert.equal(response.headers['cache-control'], 'no-store')
+  }
+  f.sessions.revoke(family)
 })
 
 test('G9 an upstream owner 401 marks credential refresh without clearing the gate family', async t => {

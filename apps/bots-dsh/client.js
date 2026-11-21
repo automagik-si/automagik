@@ -4076,7 +4076,6 @@ async function startViewer(boot, signal, prepare) {
   const viewer = active2.viewer = answer.viewer;
   try {
     localStorage.setItem(VIEWER_KEY, viewer.id);
-    sessionStorage.removeItem(RELOAD_KEY);
   } catch {
   }
   const untrackDrafts = trackDrafts(active2, viewer);
@@ -4131,6 +4130,10 @@ async function startViewer(boot, signal, prepare) {
     if (!current()) throw unavailable();
   }
   show2();
+  try {
+    sessionStorage.removeItem(RELOAD_KEY);
+  } catch {
+  }
   return viewer;
 }
 

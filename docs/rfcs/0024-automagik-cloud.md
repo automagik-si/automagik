@@ -1447,17 +1447,14 @@ keep their meaning.
     off on an OS until it exists there. The alternative is the owner's written acceptance of the
     risk for that OS ((d)).
 18. **Until the three safeguards hold.** Answered in Decided 26.
-19. **The Cloud rail on another site than its workspaces.** Recorded by the owner's delegate on
-    2026-11-20 from RFC 0038 delivery 5d's browser acceptance (#1373), as a question while the Cloud
-    service does not exist. The rail's form-post sign-in (`POST /_gate/cloud/open`, #1376) answers
-    303 with the session cookie, but the navigation it starts reaches the workspace marked
-    `Sec-Fetch-Site: cross-site`, and the gate's request-trust check (`trustedRequest`,
-    `server/gate.mjs`) refuses every cross-site request before it reads the cookie, except the
-    Cloudflare Access sign-in navigation (#1082). The landing page and a reload answer 401 "Session
-    required"; typing the workspace's address works. Same result before and after delivery 5d. Two
-    ways out: (a) serve the rail on the same site as the workspaces, so the navigation is
-    same-site; (b) a signed exception in `trustedRequest` for the Cloud form-post's redirect, like
-    the Access one. Decide before the Cloud service ships.
+19. **The Cloud rail on another site than its workspaces.** Browser acceptance on
+    `a8d663c1e` (#1373, 2026-11-20) saw the rail's direct 303 land on a cross-site 401. In
+    multiuser mode, RFC 0038 delivery 5d now returns a 200 workspace document from
+    `POST /_gate/cloud/open`. Its same-origin POST to `/_gate/cloud/open/finish` can carry the
+    previous Lax cookie, retire that family, and issue the new cookie with a 303 to `/`.
+    Verify the final cross-site landing in a browser before Cloud ships. The two options
+    remain to serve the rail on the same site as the workspaces or add a signed exception
+    in `trustedRequest` for the Cloud landing, like the Access exception (#1082).
 
 ## Tracking
 

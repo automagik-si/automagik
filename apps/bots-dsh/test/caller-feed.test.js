@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { SOURCE_KIND } from '../src/host/constants.js'
 import { install } from '../src/host/caller-feed.js'
-import { allowlist, code, fixture, guest, member, owners, stranger } from './caller-fixture.js'
+import { allowlist, code, fixture, guest, member, owners, serviceStub, stranger } from './caller-fixture.js'
 
 const url = 'http://fixture.invalid/api/omni-ui/feed'
 const feedURL = (f, principal) => {
@@ -276,6 +276,13 @@ test('CF9 a broken team lock closes caller reads and an already open feed', asyn
   const refused = await f.call('update-bot', { id: 'b', people: owners })
   assert.equal(refused.error?.code, 'bot/read-only')
   assert.deepEqual(f.saved(), replacement)
+  const reactivated = serviceStub()
+  await f.emitService(undefined)
+  await f.emitService(reactivated)
+  assert.deepEqual(f.saved(), replacement, 'adapter reactivation must not overwrite the newer file')
+  assert.equal(reactivated.hasProvider(), false)
+  assert.deepEqual([...reactivated.visibleBotIds(member)], [])
+  assert.deepEqual(f.readable(), [])
 })
 
 test('CF11 a team generation lost during a sharing save cannot commit', async t => {
@@ -290,6 +297,24 @@ test('CF11 a team generation lost during a sharing save cannot commit', async t 
   })
   await assert.rejects(f.rt.setPeople('b', owners), code('read-only'))
   assert.deepEqual(f.saved(), before)
+})
+
+test('CF13 adapter reactivation cannot commit a reset after losing the team generation', async t => {
+  const f = fixture(t)
+  await f.start()
+  await f.open()
+  await f.emitService(undefined)
+  const before = f.saved()
+  const save = f.rt.saveCopy
+  t.mock.method(f.rt, 'saveCopy', (change, options) => {
+    t.mock.method(f.rt, 'sameTeam', () => false)
+    return save(change, options)
+  })
+  const reactivated = serviceStub()
+  await f.emitService(reactivated)
+  assert.deepEqual(f.saved(), before)
+  assert.equal(reactivated.hasProvider(), false)
+  assert.deepEqual(f.readable(), [])
 })
 
 test('CF10 idle desktop installs no caller feed subscriptions', () => {

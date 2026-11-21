@@ -20,7 +20,6 @@ export function install(rt) {
   let service, removeProvider, removeEvent, ready, disposed
   let adopted = rt.teamLoaded()
   let adoption
-  let resetDirty = false
 
   const peopleQueue = fn => {
     const run = queue.then(fn)
@@ -71,11 +70,13 @@ export function install(rt) {
     })
   }
 
+  function checkCommit(generation) {
+    if (!hasCallerLock(rt) || !rt.sameTeam(generation)) throw readOnly(rt)
+  }
+
   function commit(botId, bot, people, generation, afterCommit) {
     return rt.saveCopy(copy => { copy.bots[botId].people = people }, {
-      beforeCommit: () => {
-        if (!hasCallerLock(rt) || !rt.sameTeam(generation)) throw readOnly(rt)
-      },
+      beforeCommit: () => checkCommit(generation),
       afterWrite: () => {
         bot.people = people
         afterCommit?.()
@@ -139,7 +140,7 @@ export function install(rt) {
       checkOpening(bot, current)
       const agent = await rt.resolveAgent(current)
       if (!enabled() || service !== activation) throw unavailable()
-      if (!hasCallerLock(rt) || !rt.sameTeam(generation)) throw readOnly(rt)
+      checkCommit(generation)
       if (rt.botOf(botId) !== bot || rt.chatOf(botId) !== current) {
         throw refusal(bot.name + ' is already moving to a new conversation.')
       }
@@ -150,7 +151,7 @@ export function install(rt) {
       }
       await commit(botId, bot, next, generation)
       if (!enabled() || service !== activation || rt.botOf(botId) !== bot) throw unavailable()
-      if (!hasCallerLock(rt) || !rt.sameTeam(generation)) throw readOnly(rt)
+      checkCommit(generation)
       const share = { id: randomUUID(), state: 'opening', parts: [] }
       shares.set(botId, share)
       try {
@@ -317,14 +318,25 @@ export function install(rt) {
       adopted = true
       shares.clear()
       closed.clear()
-      const bots = Object.values(state.bots).filter(bot => Object.hasOwn(bot, 'people') &&
+      const bots = Object.entries(state.bots).filter(([, bot]) => Object.hasOwn(bot, 'people') &&
         (bot.people?.mode !== 'owners' || !Array.isArray(bot.people.allow) || bot.people.allow.length !== 0 ||
           Object.keys(bot.people).length !== 2))
-      for (const bot of bots) bot.people = ownersOnly()
-      if (bots.length > 0) resetDirty = true
-      if (resetDirty) {
-        await rt.save({ required: true })
-        resetDirty = false
+      if (bots.length > 0) {
+        const generation = rt.teamGeneration()
+        checkCommit(generation)
+        await rt.save({
+          required: true,
+          copy: {
+            change(copy) {
+              for (const [id] of bots) copy.bots[id].people = ownersOnly()
+            },
+            beforeCommit: () => checkCommit(generation),
+            afterWrite() {
+              for (const [, bot] of bots) bot.people = ownersOnly()
+            },
+          },
+        })
+        checkCommit(generation)
       }
       if (!active() || service !== next || rt.readOnly() !== undefined) return
       removeProvider = next.provide(provider)

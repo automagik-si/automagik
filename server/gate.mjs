@@ -1,7 +1,7 @@
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { Transform } from 'node:stream'
-import { COOKIE, cookieSecret, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
+import { COOKIE, cookieSecret, IDLE_MS, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
 import { frontendPath } from './gate-frontend.mjs'
 import { agentMcpHeaders, callerHeaders, callerUpgradeHeaders, DSH_HOST, responseHeaders, upstreamHeaders, validBodyFraming } from './gate-upstream.mjs'
 import { MEMBER_UPGRADE_PATH, memberStatus, probeDsh } from './gate-mux.mjs'
@@ -21,6 +21,8 @@ const MAX_EARLY_UPGRADE_BYTES = 1_048_576 + 1024 * 14 // One max-size mux messag
 // Match the adapter's socket limits while the gate is still holding the handshake.
 const MAX_PENDING_UPGRADES_PER_PERSON = 4
 const MAX_PENDING_UPGRADES = 64
+const CLOUD_BROWSER_COOKIE = '__Host-automagik-browser'
+const MEDIA_PATH = /^\/api\/omni-ui\/(?:image|pet|genui-media)\/?$/i
 
 export function pinOrigin(value) {
   const url = new URL(value)
@@ -140,7 +142,12 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const clearSite = res => { if (multiuser) res.setHeader('clear-site-data', CLEAR_SITE_DATA) }
   const sessionRequired = (req, res) => {
     if (res.destroyed) return
-    if (trustedRequest(req, origin, false) && cookieSecret(req.headers.cookie)) clearSite(res)
+    if (multiuser && trustedRequest(req, origin, false) && cookieSecret(req.headers.cookie)) {
+      // A late request can still carry the old cookie after the browser's family
+      // has rotated. A live successor means the browser is still signed in.
+      const current = boundFamily(req.headers.cookie)
+      if (!current || !sessions.active(current)) clearSite(res)
+    }
     answer(res, 401, { error: 'Session required' })
   }
   const isMcpTarget = raw => new URL(raw, origin).pathname === '/api/omni-mcp'
@@ -148,6 +155,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const pendingUpgrades = new Map()
   let pendingUpgradeCount = 0
   const pendingOpens = new Map()
+  const browserBindings = new WeakMap()
   // Gated HTTP responses are piped apart from the socket table. Family changes cut
   // forwarded requests at both ends, including owner streams.
   const httpRequests = new Set()
@@ -187,19 +195,40 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     if (socket?.destroyed || res.destroyed) closed()
     return record
   }
+  function retireTransports(id, hard = false) {
+    for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy()
+    for (const record of httpRequests) if (record.family.id === id) endRequest(record, hard)
+  }
+  function boundFamily(header = '') {
+    const prefix = CLOUD_BROWSER_COOKIE + '='
+    const cookies = header.split(';').map(part => part.trim()).filter(part => part.startsWith(prefix))
+    if (cookies.length !== 1) return
+    const id = cookies[0].slice(prefix.length)
+    return sessions.families.find(family => {
+      const binding = browserBindings.get(family)
+      return binding?.id === id && binding.familyId === family.id
+    })
+  }
+  function cloudCookies(issued, binding) {
+    const cookie = sessionCookie(issued.secret, sessions.maxAge(issued.family))
+    if (!multiuser) return cookie
+    // The independent cookie identifies this browser's previous transports when
+    // the session cookie is absent. Authentication always uses the session cookie.
+    binding ??= { id: randomUUID() }
+    binding.familyId = issued.family.id
+    browserBindings.set(issued.family, binding)
+    return [cookie, `${CLOUD_BROWSER_COOKIE}=${binding.id}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${IDLE_MS / 1000}`]
+  }
   function issueCloudSession(req, res, opened) {
     const previous = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
+    const browserFamily = previous ?? (multiuser ? boundFamily(req.headers.cookie) : undefined)
+    const purge = !browserFamily || !sessions.active(browserFamily) || !samePerson(browserFamily.principal, opened.principal)
+    if (browserFamily) retireTransports(browserFamily.id, true)
     if (previous) sessions.revoke(previous)
-    else if (multiuser) {
-      // A browser that lost its cookie cannot identify its old streams. End the
-      // live transports before installing the new cookie, leaving other sessions valid.
-      for (const record of sockets.values()) record.socket.destroy()
-      for (const record of httpRequests) endRequest(record, true)
-    }
     const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires, proof: opened.proof })
-    clearSite(res)
+    if (purge) clearSite(res)
     res.writeHead(303, { location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
-      'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
+      'set-cookie': cloudCookies(issued, browserBindings.get(browserFamily)) })
     res.end()
   }
   // The rail posts a single-use code. Only the gate sees the exchanged workspace token.
@@ -290,8 +319,11 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     if (fields !== 'renew,version,workspace' || request.version !== 2 || request.renew !== true ||
       request.workspace !== cloud.config.workspace) { refuse(401, 'Renewal refused'); return }
     const family = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
+    const binding = browserBindings.get(family)
+    const renewable = () => family && sessions.active(family) && !cloud.drops(family) &&
+      (binding === undefined || binding.familyId === family.id)
     // An expired or already-revoked session, or one Cloud has dropped, never reaches Cloud.
-    if (!family || cloud.drops(family)) { refuse(401, 'Renewal refused'); return }
+    if (!renewable()) { refuse(401, 'Renewal refused'); return }
     // The proof is the exact workspace token this gate verified for the session. A missing or
     // expired held token is refused with no grace, before Cloud is called. `workspace` is v1's
     // aud, never a host: it must equal both the configured id and the held token's aud.
@@ -304,12 +336,13 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     try { renewed = await cloud.renew(family.principal, proof) }
     catch (error) { refuse(error?.status === 429 ? 429 : 401, 'Renewal refused'); return }
     if (res.destroyed) return
-    if (!samePerson(renewed.principal, family.principal)) { refuse(401, 'Renewal refused'); return }
+    if (!samePerson(renewed.principal, family.principal) || !renewable()) { refuse(401, 'Renewal refused'); return }
     // Rotate the session out and issue the rechecked one, holding the token Cloud just issued;
     // the old secret never outlives it.
+    retireTransports(family.id, true)
     sessions.revoke(family)
     const issued = sessions.issue(origin.origin, renewed.principal, { expires: renewed.expires, proof: renewed.proof })
-    res.setHeader('set-cookie', sessionCookie(issued.secret, sessions.maxAge(issued.family)))
+    res.setHeader('set-cookie', cloudCookies(issued, binding))
     answer(res, 200, {})
   }
   // Cloud's signed revocation call (contracts v1, section 6). It needs no browser session and
@@ -438,6 +471,11 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       // The gate-held browser credential also admits DSH's /api and WebSocket owner peer.
       // /connect is a DSH bearer exchange, never a second browser sign-in path.
       if (exchangePath(url)) { answer(res, 401, { error: 'Session exchanges belong to the gate' }); return }
+      if (multiuser && ['document', 'iframe', 'frame'].includes(req.headers['sec-fetch-dest']) &&
+          explorePath(req.url.split('?', 1)[0], origin, path => MEDIA_PATH.test(path))) {
+        answer(res, 403, { error: 'Not available' })
+        return
+      }
       const owner = ownerFamily(family, multiuser)
       if (!owner && !multiuser) { answer(res, 403, { error: 'Owner access required' }); return }
       if (!sessions.active(family)) { sessionRequired(req, res); return }
@@ -522,7 +560,11 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       })
       if (!record) res.on('close', () => proxy.destroy())
       req.pipe(proxy)
-    } catch { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() }
+    } catch {
+      if (res.destroyed) return
+      if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' })
+      else res.destroy()
+    }
   })
   // Inspect the complete header block, still bounded by Node's header byte limit.
   server.maxHeadersCount = 0
@@ -686,10 +728,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     relay(record, socket, head, proxy)
     proxy.end()
   }
-  const revoke = id => {
-    for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy()
-    for (const record of httpRequests) if (record.family.id === id) endRequest(record)
-  }
+  const revoke = id => retireTransports(id)
   sessions.on('revoke', revoke)
   const timer = setInterval(() => {
     for (const record of sockets.values()) if (!sessions.active(record.family)) record.socket.destroy()
