@@ -170,3 +170,19 @@ test('PC5 a second window applies the real card narrowing with a stale guest lis
     assert.equal(host.service.visibleBotIds(stranger).has('b'), false)
   }
 })
+
+test('PC6 a fresh owners-only request can explicitly remove every guest', async t => {
+  const service = serviceStub()
+  service.seen = () => [stranger.person]
+  const host = hostFixture(t, { service })
+  await host.start()
+  const { issuer, subject } = stranger.person
+  await host.open('b', { mode: 'allowlist', allow: [{ issuer, subject, role: 'guest' }] })
+  assert.equal(host.service.visibleBotIds(stranger).has('b'), true)
+  const saved = await host.call('update-bot', { id: 'b', people: owners })
+  assert.equal(saved.ok, true)
+  assert.deepEqual(saved.value.people, owners)
+  const next = { ...host.saved().bots.b.people, mode: 'allowlist' }
+  await host.open('b', next)
+  assert.equal(host.service.visibleBotIds(stranger).has('b'), false)
+})

@@ -6,6 +6,7 @@ import { refusal } from './refusal.js'
 
 const inSegments = (segments, id) => Array.isArray(segments) && segments.some(segment => segment?.sessionId === id)
 const unavailable = () => refusal('Sharing needs multiuser mode')
+const readOnly = rt => refusal(rt.readOnly() ?? 'This host does not hold the Bot team.', { code: 'bot/read-only' })
 const modes = ['owners', 'allowlist', 'workspace']
 const hasPerson = (list, entry) => list.some(person => person.issuer === entry.issuer &&
   person.subject === entry.subject && person.role === entry.role)
@@ -70,8 +71,11 @@ export function install(rt) {
     })
   }
 
-  function commit(botId, bot, people, afterCommit) {
+  function commit(botId, bot, people, generation, afterCommit) {
     return rt.saveCopy(copy => { copy.bots[botId].people = people }, {
+      beforeCommit: () => {
+        if (!hasCallerLock(rt) || !rt.sameTeam(generation)) throw readOnly(rt)
+      },
       afterWrite: () => {
         bot.people = people
         afterCommit?.()
@@ -102,16 +106,17 @@ export function install(rt) {
       if (!enabled()) throw unavailable()
       const bot = rt.botOf(botId)
       if (!bot) throw refusal('Unknown Bot', { code: 'bot/not-found' })
-      const readOnly = rt.readOnly()
-      if (readOnly !== undefined) throw refusal(readOnly, { code: 'bot/read-only' })
+      if (!hasCallerLock(rt)) throw readOnly(rt)
+      const generation = rt.teamGeneration()
       const main = rt.isMain(botId)
       const prev = peopleOf(bot, { main })
       const expected = expect === undefined ? prev : peopleOf({ people: expect }, { main })
       const stale = JSON.stringify(expected) !== JSON.stringify(prev)
-      let next = input?.mode === 'owners'
-        ? cleanPeople({ ...input, allow: prev.allow }, { main, current: prev })
+      const narrowing = input?.mode === 'owners'
+      let next = narrowing
+        ? cleanPeople({ allow: prev.allow, ...input }, { main, current: prev, narrow: true })
         : cleanPeople(input, { main, current: expected, seen: service.seen() })
-      if (stale && next.mode !== 'owners') {
+      if (stale && !narrowing) {
         // Validate the edit against the window's list first. A stale narrowing can
         // only keep grants that also exist in the committed list and mode.
         const mode = modes.indexOf(next.mode)
@@ -126,7 +131,7 @@ export function install(rt) {
       }
       // A spoiled or withdrawn share can be reopened only by an explicit owners-to-shared edit.
       if (prev.mode !== 'owners' || next.mode === 'owners') {
-        await commit(botId, bot, next, next.mode === 'owners' ? () => shares.delete(botId) : undefined)
+        await commit(botId, bot, next, generation, next.mode === 'owners' ? () => shares.delete(botId) : undefined)
         return { id: botId, people: next }
       }
       const activation = service
@@ -134,6 +139,7 @@ export function install(rt) {
       checkOpening(bot, current)
       const agent = await rt.resolveAgent(current)
       if (!enabled() || service !== activation) throw unavailable()
+      if (!hasCallerLock(rt) || !rt.sameTeam(generation)) throw readOnly(rt)
       if (rt.botOf(botId) !== bot || rt.chatOf(botId) !== current) {
         throw refusal(bot.name + ' is already moving to a new conversation.')
       }
@@ -142,8 +148,9 @@ export function install(rt) {
       if (agent.inbox.nextStep.length + agent.inbox.nextTurn.length > 0) {
         throw refusal(bot.name + ' has messages waiting; let them run or remove them, then share it.')
       }
-      await commit(botId, bot, next)
+      await commit(botId, bot, next, generation)
       if (!enabled() || service !== activation || rt.botOf(botId) !== bot) throw unavailable()
+      if (!hasCallerLock(rt) || !rt.sameTeam(generation)) throw readOnly(rt)
       const share = { id: randomUUID(), state: 'opening', parts: [] }
       shares.set(botId, share)
       try {

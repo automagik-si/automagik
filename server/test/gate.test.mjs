@@ -16,6 +16,10 @@ import { verifyAssertion } from '../../apps/multiuser-dsh/src/assertion.js'
 import { CLOUD_RENEW_PATH, createGate, pinOrigin } from '../gate.mjs'
 import { probeDsh } from '../gate-mux.mjs'
 import { DSH_HOST, DshCredentials } from '../gate-upstream.mjs'
+import routeFixture from './fixtures/caller-role-paths.json' with { type: 'json' }
+
+const feed = routeFixture.targets.find(row => row.query)
+const feedTarget = feed.path + feed.query
 
 // Reserved placeholder; no private deployment address, issuer or account belongs in tests.
 const ORIGIN = 'https://workspace.invalid:8443'
@@ -709,15 +713,15 @@ test('member frontend allowlist, MCP refusal and rollback never use the owner cr
 test('carrier unavailability, an upstream 401 and an inactive member never use the owner fallback', async t => {
   const f = await callerFixture(t, { carrierStatus: 401 })
   const { headers, family } = f.issue('member')
-  assert.equal((await request(f.gatePort, '/api/omni-ui/feed', { headers })).status, 401)
+  assert.equal((await request(f.gatePort, feedTarget, { headers })).status, 401)
   assert.equal(f.seen.length, 1)
   assert.equal(f.signs.length, 1)
   await f.stopUpstream()
   // Delivery 5b: with DSH gone the readiness probe fails, so nothing more is signed.
-  assert.equal((await request(f.gatePort, '/api/omni-ui/feed', { headers })).status, 503)
+  assert.equal((await request(f.gatePort, feedTarget, { headers })).status, 503)
   assert.equal(f.signs.length, 1)
   const staleGate = await f.makeGate(true, { handle() { f.sessions.revoke(family); return false } })
-  assert.equal((await request(staleGate, '/api/omni-ui/feed', { headers })).status, 401)
+  assert.equal((await request(staleGate, feedTarget, { headers })).status, 401)
   assert.equal(f.signs.length, 1)
   assert.deepEqual(f.cookieCalls, [])
 })
@@ -1034,7 +1038,7 @@ test('a strict probe signs nothing on a bad answer', async t => {
 
 function openFeed(port, headers, agent) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ hostname: DSH_HOST, port, path: '/api/omni-ui/feed', agent, headers: { host: HOST, ...headers } }, res => {
+    const req = http.request({ hostname: DSH_HOST, port, path: feedTarget, agent, headers: { host: HOST, ...headers } }, res => {
       const ended = new Promise(done => { res.once('close', done); res.once('error', done) })
       res.once('data', () => resolve({ res, ended }))
     })
@@ -1048,7 +1052,7 @@ function heldMemberTransports() {
   return {
     feeds, muxes,
     handleRequest(req, res) {
-      if (!req.url.endsWith('/api/omni-ui/feed')) return false
+      if (!req.url.endsWith(feedTarget)) return false
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.write('data: open\n\n')
       feeds.push({ res, closed: once(res, 'close') })
@@ -1158,7 +1162,7 @@ test('a browser disconnect cancels both outstanding pipelined member requests', 
   const responses = []
   browser.on('data', data => responses.push(data))
   const firstBytes = once(browser, 'data')
-  const raw = ({ headers }) => `GET /api/omni-ui/feed HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: ${ORIGIN}\r\nCookie: ${headers.cookie}\r\n\r\n`
+  const raw = ({ headers }) => `GET ${feedTarget} HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: ${ORIGIN}\r\nCookie: ${headers.cookie}\r\n\r\n`
   browser.write(raw(first) + raw(second))
   await Promise.all([firstBytes, both.promise])
   assert.equal(signedHops(f).length, 2)
@@ -1204,7 +1208,7 @@ test('finished requests do not tie a later keep-alive feed to the old family, an
     return new net.Socket()
   } })
   victim = f.issue('member')
-  assert.equal((await request(racing, '/api/omni-ui/feed', { headers: victim.headers })).status, 401)
+  assert.equal((await request(racing, feedTarget, { headers: victim.headers })).status, 401)
   assert.equal(f.signs.length, signs)
   assert.equal(signedHops(f).length, hops)
 })
@@ -1214,7 +1218,7 @@ test('the probe and the request share one connection', async t => {
     probe: res => res.writeHead(204, { 'x-automagik-ready': '1', 'content-length': '0' }).end(),
   })
   const member = f.issue('member')
-  assert.equal((await request(f.gatePort, '/api/omni-ui/feed', { headers: member.headers })).status, 200)
+  assert.equal((await request(f.gatePort, feedTarget, { headers: member.headers })).status, 200)
   assert.equal(f.probes.length, 1)
   assert.equal(f.seen.at(-1).remotePort, f.probes.at(-1).remotePort)
   const upgraded = await request(f.gatePort, '/api/remote.mux', { headers: { ...websocketHeaders, ...member.headers }, upgrade: true })

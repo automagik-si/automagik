@@ -1,5 +1,5 @@
 import { hostText, t } from './i18n.js'
-import { checkViewer, isRetired, requestViewer, viewerRefused } from './viewer.js'
+import { checkViewer, isRetired, requestViewer, viewerRefused, viewerResponse } from './viewer.js'
 import { markNoted, noteClientError } from './diagnostics.js'
 
 const ROUTE = 'api/omni-ui'
@@ -34,7 +34,7 @@ export const call = async (endpoint, payload, signal) => {
   }
   checkViewer(active)
   if (!response.ok) {
-    viewerRefused(`HTTP_${response.status}`)
+    viewerResponse(response)
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` })
     if (!vault && !isRetired()) noteClientError(endpoint, error)
     throw error

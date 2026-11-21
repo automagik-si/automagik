@@ -1,6 +1,6 @@
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
-import { bootView, isRetired, onRetire, startViewer } from './viewer.js'
+import { bootView, canClearDraftInMemory, isRetired, onRetire, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
@@ -106,7 +106,8 @@ import { listedOpener } from './open-listed.js'
 import { agentSessionToReuse, singleFlight } from './agent-new.js'
 import { ReadScopeControl } from './read-scope.js'
 import { installSelfUpdate } from './self-update.js'
-import { applyMember } from './member-root.js'
+import { installPeopleCard } from './bot-settings.js'
+import * as gatedShared from './gated-shared.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -153,11 +154,19 @@ export function apply(ctx) {
   const lifetime = new AbortController()
   ctx.effect(() => () => lifetime.abort(), 'ds-bot: gated viewer')
   ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy (gated)')
-  startViewer(boot, lifetime.signal).then(viewer => {
+  let gated
+  const prepare = async () => {
+    const chunk = await globalThis.__dshChunk('./client.gated.js')
+    gated = chunk.initialize(gatedShared)
+  }
+  startViewer(boot, lifetime.signal, prepare).then(viewer => {
     if (lifetime.signal.aborted || (ctx.fiber && ctx.fiber.state !== 2) || isRetired()) return
     const surface = ctx.inject([], scope => {
-      if (viewer.role === 'member' || viewer.role === 'guest') applyMember(scope)
-      else applyOwner(scope, { gated: true })
+      if (viewer.role === 'member' || viewer.role === 'guest') gated.applyMember(scope)
+      else {
+        scope.effect(() => installPeopleCard(gated.PeopleCard), 'ds-bot: gated People card')
+        applyOwner(scope, { gated: true })
+      }
     })
     ctx.effect(() => onRetire(() => { void Promise.resolve().then(() => surface.dispose()) }), 'ds-bot: retire gated surface')
   }, () => {})
@@ -362,8 +371,10 @@ function applyOwner(ctx, { gated = false } = {}) {
     seenAt = savedPrefs = {}
     agentSessionCache.clear()
     for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear()
-    for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
-      try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
+    if (canClearDraftInMemory()) {
+      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+        try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
+      }
     }
   }), 'ds-bot: clear owner state on retirement')
 
@@ -996,11 +1007,15 @@ function applyOwner(ctx, { gated = false } = {}) {
     })
   }
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, computer, cards, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } })
+  const updateQueue = async (sessionId, itemId, action) => {
+    if (gated) await call('whoami')
+    return (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false }
+  }
   // The queue dock's per-session verbs, supplied the way the shell's own dock
   // injects them (the session facade and the conversation service).
   const queueFace = (sessionId) => ({
     ...face(),
-    updateQueue: async (itemId, action) => (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false },
+    updateQueue: (itemId, action) => updateQueue(sessionId, itemId, action),
     loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment),
   })
   ctx.effect(() => noticeApprovals({
@@ -1057,7 +1072,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   actions.steerQueued = async (sessionId) => {
     const session = ctx.sessions.binding(sessionId)?.session
     if (session === undefined) return
-    if (await steerQueued(session) === 'failed') {
+    if (await steerQueued(session, gated ? (id, action) => updateQueue(sessionId, id, action) : undefined) === 'failed') {
       actions.reportError(new Error(t('Couldn’t steer the queued messages. Try again.')), 'steer-queue')
     }
   }

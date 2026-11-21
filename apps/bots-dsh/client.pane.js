@@ -15592,6 +15592,7 @@ var base64Of = (bytes) => {
   return btoa(binary);
 };
 async function post(path, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ !== void 0) return { status: 403, body: { error: "desktop-only" } };
   const answer = await fetch(`api/omni-ui/code/${path}`, {
     method: "POST",
     credentials: "same-origin",

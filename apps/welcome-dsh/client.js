@@ -29,7 +29,7 @@ var __copyProps = (to2, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// node_modules/@xterm/xterm/lib/xterm.mjs
+// ../bots-dsh/node_modules/@xterm/xterm/lib/xterm.mjs
 var xterm_exports = {};
 __export(xterm_exports, {
   Terminal: () => Dl
@@ -763,7 +763,7 @@ function Tc(s15) {
 }
 var zs, Rl, Ll, M, S, Gs, mi, $s, _i, er, tr, ir, we, De, rt, q, js, Hn, Fn, F, rr, ge, Zs, xt, nr, H, sr, Js, Be, wt, nt, ae, Dt, ce, Qs, or, Re, lr, Wn, Bl, Un, bi, ar, Rt, cr, to, ro, so, At, io, lo, ao, oo, ur, zn, Wl, dt, hr, uo, dr, Ee, D, ye, fe, kt, G, Ct, zl, mr, Gl, fo, $l, $, Mt, $n, po, br, Vn, gi, qn, Yn, Vl, Pt, ql, Yl, _r, v, jn, gr, Si, Eu, Tu, Ot, Ei, Bt, Ti, Sr, Iu, yu, vr, Nt, yr, xr, Ii, Zl, vo, go, Jl, Ql, ea, ta, Tr, Ir, bo, ia, $e, Ve, xe, So, ra, Xn, wr, Te, Zn, Dr, na, xu, Fe, st, sa, oa, Eo, la, wu, Du, Ru, Lu, ot, aa, yi, Jn, To, Io, yo, Qn, Rr, es, ua, ha, da, fa, ft, wo, Lr, qe, xi, Do, ma, ts, _a, Ye, kr, ba, Ar, va, _e, Ro, Cr, Co, Bh, be, Nh, Fh, Hh, Oo, Wh, Uh, No, Kh, zh, ss, os, wa, mt, Mr, Di, pt, Bo, Gh, Y, Da, ls, Wt, He, Q, Pr, lt, Uo, Or, cs, Ri, Br, Nr, Fr, Ca, Ut, Kt, Wr, Ur, Ma, Ko, zo, us, zr, hs, ds, Kr, zt, Gt, Gr, We, at, Li, bt, b, Ai, fs, $t, ue, he, de, J, ps, j, U, z, ve, $r, Vr, ct, Vt, Yr, ms, _s, Le, jr, jo, ki, Xr, Na, Yt, jt, Zr, bs, vs, Jr, gs, Qr, Xt, en, tn, Mi, Pi, Oi, Ss, Fa, Zo, Zt, Wa, Ua, Es, Bi, Ts, rn, Is, ys, Jt, nn, Qt, xs, on, Ds, Ya, ja, Xa, Za, Ja, ei, Hi, Wi, re, St, Ki, tl, il, Ui, Qa, ti, Rs, ln, ec, tc, ii, ic, zi, B, X, an, Ls, Ze, un, cn, ne, Je, cl, $i, hn, ks, Cs, ni, si, nc, dn, ul, hl, li, dl, Ps, fl, ai, Os, ac, se, fn, Ae, pn, Vi, uc, ci, qi, mn, pe, Yi, _n, ji, Xi, Fs, ke, hc, bn, dc, fc, mc, ut, _l, vl, gl, vn, Zi, _c, El, bc, gn, ui, Tl, Sn, gc, ee, En, Us, yl, Tn, Ks, Sc, In, xl, wl, Tt, hi, yn, xn, wn, Ji, Dn, Rn, Ln, Ic, Ue, Dl;
 var init_xterm = __esm({
-  "node_modules/@xterm/xterm/lib/xterm.mjs"() {
+  "../bots-dsh/node_modules/@xterm/xterm/lib/xterm.mjs"() {
     zs = Object.defineProperty;
     Rl = Object.getOwnPropertyDescriptor;
     Ll = (s15, t2) => {
@@ -8967,6 +8967,7 @@ var NAMESPACE = "welcome.team";
 var PT_BR = {
   // Installs and their errors
   "The install was cancelled.": "A instalação foi cancelada.",
+  "Viewer unavailable": "Visualização indisponível",
   "Omni's installer stopped (exit code {code}). What it printed is above.": "O instalador do Omni parou (código de saída {code}). A saída está acima.",
   "Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.": "O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.",
   "Omni {github} is out on GitHub and not on npm yet.": "O Omni {github} já saiu no GitHub e ainda não chegou ao npm.",
@@ -9535,22 +9536,39 @@ function t(key, params) {
 var ROUTE = "api/omni-ai";
 var OMNI_UI = "api/omni-ui";
 var call = (endpoint, payload) => callRoute(ROUTE, endpoint, payload);
-var callOmniUi = (endpoint, payload) => callRoute(OMNI_UI, endpoint, payload);
-async function callRoute(route, endpoint, payload) {
+var callOmniUi = async (endpoint, payload) => {
+  if (globalThis.__AUTOMAGIK_VIEW__ === void 0) return callRoute(OMNI_UI, endpoint, payload);
+  const viewer = globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
+  if (!viewer) throw Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+  return callRoute(OMNI_UI, endpoint, payload, viewer);
+};
+async function callRoute(route, endpoint, payload, viewer) {
+  const body = { endpoint, payload: payload ?? null };
+  if (viewer) body.viewer = viewer.id;
   let response;
   try {
     response = await fetch(route, {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ endpoint, payload: payload ?? null })
+      body: JSON.stringify(body)
     });
   } catch {
+    viewer?.check();
     throw Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), { code: "NETWORK" });
   }
-  if (!response.ok) throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), { code: `HTTP_${response.status}` });
+  viewer?.check();
+  if (!response.ok) {
+    viewer?.response(response);
+    throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), { code: `HTTP_${response.status}` });
+  }
   const result = await response.json();
-  if (!result.ok) throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code: result.error?.code ?? "omni-ai/error" });
+  viewer?.check();
+  if (!result.ok) {
+    const code = result.error?.code ?? (viewer ? "bot/error" : "omni-ai/error");
+    viewer?.refused(code);
+    throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code });
+  }
   return result.value;
 }
 
@@ -10296,7 +10314,7 @@ ${Object.entries(PRODUCT_LOCKUPS).map(([product, art]) => `.oai-lockup-${product
 body[data-ds-dark-theme] .oai-lockup-${product}{background-image:url("${art.cream}")}`).join("\n")}
 `;
 
-// node_modules/@xterm/xterm/css/xterm.css
+// ../bots-dsh/node_modules/@xterm/xterm/css/xterm.css
 var xterm_default = `/**
  * Copyright (c) 2014 The xterm.js authors. All rights reserved.
  * Copyright (c) 2012-2013, Christopher Jeffrey (MIT License)

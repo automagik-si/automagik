@@ -74,6 +74,8 @@ export function upstreamHeaders(req, credentials, cookie, principal, upgrade = f
   headers.origin = `http://${credentials.authority}`
   headers.cookie = cookie
   headers['x-automagik-principal'] = Buffer.from(JSON.stringify(principal)).toString('base64url')
+  if (req.method === 'PUT' && req.url.split('?', 1)[0] === '/api/omni-ui/pet-codex' &&
+      typeof req.headers['x-automagik-viewer'] === 'string') headers['x-automagik-viewer'] = req.headers['x-automagik-viewer']
   if (upgrade) { headers.connection = 'Upgrade'; headers.upgrade = 'websocket' }
   return headers
 }

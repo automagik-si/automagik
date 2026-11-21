@@ -173,7 +173,8 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
       const { method } = req
       const raw = req.url.slice(PREFIX.length)
       const pair = method + ' ' + raw
-      const pairLimit = VIEWER_FEED.test(pair) ? 0 : CALLER_PAIRS.get(pair)
+      const pairLimit = VIEWER_FEED.test(pair) ? CALLER_PAIRS.get('GET /api/omni-ui/feed')
+        : method === 'POST' ? CALLER_PAIRS.get(pair) : undefined
       const routes = pairLimit === undefined ? undefined : callerRoutes()
       const callerHandler = routes?.version === 1 ? routes.match(url.pathname, method) : undefined
       if (callerHandler && method === 'POST') {

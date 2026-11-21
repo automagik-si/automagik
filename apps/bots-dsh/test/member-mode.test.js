@@ -94,6 +94,8 @@ test('MM1 member and guest use only caller requests, read-only slots and the vie
     assert.deepEqual(feeds.map(feed => feed.url.split('?')[0]), ['api/omni-ui/feed'])
     assert.equal(feeds[0].url, `api/omni-ui/feed?viewer=viewer-id.${role}`)
     assert.deepEqual(f.writes, [['automagik.viewer', 'viewer-id']])
+    feeds[0].emit('hello')
+    await tick()
     const tree = render(main)
     const line = 'You can read this chat, but not send messages.'
     assert.ok(text(tree).includes(line))
@@ -190,6 +192,8 @@ test('MM5 feed loss hides the roster and header until a fresh state authorizes t
   const feeds = feedFixture(f)
   const app = slotsOf(t, f, true)
   await tick()
+  feeds[0].emit('hello')
+  await tick()
   const main = app.get('main'), sidebar = app.get('sidebar.workspaces')
   assert.ok(text(render(main)).includes(bots[0].name))
   assert.ok(text(render(sidebar)).includes(bots[0].name))
@@ -207,4 +211,25 @@ test('MM5 feed loss hides the roster and header until a fresh state authorizes t
   await tick()
   assert.ok(text(render(main)).includes(bots[0].name))
   assert.ok(text(render(sidebar)).includes(bots[0].name))
+})
+
+test('MM6 withdrawal before a delayed feed hello never displays the old roster or chat', async t => {
+  let shared = true
+  const f = browser({ boot: { version: 1, role: 'member' }, fetch: ({ body }) => {
+    if (body.endpoint === 'whoami') return viewerReply('member')
+    if (body.endpoint === 'state') return reply({ bots: shared ? bots : [] })
+    return reply({ items: [{ kind: 'bot', text: 'withdrawn chat' }], cursor: null })
+  } })
+  const feeds = feedFixture(f)
+  const app = slotsOf(t, f, true)
+  await tick()
+  feeds[0].emit('revision')
+  await tick()
+  assert.deepEqual(f.calls.map(call => call.body.endpoint), ['whoami'])
+  shared = false
+  feeds[0].emit('hello')
+  await tick()
+  assert.deepEqual(f.calls.map(call => call.body.endpoint), ['whoami', 'state'])
+  assert.doesNotMatch(text(render(app.get('sidebar.workspaces'))).join(' '), /Allowed Bot/)
+  assert.deepEqual(Array.from(nodes(render(app.get('main'))).find(node => node.type.name === 'MemberRows').props.pages), [])
 })

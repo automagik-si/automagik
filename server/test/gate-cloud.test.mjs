@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { cloudConfig, CloudConfigurationError, CloudSignIn, KEYS_TTL_MS, LIST_MAX_AGE_MS, MAX_EXCHANGES, MAX_OPEN_CODES, REFRESH_INTERVAL_MS } from '../gate-cloud.mjs'
-import { CLOUD_OPEN_PATH, createGate } from '../gate.mjs'
+import { CLOUD_OPEN_PATH, CLOUD_OPEN_FINISH_PATH, createGate } from '../gate.mjs'
 import { COOKIE, SessionStore } from '../gate-store.mjs'
 import { DSH_HOST } from '../gate-upstream.mjs'
 
@@ -195,7 +195,15 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
     state.codes.set(value, { workspace: 'workspace-a', sub: 'person-1', roles: ['owner'], used: false, ...options })
     return value
   }
-  const open = value => request(gatePort, form(new URLSearchParams({ code: value }).toString()))
+  const open = async (value, cookie) => {
+    const rail = await request(gatePort, form(new URLSearchParams({ code: value }).toString()))
+    if (!multiuser || rail.status !== 200) return rail
+    assert.equal(rail.headers['set-cookie'], undefined)
+    assert.match(rail.body, new RegExp(`action="${CLOUD_OPEN_FINISH_PATH}"`))
+    const open = /name="open" value="([^"]+)"/.exec(rail.body)[1]
+    return request(gatePort, { method: 'POST', path: CLOUD_OPEN_FINISH_PATH, body: `open=${open}`,
+      headers: { origin, 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) } })
+  }
   const renew = (body, cookie, headers = {}) => request(gatePort, {
     method: 'POST', path: RENEW, body: JSON.stringify(body),
     headers: { origin: ORIGIN, 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...headers },
@@ -1106,7 +1114,7 @@ test('v1 opens are unchanged and the v1 and v2 parsers never accept each other',
 test('G4 a cross-site Cloud open clears storage on both visits, while renewal preserves it', async t => {
   const f = await fixture(t, { multiuser: true })
   const first = await f.open(f.issue({ sub: 'first' }))
-  const second = await f.open(f.issue({ sub: 'second' }))
+  const second = await f.open(f.issue({ sub: 'second' }), cookieOf(first))
   for (const reply of [first, second]) {
     assert.equal(reply.status, 303)
     assert.equal(reply.headers['clear-site-data'], '"cache", "storage"')

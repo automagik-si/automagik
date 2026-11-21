@@ -1387,6 +1387,7 @@ export function install(rt) {
     rt.noteFailure({ source: 'api', text: `${where}: ${kind}`, code: kind, stack: error?.stack })
     return Response.json({ error: `Something went wrong (${kind}).` }, { status: error?.code === 'bot/invalid' ? 400 : 500 })
   }
+  const gatedOwner = request => multiuserMode() || (callerService(ctx) && request.headers.has('x-automagik-principal'))
   ctx.effect(() => ctx.connection.fetch.register({
     path: PET_ROUTE,
     methods: ['GET'],
@@ -1418,6 +1419,14 @@ export function install(rt) {
     methods: ['PUT'],
     requestBody: 'streaming',
     fetch: async (request) => {
+      if (gatedOwner(request)) {
+        const viewer = rt.ownerViewer(request)
+        if (!viewer || request.headers.get('x-automagik-viewer') !== viewer.id) {
+          return Response.json({ code: 'bot/viewer-changed', error: 'Your sign-in changed; reload this page.' },
+            { status: 403, headers: { 'cache-control': 'no-store' } })
+        }
+        if (!callerService(ctx)) return new Response(null, { status: 503 })
+      }
       const url = new URL(request.url)
       const id = url.searchParams.get('id') ?? ''
       try {
@@ -1491,9 +1500,9 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
-      if ((endpoint === 'whoami' || body?.viewer !== undefined) && (multiuserMode() || callerService(ctx) || body?.viewer !== undefined)) {
+      if (gatedOwner(request) || (endpoint === 'whoami' && callerService(ctx))) {
         const viewer = rt.ownerViewer(request)
-        if (!viewer || (body?.viewer !== undefined && body.viewer !== viewer.id)) {
+        if (!viewer || (!(endpoint === 'whoami' && body?.viewer === undefined) && body?.viewer !== viewer.id)) {
           return callerJson(fail('Your sign-in changed; reload this page.', 'bot/viewer-changed'))
         }
         if (!callerService(ctx)) return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } })

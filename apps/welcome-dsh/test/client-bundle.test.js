@@ -1,7 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
+import { build } from 'esbuild'
 import { bundleClient } from '../scripts/build-client.mjs'
 
 const committed = () => readFileSync(new URL('../client.js', import.meta.url), 'utf8')
@@ -9,6 +11,50 @@ const OFFICIAL_INSTALL_EFFECT = 'omni-ai: Omni and Genie install on the Apps pag
 
 test('client.js is the build of src/client', async () => {
   assert.equal(await bundleClient(), committed(), 'client.js is stale: run `npm run build` and commit it')
+})
+
+test('Welcome uses the mounted Bot viewer for gated writes and preserves its desktop request', async () => {
+  const { outputFiles } = await build({
+    entryPoints: [fileURLToPath(new URL('../src/client/api.js', import.meta.url))],
+    bundle: true, write: false, format: 'cjs', platform: 'browser',
+  })
+  const requests = []
+  let retired = false
+  let reply = { ok: true, value: 'saved' }
+  const check = () => {
+    if (retired) throw Object.assign(new Error('Viewer unavailable'), { code: 'bot/retired' })
+  }
+  const context = {
+    module: { exports: {} },
+    fetch: async (route, init) => {
+      requests.push([route, { ...init, headers: { ...init.headers }, body: JSON.parse(init.body) }])
+      return { ok: true, json: async () => reply }
+    },
+  }
+  runInNewContext(outputFiles[0].text, context)
+  const { callOmniUi } = context.module.exports
+  assert.equal(await callOmniUi('omni-pair-cancel'), 'saved')
+  context.__AUTOMAGIK_VIEW__ = { version: 1, role: 'owner' }
+  await assert.rejects(callOmniUi('omni-pair-cancel'), { code: 'bot/retired' })
+  assert.equal(requests.length, 1)
+  context.__AUTOMAGIK_MOUNTED_VIEWER__ = {
+    get id() { check(); return 'owner-viewer' },
+    check,
+    refused(code) {
+      assert.equal(code, 'bot/viewer-changed')
+      retired = true
+    },
+  }
+  assert.equal(await callOmniUi('omni-pair-cancel', { account: 'test' }), 'saved')
+  reply = { ok: false, error: { code: 'bot/viewer-changed' } }
+  await assert.rejects(callOmniUi('omni-pair-cancel'), { code: 'bot/viewer-changed' })
+  await assert.rejects(callOmniUi('omni-pair-cancel'), { code: 'bot/retired' })
+  const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' } }
+  assert.deepEqual(requests, [
+    ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: null } }],
+    ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: { account: 'test' }, viewer: 'owner-viewer' } }],
+    ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: null, viewer: 'owner-viewer' } }],
+  ])
 })
 
 // DSH runs client.js as a classic script that hands a factory to the module loader; the

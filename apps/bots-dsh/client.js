@@ -3906,18 +3906,35 @@ function bootView() {
 }
 var mountedViewer = () => guard?.retired ? void 0 : guard?.viewer;
 var isRetired = () => guard?.retired === true;
+var canClearDraftInMemory = () => guard?.draftsProtected === true;
 var unavailable = () => Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+function storedViewer() {
+  try {
+    return localStorage.getItem(VIEWER_KEY);
+  } catch {
+    return null;
+  }
+}
 function requestViewer(endpoint) {
+  checkViewer(guard);
   if (isRetired() || endpoint !== "whoami" && !guard?.viewer && bootView() !== void 0) {
     throw unavailable();
   }
   return guard;
 }
 function checkViewer(active2) {
+  if (active2 && guard === active2 && active2.viewer) {
+    const current = storedViewer();
+    if (current !== null && current !== active2.viewer.id) retire();
+  }
   if (active2 && (guard !== active2 || active2.retired)) throw unavailable();
 }
 function viewerRefused(code) {
   if (guard && ["bot/viewer-changed", "HTTP_401", "HTTP_403"].includes(code)) retire();
+}
+function viewerResponse(response) {
+  if (response.status === 401 && response.headers?.get?.("x-automagik-dsh-refresh") === "1") return;
+  viewerRefused(`HTTP_${response.status}`);
 }
 function onRetire(hook) {
   if (!guard) return () => {
@@ -3946,13 +3963,6 @@ function retire() {
   body?.replaceChildren?.();
   clearClientErrors();
   try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const key = localStorage.key(i);
-      if (key?.startsWith("dsh.conversation.")) localStorage.removeItem(key);
-    }
-  } catch {
-  }
-  try {
     if (sessionStorage.getItem(RELOAD_KEY) === "1") return;
     sessionStorage.setItem(RELOAD_KEY, "1");
   } catch {
@@ -3963,14 +3973,55 @@ function retire() {
   } catch {
   }
 }
+function trackDrafts(active2, viewer) {
+  try {
+    const storage = localStorage;
+    const prototype = Object.getPrototypeOf(storage);
+    const set2 = prototype.setItem;
+    const remove = prototype.removeItem;
+    if (typeof set2 !== "function" || typeof remove !== "function") return;
+    const written = /* @__PURE__ */ new Map();
+    const current = () => storage.getItem(VIEWER_KEY) === viewer.id;
+    const conversation = (key) => typeof key === "string" && key.startsWith("dsh.conversation.");
+    prototype.setItem = function(key, value) {
+      if (this !== storage || !conversation(key)) return set2.call(this, key, value);
+      if (!active2.retired && current()) {
+        set2.call(this, key, value);
+        written.set(key, storage.getItem(key));
+      }
+    };
+    prototype.removeItem = function(key) {
+      if (this !== storage || !conversation(key)) return remove.call(this, key);
+      if (!active2.retired && current()) {
+        remove.call(this, key);
+        written.delete(key);
+      }
+    };
+    active2.hooks.add(() => {
+      try {
+        if (current()) {
+          for (const [key, value] of written) if (storage.getItem(key) === value) remove.call(storage, key);
+        }
+      } finally {
+        written.clear();
+      }
+    });
+    return () => {
+      prototype.setItem = set2;
+      prototype.removeItem = remove;
+    };
+  } catch {
+  }
+}
 function confirmed(answer, boot) {
   const viewer = answer?.viewer;
   return boot.role !== "none" && answer?.multiuser === true && answer.role === boot.role && (viewer?.role === boot.role || boot.role === "owner" && viewer?.role === "admin") && typeof viewer.id === "string" && /^[\w-]{1,64}$/.test(viewer.id);
 }
-async function startViewer(boot, signal) {
+async function startViewer(boot, signal, prepare) {
   if (guard) throw new Error("Viewer already started");
   if (signal?.aborted) throw unavailable();
   const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false };
+  const previousViewer = storedViewer();
   const body = document.body;
   const display = body?.style?.getPropertyValue("display");
   const priority = body?.style?.getPropertyPriority("display");
@@ -3994,6 +4045,7 @@ async function startViewer(boot, signal) {
     if (guard === active2 && !active2.retired) {
       if (!active2.viewer) show2();
       guard = void 0;
+      delete globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
     }
   };
   signal?.addEventListener("abort", abort, { once: true });
@@ -4016,7 +4068,8 @@ async function startViewer(boot, signal) {
     }
   }
   if (!current()) throw new Error("Viewer unavailable");
-  if (!confirmed(answer, boot)) {
+  const currentViewer = storedViewer();
+  if (!confirmed(answer, boot) || currentViewer !== null && currentViewer !== previousViewer && currentViewer !== answer.viewer.id) {
     retire();
     throw new Error("Viewer role changed");
   }
@@ -4026,6 +4079,8 @@ async function startViewer(boot, signal) {
     sessionStorage.removeItem(RELOAD_KEY);
   } catch {
   }
+  const untrackDrafts = trackDrafts(active2, viewer);
+  active2.draftsProtected = untrackDrafts !== void 0;
   let checking = false;
   const check = async () => {
     if (checking || active2.retired || guard !== active2) return;
@@ -4049,12 +4104,32 @@ async function startViewer(boot, signal) {
   document.addEventListener("visibilitychange", visibility);
   const timer = setInterval(check, 15e3);
   active2.stop = () => {
+    if (!active2.retired) untrackDrafts?.();
     clearInterval(timer);
     window.removeEventListener("focus", check);
     window.removeEventListener("storage", storage);
     document.removeEventListener("visibilitychange", visibility);
   };
   active2.hooks.add(active2.stop);
+  const checkMounted = () => checkViewer(active2);
+  globalThis.__AUTOMAGIK_MOUNTED_VIEWER__ = Object.freeze({
+    get id() {
+      checkMounted();
+      return active2.viewer.id;
+    },
+    check: checkMounted,
+    response: viewerResponse,
+    refused: viewerRefused
+  });
+  if (prepare) {
+    try {
+      await prepare();
+    } catch (error) {
+      if (current()) retire();
+      throw error;
+    }
+    if (!current()) throw unavailable();
+  }
   show2();
   return viewer;
 }
@@ -4087,7 +4162,7 @@ var call = async (endpoint, payload, signal) => {
   }
   checkViewer(active2);
   if (!response.ok) {
-    viewerRefused(`HTTP_${response.status}`);
+    viewerResponse(response);
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` });
     if (!vault && !isRetired()) noteClientError(endpoint, error);
     throw error;
@@ -4831,7 +4906,7 @@ function plainText(markdown) {
   let text2 = markdown.replace(/[\uE000\uE001]/g, "");
   text2 = text2.replace(/(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*((?:\n(?![ \t]*\2)[^\n]*)*)(?:\n[ \t]*\2[`~]*[ \t]*(?=\n|$))?/g, (_all, start2, _fence, code) => `${start2}${hold(code.slice(1))}`);
   text2 = text2.replace(/(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g, (_all, _ticks, code) => hold(code.replace(/^ ([\s\S]*) $/, "$1")));
-  text2 = text2.replace(/\\([!-/:-@[-`{-~])/g, (_all, mark3) => hold(mark3));
+  text2 = text2.replace(/\\([!-/:-@[-`{-~])/g, (_all, mark2) => hold(mark2));
   text2 = text2.replace(/!?\[((?:[^\][]|\[[^\][]*\])*)\]\((?:[^()\s]|\([^()\s]*\))*(?:[ \t]+(?:"[^"]*"|'[^']*'))?\)/g, "$1");
   text2 = text2.replace(/!?\[((?:[^\][]|\[[^\][]*\])+)\]\[[^\]]*\]/g, "$1");
   text2 = text2.replace(/<((?:https?:\/\/|mailto:)[^<>\s]+)>/g, (_all, address) => hold(address));
@@ -5192,10 +5267,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h102, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h102 / 2}" width="${w}" height="${h102}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h102 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h102 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h102, tilt]) => `<ellipse cx="${cx}" cy="${cy + h102 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h102, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h102 / 2}" width="${w}" height="${h102}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h102, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h102 * 0.14}Q0 ${-h102 * 0.42} ${w * 0.62} ${h102 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h100, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h100 / 2}" width="${w}" height="${h100}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h100 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h100 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h100, tilt]) => `<ellipse cx="${cx}" cy="${cy + h100 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h100, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h100 / 2}" width="${w}" height="${h100}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h100, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h100 * 0.14}Q0 ${-h100 * 0.42} ${w * 0.62} ${h100 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -5310,12 +5385,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h102 = dt / steps;
+    const h100 = dt / steps;
     let moving = false;
     for (const [key, value] of values) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h102;
-        value.x += value.v * h102;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h100;
+        value.x += value.v * h100;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -7759,8 +7834,8 @@ function errorFor(error, draft, detail, minimum) {
   if (!facts.minimum) facts.minimum = release(minimum);
   const base = screenFor(code, draft, facts);
   if (code === "bot/hermes-attach-profile" && !detail && !facts.profile && typeof error?.message === "string" && error.message) {
-    const plain2 = "This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.";
-    if (error.message !== plain2 && error.message !== hostText(plain2)) base.text = error.message;
+    const plain = "This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.";
+    if (error.message !== plain && error.message !== hostText(plain)) base.text = error.message;
   }
   if (!base.ssh) return base;
   const host = shortText(draft?.ssh?.host?.trim?.() ?? "");
@@ -14515,13 +14590,22 @@ function currentKey(bot, look) {
   if (look.shape === "octopus" && look.color === "deepseek") return "omni";
   return `shape:${look.shape}`;
 }
-async function put(url, blob) {
-  const response = await fetch(url, { method: "PUT", body: blob, headers: { "content-type": "image/webp" } });
+async function put(url, blob, active2) {
+  checkViewer(active2);
+  const viewer = requestViewer("pet-codex")?.viewer?.id;
+  const headers = { "content-type": "image/webp", ...viewer ? { "x-automagik-viewer": viewer } : {} };
+  const response = await fetch(url, { method: "PUT", body: blob, headers });
+  checkViewer(active2);
   const answer = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(answer.error ?? t("Codex's pets folder could not be written"));
+  checkViewer(active2);
+  if (!response.ok) {
+    viewerResponse(response);
+    throw new Error(answer.error ?? t("Codex's pets folder could not be written"));
+  }
   return answer;
 }
 async function toCodex(bot, look) {
+  const active2 = requestViewer("pet-codex");
   const id = `automagik-${slug(bot.name)}`;
   const query = (part) => `api/omni-ui/pet-codex?${new URLSearchParams({ id, name: bot.name, description: bot.role ?? "", ...part ? { part } : {} })}`;
   const wants = petOf(bot, look, { live: true, size: 64 });
@@ -14536,8 +14620,8 @@ async function toCodex(bot, look) {
   } else {
     throw new Error(t("A photo is not a pet: pick a character or a pet first."));
   }
-  await put(query(), sheet);
-  if (sleep2) await put(query("sleep"), sleep2);
+  await put(query(), sheet, active2);
+  if (sleep2) await put(query("sleep"), sleep2, active2);
   return id;
 }
 function Portrait({ item, color }) {
@@ -17159,189 +17243,15 @@ function roleOutletVisible(outlet, id, bot, roster) {
   return owner === void 0 || effectiveRoleIds(bot, roster.prefs).includes(owner.id);
 }
 
-// src/client/people-model.js
-var personKey = ({ issuer, subject }) => JSON.stringify([issuer, subject]);
-var shortSubject = (subject) => subject.length <= 16 ? subject : subject.slice(0, 13) + "…";
-var issuerLabel = (issuer) => {
-  try {
-    return new URL(issuer).host || issuer;
-  } catch {
-    return issuer;
-  }
-};
-function personLabels(people) {
-  const unique = new Map(people.map((person) => [personKey(person), person]));
-  const short = (person) => issuerLabel(person.issuer) + " · " + shortSubject(person.subject);
-  const counts2 = /* @__PURE__ */ new Map();
-  for (const person of unique.values()) counts2.set(short(person), (counts2.get(short(person)) ?? 0) + 1);
-  return new Map([...unique].map(([key, person]) => [
-    key,
-    counts2.get(short(person)) > 1 ? issuerLabel(person.issuer) + " · " + person.subject : short(person)
-  ]));
-}
-function availablePeople(seen, allow) {
-  const listed = new Set(allow.map(personKey));
-  return seen.flatMap(({ roles, issuer, subject }) => {
-    if (listed.has(personKey({ issuer, subject })) || roles.includes("owner") || roles.includes("admin")) return [];
-    const role = roles.includes("member") ? "member" : roles.includes("guest") ? "guest" : void 0;
-    return role ? [{ issuer, subject, role }] : [];
-  });
-}
-
-// src/client/people-card.js
-var PeopleReact = __toESM(require("react"), 1);
-var { createElement: h37, useEffect: useEffect27, useRef: useRef26, useState: useState29 } = PeopleReact;
-var modes = [
-  ["owners", "Only you and admins"],
-  ["allowlist", "People you choose"],
-  ["workspace", "Anyone in the workspace"]
-];
-var shareNotes = {
-  opening: "Starting a new part of this chat for sharing…",
-  open: "Shared: people you add read this chat from its new part on.",
-  spoiled: "Sharing did not start because something moved into the new part; stop sharing and share again."
-};
-var stale = "Who may talk to this Bot changed in another window; check it and save again.";
-var roleWord = (role) => role === "member" ? t("Member") : t("Guest");
-function PeopleCard({ bot, roster }) {
-  const role = mountedViewer()?.role;
-  return role === "owner" || role === "admin" ? h37(OwnerPeopleCard, { key: bot.id, id: bot.id, main: isMainOf(roster, bot.id) }) : null;
-}
-function OwnerPeopleCard({ id, main }) {
-  const [seen, setSeen] = useState29(null);
-  const [share, setShare] = useState29(null);
-  const [saving, setSaving] = useState29(false);
-  const [error, setError] = useState29(null);
-  const lifetime = useRef26(null);
-  const busy = useRef26(false);
-  const readShare = (signal) => call("people-share", { id }, signal).then((value) => {
-    if (!signal.aborted) setShare(value);
-  });
-  useEffect27(() => {
-    const scope = new AbortController();
-    lifetime.current = scope;
-    void Promise.all([call("people-seen", void 0, scope.signal), call("people-share", { id }, scope.signal)]).then(([people2, value]) => {
-      if (!scope.signal.aborted) {
-        setSeen(people2);
-        setShare(value);
-      }
-    }, () => {
-    });
-    return () => scope.abort();
-  }, [id]);
-  useEffect27(() => {
-    if (saving || share?.state !== "opening") return;
-    const scope = new AbortController();
-    const timer = setTimeout(() => {
-      void readShare(scope.signal).catch((failure) => {
-        if (!scope.signal.aborted) {
-          setError(failure.message);
-          setShare((value) => ({ ...value }));
-        }
-      });
-    }, 3e3);
-    return () => {
-      scope.abort();
-      clearTimeout(timer);
-    };
-  }, [id, share, saving]);
-  if (!seen || !share) return null;
-  const { people } = share;
-  async function save(next) {
-    const signal = lifetime.current.signal;
-    if (busy.current || signal.aborted) return;
-    busy.current = true;
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await call("update-bot", { id, people: next, expect: people }, signal);
-      if (!signal.aborted) setShare((value) => ({ ...value, people: result.people }));
-    } catch (failure) {
-      if (!signal.aborted) setError(failure.code === "bot/stale" ? t(stale) : failure.message);
-    } finally {
-      try {
-        if (!signal.aborted) await readShare(signal);
-      } catch {
-      }
-      busy.current = false;
-      if (!signal.aborted) setSaving(false);
-    }
-  }
-  const title = t("Who can talk to this Bot");
-  const choices = availablePeople(seen, people.allow);
-  const labels = personLabels([...people.allow, ...choices]);
-  const seenById = new Map(seen.map((person) => [personKey(person), person.lastSeen]));
-  return h37(
-    Card2,
-    { title },
-    h37(
-      "div",
-      { className: "bt-set-row bt-bs-row bt-bs-stack" },
-      h37("span", { className: "bt-set-hint" }, t("Sharing starts a new part of this chat; earlier parts stay yours.")),
-      h37(Segmented, { label: title, value: people.mode }, modes.filter(([mode]) => !main || mode !== "workspace").map(([mode, label]) => h37("button", {
-        key: mode,
-        type: "button",
-        "aria-pressed": people.mode === mode,
-        disabled: saving,
-        onClick: () => {
-          if (people.mode !== mode) void save({ ...people, mode });
-        }
-      }, t(label))))
-    ),
-    h37("div", { className: "bt-set-row bt-bs-row" }, h37(
-      "span",
-      { className: "bt-set-hint" },
-      t("People you add can read this Bot's chat; they can't send messages yet.")
-    )),
-    people.mode !== "owners" ? h37(
-      "div",
-      null,
-      h37(
-        Row,
-        {
-          label: t("Guests and named people"),
-          stack: true,
-          hint: seen.length === 0 ? t("No one has signed in since the last restart.") : null
-        },
-        choices.length > 0 ? h37("select", {
-          className: "bt-soft",
-          "aria-label": t("Add person"),
-          disabled: saving,
-          value: "",
-          onChange: (event) => {
-            const person = choices.find((entry) => personKey(entry) === event.target.value);
-            if (person) void save({ ...people, allow: [...people.allow, person] });
-          }
-        }, h37("option", { value: "" }, t("Add person")), choices.map((person) => h37("option", { key: personKey(person), value: personKey(person) }, labels.get(personKey(person)) + " · " + roleWord(person.role)))) : null
-      ),
-      people.allow.map((person) => {
-        const key = personKey(person);
-        const lastSeen = seenById.get(key);
-        return h37(
-          "div",
-          { key, className: "bt-set-row bt-bs-row" },
-          h37(
-            "span",
-            { className: "bt-set-copy" },
-            labels.get(key) + " · " + roleWord(person.role),
-            h37("span", { className: "bt-set-hint" }, Number.isFinite(lastSeen) ? t("Last seen {time}", { time: relativeShort(lastSeen) }) : t("Not signed in since the last restart"))
-          ),
-          h37("button", {
-            type: "button",
-            className: "bt-soft",
-            disabled: saving,
-            onClick: () => void save({ ...people, allow: people.allow.filter((entry) => personKey(entry) !== key) })
-          }, t("Remove"))
-        );
-      })
-    ) : null,
-    Object.hasOwn(shareNotes, share.state) ? h37("p", { className: "bt-set-hint", role: "status" }, t(shareNotes[share.state])) : null,
-    error ? h37("p", { className: "bt-set-hint", role: "alert" }, error) : null
-  );
-}
-
 // src/client/bot-settings.js
 var import_react41 = require("react");
+var PeopleCard;
+function installPeopleCard(component) {
+  PeopleCard = component;
+  return () => {
+    if (PeopleCard === component) PeopleCard = void 0;
+  };
+}
 var capitalize2 = (word2) => word2[0].toUpperCase() + word2.slice(1);
 function InlineText({ label, value, placeholder: placeholder2, required = false, maxLength, multiline = false, onSave }) {
   const [draft, setDraft] = (0, import_react41.useState)(null);
@@ -17840,7 +17750,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         onChange: (value) => save({ private: value })
       })
     ),
-    (0, import_react41.createElement)(PeopleCard, { bot, roster }),
+    PeopleCard ? (0, import_react41.createElement)(PeopleCard, { bot, roster }) : null,
     (0, import_react41.createElement)(
       Card2,
       { title: t("Instructions") },
@@ -27840,7 +27750,7 @@ function markOf(ref) {
   if (OWN_MODE_MARKS.includes(provider) || TEAM_MARKS.includes(provider)) return provider;
   return slash > 0 && ref.slice(slash + 1) && ["native", "pi-ai"].includes(routeOf(provider).connectedBy) ? `api:${ref}` : void 0;
 }
-var judgeOf = (mark3) => mark3 === "acp-codex" ? "codex" : mark3 === "acp-claude" ? "claude" : TEAM_MARKS.includes(mark3) ? "team" : typeof mark3 === "string" && mark3.startsWith("api:") ? "own" : void 0;
+var judgeOf = (mark2) => mark2 === "acp-codex" ? "codex" : mark2 === "acp-claude" ? "claude" : TEAM_MARKS.includes(mark2) ? "team" : typeof mark2 === "string" && mark2.startsWith("api:") ? "own" : void 0;
 
 // src/client/permission-picker.js
 var import_react64 = require("react");
@@ -28174,10 +28084,10 @@ function autoMissingText(bot, roster) {
   if (roster?.hostModels?.[bot.id] !== void 0) return t("This Bot runs on its plugin's own engine, so Auto is not offered.");
   if (typeof bot.model !== "string" || bot.model === "") return t("Auto needs a model chosen for this Bot.");
   if (bot.model.startsWith("hermes-remote/")) return t("Auto is not offered on Remote Hermes.");
-  const mark3 = markOf(bot.model);
-  if (mark3 === void 0) return t("Auto is not offered for this Bot's model.");
-  if (markOf(bot.appliedModel) !== mark3) return t("Auto is offered once this Bot's chat runs on the model saved for it.");
-  if (judgeOf(mark3) === "team" && !roster?.backgroundModel) return t("On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.");
+  const mark2 = markOf(bot.model);
+  if (mark2 === void 0) return t("Auto is not offered for this Bot's model.");
+  if (markOf(bot.appliedModel) !== mark2) return t("Auto is offered once this Bot's chat runs on the model saved for it.");
+  if (judgeOf(mark2) === "team" && !roster?.backgroundModel) return t("On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.");
   return t("Auto is not available for this Bot right now.");
 }
 function AutoMissingNote({ bot, roster }) {
@@ -28204,12 +28114,12 @@ var autoQuestion = (name, level, judge) => {
 // src/client/enter-steer.js
 var steerable = (input) => input !== void 0 && input.phase === "plain" && input.draft.trim() === "" && input.attachmentIds.length === 0 && input.queue.some((message) => message.source?.kind === "user");
 var enterSteers = (event, input) => event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !event.getModifierState?.("AltGraph") && !event.isComposing && event.keyCode !== 229 && !event.repeat && steerable(input);
-var steerQueued = async (session) => {
+var steerQueued = async (session, update = (id, action) => session.updateQueue(id, action)) => {
   try {
     const queued = session.projections.faceOf("inbox").getSnapshot()?.["next-turn"] ?? [];
     for (const item of queued) {
       if (item.source?.kind !== "user") continue;
-      const result = await session.updateQueue(item.id, { kind: "steer" });
+      const result = await update(item.id, { kind: "steer" });
       if (result.ok) continue;
       return result.error.code === "session/steer-unavailable" || result.error.code === "session/queue-item-not-found" ? "done" : "failed";
     }
@@ -28571,7 +28481,7 @@ function sessionMention(sessionId, label) {
   let binary2 = "";
   for (const byte of new TextEncoder().encode(JSON.stringify(sessionId))) binary2 += String.fromCharCode(byte);
   const payload = btoa(binary2).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return `@[${label.replace(/[\\\]]/g, (mark3) => `\\${mark3}`)}](dsh-session:${payload})`;
+  return `@[${label.replace(/[\\\]]/g, (mark2) => `\\${mark2}`)}](dsh-session:${payload})`;
 }
 function atSources({ roster, sessions, launched, iconFor }) {
   const bots = {
@@ -30140,8 +30050,8 @@ var TEAM_APPROVAL_CSS = `
 `;
 
 // src/client/surface.js
-function groupsFor({ mode, plain: plain2 = false }) {
-  return { shell: mode === "bot", conversation: mode === "bot" && !plain2 };
+function groupsFor({ mode, plain = false }) {
+  return { shell: mode === "bot", conversation: mode === "bot" && !plain };
 }
 var GROUPS = ["shell", "conversation"];
 function disposeAll(disposers, label) {
@@ -30824,8 +30734,8 @@ function agentAvatar(engine) {
   const badge = badgeOf(engine);
   if (badge === void 0) return void 0;
   const [glyph, ink] = badge;
-  const mark3 = logo?.kind === "path" ? `<rect width="64" height="64" rx="16" fill="${INKS.black[1]}"/><g transform="translate(14 14) scale(1.5)"><path d="${logo.d}" fill="#${logo.hex}"/></g>` : `<rect width="64" height="64" rx="16" fill="${INKS[ink][0]}"/><text x="32" y="41" text-anchor="middle" font-size="26" font-weight="700" fill="${INKS.black[1]}" font-family="system-ui,sans-serif">${glyph}</text>`;
-  const svg2 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">${mark3}</svg>`;
+  const mark2 = logo?.kind === "path" ? `<rect width="64" height="64" rx="16" fill="${INKS.black[1]}"/><g transform="translate(14 14) scale(1.5)"><path d="${logo.d}" fill="#${logo.hex}"/></g>` : `<rect width="64" height="64" rx="16" fill="${INKS[ink][0]}"/><text x="32" y="41" text-anchor="middle" font-size="26" font-weight="700" fill="${INKS.black[1]}" font-family="system-ui,sans-serif">${glyph}</text>`;
+  const svg2 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">${mark2}</svg>`;
   return { image: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg2)))}` };
 }
 
@@ -33911,11 +33821,11 @@ var watchDark2 = (changed) => {
   return () => watch.disconnect();
 };
 var useDarkGround = () => (0, import_react84.useSyncExternalStore)(watchDark2, isDark2, () => false);
-function BrandMark2({ mark: mark3 }) {
+function BrandMark2({ mark: mark2 }) {
   const dark2 = useDarkGround();
   return (0, import_react84.createElement)("img", {
     className: "bt-official-brand-mark",
-    src: PRODUCT_MARK_ART[mark3][dark2 ? "cream" : "ink"],
+    src: PRODUCT_MARK_ART[mark2][dark2 ? "cream" : "ink"],
     width: 32,
     height: 32,
     alt: "",
@@ -34901,11 +34811,11 @@ function levelName(level) {
 var NO_ASK = /* @__PURE__ */ new Set(["bypassPermissions", "agent-full-access"]);
 function noAskMissed(acp) {
   if (acp === null || typeof acp !== "object" || acp.active !== true) return void 0;
-  const modes2 = acp.modes;
-  if (modes2 === null || typeof modes2 !== "object" || !Array.isArray(modes2.wanted)) return void 0;
-  const asked2 = modes2.wanted[0];
+  const modes = acp.modes;
+  if (modes === null || typeof modes !== "object" || !Array.isArray(modes.wanted)) return void 0;
+  const asked2 = modes.wanted[0];
   if (typeof asked2 !== "string" || !NO_ASK.has(asked2)) return void 0;
-  const current = permText(modes2.current);
+  const current = permText(modes.current);
   if (current === void 0 || current === "other" || NO_ASK.has(current)) return void 0;
   return { mode: current };
 }
@@ -34947,17 +34857,17 @@ function agentFacts(acp) {
     out.push(t("For the last prompt {name} was put in its strict mode: {why}.", { name, why: t(why, { name }) }));
   }
   out.push(acp.active === true ? name : t("{name}, not running now: this is from its last run", { name }));
-  const modes2 = acp.modes;
-  if (modes2 && typeof modes2 === "object") {
-    const chosen = permText(modes2.chosen);
-    const current = permText(modes2.current);
+  const modes = acp.modes;
+  if (modes && typeof modes === "object") {
+    const chosen = permText(modes.chosen);
+    const current = permText(modes.current);
     if (chosen === void 0) out.push(t("The agent offers none of the modes asked for"));
-    else if (current !== void 0 && modes2.applied === false) out.push(t('The agent is in its mode "{current}", not the one asked for, "{mode}"', { current, mode: chosen }));
-    else if (current !== void 0 && modes2.applied === true) out.push(t('The agent is in its mode "{mode}"', { mode: current }));
+    else if (current !== void 0 && modes.applied === false) out.push(t('The agent is in its mode "{current}", not the one asked for, "{mode}"', { current, mode: chosen }));
+    else if (current !== void 0 && modes.applied === true) out.push(t('The agent is in its mode "{mode}"', { mode: current }));
     else out.push(t('Mode asked of the agent: "{mode}", not confirmed now', { mode: chosen }));
-    if (modes2.fellToStrict === true && modes2.applied === true && current !== void 0) out.push(t("It took its strictest mode, because the agent does not offer the wider ones"));
-    const wanted = modeList(modes2.wanted);
-    const offered = modeList(modes2.offered);
+    if (modes.fellToStrict === true && modes.applied === true && current !== void 0) out.push(t("It took its strictest mode, because the agent does not offer the wider ones"));
+    const wanted = modeList(modes.wanted);
+    const offered = modeList(modes.offered);
     if (wanted.length > 0) out.push(t("Modes asked for, in order: {list}", { list: wanted.join(", ") }));
     if (offered.length > 0) out.push(t("Modes the agent offers: {list}", { list: offered.join(", ") }));
   }
@@ -39118,7 +39028,7 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
       ghostEl.className = "bt-panel-ghost";
       ghostEl.style.width = `${outgoing.offsetWidth}px`;
       ghostEl.append(outgoing.cloneNode(true));
-      if (source && next !== "details") for (const mark3 of ghostEl.querySelectorAll(".bt-drawer-id .bt-mark")) mark3.style.visibility = "hidden";
+      if (source && next !== "details") for (const mark2 of ghostEl.querySelectorAll(".bt-drawer-id .bt-mark")) mark2.style.visibility = "hidden";
       outgoing.parentElement.append(ghostEl);
       void ghostEl.animate([
         { opacity: 1, transform: "scale(1)" },
@@ -40121,10 +40031,10 @@ ${body2 || "(no text)"}
       return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el, next);
     }
     const found = itemFor(el, style);
-    const mark3 = found ? `[#${found.number}]` : "";
+    const mark2 = found ? `[#${found.number}]` : "";
     if (tag === "input" || tag === "textarea" || tag === "select") {
       if (found) found.item.name = nameOf3(el, tag === "select" ? "" : el.labels?.[0] ? collapse(el.labels[0].textContent) : "", found.secret);
-      return mark3 ? ` ${mark3} ` : "";
+      return mark2 ? ` ${mark2} ` : "";
     }
     let body2;
     if (tag === "pre") {
@@ -40147,22 +40057,22 @@ ${body2 || "(no text)"}
       const title = oneLine(body2);
       return title ? `
 
-${"#".repeat(Math.min(6, Number(level) || 2))} ${title}${mark3}
+${"#".repeat(Math.min(6, Number(level) || 2))} ${title}${mark2}
 
-` : mark3;
+` : mark2;
     }
     if (tag === "code" && !ctx.pre) {
       const code = oneLine(body2);
-      if (!code) return mark3;
+      if (!code) return mark2;
       const ticks = code.includes("`") ? "``" : "`";
-      return `${ticks}${code}${ticks}${mark3}`;
+      return `${ticks}${code}${ticks}${mark2}`;
     }
     if (tag === "blockquote") {
       const quoted2 = block(body2);
       return quoted2 ? keep(quoted2.split("\n").map((line) => line ? `> ${line}` : ">").join("\n")) : "";
     }
     const end = body2.trimEnd().length;
-    const marked = mark3 ? `${body2.slice(0, end)}${mark3}${body2.slice(end)}` : body2;
+    const marked = mark2 ? `${body2.slice(0, end)}${mark2}${body2.slice(end)}` : body2;
     if (ctx.pre && !BLOCK_DISPLAY.test(display)) return marked;
     if (keepsSpace && BLOCK_DISPLAY.test(display) && tag !== "pre") {
       return keep(expand(marked).replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").replace(/^\n+|\s+$/g, ""), "");
@@ -44072,10 +43982,10 @@ function progress(body, run3, offline, connectionLost, el) {
       const row = el("div", "su-step");
       row.dataset.step = key;
       row.dataset.state = i < phase ? "done" : i === phase ? "active" : "waiting";
-      const mark3 = el("span", "su-mark", i < phase ? "✓" : i === phase ? "•" : String(i + 1));
-      mark3.setAttribute("aria-hidden", "true");
+      const mark2 = el("span", "su-mark", i < phase ? "✓" : i === phase ? "•" : String(i + 1));
+      mark2.setAttribute("aria-hidden", "true");
       if (i === phase) row.setAttribute("aria-current", "step");
-      row.append(mark3, el("span", null, t(label)));
+      row.append(mark2, el("span", null, t(label)));
       list.append(row);
     }
     body.append(list);
@@ -44444,270 +44354,39 @@ function createDocumentUpdate(doc, storage = (() => {
   };
 }
 
-// src/client/member-model.js
-var initialMember = {
-  bots: [],
-  byId: /* @__PURE__ */ Object.create(null),
-  botId: null,
-  pages: [],
-  cursor: null,
-  generation: 0,
-  loading: false,
-  failed: false,
-  withdrawn: false
-};
-function selectBot(view, botId, withdrawn = false) {
-  return {
-    ...view,
-    botId,
-    withdrawn,
-    generation: view.generation + 1,
-    pages: [],
-    cursor: null,
-    loading: false,
-    failed: false
-  };
-}
-function updateRoster(view, bots) {
-  const byId = Object.fromEntries(bots.map((bot) => [bot.id, bot]));
-  const next = { ...view, bots, byId };
-  if (view.botId !== null && Object.hasOwn(byId, view.botId)) return next;
-  if (view.botId !== null) return selectBot(next, null, true);
-  return view.withdrawn || bots.length === 0 ? next : selectBot(next, bots[0].id);
-}
-var requestView = ({ generation, botId }) => ({ generation, botId });
-var isCurrent = (view, request) => view.generation === request.generation && view.botId === request.botId;
-var changedBot = (view, request, botId) => isCurrent(view, request) && view.botId === botId;
-function applyPage(view, request, page, earlier) {
-  if (!isCurrent(view, request)) return view;
-  const items = Array.isArray(page.items) ? page.items : [];
-  return {
-    ...view,
-    pages: earlier ? [...view.pages, items] : [items],
-    cursor: page.cursor,
-    loading: false,
-    failed: false
-  };
-}
-var feedEnded = (view) => selectBot({ ...initialMember, generation: view.generation }, null, view.withdrawn);
-var pageRows = (pages2) => pages2.map((items, page) => items.map((row, index) => ({ row, key: `${page}:${index}` }))).reverse().flat();
-function botLabels(bots) {
-  const counts2 = /* @__PURE__ */ new Map();
-  for (const { name } of bots) counts2.set(name, (counts2.get(name) ?? 0) + 1);
-  return new Map(bots.map(({ id, name }) => [id, counts2.get(name) > 1 ? `${name} · ${id}` : name]));
-}
-
-// src/client/member-root.js
-var import_react106 = require("react");
-var mark2 = (bot) => (0, import_react106.createElement)(BotMark, { bot, look: { ...lookOf(bot), pet: void 0 }, live: false, size: 28 });
-var plain = (text2) => (text2 ?? "").split("\n").flatMap((line, index) => index === 0 ? [line] : [(0, import_react106.createElement)("br", { key: index }), line]);
-function MemberRows({ pages: pages2, roster, botId }) {
-  const bot = Object.hasOwn(roster.byId, botId) ? roster.byId[botId] : void 0;
-  return pageRows(pages2).map(({ row, key }) => {
-    if (row.kind === "divider") {
-      return (0, import_react106.createElement)(
-        "div",
-        { key, className: "bt-part-line", role: "separator" },
-        Number.isFinite(row.time) ? (0, import_react106.createElement)("span", null, dayLabel(row.time)) : null
-      );
-    }
-    if (row.kind === "user") {
-      return (0, import_react106.createElement)("div", { key, className: "bt-urow" }, (0, import_react106.createElement)(
-        "div",
-        { className: "bt-ububble" },
-        plain(row.text),
-        row.images ? (0, import_react106.createElement)("span", { className: "bt-uimages" }, row.images === 1 ? t("1 image") : t("{count} images", { count: row.images })) : null
-      ));
-    }
-    if (row.kind === "bot") {
-      return (0, import_react106.createElement)(
-        "div",
-        { key, className: "bt-msg-line" },
-        bot ? mark2(bot) : null,
-        (0, import_react106.createElement)("div", { className: "bt-bubble" }, plain(row.text))
-      );
-    }
-    return null;
-  });
-}
-function MemberRoot({ source, load }) {
-  const view = (0, import_react106.useSyncExternalStore)(source.subscribe, source.getSnapshot);
-  const bot = view.botId !== null && Object.hasOwn(view.byId, view.botId) ? view.byId[view.botId] : void 0;
-  return (0, import_react106.createElement)(
-    "main",
-    { className: "bt-earlier", style: { height: "100%", overflowY: "auto" } },
-    bot ? (0, import_react106.createElement)("header", { className: "bt-msg-line" }, mark2(bot), (0, import_react106.createElement)("strong", null, bot.name)) : null,
-    (0, import_react106.createElement)("div", { className: "bt-earlier-top" }, view.loading ? (0, import_react106.createElement)(Shimmer, null, t("Loading earlier messages…")) : view.failed ? (0, import_react106.createElement)("button", { type: "button", className: "bt-soft", onClick: () => load(view.cursor) }, t("Couldn’t load earlier messages · Retry")) : view.cursor ? (0, import_react106.createElement)("button", { type: "button", className: "bt-soft", onClick: () => load(view.cursor) }, t("Load earlier")) : null),
-    (0, import_react106.createElement)(MemberRows, { pages: view.pages, roster: view, botId: view.botId }),
-    view.withdrawn ? (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("This Bot is no longer shared with you.")) : bot && !view.loading && !view.failed && !view.pages.some((items) => items.length > 0) ? (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("Nothing to read here yet.")) : null,
-    (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("You can read this chat, but not send messages."))
-  );
-}
-function MemberSidebar({ source, select }) {
-  const view = (0, import_react106.useSyncExternalStore)(source.subscribe, source.getSnapshot);
-  const labels = botLabels(view.bots);
-  return (0, import_react106.createElement)("div", { className: "bt-side" }, view.bots.length === 0 ? (0, import_react106.createElement)("p", { className: "bt-set-hint" }, t("No Bots are shared with you yet.")) : view.bots.map((bot) => (0, import_react106.createElement)("button", {
-    key: bot.id,
-    type: "button",
-    className: "bt-soft",
-    "aria-pressed": view.botId === bot.id,
-    onClick: () => select(bot.id)
-  }, mark2(bot), labels.get(bot.id))));
-}
-function applyMember(ctx) {
-  const source = createSource(initialMember);
-  let stopped = false;
-  let connected = true;
-  let needsChat = false;
-  let selection = null;
-  let feed, retry, pageRequest, rosterRequest;
-  const current = source.getSnapshot;
-  const active2 = () => !stopped && !isRetired();
-  const accepts = (request) => active2() && connected && isCurrent(current(), request);
-  const cancelReads = () => {
-    pageRequest?.abort();
-    rosterRequest?.abort();
-    pageRequest = rosterRequest = void 0;
-  };
-  const clear = () => {
-    cancelReads();
-    selection = current().botId ?? selection;
-    source.set(feedEnded);
-  };
-  function load(cursor) {
-    const request = requestView(current());
-    if (!accepts(request) || request.botId === null) return;
-    if (cursor && pageRequest) return;
-    pageRequest?.abort();
-    const pending = pageRequest = new AbortController();
-    source.set((view) => ({ ...view, loading: true, failed: false }));
-    void call(cursor ? "earlier" : "chat", { botId: request.botId, ...cursor ? { cursor } : {} }, pending.signal).then((page) => {
-      if (accepts(request) && pageRequest === pending) source.set((view) => applyPage(view, request, page, Boolean(cursor)));
-    }, (error) => {
-      if (!accepts(request) || pageRequest !== pending) return;
-      if (error?.code === "bot/not-found") {
-        clear();
-        selection = null;
-        source.set((view) => selectBot(view, null, true));
-        refresh();
-      } else source.set((view) => ({ ...view, loading: false, failed: true, cursor: cursor ?? null }));
-    }).finally(() => {
-      if (pageRequest === pending) pageRequest = void 0;
-    });
-  }
-  function refresh({ chat = false } = {}) {
-    if (!active2() || !connected) return;
-    needsChat ||= chat;
-    rosterRequest?.abort();
-    const request = requestView(current());
-    const pending = rosterRequest = new AbortController();
-    void call("state", void 0, pending.signal).then((answer) => {
-      if (!accepts(request) || rosterRequest !== pending) return;
-      const next = updateRoster({ ...current(), botId: selection ?? current().botId }, Array.isArray(answer.bots) ? answer.bots : []);
-      selection = null;
-      if (!isCurrent(next, request)) {
-        pageRequest?.abort();
-        pageRequest = void 0;
-      }
-      source.set(next);
-      if (needsChat || next.botId !== request.botId) load();
-      needsChat = false;
-    }, () => {
-      if (accepts(request) && rosterRequest === pending) clear();
-    }).finally(() => {
-      if (rosterRequest === pending) rosterRequest = void 0;
-    });
-  }
-  function select(id) {
-    if (!active2() || current().botId === id || !Object.hasOwn(current().byId, id)) return;
-    const refreshing = rosterRequest !== void 0;
-    cancelReads();
-    source.set((view) => selectBot(view, id));
-    if (refreshing) refresh({ chat: true });
-    else load();
-  }
-  function connect() {
-    if (!active2()) return;
-    const viewer = mountedViewer();
-    const stream = feed = new EventSource(`api/omni-ui/feed?viewer=${viewer.id}.${viewer.role}`);
-    const live = () => active2() && feed === stream;
-    stream.addEventListener("hello", () => {
-      if (!live()) return;
-      connected = true;
-      refresh({ chat: true });
-    });
-    stream.addEventListener("revision", () => {
-      if (live()) refresh();
-    });
-    stream.addEventListener("changed", (event) => {
-      if (!live() || !connected) return;
-      const request = requestView(current());
-      let id;
-      try {
-        id = JSON.parse(event.data)?.botId;
-      } catch {
-        return;
-      }
-      if (changedBot(current(), request, id)) load();
-    });
-    stream.addEventListener("error", () => {
-      if (!live()) return;
-      connected = false;
-      clear();
-      if (stream.readyState === EventSource.CLOSED) {
-        stream.close();
-        feed = void 0;
-        retry = setTimeout(connect, 1e4);
-      }
-    });
-  }
-  const stop3 = () => {
-    stopped = true;
-    feed?.close();
-    clearTimeout(retry);
-    clear();
-    selection = null;
-    source.set(initialMember);
-  };
-  ctx.effect(() => {
-    const off = onRetire(stop3);
-    refresh({ chat: true });
-    connect();
-    return () => {
-      off();
-      stop3();
-    };
-  }, "ds-bot: shared chats");
-  ctx.effect(() => installCompiledStyles(
-    SHELL_CSS + SIDEBAR_CSS + LEFT_BAR_CSS + CONVERSATION_CSS,
-    "shared-chats"
-  ), "ds-bot: shared chat styles");
-  ctx.effect(() => {
-    const style = installStyles(themeCss(allThemes().deepseek), "shared-chat-theme");
-    return () => style.remove();
-  }, "ds-bot: shared chat theme");
-  const shadow = (name, options, component) => ctx.slots.inject(name, () => ctx.slots.register({
-    name,
-    ...options,
-    priority: freePriority(ctx.slots.entries(name), { priority: -100, ...options })
-  }, component));
-  ctx.effect(() => shadow("main", { key: "conversation", inject: () => ({ source, load }) }, MemberRoot), "ds-bot: shared chat");
-  ctx.effect(() => shadow("sidebar.workspaces", { inject: () => ({ source, select }) }, MemberSidebar), "ds-bot: shared Bots");
-  for (const name of ["settings.trigger", "settings.launcher"]) {
-    ctx.effect(() => shadow(name, {}, Nothing), "ds-bot: hide " + name);
-  }
-  ctx.effect(() => shadow("sidebar.brand.mark", {}, BrandMark), "ds-bot: brand mark");
-  ctx.effect(() => shadow("sidebar.brand.name", {}, BrandName), "ds-bot: brand name");
-  ctx.effect(() => {
-    const info = ctx.layout.panelInfo;
-    const reset = () => {
-      if (info.getSnapshot().activePanelId != null) ctx.layout.selectPanel(null);
-    };
-    const off = info.subscribe(reset);
-    reset();
-    return off;
-  }, "ds-bot: keep shared chat selected");
-}
+// src/client/gated-shared.js
+var gated_shared_exports = {};
+__export(gated_shared_exports, {
+  BotMark: () => BotMark,
+  BrandMark: () => BrandMark,
+  BrandName: () => BrandName,
+  CONVERSATION_CSS: () => CONVERSATION_CSS,
+  Card: () => Card2,
+  LEFT_BAR_CSS: () => LEFT_BAR_CSS,
+  Nothing: () => Nothing,
+  Row: () => Row,
+  SHELL_CSS: () => SHELL_CSS,
+  SIDEBAR_CSS: () => SIDEBAR_CSS,
+  Segmented: () => Segmented,
+  Shimmer: () => Shimmer,
+  allThemes: () => allThemes,
+  call: () => call,
+  checkViewer: () => checkViewer,
+  createSource: () => createSource,
+  dayLabel: () => dayLabel,
+  freePriority: () => freePriority,
+  installCompiledStyles: () => installCompiledStyles,
+  installStyles: () => installStyles,
+  isMainOf: () => isMainOf,
+  isRetired: () => isRetired,
+  lookOf: () => lookOf,
+  mountedViewer: () => mountedViewer,
+  onRetire: () => onRetire,
+  relativeShort: () => relativeShort,
+  requestViewer: () => requestViewer,
+  t: () => t,
+  themeCss: () => themeCss
+});
 
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
@@ -44788,11 +44467,19 @@ function apply(ctx) {
   const lifetime = new AbortController();
   ctx.effect(() => () => lifetime.abort(), "ds-bot: gated viewer");
   ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy (gated)");
-  startViewer(boot, lifetime.signal).then((viewer) => {
+  let gated;
+  const prepare = async () => {
+    const chunk = await globalThis.__dshChunk("./client.gated.js");
+    gated = chunk.initialize(gated_shared_exports);
+  };
+  startViewer(boot, lifetime.signal, prepare).then((viewer) => {
     if (lifetime.signal.aborted || ctx.fiber && ctx.fiber.state !== 2 || isRetired()) return;
     const surface = ctx.inject([], (scope) => {
-      if (viewer.role === "member" || viewer.role === "guest") applyMember(scope);
-      else applyOwner(scope, { gated: true });
+      if (viewer.role === "member" || viewer.role === "guest") gated.applyMember(scope);
+      else {
+        scope.effect(() => installPeopleCard(gated.PeopleCard), "ds-bot: gated People card");
+        applyOwner(scope, { gated: true });
+      }
     });
     ctx.effect(() => onRetire(() => {
       void Promise.resolve().then(() => surface.dispose());
@@ -44841,7 +44528,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   let expected2 = null;
   let navigationRevision = 0;
   let chosen = null;
-  const setPlain = (plain2) => surface.set((state2) => state2.plain === plain2 ? state2 : { ...state2, plain: plain2 });
+  const setPlain = (plain) => surface.set((state2) => state2.plain === plain ? state2 : { ...state2, plain });
   const dropPanels = () => ui2.set((state2) => state2.details || state2.renaming ? { ...state2, details: null, view: "details", renaming: false, tab: null } : state2);
   const seenKey = (id) => roster.getSnapshot().byId?.[id]?.id ?? roster.getSnapshot().roomsById?.[id]?.id ?? id;
   const leaveVisits = (ids) => {
@@ -44980,10 +44667,12 @@ function applyOwner(ctx, { gated = false } = {}) {
     seenAt = savedPrefs = {};
     agentSessionCache.clear();
     for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear();
-    for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
-      try {
-        ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.("");
-      } catch {
+    if (canClearDraftInMemory()) {
+      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+        try {
+          ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.("");
+        } catch {
+        }
       }
     }
   }), "ds-bot: clear owner state on retirement");
@@ -45110,9 +44799,9 @@ function applyOwner(ctx, { gated = false } = {}) {
         const chip = /\s/.test(bot.name) ? "" : `[class*="_userRow"] [data-ref-chip="file"][title="@${bot.name.replace(/["\\]/g, "\\$&")}" i]`;
         const look = lookOf(bot);
         const marks = chip ? `${anchor}::before,${chip}::before` : `${anchor}::before`;
-        const mark3 = look.image ? `${marks}{background:center/cover url("${look.image}");-webkit-mask:none;mask:none;border-radius:50%}` : `${marks}{background:${paintCss(look.color)};-webkit-mask-image:${maskOf(look.shape)};mask-image:${maskOf(look.shape)}}`;
+        const mark2 = look.image ? `${marks}{background:center/cover url("${look.image}");-webkit-mask:none;mask:none;border-radius:50%}` : `${marks}{background:${paintCss(look.color)};-webkit-mask-image:${maskOf(look.shape)};mask-image:${maskOf(look.shape)}}`;
         const chipBase = chip ? `${chip}{color:inherit;font-weight:600}${chip}>svg{display:none}${chip}::before{content:"";display:inline-block;flex:none;width:16px;height:16px;margin-right:3px;vertical-align:-3px;-webkit-mask:${DEFAULT_MASK} center/contain no-repeat;mask:${DEFAULT_MASK} center/contain no-repeat}` : "";
-        return `${anchor}{color:${inkText(look.color)}}${chipBase}${mark3}`;
+        return `${anchor}{color:${inkText(look.color)}}${chipBase}${mark2}`;
       }).join("\n");
       if (next !== last) style.textContent = last = next;
     };
@@ -45613,9 +45302,13 @@ function applyOwner(ctx, { gated = false } = {}) {
     });
   }
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry: registry2, turnClock, live, computer, cards: cards2, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } });
+  const updateQueue = async (sessionId, itemId, action) => {
+    if (gated) await call("whoami");
+    return await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action) ?? { ok: false };
+  };
   const queueFace = (sessionId) => ({
     ...face(),
-    updateQueue: async (itemId, action) => await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action) ?? { ok: false },
+    updateQueue: (itemId, action) => updateQueue(sessionId, itemId, action),
     loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment)
   });
   ctx.effect(() => noticeApprovals({
@@ -45672,7 +45365,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   actions.steerQueued = async (sessionId) => {
     const session = ctx.sessions.binding(sessionId)?.session;
     if (session === void 0) return;
-    if (await steerQueued(session) === "failed") {
+    if (await steerQueued(session, gated ? (id, action) => updateQueue(sessionId, id, action) : void 0) === "failed") {
       actions.reportError(new Error(t("Couldn’t steer the queued messages. Try again.")), "steer-queue");
     }
   };
@@ -46082,9 +45775,9 @@ function applyOwner(ctx, { gated = false } = {}) {
       const destination = list.byId[main];
       const parentId = destination?.parentId ?? destination?.parentSessionId;
       const nativeCandidate = main !== void 0 && main !== expected2 && surface.getSnapshot().mode === "bot" && botId !== void 0 && snapshot2.byId[main] === void 0 && snapshot2.roomsById[main] === void 0 && agentOfSession(main) === void 0 && destination?.origin !== "subagent" && (destination?.blank === true || parentId === previous);
-      const plain2 = isAgentSessionId(main) || nativeCandidate;
-      setPlain(plain2);
-      if (plain2) dropPanels();
+      const plain = isAgentSessionId(main) || nativeCandidate;
+      setPlain(plain);
+      if (plain) dropPanels();
       if (main !== observed) {
         navigationRevision += 1;
         observed = main;

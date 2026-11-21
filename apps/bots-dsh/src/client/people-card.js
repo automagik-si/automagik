@@ -1,12 +1,6 @@
 import * as PeopleReact from 'react'
-import { call } from './api.js'
-import { Card, Row } from './bot-settings.js'
-import { t } from './i18n.js'
-import { Segmented } from './motion.js'
+import { call, Card, isMainOf, mountedViewer, relativeShort, Row, Segmented, t } from './gated-shared.js'
 import { availablePeople, personKey, personLabels } from './people-model.js'
-import { isMainOf } from './sources.js'
-import { relativeShort } from './text.js'
-import { mountedViewer } from './viewer.js'
 
 const { createElement: h, useEffect, useRef, useState } = PeopleReact
 const modes = [

@@ -10,6 +10,7 @@ export const NAMESPACE = 'welcome.team'
 export const PT_BR = {
   // Installs and their errors
   'The install was cancelled.': 'A instalação foi cancelada.',
+  'Viewer unavailable': 'Visualização indisponível',
   'Omni\'s installer stopped (exit code {code}). What it printed is above.': 'O instalador do Omni parou (código de saída {code}). A saída está acima.',
   'Omni {version} is not on npm, where Omni\'s installer gets it. The newest there is {npm}.': 'O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.',
   'Omni {github} is out on GitHub and not on npm yet.': 'O Omni {github} já saiu no GitHub e ainda não chegou ao npm.',

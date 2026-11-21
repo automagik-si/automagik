@@ -26,11 +26,13 @@ export function install(rt) {
   /** @type {Set<ReadableStreamDefaultController<Uint8Array>>} */
   const clients = new Set()
   const send = (controller, chunk) => {
-    if ((controller.desiredSize ?? 0) < -MAX_QUEUED) {
+    const { request, service } = requests.get(controller)
+    if (request.signal.aborted || (service && (callerService(ctx) !== service ||
+        !matchesFeedViewer(request, rt.ownerViewer(request)))) || (controller.desiredSize ?? 0) < -MAX_QUEUED) {
       leave(controller)
       return
     }
-    try { controller.enqueue(chunk) } catch { clients.delete(controller) }
+    try { controller.enqueue(chunk) } catch { leave(controller) }
   }
   const publish = (event, data) => {
     for (const tap of taps) {
@@ -123,13 +125,13 @@ export function install(rt) {
       const body = new ReadableStream({
         start(own) {
           controller = own
+          requests.set(own, { request, service })
           clients.add(own)
           const hello = { revision: state.revision, ...(rt.noticeCursor ? { api: rt.apiVersion, ...rt.noticeCursor() } : {}) }
           send(own, encoder.encode(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`))
         },
         cancel() { leave(controller) },
       })
-      requests.set(controller, request)
       request.signal.addEventListener('abort', () => leave(controller), { once: true })
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' } })
     },

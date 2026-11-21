@@ -9,6 +9,7 @@ import fixture from './fixtures/caller-role-paths.json' with { type: 'json' }
 
 const origin = new URL('https://workspace.invalid')
 const pair = row => row.method + ' ' + row.path
+const targetOf = row => row.path + (row.query ?? '')
 
 test('G1 role precedence and raw target decisions are shared across gate and adapter', () => {
   assert.deepEqual(CALLER_HTTP, new Set(fixture.targets.filter(row => row.transport === 'http').map(pair)))
@@ -19,7 +20,7 @@ test('G1 role precedence and raw target decisions are shared across gate and ada
   }
   for (const role of ['member', 'guest', undefined]) {
     for (const row of [...fixture.targets, ...fixture.refused]) {
-      const decision = callerTarget({ role, method: row.method, raw: row.path, upgrade: row.transport === 'upgrade', origin })
+      const decision = callerTarget({ role, method: row.method, raw: targetOf(row), upgrade: row.transport === 'upgrade', origin })
       const denied = !role || row.status === 403
       assert.deepEqual(decision, denied ? { allow: false, status: 403 } : { allow: true }, pair(row))
     }
@@ -27,7 +28,7 @@ test('G1 role precedence and raw target decisions are shared across gate and ada
 })
 
 test('G1 the viewer-bound feed permits only its canonical query on GET', () => {
-  const path = '/api/omni-ui/feed?viewer=mounted.member'
+  const path = targetOf(fixture.targets.find(row => row.query))
   const allow = (raw, method = 'GET') => callerTarget({ role: 'member', raw, method, origin }).allow
   assert.equal(allow(path), true)
   assert.equal(allow(path, 'POST'), false)
@@ -56,7 +57,7 @@ test('G2 the gate refuses raw spelling variants and malformed roles before probi
     const upgrade = row.transport === 'upgrade'
     const headers = { host: origin.host, origin: origin.origin }
     if (upgrade) headers.upgrade = 'websocket'
-    const req = { url: row.path, method: row.method, headers, rawHeaders: Object.entries(headers).flat() }
+    const req = { url: targetOf(row), method: row.method, headers, rawHeaders: Object.entries(headers).flat() }
     let status
     if (upgrade) {
       const socket = new EventEmitter()
@@ -118,7 +119,7 @@ test('G2 only the exact Bot UI HTTP pairs are signed and owner forwarding keeps 
     const headers = { host: origin.host, origin: origin.origin }
     if (upgrade) Object.assign(headers, { upgrade: 'websocket', connection: 'Upgrade', 'sec-websocket-version': '13' })
     return new Promise((resolve, reject) => {
-      const req = http.request({ hostname: '127.0.0.1', port: target, path: row.path, method: row.method, headers }, res => {
+      const req = http.request({ hostname: '127.0.0.1', port: target, path: targetOf(row), method: row.method, headers }, res => {
         res.resume()
         res.on('end', () => resolve(res.statusCode))
       })
@@ -126,10 +127,12 @@ test('G2 only the exact Bot UI HTTP pairs are signed and owner forwarding keeps 
       req.end()
     })
   }
-  for (const row of fixture.targets.filter(row => row.callerRoute)) assert.equal(await request(row), 200, pair(row))
-  assert.deepEqual(signed.map(input => [input.method, input.path]), [['POST', '/api/omni-ui'], ['GET', '/api/omni-ui/feed']])
+  const pairs = fixture.targets.filter(row => row.callerRoute)
+  for (const row of pairs) assert.equal(await request(row), 200, pair(row))
+  assert.equal(await request(fixture.refused.find(row => row.method === 'GET' && row.path === pairs[1].path)), 403)
+  assert.deepEqual(signed.map(input => [input.method, input.path]), pairs.map(row => [row.method, targetOf(row)]))
   assert.equal(probes.length, 2)
-  assert.deepEqual(hops, ['/_automagik/caller/api/omni-ui', '/_automagik/caller/api/omni-ui/feed'])
+  assert.deepEqual(hops, pairs.map(row => '/_automagik/caller' + targetOf(row)))
   const arbitrary = { transport: 'http', method: 'POST', path: '/api/other?x=1' }
   assert.equal(await request(arbitrary, offPort), 403)
   family.principal.roles = ['owner']

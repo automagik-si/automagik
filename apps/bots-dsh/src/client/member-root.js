@@ -1,17 +1,10 @@
 import { createElement as h, useSyncExternalStore } from 'react'
-import { call } from './api.js'
-import { Nothing, Shimmer } from './cells.js'
-import { t } from './i18n.js'
-import { LEFT_BAR_CSS } from './left-bar-css.js'
-import { BotMark, lookOf } from './mark.js'
-import { BrandMark, BrandName, SIDEBAR_CSS } from './sidebar.js'
-import { createSource } from './sources.js'
-import { freePriority } from './surface.js'
-import { CONVERSATION_CSS, SHELL_CSS, installCompiledStyles, installStyles } from './styles.js'
+import {
+  allThemes, BotMark, BrandMark, BrandName, call, checkViewer, CONVERSATION_CSS, createSource, dayLabel, freePriority,
+  installCompiledStyles, installStyles, isRetired, LEFT_BAR_CSS, lookOf, mountedViewer, Nothing, onRetire,
+  requestViewer, SHELL_CSS, Shimmer, SIDEBAR_CSS, t, themeCss,
+} from './gated-shared.js'
 import { applyPage, botLabels, changedBot, feedEnded, initialMember, isCurrent, pageRows, requestView, selectBot, updateRoster } from './member-model.js'
-import { allThemes, themeCss } from './themes.js'
-import { dayLabel } from './text.js'
-import { isRetired, mountedViewer, onRetire } from './viewer.js'
 
 const mark = bot => h(BotMark, { bot, look: { ...lookOf(bot), pet: undefined }, live: false, size: 28 })
 const plain = text => (text ?? '').split('\n').flatMap((line, index) => index === 0 ? [line] : [h('br', { key: index }), line])
@@ -64,7 +57,7 @@ function MemberSidebar({ source, select }) {
 export function applyMember(ctx) {
   const source = createSource(initialMember)
   let stopped = false
-  let connected = true
+  let connected = false
   let needsChat = false
   let selection = null
   let feed, retry, pageRequest, rosterRequest
@@ -131,9 +124,14 @@ export function applyMember(ctx) {
   }
   function connect() {
     if (!active()) return
+    let mounted
+    try { mounted = requestViewer('feed') } catch { return }
     const viewer = mountedViewer()
     const stream = feed = new EventSource(`api/omni-ui/feed?viewer=${viewer.id}.${viewer.role}`)
-    const live = () => active() && feed === stream
+    const live = () => {
+      try { checkViewer(mounted) } catch { return false }
+      return active() && feed === stream
+    }
     stream.addEventListener('hello', () => {
       if (!live()) return
       connected = true
@@ -168,7 +166,6 @@ export function applyMember(ctx) {
   }
   ctx.effect(() => {
     const off = onRetire(stop)
-    refresh({ chat: true })
     connect()
     return () => { off(); stop() }
   }, 'ds-bot: shared chats')

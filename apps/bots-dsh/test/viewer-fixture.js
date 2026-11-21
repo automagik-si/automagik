@@ -27,14 +27,17 @@ export const viewerReply = (role, id = 'viewer-id') => reply({
 })
 
 function storage(values = new Map(), writes = []) {
-  return {
+  const data = {
     get length() { return values.size },
     key: index => [...values.keys()][index] ?? null,
     getItem: key => values.get(key) ?? null,
-    setItem(key, value) { values.set(key, value); writes.push([key, value]) },
-    removeItem: key => values.delete(key),
     values,
   }
+  Object.setPrototypeOf(data, {
+    setItem(key, value) { values.set(key, value); writes.push([key, value]) },
+    removeItem: key => values.delete(key),
+  })
+  return data
 }
 
 function events(props = {}) {
@@ -51,10 +54,11 @@ function events(props = {}) {
   })
 }
 
-export function browser({ boot, fetch, session, hooks = react, timers = {} } = {}) {
+export function browser({ boot, fetch, session, local, hooks = react, timers = {} } = {}) {
   const calls = [], writes = [], reloads = [], intervals = new Set()
   const req = (url, args) => {
-    const call = { url, method: args.method, body: JSON.parse(args.body), signal: args.signal }
+    const call = { url, method: args?.method ?? 'GET', body: typeof args?.body === 'string' ? JSON.parse(args.body) : args?.body,
+      signal: args?.signal, headers: args?.headers }
     calls.push(call)
     return fetch ? fetch(call) : viewerReply(boot?.role)
   }
@@ -71,11 +75,11 @@ export function browser({ boot, fetch, session, hooks = react, timers = {} } = {
     },
   }
   const document = events({ body, visibilityState: 'visible' })
-  const localStorage = storage(new Map([['dsh.conversation.a', 'draft'], ['dsh.conversation.b', 'draft'], ['keep', 'yes']]), writes)
+  const localStorage = storage(local ?? new Map([['dsh.conversation.a', 'draft'], ['dsh.conversation.b', 'draft'], ['keep', 'yes']]), writes)
   const sessionStorage = storage(session)
   const globals = {
     window, document, location: { reload: () => reloads.push(true) },
-    localStorage, sessionStorage, fetch: req, AbortController, URL, URLSearchParams, console,
+    localStorage, sessionStorage, fetch: req, AbortController, URL, URLSearchParams, Blob, console,
     setTimeout, clearTimeout, setInterval: fn => { intervals.add(fn); return fn }, clearInterval: fn => intervals.delete(fn), ...timers,
     require: name => imports(name, hooks),
   }
@@ -100,7 +104,20 @@ export function load(code, globals) {
 
 export function loadClient(globals) {
   let client
-  globals.window.__ModuleLoader__ = { load: entry => { client = entry.factory(globals.require) } }
+  const request = globals.require
+  request.async ??= async name => {
+    assert.equal(name, './client.gated.js')
+    let chunk
+    const loader = globals.window.__ModuleLoader__
+    globals.window.__ModuleLoader__ = { load: entry => {
+      assert.equal(entry.chunk, 'client.gated.js')
+      chunk = entry.factory(request)
+    } }
+    try { runInNewContext(readFileSync(new URL('../client.gated.js', import.meta.url), 'utf8'), globals) }
+    finally { globals.window.__ModuleLoader__ = loader }
+    return chunk
+  }
+  globals.window.__ModuleLoader__ = { load: entry => { client = entry.factory(request) } }
   runInNewContext(readFileSync(new URL('../client.js', import.meta.url), 'utf8'), globals)
   return client
 }

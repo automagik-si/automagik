@@ -184,10 +184,35 @@ test('CR8 gated owner whoami uses the gate principal and rejects stale requests 
   const refresh = t.mock.method(f.rt, 'refresh')
   assert.equal((await f.call('state', null, { headers: headers('second'), viewer: first.viewer.id })).error.code, 'bot/viewer-changed')
   assert.equal(refresh.mock.callCount(), 0)
+  assert.equal((await f.call('state', null, { headers: headers('second') })).error?.code, 'bot/viewer-changed')
+  assert.equal(refresh.mock.callCount(), 0)
   assert.deepEqual((await f.call('whoami')).value.viewer, { id: 'local', role: 'owner' })
   await f.emitService(undefined)
   assert.equal((await f.call('state')).ok, true)
   assert.equal((await f.call('whoami')).ok, false)
+})
+
+test('CR10 a queued pet atlas PUT cannot write for a different owner', async t => {
+  const f = fixture(t)
+  await f.start()
+  const headers = subject => ({ 'x-automagik-principal': Buffer.from(JSON.stringify({ ...identity, subject, roles: ['owner'] })).toString('base64url') })
+  const viewer = (await f.call('whoami', null, { headers: headers('first') })).value.viewer.id
+  const route = f.routes.get('/api/omni-ui/pet-codex')
+  for (const id of [viewer, undefined]) {
+    const request = new Request(url + '/pet-codex?id=fixture', {
+      method: 'PUT', headers: { ...headers('second'), ...(id ? { 'x-automagik-viewer': id } : {}) },
+    })
+    request.arrayBuffer = () => { throw new Error('Unexpected body read') }
+    const response = await route.fetch(request)
+    assert.equal(response.status, 403)
+    assert.equal((await response.json()).code, 'bot/viewer-changed')
+  }
+})
+
+test('CR11 desktop owner POST still ignores an unexpected top-level viewer field', async t => {
+  const f = fixture(t, { service: serviceStub({ multiuser: false }) })
+  await f.start()
+  assert.equal((await f.call('state', null, { viewer: 'formerly-ignored' })).ok, true)
 })
 
 test('CR9 adapter teardown keeps the configured owner boot gated and closes calls from a mounted owner tab', async t => {

@@ -9,9 +9,12 @@ import { callerTarget, CLEAR_SITE_DATA, effectiveRole, ownerFamily } from './gat
 import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
 
 export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
+export const CLOUD_OPEN_FINISH_PATH = '/_gate/cloud/open/finish'
 export const CLOUD_RENEW_PATH = '/_gate/cloud/renew'
 export const CLOUD_REVOCATION_PATH = '/_gate/cloud/revocation'
 const MAX_OPEN_BODY = 4096
+const MAX_PENDING_OPENS = 128
+const OPEN_FINISH_MS = 60_000
 const MAX_RENEW_BODY = 4096
 const MAX_REVOCATION_BODY = 4096
 const MAX_EARLY_UPGRADE_BYTES = 1_048_576 + 1024 * 14 // One max-size mux message, with frame headers.
@@ -144,6 +147,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const sockets = new Map()
   const pendingUpgrades = new Map()
   let pendingUpgradeCount = 0
+  const pendingOpens = new Map()
   // Gated HTTP responses are piped apart from the socket table. Family changes cut
   // forwarded requests at both ends, including owner streams.
   const httpRequests = new Set()
@@ -183,9 +187,22 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     if (socket?.destroyed || res.destroyed) closed()
     return record
   }
-  // Cloud mode: the rail posts a single-use open code here, as a form (OIDC's form_post shape).
-  // The gate trades it with the Cloud service itself and sets its own session; the browser
-  // never sees a workspace token, and a code or token in a URL is refused.
+  function issueCloudSession(req, res, opened) {
+    const previous = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
+    if (previous) sessions.revoke(previous)
+    else if (multiuser) {
+      // A browser that lost its cookie cannot identify its old streams. End the
+      // live transports before installing the new cookie, leaving other sessions valid.
+      for (const record of sockets.values()) record.socket.destroy()
+      for (const record of httpRequests) endRequest(record, true)
+    }
+    const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires, proof: opened.proof })
+    clearSite(res)
+    res.writeHead(303, { location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
+      'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
+    res.end()
+  }
+  // The rail posts a single-use code. Only the gate sees the exchanged workspace token.
   async function cloudOpen(req, res) {
     const refuse = (status, error) => {
       auditAccess({ status, request_id: randomUUID() })
@@ -207,14 +224,46 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     try { opened = await cloud.open(form.get('code')) }
     catch (error) { refuse(error?.status === 429 ? 429 : 401, 'Open refused'); return }
     if (res.destroyed) return
-    // A fresh open replaces this browser's session; a replayed cookie still revokes its family.
-    const previous = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
-    if (previous) sessions.revoke(previous)
-    const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires, proof: opened.proof })
-    clearSite(res)
-    res.writeHead(303, { location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
-      'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
-    res.end()
+    if (!multiuser) { issueCloudSession(req, res, opened); return }
+    // The rail's cross-site POST omits the old Lax cookie. A document on the
+    // gate origin can post it back before the new session replaces it.
+    const now = sessions.now()
+    for (const [id, pending] of pendingOpens) if (pending.deadline <= now) pendingOpens.delete(id)
+    if (pendingOpens.size >= MAX_PENDING_OPENS) { refuse(429, 'Open refused'); return }
+    const id = randomUUID()
+    const deadline = Math.min(now + OPEN_FINISH_MS, opened.expires)
+    pendingOpens.set(id, { opened, deadline, created: now })
+    const nonce = randomUUID()
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'same-origin',
+      'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+    })
+    res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Continue to Automagik</title>
+<form method="post" action="${CLOUD_OPEN_FINISH_PATH}"><input type="hidden" name="open" value="${id}">
+<button>Continue to Automagik</button></form><script nonce="${nonce}">document.forms[0].requestSubmit()</script></html>`)
+  }
+  async function finishCloudOpen(req, res) {
+    if (!multiuser || req.url !== CLOUD_OPEN_FINISH_PATH || req.method !== 'POST' || !trustedRequest(req, origin, false) ||
+        req.headers.authorization !== undefined ||
+        req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/x-www-form-urlencoded') {
+      answer(res, 403, { error: 'Open refused' })
+      return
+    }
+    let body
+    try { body = await readBody(req, MAX_OPEN_BODY) }
+    catch { answer(res, 413, { error: 'Open refused' }); return }
+    if (res.destroyed) return
+    const form = new URLSearchParams(body)
+    const id = form.get('open')
+    const pending = pendingOpens.get(id)
+    if ([...form.keys()].length !== 1 || !pending) { answer(res, 401, { error: 'Open refused' }); return }
+    pendingOpens.delete(id)
+    const { opened, deadline, created } = pending
+    if (deadline <= sessions.now() || cloud.drops({ principal: opened.principal, created })) {
+      answer(res, 401, { error: 'Open refused' })
+      return
+    }
+    issueCloudSession(req, res, opened)
   }
   // Contracts v2 (delivery 4): a renewing browser sends JSON, never a code. The request is
   // authenticated only by the gate's current Cloud session; the gate rechecks the role with
@@ -323,6 +372,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     if (privatePath(req.url, origin)) { answer(res, 400, { error: 'Private path' }); return }
     if (cloud && req.url === CLOUD_REVOCATION_PATH) { await cloudRevoke(req, res); return }
     if (cloud && req.url === CLOUD_RENEW_PATH) { await cloudRenew(req, res); return }
+    if (cloud && req.url.split('?', 1)[0] === CLOUD_OPEN_FINISH_PATH) { await finishCloudOpen(req, res); return }
     if (cloud && req.url.split('?', 1)[0] === CLOUD_OPEN_PATH) { await cloudOpen(req, res); return }
     // The owner-only agent route uses a literal target. In multiuser mode also
     // refuse URLs DSH would match to that exact route before obtaining a credential.
@@ -451,12 +501,15 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         if (multiuser) {
           // Only a gate session transition can clear the browser's site data.
           delete response['clear-site-data']
+          delete response['x-automagik-dsh-refresh']
+          if (owner && upstream.statusCode === 401) response['x-automagik-dsh-refresh'] = '1'
           const asset = ['GET', 'HEAD'].includes(req.method) &&
             (url.pathname.startsWith('/assets/') || frontendPath(url) === 'bundle')
           if (!asset) response['cache-control'] = 'no-store'
         }
         res.writeHead(upstream.statusCode, response)
-        upstream.pipe(res)
+        if (record) upstream.pipe(activeStream(family, false, () => endRequest(record, true))).pipe(res)
+        else upstream.pipe(res)
         upstream.on('error', () => res.destroy())
       })
       if (record) record.proxy = proxy
@@ -502,13 +555,13 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         else await carryMember(req, socket, head, family)
         return
       }
+      const record = { socket, family }
+      sockets.set(socket, record)
+      socket.on('error', () => record.proxy?.destroy())
+      socket.on('close', () => { sockets.delete(socket); record.proxy?.destroy(); record.upstream?.destroy() })
       const cookie = await credentials.cookie()
       if (!sessions.active(family) || socket.destroyed) { refuseSocket(socket); return }
-      const proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: 'GET', path: req.url, headers: upstreamHeaders(req, credentials, cookie, family.principal, true), timeout: 5000 })
-      const record = { socket, family, proxy }
-      sockets.set(socket, record)
-      socket.on('error', () => proxy.destroy())
-      socket.on('close', () => { sockets.delete(socket); proxy.destroy(); record.upstream?.destroy() })
+      const proxy = record.proxy = http.request({ hostname: DSH_HOST, port: credentials.port, method: 'GET', path: req.url, headers: upstreamHeaders(req, credentials, cookie, family.principal, true), timeout: 5000 })
       proxy.on('error', () => socket.destroy())
       proxy.on('timeout', () => proxy.destroy())
       proxy.on('response', response => {
@@ -521,6 +574,17 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       proxy.end()
     } catch { refuseSocket(socket, 502) }
   })
+  function activeStream(family, touch, close) {
+    return new Transform({
+      transform(chunk, _encoding, callback) {
+        if (!(touch ? sessions.touch(family) : sessions.active(family))) {
+          callback(new Error('Session expired'))
+          return
+        }
+        callback(null, chunk)
+      },
+    }).on('error', close)
+  }
   // The upstream handshake's answer, relayed and metered by session activity for owners and
   // members alike.
   function relay(record, socket, head, proxy) {
@@ -535,15 +599,11 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       if (upstreamHead.length) socket.write(upstreamHead)
       upstream.on('error', () => socket.destroy())
       upstream.on('close', () => socket.destroy())
-      const admitted = new Transform({
-        transform(chunk, encoding, callback) {
-          if (!sessions.touch(family)) { callback(new Error('Session expired')); return }
-          callback(null, chunk)
-        },
-      })
-      admitted.on('error', () => { socket.destroy(); upstream.destroy() })
-      socket.on('close', () => admitted.destroy())
-      socket.pipe(admitted).pipe(upstream).pipe(socket)
+      const close = () => { socket.destroy(); upstream.destroy() }
+      const admitted = activeStream(family, true, close)
+      const outgoing = activeStream(family, false, close)
+      socket.on('close', () => { admitted.destroy(); outgoing.destroy() })
+      socket.pipe(admitted).pipe(upstream).pipe(outgoing).pipe(socket)
     })
   }
   // A member's or guest's /api/remote.mux: signed as GET for the exact path and sent, with the
@@ -649,6 +709,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   let rebinding = false
   server.on('close', () => {
     if (!rebinding) {
+      pendingOpens.clear()
       clearInterval(timer); clearInterval(pollTimer); sessions.off('revoke', revoke)
     }
   })

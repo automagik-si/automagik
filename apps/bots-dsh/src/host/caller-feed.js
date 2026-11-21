@@ -45,7 +45,10 @@ export function install(rt) {
 
   function live(feed) {
     if (feed.closed) return false
-    if (callerService(ctx) !== feed.service || !rt.sameTeam(feed.team) || rt.readOnly() !== undefined) {
+    const role = feed.service.roleOf(feed.principal)
+    if (feed.request.signal.aborted || callerService(ctx) !== feed.service ||
+        role !== feed.role || !matchesFeedViewer(feed.request, rt.viewerOf(feed.principal, role)) ||
+        !rt.sameTeam(feed.team) || rt.readOnly() !== undefined) {
       close(feed)
       return false
     }
@@ -149,7 +152,7 @@ export function install(rt) {
     if (person.feeds.size >= MAX_FEEDS) return new Response('Too many open feeds', { status: 429, headers: HEADERS })
 
     // Retain the request so that its signal keeps following the connection.
-    const feed = { key, person, request, service, principal, team: rt.teamGeneration(), bytes: 0, queue: [], changed: new Set() }
+    const feed = { key, person, request, service, principal, role, team: rt.teamGeneration(), bytes: 0, queue: [], changed: new Set() }
     feed.abort = () => close(feed)
     feed.allowed = allowed(feed)
     const body = new ReadableStream({

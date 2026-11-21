@@ -22,7 +22,7 @@ export function callerTarget({ role, method, raw, upgrade, origin }) {
   if (role !== 'member' && role !== 'guest') return refused
   const pair = method + ' ' + raw
   if (upgrade) return pair === CALLER_UPGRADE ? { allow: true } : refused
-  if (CALLER_HTTP.has(pair) || VIEWER_FEED.test(pair)) return { allow: true }
+  if (VIEWER_FEED.test(pair) || (method === 'POST' && CALLER_HTTP.has(pair))) return { allow: true }
   try {
     const { pathname } = new URL(raw, origin)
     const decoded = decodeURIComponent(raw.split('?', 1)[0].toLowerCase()).toLowerCase()

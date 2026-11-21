@@ -4,10 +4,12 @@ import http from 'node:http'
 import { test } from 'node:test'
 import { carrier, localHTTP, prefix, send, wire } from '../../multiuser-dsh/test/runtime.mjs'
 import { allowlist, fixture, guest } from './caller-fixture.js'
+import routeFixture from '../../../server/test/fixtures/caller-role-paths.json' with { type: 'json' }
 
 const post = '/api/omni-ui'
 const person = { ...wire.payload.principal, ...guest.person }
 const body = (endpoint, viewer) => JSON.stringify({ endpoint, viewer })
+const feedRoute = routeFixture.targets.find(row => row.query)
 
 function transport(t, f, expectedAuthority) {
   const routes = f.ctx.get('automagikCallerRoutes')
@@ -91,7 +93,7 @@ test('CC4 disconnecting one carrier connection releases only its feed', { timeou
   const f = fixture(t)
   await f.start()
   const viewer = f.rt.viewerOf(guest)
-  const feed = `${post}/feed?viewer=${viewer.id}.${viewer.role}`
+  const feed = feedRoute.path + feedRoute.query.replace('mounted.member', `${viewer.id}.${viewer.role}`)
   let authority
   const adapter = transport(t, f, () => authority)
   const ended = Promise.withResolvers()
@@ -127,6 +129,32 @@ test('CC4 disconnecting one carrier connection releases only its feed', { timeou
   f.rt.accessChanged()
   await second.revision
   await Promise.all([open('family-three').hello, open('family-four').hello, open('family-five').hello])
+})
+
+test('CC6 a routed but stale feed refuses admission and only the mounted guest gets hello', async t => {
+  const f = fixture(t)
+  await f.start()
+  const adapter = transport(t, f)
+  const { path, query, method } = feedRoute
+  assert.equal((await adapter.call(path, { method })).status, 404)
+  assert.equal(adapter.dispatched(), 0)
+  assert.equal((await adapter.call(path + query, { method })).status, 403)
+  assert.equal(adapter.dispatched(), 1)
+  const viewer = f.rt.viewerOf(guest)
+  const response = await adapter.call(path + query.replace('mounted.member', `${viewer.id}.${viewer.role}`), {
+    method,
+    onTransport(_request, response) {
+      const write = response.write.bind(response)
+      response.write = chunk => {
+        const sent = write(chunk)
+        setImmediate(() => response.destroy())
+        return sent
+      }
+    },
+  })
+  assert.equal(adapter.dispatched(), 2)
+  assert.equal(response.status, 200)
+  assert.equal(response.bytes.toString(), 'event: hello\ndata: {}\n\n')
 })
 
 test('CC5 fifty whoami round trips through the carrier on loopback', async t => {

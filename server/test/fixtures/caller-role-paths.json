@@ -20,11 +20,12 @@
   ],
   "targets": [
     {"transport": "http", "method": "POST", "path": "/api/omni-ui", "callerRoute": true, "maxBody": 16384},
-    {"transport": "http", "method": "GET", "path": "/api/omni-ui/feed", "callerRoute": true, "maxBody": 0},
+    {"transport": "http", "method": "GET", "path": "/api/omni-ui/feed", "query": "?viewer=mounted.member", "callerRoute": true, "maxBody": 0},
     {"transport": "upgrade", "method": "GET", "path": "/api/remote.mux", "callerRoute": false}
   ],
   "refused": [
     {"transport": "http", "method": "GET", "path": "/api/omni-ui", "status": 403},
+    {"transport": "http", "method": "GET", "path": "/api/omni-ui/feed", "status": 403},
     {"transport": "http", "method": "POST", "path": "/api/omni-ui/feed", "status": 403},
     {"transport": "http", "method": "HEAD", "path": "/api/omni-ui/feed", "status": 403},
     {"transport": "http", "method": "POST", "path": "/api/omni-ui?x=1", "status": 403},
@@ -84,6 +85,7 @@
     {"path": "/_gate/session/renew", "auth": "session"},
     {"path": "/_gate/sign-out-everywhere", "auth": "session"},
     {"path": "/_gate/cloud/open", "auth": "single-use code"},
+    {"path": "/_gate/cloud/open/finish", "auth": "same-origin single-use completion"},
     {"path": "/_gate/cloud/renew", "auth": "session and held token"},
     {"path": "/_gate/cloud/revocation", "auth": "Cloud detached JWS"},
     {"path": "/_gate/claim", "auth": "claim flow"},

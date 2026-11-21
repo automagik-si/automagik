@@ -55,6 +55,7 @@ const base64Of = (bytes) => {
 
 /** JSON over the plugin's own exact routes; resolves { status, body }, never the request. */
 async function post(path, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ !== undefined) return { status: 403, body: { error: 'desktop-only' } }
   const answer = await fetch(`api/omni-ui/code/${path}`, {
     method: 'POST',
     credentials: 'same-origin',

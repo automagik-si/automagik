@@ -212,17 +212,35 @@ test('CF8 feed opens are bound to the mounted viewer and role even after an owne
     assert.equal((await open(f, member, new Request(target))).status, 403)
   }
   const owner = f.routes.get('/api/omni-ui/feed').fetch
+  let previousOwner
   for (const subject of [member.person.subject, 'another-owner']) {
     const headers = { 'x-automagik-principal': Buffer.from(JSON.stringify({ ...member.person, subject, roles: ['owner'] })).toString('base64url') }
     assert.equal((await owner(new Request(url, { headers }))).status, 403)
     assert.equal((await owner(new Request(feedURL(f, member), { headers }))).status, 403)
     assert.equal((await owner(new Request(feedURL(f, member).replace('.member', '.owner'), { headers }))).status, 403)
+    if (previousOwner) assert.equal((await owner(new Request(previousOwner, { headers }))).status, 403)
     const viewer = f.rt.ownerViewer(new Request(url, { headers }))
-    const response = await owner(new Request(`${url}?viewer=${viewer.id}.${viewer.role}`, { headers }))
+    previousOwner = `${url}?viewer=${viewer.id}.${viewer.role}`
+    const response = await owner(new Request(previousOwner, { headers }))
     assert.equal(response.status, 200)
     await response.body.cancel()
   }
   await (await readerFor(f)).cancel()
+})
+
+test('CF12 an admitted owner feed rechecks the viewer and service before publishing private content', async t => {
+  const f = fixture(t)
+  await f.start()
+  const owner = f.routes.get('/api/omni-ui/feed').fetch
+  let viewer = { id: 'first', role: 'owner' }
+  t.mock.method(f.rt, 'ownerViewer', () => viewer)
+  const response = await owner(new Request(url + '?viewer=first.owner'))
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  assert.match(await read(reader), /event: hello/)
+  viewer = { id: 'second', role: 'owner' }
+  f.rt.publishFeed('message', { text: 'private content' })
+  assert.equal(await read(reader), null)
 })
 
 test('CF9 a broken team lock closes caller reads and an already open feed', async t => {
@@ -252,6 +270,26 @@ test('CF9 a broken team lock closes caller reads and an already open feed', asyn
   await assert.rejects(f.rt.callerChat(member, 'b'), code('read-only'))
   assert.equal(await read(reader), null)
   assert.equal((await open(f)).status, 503)
+  const replacement = f.saved()
+  replacement.bots.b.name = 'Saved by the other host'
+  fs.writeFileSync(f.statePath, JSON.stringify(replacement))
+  const refused = await f.call('update-bot', { id: 'b', people: owners })
+  assert.equal(refused.error?.code, 'bot/read-only')
+  assert.deepEqual(f.saved(), replacement)
+})
+
+test('CF11 a team generation lost during a sharing save cannot commit', async t => {
+  const f = fixture(t)
+  await f.start()
+  await f.open()
+  const before = f.saved()
+  const save = f.rt.saveCopy
+  t.mock.method(f.rt, 'saveCopy', (change, options) => {
+    t.mock.method(f.rt, 'sameTeam', () => false)
+    return save(change, options)
+  })
+  await assert.rejects(f.rt.setPeople('b', owners), code('read-only'))
+  assert.deepEqual(f.saved(), before)
 })
 
 test('CF10 idle desktop installs no caller feed subscriptions', () => {
