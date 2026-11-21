@@ -34,6 +34,9 @@ env:
   # Automagik ID installs from its own lockfile inside apps/id. Its tests and mutations also read
   # this workflow's ID_PAGES_BROWSER line, and the job runs the apt mirror script.
   ID_CHANGED_PATHS: '^(apps/id/|\.github/workflows/ci\.yml$|\.github/scripts/apt-canonical-sources\.sh$)'
+  # The brand font rebuild reads only its tool (scripts/brand-font, its own lockfile) and the
+  # committed font with its README in docs/brand/fonts.
+  BRAND_FONT_CHANGED_PATHS: '^(scripts/brand-font/|docs/brand/fonts/|\.github/workflows/ci\.yml$)'
 
 # Cancel only pull_request runs: a push to dev or main finishes, and
 # a manual run is never cancelled by a push. A pull request push
@@ -66,6 +69,7 @@ jobs:
       usagemeter: ${{ steps.paths.outputs.usagemeter }}
       sandbox: ${{ steps.paths.outputs.sandbox }}
       id: ${{ steps.paths.outputs.id }}
+      font: ${{ steps.paths.outputs.font }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -81,7 +85,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          areas=(herdr scheduler am pocket meter usagemeter sandbox link id)
+          areas=(herdr scheduler am pocket meter usagemeter sandbox link id font)
           report="${RUNNER_TEMP}/areas.md"
           printf '| area | changed |\n| --- | --- |\n' > "${report}"
           # Every area is written, changed or not: each job-level `if` reads one output.
@@ -142,6 +146,7 @@ jobs:
             grep_area usagemeter "${USAGEMETER_CHANGED_PATHS}" "${names}"
             grep_area sandbox "${SANDBOX_CHANGED_PATHS}" "${names}"
             grep_area id "${ID_CHANGED_PATHS}" "${names}"
+            grep_area font "${BRAND_FONT_CHANGED_PATHS}" "${names}"
             grep_area link "${POCKET_LINK_CHANGED_PATHS}" "${link_names}"
           fi
           cat "${report}"
@@ -337,12 +342,17 @@ jobs:
     # subset again from that file, at its pinned commit, and fails unless the result is the
     # committed font, byte for byte (docs/brand/fonts/README.md has the call). The tooling is in
     # scripts/brand-font, outside docs/brand, because that folder is copied into other repositories.
+    # Only when the tool, docs/brand/fonts or this workflow changed: the `changes` job's font
+    # output decides it before this job takes a runner.
     name: Brand font rebuild
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.font != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -354,6 +364,7 @@ jobs:
           bun-version: 1.4.4
 
       - name: Rebuild fredoka-latin.woff2 from its pinned source and compare
+        id: rebuild
         shell: bash
         working-directory: scripts/brand-font
         env:
@@ -372,6 +383,46 @@ jobs:
           name: brand-font-rebuild
           path: ${{ runner.temp }}/font-rebuild/fredoka-latin.woff2
           if-no-files-found: warn
+
+      # The change check and this assertion read the same diff in two independent steps: a skip
+      # in the first one cannot hide a change from the second (#895, as usagemeter's).
+      - name: Assert the steps ran
+        if: always()
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          OUTCOMES: rebuild=${{ steps.rebuild.outcome }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            changed=true
+          else
+            diff_file="${RUNNER_TEMP}/font-assert.txt"
+            if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
+              echo "::error::git diff ${BASE}...HEAD failed"
+              exit 1
+            fi
+            grep_status=0
+            grep -E "${BRAND_FONT_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
+            case "${grep_status}" in
+              0) changed=true ;;
+              1) ;;
+              *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
+            esac
+          fi
+          if [[ "${changed}" != true ]]; then
+            echo "the brand font and its tool unchanged: no steps expected"
+            exit 0
+          fi
+          missing=''
+          for outcome in ${OUTCOMES}; do
+            [[ "${outcome#*=}" == success ]] || missing="${missing} ${outcome%%=*}"
+          done
+          if [[ -n "${missing}" ]]; then
+            echo "::error::the brand font or its tool changed but these steps did not succeed:${missing}"
+            exit 1
+          fi
+          echo "ran: ${OUTCOMES}"
 
   id:
     # Only when apps/id/ changed, or this workflow or the apt mirror script it runs: the
@@ -2102,6 +2153,7 @@ jobs:
             [usagemeter]=usagemeter
             [dsh-sandbox]=sandbox
             [id]=id
+            [brand-font]=font
           )
           report="${RUNNER_TEMP}/ci-result.md"
           printf '| job | result |\n| --- | --- |\n' > "${report}"
